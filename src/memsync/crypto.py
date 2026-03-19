@@ -16,14 +16,10 @@ from __future__ import annotations
 
 import gzip
 import os
-from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from memsync.errors import CryptoError
-
-if TYPE_CHECKING:
-    pass
 
 FORMAT_VERSION = 0x01
 SALT_LEN = 16
@@ -35,7 +31,7 @@ ARGON2_TIME_COST = 3
 ARGON2_PARALLELISM = 1
 
 KEYRING_SERVICE = "memsync"
-KEYRING_USERNAME = "derived-key"
+KEYRING_USERNAME = "passphrase"
 ENV_VAR = "MEMSYNC_PASSPHRASE"
 
 
@@ -109,30 +105,7 @@ def decrypt(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
         raise CryptoError("decrypt: decompression failed — data may be corrupt.")
 
 
-def get_derived_key(passphrase: str, memory_kb: int = 65_536) -> bytes:
-    """Derive key with a fixed salt for keyring storage.
-
-    Uses a deterministic salt so the same passphrase always produces
-    the same derived key. This key is cached in the OS keyring.
-    """
-    # Fixed salt for keyring-cached key derivation.
-    # This is safe because the per-file salt provides uniqueness for encryption.
-    fixed_salt = b"memsync-keyring\x00"
-    return derive_key(passphrase, fixed_salt, memory_kb)
-
-
-def store_key_in_keyring(derived_key: bytes) -> bool:
-    """Store the derived key in the OS keyring. Returns False if keyring unavailable."""
-    try:
-        import keyring as kr
-
-        kr.set_password(KEYRING_SERVICE, KEYRING_USERNAME, derived_key.hex())
-        return True
-    except Exception:
-        return False
-
-
-def get_passphrase(memory_kb: int = 65_536) -> str:
+def get_passphrase() -> str:
     """Retrieve passphrase via keyring → env var → prompt fallback chain.
 
     Returns the passphrase string. All commands call this — no duplication.
@@ -143,10 +116,6 @@ def get_passphrase(memory_kb: int = 65_536) -> str:
 
         stored = kr.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
         if stored is not None:
-            # Keyring stores the derived key hex, but we need the passphrase
-            # for per-file encryption (each file gets its own salt).
-            # If we only have the derived key, we can't re-derive with new salts.
-            # So we store the passphrase itself, not the derived key.
             return stored
     except Exception:
         pass

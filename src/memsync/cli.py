@@ -57,10 +57,9 @@ def _get_config() -> dict:
         raise  # unreachable, but keeps type checker happy
 
 
-def _get_passphrase_or_exit(config: dict) -> str:
-    memory_kb = config.get("crypto", {}).get("argon2_memory_kb", 65_536)
+def _get_passphrase_or_exit() -> str:
     try:
-        return get_passphrase(memory_kb)
+        return get_passphrase()
     except CryptoError as e:
         _error(str(e))
         raise
@@ -165,7 +164,7 @@ def init() -> None:
     else:
         console.print(
             "  [yellow]No keyring available.[/yellow] "
-            f"Set {passphrase} environment variable MEMSYNC_PASSPHRASE instead."
+            "Set MEMSYNC_PASSPHRASE environment variable instead."
         )
 
     # Save config
@@ -190,7 +189,7 @@ def push(
 ) -> None:
     """Push local session data to storage."""
     config = _get_config()
-    passphrase = _get_passphrase_or_exit(config)
+    passphrase = _get_passphrase_or_exit()
     memory_kb = config["crypto"]["argon2_memory_kb"]
 
     try:
@@ -304,7 +303,7 @@ def pull(
 ) -> None:
     """Pull session data from storage to local."""
     config = _get_config()
-    passphrase = _get_passphrase_or_exit(config)
+    passphrase = _get_passphrase_or_exit()
     memory_kb = config["crypto"]["argon2_memory_kb"]
 
     try:
@@ -464,7 +463,7 @@ def _do_pull(
 def status() -> None:
     """Show sync status: local vs remote state."""
     config = _get_config()
-    passphrase = _get_passphrase_or_exit(config)
+    passphrase = _get_passphrase_or_exit()
     memory_kb = config["crypto"]["argon2_memory_kb"]
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -556,7 +555,7 @@ def diff_cmd(
 ) -> None:
     """Show what would change without applying (dry run)."""
     config = _get_config()
-    passphrase = _get_passphrase_or_exit(config)
+    passphrase = _get_passphrase_or_exit()
     memory_kb = config["crypto"]["argon2_memory_kb"]
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -596,7 +595,7 @@ def gc(
 ) -> None:
     """Garbage collect orphaned blobs not referenced by any manifest."""
     config = _get_config()
-    passphrase = _get_passphrase_or_exit(config)
+    passphrase = _get_passphrase_or_exit()
     memory_kb = config["crypto"]["argon2_memory_kb"]
 
     try:

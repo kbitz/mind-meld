@@ -53,12 +53,3 @@ def list_devices(backend: StorageBackend) -> list[dict[str, Any]]:
         except (StorageError, json.JSONDecodeError):
             continue  # Skip corrupt device files
     return devices
-
-
-def get_device(backend: StorageBackend, device_id: str) -> dict[str, Any] | None:
-    """Get a specific device's metadata."""
-    key = f"devices/{device_id}.json"
-    try:
-        return json.loads(backend.get(key))
-    except StorageError:
-        return None
