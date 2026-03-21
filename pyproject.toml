@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "memsync"
 version = "0.1.0"
-description = "Sync Claude Code sessions across machines via pluggable storage backends"
+description = "Sync Claude Code sessions across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "MemSync Contributors" }]
-keywords = ["claude", "sync", "cli", "encryption"]
+keywords = ["claude", "sync", "cli", "encryption", "icloud"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -30,11 +30,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-s3 = ["boto3>=1.34"]
 dev = [
     "pytest>=8.0",
-    "moto[s3]>=5.0",
-    "boto3>=1.34",
 ]
 
 [project.scripts]

@@ -1,10 +1,7 @@
 """Local folder storage backend for MemSync.
 
-Writes encrypted blobs to a local directory that is synced by Dropbox,
-Google Drive, iCloud Drive, rsync, etc. — the sync mechanism is not our concern.
-
-Includes Dropbox conflict detection: when Dropbox creates conflicted copies
-(e.g., "file (conflicted copy 2026-03-18).enc"), this backend detects them.
+Writes encrypted blobs to a local directory synced by iCloud Drive.
+Includes conflict detection for iCloud and Dropbox-style conflicted copies.
 """
 
 from __future__ import annotations
@@ -15,17 +12,19 @@ import tempfile
 from pathlib import Path
 
 from memsync.errors import StorageError
-from memsync.storage.base import StorageBackend
 
-# Dropbox conflicted copy pattern:
-# "filename (conflicted copy YYYY-MM-DD).ext"
-# or "filename (User's conflicted copy YYYY-MM-DD).ext"
-_CONFLICT_RE = re.compile(
+# iCloud conflict pattern: "filename 2.ext", "filename 3.ext"
+_ICLOUD_CONFLICT_RE = re.compile(
+    r"^(.+?)\s+(\d+)(\.[^.]+)$"
+)
+
+# Dropbox conflict pattern: "filename (conflicted copy YYYY-MM-DD).ext"
+_DROPBOX_CONFLICT_RE = re.compile(
     r"^(.+?)\s+\((?:.*?conflicted copy.*?)\)(\.[^.]+)$", re.IGNORECASE
 )
 
 
-class LocalBackend(StorageBackend):
+class LocalBackend:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
 
@@ -80,11 +79,10 @@ class LocalBackend(StorageBackend):
         return (self.root / key).exists()
 
     def find_conflict_copies(self, key: str) -> list[Path]:
-        """Find Dropbox-style conflicted copies of a file.
+        """Find iCloud or Dropbox-style conflicted copies of a file.
 
-        For key "manifests/abc/manifest.json.enc", looks for files like:
-        "manifest.json (conflicted copy 2026-03-18).enc"
-        in the same directory.
+        iCloud creates: "manifest.json 2.enc", "manifest.json 3.enc"
+        Dropbox creates: "manifest.json (conflicted copy 2026-03-18).enc"
         """
         path = self.root / key
         parent = path.parent
@@ -98,8 +96,14 @@ class LocalBackend(StorageBackend):
         for f in parent.iterdir():
             if f == path or not f.is_file():
                 continue
-            match = _CONFLICT_RE.match(f.name)
-            if match and match.group(2) == ext:
+            # Check iCloud pattern
+            m = _ICLOUD_CONFLICT_RE.match(f.name)
+            if m and m.group(1) == stem_base and m.group(3) == ext:
+                conflicts.append(f)
+                continue
+            # Check Dropbox pattern
+            m = _DROPBOX_CONFLICT_RE.match(f.name)
+            if m and m.group(2) == ext:
                 conflicts.append(f)
         return sorted(conflicts)
 

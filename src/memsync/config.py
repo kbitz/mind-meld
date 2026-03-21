@@ -27,10 +27,13 @@ LOCK_PATH = CONFIG_DIR / "memsync.lock"
 DEFAULT_MAX_FILE_SIZE = 52_428_800  # 50MB
 DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = str(Path.home() / ".claude")
+DEFAULT_STORAGE_PATH = str(
+    Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "memsync"
+)
 
 REQUIRED_FIELDS = {
     "device": ["id", "name"],
-    "storage": ["backend"],
+    "storage": ["path"],
 }
 
 
@@ -61,14 +64,6 @@ def _validate(config: dict[str, Any]) -> None:
             if field not in config[section]:
                 raise ConfigError(f"config: missing {section}.{field}.")
 
-    backend = config["storage"]["backend"]
-    if backend == "s3" and "bucket" not in config["storage"]:
-        raise ConfigError("config: S3 backend requires storage.bucket.")
-    if backend == "local" and "path" not in config["storage"]:
-        raise ConfigError("config: local backend requires storage.path.")
-    if backend not in ("s3", "local"):
-        raise ConfigError(f"config: unknown backend {backend!r}. Use 's3' or 'local'.")
-
 
 def _apply_defaults(config: dict[str, Any]) -> None:
     """Fill in optional fields with defaults."""
@@ -80,10 +75,9 @@ def _apply_defaults(config: dict[str, Any]) -> None:
     crypto.setdefault("argon2_memory_kb", DEFAULT_ARGON2_MEMORY_KB)
 
     # Expand ~ in paths
-    if config["storage"]["backend"] == "local":
-        config["storage"]["path"] = str(
-            Path(config["storage"]["path"]).expanduser()
-        )
+    config["storage"]["path"] = str(
+        Path(config["storage"]["path"]).expanduser()
+    )
     config["sync"]["claude_dir"] = str(
         Path(config["sync"]["claude_dir"]).expanduser()
     )
