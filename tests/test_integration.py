@@ -1,9 +1,12 @@
 """Integration tests for MemSync — full push/pull round-trips."""
 
 import json
+import os
 
 import pytest
+from typer.testing import CliRunner
 
+from memsync.cli import app
 from memsync.config import save_config
 from memsync.crypto import decrypt, encrypt
 from memsync.devices import list_devices, register_device
@@ -17,6 +20,7 @@ from memsync.storage.local import LocalBackend
 
 PASSPHRASE = "integration-test-passphrase"
 MEMORY_KB = 1024  # Low for fast tests
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -268,3 +272,55 @@ class TestGCSafety:
 
         assert len(orphans) == 1
         assert "hash3" in orphans[0]
+
+
+class TestAutoCommands:
+    def test_autopull_no_config_exits_silently(self, tmp_path, monkeypatch):
+        """autopull should exit silently when msync is not initialized."""
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0
+        assert result.output == ""
+
+    def test_autopush_no_config_exits_silently(self, tmp_path, monkeypatch):
+        """autopush should exit silently when msync is not initialized."""
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+        assert result.output == ""
+
+    def test_autopush_round_trip(self, tmp_path, monkeypatch):
+        """autopush should push changes and print a one-line summary."""
+        storage_dir = tmp_path / "storage"
+        claude_dir_a = tmp_path / "machine_a" / ".claude"
+        claude_dir_b = tmp_path / "machine_b" / ".claude"
+
+        # Create memory files on machine A
+        memory = claude_dir_a / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+
+        # Write config for device A
+        config_a_path = tmp_path / "config_a.toml"
+        config_a = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {"claude_dir": str(claude_dir_a), "max_file_size": 52_428_800},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config_a, config_a_path)
+
+        # Register device A
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+
+        # Monkeypatch config path and passphrase
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+
+        # Run autopush
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+        assert "msync: pushed" in result.output
+        assert "1 new" in result.output

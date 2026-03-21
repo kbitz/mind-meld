@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from memsync.errors import StorageError
-from memsync.storage.base import StorageBackend
+from memsync.storage.local import LocalBackend
 
 
 def register_device(
-    backend: StorageBackend,
+    backend: LocalBackend,
     device_id: str,
     device_name: str,
 ) -> None:
@@ -27,7 +27,7 @@ def register_device(
 
 
 def update_last_seen(
-    backend: StorageBackend,
+    backend: LocalBackend,
     device_id: str,
 ) -> None:
     """Update the last_seen timestamp for a device."""
@@ -40,7 +40,7 @@ def update_last_seen(
     backend.put(key, json.dumps(data, indent=2).encode("utf-8"))
 
 
-def list_devices(backend: StorageBackend) -> list[dict[str, Any]]:
+def list_devices(backend: LocalBackend) -> list[dict[str, Any]]:
     """List all registered devices from storage."""
     keys = backend.list_keys("devices/")
     devices = []

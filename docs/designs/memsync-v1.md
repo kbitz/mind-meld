@@ -13,7 +13,6 @@ The project is renamed from `claude-session-sync` / `css` to **MemSync** / `msyn
 | `css` | `msync` (CLI command) |
 | `src/css/` | `src/memsync/` |
 | `~/.config/claude-session-sync/` | `~/.config/memsync/` |
-| `~/Dropbox/claude-session-sync/` | `~/Dropbox/memsync/` |
 
 ## Accepted Scope Additions (beyond original SPEC.md)
 
@@ -33,14 +32,14 @@ Compares all device manifests against all stored blobs. Deletes blobs not refere
 Push always reflects the complete current state of `~/.claude/projects/`. If a file was deleted locally, the new manifest simply omits it. Pull applies the full manifest state, including deletions. GC cleans up orphaned blobs. No separate `prune` command needed.
 
 ### 6. MEMSYNC_PASSPHRASE env var fallback
-When no OS keyring is available (headless Linux, SSH sessions, CI), fall back to the `MEMSYNC_PASSPHRASE` environment variable. Keyring remains the default and preferred method.
+When no OS keyring is available (headless, SSH sessions, CI), fall back to the `MEMSYNC_PASSPHRASE` environment variable. Keyring remains the default and preferred method.
 
 ### 7. argon2-cffi dependency
 The `cryptography` library does not include Argon2id. `argon2-cffi` is added as an explicit core dependency for key derivation.
 
-### 8. Manifest corruption recovery + Dropbox conflict resolution
+### 8. Conflict resolution (iCloud + Dropbox)
 - If manifest decryption fails, treat as empty and do a full re-push.
-- For LocalBackend: detect Dropbox-style conflicted copies (`manifest.json (conflicted copy YYYY-MM-DD).enc`), try decrypting both, keep the one with the newer manifest timestamp, delete the loser.
+- Detect iCloud-style conflicted copies (`filename 2.ext`) and Dropbox-style copies (`filename (conflicted copy YYYY-MM-DD).ext`), try decrypting all, keep the one with the newer manifest timestamp, delete the losers.
 
 ### 9. PID-based lockfile
 `~/.config/memsync/memsync.lock` prevents concurrent same-device operations (double push, gc during push). Stale locks (PID no longer running) are cleaned up automatically.
@@ -66,15 +65,9 @@ cryptography >= 42.0
 argon2-cffi >= 23.1
 keyring >= 25.0
 rich >= 13.0
-tomli >= 2.0
 ```
 
-**Optional (S3 backend):**
-```
-boto3 >= 1.34
-```
-
-Install: `pipx install memsync` or `pip install memsync[s3]`
+Install: `pipx install memsync`
 
 ## Updated Encrypted Blob Format
 
@@ -89,8 +82,7 @@ Install: `pipx install memsync` or `pip install memsync[s3]`
 
 ## Deferred (TODOS.md)
 
-1. **Auto path mapping** — detect home dir prefix differences automatically instead of requiring manual `path_map` config. Deferred because manual config works for v1 and auto-detection has edge cases.
-2. **Selective sync** — `sync.include` / `sync.exclude` in config.toml to filter which projects are synced. Deferred because syncing everything is acceptable for v1.
+1. **Selective sync** — `sync.include` / `sync.exclude` in config.toml to filter which projects are synced. Deferred because syncing everything is acceptable for v1.
 
 ## Architecture Notes
 
@@ -99,7 +91,6 @@ All errors surfaced to users follow the format: `[operation] [what failed] [why]
 
 ### Observability
 - `--verbose` flag: show each file hashed, each blob uploaded/downloaded, timing
-- `--debug` flag: full stack traces, crypto parameters (never passphrase/key)
 - Push/pull summary: files scanned, changed, bytes transferred, elapsed time
 
 ### Open questions resolved

@@ -1,6 +1,6 @@
 # MemSync
 
-Sync Claude Code sessions across machines. Open-source, self-hosted, end-to-end encrypted.
+Sync Claude Code memory and todos across Macs via iCloud Drive. End-to-end encrypted.
 
 ## Install
 
@@ -11,9 +11,60 @@ pipx install memsync
 ## Quick Start
 
 ```bash
-msync init    # configure storage + passphrase
-msync push    # upload session data
+msync init    # configure iCloud storage + passphrase
+msync push    # upload memory/todos
 msync pull    # download from another device
 ```
+
+## Claude Code Integration
+
+MemSync includes `autopull` and `autopush` commands designed for Claude Code — they run silently, never prompt, and output a single line summary (or nothing if already in sync).
+
+Add the following to your **global** `~/.claude/CLAUDE.md` to have Claude automatically sync at the start and end of each conversation:
+
+```markdown
+# MemSync
+
+At the **start of each conversation**, run:
+
+\`\`\`bash
+msync autopull
+\`\`\`
+
+- **No output:** Already in sync. Continue silently.
+- **Any output:** Tell the user what was synced.
+
+At the **end of each conversation** (when the user is wrapping up, says goodbye,
+or you've completed the requested task), run:
+
+\`\`\`bash
+msync autopush
+\`\`\`
+
+- **No output:** Nothing to push. Say goodbye normally.
+- **Any output:** Tell the user what was pushed.
+
+If `msync` is not installed, both commands will fail silently — no action needed.
+```
+
+### How it works
+
+- `msync autopull` checks all other registered devices for changes and applies them locally. It writes a `.memsync-log.md` breadcrumb to each affected project so Claude Code knows what changed.
+- `msync autopush` builds a manifest of local memory/todos, diffs against the last push, and uploads only what changed.
+- Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
+
+### Manual commands
+
+| Command | Description |
+|---------|-------------|
+| `msync init` | Configure device, storage path, passphrase |
+| `msync push` | Push with verbose output |
+| `msync pull` | Pull with verbose output |
+| `msync status` | Show local vs remote state |
+| `msync devices` | List registered devices |
+| `msync diff` | Dry-run: show what would change |
+| `msync gc` | Delete orphaned blobs |
+
+## Architecture
 
 See [SPEC.md](SPEC.md) for full documentation.

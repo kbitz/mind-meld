@@ -77,7 +77,9 @@ class TestLocalBackend:
         assert backend.get("large.enc") == data
 
 
-class TestDropboxConflicts:
+class TestConflictDetection:
+    """Test detection of iCloud and Dropbox conflict copies."""
+
     @pytest.fixture
     def backend(self, tmp_path):
         root = tmp_path / "storage"
@@ -88,9 +90,26 @@ class TestDropboxConflicts:
         conflicts = backend.find_conflict_copies("manifests/abc/manifest.json.enc")
         assert conflicts == []
 
-    def test_find_conflicts(self, backend):
+    def test_find_icloud_conflicts(self, backend):
         backend.put("manifests/abc/manifest.json.enc", b"original")
-        # Simulate Dropbox conflict
+        # iCloud creates "filename 2.ext" copies
+        conflict_path = backend.root / "manifests" / "abc" / "manifest.json 2.enc"
+        conflict_path.write_bytes(b"conflict")
+
+        conflicts = backend.find_conflict_copies("manifests/abc/manifest.json.enc")
+        assert len(conflicts) == 1
+
+    def test_find_multiple_icloud_conflicts(self, backend):
+        backend.put("manifests/abc/manifest.json.enc", b"original")
+        for i in range(2, 5):
+            path = backend.root / "manifests" / "abc" / f"manifest.json {i}.enc"
+            path.write_bytes(f"conflict {i}".encode())
+
+        conflicts = backend.find_conflict_copies("manifests/abc/manifest.json.enc")
+        assert len(conflicts) == 3
+
+    def test_find_dropbox_conflicts(self, backend):
+        backend.put("manifests/abc/manifest.json.enc", b"original")
         conflict_name = "manifest.json (conflicted copy 2026-03-18).enc"
         conflict_path = backend.root / "manifests" / "abc" / conflict_name
         conflict_path.write_bytes(b"conflict")
@@ -100,10 +119,13 @@ class TestDropboxConflicts:
 
     def test_delete_conflicts(self, backend):
         backend.put("manifests/abc/manifest.json.enc", b"original")
-        conflict_name = "manifest.json (conflicted copy 2026-03-18).enc"
-        conflict_path = backend.root / "manifests" / "abc" / conflict_name
-        conflict_path.write_bytes(b"conflict")
+        # Create one of each type
+        icloud = backend.root / "manifests" / "abc" / "manifest.json 2.enc"
+        icloud.write_bytes(b"icloud conflict")
+        dropbox = backend.root / "manifests" / "abc" / "manifest.json (conflicted copy 2026-03-18).enc"
+        dropbox.write_bytes(b"dropbox conflict")
 
         count = backend.delete_conflict_copies("manifests/abc/manifest.json.enc")
-        assert count == 1
-        assert not conflict_path.exists()
+        assert count == 2
+        assert not icloud.exists()
+        assert not dropbox.exists()

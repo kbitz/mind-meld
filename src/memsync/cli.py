@@ -1,10 +1,11 @@
 """MemSync CLI — built with Typer.
 
-Commands: init, push, pull, status, devices, diff, gc
+Commands: init, push, pull, status, devices, diff, gc, autopull, autopush
 """
 
 from __future__ import annotations
 
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -15,7 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from memsync import __version__
-from memsync.config import CONFIG_PATH, load_config, save_config
+from memsync.config import CONFIG_PATH, DEFAULT_STORAGE_PATH, load_config, save_config
 from memsync.crypto import (
     decrypt,
     encrypt,
@@ -32,7 +33,6 @@ from memsync.manifest import (
     diff_manifests,
     serialize_manifest,
 )
-from memsync.paths import rewrite_manifest_paths
 from memsync.storage import get_backend
 from memsync.synclog import write_sync_log
 
@@ -104,7 +104,7 @@ def _print_diff_summary(diff: DiffResult, elapsed: float) -> None:
 
 @app.command()
 def init() -> None:
-    """Initialize MemSync: generate device ID, configure storage, set passphrase."""
+    """Initialize MemSync: generate device ID, configure iCloud storage, set passphrase."""
     if CONFIG_PATH.exists():
         overwrite = typer.confirm(
             f"Config already exists at {CONFIG_PATH}. Overwrite?"
@@ -118,37 +118,20 @@ def init() -> None:
     device_id = uuid.uuid4().hex[:8]
     device_name = typer.prompt("Device name", default=_default_device_name())
 
-    # Storage backend
-    backend_type = typer.prompt(
-        "Storage backend",
-        type=typer.Choice(["local", "s3"]),
-        default="local",
-    )
+    # Storage path (iCloud Drive by default)
+    storage_path = typer.prompt("Storage folder path", default=DEFAULT_STORAGE_PATH)
 
     config: dict = {
         "device": {"id": device_id, "name": device_name},
-        "storage": {"backend": backend_type},
+        "storage": {"path": storage_path},
         "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
         "crypto": {"argon2_memory_kb": 65_536},
     }
 
-    if backend_type == "local":
-        default_path = "~/Dropbox/memsync"
-        path = typer.prompt("Storage folder path", default=default_path)
-        config["storage"]["path"] = path
-        # Create directory
-        full_path = Path(path).expanduser()
-        full_path.mkdir(parents=True, exist_ok=True)
-        console.print(f"  Storage: {full_path}")
-    else:
-        bucket = typer.prompt("S3 bucket name", default="memsync")
-        region = typer.prompt("AWS region", default="us-east-1")
-        endpoint = typer.prompt("Endpoint URL (blank for AWS)", default="")
-        config["storage"]["bucket"] = bucket
-        config["storage"]["region"] = region
-        if endpoint:
-            config["storage"]["endpoint_url"] = endpoint
-        console.print(f"  Storage: s3://{bucket}/")
+    # Create directory
+    full_path = Path(storage_path).expanduser()
+    full_path.mkdir(parents=True, exist_ok=True)
+    console.print(f"  Storage: {full_path}")
 
     # Passphrase
     passphrase = typer.prompt("Encryption passphrase", hide_input=True)
@@ -176,7 +159,7 @@ def init() -> None:
     register_device(backend, device_id, device_name)
     console.print(f"  Device registered: {device_name} ({device_id})")
 
-    console.print("\n[green]✓ MemSync initialized. Run 'msync push' to sync.[/green]")
+    console.print("\n[green]MemSync initialized. Run 'msync push' to sync.[/green]")
 
 
 # ── push ──────────────────────────────────────────────────────────────
@@ -328,7 +311,6 @@ def _do_pull(
     start = time.time()
     my_device_id = config["device"]["id"]
     claude_dir = config["sync"]["claude_dir"]
-    path_map = config.get("sync", {}).get("path_map", {})
 
     backend = get_backend(config)
 
@@ -362,10 +344,7 @@ def _do_pull(
             console.print(f"  [yellow]No manifest for {dname}[/yellow]")
             continue
 
-        # Rewrite paths if needed
         remote_files = remote_manifest.get("files", {})
-        if path_map:
-            remote_files = rewrite_manifest_paths(remote_files, path_map)
 
         # Build a pseudo-local manifest to diff against
         local_files: dict[str, dict] = {}
@@ -657,6 +636,211 @@ def _do_gc(
             f"\n[bold green]GC complete.[/bold green] "
             f"Deleted {orphan_count} orphaned blobs."
         )
+
+
+# ── autopull ──────────────────────────────────────────────────────────
+
+
+@app.command()
+def autopull() -> None:
+    """Pull changes silently. Designed for Claude Code — no prompts, minimal output."""
+    try:
+        config = load_config()
+    except Exception:
+        return  # not initialized — silent exit
+
+    try:
+        passphrase = get_passphrase()
+    except Exception:
+        print("msync: no passphrase available — skipping pull", file=sys.stderr)
+        return
+
+    memory_kb = config["crypto"]["argon2_memory_kb"]
+    my_device_id = config["device"]["id"]
+    claude_dir = config["sync"]["claude_dir"]
+
+    try:
+        acquire_lock()
+    except LockError:
+        return  # another operation running — don't block Claude
+
+    try:
+        backend = get_backend(config)
+        all_devices = list_devices(backend)
+        other_devices = [d for d in all_devices if d["device_id"] != my_device_id]
+
+        if not other_devices:
+            return
+
+        claude_path = Path(claude_dir).expanduser().resolve()
+        total_new = 0
+        total_modified = 0
+        total_deleted = 0
+        source_names: list[str] = []
+
+        for device in other_devices:
+            did = device["device_id"]
+            dname = device["device_name"]
+
+            remote_manifest = _fetch_remote_manifest(
+                backend, did, passphrase, memory_kb
+            )
+            if remote_manifest is None:
+                continue
+
+            remote_files = remote_manifest.get("files", {})
+
+            # Build local state for comparison
+            local_files: dict[str, dict] = {}
+            for rel_path in remote_files:
+                local_path = claude_path / rel_path
+                if local_path.exists():
+                    from memsync.manifest import hash_file
+
+                    try:
+                        sha = hash_file(local_path)
+                        local_files[rel_path] = {"sha256": sha}
+                    except (PermissionError, OSError):
+                        pass
+
+            diff = diff_manifests(
+                {"files": remote_files},
+                {"files": local_files},
+            )
+
+            if not diff.has_changes:
+                continue
+
+            # Apply changes
+            to_download = {**diff.new, **diff.modified}
+            for rel_path, info in to_download.items():
+                blob_key = f"data/{did}/{info['sha256']}.enc"
+                try:
+                    enc_data = backend.get(blob_key)
+                except MemSyncError:
+                    continue
+                plain_data = decrypt(enc_data, passphrase, memory_kb)
+                local_path = claude_path / rel_path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = local_path.with_suffix(local_path.suffix + ".tmp")
+                tmp_path.write_bytes(plain_data)
+                tmp_path.rename(local_path)
+
+            for rel_path in diff.deleted:
+                local_path = claude_path / rel_path
+                if local_path.exists():
+                    local_path.unlink()
+
+            total_new += len(diff.new)
+            total_modified += len(diff.modified)
+            total_deleted += len(diff.deleted)
+            source_names.append(dname)
+
+            # Write sync log
+            write_sync_log(
+                claude_dir=claude_dir,
+                device_name=dname,
+                device_id=did,
+                new_files=list(diff.new.keys()),
+                modified_files=list(diff.modified.keys()),
+                deleted_files=diff.deleted,
+            )
+
+        if total_new or total_modified or total_deleted:
+            parts = []
+            if total_new:
+                parts.append(f"{total_new} new")
+            if total_modified:
+                parts.append(f"{total_modified} modified")
+            if total_deleted:
+                parts.append(f"{total_deleted} deleted")
+            sources = ", ".join(source_names)
+            total = total_new + total_modified + total_deleted
+            print(f"msync: pulled {total} files from {sources} ({', '.join(parts)})")
+
+    except Exception as e:
+        print(f"msync: pull failed — {e}", file=sys.stderr)
+    finally:
+        release_lock()
+
+
+# ── autopush ─────────────────────────────────────────────────────────
+
+
+@app.command()
+def autopush() -> None:
+    """Push changes silently. Designed for Claude Code — no prompts, minimal output."""
+    try:
+        config = load_config()
+    except Exception:
+        return  # not initialized — silent exit
+
+    try:
+        passphrase = get_passphrase()
+    except Exception:
+        print("msync: no passphrase available — skipping push", file=sys.stderr)
+        return
+
+    memory_kb = config["crypto"]["argon2_memory_kb"]
+    device_id = config["device"]["id"]
+    device_name = config["device"]["name"]
+    claude_dir = config["sync"]["claude_dir"]
+    max_file_size = config["sync"]["max_file_size"]
+
+    try:
+        acquire_lock()
+    except LockError:
+        return  # another operation running — don't block Claude
+
+    try:
+        backend = get_backend(config)
+
+        local_manifest = build_manifest(
+            device_id, device_name, claude_dir, max_file_size
+        )
+        remote_manifest = _fetch_remote_manifest(
+            backend, device_id, passphrase, memory_kb
+        )
+        diff = diff_manifests(local_manifest, remote_manifest)
+
+        if not diff.has_changes:
+            return
+
+        # Upload changed blobs
+        to_upload = {**diff.new, **diff.modified}
+        claude_path = Path(claude_dir).expanduser().resolve()
+
+        for rel_path, info in to_upload.items():
+            file_path = claude_path / rel_path
+            if not file_path.exists():
+                continue
+            data = file_path.read_bytes()
+            enc_data = encrypt(data, passphrase, memory_kb)
+            blob_key = f"data/{device_id}/{info['sha256']}.enc"
+            backend.put(blob_key, enc_data)
+
+        # Upload manifest
+        manifest_data = serialize_manifest(local_manifest)
+        enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
+        manifest_key = f"manifests/{device_id}/manifest.json.enc"
+        backend.put(manifest_key, enc_manifest)
+
+        update_last_seen(backend, device_id)
+
+        parts = []
+        if diff.new:
+            parts.append(f"{len(diff.new)} new")
+        if diff.modified:
+            parts.append(f"{len(diff.modified)} modified")
+        if diff.deleted:
+            parts.append(f"{len(diff.deleted)} deleted")
+        total = len(diff.new) + len(diff.modified) + len(diff.deleted)
+        print(f"msync: pushed {total} files ({', '.join(parts)})")
+
+    except Exception as e:
+        print(f"msync: push failed — {e}", file=sys.stderr)
+    finally:
+        release_lock()
 
 
 # ── helpers ───────────────────────────────────────────────────────────
