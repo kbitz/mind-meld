@@ -12,10 +12,13 @@ from memsync.crypto import decrypt, encrypt
 from memsync.devices import list_devices, register_device
 from memsync.manifest import (
     build_manifest,
+    build_manifest_v2,
     deserialize_manifest,
     diff_manifests,
+    normalize_manifest,
     serialize_manifest,
 )
+from memsync.merge import merge_jsonl
 from memsync.storage.local import LocalBackend
 
 PASSPHRASE = "integration-test-passphrase"
@@ -305,7 +308,13 @@ class TestAutoCommands:
         config_a = {
             "device": {"id": "dev-a", "name": "Mac A"},
             "storage": {"path": str(storage_dir)},
-            "sync": {"claude_dir": str(claude_dir_a), "max_file_size": 52_428_800},
+            "sync": {
+                "claude_dir": str(claude_dir_a),
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir_a), "type": "claude"},
+                ],
+            },
             "crypto": {"argon2_memory_kb": MEMORY_KB},
         }
         save_config(config_a, config_a_path)
@@ -324,3 +333,377 @@ class TestAutoCommands:
         assert result.exit_code == 0
         assert "msync: pushed" in result.output
         assert "1 new" in result.output
+
+
+class TestMultiSourceSync:
+    """Integration tests for multi-source (v2 manifest) sync."""
+
+    def _make_claude_dir(self, base: "Path") -> "Path":
+        from pathlib import Path
+        d = base / ".claude"
+        memory = d / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+        return d
+
+    def _make_gstack_dir(self, base: "Path") -> "Path":
+        from pathlib import Path
+        d = base / ".gstack"
+        projects = d / "projects"
+        projects.mkdir(parents=True)
+        (projects / "state.yaml").write_text("active: true")
+        (d / "config.yaml").write_text("version: 1")
+        return d
+
+    def _make_config(self, tmp_path, storage_dir, claude_dir, device_id, device_name, gstack_dir=None):
+        config_path = tmp_path / f"config_{device_id}.toml"
+        sources = [
+            {"name": "claude", "path": str(claude_dir), "type": "claude"},
+        ]
+        if gstack_dir is not None:
+            sources.append({
+                "name": "gstack",
+                "path": str(gstack_dir),
+                "type": "generic",
+                "include_dirs": ["projects"],
+                "include_files": ["config.yaml"],
+            })
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": sources,
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        return config_path, config
+
+    def test_push_pull_multi_source(self, tmp_path, monkeypatch):
+        """Push with both claude and gstack from A, pull to B. Both arrive.
+
+        Pull writes to the base_path from the remote manifest, so both
+        machines must share the same logical paths for claude/gstack.
+        We simulate this by: A populates the shared dirs, pushes, then we
+        clear the dirs and pull (acting as B).
+        """
+        from pathlib import Path
+        storage_dir = tmp_path / "storage"
+
+        # Shared paths (simulating both machines having ~/.claude, ~/.gstack)
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+
+        # Phase 1: Machine A populates and pushes
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+
+        projects = gstack_dir / "projects"
+        projects.mkdir(parents=True)
+        (projects / "state.yaml").write_text("active: true")
+        (gstack_dir / "config.yaml").write_text("version: 1")
+
+        config_a_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A", gstack_dir
+        )
+
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+        register_device(backend, "dev-b", "Mac B")
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+        assert "msync: pushed" in result.output
+
+        # Phase 2: Clear local dirs (simulating Machine B that starts empty)
+        import shutil
+        shutil.rmtree(str(claude_dir))
+        claude_dir.mkdir(parents=True)
+        shutil.rmtree(str(gstack_dir))
+        gstack_dir.mkdir(parents=True)
+        (gstack_dir / "projects").mkdir()
+
+        config_b_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
+        )
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0
+
+        # Verify claude files arrived
+        pulled_role = claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
+        assert pulled_role.exists()
+        assert pulled_role.read_text() == "Data scientist"
+
+        # Verify gstack files arrived
+        pulled_state = gstack_dir / "projects" / "state.yaml"
+        assert pulled_state.exists()
+        assert pulled_state.read_text() == "active: true"
+
+        pulled_config = gstack_dir / "config.yaml"
+        assert pulled_config.exists()
+        assert pulled_config.read_text() == "version: 1"
+
+    def test_jsonl_merge_on_pull(self, tmp_path, monkeypatch):
+        """JSONL files are merged (not overwritten) on pull."""
+        from pathlib import Path
+        storage_dir = tmp_path / "storage"
+
+        # Shared path (both machines see same ~/.claude)
+        claude_dir = tmp_path / ".claude"
+        memory = claude_dir / "projects" / "-app" / "memory"
+        memory.mkdir(parents=True)
+
+        # Phase 1: Machine A has lines 1-3, pushes
+        lines_a = [
+            '{"ts":"2026-01-01T00:00:00Z","key":"line1"}',
+            '{"ts":"2026-01-02T00:00:00Z","key":"line2"}',
+            '{"ts":"2026-01-03T00:00:00Z","key":"line3"}',
+        ]
+        (memory / "learnings.jsonl").write_text("\n".join(lines_a) + "\n")
+
+        config_a_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A"
+        )
+
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+        register_device(backend, "dev-b", "Mac B")
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+
+        # Phase 2: Machine B has lines 1-2 + line4 locally, pulls A's data
+        lines_b = [
+            '{"ts":"2026-01-01T00:00:00Z","key":"line1"}',
+            '{"ts":"2026-01-02T00:00:00Z","key":"line2"}',
+            '{"ts":"2026-01-04T00:00:00Z","key":"line4"}',
+        ]
+        (memory / "learnings.jsonl").write_text("\n".join(lines_b) + "\n")
+
+        config_b_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-b", "Mac B"
+        )
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0
+
+        # B should have all 4 lines merged
+        merged_text = (memory / "learnings.jsonl").read_text()
+        merged_lines = [l for l in merged_text.strip().splitlines() if l.strip()]
+        keys = set()
+        for line in merged_lines:
+            obj = json.loads(line)
+            keys.add(obj["key"])
+        assert keys == {"line1", "line2", "line3", "line4"}
+        assert len(merged_lines) == 4
+
+    def test_source_filter_on_pull(self, tmp_path, monkeypatch):
+        """Pull with --source gstack only downloads gstack files."""
+        from pathlib import Path
+        import shutil
+        storage_dir = tmp_path / "storage"
+
+        # Shared paths
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+
+        # Phase 1: Machine A populates both sources, pushes
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+
+        projects = gstack_dir / "projects"
+        projects.mkdir(parents=True)
+        (projects / "state.yaml").write_text("active: true")
+        (gstack_dir / "config.yaml").write_text("version: 1")
+
+        config_a_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A", gstack_dir
+        )
+
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+        register_device(backend, "dev-b", "Mac B")
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+
+        # Phase 2: Clear local dirs (Machine B starts empty)
+        shutil.rmtree(str(claude_dir))
+        claude_dir.mkdir(parents=True)
+        shutil.rmtree(str(gstack_dir))
+        gstack_dir.mkdir(parents=True)
+        (gstack_dir / "projects").mkdir()
+
+        config_b_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
+        )
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+        result = runner.invoke(app, ["pull", "--source", "gstack"])
+        assert result.exit_code == 0
+
+        # gstack files should be present
+        assert (gstack_dir / "projects" / "state.yaml").exists()
+        assert (gstack_dir / "config.yaml").exists()
+
+        # claude files should NOT be present (source filter excluded them)
+        assert not (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").exists()
+
+    def test_source_filter_deletion_scoping(self, tmp_path, monkeypatch):
+        """Pulling --source gstack must not delete B's claude files.
+
+        A has only gstack files (no claude). B has both. Pulling from A
+        with --source gstack should update gstack but leave claude alone.
+        """
+        from pathlib import Path
+        storage_dir = tmp_path / "storage"
+
+        # Shared paths
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+
+        # Phase 1: Machine A has only gstack (no claude files), pushes
+        claude_dir.mkdir(parents=True)  # exists but empty
+        projects = gstack_dir / "projects"
+        projects.mkdir(parents=True)
+        (projects / "state.yaml").write_text("active: true")
+        (gstack_dir / "config.yaml").write_text("version: 1")
+
+        config_a_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A", gstack_dir
+        )
+
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+        register_device(backend, "dev-b", "Mac B")
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+
+        # Phase 2: Machine B has both claude and gstack files locally
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+
+        config_b_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
+        )
+
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+        result = runner.invoke(app, ["pull", "--source", "gstack"])
+        assert result.exit_code == 0
+
+        # B's claude files must still exist (not deleted by gstack-only pull)
+        assert (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").exists()
+        assert (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").read_text() == "Data scientist"
+
+    def test_gc_with_v2_manifest(self, tmp_path, monkeypatch):
+        """GC collects hashes from all sources in v2 manifests."""
+        from pathlib import Path
+        storage_dir = tmp_path / "storage"
+
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+
+        # Populate both sources
+        memory = claude_dir / "projects" / "-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+
+        projects = gstack_dir / "projects"
+        projects.mkdir(parents=True)
+        (projects / "state.yaml").write_text("active: true")
+        (gstack_dir / "config.yaml").write_text("version: 1")
+
+        config_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A", gstack_dir
+        )
+
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+
+        # Push (creates v2 manifest with both sources)
+        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+
+        # Plant an orphan blob
+        orphan_data = encrypt(b"orphan content", PASSPHRASE, memory_kb=MEMORY_KB)
+        backend.put("data/dev-a/deadbeef.enc", orphan_data)
+
+        # Run GC
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 0
+        assert "1" in result.output  # 1 orphan deleted
+
+        # Verify the orphan is gone
+        assert not backend.exists("data/dev-a/deadbeef.enc")
+
+        # Verify referenced blobs still exist
+        all_blobs = backend.list_keys("data/")
+        assert len(all_blobs) >= 3  # at least role.md, state.yaml, config.yaml
+
+    def test_backward_compat_v1_manifest(self, tmp_path):
+        """V1 manifests (no "sources") should work via normalize_manifest."""
+        v1_manifest = {
+            "device_id": "old-device",
+            "device_name": "Old Mac",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "base_path": "/Users/kb/.claude",
+            "files": {
+                "projects/-myapp/memory/role.md": {
+                    "sha256": "abc123",
+                    "size": 100,
+                    "mtime": "2026-01-01T00:00:00Z",
+                },
+                "projects/-myapp/todos/tasks.json": {
+                    "sha256": "def456",
+                    "size": 200,
+                    "mtime": "2026-01-01T00:00:00Z",
+                },
+            },
+        }
+
+        # Serialize, then deserialize (simulating storage round-trip)
+        data = serialize_manifest(v1_manifest)
+        loaded = deserialize_manifest(data)
+
+        # normalize should add sources
+        normalize_manifest(loaded)
+
+        assert "sources" in loaded
+        assert "claude" in loaded["sources"]
+        claude_src = loaded["sources"]["claude"]
+        assert claude_src["base_path"] == "/Users/kb/.claude"
+        assert len(claude_src["files"]) == 2
+        assert claude_src["files"]["projects/-myapp/memory/role.md"]["sha256"] == "abc123"
+
+        # The original "files" key should still be there for backward compat
+        assert "files" in loaded
+        assert len(loaded["files"]) == 2

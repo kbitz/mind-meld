@@ -30,6 +30,23 @@ DEFAULT_CLAUDE_DIR = str(Path.home() / ".claude")
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "memsync"
 )
+DEFAULT_SOURCES: list[dict[str, Any]] = [
+    {"name": "claude", "path": "~/.claude", "type": "claude"},
+    {
+        "name": "gstack",
+        "path": "~/.gstack",
+        "type": "generic",
+        "include_dirs": ["projects", "analytics", "retros"],
+        "include_files": [
+            "config.yaml",
+            ".completeness-intro-seen",
+            ".telemetry-prompted",
+            ".proactive-prompted",
+            ".welcome-seen",
+            ".codex-desc-healed",
+        ],
+    },
+]
 
 REQUIRED_FIELDS = {
     "device": ["id", "name"],
@@ -83,6 +100,76 @@ def _apply_defaults(config: dict[str, Any]) -> None:
     )
 
 
+def _validate_sources(sources: list[dict[str, Any]]) -> None:
+    """Check each source has required fields and unique names."""
+    seen_names: set[str] = set()
+    for i, src in enumerate(sources):
+        for field in ("name", "path", "type"):
+            if field not in src:
+                raise ConfigError(
+                    f"config: source #{i} missing required field '{field}'."
+                )
+        name = src["name"]
+        if name in seen_names:
+            raise ConfigError(f"config: duplicate source name '{name}'.")
+        seen_names.add(name)
+
+
+def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolve the list of sync sources from config.
+
+    Priority:
+    1. config["sync"]["sources"] if present (explicit list)
+    2. config["sync"]["claude_dir"] wrapped as a single claude source
+    3. DEFAULT_SOURCES
+
+    Auto-detection: if ~/.gstack/ exists on disk but no gstack source is
+    in the resolved list, append the default gstack source.
+
+    Finally, filter to sources whose path actually exists on disk.
+    """
+    sync = config.get("sync", {})
+
+    explicit_sources = "sources" in sync
+    if explicit_sources:
+        sources = [
+            {**src, "path": str(Path(src["path"]).expanduser())}
+            for src in sync["sources"]
+        ]
+    elif "claude_dir" in sync:
+        sources = [
+            {
+                "name": "claude",
+                "path": str(Path(sync["claude_dir"]).expanduser()),
+                "type": "claude",
+            }
+        ]
+    else:
+        sources = [
+            {**src, "path": str(Path(src["path"]).expanduser())}
+            for src in DEFAULT_SOURCES
+        ]
+
+    # Auto-detect: append default gstack source if ~/.gstack exists but
+    # no gstack source is already in the list.
+    # Only auto-detect when NOT using explicit sync.sources config.
+    gstack_path = Path.home() / ".gstack"
+    has_gstack = any(s["name"] == "gstack" for s in sources)
+    if not explicit_sources and gstack_path.exists() and not has_gstack:
+        default_gstack = next(
+            (s for s in DEFAULT_SOURCES if s["name"] == "gstack"), None
+        )
+        if default_gstack:
+            sources.append(
+                {**default_gstack, "path": str(Path(default_gstack["path"]).expanduser())}
+            )
+
+    _validate_sources(sources)
+
+    # Filter to sources whose path exists on disk
+    return [s for s in sources if Path(s["path"]).exists()]
+
+
 def save_config(config: dict[str, Any], path: Path | None = None) -> None:
     """Write config dict as TOML."""
     config_path = path or CONFIG_PATH
@@ -91,9 +178,18 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> None:
     lines: list[str] = []
     for section, values in config.items():
         if isinstance(values, dict):
-            # Handle nested sections like sync.path_map
-            simple = {k: v for k, v in values.items() if not isinstance(v, dict)}
-            nested = {k: v for k, v in values.items() if isinstance(v, dict)}
+            # Separate scalar/list values, nested dicts, and array-of-tables
+            simple: dict[str, Any] = {}
+            nested: dict[str, Any] = {}
+            array_tables: dict[str, list[dict[str, Any]]] = {}
+
+            for k, v in values.items():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    array_tables[k] = v
+                elif isinstance(v, dict):
+                    nested[k] = v
+                else:
+                    simple[k] = v
 
             if simple:
                 lines.append(f"[{section}]")
@@ -106,6 +202,14 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> None:
                 for key, val in sub_values.items():
                     lines.append(f"{key} = {_toml_value(val)}")
                 lines.append("")
+
+            # Serialize arrays of tables as [[section.key]]
+            for arr_key, arr_items in array_tables.items():
+                for item in arr_items:
+                    lines.append(f"[[{section}.{arr_key}]]")
+                    for key, val in item.items():
+                        lines.append(f"{key} = {_toml_value(val)}")
+                    lines.append("")
 
     config_path.write_text("\n".join(lines))
 
@@ -120,4 +224,9 @@ def _toml_value(val: Any) -> str:
         return str(val)
     if isinstance(val, float):
         return str(val)
+    if isinstance(val, list):
+        if all(isinstance(v, str) for v in val):
+            items = ", ".join(f'"{v}"' for v in val)
+            return f"[{items}]"
+        return str(val)  # fallback for non-string lists
     return f'"{val}"'

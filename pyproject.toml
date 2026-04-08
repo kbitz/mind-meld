@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memsync"
-version = "0.1.0"
-description = "Sync Claude Code sessions across machines via iCloud Drive"
+version = "0.2.0"
+description = "Sync Claude Code sessions and AI developer context across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
