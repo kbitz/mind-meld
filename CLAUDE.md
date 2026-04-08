@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Project
-MemSync (msync) — CLI tool for syncing ~/.claude session data across Macs via iCloud Drive.
+MemSync (msync) — CLI tool for syncing ~/.claude session data and ~/.gstack context across Macs via iCloud Drive. Supports multiple configurable sync sources.
 
 ## Stack
 Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
@@ -19,14 +19,14 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/memsync/{cli,manifest,crypto,errors,devices,config,lockfile,synclog}.py
+src/memsync/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge}.py
 src/memsync/storage/{local}.py
 
 ## Testing
 pytest. Use tmp_path for local backend. Run: `pytest tests/`
 
 ## Commands
-msync init | push | pull | status | devices | diff | gc | autopull | autopush
+msync init | push | pull | status | devices | diff | gc | sources | autopull | autopush
 
 ## Auto Commands (for Claude Code integration)
 - `msync autopull` — silent pull, one-line output, never prompts, graceful on errors
@@ -37,3 +37,4 @@ msync init | push | pull | status | devices | diff | gc | autopull | autopush
 ## Spec
 See SPEC.md for full architecture and data model.
 See docs/designs/memsync-v1.md for design decisions from spec review.
+See docs/designs/sync-gstack-context.md for multi-source sync design (gstack support).

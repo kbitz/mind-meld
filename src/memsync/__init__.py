@@ -1,3 +1,3 @@
-"""MemSync — sync Claude Code sessions across machines."""
+"""MemSync — sync Claude Code sessions and AI developer context across machines."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

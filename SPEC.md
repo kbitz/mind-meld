@@ -51,7 +51,7 @@ Every piece of documentation targets one of two audiences:
 
 ## Architecture
 
-Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs are written to `~/Library/Mobile Documents/com~apple~CloudDocs/memsync/` and iCloud handles sync.
+Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs are written to `~/Library/Mobile Documents/com~apple~CloudDocs/memsync/` and iCloud handles sync. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
 
 ```
 ┌─────────────┐         encrypted blobs    ┌──────────────────┐
@@ -73,18 +73,18 @@ Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs a
 ### Module Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    msync CLI (typer)                      │
-│  init | push | pull | status | devices | diff | gc       │
-└──────────┬──────────────────────────────────┬───────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    msync CLI (typer)                          │
+│  init | push | pull | status | devices | diff | gc | sources │
+└──────────┬──────────────────────────────────┬───────────────┘
            │                                  │
-     ┌─────▼─────┐                    ┌───────▼────────┐
-     │ manifest.py│                    │   crypto.py    │
-     │ walk/hash/ │                    │ keygen/encrypt │
-     │ diff       │                    │ decrypt/gzip   │
-     └─────┬─────┘                    └───────┬────────┘
-           │                                  │
-           │         ┌──────────────┐         │
+     ┌─────▼─────┐    ┌──────────┐    ┌──────▼────────┐
+     │ manifest.py│    │ merge.py │    │   crypto.py   │
+     │ walk/hash/ │    │ JSONL    │    │ keygen/encrypt│
+     │ diff       │    │ merge    │    │ decrypt/gzip  │
+     └─────┬─────┘    └─────┬────┘    └──────┬────────┘
+           │                │                 │
+           │         ┌──────▼───────┐         │
            └────────►│  config.py   │◄────────┘
                      │  devices.py  │
                      │  errors.py   │
@@ -137,32 +137,74 @@ name = "MacBook Pro"       # user-friendly label
 path = "~/Library/Mobile Documents/com~apple~CloudDocs/memsync"
 
 [sync]
-claude_dir = "~/.claude"   # override if non-standard
 max_file_size = 52428800   # bytes (50MB). Skip files larger than this.
+
+[[sync.sources]]
+name = "claude"
+path = "~/.claude"
+type = "claude"            # uses existing projects/*/memory|todos walker
+
+[[sync.sources]]
+name = "gstack"
+path = "~/.gstack"
+type = "generic"           # whitelist-based walker
+include_dirs = ["projects", "analytics", "retros"]
+include_files = ["config.yaml", ".completeness-intro-seen", ".telemetry-prompted",
+                 ".proactive-prompted", ".welcome-seen", ".codex-desc-healed"]
 
 [crypto]
 argon2_memory_kb = 65536   # Argon2id memory parameter in KB (default: 64MB). Lower for constrained environments.
 ```
 
+**Backward compatibility:** Old configs using `sync.claude_dir` are auto-converted to a single claude source on load.
+
 ### Manifest Schema
 
-The manifest is a **truth-based snapshot** of the local filesystem state. It always reflects the complete current state of `~/.claude/projects/` — files present locally are listed, files not present locally are omitted. Deletions propagate naturally: when a file is deleted locally, the next push produces a manifest without it.
+The manifest is a **truth-based snapshot** of the local filesystem state. It always reflects the complete current state — files present locally are listed, files not present locally are omitted. Deletions propagate naturally: when a file is deleted locally, the next push produces a manifest without it.
+
+**v2 manifests** include both `files` (v1 backward compat) and `sources` (v2 multi-source):
 
 ```json
 {
   "device_id": "a1b2c3d4",
   "device_name": "MacBook Pro",
-  "timestamp": "2026-03-17T12:00:00Z",
-  "base_path": "/Users/kb/.claude",
+  "timestamp": "2026-04-08T12:00:00Z",
   "files": {
-    "projects/-Users-kb-myapp/sessions/abc123.json": {
+    "projects/-Users-kb-myapp/memory/user_role.md": {
       "sha256": "e3b0c44298fc...",
       "size": 4096,
-      "mtime": "2026-03-17T11:30:00Z"
+      "mtime": "2026-04-08T11:30:00Z"
+    }
+  },
+  "sources": {
+    "claude": {
+      "base_path": "/Users/kb/.claude",
+      "files": {
+        "projects/-Users-kb-myapp/memory/user_role.md": {
+          "sha256": "e3b0c44298fc...",
+          "size": 4096,
+          "mtime": "2026-04-08T11:30:00Z"
+        }
+      }
+    },
+    "gstack": {
+      "base_path": "/Users/kb/.gstack",
+      "files": {
+        "projects/myapp/review-log.jsonl": {
+          "sha256": "ab12cd34ef56...",
+          "size": 2048,
+          "mtime": "2026-04-08T10:00:00Z"
+        }
+      }
     }
   }
 }
 ```
+
+**Backward compatibility:**
+- Old code reads `files`, gets claude data, syncs normally (ignores `sources`).
+- New code reads `sources`, gets everything.
+- New code reading v1 manifests: falls back to `files`, wraps as a claude source.
 
 ### End-to-End Encryption
 
@@ -241,11 +283,12 @@ Built with `typer`. Installed as `msync` (MemSync).
 ```
 msync init                     # generate device ID, configure storage, set passphrase
 msync push                     # build manifest, diff against remote, upload changes
-msync pull [--from DEVICE]     # download changes from a specific device (or all)
-msync status                   # show local vs remote state, pending changes
+msync pull [--from DEVICE] [--source NAME]   # download changes (optionally scoped)
+msync status [--source NAME]   # show local vs remote state, pending changes
 msync devices                  # list registered devices
-msync diff [--from DEVICE]     # show what would change without applying (dry run)
+msync diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
 msync gc                       # delete orphaned blobs not referenced by any manifest
+msync sources                  # list configured sync sources with status
 ```
 
 ### Global Flags
@@ -280,20 +323,21 @@ msync gc                       # delete orphaned blobs not referenced by any man
 10. Release lockfile.
 11. Print summary (files scanned, changed, bytes transferred, time elapsed).
 
-### `msync pull [--from DEVICE]`
+### `msync pull [--from DEVICE] [--source NAME]`
 
 1. Acquire lockfile.
 2. List devices from `devices/` prefix.
 3. If `--from` specified, pull only that device's manifest. Otherwise pull all.
 4. Download + decrypt remote manifest(s). Handle iCloud conflict resolution if applicable.
-5. Diff against local filesystem.
+5. If `--source` specified, diff only that source. Otherwise diff all sources.
 6. Download + decrypt changed blobs.
 7. Decompress (gzip) decrypted data.
-8. Write files to local `~/.claude/projects/` using atomic writes (write to `.tmp`, then `os.rename`).
-9. Delete local files that are absent from the remote manifest (truth-based: remote manifest is the source of truth).
-10. Write `.memsync-log.md` per affected project.
-11. Release lockfile.
-12. Print summary.
+8. For `.jsonl` files, merge instead of overwrite (union of lines, dedup, sort by `ts`).
+9. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`).
+10. Delete local files absent from the remote manifest, scoped to selected source(s).
+11. Write `.memsync-log.md` per affected project (claude source only).
+12. Release lockfile.
+13. Print summary.
 
 ### `msync gc`
 
@@ -306,12 +350,19 @@ msync gc                       # delete orphaned blobs not referenced by any man
 7. Release lockfile.
 8. Print summary (blobs deleted, bytes freed).
 
-### `msync status`
+### `msync status [--source NAME]`
 
 1. Build local manifest (no upload).
 2. Fetch remote manifest for current device.
 3. Fetch device list.
 4. Print: local file count, remote file count per device, pending pushes, pending pulls.
+5. If `--source` is given, show changes for that source only. Otherwise group changes by source.
+
+### `msync sources`
+
+1. Read `[[sync.sources]]` from config.toml.
+2. For each source, display: name, type, path, and whether the path exists.
+3. For `generic` sources, also show `include_dirs` and `include_files`.
 
 ---
 
@@ -357,15 +408,17 @@ If manifest decryption fails (corrupt data, partial write, wrong format):
 
 ## Excluded Patterns
 
-### Synced Subdirectories
+### Source Types and Synced Paths
 
-Only these subdirectories within each project are synced:
+Each sync source has a type that determines how files are discovered:
+
+**`claude` type** — the original walker. Scans `projects/*/memory/` and `projects/*/todos/` within the source path. Everything else (sessions, settings, etc.) is excluded — sessions are ephemeral conversation transcripts (large, not useful across machines), and settings/CLAUDE.md/agents/commands are already git-tracked.
 
 ```python
 SYNCED_SUBDIRS = ["memory", "todos"]
 ```
 
-Everything else under `~/.claude/projects/` (sessions, settings, etc.) is intentionally excluded — sessions are ephemeral conversation transcripts (large, not useful across machines), and settings/CLAUDE.md/agents/commands are already git-tracked.
+**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for sources like `~/.gstack` where specific directories and config files need syncing but the rest should be ignored.
 
 ### Excluded Patterns
 
@@ -407,6 +460,49 @@ Last pull: 2026-03-18 10:00 UTC from **MacBook Pro** (`abc123`)
 ```
 
 This file is excluded from sync (listed in EXCLUDED) so it doesn't propagate back. It's a local breadcrumb for Claude Code to discover cross-machine context.
+
+---
+
+## Multi-Source Sync
+
+MemSync supports syncing multiple data sources beyond `~/.claude`. Each source is defined in `[[sync.sources]]` in config.toml.
+
+### Source Types
+
+- **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present.
+- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively and picks up `include_files` at the source root. Used for `~/.gstack` and other structured data directories.
+
+### JSONL Merge on Pull
+
+`.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull:
+
+1. Union of lines from local and remote (byte-exact dedup after whitespace strip).
+2. Sort by `ts` field if present in JSON lines.
+3. Lexicographic tiebreaker for non-JSON or timestamp-less lines.
+
+The merged result becomes the new local truth and propagates on the next push.
+
+### Backward Compatibility
+
+v2 manifests include both `files` (containing only claude source files) and `sources` (containing all sources). This allows:
+
+- **Old clients** to read `files` and sync claude data normally, ignoring `sources`.
+- **New clients** to read `sources` for full multi-source sync.
+- **New clients reading v1 manifests** to fall back to `files` and wrap it as a claude source.
+
+Old configs using `sync.claude_dir` are auto-converted to a single claude source on load.
+
+### Auto-Detection
+
+`msync init` auto-detects known sources (e.g. if `~/.gstack` exists, it is added as a gstack source with default include patterns). Users can add or modify sources in config.toml.
+
+### Source-Scoped Operations
+
+- **Push** always pushes all sources. No `--source` flag on push.
+- **Pull, status, diff** accept an optional `--source NAME` flag to operate on a single source for troubleshooting.
+- **Deletions** during pull are scoped to the selected source.
+- **Sync logs** are written only for the claude source. Generic sources don't produce sync logs.
+- **GC** iterates `sources.*.files` in all manifests (with a backward-compat shim for v1 manifests).
 
 ---
 
@@ -477,6 +573,7 @@ memsync/
 │       ├── devices.py         # device registration, listing
 │       ├── lockfile.py        # PID-based concurrency lock
 │       ├── synclog.py         # sync log generation
+│       ├── merge.py           # JSONL merge logic (union, dedup, sort by ts)
 │       └── config.py          # config.toml read/write
 └── tests/
     ├── test_manifest.py

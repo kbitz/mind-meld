@@ -1,6 +1,6 @@
 # MemSync
 
-Sync Claude Code memory and todos across Macs via iCloud Drive. End-to-end encrypted.
+Sync Claude Code memory, todos, and gstack context across Macs via iCloud Drive. End-to-end encrypted. Supports multiple sync sources.
 
 ## Install
 
@@ -64,6 +64,18 @@ If `msync` is not installed, both commands will fail silently — no action need
 | `msync devices` | List registered devices |
 | `msync diff` | Dry-run: show what would change |
 | `msync gc` | Delete orphaned blobs |
+| `msync sources` | List configured sync sources |
+
+### Syncing gstack
+
+If `~/.gstack` is detected during `msync init`, it is automatically added as a sync source. gstack data (projects, analytics, retros, and config files) syncs alongside Claude Code data using the same encrypted push/pull workflow.
+
+- gstack uses a **whitelist-based** walker: only configured `include_dirs` and `include_files` are synced.
+- `.jsonl` files (review logs, analytics) are **merged** on pull instead of overwritten, preserving entries from both machines.
+- To check configured sources: `msync sources`
+- To pull only gstack data: `msync pull --source gstack`
+
+No extra setup needed — if gstack is present, it syncs.
 
 ## Architecture
 
