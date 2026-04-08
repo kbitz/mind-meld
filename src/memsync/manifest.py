@@ -1,10 +1,14 @@
 """Manifest building and diffing for MemSync.
 
-Walks ~/.claude/projects/*/memory/ and ~/.claude/projects/*/todos/ only.
-Other subdirectories (sessions, settings, etc.) are intentionally excluded —
-they're either tracked via git or are ephemeral conversation transcripts.
+Walks ~/.claude/projects/*/memory/ and ~/.claude/projects/*/todos/ only (claude source).
+Also supports generic sources with configurable include_dirs/include_files.
 
 Builds truth-based manifest snapshots and diffs them to find changes.
+
+Manifest formats:
+  v1 — flat "files" dict, single claude source (backward compat)
+  v2 — "sources" dict keyed by source name, each with base_path + files
+        Also carries "files" for v1 compat (claude source only)
 """
 
 from __future__ import annotations
@@ -69,12 +73,26 @@ def hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def walk_directory(
+def read_and_hash(path: Path) -> tuple[bytes, str]:
+    """Read entire file into memory and SHA-256 hash it in one shot.
+
+    Returns (file_bytes, hex_digest). This avoids the race condition where
+    hash_file() and a later read_bytes() could see different content if
+    the file is modified between the two reads.
+    """
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    return data, digest
+
+
+def walk_claude_source(
     base_dir: str | Path,
     max_file_size: int = 52_428_800,
     on_skip: Any = None,
 ) -> dict[str, dict[str, Any]]:
-    """Walk a directory and build the files dict for a manifest.
+    """Walk a Claude ~/.claude directory and build the files dict.
+
+    Scans only projects/*/memory/ and projects/*/todos/ subdirectories.
 
     Args:
         base_dir: Root directory to walk (e.g., ~/.claude)
@@ -141,6 +159,18 @@ def walk_directory(
     return files
 
 
+def walk_directory(
+    base_dir: str | Path,
+    max_file_size: int = 52_428_800,
+    on_skip: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Walk a directory and build the files dict for a manifest.
+
+    Backward-compat alias for walk_claude_source().
+    """
+    return walk_claude_source(base_dir, max_file_size, on_skip)
+
+
 def build_manifest(
     device_id: str,
     device_name: str,
@@ -157,6 +187,179 @@ def build_manifest(
         "base_path": str(Path(claude_dir).expanduser().resolve()),
         "files": files,
     }
+
+
+def walk_generic_source(
+    source_config: dict[str, Any],
+    max_file_size: int = 52_428_800,
+    on_skip: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Walk a generic source directory with configurable include_dirs/include_files.
+
+    Args:
+        source_config: Dict with keys:
+            path: Base directory path (supports ~)
+            include_dirs: List of directory names to walk recursively
+            include_files: List of filenames to check at root level
+        max_file_size: Skip files larger than this (bytes). Default 50MB.
+        on_skip: Optional callback(path, reason) for skipped files.
+
+    Returns:
+        Dict mapping relative paths (from base) to {sha256, size, mtime}.
+    """
+    base = Path(source_config["path"]).expanduser().resolve()
+    if not base.exists():
+        return {}
+
+    include_dirs: list[str] = source_config.get("include_dirs", [])
+    include_files: list[str] = source_config.get("include_files", [])
+
+    files: dict[str, dict[str, Any]] = {}
+    collected_paths: list[Path] = []
+
+    # Walk each include_dir recursively
+    for dir_name in include_dirs:
+        scan_dir = base / dir_name
+        if not scan_dir.exists() or not scan_dir.is_dir():
+            continue
+        for path in scan_dir.rglob("*"):
+            if path.is_file():
+                collected_paths.append(path)
+
+    # Check each include_files entry at root level
+    for filename in include_files:
+        path = base / filename
+        if path.exists() and path.is_file():
+            collected_paths.append(path)
+
+    for path in collected_paths:
+        rel = str(path.relative_to(base))
+
+        if _is_excluded(rel):
+            continue
+
+        try:
+            stat = path.stat()
+        except PermissionError:
+            if on_skip:
+                on_skip(rel, "permission denied")
+            continue
+
+        if stat.st_size > max_file_size:
+            if on_skip:
+                size_mb = stat.st_size / (1024 * 1024)
+                on_skip(rel, f"exceeds max_file_size ({size_mb:.1f}MB)")
+            continue
+
+        try:
+            sha = hash_file(path)
+        except (PermissionError, OSError):
+            if on_skip:
+                on_skip(rel, "read error")
+            continue
+
+        files[rel] = {
+            "sha256": sha,
+            "size": stat.st_size,
+            "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        }
+
+    return files
+
+
+def walk_source(
+    source_config: dict[str, Any],
+    max_file_size: int = 52_428_800,
+    on_skip: Any = None,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    """Dispatch to the appropriate walker based on source type.
+
+    Args:
+        source_config: Dict with at least "type" and "path" keys.
+            type="claude" -> walk_claude_source
+            type="generic" -> walk_generic_source
+        max_file_size: Skip files larger than this (bytes).
+        on_skip: Optional callback(path, reason) for skipped files.
+
+    Returns:
+        Tuple of (resolved_base_path_str, files_dict).
+    """
+    source_type = source_config.get("type", "claude")
+    base_path = str(Path(source_config["path"]).expanduser().resolve())
+
+    if source_type == "claude":
+        files = walk_claude_source(source_config["path"], max_file_size, on_skip)
+    elif source_type == "generic":
+        files = walk_generic_source(source_config, max_file_size, on_skip)
+    else:
+        raise ManifestError(f"manifest: unknown source type '{source_type}'")
+
+    return base_path, files
+
+
+def build_manifest_v2(
+    device_id: str,
+    device_name: str,
+    sources_configs: list[dict[str, Any]],
+    max_file_size: int = 52_428_800,
+    on_skip: Any = None,
+) -> dict[str, Any]:
+    """Build a v2 manifest with multiple sources.
+
+    Args:
+        device_id: Unique device identifier.
+        device_name: Human-readable device name.
+        sources_configs: List of source config dicts, each with at least
+            "name", "type", and "path" keys.
+        max_file_size: Skip files larger than this (bytes).
+        on_skip: Optional callback(path, reason) for skipped files.
+
+    Returns:
+        v2 manifest dict with both "files" (v1 compat) and "sources".
+    """
+    sources: dict[str, dict[str, Any]] = {}
+    claude_files: dict[str, dict[str, Any]] = {}
+
+    for src_cfg in sources_configs:
+        name = src_cfg["name"]
+        base_path, files = walk_source(src_cfg, max_file_size, on_skip)
+        sources[name] = {
+            "base_path": base_path,
+            "files": files,
+        }
+        # v1 compat: "files" at top level is the claude source only
+        if name == "claude":
+            claude_files = files
+
+    return {
+        "device_id": device_id,
+        "device_name": device_name,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "files": claude_files,
+        "sources": sources,
+    }
+
+
+def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Ensure a manifest has the v2 "sources" structure.
+
+    If the manifest already has "sources", return as-is.
+    If it only has "files" (v1 format), wrap the files into a
+    claude source entry under "sources".
+
+    Returns:
+        The manifest dict (mutated in place) with "sources" guaranteed.
+    """
+    if "sources" in manifest:
+        return manifest
+
+    manifest["sources"] = {
+        "claude": {
+            "base_path": manifest.get("base_path", ""),
+            "files": manifest.get("files", {}),
+        }
+    }
+    return manifest
 
 
 def serialize_manifest(manifest: dict[str, Any]) -> bytes:
