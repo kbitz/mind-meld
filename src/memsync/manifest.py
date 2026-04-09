@@ -16,7 +16,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -341,24 +341,28 @@ def build_manifest_v2(
 
 
 def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Ensure a manifest has the v2 "sources" structure.
+    """Ensure a manifest has the v2 "sources" structure and tombstones.
 
     If the manifest already has "sources", return as-is.
     If it only has "files" (v1 format), wrap the files into a
     claude source entry under "sources".
 
-    Returns:
-        The manifest dict (mutated in place) with "sources" guaranteed.
-    """
-    if "sources" in manifest:
-        return manifest
+    Always ensures "tombstones" key exists (empty dict for old manifests).
 
-    manifest["sources"] = {
-        "claude": {
-            "base_path": manifest.get("base_path", ""),
-            "files": manifest.get("files", {}),
+    Returns:
+        The manifest dict (mutated in place) with "sources" and "tombstones" guaranteed.
+    """
+    if "sources" not in manifest:
+        manifest["sources"] = {
+            "claude": {
+                "base_path": manifest.get("base_path", ""),
+                "files": manifest.get("files", {}),
+            }
         }
-    }
+
+    if "tombstones" not in manifest:
+        manifest["tombstones"] = {}
+
     return manifest
 
 
@@ -433,3 +437,118 @@ def diff_manifests(
             deleted.append(path)
 
     return DiffResult(new=new, modified=modified, deleted=deleted, unchanged=unchanged)
+
+
+# ── tombstones ───────────────────────────────────────────────────────
+
+TOMBSTONE_TTL_DAYS = 30
+
+
+def generate_tombstones(
+    local_manifest: dict[str, Any],
+    remote_manifest: dict[str, Any] | None,
+    device_id: str,
+) -> dict[str, dict[str, str]]:
+    """Generate tombstones for files that disappeared since last push.
+
+    Compares current local manifest against the previous remote manifest.
+    Files that were in remote but are no longer in local get a tombstone.
+    Existing non-expired tombstones from the remote manifest carry forward.
+
+    Returns:
+        Dict mapping relative paths to {"deleted_at": ISO timestamp, "device_id": str}.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=TOMBSTONE_TTL_DAYS)
+    now_iso = now.isoformat()
+    tombstones: dict[str, dict[str, str]] = {}
+
+    # Carry forward non-expired tombstones from remote manifest
+    if remote_manifest:
+        for path, info in remote_manifest.get("tombstones", {}).items():
+            deleted_at = info.get("deleted_at", "")
+            try:
+                ts = datetime.fromisoformat(deleted_at)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts > cutoff:
+                    tombstones[path] = info
+            except (ValueError, TypeError):
+                pass  # drop unparseable tombstones
+
+    # Detect new tombstones: files in remote manifest but not in local
+    # Keys are "source:path" to prevent cross-source suppression
+    if remote_manifest:
+        normalize_manifest(remote_manifest)
+        local_sources = local_manifest.get("sources", {})
+        remote_sources = remote_manifest.get("sources", {})
+
+        for src_name, remote_src in remote_sources.items():
+            local_src = local_sources.get(src_name, {"files": {}})
+            local_files = local_src.get("files", {})
+            remote_files = remote_src.get("files", {})
+
+            for path in remote_files:
+                key = f"{src_name}:{path}"
+                if path not in local_files and key not in tombstones:
+                    tombstones[key] = {
+                        "deleted_at": now_iso,
+                        "device_id": device_id,
+                    }
+
+    # Remove tombstones for files that exist locally again (un-delete)
+    all_local_keys: set[str] = set()
+    for src_name, src_data in local_manifest.get("sources", {}).items():
+        for path in src_data.get("files", {}).keys():
+            all_local_keys.add(f"{src_name}:{path}")
+    tombstones = {
+        key: info for key, info in tombstones.items()
+        if key not in all_local_keys
+    }
+
+    return tombstones
+
+
+def collect_tombstones(
+    device_ids: list[str],
+    fetch_manifest: Any,
+) -> dict[str, dict[str, str]]:
+    """Pre-collect all active tombstones from all device manifests.
+
+    Args:
+        device_ids: List of all device IDs.
+        fetch_manifest: Callable(device_id) -> manifest dict or None.
+
+    Returns:
+        Dict mapping relative paths to tombstone info. For duplicates, the
+        most recent tombstone wins.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=TOMBSTONE_TTL_DAYS)
+    all_tombstones: dict[str, dict[str, str]] = {}
+
+    for did in device_ids:
+        manifest = fetch_manifest(did)
+        if manifest is None:
+            continue
+        for path, info in manifest.get("tombstones", {}).items():
+            deleted_at = info.get("deleted_at", "")
+            try:
+                ts = datetime.fromisoformat(deleted_at)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts <= cutoff:
+                    continue  # expired
+            except (ValueError, TypeError):
+                continue  # unparseable
+
+            existing = all_tombstones.get(path)
+            if existing is None or deleted_at > existing.get("deleted_at", ""):
+                all_tombstones[path] = info
+
+    return all_tombstones
+
+
+def is_tombstoned(source: str, rel_path: str, tombstones: dict[str, dict[str, str]]) -> bool:
+    """Check if a source:path has an active tombstone."""
+    return f"{source}:{rel_path}" in tombstones

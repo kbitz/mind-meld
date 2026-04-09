@@ -103,7 +103,7 @@ class LocalBackend:
                 continue
             # Check Dropbox pattern
             m = _DROPBOX_CONFLICT_RE.match(f.name)
-            if m and m.group(2) == ext:
+            if m and m.group(1) == stem_base and m.group(2) == ext:
                 conflicts.append(f)
         return sorted(conflicts)
 
