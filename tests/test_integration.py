@@ -138,11 +138,11 @@ class TestPushPullRoundTrip:
         enc_m2 = encrypt(serialize_manifest(manifest_2), PASSPHRASE, memory_kb=MEMORY_KB)
         storage.put(f"manifests/{device_a}/manifest.json.enc", enc_m2)
 
-        # Pull to B — diff should show session1 as deleted
+        # Pull to B — in the additive model, diff still computes "deleted" but
+        # pull never acts on it. B keeps user_role.md even though A deleted it.
         enc_m = storage.get(f"manifests/{device_a}/manifest.json.enc")
         remote = deserialize_manifest(decrypt(enc_m, PASSPHRASE, memory_kb=MEMORY_KB))
 
-        # Build B's full local state for diffing (B has both session1 and session2)
         b_files = {}
         projects_dir = claude_dir_b / "projects"
         if projects_dir.exists():
@@ -152,12 +152,15 @@ class TestPushPullRoundTrip:
                     rel = str(path.relative_to(claude_dir_b))
                     b_files[rel] = {"sha256": hash_file(path)}
 
-        # Remote manifest (source of truth) has only session2.
-        # diff_manifests(local=remote_manifest, remote=B_local_state):
-        #   deleted = files in B's local but NOT in remote manifest → need to delete on B
+        # diff_manifests still computes deleted (for push context),
+        # but the additive pull model ignores it.
         diff = diff_manifests({"files": remote["files"]}, {"files": b_files})
         assert len(diff.deleted) == 1
         assert "user_role.md" in diff.deleted[0]
+
+        # Verify B's local copy is preserved (additive model)
+        role_b = claude_dir_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        assert role_b.exists(), "Additive pull must preserve local-only files"
 
 
 class TestSyncLog:
