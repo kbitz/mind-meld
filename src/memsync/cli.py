@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -28,17 +29,41 @@ from memsync.errors import CryptoError, LockError, ManifestError, MemSyncError
 from memsync.lockfile import acquire_lock, release_lock
 from memsync.manifest import (
     DiffResult,
+    TOMBSTONE_TTL_DAYS,
     build_manifest_v2,
+    collect_tombstones,
     normalize_manifest,
     read_and_hash,
     deserialize_manifest,
     diff_manifests,
+    generate_tombstones,
     serialize_manifest,
     hash_file,
+    is_tombstoned,
 )
-from memsync.merge import merge_jsonl, should_merge
+from memsync.merge import merge_file, should_merge
 from memsync.storage import get_backend
 from memsync.synclog import write_sync_log
+
+
+@dataclass
+class PullResult:
+    """Result of a pull operation."""
+    total_new: int = 0
+    total_modified: int = 0
+    bytes_transferred: int = 0
+    device_names: list[str] = field(default_factory=list)
+    elapsed: float = 0.0
+
+
+@dataclass
+class PushResult:
+    """Result of a push operation."""
+    total_new: int = 0
+    total_modified: int = 0
+    total_deleted: int = 0
+    bytes_transferred: int = 0
+    elapsed: float = 0.0
 
 app = typer.Typer(
     name="msync",
@@ -72,20 +97,103 @@ def _get_passphrase_or_exit() -> str:
 def _fetch_remote_manifest(
     backend, device_id: str, passphrase: str, memory_kb: int
 ) -> dict | None:
-    """Fetch and decrypt remote manifest. Returns None if missing or corrupt."""
+    """Fetch and decrypt remote manifest, merging any conflict copies.
+
+    Read-only: does NOT delete conflict copies. Use _cleanup_conflict_copies()
+    after the manifest has been successfully used in a mutating operation.
+
+    If the canonical manifest and/or conflict copies exist, decrypt all that
+    succeed and merge additively (union of files, latest manifest timestamp wins
+    for duplicate paths). Returns None only if ALL copies fail.
+    """
     manifest_key = f"manifests/{device_id}/manifest.json.enc"
-    if not backend.exists(manifest_key):
+    manifests: list[dict] = []
+
+    # Try canonical manifest
+    if backend.exists(manifest_key):
+        try:
+            enc_data = backend.get(manifest_key)
+            plain = decrypt(enc_data, passphrase, memory_kb)
+            manifests.append(deserialize_manifest(plain))
+        except (CryptoError, ManifestError):
+            pass  # canonical corrupt — try conflict copies
+
+    # Try conflict copies (iCloud/Dropbox)
+    for conflict_path in backend.find_conflict_copies(manifest_key):
+        try:
+            enc_data = conflict_path.read_bytes()
+            plain = decrypt(enc_data, passphrase, memory_kb)
+            manifests.append(deserialize_manifest(plain))
+        except (CryptoError, ManifestError, OSError):
+            pass  # skip unreadable conflict copies
+
+    if not manifests:
+        if backend.exists(manifest_key):
+            console.print(
+                "[yellow]Warning:[/yellow] manifest corrupt or unreadable. "
+                "Will perform full re-push."
+            )
         return None
-    try:
-        enc_data = backend.get(manifest_key)
-        plain = decrypt(enc_data, passphrase, memory_kb)
-        return deserialize_manifest(plain)
-    except (CryptoError, ManifestError) as e:
-        console.print(
-            f"[yellow]Warning:[/yellow] manifest corrupt or unreadable ({e}). "
-            "Will perform full re-push."
-        )
-        return None
+
+    if len(manifests) == 1:
+        return manifests[0]
+
+    # Merge multiple manifests additively: union of files, latest timestamp wins
+    return _merge_manifests(manifests)
+
+
+def _merge_manifests(manifests: list[dict]) -> dict:
+    """Merge multiple manifest variants additively.
+
+    For each source, takes the union of all files. When the same relative path
+    appears in multiple manifests, the entry from the manifest with the latest
+    timestamp wins.
+    """
+    # Sort by timestamp so later manifests overwrite earlier ones
+    sorted_manifests = sorted(
+        manifests,
+        key=lambda m: m.get("timestamp", ""),
+    )
+
+    merged = dict(sorted_manifests[-1])  # start with latest as base
+    merged_sources: dict[str, dict] = {}
+
+    for m in sorted_manifests:
+        normalize_manifest(m)
+        for src_name, src_data in m.get("sources", {}).items():
+            if src_name not in merged_sources:
+                merged_sources[src_name] = {
+                    "base_path": src_data.get("base_path", ""),
+                    "files": {},
+                }
+            # Union: later manifests overwrite earlier for same path
+            merged_sources[src_name]["files"].update(src_data.get("files", {}))
+
+    merged["sources"] = merged_sources
+    # v1 compat: update top-level "files" from claude source
+    if "claude" in merged_sources:
+        merged["files"] = merged_sources["claude"].get("files", {})
+
+    # Merge tombstones additively too
+    merged_tombstones: dict[str, dict] = {}
+    for m in sorted_manifests:
+        for path, info in m.get("tombstones", {}).items():
+            existing = merged_tombstones.get(path)
+            if existing is None or info.get("deleted_at", "") > existing.get("deleted_at", ""):
+                merged_tombstones[path] = info
+    merged["tombstones"] = merged_tombstones
+
+    return merged
+
+
+def _cleanup_conflict_copies(backend, device_id: str) -> int:
+    """Delete conflict copies for a device's manifest.
+
+    Call ONLY from mutating operations (push, pull) after the manifest
+    has been successfully used. Never from status, diff, gc, or dry-run.
+    """
+    manifest_key = f"manifests/{device_id}/manifest.json.enc"
+    return backend.delete_conflict_copies(manifest_key)
 
 
 def _print_diff_summary(diff: DiffResult, elapsed: float) -> None:
@@ -174,7 +282,7 @@ def _download_and_apply(
 
         if should_merge(rel_path) and local_path.exists():
             local_bytes = local_path.read_bytes()
-            merged = merge_jsonl(local_bytes, plain_data)
+            merged = merge_file(rel_path, local_bytes, plain_data)
             tmp_path = local_path.with_suffix(local_path.suffix + ".tmp")
             tmp_path.write_bytes(merged)
             tmp_path.rename(local_path)
@@ -317,18 +425,33 @@ def push(
         _error(str(e))
 
     try:
-        _do_push(config, passphrase, memory_kb, verbose, dry_run)
+        result = _push_core(config, passphrase, memory_kb, verbose, dry_run)
+
+        # Auto GC on interactive push only (not autopush)
+        if result and (result.total_new or result.total_modified or result.total_deleted):
+            try:
+                gc_count = _do_gc(config, passphrase, memory_kb, dry_run=False, verbose=False)
+                if gc_count:
+                    console.print(f"  GC: deleted {gc_count} orphaned blobs.")
+            except Exception:
+                pass  # GC failure must not break push
     finally:
         release_lock()
 
 
-def _do_push(
+def _push_core(
     config: dict,
     passphrase: str,
     memory_kb: int,
-    verbose: bool,
-    dry_run: bool,
-) -> None:
+    verbose: bool = False,
+    dry_run: bool = False,
+    quiet: bool = False,
+) -> PushResult | None:
+    """Core push logic shared by push and autopush.
+
+    When quiet=True, suppresses all rich console output (for autopush).
+    Returns PushResult on success, None if nothing to push or dry_run.
+    """
     start = time.time()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -339,17 +462,19 @@ def _do_push(
     # Build local manifest (v2 with sources)
     sources = get_sources(config)
     if not sources:
-        console.print("[yellow]No sync sources found. Run 'msync init' to configure.[/yellow]")
-        return
+        if not quiet:
+            console.print("[yellow]No sync sources found. Run 'msync init' to configure.[/yellow]")
+        return None
 
     skipped: list[tuple[str, str]] = []
 
     def on_skip(path: str, reason: str) -> None:
         skipped.append((path, reason))
-        if verbose:
+        if verbose and not quiet:
             console.print(f"  [dim]skipped: {path} ({reason})[/dim]")
 
-    console.print("[bold]Building manifest...[/bold]")
+    if not quiet:
+        console.print("[bold]Building manifest...[/bold]")
     local_manifest = build_manifest_v2(
         device_id, device_name, sources, max_file_size, on_skip
     )
@@ -357,15 +482,19 @@ def _do_push(
     total_file_count = sum(
         len(src_data["files"]) for src_data in local_manifest["sources"].values()
     )
-    console.print(f"  {total_file_count} files scanned across {len(local_manifest['sources'])} source(s)")
-
-    if skipped:
-        console.print(f"  [yellow]{len(skipped)} files skipped[/yellow]")
+    if not quiet:
+        console.print(f"  {total_file_count} files scanned across {len(local_manifest['sources'])} source(s)")
+        if skipped:
+            console.print(f"  [yellow]{len(skipped)} files skipped[/yellow]")
 
     # Fetch remote manifest
     remote_manifest = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     if remote_manifest:
         normalize_manifest(remote_manifest)
+
+    # Generate tombstones for files that disappeared since last push
+    tombstones = generate_tombstones(local_manifest, remote_manifest, device_id)
+    local_manifest["tombstones"] = tombstones
 
     # Diff and upload per-source
     total_bytes = 0
@@ -386,35 +515,40 @@ def _do_push(
             continue
 
         if dry_run:
-            console.print(f"\n[bold]Source '{src_name}':[/bold]")
-            _print_diff_summary(diff, 0)
+            if not quiet:
+                console.print(f"\n[bold]Source '{src_name}':[/bold]")
+                _print_diff_summary(diff, 0)
             continue
 
         to_upload = {**diff.new, **diff.modified}
         base_path = Path(src_data["base_path"])
 
-        if verbose:
+        if verbose and not quiet:
             console.print(f"\n[bold]Uploading {len(to_upload)} files from '{src_name}'...[/bold]")
 
         total_bytes += _upload_changed_blobs(
-            backend, base_path, to_upload, device_id, passphrase, memory_kb, verbose
+            backend, base_path, to_upload, device_id, passphrase, memory_kb,
+            verbose=(verbose and not quiet),
         )
         total_new += len(diff.new)
         total_modified += len(diff.modified)
         total_deleted += len(diff.deleted)
 
     if dry_run:
-        console.print(f"\n[bold]Dry run complete.[/bold]")
-        elapsed = time.time() - start
-        console.print(f"  Completed in {elapsed:.1f}s")
-        return
+        if not quiet:
+            elapsed = time.time() - start
+            console.print(f"\n[bold]Dry run complete.[/bold]")
+            console.print(f"  Completed in {elapsed:.1f}s")
+        return None
 
     if not (total_new or total_modified or total_deleted):
-        console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
-        return
+        if not quiet:
+            console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
+        return None
 
-    # Upload manifest
-    console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
+    # Upload manifest (includes tombstones)
+    if not quiet:
+        console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     manifest_data = serialize_manifest(local_manifest)
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     manifest_key = f"manifests/{device_id}/manifest.json.enc"
@@ -423,18 +557,32 @@ def _do_push(
     # Update device last_seen
     update_last_seen(backend, device_id)
 
+    # Clean up conflict copies (write-path only)
+    _cleanup_conflict_copies(backend, device_id)
+
     elapsed = time.time() - start
-    console.print(f"\n[bold green]Push complete.[/bold green]")
-    if total_new:
-        console.print(f"  [green]+ {total_new} new[/green]")
-    if total_modified:
-        console.print(f"  [yellow]~ {total_modified} modified[/yellow]")
-    if total_deleted:
-        console.print(f"  [red]- {total_deleted} deleted[/red]")
-    console.print(f"  Completed in {elapsed:.1f}s")
-    if total_bytes:
-        mb = total_bytes / (1024 * 1024)
-        console.print(f"  {mb:.1f}MB transferred")
+    result = PushResult(
+        total_new=total_new,
+        total_modified=total_modified,
+        total_deleted=total_deleted,
+        bytes_transferred=total_bytes,
+        elapsed=elapsed,
+    )
+
+    if not quiet:
+        console.print(f"\n[bold green]Push complete.[/bold green]")
+        if total_new:
+            console.print(f"  [green]+ {total_new} new[/green]")
+        if total_modified:
+            console.print(f"  [yellow]~ {total_modified} modified[/yellow]")
+        if total_deleted:
+            console.print(f"  [red]- {total_deleted} deleted[/red]")
+        console.print(f"  Completed in {elapsed:.1f}s")
+        if total_bytes:
+            mb = total_bytes / (1024 * 1024)
+            console.print(f"  {mb:.1f}MB transferred")
+
+    return result
 
 
 # ── pull ──────────────────────────────────────────────────────────────
@@ -462,20 +610,30 @@ def pull(
         _error(str(e))
 
     try:
-        _do_pull(config, passphrase, memory_kb, from_device, source, verbose, dry_run)
+        _pull_core(config, passphrase, memory_kb, from_device, source, verbose, dry_run)
     finally:
         release_lock()
 
 
-def _do_pull(
+def _pull_core(
     config: dict,
     passphrase: str,
     memory_kb: int,
-    from_device: str | None,
-    source_filter: str | None,
-    verbose: bool,
-    dry_run: bool,
-) -> None:
+    from_device: str | None = None,
+    source_filter: str | None = None,
+    verbose: bool = False,
+    dry_run: bool = False,
+    quiet: bool = False,
+) -> PullResult:
+    """Core pull logic shared by pull and autopull.
+
+    Additive-only: downloads new and modified files, never deletes local files.
+    Tombstoned files are skipped. JSONL files are merged. MEMORY.md files are
+    line-merged.
+
+    When quiet=True, suppresses all rich console output (for autopush).
+    Returns PullResult with counts and device names.
+    """
     start = time.time()
     my_device_id = config["device"]["id"]
 
@@ -490,42 +648,58 @@ def _do_pull(
     devices = list_devices(backend)
     if from_device:
         devices = [d for d in devices if d["device_id"] == from_device]
-        if not devices:
+        if not devices and not quiet:
             _error(f"Device not found: {from_device}")
     else:
-        # Pull from all other devices
         devices = [d for d in devices if d["device_id"] != my_device_id]
 
     if not devices:
-        console.print("[yellow]No other devices found to pull from.[/yellow]")
-        return
+        if not quiet:
+            console.print("[yellow]No other devices found to pull from.[/yellow]")
+        return PullResult(elapsed=time.time() - start)
+
+    # Pre-fetch all device manifests (used for tombstone collection + pull)
+    all_devices_list = list_devices(backend)
+    manifest_cache: dict[str, dict | None] = {}
+    for d in all_devices_list:
+        manifest_cache[d["device_id"]] = _fetch_remote_manifest(
+            backend, d["device_id"], passphrase, memory_kb
+        )
+
+    # Pre-collect all tombstones from ALL device manifests for O(1) lookup
+    all_tombstones = collect_tombstones(
+        list(manifest_cache.keys()),
+        lambda did: manifest_cache.get(did),
+    )
 
     total_new = 0
     total_modified = 0
-    total_deleted = 0
     bytes_transferred = 0
+    device_names: list[str] = []
 
     for device in devices:
         did = device["device_id"]
         dname = device["device_name"]
-        console.print(f"\n[bold]Pulling from {dname} ({did})...[/bold]")
+        if not quiet:
+            console.print(f"\n[bold]Pulling from {dname} ({did})...[/bold]")
 
-        remote_manifest = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+        remote_manifest = manifest_cache.get(did)
         if remote_manifest is None:
-            console.print(f"  [yellow]No manifest for {dname}[/yellow]")
+            if not quiet:
+                console.print(f"  [yellow]No manifest for {dname}[/yellow]")
             continue
 
         normalize_manifest(remote_manifest)
         remote_sources = remote_manifest.get("sources", {})
 
+        device_had_changes = False
+
         for src_name, src_data in remote_sources.items():
-            # Skip if --source specified and doesn't match
             if source_filter and src_name != source_filter:
                 continue
 
-            # Skip sources we don't have locally configured
             if src_name not in local_sources_map:
-                if verbose:
+                if verbose and not quiet:
                     console.print(f"  [dim]skipping unknown source '{src_name}'[/dim]")
                 continue
 
@@ -533,10 +707,9 @@ def _do_pull(
             if not remote_files:
                 continue
 
-            # Use LOCAL source path, not remote manifest's base_path
             base_path = local_sources_map[src_name]
 
-            if verbose:
+            if verbose and not quiet:
                 console.print(f"  [bold]Source '{src_name}' ({base_path}):[/bold]")
 
             # Build local state for comparison
@@ -550,59 +723,77 @@ def _do_pull(
                     except (PermissionError, OSError):
                         pass
 
-            # Diff: remote is source of truth
             diff = diff_manifests(
                 {"files": remote_files},
                 {"files": local_files},
             )
 
             if dry_run:
-                console.print(f"  Dry run for {dname}/{src_name}:")
-                _print_diff_summary(diff, 0)
+                if not quiet:
+                    console.print(f"  Dry run for {dname}/{src_name}:")
+                    _print_diff_summary(diff, 0)
                 continue
 
-            if not diff.has_changes:
-                if verbose:
+            # Check if there's anything to download (ignore deleted — additive model)
+            to_download = {**diff.new, **diff.modified}
+
+            # Filter out tombstoned files
+            to_download = {
+                path: info for path, info in to_download.items()
+                if not is_tombstoned(src_name, path, all_tombstones)
+            }
+
+            if not to_download:
+                if verbose and not quiet:
                     console.print(f"  [green]Up to date with {dname}/{src_name}.[/green]")
                 continue
 
-            # Download new and modified files
-            to_download = {**diff.new, **diff.modified}
+            device_had_changes = True
             bytes_transferred += _download_and_apply(
-                backend, base_path, to_download, did, passphrase, memory_kb, verbose
+                backend, base_path, to_download, did, passphrase, memory_kb,
+                verbose=(verbose and not quiet),
             )
 
-            # Delete files not in remote manifest (truth-based)
-            _delete_files(base_path, diff.deleted, verbose)
+            total_new += len(to_download)
 
-            total_new += len(diff.new)
-            total_modified += len(diff.modified)
-            total_deleted += len(diff.deleted)
-
-            # Write sync log only for claude source
-            if src_name == "claude" and not dry_run and diff.has_changes:
+            # Write sync log only for claude source (no deleted_files in additive model)
+            if src_name == "claude":
                 claude_dir = str(base_path)
                 logs = write_sync_log(
                     claude_dir=claude_dir,
                     device_name=dname,
                     device_id=did,
-                    new_files=list(diff.new.keys()),
-                    modified_files=list(diff.modified.keys()),
-                    deleted_files=diff.deleted,
+                    new_files=list(to_download.keys()),
+                    modified_files=[],
+                    deleted_files=[],
                 )
-                if verbose and logs:
+                if verbose and not quiet and logs:
                     for log in logs:
                         console.print(f"  [dim]wrote sync log: {log}[/dim]")
 
+        if device_had_changes:
+            device_names.append(dname)
+            # Clean up conflict copies (write-path only)
+            _cleanup_conflict_copies(backend, did)
+
     elapsed = time.time() - start
-    console.print(f"\n[bold green]Pull complete.[/bold green]")
-    console.print(
-        f"  + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted"
+    result = PullResult(
+        total_new=total_new,
+        total_modified=total_modified,
+        bytes_transferred=bytes_transferred,
+        device_names=device_names,
+        elapsed=elapsed,
     )
-    if bytes_transferred:
-        mb = bytes_transferred / (1024 * 1024)
-        console.print(f"  {mb:.1f}MB transferred")
-    console.print(f"  Completed in {elapsed:.1f}s")
+
+    if not quiet:
+        console.print(f"\n[bold green]Pull complete.[/bold green]")
+        console.print(f"  {total_new} files synced")
+        if bytes_transferred:
+            mb = bytes_transferred / (1024 * 1024)
+            console.print(f"  {mb:.1f}MB transferred")
+        console.print(f"  Completed in {elapsed:.1f}s")
+
+    return result
 
 
 # ── status ────────────────────────────────────────────────────────────
@@ -830,7 +1021,8 @@ def _do_gc(
     memory_kb: int,
     dry_run: bool,
     verbose: bool,
-) -> None:
+) -> int:
+    """Run garbage collection. Returns number of orphaned blobs found/deleted."""
     backend = get_backend(config)
 
     # Collect all referenced hashes from ALL device manifests
@@ -853,7 +1045,6 @@ def _do_gc(
     # List all blobs across all devices
     all_blobs = backend.list_keys("data/")
     orphan_count = 0
-    orphan_bytes = 0
 
     for blob_key in all_blobs:
         if not blob_key.endswith(".enc"):
@@ -877,6 +1068,8 @@ def _do_gc(
             f"\n[bold green]GC complete.[/bold green] "
             f"Deleted {orphan_count} orphaned blobs."
         )
+
+    return orphan_count
 
 
 # ── sources ───────────────────────────────────────────────────────────
@@ -923,7 +1116,6 @@ def autopull() -> None:
         return
 
     memory_kb = config["crypto"]["argon2_memory_kb"]
-    my_device_id = config["device"]["id"]
 
     try:
         acquire_lock()
@@ -931,109 +1123,16 @@ def autopull() -> None:
         return  # another operation running — don't block Claude
 
     try:
-        backend = get_backend(config)
+        result = _pull_core(config, passphrase, memory_kb, quiet=True)
 
-        # Build local source path map (use LOCAL config, not remote base_path)
-        local_sources_map: dict[str, Path] = {}
-        for src_cfg in get_sources(config):
-            local_sources_map[src_cfg["name"]] = Path(src_cfg["path"]).expanduser().resolve()
-
-        all_devices = list_devices(backend)
-        other_devices = [d for d in all_devices if d["device_id"] != my_device_id]
-
-        if not other_devices:
-            return
-
-        total_new = 0
-        total_modified = 0
-        total_deleted = 0
-        source_names: list[str] = []
-
-        for device in other_devices:
-            did = device["device_id"]
-            dname = device["device_name"]
-
-            remote_manifest = _fetch_remote_manifest(
-                backend, did, passphrase, memory_kb
-            )
-            if remote_manifest is None:
-                continue
-
-            normalize_manifest(remote_manifest)
-            remote_sources = remote_manifest.get("sources", {})
-
-            device_had_changes = False
-
-            for src_name, src_data in remote_sources.items():
-                # Skip sources we don't have locally
-                if src_name not in local_sources_map:
-                    continue
-
-                remote_files = src_data.get("files", {})
-                if not remote_files:
-                    continue
-
-                base_path = local_sources_map[src_name]
-
-                # Build local state for comparison
-                local_files: dict[str, dict] = {}
-                for rel_path in remote_files:
-                    local_path = base_path / rel_path
-                    if local_path.exists():
-                        try:
-                            sha = hash_file(local_path)
-                            local_files[rel_path] = {"sha256": sha}
-                        except (PermissionError, OSError):
-                            pass
-
-                diff = diff_manifests(
-                    {"files": remote_files},
-                    {"files": local_files},
-                )
-
-                if not diff.has_changes:
-                    continue
-
-                device_had_changes = True
-
-                # Download and apply (with JSONL merge)
-                to_download = {**diff.new, **diff.modified}
-                _download_and_apply(
-                    backend, base_path, to_download, did, passphrase, memory_kb
-                )
-
-                # Delete
-                _delete_files(base_path, diff.deleted)
-
-                total_new += len(diff.new)
-                total_modified += len(diff.modified)
-                total_deleted += len(diff.deleted)
-
-                # Write sync log only for claude source
-                if src_name == "claude" and diff.has_changes:
-                    claude_dir = str(base_path)
-                    write_sync_log(
-                        claude_dir=claude_dir,
-                        device_name=dname,
-                        device_id=did,
-                        new_files=list(diff.new.keys()),
-                        modified_files=list(diff.modified.keys()),
-                        deleted_files=diff.deleted,
-                    )
-
-            if device_had_changes:
-                source_names.append(dname)
-
-        if total_new or total_modified or total_deleted:
+        if result.total_new or result.total_modified:
             parts = []
-            if total_new:
-                parts.append(f"{total_new} new")
-            if total_modified:
-                parts.append(f"{total_modified} modified")
-            if total_deleted:
-                parts.append(f"{total_deleted} deleted")
-            src_display = ", ".join(source_names)
-            total = total_new + total_modified + total_deleted
+            if result.total_new:
+                parts.append(f"{result.total_new} new")
+            if result.total_modified:
+                parts.append(f"{result.total_modified} modified")
+            src_display = ", ".join(result.device_names)
+            total = result.total_new + result.total_modified
             print(f"msync: pulled {total} files from {src_display} ({', '.join(parts)})")
 
     except Exception as e:
@@ -1060,9 +1159,6 @@ def autopush() -> None:
         return
 
     memory_kb = config["crypto"]["argon2_memory_kb"]
-    device_id = config["device"]["id"]
-    device_name = config["device"]["name"]
-    max_file_size = config["sync"]["max_file_size"]
 
     try:
         acquire_lock()
@@ -1070,67 +1166,19 @@ def autopush() -> None:
         return  # another operation running — don't block Claude
 
     try:
-        backend = get_backend(config)
+        # No auto-GC on autopush (prevents blob-deletion hole)
+        result = _push_core(config, passphrase, memory_kb, quiet=True)
 
-        # Build v2 manifest with sources
-        sources_configs = get_sources(config)
-        local_manifest = build_manifest_v2(
-            device_id, device_name, sources_configs, max_file_size
-        )
-
-        remote_manifest = _fetch_remote_manifest(
-            backend, device_id, passphrase, memory_kb
-        )
-        if remote_manifest:
-            normalize_manifest(remote_manifest)
-
-        remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
-
-        # Diff and upload per-source
-        total_new = 0
-        total_modified = 0
-        total_deleted = 0
-
-        for src_name, src_data in local_manifest["sources"].items():
-            remote_src = remote_sources.get(src_name, {"files": {}})
-            diff = diff_manifests(
-                {"files": src_data["files"]},
-                {"files": remote_src.get("files", {})},
-            )
-
-            if not diff.has_changes:
-                continue
-
-            to_upload = {**diff.new, **diff.modified}
-            base_path = Path(src_data["base_path"])
-            _upload_changed_blobs(
-                backend, base_path, to_upload, device_id, passphrase, memory_kb
-            )
-
-            total_new += len(diff.new)
-            total_modified += len(diff.modified)
-            total_deleted += len(diff.deleted)
-
-        if not (total_new or total_modified or total_deleted):
-            return
-
-        # Upload manifest
-        manifest_data = serialize_manifest(local_manifest)
-        enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
-        manifest_key = f"manifests/{device_id}/manifest.json.enc"
-        backend.put(manifest_key, enc_manifest)
-
-        update_last_seen(backend, device_id)
-
-        parts = []
-        if total_new:
-            parts.append(f"{total_new} new")
-        if total_modified:
-            parts.append(f"{total_modified} modified")
-        if total_deleted:
-            parts.append(f"{total_deleted} deleted")
-        total = total_new + total_modified + total_deleted
-        print(f"msync: pushed {total} files ({', '.join(parts)})")
+        if result:
+            parts = []
+            if result.total_new:
+                parts.append(f"{result.total_new} new")
+            if result.total_modified:
+                parts.append(f"{result.total_modified} modified")
+            if result.total_deleted:
+                parts.append(f"{result.total_deleted} deleted")
+            total = result.total_new + result.total_modified + result.total_deleted
+            print(f"msync: pushed {total} files ({', '.join(parts)})")
 
     except Exception as e:
         print(f"msync: push failed \u2014 {e}", file=sys.stderr)
