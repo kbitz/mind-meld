@@ -1,16 +1,19 @@
 """MemSync CLI — built with Typer.
 
-Commands: init, push, pull, status, devices, diff, gc, autopull, autopush, sources
+Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
+          sources, conflicts, resolve.
 """
 
 from __future__ import annotations
 
+import secrets
 import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import typer
 from rich.console import Console
@@ -32,6 +35,8 @@ from memsync.manifest import (
     TOMBSTONE_TTL_DAYS,
     build_manifest_v2,
     collect_tombstones,
+    mtime_from_manifest,
+    mtime_from_path,
     normalize_manifest,
     read_and_hash,
     deserialize_manifest,
@@ -45,15 +50,37 @@ from memsync.merge import merge_file, should_merge
 from memsync.storage import get_backend
 from memsync.synclog import write_sync_log
 
+ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
+CONFLICT_INFIX = ".sync-conflict-"
+CONFLICT_AGE_DAYS = 30
+
 
 @dataclass
 class PullResult:
-    """Result of a pull operation."""
-    total_new: int = 0
-    total_modified: int = 0
+    """Result of a pull operation.
+
+    Outcomes are split per the _apply_incoming_file decision tree:
+      written    — local had no copy; remote written to canonical path
+      merged     — .jsonl or MEMORY.md union-merged with local
+      skipped    — local is newer than remote (no write)
+      conflicted — hashes differed and remote newer/equal: local renamed to
+                   .sync-conflict-*, remote written to canonical
+      unchanged  — apply-time re-read showed local already matches remote
+      failed     — rename/write error; local preserved, no change applied
+    """
+    total_written: int = 0
+    total_merged: int = 0
+    total_skipped: int = 0
+    total_conflicted: int = 0
+    total_failed: int = 0
     bytes_transferred: int = 0
     device_names: list[str] = field(default_factory=list)
     elapsed: float = 0.0
+
+    @property
+    def total_applied(self) -> int:
+        """Files actually changed on disk (written + merged + conflicted)."""
+        return self.total_written + self.total_merged + self.total_conflicted
 
 
 @dataclass
@@ -211,6 +238,60 @@ def _print_diff_summary(diff: DiffResult, elapsed: float) -> None:
     console.print(f"  Completed in {elapsed:.1f}s")
 
 
+def _predict_pull_outcome(
+    rel_path: str,
+    remote_info: dict,
+    base_path: Path,
+) -> str:
+    """Predict what _apply_incoming_file will do for this file, without applying.
+
+    Returns one of: write, merge, skip, conflict, unchanged. Used by the pull
+    dry-run and the diff command to give the user an accurate preview.
+    """
+    local_path = base_path / rel_path
+    if not local_path.exists():
+        return "write"
+    try:
+        local_hash = hash_file(local_path)
+    except (PermissionError, OSError):
+        return "conflict"  # safest guess — will surface as a real conflict on apply
+    if local_hash == remote_info.get("sha256"):
+        return "unchanged"
+    if should_merge(rel_path):
+        return "merge"
+    try:
+        local_mtime = mtime_from_path(local_path)
+        remote_mtime_str = remote_info.get("mtime")
+        remote_mtime = mtime_from_manifest(remote_mtime_str) if remote_mtime_str else None
+    except (ValueError, OSError):
+        return "conflict"
+    if remote_mtime is not None and local_mtime > remote_mtime:
+        return "skip"
+    return "conflict"
+
+
+def _print_pull_prediction(diff: DiffResult, base_path: Path, src_name: str) -> None:
+    """Print per-file predicted outcomes for the pull dry-run path.
+
+    Splits diff.modified into skip/merge/conflict buckets so the user can
+    see what pull would actually do, not just a "modified" count.
+    """
+    console.print(f"  [dim]source '{src_name}' ({base_path}):[/dim]")
+    for path, info in sorted(diff.new.items()):
+        console.print(f"    [green]+ write[/green]    {path}")
+    buckets: dict[str, list[str]] = {"merge": [], "skip": [], "conflict": [], "unchanged": []}
+    for path, info in diff.modified.items():
+        buckets[_predict_pull_outcome(path, info, base_path)].append(path)
+    for path in sorted(buckets["merge"]):
+        console.print(f"    [cyan]~ merge[/cyan]    {path}")
+    for path in sorted(buckets["skip"]):
+        console.print(f"    [dim]= skip[/dim]     {path} (local newer)")
+    for path in sorted(buckets["conflict"]):
+        console.print(f"    [yellow]! conflict[/yellow] {path} (would rename local to .sync-conflict-*)")
+    for path in sorted(buckets["unchanged"]):
+        console.print(f"    [dim]  unchanged[/dim] {path}")
+
+
 # ── shared helpers ────────────────────────────────────────────────────
 
 
@@ -248,6 +329,238 @@ def _upload_changed_blobs(
     return bytes_transferred
 
 
+def conflict_filename(
+    canonical: Path,
+    device_id: str,
+    now: datetime | None = None,
+) -> Path:
+    """Compute the sibling path used to preserve a local divergent version.
+
+    Syncthing convention: <stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device_short>.<ext>
+
+    If the computed path already exists (same-second double-conflict on the
+    same device), append a 4-char random suffix. Filenames are never overwritten.
+    """
+    now = now or datetime.now(timezone.utc)
+    ts = now.strftime("%Y%m%d-%H%M%S")
+    device_short = (device_id or "unknown")[:8]
+
+    stem = canonical.stem
+    suffix = canonical.suffix
+    base_name = f"{stem}{CONFLICT_INFIX}{ts}-{device_short}"
+    path = canonical.with_name(f"{base_name}{suffix}")
+
+    if path.exists():
+        rand = secrets.token_hex(2)
+        path = canonical.with_name(f"{base_name}-{rand}{suffix}")
+
+    return path
+
+
+def _atomic_write(target: Path, data: bytes) -> None:
+    """Write bytes via tmp + rename. Raises OSError on failure.
+
+    Cleans up the .tmp sibling if either the write or the rename fails so
+    we don't strand orphan files in the synced tree (which would propagate
+    as regular files on the next push).
+    """
+    tmp_path = target.with_suffix(target.suffix + ".tmp")
+    try:
+        tmp_path.write_bytes(data)
+        tmp_path.rename(target)
+    except OSError:
+        # Best-effort cleanup; ignore errors trying to remove a file that
+        # never got created.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _prompt_conflict_choice(
+    rel_path: str,
+    local_path: Path,
+    remote_data: bytes,
+) -> str:
+    """Prompt interactively for how to handle one conflict. Default keep-both."""
+    import difflib
+
+    try:
+        local_text = local_path.read_text(errors="replace").splitlines()
+    except OSError:
+        local_text = ["<unreadable>"]
+    remote_text = remote_data.decode("utf-8", errors="replace").splitlines()
+
+    diff = list(difflib.unified_diff(
+        local_text, remote_text,
+        fromfile=f"local {rel_path}",
+        tofile=f"remote {rel_path}",
+        lineterm="",
+        n=3,
+    ))
+
+    console.print(f"\n[bold yellow]Conflict:[/bold yellow] {rel_path}")
+    if diff:
+        for line in diff[:60]:
+            if line.startswith("+") and not line.startswith("+++"):
+                console.print(f"  [green]{line}[/green]")
+            elif line.startswith("-") and not line.startswith("---"):
+                console.print(f"  [red]{line}[/red]")
+            else:
+                console.print(f"  {line}")
+        if len(diff) > 60:
+            console.print(f"  [dim]...({len(diff) - 60} more diff lines)[/dim]")
+    else:
+        console.print("  [dim](files differ but text diff is empty \u2014 likely binary)[/dim]")
+
+    console.print(
+        "[bold]Keep which version?[/bold] "
+        "(b)oth [default] / (l)ocal / (r)emote / (a)bort pull"
+    )
+    choice = typer.prompt("Choice", default="b", show_default=False).strip().lower()
+    if choice in ("l", "local", "keep-canonical"):
+        return "keep-canonical"
+    if choice in ("r", "remote", "keep-remote"):
+        return "keep-remote"
+    if choice in ("a", "abort"):
+        return "abort"
+    return "keep-both"
+
+
+# \u2500\u2500 _apply_incoming_file decision tree \u2500\u2500\u2500
+#
+#   Re-read local state at apply time (user may have edited since _pull_core
+#   snapshotted). Decide outcome:
+#
+#   local missing                           -> WRITE     (remote -> canonical)
+#   local hash == remote hash               -> UNCHANGED
+#   should_merge(rel_path)                  -> MERGED    (jsonl / MEMORY.md)
+#   local mtime > remote mtime              -> SKIPPED   (local newer)
+#   local mtime <= remote mtime             -> CONFLICTED
+#        rename canonical -> .sync-conflict-<ts>-<device>.<ext>
+#        write  remote    -> canonical
+#
+#   Failures (rename / write) are isolated per-file: the local file is never
+#   left destroyed without a recoverable trail. Returns "failed" on error.
+
+def _apply_incoming_file(
+    local_path: Path,
+    rel_path: str,
+    plain_data: bytes,
+    remote_info: dict,
+    remote_device_id: str,
+    interactive_resolve: bool = False,
+    verbose: bool = False,
+) -> ApplyOutcome:
+    """Apply one decrypted remote file to the local tree.
+
+    See the decision-tree comment above for branch semantics. The local file
+    is never destroyed without a recoverable trail (either conflict copy
+    or rollback).
+    """
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # [W] local has no copy yet.
+    if not local_path.exists():
+        try:
+            _atomic_write(local_path, plain_data)
+        except OSError as e:
+            console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
+            return "failed"
+        if verbose:
+            console.print(f"  [green]\u2193[/green] {rel_path}")
+        return "written"
+
+    # Re-read local state. Precomputed snapshot can be stale if the user
+    # edited the file after _pull_core built its diff.
+    try:
+        local_hash = hash_file(local_path)
+    except (PermissionError, OSError) as e:
+        console.print(f"  [yellow]read failed:[/yellow] {rel_path} \u2014 {e}")
+        return "failed"
+
+    remote_hash = remote_info.get("sha256")
+
+    # [U] already in sync.
+    if local_hash == remote_hash:
+        return "unchanged"
+
+    # [M] mergeable: jsonl / MEMORY.md are line-union safe.
+    if should_merge(rel_path):
+        try:
+            local_bytes = local_path.read_bytes()
+            merged = merge_file(rel_path, local_bytes, plain_data)
+            _atomic_write(local_path, merged)
+        except OSError as e:
+            console.print(f"  [red]merge failed:[/red] {rel_path} \u2014 {e}")
+            return "failed"
+        if verbose:
+            console.print(f"  [cyan]merged[/cyan] {rel_path}")
+        return "merged"
+
+    # [S] local is newer. Keep local at canonical path \u2014 next push propagates it.
+    remote_mtime_str = remote_info.get("mtime")
+    local_mtime: datetime | None = None
+    remote_mtime: datetime | None = None
+    try:
+        local_mtime = mtime_from_path(local_path)
+        if remote_mtime_str:
+            remote_mtime = mtime_from_manifest(remote_mtime_str)
+    except (ValueError, OSError) as e:
+        # Malformed mtime or filesystem error: fall through to conflict path.
+        console.print(f"  [yellow]mtime parse failed (forcing conflict):[/yellow] {rel_path} \u2014 {e}")
+        local_mtime = None
+        remote_mtime = None
+
+    if local_mtime is not None and remote_mtime is not None and local_mtime > remote_mtime:
+        if verbose:
+            console.print(f"  [dim]= {rel_path} (local newer, kept)[/dim]")
+        return "skipped"
+
+    # [C] conflict path. Optionally prompt the user; default keep-both.
+    if interactive_resolve:
+        choice = _prompt_conflict_choice(rel_path, local_path, plain_data)
+        if choice == "keep-canonical":
+            if verbose:
+                console.print(f"  [dim]= {rel_path} (kept canonical by user)[/dim]")
+            return "skipped"
+        if choice == "keep-remote":
+            try:
+                _atomic_write(local_path, plain_data)
+            except OSError as e:
+                console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
+                return "failed"
+            if verbose:
+                console.print(f"  [yellow]\u2193[/yellow] {rel_path} (remote kept by user)")
+            return "written"
+        if choice == "abort":
+            raise typer.Abort()
+        # choice == "keep-both" -> fall through to default conflict path
+
+    conflict_path = conflict_filename(local_path, remote_device_id)
+    try:
+        local_path.rename(conflict_path)
+    except OSError as e:
+        console.print(f"  [red]conflict rename failed (local preserved):[/red] {rel_path} \u2014 {e}")
+        return "failed"
+
+    try:
+        _atomic_write(local_path, plain_data)
+    except OSError as e:
+        # Best-effort rollback so canonical still points at something.
+        try:
+            conflict_path.rename(local_path)
+        except OSError:
+            pass  # local now lives at conflict_path only \u2014 not lost, just moved
+        console.print(f"  [red]canonical write failed after rename:[/red] {rel_path} \u2014 {e}")
+        return "failed"
+
+    if verbose:
+        console.print(f"  [yellow]conflict:[/yellow] {rel_path} -> {conflict_path.name}")
+    return "conflicted"
+
+
 def _download_and_apply(
     backend,
     base_path: Path,
@@ -255,16 +568,25 @@ def _download_and_apply(
     source_device_id: str,
     passphrase: str,
     memory_kb: int,
+    interactive_resolve: bool = False,
     verbose: bool = False,
-) -> int:
-    """Download blobs and apply them locally.
+) -> tuple[int, dict[ApplyOutcome, list[str]]]:
+    """Download blobs and dispatch each to _apply_incoming_file.
 
-    For .jsonl files: merges with existing local content instead of overwriting.
-    For other files: atomic write via tmp + rename.
-
-    Returns total encrypted bytes transferred.
+    Returns (encrypted_bytes_transferred, outcomes_by_path).
+    outcomes_by_path groups rel_paths by outcome so callers can report
+    per-outcome totals and write accurate sync logs.
     """
     bytes_transferred = 0
+    outcomes: dict[ApplyOutcome, list[str]] = {
+        "written": [],
+        "merged": [],
+        "skipped": [],
+        "conflicted": [],
+        "unchanged": [],
+        "failed": [],
+    }
+
     for rel_path, info in to_download.items():
         blob_key = f"data/{source_device_id}/{info['sha256']}.enc"
         try:
@@ -272,29 +594,31 @@ def _download_and_apply(
         except MemSyncError:
             if verbose:
                 console.print(f"  [yellow]blob missing: {blob_key}[/yellow]")
+            outcomes["failed"].append(rel_path)
             continue
 
-        plain_data = decrypt(enc_data, passphrase, memory_kb)
+        try:
+            plain_data = decrypt(enc_data, passphrase, memory_kb)
+        except CryptoError as e:
+            console.print(f"  [red]decrypt failed:[/red] {rel_path} \u2014 {e}")
+            outcomes["failed"].append(rel_path)
+            continue
+
         bytes_transferred += len(enc_data)
-
         local_path = base_path / rel_path
-        local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if should_merge(rel_path) and local_path.exists():
-            local_bytes = local_path.read_bytes()
-            merged = merge_file(rel_path, local_bytes, plain_data)
-            tmp_path = local_path.with_suffix(local_path.suffix + ".tmp")
-            tmp_path.write_bytes(merged)
-            tmp_path.rename(local_path)
-        else:
-            tmp_path = local_path.with_suffix(local_path.suffix + ".tmp")
-            tmp_path.write_bytes(plain_data)
-            tmp_path.rename(local_path)
+        outcome = _apply_incoming_file(
+            local_path=local_path,
+            rel_path=rel_path,
+            plain_data=plain_data,
+            remote_info=info,
+            remote_device_id=source_device_id,
+            interactive_resolve=interactive_resolve,
+            verbose=verbose,
+        )
+        outcomes[outcome].append(rel_path)
 
-        if verbose:
-            console.print(f"  [green]\u2193[/green] {rel_path}")
-
-    return bytes_transferred
+    return bytes_transferred, outcomes
 
 
 def _delete_files(
@@ -598,8 +922,24 @@ def pull(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     dry_run: bool = typer.Option(False, "--dry-run"),
+    no_prompt: bool = typer.Option(
+        False, "--no-prompt",
+        help="Don't prompt on conflicts — default keep-both (for scripting)",
+    ),
+    resolve_interactive: bool = typer.Option(
+        False, "--resolve-interactive",
+        help="Prompt for each conflict (default: auto keep-both)",
+    ),
 ) -> None:
-    """Pull session data from storage to local."""
+    """Pull session data from storage to local.
+
+    Conflicts (local edited, remote differs) default to keep-both: remote
+    wins the canonical path, local is renamed to .sync-conflict-*. Use
+    --resolve-interactive to pick per-file at pull time.
+    """
+    if no_prompt and resolve_interactive:
+        _error("--no-prompt and --resolve-interactive are mutually exclusive")
+
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
     memory_kb = config["crypto"]["argon2_memory_kb"]
@@ -610,7 +950,10 @@ def pull(
         _error(str(e))
 
     try:
-        _pull_core(config, passphrase, memory_kb, from_device, source, verbose, dry_run)
+        _pull_core(
+            config, passphrase, memory_kb, from_device, source, verbose, dry_run,
+            interactive_resolve=resolve_interactive,
+        )
     finally:
         release_lock()
 
@@ -624,15 +967,18 @@ def _pull_core(
     verbose: bool = False,
     dry_run: bool = False,
     quiet: bool = False,
+    interactive_resolve: bool = False,
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
     Additive-only: downloads new and modified files, never deletes local files.
     Tombstoned files are skipped. JSONL files are merged. MEMORY.md files are
-    line-merged.
+    line-merged. Non-mergeable files with divergent local edits are handled
+    per the _apply_incoming_file decision tree: skip (local newer),
+    conflict-copy (remote wins canonical, local preserved as .sync-conflict-*),
+    or interactively resolved if interactive_resolve=True.
 
-    When quiet=True, suppresses all rich console output (for autopush).
-    Returns PullResult with counts and device names.
+    When quiet=True, suppresses all rich console output (for autopull).
     """
     start = time.time()
     my_device_id = config["device"]["id"]
@@ -672,8 +1018,11 @@ def _pull_core(
         lambda did: manifest_cache.get(did),
     )
 
-    total_new = 0
-    total_modified = 0
+    total_written = 0
+    total_merged = 0
+    total_skipped = 0
+    total_conflicted = 0
+    total_failed = 0
     bytes_transferred = 0
     device_names: list[str] = []
 
@@ -712,7 +1061,8 @@ def _pull_core(
             if verbose and not quiet:
                 console.print(f"  [bold]Source '{src_name}' ({base_path}):[/bold]")
 
-            # Build local state for comparison
+            # Build local state for diff. mtime is re-read at apply time so it
+            # reflects what the file actually looks like when we act on it.
             local_files: dict[str, dict] = {}
             for rel_path in remote_files:
                 local_path = base_path / rel_path
@@ -731,7 +1081,7 @@ def _pull_core(
             if dry_run:
                 if not quiet:
                     console.print(f"  Dry run for {dname}/{src_name}:")
-                    _print_diff_summary(diff, 0)
+                    _print_pull_prediction(diff, base_path, src_name)
                 continue
 
             # Check if there's anything to download (ignore deleted — additive model)
@@ -748,24 +1098,63 @@ def _pull_core(
                     console.print(f"  [green]Up to date with {dname}/{src_name}.[/green]")
                 continue
 
-            device_had_changes = True
-            bytes_transferred += _download_and_apply(
+            bt, outcomes = _download_and_apply(
                 backend, base_path, to_download, did, passphrase, memory_kb,
+                interactive_resolve=interactive_resolve,
                 verbose=(verbose and not quiet),
             )
+            bytes_transferred += bt
 
-            total_new += len(to_download)
+            src_written = len(outcomes["written"])
+            src_merged = len(outcomes["merged"])
+            src_skipped = len(outcomes["skipped"])
+            src_conflicted = len(outcomes["conflicted"])
+            src_failed = len(outcomes["failed"])
 
-            # Write sync log only for claude source (no deleted_files in additive model)
+            total_written += src_written
+            total_merged += src_merged
+            total_skipped += src_skipped
+            total_conflicted += src_conflicted
+            total_failed += src_failed
+
+            # "had changes" drives the manifest-level iCloud conflict-copy
+            # cleanup downstream. Fire if we *processed* any files for this
+            # device, including skipped/failed — otherwise one-way-sync
+            # setups (always local-newer) never run the manifest cleanup
+            # and accumulate iCloud duplicates forever.
+            if src_written + src_merged + src_conflicted + src_skipped + src_failed > 0:
+                device_had_changes = True
+
+            # Per-source status line. Conflicts/failures are load-bearing —
+            # print them even without --verbose so the user notices.
+            if not quiet and (src_conflicted or src_failed or verbose):
+                line = f"  [bold]{src_name}:[/bold]"
+                if src_written:
+                    line += f" [green]{src_written} written[/green]"
+                if src_merged:
+                    line += f" [cyan]{src_merged} merged[/cyan]"
+                if src_skipped:
+                    line += f" [dim]{src_skipped} skipped (local newer)[/dim]"
+                if src_conflicted:
+                    line += f" [yellow]{src_conflicted} conflicts[/yellow]"
+                if src_failed:
+                    line += f" [red]{src_failed} failed[/red]"
+                console.print(line)
+
+            # Write sync log only for claude source. Group by outcome so a user
+            # reading .memsync-log.md can tell what was applied vs what needs
+            # manual conflict resolution.
             if src_name == "claude":
                 claude_dir = str(base_path)
                 logs = write_sync_log(
                     claude_dir=claude_dir,
                     device_name=dname,
                     device_id=did,
-                    new_files=list(to_download.keys()),
-                    modified_files=[],
+                    new_files=outcomes["written"],
+                    modified_files=outcomes["merged"],
                     deleted_files=[],
+                    conflicted_files=outcomes["conflicted"],
+                    skipped_files=outcomes["skipped"],
                 )
                 if verbose and not quiet and logs:
                     for log in logs:
@@ -773,13 +1162,17 @@ def _pull_core(
 
         if device_had_changes:
             device_names.append(dname)
-            # Clean up conflict copies (write-path only)
+            # Clean up iCloud/Dropbox manifest conflict copies. Unrelated to
+            # .sync-conflict-* file copies — those live in the synced tree.
             _cleanup_conflict_copies(backend, did)
 
     elapsed = time.time() - start
     result = PullResult(
-        total_new=total_new,
-        total_modified=total_modified,
+        total_written=total_written,
+        total_merged=total_merged,
+        total_skipped=total_skipped,
+        total_conflicted=total_conflicted,
+        total_failed=total_failed,
         bytes_transferred=bytes_transferred,
         device_names=device_names,
         elapsed=elapsed,
@@ -787,11 +1180,30 @@ def _pull_core(
 
     if not quiet:
         console.print(f"\n[bold green]Pull complete.[/bold green]")
-        console.print(f"  {total_new} files synced")
+        parts = []
+        if total_written:
+            parts.append(f"{total_written} written")
+        if total_merged:
+            parts.append(f"{total_merged} merged")
+        if total_skipped:
+            parts.append(f"{total_skipped} skipped (local newer)")
+        if total_conflicted:
+            parts.append(f"[yellow]{total_conflicted} conflicts[/yellow]")
+        if total_failed:
+            parts.append(f"[red]{total_failed} failed[/red]")
+        if parts:
+            console.print("  " + ", ".join(parts))
+        else:
+            console.print("  nothing to apply")
         if bytes_transferred:
             mb = bytes_transferred / (1024 * 1024)
             console.print(f"  {mb:.1f}MB transferred")
         console.print(f"  Completed in {elapsed:.1f}s")
+        if total_conflicted:
+            console.print(
+                "  [yellow]Run [bold]msync conflicts[/bold] to review, "
+                "[bold]msync resolve[/bold] to pick a winner.[/yellow]"
+            )
 
     return result
 
@@ -964,15 +1376,21 @@ def diff_cmd(
 
     console.print(f"\n[bold]Diff against {'device ' + target_id if from_device else 'remote'}:[/bold]")
 
+    # Map source names → local base paths for pull-outcome prediction
+    src_base_paths: dict[str, Path] = {
+        s["name"]: Path(s["path"]).expanduser().resolve() for s in sources_configs
+    }
+
     any_changes = False
     for src_name, src_data in local_manifest["sources"].items():
         if source and src_name != source:
             continue
 
         remote_src = remote_sources.get(src_name, {"files": {}})
+        remote_files = remote_src.get("files", {})
         diff = diff_manifests(
             {"files": src_data["files"]},
-            {"files": remote_src.get("files", {})},
+            {"files": remote_files},
         )
 
         if not diff.has_changes:
@@ -980,12 +1398,22 @@ def diff_cmd(
 
         any_changes = True
         console.print(f"\n  [bold]Source '{src_name}':[/bold]")
+        console.print(f"  [dim](push direction: local → remote)[/dim]")
         for path in sorted(diff.new):
-            console.print(f"    [green]+ {path}[/green]")
+            console.print(f"    [green]+ push  [/green] {path}")
         for path in sorted(diff.modified):
-            console.print(f"    [yellow]~ {path}[/yellow]")
+            # Predict what pulling the REMOTE version would do to local. The
+            # manifests were built from the same state, so local hash matches
+            # src_data; remote hash is the divergent one.
+            remote_info = remote_files.get(path, {})
+            base_path = src_base_paths.get(src_name)
+            if base_path is not None and remote_info:
+                outcome = _predict_pull_outcome(path, remote_info, base_path)
+                console.print(f"    [yellow]~ push  [/yellow] {path} (pull would: {outcome})")
+            else:
+                console.print(f"    [yellow]~ push  [/yellow] {path}")
         for path in sorted(diff.deleted):
-            console.print(f"    [red]- {path}[/red]")
+            console.print(f"    [red]- only-remote[/red] {path}")
 
     if not any_changes:
         console.print("[green]No differences.[/green]")
@@ -998,8 +1426,12 @@ def diff_cmd(
 def gc(
     dry_run: bool = typer.Option(False, "--dry-run", help="List orphans without deleting"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    prune_conflicts: bool = typer.Option(
+        False, "--conflicts",
+        help=f"Also delete .sync-conflict-* files older than {CONFLICT_AGE_DAYS} days",
+    ),
 ) -> None:
-    """Garbage collect orphaned blobs not referenced by any manifest."""
+    """Garbage collect orphaned blobs. Optionally reap stale conflict files."""
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
     memory_kb = config["crypto"]["argon2_memory_kb"]
@@ -1011,6 +1443,8 @@ def gc(
 
     try:
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
+        if prune_conflicts:
+            _gc_old_conflict_files(config, dry_run, verbose)
     finally:
         release_lock()
 
@@ -1098,6 +1532,284 @@ def sources() -> None:
     console.print(table)
 
 
+# ── conflicts / resolve ───────────────────────────────────────────────
+
+
+def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
+    """Return the directories `msync push` would walk for this source.
+
+    Limits conflict discovery to paths msync actually syncs so we don't
+    list .sync-conflict-* files from unsynced areas (e.g., ~/.claude/sessions
+    when the claude source only syncs memory/ and todos/).
+
+    - claude type: projects/<any>/memory, projects/<any>/todos
+    - generic type: include_dirs (relative to source root)
+    """
+    src_type = src_cfg.get("type", "claude")
+    if src_type == "claude":
+        from memsync.manifest import SYNCED_SUBDIRS
+        projects = base_path / "projects"
+        if not projects.exists():
+            return []
+        dirs: list[Path] = []
+        for project_dir in projects.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for sub in SYNCED_SUBDIRS:
+                candidate = project_dir / sub
+                if candidate.exists():
+                    dirs.append(candidate)
+        return dirs
+    # generic: include_dirs (resolved) + base for single-file includes
+    dirs = []
+    for d in src_cfg.get("include_dirs", []):
+        candidate = base_path / d
+        if candidate.exists():
+            dirs.append(candidate)
+    return dirs
+
+
+def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
+    """Walk all sync sources looking for .sync-conflict-* files.
+
+    Scoped to the same paths msync push walks — won't surface conflict files
+    from unsynced areas of the source tree. Returns (source_name,
+    conflict_path, canonical_path_if_exists). Canonical is None if the user
+    has already deleted it.
+    """
+    hits: list[tuple[str, Path, Path | None]] = []
+    for src_cfg in get_sources(config):
+        base_path = Path(src_cfg["path"]).expanduser().resolve()
+        if not base_path.exists():
+            continue
+        for scan_dir in _synced_scan_dirs(src_cfg, base_path):
+            for conflict_path in scan_dir.rglob(f"*{CONFLICT_INFIX}*"):
+                if not conflict_path.is_file():
+                    continue
+                if CONFLICT_INFIX not in conflict_path.name:
+                    continue
+                canonical = _canonical_for_conflict(conflict_path)
+                hits.append((src_cfg["name"], conflict_path, canonical if canonical.exists() else None))
+    return hits
+
+
+def _canonical_for_conflict(conflict_path: Path) -> Path:
+    """Given a .sync-conflict-<ts>-<device>.<ext> path, return the canonical sibling.
+
+    Strips the ".sync-conflict-<rest>" infix from the filename, re-assembling
+    the original stem and extension. Uses rfind so that files which already
+    had an infix before msync added its own (e.g., a Syncthing conflict file
+    that msync then conflicted again) unwind the most recent layer only.
+    """
+    name = conflict_path.name
+    idx = name.rfind(CONFLICT_INFIX)
+    if idx == -1:
+        return conflict_path
+    before = name[:idx]
+    # Everything after the infix up to the final suffix is conflict metadata.
+    after = name[idx + len(CONFLICT_INFIX):]
+    suffix = ""
+    if "." in after:
+        suffix = "." + after.rsplit(".", 1)[-1]
+    return conflict_path.with_name(before + suffix)
+
+
+@app.command()
+def conflicts() -> None:
+    """List .sync-conflict-* files across all synced sources."""
+    config = _get_config()
+    hits = _find_conflict_files(config)
+    if not hits:
+        console.print("[green]No conflict files.[/green]")
+        return
+
+    table = Table(title=f"Conflict files ({len(hits)})")
+    table.add_column("Source")
+    table.add_column("Conflict")
+    table.add_column("Canonical")
+    table.add_column("Age")
+    now = datetime.now(timezone.utc)
+    for src_name, cpath, canonical in sorted(hits, key=lambda h: str(h[1])):
+        try:
+            mtime = datetime.fromtimestamp(cpath.stat().st_mtime, tz=timezone.utc)
+            age = now - mtime
+            age_str = f"{age.days}d" if age.days else f"{age.seconds // 3600}h"
+        except OSError:
+            age_str = "?"
+        canonical_display = str(canonical) if canonical else "[dim](gone)[/dim]"
+        table.add_row(src_name, str(cpath), canonical_display, age_str)
+    console.print(table)
+    console.print(
+        "\nRun [bold]msync resolve[/bold] to pick a winner interactively, or "
+        "delete files manually with [bold]rm[/bold]."
+    )
+
+
+@app.command()
+def resolve(
+    path: Optional[str] = typer.Argument(
+        None,
+        help="Specific conflict path to resolve. If omitted, walks all conflicts.",
+    ),
+) -> None:
+    """Interactively resolve .sync-conflict-* files.
+
+    For each conflict: shows a unified diff of canonical vs conflict, then
+    prompts: keep canonical / keep conflict / keep both (no-op) / abort.
+
+    "Keep canonical" deletes the conflict file.
+    "Keep conflict" renames conflict → canonical (overwriting canonical).
+    "Keep both" leaves both files in place.
+
+    Both deletions and renames propagate on the next `msync push` via the
+    existing tombstone / additive-sync machinery.
+
+    Acquires the msync lockfile so an autopull running in parallel can't
+    race with our rename/unlink operations on the synced files.
+    """
+    config = _get_config()
+
+    try:
+        acquire_lock()
+    except LockError as e:
+        _error(str(e))
+
+    try:
+        hits = _find_conflict_files(config)
+
+        if path:
+            target = Path(path).expanduser().resolve()
+            hits = [h for h in hits if h[1] == target]
+            if not hits:
+                _error(f"No conflict file matching: {path}")
+
+        if not hits:
+            console.print("[green]No conflict files.[/green]")
+            return
+        _resolve_interactive_loop(hits)
+    finally:
+        release_lock()
+
+
+def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> None:
+    """Walk each conflict and prompt for resolution. Extracted so `resolve`
+    stays a thin wrapper around acquire/release lock boilerplate."""
+    import difflib
+
+    resolved = 0
+    for src_name, cpath, canonical in hits:
+        console.print(f"\n[bold yellow]Conflict in {src_name}:[/bold yellow] {cpath}")
+
+        if canonical is None:
+            console.print(
+                "  [dim]Canonical version no longer exists. "
+                "Promote conflict to canonical or delete it?[/dim]"
+            )
+            choice = typer.prompt(
+                "  (p)romote / (d)elete / (s)kip",
+                default="s",
+                show_default=False,
+            ).strip().lower()
+            if choice.startswith("p"):
+                target_canonical = _canonical_for_conflict(cpath)
+                try:
+                    cpath.rename(target_canonical)
+                    console.print(f"  [green]promoted[/green] {cpath.name} -> {target_canonical.name}")
+                    resolved += 1
+                except OSError as e:
+                    console.print(f"  [red]promote failed:[/red] {e}")
+            elif choice.startswith("d"):
+                try:
+                    cpath.unlink()
+                    console.print(f"  [red]deleted[/red] {cpath.name}")
+                    resolved += 1
+                except OSError as e:
+                    console.print(f"  [red]delete failed:[/red] {e}")
+            continue
+
+        try:
+            local_text = canonical.read_text(errors="replace").splitlines()
+            conflict_text = cpath.read_text(errors="replace").splitlines()
+        except OSError as e:
+            console.print(f"  [red]read failed:[/red] {e}")
+            continue
+
+        diff = list(difflib.unified_diff(
+            local_text, conflict_text,
+            fromfile=f"canonical {canonical.name}",
+            tofile=f"conflict  {cpath.name}",
+            lineterm="",
+            n=3,
+        ))
+        if diff:
+            for line in diff[:80]:
+                if line.startswith("+") and not line.startswith("+++"):
+                    console.print(f"  [green]{line}[/green]")
+                elif line.startswith("-") and not line.startswith("---"):
+                    console.print(f"  [red]{line}[/red]")
+                else:
+                    console.print(f"  {line}")
+            if len(diff) > 80:
+                console.print(f"  [dim]...({len(diff) - 80} more diff lines)[/dim]")
+        else:
+            console.print("  [dim](files differ but text diff is empty — likely binary)[/dim]")
+
+        console.print(
+            "  [bold]Keep which?[/bold] "
+            "(c)anonical / (f)orce conflict -> canonical / (b)oth [default] / (a)bort"
+        )
+        choice = typer.prompt("  Choice", default="b", show_default=False).strip().lower()
+        if choice.startswith("c"):
+            try:
+                cpath.unlink()
+                console.print(f"  [green]kept canonical; deleted[/green] {cpath.name}")
+                resolved += 1
+            except OSError as e:
+                console.print(f"  [red]delete failed:[/red] {e}")
+        elif choice.startswith("f"):
+            try:
+                cpath.rename(canonical)
+                console.print(f"  [green]promoted conflict to canonical[/green] {canonical.name}")
+                resolved += 1
+            except OSError as e:
+                console.print(f"  [red]rename failed:[/red] {e}")
+        elif choice.startswith("a"):
+            raise typer.Abort()
+        else:
+            console.print("  [dim]kept both; no change[/dim]")
+
+    console.print(f"\n[bold]Resolved {resolved} of {len(hits)}.[/bold]")
+
+
+def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
+    """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS. Returns count."""
+    hits = _find_conflict_files(config)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=CONFLICT_AGE_DAYS)
+    reaped = 0
+    for src_name, cpath, _canonical in hits:
+        try:
+            mtime = datetime.fromtimestamp(cpath.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if mtime < cutoff:
+            if verbose or dry_run:
+                age_days = (datetime.now(timezone.utc) - mtime).days
+                prefix = "would delete" if dry_run else "deleted"
+                console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {cpath}")
+            if not dry_run:
+                try:
+                    cpath.unlink()
+                    reaped += 1
+                except OSError:
+                    pass
+    label = "would reap" if dry_run else "reaped"
+    console.print(
+        f"[bold]{label}[/bold] {reaped} stale conflict files "
+        f"(older than {CONFLICT_AGE_DAYS} days)"
+    )
+    return reaped
+
+
 # ── autopull ──────────────────────────────────────────────────────────
 
 
@@ -1123,17 +1835,26 @@ def autopull() -> None:
         return  # another operation running — don't block Claude
 
     try:
-        result = _pull_core(config, passphrase, memory_kb, quiet=True)
+        # autopull is always silent + never-prompt (Claude Code hook context)
+        result = _pull_core(config, passphrase, memory_kb, quiet=True, interactive_resolve=False)
 
-        if result.total_new or result.total_modified:
+        if result.total_applied:
             parts = []
-            if result.total_new:
-                parts.append(f"{result.total_new} new")
-            if result.total_modified:
-                parts.append(f"{result.total_modified} modified")
+            if result.total_written:
+                parts.append(f"{result.total_written} written")
+            if result.total_merged:
+                parts.append(f"{result.total_merged} merged")
+            if result.total_conflicted:
+                parts.append(f"{result.total_conflicted} conflicts")
             src_display = ", ".join(result.device_names)
-            total = result.total_new + result.total_modified
+            total = result.total_applied
             print(f"msync: pulled {total} files from {src_display} ({', '.join(parts)})")
+            if result.total_conflicted:
+                print(
+                    f"msync: {result.total_conflicted} conflicts — "
+                    "run 'msync conflicts' to review",
+                    file=sys.stderr,
+                )
 
     except Exception as e:
         print(f"msync: pull failed \u2014 {e}", file=sys.stderr)

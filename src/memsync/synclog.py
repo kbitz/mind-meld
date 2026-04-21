@@ -19,10 +19,16 @@ def write_sync_log(
     new_files: list[str],
     modified_files: list[str],
     deleted_files: list[str],
+    conflicted_files: list[str] | None = None,
+    skipped_files: list[str] | None = None,
 ) -> list[Path]:
     """Write .memsync-log.md to each affected project directory.
 
-    Groups changes by project and writes one log file per project.
+    Groups changes by project and writes one log file per project. Conflicts
+    and skips are surfaced so Claude Code can see them alongside plain
+    additions and merges — conflicts in particular are things the user
+    should resolve (msync conflicts / msync resolve).
+
     Returns list of log files written.
     """
     claude_path = Path(claude_dir).expanduser().resolve()
@@ -30,29 +36,29 @@ def write_sync_log(
     if not projects_dir.exists():
         return []
 
-    # Group all changes by project directory
+    conflicted_files = conflicted_files or []
+    skipped_files = skipped_files or []
+
+    # Group all changes by project directory.
     # rel_path format: "projects/{project-name}/memory/file.md"
+    def _new_bucket() -> dict[str, list[str]]:
+        return {"new": [], "modified": [], "deleted": [], "conflicted": [], "skipped": []}
+
     project_changes: dict[str, dict[str, list[str]]] = {}
 
-    for rel_path in new_files:
-        project = _extract_project(rel_path)
-        if project:
-            project_changes.setdefault(project, {"new": [], "modified": [], "deleted": []})
-            project_changes[project]["new"].append(_friendly_name(rel_path))
+    def _add(bucket_name: str, rel_paths: list[str]) -> None:
+        for rel_path in rel_paths:
+            project = _extract_project(rel_path)
+            if project:
+                project_changes.setdefault(project, _new_bucket())
+                project_changes[project][bucket_name].append(_friendly_name(rel_path))
 
-    for rel_path in modified_files:
-        project = _extract_project(rel_path)
-        if project:
-            project_changes.setdefault(project, {"new": [], "modified": [], "deleted": []})
-            project_changes[project]["modified"].append(_friendly_name(rel_path))
+    _add("new", new_files)
+    _add("modified", modified_files)
+    _add("deleted", deleted_files)
+    _add("conflicted", conflicted_files)
+    _add("skipped", skipped_files)
 
-    for rel_path in deleted_files:
-        project = _extract_project(rel_path)
-        if project:
-            project_changes.setdefault(project, {"new": [], "modified": [], "deleted": []})
-            project_changes[project]["deleted"].append(_friendly_name(rel_path))
-
-    # Write one log per project
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     written: list[Path] = []
 
@@ -78,6 +84,20 @@ def write_sync_log(
         if changes["modified"]:
             lines.append("## Updated from other machine")
             for name in sorted(changes["modified"]):
+                lines.append(f"- {name}")
+            lines.append("")
+
+        if changes["conflicted"]:
+            lines.append("## Conflicts (remote differed, local preserved as .sync-conflict-*)")
+            for name in sorted(changes["conflicted"]):
+                lines.append(f"- {name}")
+            lines.append("")
+            lines.append("Run `msync conflicts` to review, `msync resolve` to pick a winner.")
+            lines.append("")
+
+        if changes["skipped"]:
+            lines.append("## Skipped (local was newer)")
+            for name in sorted(changes["skipped"]):
                 lines.append(f"- {name}")
             lines.append("")
 

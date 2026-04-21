@@ -29,6 +29,7 @@ EXCLUDED = [
     ".env",
     ".env.*",
     "*.log",
+    "*.tmp",  # msync writes <target>.tmp during atomic writes; don't sync leftovers
     ".claude-sync/",
     "dist/",
     "build/",
@@ -42,6 +43,25 @@ EXCLUDED = [
 # Only sync these subdirectories within each project.
 # Everything else (sessions, settings, etc.) is either git-tracked or ephemeral.
 SYNCED_SUBDIRS = ["memory", "todos"]
+
+
+def mtime_from_manifest(iso_str: str) -> datetime:
+    """Parse a manifest mtime ISO-8601 string to a timezone-aware UTC datetime.
+
+    Manifests always emit UTC with either `+00:00` or `Z` suffix. We accept
+    both; `datetime.fromisoformat` on 3.11+ handles `Z` natively.
+    """
+    return datetime.fromisoformat(iso_str)
+
+
+def mtime_from_path(path: Path) -> datetime:
+    """Return the file's mtime as a timezone-aware UTC datetime.
+
+    Matches the canonical form used by walk_claude_source/walk_generic_source
+    so comparisons against manifest-recorded mtimes are apples-to-apples.
+    """
+    stat = path.stat()
+    return datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
 
 def _is_excluded(rel_path: str) -> bool:
