@@ -1,0 +1,617 @@
+"""Tests for conflict-copy preservation + mtime-skip on pull.
+
+Covers _apply_incoming_file's decision tree:
+
+    local missing                           -> WRITE
+    local hash == remote hash               -> UNCHANGED
+    should_merge(rel_path)                  -> MERGED
+    local mtime > remote mtime              -> SKIPPED
+    local mtime <= remote mtime             -> CONFLICTED
+        rename canonical -> .sync-conflict-<ts>-<device>.<ext>
+        write  remote    -> canonical
+
+Plus the conflict_filename helper, manifest mtime helpers, and the new
+msync conflicts / resolve / gc --conflicts commands.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from memsync.cli import (
+    CONFLICT_INFIX,
+    _apply_incoming_file,
+    _canonical_for_conflict,
+    _find_conflict_files,
+    _predict_pull_outcome,
+    conflict_filename,
+)
+from memsync.manifest import mtime_from_manifest, mtime_from_path
+
+
+# ── helpers ──────────────────────────────────────────────────────────
+
+
+def _set_mtime(path: Path, dt: datetime) -> None:
+    ts = dt.timestamp()
+    os.utime(path, (ts, ts))
+
+
+def _remote_info(sha: str, mtime: datetime) -> dict:
+    return {
+        "sha256": sha,
+        "size": 0,
+        "mtime": mtime.isoformat(),
+    }
+
+
+# ── _apply_incoming_file branches ────────────────────────────────────
+
+
+class TestApplyIncomingFile:
+    def test_write_when_local_missing(self, tmp_path: Path) -> None:
+        """[W] Local file doesn't exist -> remote written to canonical path."""
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        remote_data = b"remote content"
+        info = _remote_info("deadbeef", datetime.now(timezone.utc))
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=remote_data,
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+
+        assert outcome == "written"
+        assert local.read_bytes() == remote_data
+        # No conflict file created
+        conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert conflicts == []
+
+    def test_unchanged_when_local_matches_remote(self, tmp_path: Path) -> None:
+        """[U] Local hash == remote hash -> no-op, idempotent."""
+        from memsync.manifest import hash_file
+
+        rel = "memory/unchanged.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"same content")
+        sha = hash_file(local)
+        info = _remote_info(sha, datetime.now(timezone.utc))
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"same content",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+
+        assert outcome == "unchanged"
+        assert local.read_bytes() == b"same content"
+
+    def test_merge_wins_for_jsonl_even_when_local_newer(self, tmp_path: Path) -> None:
+        """[M] precedes [S]: a newer local .jsonl still merges, not skips."""
+        rel = "projects/p1/learnings.jsonl"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b'{"ts":"2026-01-01","key":"a"}\n')
+
+        # Local is "newer" than remote, but merge is the correct operation.
+        _set_mtime(local, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
+
+        remote_data = b'{"ts":"2026-02-01","key":"b"}\n'
+        info = _remote_info("bbb", datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=remote_data,
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+
+        assert outcome == "merged"
+        merged = local.read_bytes().decode()
+        # Both lines present (order is ts-sorted)
+        assert "a" in merged and "b" in merged
+
+    def test_merge_wins_for_memory_md(self, tmp_path: Path) -> None:
+        """[M] MEMORY.md is line-union merged, not conflict-copied."""
+        rel = "projects/p1/memory/MEMORY.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"- [alpha](a.md)\n")
+        remote_data = b"- [beta](b.md)\n"
+        info = _remote_info("bbb", datetime.now(timezone.utc))
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=remote_data,
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+
+        assert outcome == "merged"
+        conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert conflicts == []
+
+    def test_skip_when_local_is_newer(self, tmp_path: Path) -> None:
+        """[S] Local mtime > remote mtime -> skip. No conflict file."""
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+
+        # Local mtime AFTER remote
+        _set_mtime(local, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
+
+        remote_mtime = datetime(2026, 4, 21, 11, 0, tzinfo=timezone.utc)
+        info = _remote_info("remotehash", remote_mtime)
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+
+        assert outcome == "skipped"
+        assert local.read_bytes() == b"local content"  # untouched
+        conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert conflicts == []
+
+    def test_conflict_flips_local_to_sibling(self, tmp_path: Path) -> None:
+        """[C] Local older than remote -> local renamed to .sync-conflict-*,
+        remote written to canonical path."""
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+
+        remote_mtime = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+        info = _remote_info("remotehash", remote_mtime)
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+
+        assert outcome == "conflicted"
+        # Canonical now has remote
+        assert local.read_bytes() == b"remote content"
+        # Conflict file has original local
+        conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert len(conflicts) == 1
+        assert conflicts[0].read_bytes() == b"local content"
+        assert conflicts[0].name.endswith(".md")
+
+    def test_pull_is_idempotent_after_conflict(self, tmp_path: Path) -> None:
+        """Second apply of the same remote data should be unchanged, not a
+        second conflict. This is the critical convergence property."""
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+
+        from memsync.manifest import hash_file
+
+        # Simulated remote info that _apply_incoming_file reaches via diff.
+        # Apply #1 creates a conflict.
+        import hashlib
+        remote_sha = hashlib.sha256(b"remote content").hexdigest()
+        info = _remote_info(remote_sha, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
+
+        first = _apply_incoming_file(
+            local_path=local, rel_path=rel, plain_data=b"remote content",
+            remote_info=info, remote_device_id="devA1234",
+        )
+        assert first == "conflicted"
+
+        # Apply #2: local now matches remote (we just wrote remote). diff_manifests
+        # upstream would have filtered this out as unchanged, but if it somehow
+        # still reaches _apply_incoming_file, the re-read hash branch catches it.
+        second = _apply_incoming_file(
+            local_path=local, rel_path=rel, plain_data=b"remote content",
+            remote_info=info, remote_device_id="devA1234",
+        )
+        assert second == "unchanged"
+
+        # Critically: only ONE conflict file, not two.
+        conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert len(conflicts) == 1
+
+
+class TestConflictFilename:
+    def test_syncthing_format(self) -> None:
+        """Format: <stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device_short>.<ext>"""
+        canonical = Path("/tmp/fake/user_role.md")
+        now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
+        path = conflict_filename(canonical, "a1b2c3d4-e5f6-7890", now=now)
+        assert path.name == "user_role.sync-conflict-20260421-143055-a1b2c3d4.md"
+
+    def test_short_device_id_padded(self, tmp_path: Path) -> None:
+        """Device id shorter than 8 chars is used as-is (no padding)."""
+        canonical = tmp_path / "f.md"
+        path = conflict_filename(canonical, "dev")
+        assert "-dev." in path.name
+
+    def test_collision_suffix_when_same_second(self, tmp_path: Path) -> None:
+        """Same-second double conflict on same device gets 4-char random suffix."""
+        canonical = tmp_path / "x.md"
+        now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
+        first = conflict_filename(canonical, "devA1234", now=now)
+        first.parent.mkdir(parents=True, exist_ok=True)
+        first.write_bytes(b"seed")
+        second = conflict_filename(canonical, "devA1234", now=now)
+        assert second != first
+        # Suffix pattern: <base>-<4hex>.<ext>
+        assert second.stem.endswith(tuple("0123456789abcdef"))
+        assert second.suffix == ".md"
+
+    def test_preserves_multidot_stems(self, tmp_path: Path) -> None:
+        """file.config.yaml keeps its middle dot in the stem portion."""
+        canonical = tmp_path / "config.local.yaml"
+        now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
+        path = conflict_filename(canonical, "devA1234", now=now)
+        assert path.name.startswith("config.local")
+        assert path.suffix == ".yaml"
+
+
+# ── manifest mtime helpers ───────────────────────────────────────────
+
+
+class TestMtimeHelpers:
+    def test_roundtrip_matches_walker_output(self, tmp_path: Path) -> None:
+        """mtime_from_path produces the same form that manifest walkers emit."""
+        f = tmp_path / "x.md"
+        f.write_bytes(b"hi")
+        target = datetime(2026, 4, 21, 14, 30, 0, tzinfo=timezone.utc)
+        _set_mtime(f, target)
+
+        from_path = mtime_from_path(f)
+        from_manifest_form = mtime_from_manifest(target.isoformat())
+
+        # Same instant, both tz-aware UTC
+        assert from_path.tzinfo is not None
+        assert from_manifest_form.tzinfo is not None
+        assert abs((from_path - from_manifest_form).total_seconds()) < 1
+
+    def test_manifest_parses_z_suffix(self) -> None:
+        """mtime_from_manifest handles `Z` suffix."""
+        dt = mtime_from_manifest("2026-04-21T14:30:00+00:00")
+        assert dt.year == 2026 and dt.hour == 14
+
+
+# ── _find_conflict_files / _canonical_for_conflict ────────────────────
+
+
+class TestConflictDiscovery:
+    def test_canonical_for_conflict_strips_infix(self) -> None:
+        """Converts .sync-conflict-<stuff>.ext back to the original filename."""
+        cpath = Path("/x/user_role.sync-conflict-20260421-143055-a1b2c3d4.md")
+        assert _canonical_for_conflict(cpath).name == "user_role.md"
+
+    def test_canonical_for_conflict_with_random_suffix(self) -> None:
+        """Random 4-char collision suffix is part of the conflict metadata."""
+        cpath = Path("/x/user_role.sync-conflict-20260421-143055-a1b2c3d4-7f9a.md")
+        assert _canonical_for_conflict(cpath).name == "user_role.md"
+
+    def test_find_conflict_files_walks_sources(self, tmp_path: Path, monkeypatch) -> None:
+        """_find_conflict_files walks configured sources and finds .sync-conflict-* files."""
+        src = tmp_path / "src1"
+        (src / "memory").mkdir(parents=True)
+        (src / "memory" / "user.md").write_bytes(b"canonical")
+        conflict = src / "memory" / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict")
+
+        config = {
+            "device": {"id": "me"},
+            "sync": {"sources": [{"name": "s1", "path": str(src), "type": "generic",
+                                  "include_dirs": ["memory"], "include_files": []}]},
+        }
+
+        hits = _find_conflict_files(config)
+        assert len(hits) == 1
+        src_name, cpath, canonical = hits[0]
+        assert src_name == "s1"
+        assert cpath == conflict
+        assert canonical == src / "memory" / "user.md"
+
+
+# ── _predict_pull_outcome ────────────────────────────────────────────
+
+
+class TestAtomicWrite:
+    def test_cleans_up_tmp_on_write_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """_atomic_write removes its .tmp sibling if write_bytes fails,
+        so the synced tree doesn't accumulate orphan .tmp files."""
+        from memsync.cli import _atomic_write
+
+        target = tmp_path / "out.md"
+
+        def fail_write(_self: Path, _data: bytes) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "write_bytes", fail_write)
+
+        with pytest.raises(OSError):
+            _atomic_write(target, b"hello")
+
+        # No orphaned .tmp sibling
+        tmp_siblings = list(tmp_path.glob("*.tmp"))
+        assert tmp_siblings == []
+
+    def test_cleans_up_tmp_on_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """If rename fails after write, the .tmp file is still cleaned up."""
+        from memsync.cli import _atomic_write
+
+        target = tmp_path / "out.md"
+
+        original_rename = Path.rename
+
+        def fail_rename(self: Path, target_path) -> Path:
+            raise OSError("cross-device link")
+
+        monkeypatch.setattr(Path, "rename", fail_rename)
+
+        with pytest.raises(OSError):
+            _atomic_write(target, b"hello")
+
+        tmp_siblings = list(tmp_path.glob("*.tmp"))
+        assert tmp_siblings == []
+
+
+class TestGcOldConflictFiles:
+    def test_reaps_files_older_than_cutoff(self, tmp_path: Path, monkeypatch) -> None:
+        """_gc_old_conflict_files deletes .sync-conflict-* files older than
+        CONFLICT_AGE_DAYS. Fresh files are preserved."""
+        from memsync.cli import CONFLICT_AGE_DAYS, _gc_old_conflict_files
+
+        src = tmp_path / "src"
+        (src / "memory").mkdir(parents=True)
+
+        old_conflict = src / "memory" / "a.sync-conflict-20000101-000000-devA1234.md"
+        old_conflict.write_bytes(b"old")
+        ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(old_conflict, (ancient, ancient))
+
+        new_conflict = src / "memory" / "b.sync-conflict-20260421-000000-devA1234.md"
+        new_conflict.write_bytes(b"new")
+        # Fresh mtime (now) so it falls inside the retention window
+
+        config = {
+            "sync": {"sources": [{
+                "name": "s1", "path": str(src), "type": "generic",
+                "include_dirs": ["memory"], "include_files": [],
+            }]},
+        }
+
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False)
+        assert reaped == 1
+        assert not old_conflict.exists(), "old conflict should be reaped"
+        assert new_conflict.exists(), "fresh conflict should survive"
+
+    def test_dry_run_does_not_delete(self, tmp_path: Path) -> None:
+        """dry_run=True lists but preserves everything."""
+        from memsync.cli import _gc_old_conflict_files
+
+        src = tmp_path / "src"
+        (src / "memory").mkdir(parents=True)
+        old = src / "memory" / "a.sync-conflict-20000101-000000-devA1234.md"
+        old.write_bytes(b"old")
+        ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(old, (ancient, ancient))
+
+        config = {
+            "sync": {"sources": [{
+                "name": "s1", "path": str(src), "type": "generic",
+                "include_dirs": ["memory"], "include_files": [],
+            }]},
+        }
+        _gc_old_conflict_files(config, dry_run=True, verbose=False)
+        assert old.exists(), "dry-run must not delete"
+
+
+class TestCanonicalForConflictEdgeCases:
+    def test_no_infix_returns_path_unchanged(self) -> None:
+        """File without .sync-conflict- in its name is returned as-is."""
+        path = Path("/x/plain.md")
+        assert _canonical_for_conflict(path) == path
+
+
+class TestFindConflictFilesClaudeType:
+    def test_walks_claude_projects_subtree(self, tmp_path: Path) -> None:
+        """claude-type sources walk projects/*/memory and projects/*/todos."""
+        src = tmp_path / "claude"
+        (src / "projects" / "proj1" / "memory").mkdir(parents=True)
+        (src / "projects" / "proj1" / "todos").mkdir(parents=True)
+        (src / "projects" / "proj1" / "sessions").mkdir(parents=True)
+
+        in_scope = src / "projects" / "proj1" / "memory" / "a.sync-conflict-20260421-143055-devA1234.md"
+        in_scope.write_bytes(b"conflict")
+
+        out_of_scope = src / "projects" / "proj1" / "sessions" / "b.sync-conflict-20260421-143055-devA1234.md"
+        out_of_scope.write_bytes(b"should not be listed")
+
+        config = {
+            "sync": {"sources": [{"name": "claude", "path": str(src), "type": "claude"}]},
+        }
+
+        hits = _find_conflict_files(config)
+        hit_paths = [h[1] for h in hits]
+        assert in_scope in hit_paths
+        assert out_of_scope not in hit_paths, "scope should exclude sessions/"
+
+
+class TestResolveInteractiveLoop:
+    """Tests for _resolve_interactive_loop — the interactive picker invoked by
+    `msync resolve`. Uses monkeypatch on typer.prompt to simulate user input.
+    """
+
+    @staticmethod
+    def _make_conflict_pair(tmp_path: Path) -> tuple[Path, Path]:
+        """Create a canonical + conflict sibling with distinct content.
+        Returns (canonical, conflict)."""
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"canonical content")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict content")
+        return canonical, conflict
+
+    def test_keep_canonical_deletes_conflict(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'c' — conflict file is deleted, canonical preserved."""
+        import typer
+        from memsync.cli import _resolve_interactive_loop
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert canonical.exists()
+        assert canonical.read_bytes() == b"canonical content"
+        assert not conflict.exists(), "conflict should be deleted"
+
+    def test_force_promotes_conflict_over_canonical(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'f' — conflict renamed to canonical (overwriting canonical)."""
+        import typer
+        from memsync.cli import _resolve_interactive_loop
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert canonical.exists()
+        assert canonical.read_bytes() == b"conflict content", "canonical should now have conflict's content"
+        assert not conflict.exists(), "conflict path should be gone (renamed)"
+
+    def test_keep_both_is_noop(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'b' (default) — both files remain unchanged."""
+        import typer
+        from memsync.cli import _resolve_interactive_loop
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "b")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert canonical.read_bytes() == b"canonical content"
+        assert conflict.read_bytes() == b"conflict content"
+
+    def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
+        import typer
+        from memsync.cli import _resolve_interactive_loop
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "a")
+
+        with pytest.raises(typer.Abort):
+            _resolve_interactive_loop([("s1", conflict, canonical)])
+
+    def test_canonical_missing_promote(self, tmp_path: Path, monkeypatch) -> None:
+        """Canonical is gone, user picks 'p' — conflict is renamed to recovered canonical path."""
+        import typer
+        from memsync.cli import _resolve_interactive_loop
+
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict content")
+        expected_canonical = tmp_path / "user.md"
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+
+        # canonical is None in the hit tuple because it's missing
+        _resolve_interactive_loop([("s1", conflict, None)])
+
+        assert expected_canonical.exists()
+        assert expected_canonical.read_bytes() == b"conflict content"
+        assert not conflict.exists()
+
+    def test_canonical_missing_delete(self, tmp_path: Path, monkeypatch) -> None:
+        """Canonical is gone, user picks 'd' — conflict file is deleted."""
+        import typer
+        from memsync.cli import _resolve_interactive_loop
+
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict content")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "d")
+
+        _resolve_interactive_loop([("s1", conflict, None)])
+
+        assert not conflict.exists()
+
+    def test_walks_multiple_conflicts(self, tmp_path: Path, monkeypatch) -> None:
+        """Given multiple hits, each is prompted sequentially."""
+        import typer
+        from memsync.cli import _resolve_interactive_loop
+
+        c1 = tmp_path / "a.md"
+        c1.write_bytes(b"a-canon")
+        conflict1 = tmp_path / "a.sync-conflict-20260421-143055-devA1234.md"
+        conflict1.write_bytes(b"a-conflict")
+
+        c2 = tmp_path / "b.md"
+        c2.write_bytes(b"b-canon")
+        conflict2 = tmp_path / "b.sync-conflict-20260421-143055-devA1234.md"
+        conflict2.write_bytes(b"b-conflict")
+
+        # Return different choices per call: first 'c' (keep canonical), then 'f' (force)
+        choices = iter(["c", "f"])
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(choices))
+
+        _resolve_interactive_loop([("s1", conflict1, c1), ("s1", conflict2, c2)])
+
+        # First pair: canonical kept, conflict deleted
+        assert c1.read_bytes() == b"a-canon"
+        assert not conflict1.exists()
+        # Second pair: conflict promoted over canonical
+        assert c2.read_bytes() == b"b-conflict"
+        assert not conflict2.exists()
+
+
+class TestPredictPullOutcome:
+    def test_predicts_write_for_missing_local(self, tmp_path: Path) -> None:
+        info = _remote_info("xxx", datetime.now(timezone.utc))
+        assert _predict_pull_outcome("missing.md", info, tmp_path) == "write"
+
+    def test_predicts_unchanged_for_matching_hash(self, tmp_path: Path) -> None:
+        from memsync.manifest import hash_file
+        f = tmp_path / "a.md"
+        f.write_bytes(b"same")
+        info = _remote_info(hash_file(f), datetime.now(timezone.utc))
+        assert _predict_pull_outcome("a.md", info, tmp_path) == "unchanged"
+
+    def test_predicts_merge_for_jsonl(self, tmp_path: Path) -> None:
+        f = tmp_path / "x.jsonl"
+        f.write_bytes(b"line\n")
+        info = _remote_info("other", datetime.now(timezone.utc))
+        assert _predict_pull_outcome("x.jsonl", info, tmp_path) == "merge"
+
+    def test_predicts_skip_when_local_newer(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.md"
+        f.write_bytes(b"local")
+        _set_mtime(f, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
+        info = _remote_info("other", datetime(2026, 4, 21, 11, 0, tzinfo=timezone.utc))
+        assert _predict_pull_outcome("a.md", info, tmp_path) == "skip"
+
+    def test_predicts_conflict_when_remote_newer(self, tmp_path: Path) -> None:
+        f = tmp_path / "a.md"
+        f.write_bytes(b"local")
+        _set_mtime(f, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+        info = _remote_info("other", datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
+        assert _predict_pull_outcome("a.md", info, tmp_path) == "conflict"

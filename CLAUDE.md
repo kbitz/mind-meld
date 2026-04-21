@@ -12,7 +12,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - **End-to-end encrypted.** All data (sessions, manifests, artifacts) encrypted client-side with AES-256-GCM before touching storage. The storage layer never sees plaintext. This is a hard invariant — no code path may write unencrypted session data to storage.
 - **Scoped sync.** Only syncs `memory/` and `todos/` within each project — not sessions, settings, or other git-tracked files.
 - **Truth-based manifests.** Manifests are complete snapshots of local state. Deletions propagate automatically — no separate prune step.
-- **Conflict resolution.** Detects and resolves iCloud and Dropbox-style conflict copies on manifest files.
+- **Conflict resolution.** Detects and resolves iCloud and Dropbox-style conflict copies on manifest files. For source files with divergent local edits, preserves the local version as `<stem>.sync-conflict-<ts>-<device>.<ext>` (Syncthing convention) so edits are never destroyed. Mtime-skip: if the local file is newer than remote, pull leaves it alone.
 - **Sync log.** After pull, writes `.memsync-log.md` per project so Claude Code knows what changed from other machines.
 - Manifest-based diffing: SHA-256 hash every file, only upload/download changes.
 - Content-addressed storage: blobs stored by hash, not by path.
@@ -26,7 +26,10 @@ src/memsync/storage/{local}.py
 pytest. Use tmp_path for local backend. Run: `pytest tests/`
 
 ## Commands
-msync init | push | pull | status | devices | diff | gc | sources | autopull | autopush
+msync init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | autopull | autopush
+
+Pull flags: `--resolve-interactive` (prompt per-file), `--no-prompt` (script mode, always keep-both).
+GC flags: `--conflicts` (also reap `.sync-conflict-*` files older than 30 days).
 
 ## Auto Commands (for Claude Code integration)
 - `msync autopull` — silent pull, one-line output, never prompts, graceful on errors
