@@ -2,6 +2,32 @@
 
 All notable changes to MemSync will be documented in this file.
 
+## [0.4.0] - 2026-04-21
+
+### Added
+- Conflict-copy preservation on `msync pull`: when local and remote versions of a non-mergeable file diverge, the losing local version is renamed to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.<ext>` (Syncthing convention) and the remote wins the canonical path. Local edits are never destroyed.
+- Mtime-based skip: if the local file is newer than remote, pull leaves it untouched. Convergence happens on the next push.
+- `msync conflicts` — list every `.sync-conflict-*` file across synced sources with age and canonical sibling.
+- `msync resolve [<path>]` — interactive picker showing a unified diff and prompting keep canonical / force conflict to canonical / keep both / abort. Acquires the msync lockfile to race-guard against autopull.
+- `msync gc --conflicts` — reap stale conflict files older than 30 days.
+- `msync pull --resolve-interactive` — prompt per-conflict during pull instead of defaulting to keep-both.
+- `msync pull --no-prompt` — explicit no-prompt mode for scripting.
+- `msync diff` now annotates each modified path with its predicted pull outcome (write / merge / skip / conflict).
+- `.memsync-log.md` now includes `## Conflicts` and `## Skipped (local was newer)` sections so Claude Code sees resolution work when reading cross-machine context.
+
+### Changed
+- `PullResult` split counts: `total_written`, `total_merged`, `total_skipped`, `total_conflicted`, `total_failed` replace the single `total_new`/`total_modified` pair. Pull summary and autopull one-liner updated to match.
+- Pull re-reads local hash and mtime at apply time so decisions reflect the file's actual state when written (race-safe against concurrent editors during a pull).
+- `_download_and_apply` extracted into `_apply_incoming_file` with a documented decision tree (W / U / M / S / C branches).
+- `EXCLUDED` patterns now include `*.tmp` so atomic-write leftovers from disk-full failures don't propagate cross-device.
+- `_atomic_write` cleans up its `.tmp` sibling on write or rename failure instead of leaving orphan files in the synced tree.
+
+### Fixed
+- Pull reporting now fires the iCloud/Dropbox manifest-cleanup path when a device produces only skips or failures, preventing long-term manifest conflict-copy bloat on one-way-sync setups.
+- `_canonical_for_conflict` uses `rfind` so a conflict-of-a-conflict file unwinds the outermost layer correctly.
+- `gc` command's internal `conflicts` parameter renamed to `prune_conflicts` to stop shadowing the top-level `conflicts` command (CLI flag `--conflicts` unchanged).
+- `_find_conflict_files` walks only synced paths (`SYNCED_SUBDIRS` for claude, `include_dirs` for generic) instead of the full source tree, avoiding noise from `.sync-conflict-*` files in unsynced areas.
+
 ## [0.3.0] - 2026-04-09
 
 ### Added
