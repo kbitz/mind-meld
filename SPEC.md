@@ -283,12 +283,18 @@ Built with `typer`. Installed as `msync` (MemSync).
 ```
 msync init                     # generate device ID, configure storage, set passphrase
 msync push                     # build manifest, diff against remote, upload changes
-msync pull [--from DEVICE] [--source NAME]   # download changes (optionally scoped)
+msync pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
+           [--resolve-interactive | --no-prompt]        # conflict handling mode
 msync status [--source NAME]   # show local vs remote state, pending changes
 msync devices                  # list registered devices
 msync diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
-msync gc                       # delete orphaned blobs not referenced by any manifest
+                                             # annotates modified files as write / merge / skip / conflict
+msync gc [--conflicts]         # delete orphaned blobs; with --conflicts, also reap .sync-conflict-* files >30d
 msync sources                  # list configured sync sources with status
+msync conflicts                # list unresolved .sync-conflict-* files across sources
+msync resolve [PATH]           # interactively resolve conflict files (unified diff + pick winner)
+msync autopull                 # silent pull for Claude Code (one-line output, never prompts)
+msync autopush                 # silent push for Claude Code (one-line output, never prompts)
 ```
 
 ### Global Flags
@@ -328,16 +334,18 @@ msync sources                  # list configured sync sources with status
 1. Acquire lockfile.
 2. List devices from `devices/` prefix.
 3. If `--from` specified, pull only that device's manifest. Otherwise pull all.
-4. Download + decrypt remote manifest(s). Handle iCloud conflict resolution if applicable.
+4. Download + decrypt remote manifest(s). Handle iCloud/Dropbox conflict resolution if applicable.
 5. If `--source` specified, diff only that source. Otherwise diff all sources.
-6. Download + decrypt changed blobs.
-7. Decompress (gzip) decrypted data.
-8. For `.jsonl` files, merge instead of overwrite (union of lines, dedup, sort by `ts`).
-9. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`).
-10. Delete local files absent from the remote manifest, scoped to selected source(s).
-11. Write `.memsync-log.md` per affected project (claude source only).
-12. Release lockfile.
-13. Print summary.
+6. Apply tombstones: files in the remote manifest tombstone set are skipped.
+7. For each incoming file, re-read the local hash and mtime, then decide per `_apply_incoming_file`: write / update-base / merge / skip (local newer) / conflict-copy. See Conflict Resolution for the full decision tree.
+8. Download + decrypt changed blobs. Decompress (gzip).
+9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
+10. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`; `.tmp` siblings are cleaned up on failure).
+11. For conflict-copy decisions, rename the local file to `<stem>.sync-conflict-<ts>-<device>.<ext>` before writing remote to the canonical path. With `--resolve-interactive`, prompt per-file instead.
+12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
+13. Write `.memsync-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
+14. Release lockfile.
+15. Print summary with split counts: written / merged / skipped / conflicted / failed.
 
 ### `msync gc`
 
@@ -368,6 +376,10 @@ msync sources                  # list configured sync sources with status
 
 ## Conflict Resolution
 
+There are two distinct conflict surfaces: **manifest-level conflicts** created by the iCloud/Dropbox sync layer, and **source-file conflicts** where the same logical file was edited on two machines before a sync round-trip.
+
+### Manifest conflicts (iCloud / Dropbox)
+
 iCloud Drive (and Dropbox, if the storage path points there) can create conflicted copies when two machines write the same file concurrently.
 
 **iCloud conflict pattern:** `filename 2.ext`, `filename 3.ext`
@@ -383,6 +395,8 @@ The `LocalBackend` detects both patterns via regex matching.
 4. Delete the losers.
 5. If all copies fail to decrypt, fall back to full re-push.
 
+Additive resolution for the multi-manifest case: when multiple conflict copies coexist, the union of referenced files is preserved so no device's entries are dropped before a losing copy is deleted.
+
 **Manifest corruption recovery:**
 
 If manifest decryption fails (corrupt data, partial write, wrong format):
@@ -390,6 +404,28 @@ If manifest decryption fails (corrupt data, partial write, wrong format):
 1. Log a warning: "Manifest corrupt or unreadable — will perform full re-push."
 2. Treat as empty manifest (all local files are "new").
 3. Full re-push: upload all blobs and write a fresh manifest.
+
+### Source-file conflicts (Syncthing-style conflict-copy preservation)
+
+If the local file has been edited independently of the remote version (local hash ≠ last-synced hash AND local hash ≠ remote hash), pull never destroys local edits. Behavior is decided per-file at apply time by a documented decision tree in `_apply_incoming_file`:
+
+1. **Skip (S):** local mtime is newer than remote mtime — leave local as-is. Convergence happens on the next push.
+2. **Merge (M):** file has a mergeable type (`.jsonl` union-merge, `MEMORY.md` line-merge).
+3. **Write (W):** no local divergence — write the remote version to the canonical path.
+4. **Conflict-copy (C):** local has diverged AND isn't mergeable AND isn't newer — rename local to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.<ext>` (Syncthing convention, collision suffix on clash), then write remote to the canonical path. Local edits are preserved alongside.
+5. **Update-base (U):** remote hash matches local hash — no I/O, just refresh the last-synced state.
+
+Pull re-reads local hash and mtime at apply time so the decision reflects the actual state when writing, race-safe against editors running during a long pull.
+
+**Interactive resolution.** `msync pull --resolve-interactive` replaces the default keep-both for conflicts with a per-file prompt (unified diff + pick: canonical / force conflict to canonical / keep both / abort). `--no-prompt` is the explicit script-mode counterpart and is mutually exclusive with `--resolve-interactive`.
+
+**Post-hoc resolution commands:**
+
+- `msync conflicts` — list every `.sync-conflict-*` file across synced sources with age and canonical sibling.
+- `msync resolve [PATH]` — walk conflicts (or a single path) interactively. Shows a unified diff, prompts for a winner, acquires the msync lockfile so autopull can't race the rename/unlink. Deletions and renames propagate via the existing additive-sync tombstone machinery.
+- `msync gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days).
+
+**Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.memsync-log.md`, and `msync diff` annotations all reflect the split so cross-machine work is visible.
 
 ---
 
@@ -439,6 +475,7 @@ EXCLUDED = [
     ".turbo/",
     "__pycache__/",
     "*.pyc",
+    "*.tmp",             # atomic-write leftovers from disk-full failures — don't propagate
     ".memsync-log.md",   # generated by pull, not synced back
 ]
 ```
