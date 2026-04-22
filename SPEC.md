@@ -321,7 +321,7 @@ mm autopush                 # silent push for Claude Code (one-line output, neve
 2. Walk `~/.claude/projects/` recursively.
 3. Skip excluded patterns (see below) and files exceeding `max_file_size`.
 4. SHA-256 hash each file → build local manifest (truth-based snapshot).
-5. Fetch remote manifest for this device from storage (if exists). If corrupt, log warning and treat as empty.
+5. Fetch remote manifest for this device from storage via the tri-state `_fetch_remote_manifest` (`ok` / `missing` / `corrupt`). On `corrupt`, run the recovery chain (local sidecar → peer tombstone fallback → refuse; see Manifest corruption recovery). Never silently treat corrupt as empty.
 6. Diff: find new, modified, and deleted files.
 7. Gzip-compress and encrypt changed files with AES-256-GCM (version byte + salt + nonce + ciphertext).
 8. Write encrypted blobs to `data/{device_id}/{sha256}.enc`.
@@ -399,11 +399,30 @@ Additive resolution for the multi-manifest case: when multiple conflict copies c
 
 **Manifest corruption recovery:**
 
-If manifest decryption fails (corrupt data, partial write, wrong format):
+`_fetch_remote_manifest` returns a tri-state result (`ManifestFetch`):
 
-1. Log a warning: "Manifest corrupt or unreadable — will perform full re-push."
-2. Treat as empty manifest (all local files are "new").
-3. Full re-push: upload all blobs and write a fresh manifest.
+- `ok` — at least one copy decrypted; caller uses `.manifest`.
+- `missing` — no manifest at the expected key (first push or fresh device). Callers that read remote state treat this as "empty remote." Push treats this as the correct "no prior state" signal and writes the first manifest.
+- `corrupt` — manifest(s) exist but every copy failed to decrypt/parse. Callers must NOT treat this as "missing"; doing so would drop this device's tombstones and silently un-delete files across the fleet on the next pull.
+
+On `corrupt`, `push` runs the following recovery chain before writing a new manifest:
+
+1. **Local sidecar.** Read `~/.config/mind-meld/last-push.json` (written atomically at the end of every successful push). If present and parseable, use it as the prior-state manifest. This is the only recovery source that preserves **fresh local deletions** — deletions this device made since its last successful push but not yet propagated anywhere.
+2. **Peer fallback.** If no sidecar, iterate peer devices and aggregate their tombstones via `collect_tombstones`. This recovers only deletions that previously propagated. Fresh local deletions since the last good push are lost. A warning surfaces this explicitly.
+3. **Refuse.** If neither source yields prior state, exit nonzero with an actionable message. Silent empty-tombstone push is never acceptable: it would erase the deletion record across the device fleet.
+
+### Merge invariants (load-bearing)
+
+When `_merge_manifests` combines multiple conflict copies of the same device's manifest, the file-merge and tombstone-merge policies are intentionally asymmetric:
+
+- **Files: UNION across all copies** (older entries survive when absent from newer copies).
+- **Tombstones: newest-timestamp-wins** on `deleted_at`.
+
+The asymmetry is correct because the manifest walker is **lossy** — it drops files on permission errors, read failures, and `max_file_size` overruns (see `manifest.walk_claude_source` / `walk_generic_source`). A file missing from the newer conflict copy is **not causal evidence** of deletion; only an explicit tombstone is. Swapping files to newest-wins would silently drop any file that happened to be transiently locked/unreadable during one scan but not another.
+
+**Correctness invariant:** union-for-files + newest-wins-for-tombstones + `is_tombstoned()` gate at every downstream consumer. The tombstone gate is load-bearing. **Every new consumer of a merged manifest MUST check `is_tombstoned(source, rel_path, aggregated_tombstones)` before acting on a file entry.** Adding a consumer that reads `manifest["sources"][x]["files"]` without the gate will silently resurrect deletions.
+
+Current gated consumers: pull-side `_pull_core` (via `collect_tombstones` across all peers, applied at the `to_download` filter step).
 
 ### Source-file conflicts (Syncthing-style conflict-copy preservation)
 
@@ -548,12 +567,12 @@ Old configs using `sync.claude_dir` are auto-converted to a single claude source
 ### Error Hierarchy (`mind-meld/errors.py`)
 
 ```python
-class Mind MeldError(Exception): ...           # base — all mm errors
-class CryptoError(Mind MeldError): ...         # encryption/decryption failures
-class StorageError(Mind MeldError): ...        # backend I/O failures
-class ConfigError(Mind MeldError): ...         # config parsing/validation
-class ManifestError(Mind MeldError): ...       # manifest corruption/incompatibility
-class LockError(Mind MeldError): ...           # concurrent operation conflict
+class MindMeldError(Exception): ...           # base — all mm errors
+class CryptoError(MindMeldError): ...         # encryption/decryption failures
+class StorageError(MindMeldError): ...        # backend I/O failures
+class ConfigError(MindMeldError): ...         # config parsing/validation
+class ManifestError(MindMeldError): ...       # manifest corruption/incompatibility
+class LockError(MindMeldError): ...           # concurrent operation conflict
 ```
 
 ### Error Message Format
@@ -598,12 +617,13 @@ mind-meld/
 │   ├── encryption.md          # how encryption works, threat model, key management
 │   └── troubleshooting.md     # common issues and fixes
 ├── src/
-│   └── mind-meld/
-│       ├── __init__.py
-│       ├── cli.py             # typer app, command definitions
-│       ├── manifest.py        # directory walking, hashing, diffing
+│   └── mind_meld/
+│       ├── __init__.py        # __version__ via importlib.metadata (fallback "0.0.0+dev")
+│       ├── cli.py             # typer app, command definitions, tri-state manifest fetch + recovery
+│       ├── manifest.py        # directory walking, hashing, diffing, tombstone merge
 │       ├── crypto.py          # AES-256-GCM encrypt/decrypt, Argon2id key derivation, gzip
-│       ├── errors.py          # Mind MeldError hierarchy
+│       ├── errors.py          # MindMeldError hierarchy
+│       ├── sidecar.py         # local last-successful-push snapshot for corrupt-manifest recovery
 │       ├── storage/
 │       │   ├── __init__.py    # exports get_backend(config) → LocalBackend
 │       │   └── local.py       # Local folder implementation (pathlib) + iCloud conflict resolution
@@ -618,6 +638,11 @@ mind-meld/
     ├── test_config.py         # TOML load/save, validation, missing fields
     ├── test_storage_local.py  # uses tmp_path fixture, iCloud + Dropbox conflict resolution
     ├── test_lockfile.py       # acquire/release, stale PID, already held
+    ├── test_merge.py          # JSONL union-merge, MEMORY.md line-merge
+    ├── test_additive_sync.py  # additive-only pull, tombstones, conflict manifest union
+    ├── test_conflict_copy.py  # Syncthing-style conflict-copy preservation on pull
+    ├── test_recovery.py       # corrupt-manifest recovery chain (sidecar → peers → refuse)
+    ├── test_version.py        # importlib.metadata version wiring, --version flag
     └── test_integration.py    # full push→pull round-trip, deletion propagation, GC safety
 ```
 

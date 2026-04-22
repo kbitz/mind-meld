@@ -21,7 +21,7 @@ work assumes these are correct. Parallel wins in crypto and storage have no
 file overlap with correctness work, so they go alongside.
 
 **Pre-flight** (shared-infra; serial, one-at-a-time):
-- Align version across `VERSION` (0.4.0), `pyproject.toml` (0.3.0), and `src/mind_meld/__init__.py` (0.2.0). Pick one source of truth (prefer `importlib.metadata.version("mind_meld")`) and derive the others. `init` currently prints `__version__` so users see 0.2.0 against a 0.4.0 release.
+- Unify version source of truth. `pyproject.toml` is canonical; `src/mind_meld/__init__.py` reads it via `importlib.metadata.version("mind-meld")` with a `"0.0.0+dev"` fallback for uninstalled source-tree runs. `VERSION` file is deleted. `mm --version` flag added.
 
 ### Track 1A: CLI tombstone correctness
 _2 tasks · ~1 day (human) / ~15 min (CC) · high risk · [cli.py, integration tests]_

@@ -19,17 +19,22 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge}.py
+src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar}.py
 src/mind_meld/storage/{local}.py
+
+Version source of truth: `pyproject.toml` (read by `__init__.py` via `importlib.metadata.version("mind-meld")`, fallback `"0.0.0+dev"` for uninstalled source-tree runs). No `VERSION` file.
 
 ## Testing
 pytest. Use tmp_path for local backend. Run: `pytest tests/`
 
 ## Commands
-mm init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | autopull | autopush
+mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | autopull | autopush
 
 Pull flags: `--resolve-interactive` (prompt per-file), `--no-prompt` (script mode, always keep-both).
 GC flags: `--conflicts` (also reap `.sync-conflict-*` files older than 30 days).
+
+## Corrupt-manifest recovery (load-bearing)
+`_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt`, `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. `mm gc` refuses when any peer manifest is corrupt (referenced blobs may still be live). See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.
 
 ## Auto Commands (for Claude Code integration)
 - `mm autopull` — silent pull, one-line output, never prompts, graceful on errors

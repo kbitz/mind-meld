@@ -4,6 +4,8 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.5.1   | 2026-04-22 | Corrupt-manifest recovery chain (sidecar → peers → refuse) + `mm --version` |
+| 0.5.0   | 2026-04-22 | Rename memsync/msync → mind-meld/mm |
 | 0.4.0   | 2026-04-21 | Conflict-copy preservation + mtime-skip for pull |
 | 0.3.0   | (pre-v0.4) | Additive-only sync model with tombstones and conflict resolution |
 | 0.2.0   | (pre-v0.3) | Multi-source sync with gstack support |
@@ -24,9 +26,10 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
 - **Groups 2–6 (Refactor + hygiene):** not started — queued after Group 1.
 - **Groups 7–9 (P2/P3 features, parallel-safe after Group 6):** not started.
 
-### Known version-source drift
+### Version source of truth
 
-The repository currently has three inconsistent version sources — `VERSION`
-says 0.4.0, `pyproject.toml` says 0.3.0, and `src/mind_meld/__init__.py` says
-0.2.0. `init` prints `__version__` so users see 0.2.0 despite a 0.4.0 release.
-Group 1 pre-flight resolves this.
+`pyproject.toml` is the single source of truth for the release number.
+`src/mind_meld/__init__.py` reads it at import time via
+`importlib.metadata.version("mind-meld")` and falls back to `"0.0.0+dev"`
+when the package is not installed (source-tree runs). There is no
+separate `VERSION` file.
