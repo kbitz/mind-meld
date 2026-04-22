@@ -1,4 +1,4 @@
-"""Device registration and listing for MemSync."""
+"""Device registration and listing for Mind Meld."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from memsync.errors import StorageError
-from memsync.storage.local import LocalBackend
+from mind_meld.errors import StorageError
+from mind_meld.storage.local import LocalBackend
 
 
 def register_device(

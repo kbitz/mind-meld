@@ -1,10 +1,10 @@
-"""Tests for memsync.config — TOML load/save, validation."""
+"""Tests for mind_meld.config — TOML load/save, validation."""
 
 from pathlib import Path
 
 import pytest
 
-from memsync.config import (
+from mind_meld.config import (
     DEFAULT_SOURCES,
     _apply_defaults,
     _validate,
@@ -13,14 +13,14 @@ from memsync.config import (
     load_config,
     save_config,
 )
-from memsync.errors import ConfigError
+from mind_meld.errors import ConfigError
 
 
 class TestValidation:
     def test_valid_config(self):
         config = {
             "device": {"id": "abc123", "name": "MacBook"},
-            "storage": {"path": "/tmp/memsync"},
+            "storage": {"path": "/tmp/mind-meld"},
         }
         _validate(config)  # should not raise
 
@@ -55,7 +55,7 @@ class TestDefaults:
     def test_applies_sync_defaults(self):
         config = {
             "device": {"id": "abc", "name": "Mac"},
-            "storage": {"path": "/tmp/memsync"},
+            "storage": {"path": "/tmp/mind-meld"},
         }
         _apply_defaults(config)
         assert config["sync"]["max_file_size"] == 52_428_800
@@ -64,7 +64,7 @@ class TestDefaults:
     def test_does_not_overwrite_existing(self):
         config = {
             "device": {"id": "abc", "name": "Mac"},
-            "storage": {"path": "/tmp/memsync"},
+            "storage": {"path": "/tmp/mind-meld"},
             "sync": {"claude_dir": "/custom/claude", "max_file_size": 10_000_000},
             "crypto": {"argon2_memory_kb": 32_768},
         }

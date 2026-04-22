@@ -27,6 +27,6 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
 ### Known version-source drift
 
 The repository currently has three inconsistent version sources — `VERSION`
-says 0.4.0, `pyproject.toml` says 0.3.0, and `src/memsync/__init__.py` says
+says 0.4.0, `pyproject.toml` says 0.3.0, and `src/mind_meld/__init__.py` says
 0.2.0. `init` prints `__version__` so users see 0.2.0 despite a 0.4.0 release.
 Group 1 pre-flight resolves this.

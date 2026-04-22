@@ -1,17 +1,17 @@
-"""Tests for memsync.lockfile — PID-based locking."""
+"""Tests for mind_meld.lockfile — PID-based locking."""
 
 import os
 
 import pytest
 
-from memsync.errors import LockError
-from memsync.lockfile import acquire_lock, release_lock
+from mind_meld.errors import LockError
+from mind_meld.lockfile import acquire_lock, release_lock
 
 
 class TestLockfile:
     @pytest.fixture
     def lock_path(self, tmp_path):
-        return tmp_path / "memsync.lock"
+        return tmp_path / "mind-meld.lock"
 
     def test_acquire_and_release(self, lock_path):
         acquire_lock(lock_path)
@@ -23,7 +23,7 @@ class TestLockfile:
     def test_acquire_twice_raises(self, lock_path):
         acquire_lock(lock_path)
         # Same PID, same process — should raise since PID is running
-        with pytest.raises(LockError, match="Another msync operation"):
+        with pytest.raises(LockError, match="Another mm operation"):
             acquire_lock(lock_path)
         release_lock(lock_path)
 

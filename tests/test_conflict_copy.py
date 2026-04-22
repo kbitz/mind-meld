@@ -11,7 +11,7 @@ Covers _apply_incoming_file's decision tree:
         write  remote    -> canonical
 
 Plus the conflict_filename helper, manifest mtime helpers, and the new
-msync conflicts / resolve / gc --conflicts commands.
+mm conflicts / resolve / gc --conflicts commands.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from memsync.cli import (
+from mind_meld.cli import (
     CONFLICT_INFIX,
     _apply_incoming_file,
     _canonical_for_conflict,
@@ -31,7 +31,7 @@ from memsync.cli import (
     _predict_pull_outcome,
     conflict_filename,
 )
-from memsync.manifest import mtime_from_manifest, mtime_from_path
+from mind_meld.manifest import mtime_from_manifest, mtime_from_path
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ class TestApplyIncomingFile:
 
     def test_unchanged_when_local_matches_remote(self, tmp_path: Path) -> None:
         """[U] Local hash == remote hash -> no-op, idempotent."""
-        from memsync.manifest import hash_file
+        from mind_meld.manifest import hash_file
 
         rel = "memory/unchanged.md"
         local = tmp_path / rel
@@ -208,7 +208,7 @@ class TestApplyIncomingFile:
         local.write_bytes(b"local content")
         _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
 
-        from memsync.manifest import hash_file
+        from mind_meld.manifest import hash_file
 
         # Simulated remote info that _apply_incoming_file reaches via diff.
         # Apply #1 creates a conflict.
@@ -340,7 +340,7 @@ class TestAtomicWrite:
     def test_cleans_up_tmp_on_write_failure(self, tmp_path: Path, monkeypatch) -> None:
         """_atomic_write removes its .tmp sibling if write_bytes fails,
         so the synced tree doesn't accumulate orphan .tmp files."""
-        from memsync.cli import _atomic_write
+        from mind_meld.cli import _atomic_write
 
         target = tmp_path / "out.md"
 
@@ -358,7 +358,7 @@ class TestAtomicWrite:
 
     def test_cleans_up_tmp_on_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
         """If rename fails after write, the .tmp file is still cleaned up."""
-        from memsync.cli import _atomic_write
+        from mind_meld.cli import _atomic_write
 
         target = tmp_path / "out.md"
 
@@ -380,7 +380,7 @@ class TestGcOldConflictFiles:
     def test_reaps_files_older_than_cutoff(self, tmp_path: Path, monkeypatch) -> None:
         """_gc_old_conflict_files deletes .sync-conflict-* files older than
         CONFLICT_AGE_DAYS. Fresh files are preserved."""
-        from memsync.cli import CONFLICT_AGE_DAYS, _gc_old_conflict_files
+        from mind_meld.cli import CONFLICT_AGE_DAYS, _gc_old_conflict_files
 
         src = tmp_path / "src"
         (src / "memory").mkdir(parents=True)
@@ -408,7 +408,7 @@ class TestGcOldConflictFiles:
 
     def test_dry_run_does_not_delete(self, tmp_path: Path) -> None:
         """dry_run=True lists but preserves everything."""
-        from memsync.cli import _gc_old_conflict_files
+        from mind_meld.cli import _gc_old_conflict_files
 
         src = tmp_path / "src"
         (src / "memory").mkdir(parents=True)
@@ -460,7 +460,7 @@ class TestFindConflictFilesClaudeType:
 
 class TestResolveInteractiveLoop:
     """Tests for _resolve_interactive_loop — the interactive picker invoked by
-    `msync resolve`. Uses monkeypatch on typer.prompt to simulate user input.
+    `mm resolve`. Uses monkeypatch on typer.prompt to simulate user input.
     """
 
     @staticmethod
@@ -476,7 +476,7 @@ class TestResolveInteractiveLoop:
     def test_keep_canonical_deletes_conflict(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'c' — conflict file is deleted, canonical preserved."""
         import typer
-        from memsync.cli import _resolve_interactive_loop
+        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
@@ -490,7 +490,7 @@ class TestResolveInteractiveLoop:
     def test_force_promotes_conflict_over_canonical(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'f' — conflict renamed to canonical (overwriting canonical)."""
         import typer
-        from memsync.cli import _resolve_interactive_loop
+        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
@@ -504,7 +504,7 @@ class TestResolveInteractiveLoop:
     def test_keep_both_is_noop(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'b' (default) — both files remain unchanged."""
         import typer
-        from memsync.cli import _resolve_interactive_loop
+        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "b")
@@ -517,7 +517,7 @@ class TestResolveInteractiveLoop:
     def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
         import typer
-        from memsync.cli import _resolve_interactive_loop
+        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "a")
@@ -528,7 +528,7 @@ class TestResolveInteractiveLoop:
     def test_canonical_missing_promote(self, tmp_path: Path, monkeypatch) -> None:
         """Canonical is gone, user picks 'p' — conflict is renamed to recovered canonical path."""
         import typer
-        from memsync.cli import _resolve_interactive_loop
+        from mind_meld.cli import _resolve_interactive_loop
 
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict content")
@@ -545,7 +545,7 @@ class TestResolveInteractiveLoop:
     def test_canonical_missing_delete(self, tmp_path: Path, monkeypatch) -> None:
         """Canonical is gone, user picks 'd' — conflict file is deleted."""
         import typer
-        from memsync.cli import _resolve_interactive_loop
+        from mind_meld.cli import _resolve_interactive_loop
 
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict content")
@@ -558,7 +558,7 @@ class TestResolveInteractiveLoop:
     def test_walks_multiple_conflicts(self, tmp_path: Path, monkeypatch) -> None:
         """Given multiple hits, each is prompted sequentially."""
         import typer
-        from memsync.cli import _resolve_interactive_loop
+        from mind_meld.cli import _resolve_interactive_loop
 
         c1 = tmp_path / "a.md"
         c1.write_bytes(b"a-canon")
@@ -590,7 +590,7 @@ class TestPredictPullOutcome:
         assert _predict_pull_outcome("missing.md", info, tmp_path) == "write"
 
     def test_predicts_unchanged_for_matching_hash(self, tmp_path: Path) -> None:
-        from memsync.manifest import hash_file
+        from mind_meld.manifest import hash_file
         f = tmp_path / "a.md"
         f.write_bytes(b"same")
         info = _remote_info(hash_file(f), datetime.now(timezone.utc))

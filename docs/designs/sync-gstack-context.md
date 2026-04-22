@@ -5,7 +5,7 @@
 
 ## Problem
 
-MemSync syncs only `~/.claude/projects/*/memory/` and `*/todos/`. The `~/.gstack/` directory contains accumulated AI developer context (learnings, design docs, CEO plans, review logs, timelines, analytics, retros, config) that compounds over time and is lost when switching machines.
+Mind Meld syncs only `~/.claude/projects/*/memory/` and `*/todos/`. The `~/.gstack/` directory contains accumulated AI developer context (learnings, design docs, CEO plans, review logs, timelines, analytics, retros, config) that compounds over time and is lost when switching machines.
 
 ## Solution: Configurable Sync Sources
 
@@ -19,8 +19,8 @@ Replace the hardcoded single-source walker with configurable `[[sync.sources]]` 
 | 2 | Per-source pull/status/diff flags | ACCEPTED | --source for troubleshooting (NOT push) |
 | 3 | Source-aware sync log for gstack | SKIPPED | gstack writes to its own dirs, would overwrite |
 | 4 | Auto-detect sources on init | ACCEPTED | Zero friction for existing gstack users |
-| 5 | msync sources command | ACCEPTED | Lists configured sync sources with status |
-| 6 | Per-source status breakdown | ACCEPTED | Changes grouped by source in msync status |
+| 5 | mm sources command | ACCEPTED | Lists configured sync sources with status |
+| 6 | Per-source status breakdown | ACCEPTED | Changes grouped by source in mm status |
 | 7 | Default source configs | ACCEPTED | Built-in definitions for claude/gstack |
 
 ## Cross-Model Tension Resolutions (Claude + Codex)

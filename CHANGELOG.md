@@ -1,19 +1,33 @@
 # Changelog
 
-All notable changes to MemSync will be documented in this file.
+All notable changes to Mind Meld will be documented in this file.
+
+## [0.5.0] - 2026-04-22
+
+### Changed
+- **Project renamed** from `memsync` / `msync` to `mind-meld` / `mm`. Clean rename: no migration shims.
+  - PyPI package: `memsync` → `mind-meld`
+  - CLI binary: `msync` → `mm`
+  - Python package: `memsync` → `mind_meld`
+  - Config dir: `~/.config/memsync/` → `~/.config/mind-meld/`
+  - Default storage: `.../CloudDocs/memsync/` → `.../CloudDocs/mind-meld/`
+  - Keyring service: `memsync` → `mind-meld`
+  - Env var: `MEMSYNC_PASSPHRASE` → `MINDMELD_PASSPHRASE`
+  - Per-project sync log: `.memsync-log.md` → `.mind-meld-log.md`
+- **Existing installs must:** `pipx uninstall memsync && pipx install mind-meld`, move the iCloud folder, re-run `mm init`, and re-enter the passphrase. Old keyring entry under service `memsync` is orphaned (delete via Keychain Access).
 
 ## [0.4.0] - 2026-04-21
 
 ### Added
-- Conflict-copy preservation on `msync pull`: when local and remote versions of a non-mergeable file diverge, the losing local version is renamed to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.<ext>` (Syncthing convention) and the remote wins the canonical path. Local edits are never destroyed.
+- Conflict-copy preservation on `mm pull`: when local and remote versions of a non-mergeable file diverge, the losing local version is renamed to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.<ext>` (Syncthing convention) and the remote wins the canonical path. Local edits are never destroyed.
 - Mtime-based skip: if the local file is newer than remote, pull leaves it untouched. Convergence happens on the next push.
-- `msync conflicts` — list every `.sync-conflict-*` file across synced sources with age and canonical sibling.
-- `msync resolve [<path>]` — interactive picker showing a unified diff and prompting keep canonical / force conflict to canonical / keep both / abort. Acquires the msync lockfile to race-guard against autopull.
-- `msync gc --conflicts` — reap stale conflict files older than 30 days.
-- `msync pull --resolve-interactive` — prompt per-conflict during pull instead of defaulting to keep-both.
-- `msync pull --no-prompt` — explicit no-prompt mode for scripting.
-- `msync diff` now annotates each modified path with its predicted pull outcome (write / merge / skip / conflict).
-- `.memsync-log.md` now includes `## Conflicts` and `## Skipped (local was newer)` sections so Claude Code sees resolution work when reading cross-machine context.
+- `mm conflicts` — list every `.sync-conflict-*` file across synced sources with age and canonical sibling.
+- `mm resolve [<path>]` — interactive picker showing a unified diff and prompting keep canonical / force conflict to canonical / keep both / abort. Acquires the mm lockfile to race-guard against autopull.
+- `mm gc --conflicts` — reap stale conflict files older than 30 days.
+- `mm pull --resolve-interactive` — prompt per-conflict during pull instead of defaulting to keep-both.
+- `mm pull --no-prompt` — explicit no-prompt mode for scripting.
+- `mm diff` now annotates each modified path with its predicted pull outcome (write / merge / skip / conflict).
+- `.mind-meld-log.md` now includes `## Conflicts` and `## Skipped (local was newer)` sections so Claude Code sees resolution work when reading cross-machine context.
 
 ### Changed
 - `PullResult` split counts: `total_written`, `total_merged`, `total_skipped`, `total_conflicted`, `total_failed` replace the single `total_new`/`total_modified` pair. Pull summary and autopull one-liner updated to match.
@@ -57,7 +71,7 @@ All notable changes to MemSync will be documented in this file.
 - Configurable sync sources via `[[sync.sources]]` in config
 - JSONL merge strategy for append-only files
 - Per-source pull/status/diff flags
-- `msync sources` command
+- `mm sources` command
 
 ## [0.1.0] - 2026-04-07
 
@@ -66,5 +80,5 @@ All notable changes to MemSync will be documented in this file.
 - iCloud Drive storage backend with end-to-end AES-256-GCM encryption
 - Manifest-based diffing with SHA-256 content addressing
 - Scoped sync (memory/ and todos/ only)
-- Cross-machine sync log (.memsync-log.md)
+- Cross-machine sync log (.mind-meld-log.md)
 - autopull and autopush for Claude Code integration

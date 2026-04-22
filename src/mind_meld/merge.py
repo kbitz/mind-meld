@@ -1,4 +1,4 @@
-"""Merge logic for MemSync.
+"""Merge logic for Mind Meld.
 
 On pull, certain files are merged instead of overwritten to preserve
 entries appended on different machines:

@@ -1,6 +1,6 @@
-"""Configuration management for MemSync.
+"""Configuration management for Mind Meld.
 
-Reads and writes ~/.config/memsync/config.toml.
+Reads and writes ~/.config/mind-meld/config.toml.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from memsync.errors import ConfigError
+from mind_meld.errors import ConfigError
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -19,16 +19,16 @@ else:
     except ModuleNotFoundError:
         import tomli as tomllib  # type: ignore[no-redef]
 
-CONFIG_DIR = Path.home() / ".config" / "memsync"
+CONFIG_DIR = Path.home() / ".config" / "mind-meld"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
-LOCK_PATH = CONFIG_DIR / "memsync.lock"
+LOCK_PATH = CONFIG_DIR / "mind-meld.lock"
 
 # Defaults
 DEFAULT_MAX_FILE_SIZE = 52_428_800  # 50MB
 DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = str(Path.home() / ".claude")
 DEFAULT_STORAGE_PATH = str(
-    Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "memsync"
+    Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
 )
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": "~/.claude", "type": "claude"},
@@ -59,7 +59,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     config_path = path or CONFIG_PATH
     if not config_path.exists():
         raise ConfigError(
-            f"init: config not found at {config_path} — run 'msync init' first."
+            f"init: config not found at {config_path} — run 'mm init' first."
         )
     try:
         with open(config_path, "rb") as f:

@@ -1,6 +1,6 @@
-"""Storage backend for MemSync."""
+"""Storage backend for Mind Meld."""
 
-from memsync.storage.local import LocalBackend
+from mind_meld.storage.local import LocalBackend
 
 __all__ = ["LocalBackend", "get_backend"]
 

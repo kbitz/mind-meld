@@ -1,4 +1,4 @@
-"""Tests for memsync.manifest — walking, hashing, diffing."""
+"""Tests for mind_meld.manifest — walking, hashing, diffing."""
 
 import hashlib
 from pathlib import Path
@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from memsync.errors import ManifestError
-from memsync.manifest import (
+from mind_meld.errors import ManifestError
+from mind_meld.manifest import (
     DiffResult,
     _is_excluded,
     build_manifest,
@@ -49,8 +49,8 @@ class TestIsExcluded:
     def test_excludes_pycache(self):
         assert _is_excluded("projects/-foo/__pycache__/module.cpython-311.pyc")
 
-    def test_excludes_memsync_log(self):
-        assert _is_excluded("projects/-foo/.memsync-log.md")
+    def test_excludes_mind_meld_log(self):
+        assert _is_excluded("projects/-foo/.mind-meld-log.md")
 
     def test_allows_normal_files(self):
         assert not _is_excluded("projects/-foo/memory/user_role.md")
@@ -224,7 +224,7 @@ class TestSerialize:
         assert result["files"]["a.json"]["sha256"] == "xxx"
 
     def test_invalid_json_raises(self):
-        from memsync.errors import ManifestError
+        from mind_meld.errors import ManifestError
         with pytest.raises(ManifestError):
             deserialize_manifest(b"not json")
 

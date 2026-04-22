@@ -1,4 +1,4 @@
-"""Manifest building and diffing for MemSync.
+"""Manifest building and diffing for Mind Meld.
 
 Walks ~/.claude/projects/*/memory/ and ~/.claude/projects/*/todos/ only (claude source).
 Also supports generic sources with configurable include_dirs/include_files.
@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from memsync.errors import ManifestError
+from mind_meld.errors import ManifestError
 
 EXCLUDED = [
     "node_modules/",
@@ -29,7 +29,7 @@ EXCLUDED = [
     ".env",
     ".env.*",
     "*.log",
-    "*.tmp",  # msync writes <target>.tmp during atomic writes; don't sync leftovers
+    "*.tmp",  # mm writes <target>.tmp during atomic writes; don't sync leftovers
     ".claude-sync/",
     "dist/",
     "build/",
@@ -37,7 +37,7 @@ EXCLUDED = [
     ".turbo/",
     "__pycache__/",
     "*.pyc",
-    ".memsync-log.md",
+    ".mind-meld-log.md",
 ]
 
 # Only sync these subdirectories within each project.

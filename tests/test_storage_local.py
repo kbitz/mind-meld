@@ -1,9 +1,9 @@
-"""Tests for memsync.storage.local — local folder backend."""
+"""Tests for mind_meld.storage.local — local folder backend."""
 
 import pytest
 
-from memsync.errors import StorageError
-from memsync.storage.local import LocalBackend
+from mind_meld.errors import StorageError
+from mind_meld.storage.local import LocalBackend
 
 
 class TestLocalBackend:

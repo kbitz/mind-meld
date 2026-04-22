@@ -1,18 +1,18 @@
-# MemSync v1 Design Decisions
+# Mind Meld v1 Design Decisions
 
 > Generated from CEO plan review on 2026-03-18.
 > Supplements SPEC.md with scope expansions and architectural decisions made during review.
 
 ## Rebrand
 
-The project is renamed from `claude-session-sync` / `css` to **MemSync** / `msync`.
+The project is renamed from `claude-session-sync` / `css` to **Mind Meld** / `mm`.
 
 | Old | New |
 |-----|-----|
-| `claude-session-sync` | `memsync` (PyPI package) |
-| `css` | `msync` (CLI command) |
-| `src/css/` | `src/memsync/` |
-| `~/.config/claude-session-sync/` | `~/.config/memsync/` |
+| `claude-session-sync` | `mind-meld` (PyPI package) |
+| `css` | `mm` (CLI command) |
+| `src/claude_session_sync/` | `src/mind_meld/` |
+| `~/.config/claude-session-sync/` | `~/.config/mind-meld/` |
 
 ## Accepted Scope Additions (beyond original SPEC.md)
 
@@ -25,14 +25,14 @@ Encrypted blob format becomes: `[version:1][salt:16][nonce:12][compressed_cipher
 ### 3. Large file cap
 Default 50MB per file, configurable via `sync.max_file_size` in config.toml. Files exceeding the cap are skipped with a warning. Prevents a single large artifact from making push/pull unusable.
 
-### 4. Garbage collection (`msync gc`)
+### 4. Garbage collection (`mm gc`)
 Compares all device manifests against all stored blobs. Deletes blobs not referenced by ANY manifest. Supports `--dry-run`. Must hold a lockfile during execution to prevent races with concurrent pushes.
 
 ### 5. Truth-based manifests (deletion propagation)
 Push always reflects the complete current state of `~/.claude/projects/`. If a file was deleted locally, the new manifest simply omits it. Pull applies the full manifest state, including deletions. GC cleans up orphaned blobs. No separate `prune` command needed.
 
-### 6. MEMSYNC_PASSPHRASE env var fallback
-When no OS keyring is available (headless, SSH sessions, CI), fall back to the `MEMSYNC_PASSPHRASE` environment variable. Keyring remains the default and preferred method.
+### 6. MINDMELD_PASSPHRASE env var fallback
+When no OS keyring is available (headless, SSH sessions, CI), fall back to the `MINDMELD_PASSPHRASE` environment variable. Keyring remains the default and preferred method.
 
 ### 7. argon2-cffi dependency
 The `cryptography` library does not include Argon2id. `argon2-cffi` is added as an explicit core dependency for key derivation.
@@ -42,14 +42,14 @@ The `cryptography` library does not include Argon2id. `argon2-cffi` is added as 
 - Detect iCloud-style conflicted copies (`filename 2.ext`) and Dropbox-style copies (`filename (conflicted copy YYYY-MM-DD).ext`), try decrypting all, keep the one with the newer manifest timestamp, delete the losers.
 
 ### 9. PID-based lockfile
-`~/.config/memsync/memsync.lock` prevents concurrent same-device operations (double push, gc during push). Stale locks (PID no longer running) are cleaned up automatically.
+`~/.config/mind-meld/mind-meld.lock` prevents concurrent same-device operations (double push, gc during push). Stale locks (PID no longer running) are cleaned up automatically.
 
 ### 10. Atomic writes on pull
 All file writes during pull use write-to-tmp-then-rename pattern (`os.rename` is atomic on POSIX). Prevents half-written files on crash or ctrl-C.
 
 ### 11. Structured error hierarchy
-`memsync/errors.py` defines:
-- `MemSyncError` (base)
+`mind-meld/errors.py` defines:
+- `Mind MeldError` (base)
 - `CryptoError` (encryption/decryption failures)
 - `StorageError` (backend I/O failures)
 - `ConfigError` (config parsing/validation)
@@ -67,7 +67,7 @@ keyring >= 25.0
 rich >= 13.0
 ```
 
-Install: `pipx install memsync`
+Install: `pipx install mind-meld`
 
 ## Updated Encrypted Blob Format
 
@@ -97,4 +97,4 @@ All errors surfaced to users follow the format: `[operation] [what failed] [why]
 1. **Deletion propagation:** Yes — truth-based manifests. Push reflects reality.
 2. **Large files:** 50MB cap, configurable.
 3. **Compression:** Yes — gzip before encrypt.
-4. **CLI name:** `msync` (project = MemSync).
+4. **CLI name:** `mm` (project = Mind Meld).

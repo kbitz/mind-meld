@@ -1,6 +1,6 @@
 """Tests for merge logic — JSONL and MEMORY.md."""
 
-from memsync.merge import merge_file, merge_jsonl, merge_lines, should_merge
+from mind_meld.merge import merge_file, merge_jsonl, merge_lines, should_merge
 
 
 class TestShouldMerge:

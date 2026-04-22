@@ -1,11 +1,11 @@
-# MemSync
+# Mind Meld
 
 > Open-source, self-hosted CLI tool for syncing Claude Code sessions across Macs via iCloud Drive.
 
 **License:** MIT
 **Status:** Pre-release
 
-This is a personal tool. Anyone with a Claude Code setup and a Mac with iCloud Drive should be able to install it, run `msync init`, and be syncing within five minutes — no account creation, no third-party API, no vendor trust required.
+This is a personal tool. Anyone with a Claude Code setup and a Mac with iCloud Drive should be able to install it, run `mm init`, and be syncing within five minutes — no account creation, no third-party API, no vendor trust required.
 
 ## Problem
 
@@ -41,7 +41,7 @@ Every piece of documentation targets one of two audiences:
 
 **README structure:**
 - One-liner description + badges (PyPI, license, CI)
-- 30-second install (`pipx install memsync`)
+- 30-second install (`pipx install mind-meld`)
 - 2-minute quickstart (init → push → pull)
 - Links to detailed docs
 - "How it works" section with the architecture diagram
@@ -51,7 +51,7 @@ Every piece of documentation targets one of two audiences:
 
 ## Architecture
 
-Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs are written to `~/Library/Mobile Documents/com~apple~CloudDocs/memsync/` and iCloud handles sync. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
+Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs are written to `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld/` and iCloud handles sync. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
 
 ```
 ┌─────────────┐         encrypted blobs    ┌──────────────────┐
@@ -59,7 +59,7 @@ Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs a
 │  (CLI)      │                             │  Mobile Documents│
 └─────────────┘                             │  /com~apple~     │
                                             │  CloudDocs/      │
-      ▲                                     │  memsync/        │
+      ▲                                     │  mind-meld/        │
       │                                     └──────────────────┘
       │                                            │
       │                                     iCloud Drive sync
@@ -74,7 +74,7 @@ Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs a
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    msync CLI (typer)                          │
+│                    mm CLI (typer)                          │
 │  init | push | pull | status | devices | diff | gc | sources │
 └──────────┬──────────────────────────────────┬───────────────┘
            │                                  │
@@ -124,9 +124,9 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
     └── ...
 ```
 
-Default `storage_root`: `~/Library/Mobile Documents/com~apple~CloudDocs/memsync/`
+Default `storage_root`: `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld/`
 
-### Device Config (`~/.config/memsync/config.toml`)
+### Device Config (`~/.config/mind-meld/config.toml`)
 
 ```toml
 [device]
@@ -134,7 +134,7 @@ id = "a1b2c3d4"           # generated on init
 name = "MacBook Pro"       # user-friendly label
 
 [storage]
-path = "~/Library/Mobile Documents/com~apple~CloudDocs/memsync"
+path = "~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld"
 
 [sync]
 max_file_size = 52428800   # bytes (50MB). Skip files larger than this.
@@ -233,9 +233,9 @@ All session data is encrypted on the device before it touches iCloud Drive. iClo
 Each file gets a fresh random salt and nonce on every encrypt. Same plaintext produces different ciphertext each time. Plaintext is gzip-compressed (default level) before encryption — session JSONs typically compress 5-10x.
 
 **Passphrase handling:**
-- Prompted once during `msync init`
+- Prompted once during `mm init`
 - Derived key cached in the OS keyring via `keyring` library (macOS Keychain)
-- **Headless fallback:** if no keyring is available, fall back to `MEMSYNC_PASSPHRASE` environment variable
+- **Headless fallback:** if no keyring is available, fall back to `MINDMELD_PASSPHRASE` environment variable
 - **Single function:** `crypto.get_passphrase()` encapsulates the full fallback chain (keyring → env var → prompt). All commands call this — no duplication.
 - Passphrase and derived key are never written to disk in plaintext
 
@@ -243,7 +243,7 @@ Each file gets a fresh random salt and nonce on every encrypt. Same plaintext pr
 
 **Multi-device key sharing:**
 - All devices must use the same passphrase — this is the "end-to-end" part
-- When running `msync init` on a second machine, the user enters the same passphrase
+- When running `mm init` on a second machine, the user enters the same passphrase
 - There is no key exchange protocol; the passphrase is the shared secret
 - If a user enters the wrong passphrase, decryption fails with a clear error (GCM tag verification), not silent corruption
 
@@ -276,25 +276,25 @@ Factory function `get_backend(config) → LocalBackend` reads `config.storage.pa
 
 ## CLI Interface
 
-Built with `typer`. Installed as `msync` (MemSync).
+Built with `typer`. Installed as `mm` (Mind Meld).
 
 ### Commands
 
 ```
-msync init                     # generate device ID, configure storage, set passphrase
-msync push                     # build manifest, diff against remote, upload changes
-msync pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
+mm init                     # generate device ID, configure storage, set passphrase
+mm push                     # build manifest, diff against remote, upload changes
+mm pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
            [--resolve-interactive | --no-prompt]        # conflict handling mode
-msync status [--source NAME]   # show local vs remote state, pending changes
-msync devices                  # list registered devices
-msync diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
+mm status [--source NAME]   # show local vs remote state, pending changes
+mm devices                  # list registered devices
+mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
                                              # annotates modified files as write / merge / skip / conflict
-msync gc [--conflicts]         # delete orphaned blobs; with --conflicts, also reap .sync-conflict-* files >30d
-msync sources                  # list configured sync sources with status
-msync conflicts                # list unresolved .sync-conflict-* files across sources
-msync resolve [PATH]           # interactively resolve conflict files (unified diff + pick winner)
-msync autopull                 # silent pull for Claude Code (one-line output, never prompts)
-msync autopush                 # silent push for Claude Code (one-line output, never prompts)
+mm gc [--conflicts]         # delete orphaned blobs; with --conflicts, also reap .sync-conflict-* files >30d
+mm sources                  # list configured sync sources with status
+mm conflicts                # list unresolved .sync-conflict-* files across sources
+mm resolve [PATH]           # interactively resolve conflict files (unified diff + pick winner)
+mm autopull                 # silent pull for Claude Code (one-line output, never prompts)
+mm autopush                 # silent push for Claude Code (one-line output, never prompts)
 ```
 
 ### Global Flags
@@ -304,20 +304,20 @@ msync autopush                 # silent push for Claude Code (one-line output, n
 --dry-run                      # show what would happen without doing it
 ```
 
-### `msync init`
+### `mm init`
 
 1. Detect if already initialized. If config.toml exists, ask to overwrite.
 2. Generate a UUID4 device ID.
 3. Prompt for device name.
-4. Prompt for storage folder path (default: iCloud Drive `~/Library/Mobile Documents/com~apple~CloudDocs/memsync`). Create it if it doesn't exist.
+4. Prompt for storage folder path (default: iCloud Drive `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`). Create it if it doesn't exist.
 5. Prompt for encryption passphrase.
-6. Store derived key in OS keyring (or instruct to set `MEMSYNC_PASSPHRASE` if no keyring).
+6. Store derived key in OS keyring (or instruct to set `MINDMELD_PASSPHRASE` if no keyring).
 7. Write `config.toml`.
 8. Write `devices/{device_id}.json` to storage.
 
-### `msync push`
+### `mm push`
 
-1. Acquire lockfile (`~/.config/memsync/memsync.lock`). Fail if another operation is running.
+1. Acquire lockfile (`~/.config/mind-meld/mind-meld.lock`). Fail if another operation is running.
 2. Walk `~/.claude/projects/` recursively.
 3. Skip excluded patterns (see below) and files exceeding `max_file_size`.
 4. SHA-256 hash each file → build local manifest (truth-based snapshot).
@@ -329,7 +329,7 @@ msync autopush                 # silent push for Claude Code (one-line output, n
 10. Release lockfile.
 11. Print summary (files scanned, changed, bytes transferred, time elapsed).
 
-### `msync pull [--from DEVICE] [--source NAME]`
+### `mm pull [--from DEVICE] [--source NAME]`
 
 1. Acquire lockfile.
 2. List devices from `devices/` prefix.
@@ -343,11 +343,11 @@ msync autopush                 # silent push for Claude Code (one-line output, n
 10. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`; `.tmp` siblings are cleaned up on failure).
 11. For conflict-copy decisions, rename the local file to `<stem>.sync-conflict-<ts>-<device>.<ext>` before writing remote to the canonical path. With `--resolve-interactive`, prompt per-file instead.
 12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
-13. Write `.memsync-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
+13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
 15. Print summary with split counts: written / merged / skipped / conflicted / failed.
 
-### `msync gc`
+### `mm gc`
 
 1. Acquire lockfile.
 2. Download and decrypt ALL device manifests.
@@ -358,7 +358,7 @@ msync autopush                 # silent push for Claude Code (one-line output, n
 7. Release lockfile.
 8. Print summary (blobs deleted, bytes freed).
 
-### `msync status [--source NAME]`
+### `mm status [--source NAME]`
 
 1. Build local manifest (no upload).
 2. Fetch remote manifest for current device.
@@ -366,7 +366,7 @@ msync autopush                 # silent push for Claude Code (one-line output, n
 4. Print: local file count, remote file count per device, pending pushes, pending pulls.
 5. If `--source` is given, show changes for that source only. Otherwise group changes by source.
 
-### `msync sources`
+### `mm sources`
 
 1. Read `[[sync.sources]]` from config.toml.
 2. For each source, display: name, type, path, and whether the path exists.
@@ -417,28 +417,28 @@ If the local file has been edited independently of the remote version (local has
 
 Pull re-reads local hash and mtime at apply time so the decision reflects the actual state when writing, race-safe against editors running during a long pull.
 
-**Interactive resolution.** `msync pull --resolve-interactive` replaces the default keep-both for conflicts with a per-file prompt (unified diff + pick: canonical / force conflict to canonical / keep both / abort). `--no-prompt` is the explicit script-mode counterpart and is mutually exclusive with `--resolve-interactive`.
+**Interactive resolution.** `mm pull --resolve-interactive` replaces the default keep-both for conflicts with a per-file prompt (unified diff + pick: canonical / force conflict to canonical / keep both / abort). `--no-prompt` is the explicit script-mode counterpart and is mutually exclusive with `--resolve-interactive`.
 
 **Post-hoc resolution commands:**
 
-- `msync conflicts` — list every `.sync-conflict-*` file across synced sources with age and canonical sibling.
-- `msync resolve [PATH]` — walk conflicts (or a single path) interactively. Shows a unified diff, prompts for a winner, acquires the msync lockfile so autopull can't race the rename/unlink. Deletions and renames propagate via the existing additive-sync tombstone machinery.
-- `msync gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days).
+- `mm conflicts` — list every `.sync-conflict-*` file across synced sources with age and canonical sibling.
+- `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows a unified diff, prompts for a winner, acquires the mm lockfile so autopull can't race the rename/unlink. Deletions and renames propagate via the existing additive-sync tombstone machinery.
+- `mm gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days).
 
-**Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.memsync-log.md`, and `msync diff` annotations all reflect the split so cross-machine work is visible.
+**Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.mind-meld-log.md`, and `mm diff` annotations all reflect the split so cross-machine work is visible.
 
 ---
 
 ## Concurrency Safety
 
-**Lockfile:** `~/.config/memsync/memsync.lock` — PID-based.
+**Lockfile:** `~/.config/mind-meld/mind-meld.lock` — PID-based.
 
 - Acquired at the start of `push`, `pull`, and `gc`.
 - Contains the PID of the holding process.
 - Stale locks (PID no longer running) are cleaned up automatically.
-- If lock is held by a running process, fail with: "Another msync operation is running (PID {pid}). Wait for it to finish or remove ~/.config/memsync/memsync.lock."
+- If lock is held by a running process, fail with: "Another mm operation is running (PID {pid}). Wait for it to finish or remove ~/.config/mind-meld/mind-meld.lock."
 
-**GC safety:** `msync gc` checks ALL device manifests before deleting any blob. A blob is only deleted if it is referenced by zero manifests. This is safe even if another device pushes concurrently — the new blob won't be in any manifest yet, but it also won't be in the delete set (it was just uploaded, not listed during the gc scan).
+**GC safety:** `mm gc` checks ALL device manifests before deleting any blob. A blob is only deleted if it is referenced by zero manifests. This is safe even if another device pushes concurrently — the new blob won't be in any manifest yet, but it also won't be in the delete set (it was just uploaded, not listed during the gc scan).
 
 ---
 
@@ -476,16 +476,16 @@ EXCLUDED = [
     "__pycache__/",
     "*.pyc",
     "*.tmp",             # atomic-write leftovers from disk-full failures — don't propagate
-    ".memsync-log.md",   # generated by pull, not synced back
+    ".mind-meld-log.md",   # generated by pull, not synced back
 ]
 ```
 
-### Sync Log (`.memsync-log.md`)
+### Sync Log (`.mind-meld-log.md`)
 
-After `msync pull`, a `.memsync-log.md` file is written to each affected project directory. This gives Claude Code awareness of what changed from other machines:
+After `mm pull`, a `.mind-meld-log.md` file is written to each affected project directory. This gives Claude Code awareness of what changed from other machines:
 
 ```markdown
-# MemSync Activity
+# Mind Meld Activity
 
 Last pull: 2026-03-18 10:00 UTC from **MacBook Pro** (`abc123`)
 
@@ -502,7 +502,7 @@ This file is excluded from sync (listed in EXCLUDED) so it doesn't propagate bac
 
 ## Multi-Source Sync
 
-MemSync supports syncing multiple data sources beyond `~/.claude`. Each source is defined in `[[sync.sources]]` in config.toml.
+Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source is defined in `[[sync.sources]]` in config.toml.
 
 ### Source Types
 
@@ -531,7 +531,7 @@ Old configs using `sync.claude_dir` are auto-converted to a single claude source
 
 ### Auto-Detection
 
-`msync init` auto-detects known sources (e.g. if `~/.gstack` exists, it is added as a gstack source with default include patterns). Users can add or modify sources in config.toml.
+`mm init` auto-detects known sources (e.g. if `~/.gstack` exists, it is added as a gstack source with default include patterns). Users can add or modify sources in config.toml.
 
 ### Source-Scoped Operations
 
@@ -545,15 +545,15 @@ Old configs using `sync.claude_dir` are auto-converted to a single claude source
 
 ## Error Handling
 
-### Error Hierarchy (`memsync/errors.py`)
+### Error Hierarchy (`mind-meld/errors.py`)
 
 ```python
-class MemSyncError(Exception): ...           # base — all msync errors
-class CryptoError(MemSyncError): ...         # encryption/decryption failures
-class StorageError(MemSyncError): ...        # backend I/O failures
-class ConfigError(MemSyncError): ...         # config parsing/validation
-class ManifestError(MemSyncError): ...       # manifest corruption/incompatibility
-class LockError(MemSyncError): ...           # concurrent operation conflict
+class Mind MeldError(Exception): ...           # base — all mm errors
+class CryptoError(Mind MeldError): ...         # encryption/decryption failures
+class StorageError(Mind MeldError): ...        # backend I/O failures
+class ConfigError(Mind MeldError): ...         # config parsing/validation
+class ManifestError(Mind MeldError): ...       # manifest corruption/incompatibility
+class LockError(Mind MeldError): ...           # concurrent operation conflict
 ```
 
 ### Error Message Format
@@ -583,7 +583,7 @@ rich >= 13.0          # pretty terminal output
 ## Project Structure
 
 ```
-memsync/
+mind-meld/
 ├── pyproject.toml
 ├── LICENSE                    # MIT
 ├── README.md                  # quickstart, install, usage examples
@@ -593,17 +593,17 @@ memsync/
 ├── SPEC.md                    # this file
 ├── docs/
 │   ├── designs/
-│   │   └── memsync-v1.md     # design decisions from spec review
+│   │   └── mind-meld-v1.md     # design decisions from spec review
 │   ├── quickstart.md          # zero-to-syncing walkthrough
 │   ├── encryption.md          # how encryption works, threat model, key management
 │   └── troubleshooting.md     # common issues and fixes
 ├── src/
-│   └── memsync/
+│   └── mind-meld/
 │       ├── __init__.py
 │       ├── cli.py             # typer app, command definitions
 │       ├── manifest.py        # directory walking, hashing, diffing
 │       ├── crypto.py          # AES-256-GCM encrypt/decrypt, Argon2id key derivation, gzip
-│       ├── errors.py          # MemSyncError hierarchy
+│       ├── errors.py          # Mind MeldError hierarchy
 │       ├── storage/
 │       │   ├── __init__.py    # exports get_backend(config) → LocalBackend
 │       │   └── local.py       # Local folder implementation (pathlib) + iCloud conflict resolution
@@ -636,13 +636,13 @@ memsync/
 7. `cli.py` — wire up `init`, `push`, `status` (with lockfile)
 8. Tests for each module
 
-**Exit criteria:** can `msync init` + `msync push` from one machine, see encrypted blobs in iCloud Drive.
+**Exit criteria:** can `mm init` + `mm push` from one machine, see encrypted blobs in iCloud Drive.
 
 ### Phase 2 — Pull + Multi-Device + GC
 
 9. `cli.py` — add `pull` (with atomic writes + deletion propagation), `devices`, `diff`
 10. `cli.py` — add `gc` command (with manifest cross-check safety)
-11. `synclog.py` — write `.memsync-log.md` per project after pull
+11. `synclog.py` — write `.mind-meld-log.md` per project after pull
 12. Integration test: push from device A, pull from device B, round-trip verified
 
 **Exit criteria:** round-trip sync between two Macs works. GC safely cleans orphaned blobs.
@@ -663,9 +663,9 @@ memsync/
 19. `rich` progress bars for upload/download
 20. `--verbose` flag on all commands
 21. Bandwidth reporting (bytes transferred, time elapsed)
-22. `msync nuke --device DEVICE` to remove a device's data
+22. `mm nuke --device DEVICE` to remove a device's data
 23. CHANGELOG.md with initial release notes
-24. PyPI package publishing via `pyproject.toml` (installable via `pip install memsync`)
+24. PyPI package publishing via `pyproject.toml` (installable via `pip install mind-meld`)
 25. GitHub repo setup: LICENSE, issue templates, CI (pytest + linting via GitHub Actions)
 
 ---
@@ -676,6 +676,6 @@ memsync/
 2. **Manifest conflict:** two devices push simultaneously. Last-write-wins is fine for v1 since manifests are per-device, but note this.
 3. ~~**Large files:**~~ **RESOLVED.** 50MB default cap, configurable via `sync.max_file_size`.
 4. ~~**Compression:**~~ **RESOLVED.** Gzip before encrypt. Session JSONs compress 5-10x.
-5. ~~**PyPI name:**~~ **RESOLVED.** `memsync`.
-6. ~~**CLI command name:**~~ **RESOLVED.** `msync`.
+5. ~~**PyPI name:**~~ **RESOLVED.** `mind-meld`.
+6. ~~**CLI command name:**~~ **RESOLVED.** `mm`.
 7. **GitHub org:** personal repo or create a dedicated org for discoverability?
