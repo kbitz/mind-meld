@@ -48,11 +48,35 @@ from mind_meld.manifest import (
 )
 from mind_meld.merge import merge_file, should_merge
 from mind_meld.storage import get_backend
+from mind_meld import sidecar
 from mind_meld.synclog import write_sync_log
 
 ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
+FetchStatus = Literal["ok", "missing", "corrupt"]
 CONFLICT_INFIX = ".sync-conflict-"
 CONFLICT_AGE_DAYS = 30
+
+
+@dataclass
+class ManifestFetch:
+    """Tri-state result of fetching a device's remote manifest.
+
+    "ok"      — at least one copy decrypted successfully; `manifest` is set.
+    "missing" — no manifest exists at the expected key (first push, or device
+                never pushed). `manifest` is None. Callers should treat this
+                as "no prior state" — e.g. push with empty tombstones.
+    "corrupt" — manifest(s) exist but every copy failed to decrypt/parse.
+                `manifest` is None. Callers that read state (status, diff,
+                pull) should surface this to the user; callers that WRITE
+                state (push, gc) must NOT silently treat this as missing
+                because doing so drops tombstones / orphans blobs.
+    """
+    status: FetchStatus
+    manifest: dict | None = None
+
+    @property
+    def is_ok(self) -> bool:
+        return self.status == "ok"
 
 
 @dataclass
@@ -100,6 +124,25 @@ app = typer.Typer(
 console = Console()
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"mm {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
+) -> None:
+    pass
+
+
 def _error(msg: str) -> None:
     console.print(f"[red]Error:[/red] {msg}")
     raise typer.Exit(1)
@@ -123,50 +166,175 @@ def _get_passphrase_or_exit() -> str:
 
 def _fetch_remote_manifest(
     backend, device_id: str, passphrase: str, memory_kb: int
-) -> dict | None:
+) -> ManifestFetch:
     """Fetch and decrypt remote manifest, merging any conflict copies.
 
     Read-only: does NOT delete conflict copies. Use _cleanup_conflict_copies()
     after the manifest has been successfully used in a mutating operation.
 
-    If the canonical manifest and/or conflict copies exist, decrypt all that
-    succeed and merge additively (union of files, latest manifest timestamp wins
-    for duplicate paths). Returns None only if ALL copies fail.
+    Tri-state return — see ManifestFetch. Callers MUST distinguish MISSING
+    (no manifest at all — valid first-push state) from CORRUPT (manifest(s)
+    exist but unreadable — needs recovery path). Conflating the two drops
+    tombstones on every first push.
     """
     manifest_key = f"manifests/{device_id}/manifest.json.enc"
     manifests: list[dict] = []
 
-    # Try canonical manifest
-    if backend.exists(manifest_key):
+    canonical_exists = backend.exists(manifest_key)
+    conflict_copies = backend.find_conflict_copies(manifest_key)
+    had_any_source = canonical_exists or bool(conflict_copies)
+
+    # Try canonical manifest. Storage-layer errors (OSError, StorageError, any
+    # MindMeldError) are treated as "this copy unreadable" — try conflict
+    # copies next. Without this, a TOCTOU race between backend.exists() and
+    # backend.get(), or a permission flip mid-scan, would escape as an
+    # exception and crash recovery.
+    if canonical_exists:
         try:
             enc_data = backend.get(manifest_key)
             plain = decrypt(enc_data, passphrase, memory_kb)
             manifests.append(deserialize_manifest(plain))
-        except (CryptoError, ManifestError):
-            pass  # canonical corrupt — try conflict copies
+        except (CryptoError, ManifestError, OSError, MindMeldError):
+            pass  # canonical unreadable — try conflict copies
 
     # Try conflict copies (iCloud/Dropbox)
-    for conflict_path in backend.find_conflict_copies(manifest_key):
+    for conflict_path in conflict_copies:
         try:
             enc_data = conflict_path.read_bytes()
             plain = decrypt(enc_data, passphrase, memory_kb)
             manifests.append(deserialize_manifest(plain))
-        except (CryptoError, ManifestError, OSError):
+        except (CryptoError, ManifestError, OSError, MindMeldError):
             pass  # skip unreadable conflict copies
 
     if not manifests:
-        if backend.exists(manifest_key):
-            console.print(
-                "[yellow]Warning:[/yellow] manifest corrupt or unreadable. "
-                "Will perform full re-push."
-            )
-        return None
+        if had_any_source:
+            return ManifestFetch(status="corrupt")
+        return ManifestFetch(status="missing")
 
     if len(manifests) == 1:
-        return manifests[0]
+        return ManifestFetch(status="ok", manifest=manifests[0])
 
-    # Merge multiple manifests additively: union of files, latest timestamp wins
-    return _merge_manifests(manifests)
+    # Merge multiple manifests additively.
+    #
+    # INVARIANT (load-bearing): files are merged as a UNION across conflict
+    # copies (see _merge_manifests). Tombstones are newest-timestamp-wins.
+    # The asymmetry is correct because the manifest walker is LOSSY — it
+    # drops files on permission errors, size-exceeded, and read failures
+    # (manifest.py:walk_claude_source, walk_generic_source). A file missing
+    # from the newer conflict copy is NOT causal evidence of deletion; only
+    # an explicit tombstone is. Swapping files to newest-wins would silently
+    # resurrect-via-erase any file that happened to be locked/unreadable
+    # during one scan but not another. The correctness guarantee is:
+    # union-for-files + newest-wins-for-tombstones + is_tombstoned() gate
+    # at every downstream consumer. See SPEC.md "Merge invariants".
+    return ManifestFetch(status="ok", manifest=_merge_manifests(manifests))
+
+
+def _recover_prior_manifest(
+    fetch: ManifestFetch,
+    backend,
+    device_id: str,
+    passphrase: str,
+    memory_kb: int,
+    *,
+    quiet: bool = False,
+) -> dict | None:
+    """Resolve a prior-state manifest for tombstone generation.
+
+    Called by _push_core after fetching THIS device's remote manifest.
+    Returns the manifest to pass to `generate_tombstones` as `remote_manifest`.
+
+    Recovery chain:
+      1. status == "ok"       → return the fetched manifest (normal path).
+      2. status == "missing"  → return None (first push; no prior state is
+                                 the correct answer, tombstones will be empty).
+      3. status == "corrupt"  → try sidecar (fresh-deletion-preserving);
+                                 then peer fallback (propagated tombstones
+                                 only); then _error with recovery steps.
+
+    Raises typer.Exit(1) via _error() when corrupt + no sidecar + no peers.
+    """
+    if fetch.is_ok:
+        return fetch.manifest
+    if fetch.status == "missing":
+        return None
+
+    # status == "corrupt" — recovery chain
+    sidecar_manifest = sidecar.read(device_id)
+    if sidecar_manifest is not None:
+        if not quiet:
+            console.print(
+                "[yellow]Warning:[/yellow] remote manifest corrupt; "
+                "recovered prior state from local sidecar "
+                f"({sidecar.sidecar_path()})."
+            )
+        return sidecar_manifest
+
+    # No sidecar — try peer fallback
+    peer_tombstones = _collect_peer_tombstones(
+        backend, device_id, passphrase, memory_kb
+    )
+    if peer_tombstones:
+        if not quiet:
+            console.print(
+                f"[yellow]Warning:[/yellow] remote manifest corrupt and no "
+                f"local sidecar; recovered {len(peer_tombstones)} tombstone(s) "
+                f"from peer device(s). Recent local deletions may be lost — "
+                f"verify no files have resurrected."
+            )
+        # Synthetic prior manifest: no prior file list (so fresh-deletion
+        # detection is disabled — we have no basis for it), but the
+        # carry-forward loop in generate_tombstones() preserves these.
+        return {"sources": {}, "tombstones": peer_tombstones}
+
+    # Nothing to recover from — refuse rather than silently drop tombstones.
+    _error(
+        "remote manifest corrupt, no local sidecar, and no peer manifests "
+        "available for recovery. Run 'mm status' to inspect storage state, "
+        "then 'mm init' if storage is unrecoverable. Pushing now would "
+        "erase this device's deletion records across your fleet."
+    )
+    return None  # unreachable; _error raises
+
+
+def _collect_peer_tombstones(
+    backend, my_device_id: str, passphrase: str, memory_kb: int
+) -> dict[str, dict[str, str]]:
+    """Aggregate tombstones from all peer devices. Returns {} if none.
+
+    `list_devices` can fail if the storage layer raises (permissions, I/O) or
+    if the devices-directory read itself errors. We swallow those specifically
+    so recovery can fall through to "refuse" rather than crashing mid-recovery.
+    Unexpected exceptions propagate — we don't want to mask bugs here.
+    """
+    try:
+        devices = list_devices(backend)
+    except (OSError, MindMeldError):
+        return {}
+
+    peer_manifests: dict[str, dict | None] = {}
+    for d in devices:
+        did = d["device_id"]
+        if did == my_device_id:
+            continue
+        # Per-peer try/except — one flaky peer must not abort recovery.
+        try:
+            peer_fetch = _fetch_remote_manifest(
+                backend, did, passphrase, memory_kb
+            )
+            peer_manifests[did] = (
+                peer_fetch.manifest if peer_fetch.is_ok else None
+            )
+        except (OSError, MindMeldError):
+            peer_manifests[did] = None
+
+    if not peer_manifests:
+        return {}
+
+    return collect_tombstones(
+        list(peer_manifests.keys()),
+        lambda did: peer_manifests.get(did),
+    )
 
 
 def _merge_manifests(manifests: list[dict]) -> dict:
@@ -175,6 +343,13 @@ def _merge_manifests(manifests: list[dict]) -> dict:
     For each source, takes the union of all files. When the same relative path
     appears in multiple manifests, the entry from the manifest with the latest
     timestamp wins.
+
+    Policy asymmetry (load-bearing): files are UNIONED across copies, tombstones
+    are newest-timestamp-wins. The walker is lossy (permission errors, size
+    caps, read failures drop files from a scan), so absence from a newer copy
+    is NOT causal evidence of deletion — only tombstones are. Pairing this with
+    the `is_tombstoned()` gate at every consumer of a merged manifest is what
+    keeps deletions correct. See SPEC.md "Merge invariants".
     """
     # Sort by timestamp so later manifests overwrite earlier ones
     sorted_manifests = sorted(
@@ -751,14 +926,22 @@ def push(
     try:
         result = _push_core(config, passphrase, memory_kb, verbose, dry_run)
 
-        # Auto GC on interactive push only (not autopush)
+        # Auto GC on interactive push only (not autopush).
+        # Catch only unexpected failures — let typer.Exit (from _do_gc's
+        # refuse-on-corrupt path) propagate so the user sees the actionable
+        # message. Silent-swallow would hide the safety refusal.
         if result and (result.total_new or result.total_modified or result.total_deleted):
             try:
                 gc_count = _do_gc(config, passphrase, memory_kb, dry_run=False, verbose=False)
                 if gc_count:
                     console.print(f"  GC: deleted {gc_count} orphaned blobs.")
-            except Exception:
-                pass  # GC failure must not break push
+            except typer.Exit:
+                raise
+            except (OSError, MindMeldError) as e:
+                console.print(
+                    f"  [yellow]Warning:[/yellow] GC skipped ({e}). "
+                    f"Run 'mm gc' manually for details."
+                )
     finally:
         release_lock()
 
@@ -811,8 +994,11 @@ def _push_core(
         if skipped:
             console.print(f"  [yellow]{len(skipped)} files skipped[/yellow]")
 
-    # Fetch remote manifest
-    remote_manifest = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    # Fetch remote manifest (tri-state: ok / missing / corrupt).
+    fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    remote_manifest = _recover_prior_manifest(
+        fetch, backend, device_id, passphrase, memory_kb, quiet=quiet
+    )
     if remote_manifest:
         normalize_manifest(remote_manifest)
 
@@ -826,7 +1012,12 @@ def _push_core(
     total_modified = 0
     total_deleted = 0
 
-    remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
+    # Only the REAL remote manifest drives the diff (avoid re-uploading every
+    # file just because we're recovering from corruption via the sidecar).
+    real_remote = fetch.manifest if fetch.is_ok else None
+    if real_remote is not None:
+        normalize_manifest(real_remote)
+    remote_sources = real_remote.get("sources", {}) if real_remote else {}
 
     for src_name, src_data in local_manifest["sources"].items():
         remote_src = remote_sources.get(src_name, {"files": {}})
@@ -865,18 +1056,41 @@ def _push_core(
             console.print(f"  Completed in {elapsed:.1f}s")
         return None
 
-    if not (total_new or total_modified or total_deleted):
+    # If the remote manifest was corrupt and we recovered via sidecar/peers,
+    # we MUST rewrite the remote manifest to heal the corruption - even when
+    # local file diffs are zero. Otherwise the corrupt manifest stays in
+    # place and recovered tombstones never propagate.
+    recovering_from_corrupt = fetch.status == "corrupt"
+
+    if not (total_new or total_modified or total_deleted) and not recovering_from_corrupt:
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
         return None
 
     # Upload manifest (includes tombstones)
     if not quiet:
-        console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
+        if recovering_from_corrupt and not (total_new or total_modified or total_deleted):
+            console.print(
+                "\n[bold]Rewriting manifest to heal remote corruption...[/bold]"
+            )
+        else:
+            console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     manifest_data = serialize_manifest(local_manifest)
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     manifest_key = f"manifests/{device_id}/manifest.json.enc"
     backend.put(manifest_key, enc_manifest)
+
+    # Write sidecar (best-effort: failure warns but does not abort push;
+    # the remote manifest succeeded, so peers still have a path to recovery).
+    try:
+        sidecar.write(local_manifest)
+    except OSError as e:
+        if not quiet:
+            console.print(
+                f"[yellow]Warning:[/yellow] failed to write recovery sidecar "
+                f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
+                f"corruption recovery will fall back to peer devices."
+            )
 
     # Update device last_seen
     update_last_seen(backend, device_id)
@@ -1004,13 +1218,22 @@ def _pull_core(
             console.print("[yellow]No other devices found to pull from.[/yellow]")
         return PullResult(elapsed=time.time() - start)
 
-    # Pre-fetch all device manifests (used for tombstone collection + pull)
+    # Pre-fetch all device manifests (used for tombstone collection + pull).
+    # Missing and corrupt manifests are both mapped to None — pull is read-
+    # only on remote state, so skipping either is safe. Corrupt manifests
+    # are surfaced as a warning so the user can investigate.
     all_devices_list = list_devices(backend)
     manifest_cache: dict[str, dict | None] = {}
     for d in all_devices_list:
-        manifest_cache[d["device_id"]] = _fetch_remote_manifest(
-            backend, d["device_id"], passphrase, memory_kb
-        )
+        did = d["device_id"]
+        peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+        if peer_fetch.status == "corrupt" and not quiet:
+            console.print(
+                f"[yellow]Warning:[/yellow] manifest for device "
+                f"{d.get('device_name', did)} ({did}) is corrupt — skipping "
+                f"pull from this device."
+            )
+        manifest_cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
 
     # Pre-collect all tombstones from ALL device manifests for O(1) lookup
     all_tombstones = collect_tombstones(
@@ -1233,8 +1456,9 @@ def status(
         device_id, device_name, sources_configs, max_file_size
     )
 
-    # Fetch remote manifest
-    remote_manifest = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    # Fetch remote manifest (tri-state — surface missing/corrupt to user).
+    fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    remote_manifest = fetch.manifest if fetch.is_ok else None
     if remote_manifest:
         normalize_manifest(remote_manifest)
 
@@ -1245,6 +1469,15 @@ def status(
 
     console.print(f"\n[bold]Mind Meld Status[/bold]")
     console.print(f"  Device: {device_name} ({device_id})")
+    if fetch.status == "missing":
+        console.print(
+            "  [dim]Remote manifest: not yet pushed from this device.[/dim]"
+        )
+    elif fetch.status == "corrupt":
+        console.print(
+            "  [yellow]Remote manifest: CORRUPT[/yellow] — next 'mm push' "
+            "will attempt recovery from sidecar or peers."
+        )
 
     # Per-source breakdown
     total_local = 0
@@ -1368,7 +1601,19 @@ def diff_cmd(
         device_id, device_name, sources_configs, max_file_size
     )
 
-    remote_manifest = _fetch_remote_manifest(backend, target_id, passphrase, memory_kb)
+    diff_fetch = _fetch_remote_manifest(backend, target_id, passphrase, memory_kb)
+    if diff_fetch.status == "missing":
+        console.print(
+            f"[dim]No remote manifest for "
+            f"{'device ' + target_id if from_device else 'this device'} yet.[/dim]"
+        )
+    elif diff_fetch.status == "corrupt":
+        console.print(
+            f"[yellow]Warning:[/yellow] remote manifest for "
+            f"{'device ' + target_id if from_device else 'this device'} is "
+            f"corrupt — showing diff against empty remote."
+        )
+    remote_manifest = diff_fetch.manifest if diff_fetch.is_ok else None
     if remote_manifest:
         normalize_manifest(remote_manifest)
 
@@ -1463,18 +1708,39 @@ def _do_gc(
     devices = list_devices(backend)
     referenced_hashes: set[str] = set()
 
+    corrupt_devices: list[str] = []
     for device in devices:
         did = device["device_id"]
-        manifest = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
-        if manifest is None:
+        gc_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+        if gc_fetch.status == "missing":
+            continue
+        if gc_fetch.status == "corrupt":
+            # A corrupt manifest may reference blobs we'd otherwise orphan.
+            # Collect the IDs so we can refuse in write mode.
+            corrupt_devices.append(f"{device.get('device_name', did)} ({did})")
             continue
 
+        manifest = gc_fetch.manifest
         normalize_manifest(manifest)
 
         # Iterate sources.*.files to collect hashes
         for src_data in manifest.get("sources", {}).values():
             for info in src_data.get("files", {}).values():
                 referenced_hashes.add(info["sha256"])
+
+    if corrupt_devices:
+        msg = (
+            "cannot GC safely — manifest(s) corrupt on: "
+            f"{', '.join(corrupt_devices)}. Those manifests may reference "
+            "blobs that would be reaped as orphans. Run 'mm push' on each "
+            "affected device to recover the manifest, then retry GC."
+        )
+        # Refuse in BOTH modes. Printing an orphan list in dry-run with
+        # corrupt manifests would mislead: the list is incomplete because
+        # the corrupt manifest's referenced hashes are missing from
+        # referenced_hashes. A user who copies that list into a separate
+        # delete flow would reap live data.
+        _error(msg)
 
     # List all blobs across all devices
     all_blobs = backend.list_keys("data/")

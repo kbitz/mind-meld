@@ -244,20 +244,34 @@ class TestConflictManifestMerge:
         conflict = tmp_path / "storage" / "manifests" / "abc" / "manifest.json 2.enc"
         conflict.write_bytes(b"not valid encrypted data")
 
-        # Should still return the canonical manifest
+        # Should still return the canonical manifest (status == "ok")
         result = _fetch_remote_manifest(backend, "abc", PASSPHRASE, MEMORY_KB)
-        assert result is not None
-        assert "a.md" in result.get("files", {})
+        assert result.is_ok
+        assert "a.md" in result.manifest.get("files", {})
 
-    def test_all_copies_corrupt_returns_none(self, tmp_path):
-        """If all manifest copies are corrupt, returns None."""
+    def test_all_copies_corrupt_returns_corrupt_status(self, tmp_path):
+        """If all manifest copies are corrupt, return status='corrupt'."""
         from mind_meld.cli import _fetch_remote_manifest
 
         backend = LocalBackend(tmp_path / "storage")
         backend.put("manifests/abc/manifest.json.enc", b"corrupt data")
 
         result = _fetch_remote_manifest(backend, "abc", PASSPHRASE, MEMORY_KB)
-        assert result is None
+        assert result.status == "corrupt"
+        assert result.manifest is None
+
+    def test_no_manifest_at_all_returns_missing_status(self, tmp_path):
+        """If no manifest exists (first push / fresh device), return
+        status='missing' — NOT corrupt. Conflating the two would refuse
+        every first push."""
+        from mind_meld.cli import _fetch_remote_manifest
+
+        backend = LocalBackend(tmp_path / "storage")
+        # no put — device has never pushed
+
+        result = _fetch_remote_manifest(backend, "fresh-device", PASSPHRASE, MEMORY_KB)
+        assert result.status == "missing"
+        assert result.manifest is None
 
     def test_cleanup_only_from_mutating_ops(self, tmp_path):
         """_cleanup_conflict_copies deletes conflict copies."""
