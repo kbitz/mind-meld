@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.5.1   | 2026-04-22 | Corrupt-manifest recovery chain (sidecar → peers → refuse) + `mm --version` |
 | 0.5.0   | 2026-04-22 | Rename memsync/msync → mind-meld/mm |
 | 0.4.0   | 2026-04-21 | Conflict-copy preservation + mtime-skip for pull |
 | 0.3.0   | (pre-v0.4) | Additive-only sync model with tombstones and conflict resolution |

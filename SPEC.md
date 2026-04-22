@@ -321,7 +321,7 @@ mm autopush                 # silent push for Claude Code (one-line output, neve
 2. Walk `~/.claude/projects/` recursively.
 3. Skip excluded patterns (see below) and files exceeding `max_file_size`.
 4. SHA-256 hash each file → build local manifest (truth-based snapshot).
-5. Fetch remote manifest for this device from storage (if exists). If corrupt, log warning and treat as empty.
+5. Fetch remote manifest for this device from storage via the tri-state `_fetch_remote_manifest` (`ok` / `missing` / `corrupt`). On `corrupt`, run the recovery chain (local sidecar → peer tombstone fallback → refuse; see Manifest corruption recovery). Never silently treat corrupt as empty.
 6. Diff: find new, modified, and deleted files.
 7. Gzip-compress and encrypt changed files with AES-256-GCM (version byte + salt + nonce + ciphertext).
 8. Write encrypted blobs to `data/{device_id}/{sha256}.enc`.
@@ -567,12 +567,12 @@ Old configs using `sync.claude_dir` are auto-converted to a single claude source
 ### Error Hierarchy (`mind-meld/errors.py`)
 
 ```python
-class Mind MeldError(Exception): ...           # base — all mm errors
-class CryptoError(Mind MeldError): ...         # encryption/decryption failures
-class StorageError(Mind MeldError): ...        # backend I/O failures
-class ConfigError(Mind MeldError): ...         # config parsing/validation
-class ManifestError(Mind MeldError): ...       # manifest corruption/incompatibility
-class LockError(Mind MeldError): ...           # concurrent operation conflict
+class MindMeldError(Exception): ...           # base — all mm errors
+class CryptoError(MindMeldError): ...         # encryption/decryption failures
+class StorageError(MindMeldError): ...        # backend I/O failures
+class ConfigError(MindMeldError): ...         # config parsing/validation
+class ManifestError(MindMeldError): ...       # manifest corruption/incompatibility
+class LockError(MindMeldError): ...           # concurrent operation conflict
 ```
 
 ### Error Message Format
@@ -617,12 +617,13 @@ mind-meld/
 │   ├── encryption.md          # how encryption works, threat model, key management
 │   └── troubleshooting.md     # common issues and fixes
 ├── src/
-│   └── mind-meld/
-│       ├── __init__.py
-│       ├── cli.py             # typer app, command definitions
-│       ├── manifest.py        # directory walking, hashing, diffing
+│   └── mind_meld/
+│       ├── __init__.py        # __version__ via importlib.metadata (fallback "0.0.0+dev")
+│       ├── cli.py             # typer app, command definitions, tri-state manifest fetch + recovery
+│       ├── manifest.py        # directory walking, hashing, diffing, tombstone merge
 │       ├── crypto.py          # AES-256-GCM encrypt/decrypt, Argon2id key derivation, gzip
-│       ├── errors.py          # Mind MeldError hierarchy
+│       ├── errors.py          # MindMeldError hierarchy
+│       ├── sidecar.py         # local last-successful-push snapshot for corrupt-manifest recovery
 │       ├── storage/
 │       │   ├── __init__.py    # exports get_backend(config) → LocalBackend
 │       │   └── local.py       # Local folder implementation (pathlib) + iCloud conflict resolution
@@ -637,6 +638,11 @@ mind-meld/
     ├── test_config.py         # TOML load/save, validation, missing fields
     ├── test_storage_local.py  # uses tmp_path fixture, iCloud + Dropbox conflict resolution
     ├── test_lockfile.py       # acquire/release, stale PID, already held
+    ├── test_merge.py          # JSONL union-merge, MEMORY.md line-merge
+    ├── test_additive_sync.py  # additive-only pull, tombstones, conflict manifest union
+    ├── test_conflict_copy.py  # Syncthing-style conflict-copy preservation on pull
+    ├── test_recovery.py       # corrupt-manifest recovery chain (sidecar → peers → refuse)
+    ├── test_version.py        # importlib.metadata version wiring, --version flag
     └── test_integration.py    # full push→pull round-trip, deletion propagation, GC safety
 ```
 
