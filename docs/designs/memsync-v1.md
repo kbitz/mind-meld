@@ -80,7 +80,7 @@ Install: `pipx install memsync`
 - Bytes 17-28: random nonce (unique per encryption)
 - Bytes 29+: AES-256-GCM ciphertext of gzip-compressed plaintext, with 16-byte auth tag appended
 
-## Deferred (TODOS.md)
+## Deferred (docs/TODOS.md)
 
 1. **Selective sync** — `sync.include` / `sync.exclude` in config.toml to filter which projects are synced. Deferred because syncing everything is acceptable for v1.
 
