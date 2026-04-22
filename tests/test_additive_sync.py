@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from memsync.crypto import decrypt, encrypt
-from memsync.manifest import (
+from mind_meld.crypto import decrypt, encrypt
+from mind_meld.manifest import (
     TOMBSTONE_TTL_DAYS,
     build_manifest,
     collect_tombstones,
@@ -27,7 +27,7 @@ from memsync.manifest import (
     normalize_manifest,
     serialize_manifest,
 )
-from memsync.storage.local import LocalBackend
+from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "test-passphrase"
 MEMORY_KB = 1024
@@ -231,7 +231,7 @@ class TestConflictManifestMerge:
 
     def test_conflict_copy_read_error_skipped(self, tmp_path):
         """Conflict copies that can't be read are skipped gracefully."""
-        from memsync.cli import _fetch_remote_manifest
+        from mind_meld.cli import _fetch_remote_manifest
 
         backend = LocalBackend(tmp_path / "storage")
 
@@ -251,7 +251,7 @@ class TestConflictManifestMerge:
 
     def test_all_copies_corrupt_returns_none(self, tmp_path):
         """If all manifest copies are corrupt, returns None."""
-        from memsync.cli import _fetch_remote_manifest
+        from mind_meld.cli import _fetch_remote_manifest
 
         backend = LocalBackend(tmp_path / "storage")
         backend.put("manifests/abc/manifest.json.enc", b"corrupt data")
@@ -261,7 +261,7 @@ class TestConflictManifestMerge:
 
     def test_cleanup_only_from_mutating_ops(self, tmp_path):
         """_cleanup_conflict_copies deletes conflict copies."""
-        from memsync.cli import _cleanup_conflict_copies
+        from mind_meld.cli import _cleanup_conflict_copies
 
         backend = LocalBackend(tmp_path / "storage")
         backend.put("manifests/abc/manifest.json.enc", b"data")
@@ -309,9 +309,9 @@ class TestAdditivePull:
 class TestAutoGC:
     def test_gc_returns_count(self, tmp_path):
         """_do_gc should return the number of orphaned blobs deleted."""
-        from memsync.cli import _do_gc
-        from memsync.config import save_config
-        from memsync.devices import register_device
+        from mind_meld.cli import _do_gc
+        from mind_meld.config import save_config
+        from mind_meld.devices import register_device
 
         storage = LocalBackend(tmp_path / "storage")
         config = {

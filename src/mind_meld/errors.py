@@ -1,29 +1,29 @@
-"""MemSync error hierarchy.
+"""Mind Meld error hierarchy.
 
 All user-facing errors follow the format:
     [operation]: [what failed] — [why]. [what to do]
 """
 
 
-class MemSyncError(Exception):
-    """Base exception for all MemSync errors."""
+class MindMeldError(Exception):
+    """Base exception for all Mind Meld errors."""
 
 
-class CryptoError(MemSyncError):
+class CryptoError(MindMeldError):
     """Encryption or decryption failure."""
 
 
-class StorageError(MemSyncError):
+class StorageError(MindMeldError):
     """Storage backend I/O failure."""
 
 
-class ConfigError(MemSyncError):
+class ConfigError(MindMeldError):
     """Configuration parsing or validation failure."""
 
 
-class ManifestError(MemSyncError):
+class ManifestError(MindMeldError):
     """Manifest corruption or incompatibility."""
 
 
-class LockError(MemSyncError):
+class LockError(MindMeldError):
     """Concurrent operation conflict."""

@@ -1,4 +1,4 @@
-"""Encryption and key derivation for MemSync.
+"""Encryption and key derivation for Mind Meld.
 
 Blob format (v1):
     [version:1][salt:16][nonce:12][gzip_compressed_ciphertext + GCM_auth_tag]
@@ -9,7 +9,7 @@ Blob format (v1):
     - Bytes 29+:  AES-256-GCM ciphertext of gzip-compressed plaintext, with 16-byte auth tag
 
 Key derivation: Argon2id(passphrase, salt) → 256-bit key
-Passphrase retrieval: keyring → MEMSYNC_PASSPHRASE env var → interactive prompt
+Passphrase retrieval: keyring → MINDMELD_PASSPHRASE env var → interactive prompt
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import os
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from memsync.errors import CryptoError
+from mind_meld.errors import CryptoError
 
 FORMAT_VERSION = 0x01
 SALT_LEN = 16
@@ -30,9 +30,9 @@ KEY_LEN = 32  # 256 bits
 ARGON2_TIME_COST = 3
 ARGON2_PARALLELISM = 1
 
-KEYRING_SERVICE = "memsync"
+KEYRING_SERVICE = "mind-meld"
 KEYRING_USERNAME = "passphrase"
-ENV_VAR = "MEMSYNC_PASSPHRASE"
+ENV_VAR = "MINDMELD_PASSPHRASE"
 
 
 def derive_key(
@@ -82,7 +82,7 @@ def decrypt(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
     if version != FORMAT_VERSION:
         raise CryptoError(
             f"decrypt: unsupported format version 0x{version:02x}. "
-            f"Expected 0x{FORMAT_VERSION:02x}. Update msync?"
+            f"Expected 0x{FORMAT_VERSION:02x}. Update mm?"
         )
 
     salt = blob[1 : 1 + SALT_LEN]
@@ -129,7 +129,7 @@ def get_passphrase() -> str:
     try:
         import getpass
 
-        passphrase = getpass.getpass("MemSync passphrase: ")
+        passphrase = getpass.getpass("Mind Meld passphrase: ")
         if not passphrase:
             raise CryptoError("init: passphrase cannot be empty.")
         return passphrase

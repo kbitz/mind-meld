@@ -1,4 +1,4 @@
-"""MemSync CLI — built with Typer.
+"""Mind Meld CLI — built with Typer.
 
 Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
           sources, conflicts, resolve.
@@ -19,18 +19,18 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from memsync import __version__
-from memsync.config import CONFIG_PATH, DEFAULT_STORAGE_PATH, load_config, save_config, get_sources
-from memsync.crypto import (
+from mind_meld import __version__
+from mind_meld.config import CONFIG_PATH, DEFAULT_STORAGE_PATH, load_config, save_config, get_sources
+from mind_meld.crypto import (
     decrypt,
     encrypt,
     get_passphrase,
     store_passphrase_in_keyring,
 )
-from memsync.devices import list_devices, register_device, update_last_seen
-from memsync.errors import CryptoError, LockError, ManifestError, MemSyncError
-from memsync.lockfile import acquire_lock, release_lock
-from memsync.manifest import (
+from mind_meld.devices import list_devices, register_device, update_last_seen
+from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError
+from mind_meld.lockfile import acquire_lock, release_lock
+from mind_meld.manifest import (
     DiffResult,
     TOMBSTONE_TTL_DAYS,
     build_manifest_v2,
@@ -46,9 +46,9 @@ from memsync.manifest import (
     hash_file,
     is_tombstoned,
 )
-from memsync.merge import merge_file, should_merge
-from memsync.storage import get_backend
-from memsync.synclog import write_sync_log
+from mind_meld.merge import merge_file, should_merge
+from mind_meld.storage import get_backend
+from mind_meld.synclog import write_sync_log
 
 ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
 CONFLICT_INFIX = ".sync-conflict-"
@@ -93,8 +93,8 @@ class PushResult:
     elapsed: float = 0.0
 
 app = typer.Typer(
-    name="msync",
-    help="MemSync — sync Claude Code sessions and other sources across machines.",
+    name="mm",
+    help="Mind Meld — sync Claude Code sessions and other sources across machines.",
     add_completion=False,
 )
 console = Console()
@@ -108,7 +108,7 @@ def _error(msg: str) -> None:
 def _get_config() -> dict:
     try:
         return load_config()
-    except MemSyncError as e:
+    except MindMeldError as e:
         _error(str(e))
         raise  # unreachable, but keeps type checker happy
 
@@ -591,7 +591,7 @@ def _download_and_apply(
         blob_key = f"data/{source_device_id}/{info['sha256']}.enc"
         try:
             enc_data = backend.get(blob_key)
-        except MemSyncError:
+        except MindMeldError:
             if verbose:
                 console.print(f"  [yellow]blob missing: {blob_key}[/yellow]")
             outcomes["failed"].append(rel_path)
@@ -643,7 +643,7 @@ def _delete_files(
 
 @app.command()
 def init() -> None:
-    """Initialize MemSync: generate device ID, configure iCloud storage, set passphrase."""
+    """Initialize Mind Meld: generate device ID, configure iCloud storage, set passphrase."""
     if CONFIG_PATH.exists():
         overwrite = typer.confirm(
             f"Config already exists at {CONFIG_PATH}. Overwrite?"
@@ -651,7 +651,7 @@ def init() -> None:
         if not overwrite:
             raise typer.Exit()
 
-    console.print(f"[bold]MemSync v{__version__} \u2014 init[/bold]\n")
+    console.print(f"[bold]Mind Meld v{__version__} \u2014 init[/bold]\n")
 
     # Device
     device_id = uuid.uuid4().hex[:8]
@@ -686,7 +686,7 @@ def init() -> None:
     else:
         console.print(
             "  [yellow]No keyring available.[/yellow] "
-            "Set MEMSYNC_PASSPHRASE environment variable instead."
+            "Set MINDMELD_PASSPHRASE environment variable instead."
         )
 
     # Save config
@@ -727,7 +727,7 @@ def init() -> None:
     register_device(backend, device_id, device_name)
     console.print(f"  Device registered: {device_name} ({device_id})")
 
-    console.print("\n[green]MemSync initialized. Run 'msync push' to sync.[/green]")
+    console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
 
 
 # ── push ──────────────────────────────────────────────────────────────
@@ -787,7 +787,7 @@ def _push_core(
     sources = get_sources(config)
     if not sources:
         if not quiet:
-            console.print("[yellow]No sync sources found. Run 'msync init' to configure.[/yellow]")
+            console.print("[yellow]No sync sources found. Run 'mm init' to configure.[/yellow]")
         return None
 
     skipped: list[tuple[str, str]] = []
@@ -1142,7 +1142,7 @@ def _pull_core(
                 console.print(line)
 
             # Write sync log only for claude source. Group by outcome so a user
-            # reading .memsync-log.md can tell what was applied vs what needs
+            # reading .mind-meld-log.md can tell what was applied vs what needs
             # manual conflict resolution.
             if src_name == "claude":
                 claude_dir = str(base_path)
@@ -1201,8 +1201,8 @@ def _pull_core(
         console.print(f"  Completed in {elapsed:.1f}s")
         if total_conflicted:
             console.print(
-                "  [yellow]Run [bold]msync conflicts[/bold] to review, "
-                "[bold]msync resolve[/bold] to pick a winner.[/yellow]"
+                "  [yellow]Run [bold]mm conflicts[/bold] to review, "
+                "[bold]mm resolve[/bold] to pick a winner.[/yellow]"
             )
 
     return result
@@ -1243,7 +1243,7 @@ def status(
     # Devices
     devices = list_devices(backend)
 
-    console.print(f"\n[bold]MemSync Status[/bold]")
+    console.print(f"\n[bold]Mind Meld Status[/bold]")
     console.print(f"  Device: {device_name} ({device_id})")
 
     # Per-source breakdown
@@ -1514,7 +1514,7 @@ def sources() -> None:
     """List configured sync sources."""
     config = _get_config()
 
-    from memsync.manifest import walk_source
+    from mind_meld.manifest import walk_source
 
     src_list = get_sources(config)
     max_file_size = config["sync"]["max_file_size"]
@@ -1536,9 +1536,9 @@ def sources() -> None:
 
 
 def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
-    """Return the directories `msync push` would walk for this source.
+    """Return the directories `mm push` would walk for this source.
 
-    Limits conflict discovery to paths msync actually syncs so we don't
+    Limits conflict discovery to paths mm actually syncs so we don't
     list .sync-conflict-* files from unsynced areas (e.g., ~/.claude/sessions
     when the claude source only syncs memory/ and todos/).
 
@@ -1547,7 +1547,7 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     """
     src_type = src_cfg.get("type", "claude")
     if src_type == "claude":
-        from memsync.manifest import SYNCED_SUBDIRS
+        from mind_meld.manifest import SYNCED_SUBDIRS
         projects = base_path / "projects"
         if not projects.exists():
             return []
@@ -1572,7 +1572,7 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
 def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
     """Walk all sync sources looking for .sync-conflict-* files.
 
-    Scoped to the same paths msync push walks — won't surface conflict files
+    Scoped to the same paths mm push walks — won't surface conflict files
     from unsynced areas of the source tree. Returns (source_name,
     conflict_path, canonical_path_if_exists). Canonical is None if the user
     has already deleted it.
@@ -1598,8 +1598,8 @@ def _canonical_for_conflict(conflict_path: Path) -> Path:
 
     Strips the ".sync-conflict-<rest>" infix from the filename, re-assembling
     the original stem and extension. Uses rfind so that files which already
-    had an infix before msync added its own (e.g., a Syncthing conflict file
-    that msync then conflicted again) unwind the most recent layer only.
+    had an infix before mm added its own (e.g., a Syncthing conflict file
+    that mm then conflicted again) unwind the most recent layer only.
     """
     name = conflict_path.name
     idx = name.rfind(CONFLICT_INFIX)
@@ -1640,7 +1640,7 @@ def conflicts() -> None:
         table.add_row(src_name, str(cpath), canonical_display, age_str)
     console.print(table)
     console.print(
-        "\nRun [bold]msync resolve[/bold] to pick a winner interactively, or "
+        "\nRun [bold]mm resolve[/bold] to pick a winner interactively, or "
         "delete files manually with [bold]rm[/bold]."
     )
 
@@ -1661,10 +1661,10 @@ def resolve(
     "Keep conflict" renames conflict → canonical (overwriting canonical).
     "Keep both" leaves both files in place.
 
-    Both deletions and renames propagate on the next `msync push` via the
+    Both deletions and renames propagate on the next `mm push` via the
     existing tombstone / additive-sync machinery.
 
-    Acquires the msync lockfile so an autopull running in parallel can't
+    Acquires the mm lockfile so an autopull running in parallel can't
     race with our rename/unlink operations on the synced files.
     """
     config = _get_config()
@@ -1824,7 +1824,7 @@ def autopull() -> None:
     try:
         passphrase = get_passphrase()
     except Exception:
-        print("msync: no passphrase available \u2014 skipping pull", file=sys.stderr)
+        print("mm: no passphrase available \u2014 skipping pull", file=sys.stderr)
         return
 
     memory_kb = config["crypto"]["argon2_memory_kb"]
@@ -1848,16 +1848,16 @@ def autopull() -> None:
                 parts.append(f"{result.total_conflicted} conflicts")
             src_display = ", ".join(result.device_names)
             total = result.total_applied
-            print(f"msync: pulled {total} files from {src_display} ({', '.join(parts)})")
+            print(f"mm: pulled {total} files from {src_display} ({', '.join(parts)})")
             if result.total_conflicted:
                 print(
-                    f"msync: {result.total_conflicted} conflicts — "
-                    "run 'msync conflicts' to review",
+                    f"mm: {result.total_conflicted} conflicts — "
+                    "run 'mm conflicts' to review",
                     file=sys.stderr,
                 )
 
     except Exception as e:
-        print(f"msync: pull failed \u2014 {e}", file=sys.stderr)
+        print(f"mm: pull failed \u2014 {e}", file=sys.stderr)
     finally:
         release_lock()
 
@@ -1876,7 +1876,7 @@ def autopush() -> None:
     try:
         passphrase = get_passphrase()
     except Exception:
-        print("msync: no passphrase available \u2014 skipping push", file=sys.stderr)
+        print("mm: no passphrase available \u2014 skipping push", file=sys.stderr)
         return
 
     memory_kb = config["crypto"]["argon2_memory_kb"]
@@ -1899,10 +1899,10 @@ def autopush() -> None:
             if result.total_deleted:
                 parts.append(f"{result.total_deleted} deleted")
             total = result.total_new + result.total_modified + result.total_deleted
-            print(f"msync: pushed {total} files ({', '.join(parts)})")
+            print(f"mm: pushed {total} files ({', '.join(parts)})")
 
     except Exception as e:
-        print(f"msync: push failed \u2014 {e}", file=sys.stderr)
+        print(f"mm: push failed \u2014 {e}", file=sys.stderr)
     finally:
         release_lock()
 

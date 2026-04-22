@@ -1,4 +1,4 @@
-"""Local folder storage backend for MemSync.
+"""Local folder storage backend for Mind Meld.
 
 Writes encrypted blobs to a local directory synced by iCloud Drive.
 Includes conflict detection for iCloud and Dropbox-style conflicted copies.
@@ -11,7 +11,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from memsync.errors import StorageError
+from mind_meld.errors import StorageError
 
 # iCloud conflict pattern: "filename 2.ext", "filename 3.ext"
 _ICLOUD_CONFLICT_RE = re.compile(

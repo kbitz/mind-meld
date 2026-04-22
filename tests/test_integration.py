@@ -1,4 +1,4 @@
-"""Integration tests for MemSync — full push/pull round-trips."""
+"""Integration tests for Mind Meld — full push/pull round-trips."""
 
 import json
 import os
@@ -6,11 +6,11 @@ import os
 import pytest
 from typer.testing import CliRunner
 
-from memsync.cli import app
-from memsync.config import save_config
-from memsync.crypto import decrypt, encrypt
-from memsync.devices import list_devices, register_device
-from memsync.manifest import (
+from mind_meld.cli import app
+from mind_meld.config import save_config
+from mind_meld.crypto import decrypt, encrypt
+from mind_meld.devices import list_devices, register_device
+from mind_meld.manifest import (
     build_manifest,
     build_manifest_v2,
     deserialize_manifest,
@@ -18,8 +18,8 @@ from memsync.manifest import (
     normalize_manifest,
     serialize_manifest,
 )
-from memsync.merge import merge_jsonl
-from memsync.storage.local import LocalBackend
+from mind_meld.merge import merge_jsonl
+from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "integration-test-passphrase"
 MEMORY_KB = 1024  # Low for fast tests
@@ -148,7 +148,7 @@ class TestPushPullRoundTrip:
         if projects_dir.exists():
             for path in projects_dir.rglob("*"):
                 if path.is_file():
-                    from memsync.manifest import hash_file
+                    from mind_meld.manifest import hash_file
                     rel = str(path.relative_to(claude_dir_b))
                     b_files[rel] = {"sha256": hash_file(path)}
 
@@ -166,7 +166,7 @@ class TestPushPullRoundTrip:
 class TestSyncLog:
     def test_writes_log_per_project(self, tmp_path):
         """Sync log should be written to each affected project dir."""
-        from memsync.synclog import write_sync_log
+        from mind_meld.synclog import write_sync_log
 
         claude_dir = tmp_path / ".claude"
         project_dir = claude_dir / "projects" / "-Users-kb-myapp"
@@ -182,7 +182,7 @@ class TestSyncLog:
         )
 
         assert len(logs) == 1
-        log_path = project_dir / ".memsync-log.md"
+        log_path = project_dir / ".mind-meld-log.md"
         assert log_path.exists()
         content = log_path.read_text()
         assert "MacBook Pro" in content
@@ -191,7 +191,7 @@ class TestSyncLog:
         assert "memory/feedback.md" in content
 
     def test_no_log_without_changes(self, tmp_path):
-        from memsync.synclog import write_sync_log
+        from mind_meld.synclog import write_sync_log
 
         claude_dir = tmp_path / ".claude"
         (claude_dir / "projects" / "-foo").mkdir(parents=True)
@@ -282,15 +282,15 @@ class TestGCSafety:
 
 class TestAutoCommands:
     def test_autopull_no_config_exits_silently(self, tmp_path, monkeypatch):
-        """autopull should exit silently when msync is not initialized."""
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
+        """autopull should exit silently when mm is not initialized."""
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
         assert result.output == ""
 
     def test_autopush_no_config_exits_silently(self, tmp_path, monkeypatch):
-        """autopush should exit silently when msync is not initialized."""
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
+        """autopush should exit silently when mm is not initialized."""
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
         assert result.output == ""
@@ -327,14 +327,14 @@ class TestAutoCommands:
         register_device(backend, "dev-a", "Mac A")
 
         # Monkeypatch config path and passphrase
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
-        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         # Run autopush
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
-        assert "msync: pushed" in result.output
+        assert "mm: pushed" in result.output
         assert "1 new" in result.output
 
 
@@ -416,13 +416,13 @@ class TestMultiSourceSync:
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
-        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
-        assert "msync: pushed" in result.output
+        assert "mm: pushed" in result.output
 
         # Phase 2: Clear local dirs (simulating Machine B that starts empty)
         import shutil
@@ -436,8 +436,8 @@ class TestMultiSourceSync:
             tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
         )
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
 
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
@@ -482,9 +482,9 @@ class TestMultiSourceSync:
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
-        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
 
@@ -500,8 +500,8 @@ class TestMultiSourceSync:
             tmp_path, storage_dir, claude_dir, "dev-b", "Mac B"
         )
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
 
@@ -543,9 +543,9 @@ class TestMultiSourceSync:
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
-        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
 
@@ -560,8 +560,8 @@ class TestMultiSourceSync:
             tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
         )
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
         result = runner.invoke(app, ["pull", "--source", "gstack"])
         assert result.exit_code == 0
 
@@ -600,9 +600,9 @@ class TestMultiSourceSync:
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_a_path)
-        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
 
@@ -615,8 +615,8 @@ class TestMultiSourceSync:
             tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
         )
 
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
         result = runner.invoke(app, ["pull", "--source", "gstack"])
         assert result.exit_code == 0
 
@@ -650,9 +650,9 @@ class TestMultiSourceSync:
         register_device(backend, "dev-a", "Mac A")
 
         # Push (creates v2 manifest with both sources)
-        monkeypatch.setattr("memsync.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("memsync.cli.CONFIG_PATH", config_path)
-        monkeypatch.setenv("MEMSYNC_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
 

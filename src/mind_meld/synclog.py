@@ -1,6 +1,6 @@
-"""Sync log generation for MemSync.
+"""Sync log generation for Mind Meld.
 
-After pull, writes a .memsync-log.md in each affected project directory
+After pull, writes a .mind-meld-log.md in each affected project directory
 so Claude Code can discover what changed from other machines.
 
 This file is excluded from sync (listed in EXCLUDED patterns).
@@ -22,12 +22,12 @@ def write_sync_log(
     conflicted_files: list[str] | None = None,
     skipped_files: list[str] | None = None,
 ) -> list[Path]:
-    """Write .memsync-log.md to each affected project directory.
+    """Write .mind-meld-log.md to each affected project directory.
 
     Groups changes by project and writes one log file per project. Conflicts
     and skips are surfaced so Claude Code can see them alongside plain
     additions and merges — conflicts in particular are things the user
-    should resolve (msync conflicts / msync resolve).
+    should resolve (mm conflicts / mm resolve).
 
     Returns list of log files written.
     """
@@ -67,9 +67,9 @@ def write_sync_log(
         if not project_dir.exists():
             continue
 
-        log_path = project_dir / ".memsync-log.md"
+        log_path = project_dir / ".mind-meld-log.md"
         lines = [
-            "# MemSync Activity",
+            "# Mind Meld Activity",
             "",
             f"Last pull: {now} from **{device_name}** (`{device_id}`)",
             "",
@@ -92,7 +92,7 @@ def write_sync_log(
             for name in sorted(changes["conflicted"]):
                 lines.append(f"- {name}")
             lines.append("")
-            lines.append("Run `msync conflicts` to review, `msync resolve` to pick a winner.")
+            lines.append("Run `mm conflicts` to review, `mm resolve` to pick a winner.")
             lines.append("")
 
         if changes["skipped"]:

@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "memsync"
-version = "0.3.0"
+name = "mind-meld"
+version = "0.5.0"
 description = "Sync Claude Code sessions and AI developer context across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-authors = [{ name = "MemSync Contributors" }]
+authors = [{ name = "Mind Meld Contributors" }]
 keywords = ["claude", "sync", "cli", "encryption", "icloud"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -35,10 +35,10 @@ dev = [
 ]
 
 [project.scripts]
-msync = "memsync.cli:app"
+mm = "mind_meld.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/memsync"]
+packages = ["src/mind_meld"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

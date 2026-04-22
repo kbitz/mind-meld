@@ -1,10 +1,10 @@
-"""Tests for memsync.crypto — encryption, decryption, versioning, compression."""
+"""Tests for mind_meld.crypto — encryption, decryption, versioning, compression."""
 
 import os
 
 import pytest
 
-from memsync.crypto import (
+from mind_meld.crypto import (
     FORMAT_VERSION,
     NONCE_LEN,
     SALT_LEN,
@@ -13,7 +13,7 @@ from memsync.crypto import (
     encrypt,
     get_passphrase,
 )
-from memsync.errors import CryptoError
+from mind_meld.errors import CryptoError
 
 
 PASSPHRASE = "test-passphrase-123"
@@ -117,7 +117,7 @@ class TestEncryptDecrypt:
 
 class TestGetPassphrase:
     def test_env_var_fallback(self, monkeypatch):
-        monkeypatch.setenv("MEMSYNC_PASSPHRASE", "from-env")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "from-env")
         # Disable keyring by making import fail
         monkeypatch.delattr("keyring.get_password", raising=False)
         result = get_passphrase()

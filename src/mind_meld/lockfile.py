@@ -1,4 +1,4 @@
-"""PID-based lockfile for MemSync concurrency safety.
+"""PID-based lockfile for Mind Meld concurrency safety.
 
 Prevents concurrent push/pull/gc operations on the same device.
 Stale locks (PID no longer running) are cleaned up automatically.
@@ -9,8 +9,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from memsync.config import LOCK_PATH
-from memsync.errors import LockError
+from mind_meld.config import LOCK_PATH
+from mind_meld.errors import LockError
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -51,7 +51,7 @@ def acquire_lock(path: Path | None = None) -> None:
 
     if stored_pid > 0 and _pid_is_running(stored_pid):
         raise LockError(
-            f"Another msync operation is running (PID {stored_pid}). "
+            f"Another mm operation is running (PID {stored_pid}). "
             f"Wait for it to finish or remove {lock_path}"
         )
 
@@ -63,7 +63,7 @@ def acquire_lock(path: Path | None = None) -> None:
         os.close(fd)
     except FileExistsError:
         raise LockError(
-            "Another msync operation just started. "
+            "Another mm operation just started. "
             f"Wait for it to finish or remove {lock_path}"
         )
 

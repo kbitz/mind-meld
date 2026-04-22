@@ -21,45 +21,45 @@ work assumes these are correct. Parallel wins in crypto and storage have no
 file overlap with correctness work, so they go alongside.
 
 **Pre-flight** (shared-infra; serial, one-at-a-time):
-- Align version across `VERSION` (0.4.0), `pyproject.toml` (0.3.0), and `src/memsync/__init__.py` (0.2.0). Pick one source of truth (prefer `importlib.metadata.version("memsync")`) and derive the others. `init` currently prints `__version__` so users see 0.2.0 against a 0.4.0 release.
+- Align version across `VERSION` (0.4.0), `pyproject.toml` (0.3.0), and `src/mind_meld/__init__.py` (0.2.0). Pick one source of truth (prefer `importlib.metadata.version("mind_meld")`) and derive the others. `init` currently prints `__version__` so users see 0.2.0 against a 0.4.0 release.
 
 ### Track 1A: CLI tombstone correctness
 _2 tasks · ~1 day (human) / ~15 min (CC) · high risk · [cli.py, integration tests]_
-_touches: src/memsync/cli.py, tests/test_integration.py, tests/test_additive_sync.py_
+_touches: src/mind_meld/cli.py, tests/test_integration.py, tests/test_additive_sync.py_
 
 Fix the CLI-side tombstone paths that can silently resurrect deleted files.
 
-- **Tombstone loss on empty-remote fallback** — `cli.py:815-821, 868-879`: if `_fetch_remote_manifest` returns None (all manifest copies corrupt), `generate_tombstones(local, None, device_id)` returns `{}` and push writes a manifest with no tombstones. Read tombstones from OTHER devices' manifests before accepting the empty fallback, or persist tombstones in a local sidecar. _src/memsync/cli.py, tests/test_additive_sync.py, ~50 lines._ (S)
-- **`_merge_manifests` union resurrects deletions** — `cli.py:172-213`: current merge takes `dict.update` union across conflict-copy manifests, so a file deleted in the newer manifest but present in an older copy survives. Rewrite to key off the newest-timestamp view of each source's file set; only carry forward older-copy entries not explicitly omitted by newer copies. _src/memsync/cli.py, tests/test_conflict_copy.py, ~150 lines._ (M)
+- **Tombstone loss on empty-remote fallback** — `cli.py:815-821, 868-879`: if `_fetch_remote_manifest` returns None (all manifest copies corrupt), `generate_tombstones(local, None, device_id)` returns `{}` and push writes a manifest with no tombstones. Read tombstones from OTHER devices' manifests before accepting the empty fallback, or persist tombstones in a local sidecar. _src/mind_meld/cli.py, tests/test_additive_sync.py, ~50 lines._ (S)
+- **`_merge_manifests` union resurrects deletions** — `cli.py:172-213`: current merge takes `dict.update` union across conflict-copy manifests, so a file deleted in the newer manifest but present in an older copy survives. Rewrite to key off the newest-timestamp view of each source's file set; only carry forward older-copy entries not explicitly omitted by newer copies. _src/mind_meld/cli.py, tests/test_conflict_copy.py, ~150 lines._ (M)
 
 ### Track 1B: Walker + manifest tombstone fixes
 _2 tasks · ~1 day (human) / ~12 min (CC) · high risk · [manifest.py, manifest tests]_
-_touches: src/memsync/manifest.py, tests/test_manifest.py, tests/test_conflict_copy.py_
+_touches: src/mind_meld/manifest.py, tests/test_manifest.py, tests/test_conflict_copy.py_
 
 Stop conflict-copy files from propagating cross-device and normalize tombstone
 keys so legacy manifests migrate cleanly.
 
-- **Exclude `*.sync-conflict-*` from walker** — `manifest.py:25-41` EXCLUDED does not match conflict files, so the next push uploads them cross-device and other devices receive them as regular source files. Defeats the Syncthing model shipped in v0.4.0. Add the pattern plus a regression test that a conflict file in `memory/` is never walked. _src/memsync/manifest.py, tests/test_manifest.py, ~25 lines._ (S)
-- **Normalize tombstone keys at read time** — `manifest.py:463-569`: carry-forward preserves verbatim tombstone keys while new writes always use `src_name:path`. Pre-v2 bare-path tombstones silently fail to match `is_tombstoned(src, path, …)`. Normalize to `src_name:path` in `normalize_manifest` (or dual-check in `is_tombstoned`); add a regression test for mixed-format manifests. _src/memsync/manifest.py, tests/test_manifest.py, ~150 lines._ (M)
+- **Exclude `*.sync-conflict-*` from walker** — `manifest.py:25-41` EXCLUDED does not match conflict files, so the next push uploads them cross-device and other devices receive them as regular source files. Defeats the Syncthing model shipped in v0.4.0. Add the pattern plus a regression test that a conflict file in `memory/` is never walked. _src/mind_meld/manifest.py, tests/test_manifest.py, ~25 lines._ (S)
+- **Normalize tombstone keys at read time** — `manifest.py:463-569`: carry-forward preserves verbatim tombstone keys while new writes always use `src_name:path`. Pre-v2 bare-path tombstones silently fail to match `is_tombstoned(src, path, …)`. Normalize to `src_name:path` in `normalize_manifest` (or dual-check in `is_tombstoned`); add a regression test for mixed-format manifests. _src/mind_meld/manifest.py, tests/test_manifest.py, ~150 lines._ (M)
 
 ### Track 1C: Argon2 KDF caching
 _1 task · ~0.5 day (human) / ~10 min (CC) · medium risk · [crypto.py]_
-_touches: src/memsync/crypto.py, tests/test_crypto.py
+_touches: src/mind_meld/crypto.py, tests/test_crypto.py
 
 Per-file salts force Argon2id (64MB/3 iters) to re-derive the key once per
 file on push AND once per file on pull. A 1000-file sync burns ~150-300ms per
 derivation; manifest-diff optimization is undermined at scale. Explicit
 "benchmark before 1.0" note in the code.
 
-- **Cache derived keys** — key an LRU by `(passphrase-hash, salt)` so repeated derivations in push/pull/gc reuse the key; alternately, adopt a single salt per push/pull (stored alongside the ciphertext) for a simpler model. Include a benchmark that measures the 1000-file case. _src/memsync/crypto.py, tests/test_crypto.py, ~150 lines._ (M)
+- **Cache derived keys** — key an LRU by `(passphrase-hash, salt)` so repeated derivations in push/pull/gc reuse the key; alternately, adopt a single salt per push/pull (stored alongside the ciphertext) for a simpler model. Include a benchmark that measures the 1000-file case. _src/mind_meld/crypto.py, tests/test_crypto.py, ~150 lines._ (M)
 
 ### Track 1D: Storage layer hardening
 _3 tasks · ~1 day (human) / ~15 min (CC) · medium risk · [storage/local.py, lockfile.py]_
-_touches: src/memsync/storage/local.py, src/memsync/lockfile.py, tests/test_storage_local.py
+_touches: src/mind_meld/storage/local.py, src/mind_meld/lockfile.py, tests/test_storage_local.py
 
-- **`LocalBackend.put` tmp-file cleanup** — `storage/local.py:31-43`: `tempfile.mkstemp(dir=path.parent, suffix=".tmp")` leaves stranded `tmp*.tmp` files on crash, ctrl-C, disk full, etc. Wrap put in try/except that unlinks on failure; add startup sweep of `data/**/tmp*.tmp`. _src/memsync/storage/local.py, tests/test_storage_local.py, ~50 lines._ (S)
-- **Tighten iCloud conflict regex** — `storage/local.py:17-23, 81-108`: `^(.+?)\s+(\d+)(\.[^.]+)$` matches any "name N.ext" sibling without verifying it's iCloud-generated. After matching, verify (decryptable as the expected type, or mtime near canonical) before `delete_conflict_copies` unlinks; add adversarial unit tests for "not a conflict copy" filenames. _src/memsync/storage/local.py, tests/test_storage_local.py, ~50 lines._ (S)
-- **Lockfile PID race** — `lockfile.py:28-68`: two concurrent msync processes can both pass the "stale detected" check before one atomically re-creates the lock. The `O_CREAT|O_EXCL` saves us, but the loser's LockError is misleading. Retry once after a 100ms sleep (or switch to `fcntl.flock`). _src/memsync/lockfile.py, tests/test_lockfile.py, ~40 lines._ (S)
+- **`LocalBackend.put` tmp-file cleanup** — `storage/local.py:31-43`: `tempfile.mkstemp(dir=path.parent, suffix=".tmp")` leaves stranded `tmp*.tmp` files on crash, ctrl-C, disk full, etc. Wrap put in try/except that unlinks on failure; add startup sweep of `data/**/tmp*.tmp`. _src/mind_meld/storage/local.py, tests/test_storage_local.py, ~50 lines._ (S)
+- **Tighten iCloud conflict regex** — `storage/local.py:17-23, 81-108`: `^(.+?)\s+(\d+)(\.[^.]+)$` matches any "name N.ext" sibling without verifying it's iCloud-generated. After matching, verify (decryptable as the expected type, or mtime near canonical) before `delete_conflict_copies` unlinks; add adversarial unit tests for "not a conflict copy" filenames. _src/mind_meld/storage/local.py, tests/test_storage_local.py, ~50 lines._ (S)
+- **Lockfile PID race** — `lockfile.py:28-68`: two concurrent mm processes can both pass the "stale detected" check before one atomically re-creates the lock. The `O_CREAT|O_EXCL` saves us, but the loser's LockError is misleading. Retry once after a 100ms sleep (or switch to `fcntl.flock`). _src/mind_meld/lockfile.py, tests/test_lockfile.py, ~40 lines._ (S)
 
 ---
 
@@ -72,21 +72,21 @@ instead of being swallowed.
 
 ### Track 2A: Silent failures in cli.py
 _5 tasks · ~1 day (human) / ~20 min (CC) · low risk · [cli.py]_
-_touches: src/memsync/cli.py, tests/test_integration.py
+_touches: src/mind_meld/cli.py, tests/test_integration.py
 
-- **Typed catches in autopull/autopush** — `cli.py:1824-1907`: bare `except Exception` hides real bugs behind one-line stderr. Differentiate `MemSyncError` (expected, one-liner) from `Exception` (unexpected, log traceback to `~/.config/memsync/autopull.log` with rotation). Since autopull is what Claude Code runs in the background, hidden data-integrity issues are the worst outcome. _src/memsync/cli.py, ~80 lines._ (M)
-- **Post-push auto-GC warning** — `cli.py:756-761`: `except Exception: pass` masks wrong-passphrase, storage-permission, and future refactor bugs. Catch `MemSyncError` explicitly and emit a `[yellow]Warning:[/yellow]` line like the manifest-corruption warning; let unknown exceptions propagate. _src/memsync/cli.py, ~20 lines._ (S)
-- **Unknown-source warning on pull** — `cli.py:1046-1053`: remote sources not configured locally are silently skipped (verbose-only dim message). Print a warning regardless of verbose and include `skipped_unknown_source` in the pull summary; silent-partition risk when source configuration drifts. _src/memsync/cli.py, ~30 lines._ (S)
-- **Document `--no-prompt` keep-both behavior** — `cli.py:940-941`: script mode silently keep-boths conflicts with no terminal feedback. Document the three resolve modes in the pull docstring; add `--fail-on-conflict` for CI-style usage. _src/memsync/cli.py, ~30 lines._ (S)
-- **Pull updates local `last_seen`** — push updates `last_seen` at `cli.py:882`, pull does not. A read-only device appears stale forever. Update on pull (or document "last_seen means last pushed" in a comment if the existing semantic is intentional). _src/memsync/cli.py, src/memsync/devices.py, ~20 lines._ (S)
+- **Typed catches in autopull/autopush** — `cli.py:1824-1907`: bare `except Exception` hides real bugs behind one-line stderr. Differentiate `Mind MeldError` (expected, one-liner) from `Exception` (unexpected, log traceback to `~/.config/mind_meld/autopull.log` with rotation). Since autopull is what Claude Code runs in the background, hidden data-integrity issues are the worst outcome. _src/mind_meld/cli.py, ~80 lines._ (M)
+- **Post-push auto-GC warning** — `cli.py:756-761`: `except Exception: pass` masks wrong-passphrase, storage-permission, and future refactor bugs. Catch `Mind MeldError` explicitly and emit a `[yellow]Warning:[/yellow]` line like the manifest-corruption warning; let unknown exceptions propagate. _src/mind_meld/cli.py, ~20 lines._ (S)
+- **Unknown-source warning on pull** — `cli.py:1046-1053`: remote sources not configured locally are silently skipped (verbose-only dim message). Print a warning regardless of verbose and include `skipped_unknown_source` in the pull summary; silent-partition risk when source configuration drifts. _src/mind_meld/cli.py, ~30 lines._ (S)
+- **Document `--no-prompt` keep-both behavior** — `cli.py:940-941`: script mode silently keep-boths conflicts with no terminal feedback. Document the three resolve modes in the pull docstring; add `--fail-on-conflict` for CI-style usage. _src/mind_meld/cli.py, ~30 lines._ (S)
+- **Pull updates local `last_seen`** — push updates `last_seen` at `cli.py:882`, pull does not. A read-only device appears stale forever. Update on pull (or document "last_seen means last pushed" in a comment if the existing semantic is intentional). _src/mind_meld/cli.py, src/mind_meld/devices.py, ~20 lines._ (S)
 
 ### Track 2B: Config eager validation + legacy cleanup
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [config.py]_
-_touches: src/memsync/config.py, tests/test_config.py
+_touches: src/mind_meld/config.py, tests/test_config.py
 
-- **Eager source validation** — `config.py:57-72, 103-116`: `_validate_sources` is only called from `get_sources`, not from `_validate`/`load_config`. Move it into `_validate` so TOML errors surface at load time, not mid-sync. _src/memsync/config.py, tests/test_config.py, ~40 lines._ (S)
-- **Delete Python 3.10 tomllib fallback** — `config.py:14-20`: `sys.version_info >= (3, 11)` / `tomli` fallback is unreachable (pyproject requires 3.11+). Replace with unconditional `import tomllib`; drop `import sys`. _src/memsync/config.py, ~10 lines._ (S)
-- **Scope legacy `claude_dir` defaulting** — `config.py:86-100`: `_apply_defaults` still treats `sync.claude_dir` as a first-class field, but `get_sources` only honors it in the legacy fallback branch. Delete the defaulting or document that `claude_dir` is only honored for legacy configs. Also: `.expanduser()` is applied without `.resolve()`, drifting from the canonical `.expanduser().resolve()` used everywhere else — fix both together. _src/memsync/config.py, tests/test_config.py, ~30 lines._ (S)
+- **Eager source validation** — `config.py:57-72, 103-116`: `_validate_sources` is only called from `get_sources`, not from `_validate`/`load_config`. Move it into `_validate` so TOML errors surface at load time, not mid-sync. _src/mind_meld/config.py, tests/test_config.py, ~40 lines._ (S)
+- **Delete Python 3.10 tomllib fallback** — `config.py:14-20`: `sys.version_info >= (3, 11)` / `tomli` fallback is unreachable (pyproject requires 3.11+). Replace with unconditional `import tomllib`; drop `import sys`. _src/mind_meld/config.py, ~10 lines._ (S)
+- **Scope legacy `claude_dir` defaulting** — `config.py:86-100`: `_apply_defaults` still treats `sync.claude_dir` as a first-class field, but `get_sources` only honors it in the legacy fallback branch. Delete the defaulting or document that `claude_dir` is only honored for legacy configs. Also: `.expanduser()` is applied without `.resolve()`, drifting from the canonical `.expanduser().resolve()` used everywhere else — fix both together. _src/mind_meld/config.py, tests/test_config.py, ~30 lines._ (S)
 
 ---
 
@@ -97,22 +97,22 @@ GC) alongside manifest dead-code removal. Parallel-safe across files.
 
 ### Track 3A: cli.py surgical hardening + `_delete_files` removal
 _5 tasks · ~1 day (human) / ~15 min (CC) · medium risk · [cli.py]_
-_touches: src/memsync/cli.py, tests/test_conflict_copy.py, tests/test_storage_local.py
+_touches: src/mind_meld/cli.py, tests/test_conflict_copy.py, tests/test_storage_local.py
 
-- **`resolve --force` atomic rename** — `cli.py:1769-1775`: bare `Path.rename` fails across filesystems and has no tmp-then-rename safety. Use `shutil.move` or read-write-rename via `_atomic_write`; surface rename failure as a non-zero exit code. _src/memsync/cli.py, tests/test_conflict_copy.py, ~40 lines._ (S)
-- **16-char device_id in conflict filenames** — `cli.py:54, 541`: `device_id[:8]` truncation risks collision between two machines in same-second conflict-of-a-conflict scenarios. Widen to 16-char prefix (or full device_id). _src/memsync/cli.py, ~15 lines._ (S)
-- **GC logs malformed blob paths** — `cli.py:1482-1497`: `_do_gc` silently ignores blobs at unexpected depth; orphaned `.tmp` artifacts from crashed pushes accumulate forever. Log (and optionally reap) `data/**` files that don't match the expected `data/{device}/{sha}.enc` pattern; add a test. _src/memsync/cli.py, tests/test_storage_local.py, ~30 lines._ (S)
-- **Remove `_delete_files` dead code** — `cli.py:624-638`: never called after the additive-only refactor (v0.3.0); a future maintainer will re-wire delete-on-pull behavior that the spec forbids. Delete the function. _src/memsync/cli.py, ~15 lines._ (S)
-- **Drop unused `TOMBSTONE_TTL_DAYS` import** — `cli.py:35`: imported but never referenced. _src/memsync/cli.py, ~2 lines._ (S)
+- **`resolve --force` atomic rename** — `cli.py:1769-1775`: bare `Path.rename` fails across filesystems and has no tmp-then-rename safety. Use `shutil.move` or read-write-rename via `_atomic_write`; surface rename failure as a non-zero exit code. _src/mind_meld/cli.py, tests/test_conflict_copy.py, ~40 lines._ (S)
+- **16-char device_id in conflict filenames** — `cli.py:54, 541`: `device_id[:8]` truncation risks collision between two machines in same-second conflict-of-a-conflict scenarios. Widen to 16-char prefix (or full device_id). _src/mind_meld/cli.py, ~15 lines._ (S)
+- **GC logs malformed blob paths** — `cli.py:1482-1497`: `_do_gc` silently ignores blobs at unexpected depth; orphaned `.tmp` artifacts from crashed pushes accumulate forever. Log (and optionally reap) `data/**` files that don't match the expected `data/{device}/{sha}.enc` pattern; add a test. _src/mind_meld/cli.py, tests/test_storage_local.py, ~30 lines._ (S)
+- **Remove `_delete_files` dead code** — `cli.py:624-638`: never called after the additive-only refactor (v0.3.0); a future maintainer will re-wire delete-on-pull behavior that the spec forbids. Delete the function. _src/mind_meld/cli.py, ~15 lines._ (S)
+- **Drop unused `TOMBSTONE_TTL_DAYS` import** — `cli.py:35`: imported but never referenced. _src/mind_meld/cli.py, ~2 lines._ (S)
 
 ### Track 3B: Manifest dead code + v1-holdover cleanup
 _4 tasks · ~1 day (human) / ~15 min (CC) · low risk · [manifest.py, manifest tests]_
-_touches: src/memsync/manifest.py, tests/test_manifest.py, tests/test_additive_sync.py, tests/test_integration.py
+_touches: src/mind_meld/manifest.py, tests/test_manifest.py, tests/test_additive_sync.py, tests/test_integration.py
 
-- **Delete `walk_directory` and `build_manifest`** — `manifest.py:182-209`: backward-compat aliases with no production callers; `test_manifest.py`/`test_integration.py`/`test_additive_sync.py` are the only users. Delete both and migrate the three test files to `walk_claude_source` / `build_manifest_v2`. _src/memsync/manifest.py, tests/test_manifest.py, tests/test_additive_sync.py, tests/test_integration.py, ~60 lines._ (M)
-- **Drop redundant v1 `"files"` key in v2 manifests** — `manifest.py:340-360`, `cli.py:200-202`: `build_manifest_v2` and `_merge_manifests` both write a top-level `"files"` key that no downstream reader consumes; `normalize_manifest`'s v1→v2 promotion is the only real compat shim. (Note: `cli.py:200-202` change also belongs logically here, but touches cli.py — land it as part of Track 3A instead if Group 3 ordering is preserved.) _src/memsync/manifest.py, ~20 lines._ (S)
-- **`DiffResult` → `@dataclass`** — `manifest.py:402-425`: hand-written `__init__`/`__repr__`, inconsistent with `PullResult`/`PushResult`. Convert to `@dataclass`. _src/memsync/manifest.py, ~30 lines._ (S)
-- **`diff_manifests` → `diff_files(local_files, remote_files)`** — `manifest.py:428-459`: every call site wraps per-source data as `{"files": src_data["files"]}`; the single-source signature is a v1 holdover. Rename and take dicts directly; migrate call sites in cli.py (but note: the signature change forces a cli.py touch — coordinate with 3A). _src/memsync/manifest.py, ~50 lines._ (S)
+- **Delete `walk_directory` and `build_manifest`** — `manifest.py:182-209`: backward-compat aliases with no production callers; `test_manifest.py`/`test_integration.py`/`test_additive_sync.py` are the only users. Delete both and migrate the three test files to `walk_claude_source` / `build_manifest_v2`. _src/mind_meld/manifest.py, tests/test_manifest.py, tests/test_additive_sync.py, tests/test_integration.py, ~60 lines._ (M)
+- **Drop redundant v1 `"files"` key in v2 manifests** — `manifest.py:340-360`, `cli.py:200-202`: `build_manifest_v2` and `_merge_manifests` both write a top-level `"files"` key that no downstream reader consumes; `normalize_manifest`'s v1→v2 promotion is the only real compat shim. (Note: `cli.py:200-202` change also belongs logically here, but touches cli.py — land it as part of Track 3A instead if Group 3 ordering is preserved.) _src/mind_meld/manifest.py, ~20 lines._ (S)
+- **`DiffResult` → `@dataclass`** — `manifest.py:402-425`: hand-written `__init__`/`__repr__`, inconsistent with `PullResult`/`PushResult`. Convert to `@dataclass`. _src/mind_meld/manifest.py, ~30 lines._ (S)
+- **`diff_manifests` → `diff_files(local_files, remote_files)`** — `manifest.py:428-459`: every call site wraps per-source data as `{"files": src_data["files"]}`; the single-source signature is a v1 holdover. Rename and take dicts directly; migrate call sites in cli.py (but note: the signature change forces a cli.py touch — coordinate with 3A). _src/mind_meld/manifest.py, ~50 lines._ (S)
 
 > **Intra-Group coupling note:** Tasks "Drop redundant v1 `files` key" and `diff_files` rename both touch cli.py at call sites. Land them after 3A merges, or merge 3A+3B into a single track if your workflow prefers one PR.
 
@@ -124,40 +124,40 @@ Break up overgrown functions and extract duplicated logic. Parallel-safe
 across cli.py and manifest.py + merge.py.
 
 **Pre-flight** (shared-infra; serial, one-at-a-time):
-- Create `src/memsync/constants.py` and move `CONFLICT_INFIX`, `CONFLICT_AGE_DAYS`, `TOMBSTONE_TTL_DAYS`, `FORMAT_VERSION`. Add `_manifest_key(device_id)` / `_blob_key(device_id, sha)` (and a parser) in the storage package. Migrate the 6 string-literal construction sites in cli.py (lines 136, 222, 322, 591, 878, 1486) and the parse site. ~100 LOC across cli.py, manifest.py, storage/local.py, new constants.py.
+- Create `src/mind_meld/constants.py` and move `CONFLICT_INFIX`, `CONFLICT_AGE_DAYS`, `TOMBSTONE_TTL_DAYS`, `FORMAT_VERSION`. Add `_manifest_key(device_id)` / `_blob_key(device_id, sha)` (and a parser) in the storage package. Migrate the 6 string-literal construction sites in cli.py (lines 136, 222, 322, 591, 878, 1486) and the parse site. ~100 LOC across cli.py, manifest.py, storage/local.py, new constants.py.
 
 ### Track 4A: Decompose overgrown cli.py functions
 _2 tasks · ~1.5 days (human) / ~20 min (CC) · medium risk · [cli.py]_
-_touches: src/memsync/cli.py, tests/test_integration.py
+_touches: src/mind_meld/cli.py, tests/test_integration.py
 
-- **Decompose `_pull_core` (247 lines)** — `cli.py:961-1208`: split into `_select_devices`, `_prefetch_manifests`, `_pull_one_source`, `_print_pull_summary` so the top-level reads as five orchestration calls. Also fix the double `list_devices` call (cli.py:994, 1008) while you're in there, and align `_predict_pull_outcome` return vocabulary with `ApplyOutcome` (cli.py:241-270). _src/memsync/cli.py, ~250 lines._ (L)
-- **Decompose `_apply_incoming_file` (114 lines)** — `cli.py:447-561`: extract `_apply_write`, `_apply_merge`, `_apply_conflict` helpers; `_apply_incoming_file` dispatches via outcome classification. _src/memsync/cli.py, ~150 lines._ (M)
+- **Decompose `_pull_core` (247 lines)** — `cli.py:961-1208`: split into `_select_devices`, `_prefetch_manifests`, `_pull_one_source`, `_print_pull_summary` so the top-level reads as five orchestration calls. Also fix the double `list_devices` call (cli.py:994, 1008) while you're in there, and align `_predict_pull_outcome` return vocabulary with `ApplyOutcome` (cli.py:241-270). _src/mind_meld/cli.py, ~250 lines._ (L)
+- **Decompose `_apply_incoming_file` (114 lines)** — `cli.py:447-561`: extract `_apply_write`, `_apply_merge`, `_apply_conflict` helpers; `_apply_incoming_file` dispatches via outcome classification. _src/mind_meld/cli.py, ~150 lines._ (M)
 
 ### Track 4B: Walker + manifest + merge DRY
 _3 tasks · ~0.5 day (human) / ~12 min (CC) · low risk · [manifest.py, merge.py]_
-_touches: src/memsync/manifest.py, src/memsync/merge.py, tests/test_manifest.py, tests/test_merge.py
+_touches: src/mind_meld/manifest.py, src/mind_meld/merge.py, tests/test_manifest.py, tests/test_merge.py
 
-- **Extract `_record_file` helper** — `manifest.py:143-177, 255-285`: 30 lines of per-file "stat → exclude → size-check → hash → record mtime/size/sha" duplicated verbatim between `walk_claude_source` and `walk_generic_source`. _src/memsync/manifest.py, ~50 lines._ (S)
-- **`_parse_tombstone_ts(iso_str)` helper** — `manifest.py:488-497, 553-563`: `generate_tombstones` and `collect_tombstones` both parse `deleted_at` with the same fromisoformat-add-utc-compare dance. _src/memsync/manifest.py, ~30 lines._ (S)
-- **`merge.py` dispatch + join helpers** — `merge.py:16-35, 64, 80`: `should_merge`/`merge_file` duplicate strategy classification; `merge_jsonl`/`merge_lines` share an identical join-lines tail. Introduce `_merge_strategy(rel_path)` dispatch and `_join_lines(lines)` helper. _src/memsync/merge.py, tests/test_merge.py, ~40 lines._ (S)
+- **Extract `_record_file` helper** — `manifest.py:143-177, 255-285`: 30 lines of per-file "stat → exclude → size-check → hash → record mtime/size/sha" duplicated verbatim between `walk_claude_source` and `walk_generic_source`. _src/mind_meld/manifest.py, ~50 lines._ (S)
+- **`_parse_tombstone_ts(iso_str)` helper** — `manifest.py:488-497, 553-563`: `generate_tombstones` and `collect_tombstones` both parse `deleted_at` with the same fromisoformat-add-utc-compare dance. _src/mind_meld/manifest.py, ~30 lines._ (S)
+- **`merge.py` dispatch + join helpers** — `merge.py:16-35, 64, 80`: `should_merge`/`merge_file` duplicate strategy classification; `merge_jsonl`/`merge_lines` share an identical join-lines tail. Introduce `_merge_strategy(rel_path)` dispatch and `_join_lines(lines)` helper. _src/mind_meld/merge.py, tests/test_merge.py, ~40 lines._ (S)
 
 ---
 
 ## Group 5: Init flow + sync_log generalization
 
 Multi-source assumption lag — `init` still hardcodes `~/.claude` and
-`write_sync_log` is claude-specific. Resolving this makes msync genuinely
+`write_sync_log` is claude-specific. Resolving this makes mm genuinely
 multi-source in day-to-day usage.
 
 ### Track 5A: Init decomposition + DEFAULT_SOURCES reuse + sync_log generalization
 _5 tasks · ~1.5 days (human) / ~25 min (CC) · medium risk · [cli.py, config.py, synclog.py]_
-_touches: src/memsync/cli.py, src/memsync/config.py, src/memsync/synclog.py, tests/test_integration.py, tests/test_synclog.py
+_touches: src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/synclog.py, tests/test_integration.py, tests/test_synclog.py
 
-- **Decompose `init` (85 lines)** — `cli.py:645-730`: extract `_prompt_passphrase()`, `_maybe_add_gstack_source(config)`, `_save_and_register(config)` helpers. _src/memsync/cli.py, ~120 lines._ (M)
-- **Reuse `DEFAULT_SOURCES` in init** — `cli.py:663-668, 704-720`: `init()` hardcodes `"~/.claude"`, `52_428_800`, `65_536`, and re-inlines the full gstack source dict already in `config.DEFAULT_SOURCES`. Import and reuse `DEFAULT_CLAUDE_DIR` / `DEFAULT_MAX_FILE_SIZE` / `DEFAULT_ARGON2_MEMORY_KB`, and pick the gstack entry out of `DEFAULT_SOURCES`. _src/memsync/cli.py, src/memsync/config.py, ~40 lines._ (S)
-- **Init refuses to finish without a source path** — `cli.py:696-723`: current flow writes `sync.claude_dir = "~/.claude"` unconditionally; a pure-gstack user ends with `get_sources() == []` and push says "No sync sources found". Prompt for which sources to enable with auto-detect defaults; refuse to finish init if no source path exists on disk. _src/memsync/cli.py, tests/test_integration.py, ~60 lines._ (M)
-- **`write_sync_log` keyed off source type** — `cli.py:1147-1158`: called only when `src_name == "claude"`. A user renaming the claude source in config (spec doesn't forbid it) breaks sync-log entirely. Key off `src_cfg["type"] == "claude"` instead. _src/memsync/cli.py, ~15 lines._ (S)
-- **`synclog.py` param rename `claude_dir` → `base_path`** — `synclog.py:16, 34-36`: naming lags the multi-source rename; `projects/` layout stays claude-specific but is now explicitly scoped. Rename the parameter, document the claude-only semantic, scope the caller. _src/memsync/synclog.py, tests/test_synclog.py, ~30 lines._ (S)
+- **Decompose `init` (85 lines)** — `cli.py:645-730`: extract `_prompt_passphrase()`, `_maybe_add_gstack_source(config)`, `_save_and_register(config)` helpers. _src/mind_meld/cli.py, ~120 lines._ (M)
+- **Reuse `DEFAULT_SOURCES` in init** — `cli.py:663-668, 704-720`: `init()` hardcodes `"~/.claude"`, `52_428_800`, `65_536`, and re-inlines the full gstack source dict already in `config.DEFAULT_SOURCES`. Import and reuse `DEFAULT_CLAUDE_DIR` / `DEFAULT_MAX_FILE_SIZE` / `DEFAULT_ARGON2_MEMORY_KB`, and pick the gstack entry out of `DEFAULT_SOURCES`. _src/mind_meld/cli.py, src/mind_meld/config.py, ~40 lines._ (S)
+- **Init refuses to finish without a source path** — `cli.py:696-723`: current flow writes `sync.claude_dir = "~/.claude"` unconditionally; a pure-gstack user ends with `get_sources() == []` and push says "No sync sources found". Prompt for which sources to enable with auto-detect defaults; refuse to finish init if no source path exists on disk. _src/mind_meld/cli.py, tests/test_integration.py, ~60 lines._ (M)
+- **`write_sync_log` keyed off source type** — `cli.py:1147-1158`: called only when `src_name == "claude"`. A user renaming the claude source in config (spec doesn't forbid it) breaks sync-log entirely. Key off `src_cfg["type"] == "claude"` instead. _src/mind_meld/cli.py, ~15 lines._ (S)
+- **`synclog.py` param rename `claude_dir` → `base_path`** — `synclog.py:16, 34-36`: naming lags the multi-source rename; `projects/` layout stays claude-specific but is now explicitly scoped. Rename the parameter, document the claude-only semantic, scope the caller. _src/mind_meld/synclog.py, tests/test_synclog.py, ~30 lines._ (S)
 
 ---
 
@@ -171,15 +171,15 @@ _touches: tests/test_integration.py, tests/test_conflict_copy.py
 
 - **Migrate `TestPushPullRoundTrip` to CLI invocation** — `tests/test_integration.py:53-163`: bypasses the CLI entirely; uses `build_manifest`/`encrypt`/`storage.put` by hand. Does not exercise `_pull_core` or `_apply_incoming_file`. Replace with `runner.invoke(app, ["push"|"pull"])` like `TestMultiSourceSync`. Once migrated, the `build_manifest` import drops too. Add a CLI-driven end-to-end test covering push→pull→conflict→tombstone propagation together. _tests/test_integration.py, ~100 lines._ (M)
 - **Rename misleading test** — `tests/test_integration.py:103-163`: `test_deletion_propagation` is named after pre-additive behavior but the body asserts the opposite. Rename to `test_deletion_not_propagated_in_additive_model`. _tests/test_integration.py, ~5 lines._ (S)
-- **Hoist lazy imports** — `tests/test_conflict_copy.py` (~11 sites) and `tests/test_integration.py` (~7 sites): in-function imports of `memsync.cli` helpers and `pathlib.Path`/`shutil` redeclared despite module-level blocks. Hoist to the top. _tests/test_conflict_copy.py, tests/test_integration.py, ~30 lines._ (S)
+- **Hoist lazy imports** — `tests/test_conflict_copy.py` (~11 sites) and `tests/test_integration.py` (~7 sites): in-function imports of `mind_meld.cli` helpers and `pathlib.Path`/`shutil` redeclared despite module-level blocks. Hoist to the top. _tests/test_conflict_copy.py, tests/test_integration.py, ~30 lines._ (S)
 
 ### Track 6B: Style nits in cli.py
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [cli.py]_
-_touches: src/memsync/cli.py
+_touches: src/mind_meld/cli.py
 
-- **Type hints on helper `backend` params** — `cli.py:108, 116, 124, 241, 273, 298, 332, 360, 381, 447, 564, 624, 766, 961`: helpers accept untyped `backend`, while `devices.py:13, 30, 43` types it as `LocalBackend`. Add `backend: LocalBackend` hints matching devices.py. _src/memsync/cli.py, ~20 lines._ (S)
-- **Standardize optional syntax** — `cli.py`: 6 `Optional[X]` and 11 `X | None` despite `from __future__ import annotations`. Standardize on `X | None` and drop `Optional` from the typing import. _src/memsync/cli.py, ~15 lines._ (S)
-- **Drop placeholderless f-strings + keyring bare-except narrow** — `cli.py:897, 1246, 1377, 1502, 1864`: literal strings marked `f"..."` with no interpolation. Also narrow `crypto.py:97, 104, 120, 147` keyring bare-except to `keyring.errors.KeyringError` + `ImportError`. _src/memsync/cli.py, src/memsync/crypto.py, ~20 lines._ (S)
+- **Type hints on helper `backend` params** — `cli.py:108, 116, 124, 241, 273, 298, 332, 360, 381, 447, 564, 624, 766, 961`: helpers accept untyped `backend`, while `devices.py:13, 30, 43` types it as `LocalBackend`. Add `backend: LocalBackend` hints matching devices.py. _src/mind_meld/cli.py, ~20 lines._ (S)
+- **Standardize optional syntax** — `cli.py`: 6 `Optional[X]` and 11 `X | None` despite `from __future__ import annotations`. Standardize on `X | None` and drop `Optional` from the typing import. _src/mind_meld/cli.py, ~15 lines._ (S)
+- **Drop placeholderless f-strings + keyring bare-except narrow** — `cli.py:897, 1246, 1377, 1502, 1864`: literal strings marked `f"..."` with no interpolation. Also narrow `crypto.py:97, 104, 120, 147` keyring bare-except to `keyring.errors.KeyringError` + `ImportError`. _src/mind_meld/cli.py, src/mind_meld/crypto.py, ~20 lines._ (S)
 
 ---
 
@@ -191,11 +191,11 @@ until post-cleanup so walker code is stable.
 
 ### Track 7A: `sync.include` / `sync.exclude` config
 _3 tasks · ~1.5 days (human) / ~20 min (CC) · medium risk · [config.py, manifest.py]_
-_touches: src/memsync/config.py, src/memsync/manifest.py, tests/test_config.py, tests/test_manifest.py
+_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, tests/test_config.py, tests/test_manifest.py
 
-- **Schema + validation for include/exclude globs** — add `sync.include` / `sync.exclude` arrays to config.toml schema; validate glob patterns; document precedence (exclude wins over include). _src/memsync/config.py, tests/test_config.py, ~80 lines._ (M)
-- **Walker applies filters** — integrate the filters into `walk_claude_source` / `walk_generic_source` so filtered projects never get hashed. _src/memsync/manifest.py, tests/test_manifest.py, ~60 lines._ (S)
-- **CLI flag surface** — expose as `--include` / `--exclude` runtime overrides on push/pull; document in README. _src/memsync/cli.py, README.md, ~40 lines._ (S)
+- **Schema + validation for include/exclude globs** — add `sync.include` / `sync.exclude` arrays to config.toml schema; validate glob patterns; document precedence (exclude wins over include). _src/mind_meld/config.py, tests/test_config.py, ~80 lines._ (M)
+- **Walker applies filters** — integrate the filters into `walk_claude_source` / `walk_generic_source` so filtered projects never get hashed. _src/mind_meld/manifest.py, tests/test_manifest.py, ~60 lines._ (S)
+- **CLI flag surface** — expose as `--include` / `--exclude` runtime overrides on push/pull; document in README. _src/mind_meld/cli.py, README.md, ~40 lines._ (S)
 
 ---
 
@@ -208,11 +208,11 @@ code paths.
 
 ### Track 8A: Local mtime→hash cache
 _3 tasks · ~1.5 days (human) / ~25 min (CC) · medium risk · [manifest.py, new local state]_
-_touches: src/memsync/manifest.py, src/memsync/cache.py, tests/test_manifest.py
+_touches: src/mind_meld/manifest.py, src/mind_meld/cache.py, tests/test_manifest.py
 
-- **`~/.config/memsync/local-manifest.json` cache** — design + write a per-device local cache: path → (mtime, size, sha). Fallback semantics: if mtime is unreliable (network drives, clock drift), invalidate the cache entry. _src/memsync/cache.py, ~100 lines._ (M)
-- **Walker reads/writes the cache** — on hash, check cache first; on hash-miss or mtime-change, re-hash and update. _src/memsync/manifest.py, tests/test_manifest.py, ~80 lines._ (M)
-- **`msync gc --local-cache`** — GC reaper for stale cache entries (paths that no longer exist on disk). _src/memsync/cli.py, ~30 lines._ (S)
+- **`~/.config/mind_meld/local-manifest.json` cache** — design + write a per-device local cache: path → (mtime, size, sha). Fallback semantics: if mtime is unreliable (network drives, clock drift), invalidate the cache entry. _src/mind_meld/cache.py, ~100 lines._ (M)
+- **Walker reads/writes the cache** — on hash, check cache first; on hash-miss or mtime-change, re-hash and update. _src/mind_meld/manifest.py, tests/test_manifest.py, ~80 lines._ (M)
+- **`mm gc --local-cache`** — GC reaper for stale cache entries (paths that no longer exist on disk). _src/mind_meld/cli.py, ~30 lines._ (S)
 
 ---
 
@@ -225,11 +225,11 @@ per v0.4.0 context note. Parallel to Groups 7-8.
 
 ### Track 9A: Stored last-synced hash
 _3 tasks · ~2 days (human) / ~30 min (CC) · high risk · [cli.py, new state file]_
-_touches: src/memsync/cli.py, src/memsync/sync_state.py, tests/test_conflict_copy.py
+_touches: src/mind_meld/cli.py, src/mind_meld/sync_state.py, tests/test_conflict_copy.py
 
-- **`~/.config/memsync/sync-state.json`** — per-source, per-file last-synced hashes. Schema, persistence, corruption recovery. _src/memsync/sync_state.py, ~100 lines._ (M)
-- **Three-way conflict detection** — on pull, compare local hash, remote hash, and last-synced base. Fast-forward when only one side changed; conflict only when both diverged from base. _src/memsync/cli.py, tests/test_conflict_copy.py, ~150 lines._ (M)
-- **Migration path** — first-run bootstraps the base from current local hashes; document how the upgrade interacts with existing `.sync-conflict-*` files. _src/memsync/cli.py, docs/designs/three-way-merge.md, ~60 lines._ (M)
+- **`~/.config/mind_meld/sync-state.json`** — per-source, per-file last-synced hashes. Schema, persistence, corruption recovery. _src/mind_meld/sync_state.py, ~100 lines._ (M)
+- **Three-way conflict detection** — on pull, compare local hash, remote hash, and last-synced base. Fast-forward when only one side changed; conflict only when both diverged from base. _src/mind_meld/cli.py, tests/test_conflict_copy.py, ~150 lines._ (M)
+- **Migration path** — first-run bootstraps the base from current local hashes; document how the upgrade interacts with existing `.sync-conflict-*` files. _src/mind_meld/cli.py, docs/designs/three-way-merge.md, ~60 lines._ (M)
 
 ---
 
