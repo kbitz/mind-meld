@@ -399,11 +399,30 @@ Additive resolution for the multi-manifest case: when multiple conflict copies c
 
 **Manifest corruption recovery:**
 
-If manifest decryption fails (corrupt data, partial write, wrong format):
+`_fetch_remote_manifest` returns a tri-state result (`ManifestFetch`):
 
-1. Log a warning: "Manifest corrupt or unreadable — will perform full re-push."
-2. Treat as empty manifest (all local files are "new").
-3. Full re-push: upload all blobs and write a fresh manifest.
+- `ok` — at least one copy decrypted; caller uses `.manifest`.
+- `missing` — no manifest at the expected key (first push or fresh device). Callers that read remote state treat this as "empty remote." Push treats this as the correct "no prior state" signal and writes the first manifest.
+- `corrupt` — manifest(s) exist but every copy failed to decrypt/parse. Callers must NOT treat this as "missing"; doing so would drop this device's tombstones and silently un-delete files across the fleet on the next pull.
+
+On `corrupt`, `push` runs the following recovery chain before writing a new manifest:
+
+1. **Local sidecar.** Read `~/.config/mind-meld/last-push.json` (written atomically at the end of every successful push). If present and parseable, use it as the prior-state manifest. This is the only recovery source that preserves **fresh local deletions** — deletions this device made since its last successful push but not yet propagated anywhere.
+2. **Peer fallback.** If no sidecar, iterate peer devices and aggregate their tombstones via `collect_tombstones`. This recovers only deletions that previously propagated. Fresh local deletions since the last good push are lost. A warning surfaces this explicitly.
+3. **Refuse.** If neither source yields prior state, exit nonzero with an actionable message. Silent empty-tombstone push is never acceptable: it would erase the deletion record across the device fleet.
+
+### Merge invariants (load-bearing)
+
+When `_merge_manifests` combines multiple conflict copies of the same device's manifest, the file-merge and tombstone-merge policies are intentionally asymmetric:
+
+- **Files: UNION across all copies** (older entries survive when absent from newer copies).
+- **Tombstones: newest-timestamp-wins** on `deleted_at`.
+
+The asymmetry is correct because the manifest walker is **lossy** — it drops files on permission errors, read failures, and `max_file_size` overruns (see `manifest.walk_claude_source` / `walk_generic_source`). A file missing from the newer conflict copy is **not causal evidence** of deletion; only an explicit tombstone is. Swapping files to newest-wins would silently drop any file that happened to be transiently locked/unreadable during one scan but not another.
+
+**Correctness invariant:** union-for-files + newest-wins-for-tombstones + `is_tombstoned()` gate at every downstream consumer. The tombstone gate is load-bearing. **Every new consumer of a merged manifest MUST check `is_tombstoned(source, rel_path, aggregated_tombstones)` before acting on a file entry.** Adding a consumer that reads `manifest["sources"][x]["files"]` without the gate will silently resurrect deletions.
+
+Current gated consumers: pull-side `_pull_core` (via `collect_tombstones` across all peers, applied at the `to_download` filter step).
 
 ### Source-file conflicts (Syncthing-style conflict-copy preservation)
 

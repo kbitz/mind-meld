@@ -57,6 +57,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 | Command | Description |
 |---------|-------------|
+| `mm --version` | Print the installed version and exit |
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Push with verbose output |
 | `mm pull` | Pull with verbose output |
