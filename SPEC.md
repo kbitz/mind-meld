@@ -322,7 +322,7 @@ Built with `typer`. Installed as `mm` (Mind Meld).
 mm init                     # generate device ID, configure storage, set passphrase
 mm push                     # build manifest, diff against remote, upload changes
 mm pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
-           [--resolve-interactive | --no-prompt]        # conflict handling mode
+           [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
 mm status [--source NAME]   # show local vs remote state, pending changes
 mm devices                  # list registered devices
 mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
@@ -379,7 +379,7 @@ mm autopush                 # silent push for Claude Code (one-line output, neve
 8. Download + decrypt changed blobs. Decompress (gzip).
 9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
 10. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`; `.tmp` siblings are cleaned up on failure).
-11. For conflict-copy decisions, rename the local file to `<stem>.sync-conflict-<ts>-<device>.<ext>` before writing remote to the canonical path. With `--resolve-interactive`, prompt per-file instead.
+11. For conflict-copy decisions, rename the local file to `<stem>.sync-conflict-<ts>-<device>.<ext>` before writing remote to the canonical path. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight all files and exit 2 with the predicted-conflict list if any file would conflict — no writes happen.
 12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
@@ -484,7 +484,10 @@ If the local file has been edited independently of the remote version (local has
 
 Pull re-reads local hash and mtime at apply time so the decision reflects the actual state when writing, race-safe against editors running during a long pull.
 
-**Interactive resolution.** `mm pull --resolve-interactive` replaces the default keep-both for conflicts with a per-file prompt (unified diff + pick: canonical / force conflict to canonical / keep both / abort). `--no-prompt` is the explicit script-mode counterpart and is mutually exclusive with `--resolve-interactive`.
+**Conflict mode.** `mm pull --conflict-mode` takes one of three values:
+- `keep-both` (default): auto-rename local to `.sync-conflict-*`, remote wins canonical.
+- `prompt`: per-file prompt (unified diff + pick: canonical / force conflict to canonical / keep both / abort).
+- `fail`: preflight every file via `_predict_pull_outcome`. If any file would conflict, print the list and exit **3** with **no writes**. For CI use. Best-effort — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
 
 **Post-hoc resolution commands:**
 
