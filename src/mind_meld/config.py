@@ -5,20 +5,12 @@ Reads and writes ~/.config/mind-meld/config.toml.
 
 from __future__ import annotations
 
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
 from mind_meld import fsutil
 from mind_meld.errors import ConfigError
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
 
 CONFIG_DIR = Path.home() / ".config" / "mind-meld"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -68,8 +60,17 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     except Exception as e:
         raise ConfigError(f"init: failed to parse {config_path} — {e}") from e
 
-    _validate(config)
-    _apply_defaults(config)
+    # Normalize any non-ConfigError exceptions from validate/apply_defaults
+    # (e.g. .resolve() RuntimeError on cyclic symlinks) into ConfigError so
+    # autopull/autopush surface them via the typed-error branch instead of
+    # falling through to the silent generic-Exception branch.
+    try:
+        _validate(config)
+        _apply_defaults(config)
+    except ConfigError:
+        raise
+    except Exception as e:
+        raise ConfigError(f"init: failed to load {config_path} — {e}") from e
     return config
 
 
@@ -82,33 +83,52 @@ def _validate(config: dict[str, Any]) -> None:
             if field not in config[section]:
                 raise ConfigError(f"config: missing {section}.{field}.")
 
+    # Eager source validation: surface malformed sync.sources at load time
+    # instead of mid-sync. Runs before _apply_defaults, so we only check
+    # structure — path expansion happens in get_sources.
+    sync = config.get("sync")
+    if isinstance(sync, dict) and "sources" in sync:
+        _validate_sources(sync["sources"])
+
 
 def _apply_defaults(config: dict[str, Any]) -> None:
     """Fill in optional fields with defaults."""
     sync = config.setdefault("sync", {})
-    sync.setdefault("claude_dir", DEFAULT_CLAUDE_DIR)
     sync.setdefault("max_file_size", DEFAULT_MAX_FILE_SIZE)
 
     crypto = config.setdefault("crypto", {})
     crypto.setdefault("argon2_memory_kb", DEFAULT_ARGON2_MEMORY_KB)
 
-    # Expand ~ in paths
+    # Canonicalize paths: expanduser + resolve matches the walker / storage pattern.
+    # claude_dir is only present in legacy configs; guard the expansion accordingly.
     config["storage"]["path"] = str(
-        Path(config["storage"]["path"]).expanduser()
+        Path(config["storage"]["path"]).expanduser().resolve()
     )
-    config["sync"]["claude_dir"] = str(
-        Path(config["sync"]["claude_dir"]).expanduser()
-    )
+    if "claude_dir" in sync:
+        sync["claude_dir"] = str(Path(sync["claude_dir"]).expanduser().resolve())
 
 
-def _validate_sources(sources: list[dict[str, Any]]) -> None:
-    """Check each source has required fields and unique names."""
+def _validate_sources(sources: Any) -> None:
+    """Check sync.sources is a list of dicts with required fields and unique names."""
+    if not isinstance(sources, list):
+        raise ConfigError(
+            f"config: sync.sources must be a list, got {type(sources).__name__}."
+        )
     seen_names: set[str] = set()
     for i, src in enumerate(sources):
+        if not isinstance(src, dict):
+            raise ConfigError(
+                f"config: source #{i} must be a table, got {type(src).__name__}."
+            )
         for field in ("name", "path", "type"):
             if field not in src:
                 raise ConfigError(
                     f"config: source #{i} missing required field '{field}'."
+                )
+            if not isinstance(src[field], str):
+                raise ConfigError(
+                    f"config: source #{i} field '{field}' must be a string, "
+                    f"got {type(src[field]).__name__}."
                 )
         name = src["name"]
         if name in seen_names:
@@ -134,18 +154,22 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     explicit_sources = "sources" in sync
     if explicit_sources:
         sources = [
-            {**src, "path": str(Path(src["path"]).expanduser())}
+            {**src, "path": str(Path(src["path"]).expanduser().resolve())}
             for src in sync["sources"]
         ]
     elif "claude_dir" in sync:
         sources = [
             {
                 "name": "claude",
-                "path": str(Path(sync["claude_dir"]).expanduser()),
+                "path": str(Path(sync["claude_dir"]).expanduser().resolve()),
                 "type": "claude",
             }
         ]
     else:
+        # DEFAULT_SOURCES paths (~/.claude, ~/.gstack) are only expanduser'd
+        # here — the walker / storage re-resolve at use time, so skipping
+        # .resolve() here keeps a cyclic user symlink (e.g. broken ~/.gstack)
+        # from breaking get_sources for every command startup.
         sources = [
             {**src, "path": str(Path(src["path"]).expanduser())}
             for src in DEFAULT_SOURCES
@@ -161,8 +185,14 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
             (s for s in DEFAULT_SOURCES if s["name"] == "gstack"), None
         )
         if default_gstack:
+            # Same rationale as the DEFAULT_SOURCES branch above: walker resolves
+            # at use time, so no need to .resolve() a hardcoded ~/.gstack here
+            # and risk cyclic-symlink failures at every command startup.
             sources.append(
-                {**default_gstack, "path": str(Path(default_gstack["path"]).expanduser())}
+                {
+                    **default_gstack,
+                    "path": str(Path(default_gstack["path"]).expanduser()),
+                }
             )
 
     _validate_sources(sources)

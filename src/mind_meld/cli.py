@@ -37,7 +37,7 @@ from mind_meld.crypto import (
     verify_passphrase,
 )
 from mind_meld.devices import list_devices, register_device, update_last_seen
-from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError, StorageError
+from mind_meld.errors import ConfigError, CryptoError, LockError, ManifestError, MindMeldError, StorageError
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -2401,10 +2401,15 @@ def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
 @app.command()
 def autopull() -> None:
     """Pull changes silently. Designed for Claude Code — no prompts, minimal output."""
+    if not CONFIG_PATH.exists():
+        return  # not initialized — silent exit
     try:
         config = load_config()
+    except ConfigError as e:
+        print(f"mm: pull failed — {e}", file=sys.stderr)
+        return
     except Exception:
-        return  # not initialized — silent exit
+        return  # unexpected load failure — stay silent for Claude Code
 
     try:
         passphrase = get_passphrase()
@@ -2457,10 +2462,15 @@ def autopull() -> None:
 @app.command()
 def autopush() -> None:
     """Push changes silently. Designed for Claude Code — no prompts, minimal output."""
+    if not CONFIG_PATH.exists():
+        return  # not initialized — silent exit
     try:
         config = load_config()
+    except ConfigError as e:
+        print(f"mm: push failed — {e}", file=sys.stderr)
+        return
     except Exception:
-        return  # not initialized — silent exit
+        return  # unexpected load failure — stay silent for Claude Code
 
     try:
         passphrase = get_passphrase()
