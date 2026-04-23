@@ -60,22 +60,62 @@ Two follow-ups captured in `docs/TODOS.md` (both Codex findings from /plan-eng-r
 Review-cycle residue from v0.5.1 (corrupt-manifest recovery) and v0.6.0 (crypto
 v2). Error-message and user-surface cleanups that were blocked on the tri-state
 `ManifestFetch` and `mm-crypto-init` bootstrap landing — both now shipped, so
-these are unblocked. Pre-flight holds three cli.py-only small additions; the
-track handles the meatier signature + stderr-contract work.
+these are unblocked.
+
+LOC estimates below split **prod LOC** from **test LOC**. Tests are required,
+not optional — see the test plan artifact for per-item coverage gaps.
+
+Implementation order (serial, shared cli.py touch):
+1. Pre-flight 1 (`_merge_manifests` tiebreak)
+2. Track 2A.2 (`_error` stderr routing) — unblocks stderr_console for 2A.1's refuse path
+3. Track 2A.3 (`list_devices` warnings + shape validation)
+4. Pre-flight 3 (`mm init` guard)
+5. Pre-flight 2 (`mm diag` subcommand)
+6. Track 2A.1 (`mm recover --abandon-manifest`) — heaviest, depends on stderr_console
 
 **Pre-flight** (shared-infra; serial, one-at-a-time):
-- **`_merge_manifests` timestamp tiebreak determinism** — `cli.py:_merge_manifests` is non-deterministic across devices when two conflict copies carry identical ISO timestamps (same-second double-write). Add a `(timestamp, device_id, content-hash)` composite sort key so merged manifests are reproducible across devices. _src/mind_meld/cli.py, ~15 lines._ (S)
-- **`mm diag` subcommand** — dumps non-secret crypto state (format version bytes seen, `mm-crypto-init` fingerprint, argon2 params, cache state) for post-hoc debugging. After Track 1C a GCM-tag mismatch has three possible causes (wrong passphrase, wrong root_salt, corrupt blob); support triage needs a way to narrow it down without users posting raw blobs. _src/mind_meld/cli.py, ~40 lines._ (S)
-- **`mm init --force` guard** — currently re-running `mm init` on a storage root with existing devices silently re-bootstraps and bricks existing blobs. Require `--i-know-what-im-doing` (or interactive "type BRICK to proceed") before overwriting live crypto state. _src/mind_meld/cli.py, ~30 lines._ (S)
+
+- **`_merge_manifests` timestamp tiebreak determinism** — `cli.py:_merge_manifests` is non-deterministic when two iCloud/Dropbox conflict copies of the SAME device's manifest carry identical ISO-second timestamps (same-second double-write). Change sort key from `m.get("timestamp", "")` to `(timestamp, content_hash)` where `content_hash` = SHA-256 of the serialized canonical JSON of the manifest body. (`device_id` is NOT a useful tiebreaker — every copy is for the same device.) Two Macs pulling simultaneously today can briefly see different tombstone sets until the next clean push.
+  - Prod: _src/mind_meld/cli.py, ~15 lines._
+  - Tests: _tests/test_additive_sync.py, ~30 lines._ REGRESSION: pin determinism under identical timestamps (different content) regardless of input list order. (S)
+
+- **`mm diag` subcommand** — support-triage state dump. Delegates to `fetch_crypto_init()` tri-state rather than re-sampling format bytes. Plain text default; `--json` flag for scripting.
+  - Fields: `fetch_crypto_init()` result (status + root_salt fingerprint + argon2 params), config device_id/name/storage_path, config.crypto.root_salt_fp (drift check), sidecar path/presence/device_id-match (via `sidecar.read()`), storage inventory (manifest-key count, peer data-prefix count, own conflict-copy count), last-autorun breadcrumb contents.
+  - Secrets allowlist (explicit): NEVER include root_salt raw bytes, master_key, keycheck_blob, passphrase, or peer device_ids. DROP `crypto_session` module state (process-local scratch — empty in a standalone diag run).
+  - Prod: _src/mind_meld/cli.py, ~30 lines._
+  - Tests: _tests/test_diag.py (new), ~50 lines._ Cases: each of mm-crypto-init {ok, missing, corrupt} × sidecar {present, absent} × --json {on, off}. Secrets-boundary test asserts no forbidden field appears in either output mode. (S)
+
+- **`mm init` two-tier guard** — the plan's "rebricks existing blobs" framing was too narrow. Two distinct scenarios, two severities, guarded off **storage occupancy** (authoritative) rather than `devices/` presence (untrustworthy — `list_devices` silently drops bad entries today).
+  - Storage-occupancy signals checked in priority order: (1) `fetch_crypto_init()` == ok, (2) any `data/**/*.enc` exists, (3) any `manifests/**/*.enc` exists, (4) `devices/` non-empty (tiebreaker only).
+  - **Orphan case** (any of 1/2/3/4 true, mm-crypto-init ok): `typer.confirm(f"This creates a new device entry, orphaning existing device {old_id} ({old_name}). Old blobs remain readable but won't push/pull from the old device. Proceed?")`.
+  - **BRICK case** (mm-crypto-init missing + any of 2/3 true): refuse by default, require exact typed `BRICK` (case-sensitive match, no `.upper()`). Non-TTY → `typer.Abort`.
+  - Prod: _src/mind_meld/cli.py, ~60 lines._
+  - Tests: _tests/test_integration.py::TestInitFlows, ~60 lines._ Cases: orphan-case warn+confirm, orphan-case abort-on-n, BRICK refuse-by-default, BRICK accepted on exact typed value, BRICK rejected on lowercase, first-device path unchanged, non-TTY abort. (M)
 
 ### Track 2A: Error-surface follow-ups
-_4 tasks · ~0.5 day (human) / ~15 min (CC) · low risk · [cli.py, devices.py]_
-_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, tests/test_integration.py, tests/test_recovery.py_
+_3 tasks · ~1 day (human) / ~25 min (CC) · low risk · [cli.py, devices.py]_
+_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, tests/test_track_1a.py, tests/test_recovery.py, tests/test_recover.py (new)_
 
-- **`_recover_prior_manifest` refuse-message rewrite** — current refuse message says "Run 'mm init' if storage is unrecoverable" but `mm init` doesn't delete the corrupt manifest, it generates a new device_id (which silently zeroes the deletion record fleet-wide). Either rewrite the guidance to say "delete `manifests/<device_id>/manifest.json.enc` from storage", or add a dedicated `mm recover --reset-manifest` subcommand. _src/mind_meld/cli.py, ~20 lines (message) or ~60 lines (subcommand)._ (S-M)
-- **`_error()` stderr routing** — `_error()` writes via `console.print`, which goes to stdout. In `autopush`/`autopull` quiet mode this violates the "silent, one-line output" contract documented for `mm autopull`/`mm autopush` in README.md, so failures currently emit both a rich stdout line AND the outer plain-text stderr line — confusing Claude Code integration. Route `_error` output to stderr. _src/mind_meld/cli.py, ~15 lines._ (S)
-- **`list_devices` corrupt entries warning** — `devices.py:53` silently drops corrupt `devices/*.json` entries; if a peer's `devices.json` is corrupt but its manifest is intact, peer fallback misses that peer and the corruption-recovery chain silently loses a data source. Log a warning per dropped peer, and consider blob directory listing as a secondary peer-discovery path. _src/mind_meld/devices.py, src/mind_meld/cli.py (`_collect_peer_tombstones`), ~40 lines._ (M)
-- **cli.py `Optional[X]` signature audit** — Codex flagged during Track 1A review that `_fetch_remote_manifest`'s `-> X | None` conflated "not-found" vs "error" and was the visible symptom of a wider pattern. Now that the tri-state migration has landed, sweep other `-> X | None` / `-> Optional[X]` signatures in `cli.py` and classify: (a) None is genuinely one meaning, (b) None conflates ≥2 states and callers would benefit from an explicit result type, (c) borderline — document the meaning of None in the docstring. Bound by time, not completeness. _src/mind_meld/cli.py, ~60 lines._ (S-M)
+- **`mm recover --abandon-manifest` subcommand** (renamed from `--reset-manifest` — the operation is irreversible for pending deletions; "reset" implied reversibility). Last-resort escape hatch when `_recover_prior_manifest` hits corrupt + no sidecar + no peers.
+  - Destructive UX: typed `RESET` confirmation (case-sensitive, same ceremony as BRICK). Warning text read verbatim before the prompt: "This abandons this device's manifest. Files you deleted locally since your last successful push will no longer propagate as deletions — peers will see those files come back."
+  - Crash-durable quarantine: move manifest to `<key>.corrupt-<ts>` via **atomic-write + fsync + unlink** (read src → `fsutil.atomic_write_bytes(dst, data, fsync=True)` → `os.unlink(src)`), NOT plain `os.rename`. Matches the durability discipline already used for manifests (storage/local.py:45) and sidecar (sidecar.py:54). Power loss between steps leaves src intact or dst written, never both gone.
+  - Collision handling: if `<key>.corrupt-<ts>` already exists, pick `<key>.corrupt-<ts>-<4-char-suffix>`.
+  - Refuse-when-healthy: if remote manifest fetches ok, exit with actionable message.
+  - SPEC.md note required documenting this as an accepted deletion-history loss (see spec update in this PR).
+  - Prod: _src/mind_meld/cli.py, ~70 lines._
+  - Tests: _tests/test_recover.py (new), ~60 lines (unit) + tests/test_recovery.py, ~40 lines (integration)._ Unit: rename/collision/refuse-when-healthy, crash-mock assertion. **Integration MUST cover the destructive path**: corrupt manifest + no sidecar + no peer tombstones + local deletion performed after last push. Assert: after reset + push, a peer's next pull does NOT tombstone the deleted file (proving deletion history was lost — that's the accepted cost). (L)
+
+- **`_error()` stderr routing** — `_error()` writes via `console.print` to stdout; autopush/autopull quiet mode violates the one-line-stderr contract. Introduce `stderr_console = Console(stderr=True)` at module level; `_error` uses it. Interactive TTY retains `[red]Error:[/red]` formatting via Rich-on-stderr; pipes get clean stdout + one stderr line.
+  - Prod: _src/mind_meld/cli.py, ~20 lines._
+  - Tests: _tests/test_track_1a.py, ~40 lines._ Cases: interactive mm push → stderr sink + stdout empty (capsys); autopush quiet + _recover_prior_manifest corrupt branch → stdout silent + stderr has the refuse message. (S)
+
+- **`list_devices` warnings + shape validation** — `devices.py:53` silently drops both parse failures AND shape-invalid entries. Callers at `cli.py:1462` and `cli.py:1944` index `d["device_id"]` directly, so a JSON-valid but shape-invalid device file (missing `device_id`, non-dict top level) crashes the CLI today. Fix: after `json.loads()`, require `isinstance(raw, dict)` AND `device_id` is non-empty str AND `device_name` is str. Anything else → same warning path as parse failure. Log via `stderr_console` (depends on 2A.2 landing first).
+  - Prod: _src/mind_meld/devices.py + src/mind_meld/cli.py (`_collect_peer_tombstones`), ~20 lines._
+  - Tests: _tests/test_recovery.py, ~30 lines._ Cases: parse failure (existing coverage), shape-invalid dict (missing device_id), non-dict top level, multiple corrupt entries (one warning per, not batched), good entries still returned when mixed in. (S)
+
+_Track 2A.4 (Optional[X] signature audit) DROPPED from this track — the canonical conflation case was already fixed via the ManifestFetch tri-state. Remaining Optional[] in cli.py is 6 typer decorators, cosmetic only; cleanup lives in Group 6B "Standardize optional syntax."_
+
+> **Blob-directory-as-secondary-peer-discovery** (deferred from Track 2A.3's original bundled scope): if `devices/<id>.json` is corrupt but `data/<id>/` exists and `manifests/<id>/*.enc` decrypts, that peer's tombstones are recoverable. Would require promoting blob-presence to load-bearing evidence of a peer — a widening of the recovery trust surface. Parked in TODOS.md with observation bar: "first real support case where corrupt devices.json masks a recoverable manifest."
 
 ---
 
@@ -246,8 +286,8 @@ Group 1: Error discipline
   └── Track 1B ............ ~0.5d .... 3 tasks ... config eager validation
 
 Group 2: Post-v0.5.1 follow-ups
-  Pre-flight ............... ~1 hr (3 cli.py-only additions)
-  └── Track 2A ............ ~0.5d .... 4 tasks ... error-surface follow-ups
+  Pre-flight ............... ~0.5d (3 items: tiebreak + diag + init guard)
+  └── Track 2A ............ ~1d ..... 3 tasks ... error-surface (recover, _error, devices)
 
 Group 3: cli.py hardening + dead code in manifest
   ├── Track 3A ............ ~1 day ... 5 tasks ... cli.py surgical hardening
@@ -275,7 +315,7 @@ Group 9: Three-way merge base (P3)
   └── Track 9A ............ ~2 days .. 3 tasks ... stored last-synced hash
 ```
 
-**Total: 9 groups · 13 tracks · 40 tasks** (+ 4 pre-flight items)
+**Total: 9 groups · 13 tracks · 39 tasks** (+ 4 pre-flight items)
 
 ---
 

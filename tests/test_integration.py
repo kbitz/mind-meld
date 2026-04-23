@@ -1137,3 +1137,162 @@ class TestInitFlow:
         canonical_bytes = (storage / "mm-crypto-init").read_bytes()
         winner_salt_in_canonical = canonical_bytes[5:21]
         assert winner_salt_in_canonical == fetched.root_salt
+
+
+class TestInitTwoTierGuard:
+    """Group 2 Pre-flight 3: storage-occupancy-based re-init guard.
+
+    Two tiers:
+      * ORPHAN — mm-crypto-init ok + any occupancy: typer.confirm warn.
+      * BRICK — mm-crypto-init missing + blobs/manifests: require typed BRICK.
+    """
+
+    def _setup(self, tmp_path, monkeypatch):
+        from pathlib import Path as _P
+        cfg = tmp_path / "config_test.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
+        monkeypatch.setattr(
+            "mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False
+        )
+        return cfg
+
+    def test_orphan_case_warns_and_confirms(self, tmp_path, monkeypatch):
+        """Existing mm-crypto-init + existing blob + we answer 'y' to orphan
+        prompt → init proceeds on the second-device path."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
+        # Seed a blob so occupancy.has_any_blobs is True.
+        backend.put("data/oldpeer/decafbad.enc", b"stub-blob")
+
+        # Inputs: storage path, orphan-confirm y, device name, passphrase, gstack n
+        stdin = f"{storage}\ny\nMac B\npw-shared\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        # existing_device_id is None (no prior config in this test), so the
+        # orphan prompt takes the "alongside existing devices" form.
+        assert "alongside the existing devices" in result.output
+        # Second-device verify completed.
+        assert "Verified passphrase against existing mm-crypto-init" in result.output
+
+    def test_orphan_case_abort_on_n_leaves_state_clean(self, tmp_path, monkeypatch):
+        from mind_meld.storage.local import LocalBackend
+
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
+        backend.put("data/oldpeer/decafbad.enc", b"stub-blob")
+
+        # Answer 'n' to the orphan prompt.
+        stdin = f"{storage}\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0  # typer.Exit() without code is 0
+        # Config not written.
+        assert not cfg.exists()
+
+    def test_brick_case_refuses_without_exact_typed_token(self, tmp_path, monkeypatch):
+        """mm-crypto-init missing + blobs exist + user types wrong token."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        # Seed blobs but NO mm-crypto-init (simulating deletion / iCloud loss).
+        backend.put("data/peer/cafebabe.enc", b"stub-blob")
+
+        # Inputs: storage path, then WRONG token for BRICK.
+        stdin = f"{storage}\nwhatever\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code != 0, result.output
+        assert "DANGER" in (result.stderr or "") + result.output
+        # Config not written.
+        assert not cfg.exists()
+        # mm-crypto-init still not created.
+        assert not backend.exists("mm-crypto-init")
+
+    def test_brick_case_rejects_lowercase_brick(self, tmp_path, monkeypatch):
+        """Case-sensitive match: 'brick' is NOT accepted."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
+
+        stdin = f"{storage}\nbrick\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code != 0
+        assert not cfg.exists()
+        assert not backend.exists("mm-crypto-init")
+
+    def test_brick_case_accepts_exact_BRICK(self, tmp_path, monkeypatch):
+        """Exact typed 'BRICK' proceeds to first-device bootstrap path."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        # Seed a manifest (no mm-crypto-init — our target scenario).
+        backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
+
+        # After BRICK, init continues on the first-device path:
+        # device name, passphrase, confirm passphrase, gstack n.
+        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        # New mm-crypto-init bootstrapped.
+        assert backend.exists("mm-crypto-init")
+
+    def test_first_device_path_not_gated_on_empty_storage(self, tmp_path, monkeypatch):
+        """Empty storage: no guard triggers, first-device path works normally.
+
+        Regression guard: the two-tier logic must not fire on fresh init.
+        """
+        from mind_meld.storage.local import LocalBackend
+
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        # No orphan or BRICK output polluted the happy path.
+        assert "orphaning" not in result.output
+        assert "DANGER" not in (result.stderr or "") + result.output
+
+    def test_devices_only_occupancy_triggers_orphan_not_brick(
+        self, tmp_path, monkeypatch
+    ):
+        """If only devices/ is populated (no blobs, no manifests, no
+        mm-crypto-init), BRICK must NOT fire — no encrypted state is at risk.
+
+        The guard should reach the orphan-case check, and since
+        has_crypto_init is False, fall through to first-device path.
+        """
+        from mind_meld.storage.local import LocalBackend
+
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        # Seed ONLY a devices/ entry (no data/, no manifests/).
+        import json as _json
+        backend.put(
+            "devices/stale.json",
+            _json.dumps({"device_id": "stale", "device_name": "stale-dev"}).encode(),
+        )
+
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        # BRICK did NOT fire (no typed token consumed from stdin).
+        assert result.exit_code == 0, result.output
+        assert "DANGER" not in (result.stderr or "") + result.output

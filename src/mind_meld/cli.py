@@ -6,6 +6,7 @@ Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
 
 from __future__ import annotations
 
+import os
 import secrets
 import sys
 import time
@@ -36,7 +37,7 @@ from mind_meld.crypto import (
     store_passphrase_in_keyring,
     verify_passphrase,
 )
-from mind_meld.devices import list_devices, register_device, update_last_seen
+from mind_meld.devices import _list_devices_impl, register_device, update_last_seen
 from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError, StorageError
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
@@ -138,6 +139,13 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+# Dedicated stderr sink for _error and other failure-path output. Rich
+# formatting is preserved in interactive terminals; pipes (autopush/autopull
+# quiet mode, CI) get a clean stdout and one-line stderr per the contract
+# documented in README.md "Claude Code Integration." Using a single module-
+# level instance rather than constructing ad-hoc keeps color-capability
+# detection and terminal-width behavior consistent across call sites.
+stderr_console = Console(stderr=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -160,8 +168,33 @@ def _main(
 
 
 def _error(msg: str) -> None:
-    console.print(f"[red]Error:[/red] {msg}")
+    # Route to stderr so quiet-mode autopush/autopull don't leak error text
+    # to stdout (violating the one-line-stderr contract). Interactive users
+    # still see the [red]Error:[/red] formatting because terminals render
+    # stderr alongside stdout — the separation only matters when stdout is
+    # being consumed programmatically.
+    stderr_console.print(f"[red]Error:[/red] {msg}")
     raise typer.Exit(1)
+
+
+def _list_devices_warn(backend) -> list[dict]:
+    """list_devices variant that surfaces dropped entries to stderr.
+
+    Loss of a peer's device entry is load-bearing during corrupt-manifest
+    recovery: the peer's tombstones are unreachable without its device_id,
+    so silent drops can mask a recoverable manifest (see TODOS.md
+    "Blob-directory as secondary peer-discovery path"). Emitting a warning
+    per dropped entry at least makes the gap visible to support triage.
+
+    Library callers (and direct tests) should continue to call
+    `devices.list_devices` — that variant is intentionally silent so
+    programmatic consumers don't spam stderr.
+    """
+    def _warn(key: str, reason: str) -> None:
+        stderr_console.print(
+            f"[yellow]Warning:[/yellow] dropped device entry {key} — {reason}"
+        )
+    return _list_devices_impl(backend, on_drop=_warn)
 
 
 def _get_config() -> dict:
@@ -433,7 +466,7 @@ def _collect_peer_tombstones(
     Unexpected exceptions propagate — we don't want to mask bugs here.
     """
     try:
-        devices = list_devices(backend)
+        devices = _list_devices_warn(backend)
     except (OSError, MindMeldError):
         return {}
 
@@ -462,6 +495,20 @@ def _collect_peer_tombstones(
     )
 
 
+def _manifest_content_hash(manifest: dict) -> str:
+    """Stable SHA-256 of a manifest's canonical JSON.
+
+    Used as the deterministic tiebreaker in `_merge_manifests` when two
+    conflict copies carry identical ISO-second timestamps. Canonical JSON
+    means sorted keys + no ASCII escaping, so the hash is stable across
+    any platform that implements the same JSON serializer contract.
+    """
+    import hashlib
+    import json
+    canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _merge_manifests(manifests: list[dict]) -> dict:
     """Merge multiple manifest variants additively.
 
@@ -475,11 +522,32 @@ def _merge_manifests(manifests: list[dict]) -> dict:
     is NOT causal evidence of deletion — only tombstones are. Pairing this with
     the `is_tombstoned()` gate at every consumer of a merged manifest is what
     keeps deletions correct. See SPEC.md "Merge invariants".
+
+    Merge order (N conflict copies for ONE device):
+
+        timestamps differ:          [t1] [t2] [t3]  →  sort by t        →  [t1, t2, t3]
+                                                                                  └─ base (winner)
+
+        timestamps tie (t2a == t2b): [t2a] [t2b]    →  sort by (t, hash) →  determined by
+                                                                            lex-ordering of
+                                                                            content hashes:
+                                                                            stable across devices
+                                                                            regardless of FS
+                                                                            listing order from
+                                                                            find_conflict_copies.
+
+    `device_id` is NOT in the sort key: every input here is a conflict copy
+    of the SAME device's manifest (cli.py:_fetch_remote_manifest keys the
+    fetch by device_id), so device_id is constant across inputs and would
+    be a no-op tiebreaker.
     """
-    # Sort by timestamp so later manifests overwrite earlier ones
+    # Sort by (timestamp, content_hash) so same-second conflict copies produce
+    # a deterministic base across devices. Without the content-hash tiebreak,
+    # Python's stable sort preserves find_conflict_copies insertion order,
+    # which comes from Path.glob (filesystem-dependent, not sorted cross-device).
     sorted_manifests = sorted(
         manifests,
-        key=lambda m: m.get("timestamp", ""),
+        key=lambda m: (m.get("timestamp", ""), _manifest_content_hash(m)),
     )
 
     merged = dict(sorted_manifests[-1])  # start with latest as base
@@ -931,6 +999,126 @@ def _delete_files(
 # ── init ──────────────────────────────────────────────────────────────
 
 
+@dataclass
+class _StorageOccupancy:
+    """Authoritative occupancy signals for the init guard.
+
+    `devices/` entries alone are NOT a trustworthy signal \u2014 list_devices
+    silently drops malformed entries, so an attacker or corruption event
+    could leave `devices/` empty while `data/` and `manifests/` still
+    hold load-bearing encrypted state. The init guard checks the stronger
+    signals (mm-crypto-init + blobs + manifests) first.
+    """
+    has_crypto_init: bool       # fetch_crypto_init().status == "ok"
+    has_corrupt_crypto_init: bool
+    has_any_blobs: bool         # any data/**/*.enc
+    has_any_manifests: bool     # any manifests/**/*.enc
+    has_any_devices: bool       # devices/ non-empty (weakest signal)
+
+
+def _probe_storage_occupancy(backend) -> _StorageOccupancy:
+    """Check which kinds of state a storage root already holds.
+
+    Called by `init` before prompting for a passphrase. Each probe is
+    cheap (list_keys with a prefix) and degrades to False on any error,
+    so a racy backend never prevents init from continuing.
+    """
+    fetch = fetch_crypto_init(backend)
+
+    def _any_enc(prefix: str) -> bool:
+        try:
+            for k in backend.list_keys(prefix):
+                if k.endswith(".enc"):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _has_devices() -> bool:
+        try:
+            for _ in backend.list_keys("devices/"):
+                return True
+        except Exception:
+            return False
+        return False
+
+    return _StorageOccupancy(
+        has_crypto_init=(fetch.status == "ok"),
+        has_corrupt_crypto_init=(fetch.status == "corrupt"),
+        has_any_blobs=_any_enc("data/"),
+        has_any_manifests=_any_enc("manifests/"),
+        has_any_devices=_has_devices(),
+    )
+
+
+def _init_storage_guard(
+    occupancy: _StorageOccupancy,
+    existing_device_id: str | None,
+    existing_device_name: str | None,
+) -> None:
+    """Gate init when storage already holds state. Exits nonzero on refuse.
+
+    Two tiers, priority-ordered by severity:
+
+      * BRICK case \u2014 mm-crypto-init is MISSING but blobs or manifests
+        exist. About to rebootstrap a new root_salt, which makes every
+        existing blob unrecoverable. Refuse by default; require exact
+        typed "BRICK" (case-sensitive) to proceed. Non-TTY aborts via
+        typer.prompt.
+
+      * ORPHAN case \u2014 mm-crypto-init is ok AND any other occupancy
+        signal is true. A new device_id gets minted; old blobs remain
+        readable under the shared root_salt but the old device entry
+        no longer pushes or pulls. Warn + typer.confirm. Non-TTY aborts.
+    """
+    # BRICK first: most severe.
+    if not occupancy.has_crypto_init and (
+        occupancy.has_any_blobs or occupancy.has_any_manifests
+    ):
+        stderr_console.print(
+            "[red]DANGER:[/red] mm-crypto-init is missing from storage, but "
+            "encrypted blobs/manifests still exist. Initializing now generates "
+            "a NEW root_salt \u2014 [bold]every existing blob becomes "
+            "unrecoverable[/bold]. If another device still has a working "
+            "mm-crypto-init in its iCloud cache, wait for sync to reconcile "
+            "and retry init instead."
+        )
+        typed = typer.prompt(
+            'Type "BRICK" (case-sensitive) to confirm and proceed'
+        )
+        if typed != "BRICK":
+            stderr_console.print("[yellow]Aborted.[/yellow] No state changed.")
+            raise typer.Exit(1)
+        return
+
+    # Orphan case: storage has state and we're about to add a device entry.
+    any_storage = (
+        occupancy.has_any_blobs
+        or occupancy.has_any_manifests
+        or occupancy.has_any_devices
+    )
+    if occupancy.has_crypto_init and any_storage:
+        if existing_device_id:
+            msg = (
+                f"This creates a new device entry, orphaning existing device "
+                f"'{existing_device_id}' ({existing_device_name or 'unknown'}). "
+                f"Old blobs remain readable under the shared root_salt but the "
+                f"old device entry will no longer push or pull. Proceed?"
+            )
+        else:
+            msg = (
+                "Storage already holds encrypted state. A new device_id will "
+                "be minted and registered alongside the existing devices. "
+                "Proceed?"
+            )
+        if not typer.confirm(msg, default=False):
+            raise typer.Exit()
+        return
+
+    # Not gated: first-device path on empty storage, or mm-crypto-init
+    # is ok and nothing else exists.
+
+
 @app.command()
 def init() -> None:
     """Initialize Mind Meld: generate device ID, configure iCloud storage, set passphrase.
@@ -946,8 +1134,27 @@ def init() -> None:
         Single-prompt passphrase, derive master_key from the stored root_salt,
         verify keycheck. On success, save config + register + store passphrase.
         On failure, nothing local is written.
+
+    Two-tier re-init guard (Group 2 pre-flight 3):
+        * Orphan case \u2014 mm-crypto-init ok + other occupancy: warn that
+          a new device entry gets created alongside existing devices;
+          require typer.confirm.
+        * BRICK case \u2014 mm-crypto-init missing + blobs/manifests exist:
+          re-bootstrap would generate a new root_salt and brick every
+          existing blob. Refuse by default; require exact typed "BRICK".
     """
+    # Capture existing local-device metadata BEFORE any prompt, so the
+    # orphan-case warning can name the device that's about to be left
+    # behind. Best-effort \u2014 malformed config just loses the name.
+    existing_device_id: str | None = None
+    existing_device_name: str | None = None
     if CONFIG_PATH.exists():
+        try:
+            _prior = load_config()
+            existing_device_id = _prior.get("device", {}).get("id")
+            existing_device_name = _prior.get("device", {}).get("name")
+        except MindMeldError:
+            pass  # prior config unreadable \u2014 best-effort None
         overwrite = typer.confirm(
             f"Config already exists at {CONFIG_PATH}. Overwrite?"
         )
@@ -976,6 +1183,16 @@ def init() -> None:
             "reconcile and retry. Otherwise remove mm-crypto-init manually and "
             "retry init (WARNING: this destroys all existing v2 blobs)."
         )
+
+    # Two-tier guard: storage occupancy is authoritative state, not just
+    # local config. Runs BEFORE any further prompt, so a refused init never
+    # touches the keyring or writes config.
+    occupancy = _probe_storage_occupancy(backend)
+    _init_storage_guard(
+        occupancy,
+        existing_device_id=existing_device_id,
+        existing_device_name=existing_device_name,
+    )
 
     is_first_device = fetch.status == "missing"
 
@@ -1459,7 +1676,7 @@ def _pull_core(
         local_sources_map[src_cfg["name"]] = Path(src_cfg["path"]).expanduser().resolve()
 
     # Find devices to pull from
-    devices = list_devices(backend)
+    devices = _list_devices_warn(backend)
     if from_device:
         devices = [d for d in devices if d["device_id"] == from_device]
         if not devices and not quiet:
@@ -1476,7 +1693,7 @@ def _pull_core(
     # Missing and corrupt manifests are both mapped to None — pull is read-
     # only on remote state, so skipping either is safe. Corrupt manifests
     # are surfaced as a warning so the user can investigate.
-    all_devices_list = list_devices(backend)
+    all_devices_list = _list_devices_warn(backend)
     manifest_cache: dict[str, dict | None] = {}
     for d in all_devices_list:
         did = d["device_id"]
@@ -1844,7 +2061,7 @@ def status(
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
     # Devices
-    devices = list_devices(backend)
+    devices = _list_devices_warn(backend)
 
     console.print(f"\n[bold]Mind Meld Status[/bold]")
     console.print(f"  Device: {device_name} ({device_id})")
@@ -1933,6 +2150,223 @@ def status(
                 console.print(f"    {d['device_name']} ({d['device_id']})")
 
 
+# ── diag ──────────────────────────────────────────────────────────────
+
+
+def _collect_diag_state(backend) -> dict:
+    """Gather non-secret state for support triage.
+
+    Secrets allowlist — NEVER include:
+      * raw root_salt bytes (fingerprint only)
+      * master_key (never computed here)
+      * keycheck_blob contents
+      * passphrase
+      * peer device_ids (only counts)
+
+    Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
+    rather than re-sampling raw blob bytes — the tri-state branches are
+    where corruption meaning lives, so bypassing them would misreport the
+    exact scenario this command exists to diagnose.
+    """
+    import json as _json
+
+    # Local config (best-effort — a broken config is itself diag-worthy).
+    try:
+        cfg = load_config()
+        dev_id = cfg.get("device", {}).get("id")
+        dev_name = cfg.get("device", {}).get("name")
+        storage_path = cfg.get("storage", {}).get("path")
+        local_fp = cfg.get("crypto", {}).get("root_salt_fp")
+        config_state = "ok"
+    except MindMeldError as e:
+        dev_id = dev_name = storage_path = local_fp = None
+        config_state = f"error: {e}"
+
+    # Storage crypto init (delegates tri-state to the source of truth).
+    fetch = fetch_crypto_init(backend)
+    if fetch.status == "ok":
+        crypto_init = {
+            "status": "ok",
+            "root_salt_fp": root_salt_fingerprint(fetch.root_salt),
+            "argon2_memory_kb": fetch.argon2_memory_kb,
+        }
+    else:
+        crypto_init = {"status": fetch.status}
+
+    # Sidecar (scoped by local device_id for device_id-mismatch detection).
+    sidecar_info: dict = {"path": str(sidecar.sidecar_path())}
+    try:
+        sc = sidecar.read(dev_id) if dev_id else None
+        if sc is None and sidecar.sidecar_path().exists():
+            # sidecar exists on disk but read() returned None (device_id mismatch,
+            # shape-invalid, etc.) — useful triage signal.
+            sidecar_info["state"] = "present_but_rejected"
+        elif sc is None:
+            sidecar_info["state"] = "missing"
+        else:
+            sidecar_info["state"] = "ok"
+            sidecar_info["device_id"] = sc.get("device_id")
+            sidecar_info["timestamp"] = sc.get("timestamp")
+    except Exception as e:  # very defensive — diag must not crash
+        sidecar_info["state"] = f"error: {type(e).__name__}"
+
+    # Storage inventory — counts only, no identifiers.
+    def _count(prefix: str, suffix: str = ".enc") -> int:
+        try:
+            return sum(1 for k in backend.list_keys(prefix) if k.endswith(suffix))
+        except Exception:
+            return -1  # signals "could not enumerate"
+
+    # For manifests/ and data/, count per-device sub-prefixes as "peer count."
+    def _count_device_prefixes(prefix: str) -> int:
+        try:
+            prefixes = set()
+            for k in backend.list_keys(prefix):
+                parts = k.split("/")
+                if len(parts) >= 3:
+                    prefixes.add(parts[1])
+            return len(prefixes)
+        except Exception:
+            return -1
+
+    # Own manifest conflict copies via the existing find_conflict_copies
+    # helper, if a local device_id is known.
+    own_conflict_copies = -1
+    if dev_id:
+        try:
+            # Predicate is validator-free because we don't need to decrypt;
+            # count all sibling files that match the conflict-name pattern.
+            own_conflict_copies = len(
+                backend.find_conflict_copies(
+                    f"manifests/{dev_id}/manifest.json.enc", lambda p: True
+                )
+            )
+        except Exception:
+            pass
+
+    storage_inv = {
+        "manifests_total": _count("manifests/"),
+        "manifest_peer_count": _count_device_prefixes("manifests/"),
+        "data_peer_count": _count_device_prefixes("data/"),
+        "devices_total": _count("devices/", suffix=".json"),
+        "own_manifest_conflict_copies": own_conflict_copies,
+    }
+
+    # Last autorun breadcrumb (ops-oriented: when did autopush/autopull
+    # last fire and how did it end).
+    breadcrumb: dict | None = None
+    try:
+        bp = _autorun_breadcrumb_path()
+        if bp.exists():
+            breadcrumb = _json.loads(bp.read_text())
+    except (OSError, ValueError):
+        breadcrumb = {"error": "unreadable"}
+
+    return {
+        "mm_version": __version__,
+        "config": {
+            "state": config_state,
+            "device_id": dev_id,
+            "device_name": dev_name,
+            "storage_path": storage_path,
+            "root_salt_fp": local_fp,  # fingerprint only, never the raw salt
+        },
+        "crypto_init": crypto_init,
+        "root_salt_drift": (
+            "ok" if (local_fp and crypto_init.get("root_salt_fp") == local_fp)
+            else "mismatch" if (local_fp and crypto_init.get("status") == "ok")
+            else "n/a"
+        ),
+        "sidecar": sidecar_info,
+        "storage_inventory": storage_inv,
+        "last_autorun": breadcrumb,
+    }
+
+
+@app.command()
+def diag(
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of plain text."
+    ),
+) -> None:
+    """Dump non-secret crypto + sync state for support triage.
+
+    Never prints raw root_salt, master_key, keycheck, passphrase, or peer
+    device_ids. See SPEC.md "Manifest corruption recovery" for how this
+    maps to the tri-state recovery chain — each field here names one
+    possible cause of a recovery failure.
+    """
+    # Resolve storage path WITHOUT a valid config: diag has to run even
+    # when config is broken (that's literally one of the things users run
+    # it to debug). Fall back to the default storage path.
+    from mind_meld.storage.local import LocalBackend
+    try:
+        cfg = load_config()
+        storage_path = cfg["storage"]["path"]
+    except MindMeldError:
+        storage_path = DEFAULT_STORAGE_PATH
+    full_path = Path(storage_path).expanduser()
+    backend = LocalBackend(str(full_path))
+
+    state = _collect_diag_state(backend)
+
+    if as_json:
+        import json as _json
+        # Emit via typer.echo, NOT console.print: Rich would reflow the JSON
+        # (word-wrap, style markup) and break downstream consumers.
+        typer.echo(_json.dumps(state, indent=2, sort_keys=True, default=str))
+        return
+
+    # Plain text formatting — optimized for support-chat paste.
+    console.print(f"[bold]Mind Meld diag (v{state['mm_version']})[/bold]\n")
+
+    cfg_state = state["config"]
+    console.print("[bold]Config[/bold]")
+    console.print(f"  state:         {cfg_state['state']}")
+    console.print(f"  device_id:     {cfg_state['device_id'] or '(none)'}")
+    console.print(f"  device_name:   {cfg_state['device_name'] or '(none)'}")
+    console.print(f"  storage_path:  {cfg_state['storage_path'] or '(default)'}")
+    console.print(f"  root_salt_fp:  {cfg_state['root_salt_fp'] or '(unset)'}")
+
+    ci = state["crypto_init"]
+    console.print("\n[bold]mm-crypto-init[/bold]")
+    console.print(f"  status:        {ci.get('status')}")
+    if ci.get("status") == "ok":
+        console.print(f"  root_salt_fp:  {ci.get('root_salt_fp')}")
+        console.print(f"  argon2 mem kb: {ci.get('argon2_memory_kb')}")
+    console.print(f"  drift check:   {state['root_salt_drift']}")
+
+    sc = state["sidecar"]
+    console.print("\n[bold]Sidecar (local last-push snapshot)[/bold]")
+    console.print(f"  path:          {sc.get('path')}")
+    console.print(f"  state:         {sc.get('state')}")
+    if sc.get("device_id"):
+        console.print(f"  device_id:     {sc.get('device_id')}")
+    if sc.get("timestamp"):
+        console.print(f"  timestamp:     {sc.get('timestamp')}")
+
+    inv = state["storage_inventory"]
+    console.print("\n[bold]Storage inventory[/bold]")
+    console.print(f"  manifests total:         {inv['manifests_total']}")
+    console.print(f"  manifest peer count:     {inv['manifest_peer_count']}")
+    console.print(f"  data peer count:         {inv['data_peer_count']}")
+    console.print(f"  devices/ entries:        {inv['devices_total']}")
+    console.print(f"  own manifest conflicts:  {inv['own_manifest_conflict_copies']}")
+
+    console.print("\n[bold]Last autorun[/bold]")
+    br = state["last_autorun"]
+    if br is None:
+        console.print("  (no autopull/autopush has run on this device yet)")
+    elif "error" in br:
+        console.print(f"  [yellow]breadcrumb unreadable[/yellow]")
+    else:
+        console.print(f"  verb:       {br.get('verb')}")
+        console.print(f"  outcome:    {br.get('outcome')}")
+        console.print(f"  timestamp:  {br.get('timestamp')}")
+        if br.get("detail"):
+            console.print(f"  detail:     {br.get('detail')}")
+
+
 # ── devices ───────────────────────────────────────────────────────────
 
 
@@ -1941,7 +2375,7 @@ def devices() -> None:
     """List all registered devices."""
     config = _get_config()
     backend = get_backend(config)
-    device_list = list_devices(backend)
+    device_list = _list_devices_warn(backend)
     my_id = config["device"]["id"]
 
     if not device_list:
@@ -2175,7 +2609,7 @@ def _do_gc(
     _sweep_local_tmp_files(backend, my_device_id, dry_run, verbose)
 
     # Collect all referenced hashes from ALL device manifests
-    devices = list_devices(backend)
+    devices = _list_devices_warn(backend)
     referenced_hashes: set[str] = set()
 
     corrupt_devices: list[str] = []
@@ -2380,6 +2814,190 @@ def conflicts() -> None:
     console.print(
         "\nRun [bold]mm resolve[/bold] to pick a winner interactively, or "
         "delete files manually with [bold]rm[/bold]."
+    )
+
+
+# ── recover ───────────────────────────────────────────────────────────
+
+
+def _quarantine_corrupt_manifest(
+    backend,
+    storage_root: Path,
+    device_id: str,
+) -> Path:
+    """Crash-durable move of a corrupt manifest blob to a quarantine sibling.
+
+    Uses read-then-atomic-write-then-unlink (matching the discipline at
+    storage/local.py:45 and sidecar.py:54) rather than plain os.rename.
+    A power loss between steps leaves the source intact or the destination
+    fully written — never both gone.
+
+    Collision handling: if `<key>.corrupt-<ts>` already exists (a second
+    quarantine within the same second), append a 4-char random suffix.
+
+    Returns the quarantine path.
+    """
+    import secrets as _secrets
+    from datetime import datetime, timezone
+
+    manifest_key = f"manifests/{device_id}/manifest.json.enc"
+    src = storage_root / manifest_key
+    if not src.exists():
+        raise FileNotFoundError(str(src))
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    candidates = [
+        src.with_name(src.name + f".corrupt-{ts}"),
+        src.with_name(src.name + f".corrupt-{ts}-{_secrets.token_hex(2)}"),
+    ]
+    dst = next((c for c in candidates if not c.exists()), None)
+    if dst is None:
+        # Both collided — extremely improbable, but pick a guaranteed-unique name.
+        dst = src.with_name(src.name + f".corrupt-{ts}-{_secrets.token_hex(4)}")
+
+    data = src.read_bytes()
+    # atomic_write_bytes with fsync=True ensures dst is durably written
+    # before we unlink src.
+    fsutil.atomic_write_bytes(dst, data, fsync=True)
+    os.unlink(src)
+    # Also fsync the parent directory so the unlink is durable. Best-effort
+    # — the file content is already durable at dst. Worst-case on a crash
+    # mid-fsync: src may reappear on next boot, but dst still has the
+    # quarantined copy.
+    try:
+        fsutil.fsync_dir(src.parent)
+    except (OSError, StorageError):
+        pass
+    return dst
+
+
+@app.command()
+def recover(
+    abandon_manifest: bool = typer.Option(
+        False,
+        "--abandon-manifest",
+        help=(
+            "Quarantine this device's corrupt manifest and allow the next "
+            "push to start fresh. DESTRUCTIVE: files deleted locally since "
+            "the last successful push will lose their deletion records."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the typed-RESET confirmation (for scripted recovery).",
+    ),
+) -> None:
+    """Last-resort escape hatch for corrupt-manifest recovery.
+
+    Use ONLY when `mm push` refuses with "remote manifest corrupt, no
+    local sidecar, and no peer manifests." Running this when the recovery
+    chain has a viable source (sidecar or peers) is wasted destructiveness
+    — push will self-heal through the normal chain.
+
+    See SPEC.md "Manifest corruption recovery" / "Last-resort escape
+    hatch" for the full contract.
+    """
+    if not abandon_manifest:
+        _error(
+            "mm recover requires a recovery mode flag. Today the only mode "
+            "is --abandon-manifest (quarantine a corrupt manifest and allow "
+            "the next push to start fresh)."
+        )
+
+    config = _get_config()
+    passphrase = _get_passphrase_or_exit()
+    device_id = config["device"]["id"]
+    storage_path = config["storage"]["path"]
+    storage_root = Path(storage_path).expanduser()
+
+    backend = get_backend(config)
+    try:
+        memory_kb = _init_crypto_session(backend, passphrase, config)
+    except MindMeldError as e:
+        _error(str(e))
+
+    # Refuse-when-healthy: if the normal recovery chain has any viable
+    # source, this command has no business running.
+    fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    if fetch.is_ok:
+        _error(
+            "remote manifest is readable — recovery is not required. "
+            "If you meant to investigate a different device's corrupt "
+            "manifest, re-run mm push from that device."
+        )
+    if fetch.status == "missing":
+        _error(
+            "no manifest exists for this device at "
+            f"manifests/{device_id}/manifest.json.enc — nothing to quarantine."
+        )
+
+    # Sidecar and peer tombstones are the non-destructive paths. If either
+    # exists, refuse: running --abandon-manifest would lose fresh deletions
+    # that the normal push recovery chain would preserve.
+    sidecar_manifest = sidecar.read(device_id)
+    if sidecar_manifest is not None:
+        _error(
+            f"local sidecar is present at {sidecar.sidecar_path()}. "
+            f"Run 'mm push' — the normal recovery chain will use the "
+            f"sidecar to preserve fresh deletions. --abandon-manifest "
+            f"would throw those deletion records away."
+        )
+    peer_tombstones = _collect_peer_tombstones(
+        backend, device_id, passphrase, memory_kb
+    )
+    if peer_tombstones:
+        _error(
+            f"peer manifests carry {len(peer_tombstones)} tombstone(s) that "
+            f"'mm push' would use as a recovery source. Run 'mm push' instead "
+            f"— --abandon-manifest would discard these tombstone records."
+        )
+
+    # Loud warning before the typed prompt. stderr_console so the UX is
+    # consistent with other destructive paths (init BRICK).
+    stderr_console.print(
+        "\n[red]DANGER:[/red] this will QUARANTINE this device's corrupt "
+        "manifest and allow the next push to start fresh with [bold]no "
+        "prior-state knowledge[/bold]. Files you deleted locally since the "
+        "last successful push will no longer propagate as deletions — peers "
+        "will see those files come back on their next pull.\n"
+    )
+    stderr_console.print(
+        f"  Source blob:      manifests/{device_id}/manifest.json.enc\n"
+        f"  Quarantine name:  manifests/{device_id}/manifest.json.enc."
+        f"corrupt-<timestamp>\n"
+        f"  Storage root:     {storage_root}\n"
+    )
+
+    if not yes:
+        typed = typer.prompt(
+            'Type "RESET" (case-sensitive) to confirm and proceed'
+        )
+        if typed != "RESET":
+            stderr_console.print("[yellow]Aborted.[/yellow] Nothing changed.")
+            raise typer.Exit(1)
+
+    try:
+        quarantine_path = _quarantine_corrupt_manifest(
+            backend, storage_root, device_id
+        )
+    except FileNotFoundError:
+        _error(
+            f"manifests/{device_id}/manifest.json.enc not found on disk. "
+            f"Nothing to quarantine."
+        )
+    except OSError as e:
+        _error(f"quarantine failed: {e}")
+
+    console.print(
+        f"[green]Quarantined[/green] corrupt manifest to "
+        f"[dim]{quarantine_path}[/dim]."
+    )
+    console.print(
+        "Next 'mm push' will start fresh with no prior-state manifest. "
+        "The quarantined copy is preserved for post-mortem and can be "
+        "deleted manually once you've confirmed recovery."
     )
 
 
