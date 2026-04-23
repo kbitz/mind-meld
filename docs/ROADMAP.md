@@ -42,16 +42,31 @@ keys so legacy manifests migrate cleanly.
 - **Exclude `*.sync-conflict-*` from walker** — `manifest.py:25-41` EXCLUDED does not match conflict files, so the next push uploads them cross-device and other devices receive them as regular source files. Defeats the Syncthing model shipped in v0.4.0. Add the pattern plus a regression test that a conflict file in `memory/` is never walked. _src/mind_meld/manifest.py, tests/test_manifest.py, ~25 lines._ (S)
 - **Normalize tombstone keys at read time** — `manifest.py:463-569`: carry-forward preserves verbatim tombstone keys while new writes always use `src_name:path`. Pre-v2 bare-path tombstones silently fail to match `is_tombstoned(src, path, …)`. Normalize to `src_name:path` in `normalize_manifest` (or dual-check in `is_tombstoned`); add a regression test for mixed-format manifests. _src/mind_meld/manifest.py, tests/test_manifest.py, ~150 lines._ (M)
 
-### Track 1C: Argon2 KDF caching
-_1 task · ~0.5 day (human) / ~10 min (CC) · medium risk · [crypto.py]_
-_touches: src/mind_meld/crypto.py, tests/test_crypto.py
+### Track 1C: Argon2 KDF caching ✅ SHIPPED in v0.6.0
+_Shipped 2026-04-22. Final scope: ~900 LOC across 11 files. See
+`docs/designs/crypto-v2.md` for the full decision record._
 
-Per-file salts force Argon2id (64MB/3 iters) to re-derive the key once per
-file on push AND once per file on pull. A 1000-file sync burns ~150-300ms per
-derivation; manifest-diff optimization is undermined at scale. Explicit
-"benchmark before 1.0" note in the code.
+**Original proposal was structurally broken.** The entry below suggested an
+LRU keyed by `(passphrase-hash, salt)`. Per-file salts are `os.urandom(16)`,
+so the LRU hit rate is ~0% in every real code path — caught on
+`/plan-ceo-review`.
 
-- **Cache derived keys** — key an LRU by `(passphrase-hash, salt)` so repeated derivations in push/pull/gc reuse the key; alternately, adopt a single salt per push/pull (stored alongside the ciphertext) for a simpler model. Include a benchmark that measures the 1000-file case. _src/mind_meld/crypto.py, tests/test_crypto.py, ~150 lines._ (M)
+**What actually shipped:** process-scoped master_key (Argon2 once per process,
+cached in `_MASTER_KEY_CACHE`) + HKDF-SHA256 per-file keys (microseconds).
+Mirrors the age/restic/rclone pattern. `mm-crypto-init` at the storage root
+carries root_salt + argon2_memory_kb + a keycheck blob used for second-device
+passphrase verification. Blob format v2 = `[0x02][salt][nonce][ct+tag]`.
+No v1 back-compat (pre-release, no users).
+
+**Measured speedup at production Argon2 (64MB):** encrypt per-op 123ms →
+0.07ms (~1760x), decrypt per-op 122ms → 0.01ms (~12200x). 100-file round-trip
+24.4s → 0.14s.
+
+**Coordination note:** Track 1C extended `storage/local.py` (`put_exclusive`
+via temp+`os.link`, iCloud conflict regex relaxed to optional extension).
+This overlaps Track 1D's footprint. Land 1D after 1C, OR fold 1D's
+atomic-write hardening into Track 1C — the "parallel-safe within Group 1"
+claim no longer holds for 1C ↔ 1D.
 
 ### Track 1D: Storage layer hardening
 _3 tasks · ~1 day (human) / ~15 min (CC) · medium risk · [storage/local.py, lockfile.py]_

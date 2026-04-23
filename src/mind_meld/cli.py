@@ -22,10 +22,17 @@ from rich.table import Table
 from mind_meld import __version__
 from mind_meld.config import CONFIG_PATH, DEFAULT_STORAGE_PATH, load_config, save_config, get_sources
 from mind_meld.crypto import (
+    CryptoInitFetch,
+    bootstrap_crypto_init,
     decrypt,
     encrypt,
+    fetch_crypto_init,
     get_passphrase,
+    load_master_key,
+    root_salt_fingerprint,
+    set_crypto_session,
     store_passphrase_in_keyring,
+    verify_passphrase,
 )
 from mind_meld.devices import list_devices, register_device, update_last_seen
 from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError
@@ -162,6 +169,67 @@ def _get_passphrase_or_exit() -> str:
     except CryptoError as e:
         _error(str(e))
         raise
+
+
+def _init_crypto_session(backend, passphrase: str, config: dict) -> int:
+    """Read mm-crypto-init, drift-check against local config, pin process crypto session.
+
+    Called at the top of every crypto-using command (push/pull/status/diff/gc/etc).
+    Returns the authoritative argon2_memory_kb from storage — callers should use
+    THIS value, not config["crypto"]["argon2_memory_kb"], to avoid silent drift
+    between local config and storage.
+
+    Side-effect: if local config's root_salt_fp is missing (e.g. first command
+    after init), populate and save it so future commands can drift-check.
+
+    Raises:
+      MindMeldError subclasses — caller chooses presentation (_error for
+      interactive; stderr print for autopull/autopush).
+    """
+    fetch = fetch_crypto_init(backend)
+    if fetch.status == "missing":
+        raise CryptoError(
+            "crypto: mm-crypto-init not found at storage root. "
+            "Run 'mm init' to initialize this storage."
+        )
+    if fetch.status == "corrupt":
+        raise CryptoError(
+            "crypto: mm-crypto-init is corrupt. If another device still has a "
+            "valid copy in its local iCloud cache, wait for sync to reconcile. "
+            "Otherwise delete mm-crypto-init from the storage root and re-run "
+            "'mm init' (WARNING: destroys all existing v2 blobs for every device)."
+        )
+
+    assert fetch.root_salt is not None and fetch.argon2_memory_kb is not None
+    storage_fp = root_salt_fingerprint(fetch.root_salt)
+    local_fp = config.get("crypto", {}).get("root_salt_fp")
+
+    if local_fp and local_fp != storage_fp:
+        raise CryptoError(
+            f"crypto: mm-crypto-init root_salt changed since this device was "
+            f"initialized (local fp={local_fp}, storage fp={storage_fp}). "
+            f"Another device may have bootstrapped storage concurrently. "
+            f"Re-run 'mm init' to reconfigure against the current storage."
+        )
+
+    set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
+    master_key = load_master_key(
+        passphrase, fetch.root_salt, fetch.argon2_memory_kb
+    )
+    assert fetch.keycheck_blob is not None
+    verify_passphrase(master_key, fetch.keycheck_blob)
+
+    # Backfill local config if needed (first command after an upgrade or
+    # a previously-uninitialized config). Silent one-time write.
+    if not local_fp:
+        config.setdefault("crypto", {})["root_salt_fp"] = storage_fp
+        config["crypto"]["argon2_memory_kb"] = fetch.argon2_memory_kb
+        try:
+            save_config(config)
+        except OSError:
+            pass  # non-fatal; drift check just won't fire next run
+
+    return fetch.argon2_memory_kb
 
 
 def _fetch_remote_manifest(
@@ -818,7 +886,20 @@ def _delete_files(
 
 @app.command()
 def init() -> None:
-    """Initialize Mind Meld: generate device ID, configure iCloud storage, set passphrase."""
+    """Initialize Mind Meld: generate device ID, configure iCloud storage, set passphrase.
+
+    Two-path flow. Storage is probed (mm-crypto-init) BEFORE any local state is
+    written or any passphrase is committed to the keyring.
+
+    First-device path (mm-crypto-init missing):
+        Double-prompt passphrase, generate root_salt + keycheck, atomic write,
+        then save config + register device + store passphrase.
+
+    Second-device path (mm-crypto-init ok):
+        Single-prompt passphrase, derive master_key from the stored root_salt,
+        verify keycheck. On success, save config + register + store passphrase.
+        On failure, nothing local is written.
+    """
     if CONFIG_PATH.exists():
         overwrite = typer.confirm(
             f"Config already exists at {CONFIG_PATH}. Overwrite?"
@@ -828,47 +909,122 @@ def init() -> None:
 
     console.print(f"[bold]Mind Meld v{__version__} \u2014 init[/bold]\n")
 
-    # Device
-    device_id = uuid.uuid4().hex[:8]
-    device_name = typer.prompt("Device name", default=_default_device_name())
-
-    # Storage path (iCloud Drive by default)
+    # Storage path first: we need a backend to probe mm-crypto-init.
     storage_path = typer.prompt("Storage folder path", default=DEFAULT_STORAGE_PATH)
-
-    config: dict = {
-        "device": {"id": device_id, "name": device_name},
-        "storage": {"path": storage_path},
-        "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
-        "crypto": {"argon2_memory_kb": 65_536},
-    }
-
-    # Create directory
     full_path = Path(storage_path).expanduser()
     full_path.mkdir(parents=True, exist_ok=True)
     console.print(f"  Storage: {full_path}")
 
-    # Passphrase
-    passphrase = typer.prompt("Encryption passphrase", hide_input=True)
-    if not passphrase:
-        _error("Passphrase cannot be empty.")
-    passphrase_confirm = typer.prompt("Confirm passphrase", hide_input=True)
-    if passphrase != passphrase_confirm:
-        _error("Passphrases don't match.")
+    # Lightweight backend (config is not yet written; instantiate directly).
+    from mind_meld.storage.local import LocalBackend
+    from mind_meld.errors import StorageError as _StorageError
+    backend = LocalBackend(str(full_path))
 
-    # Store in keyring
-    if store_passphrase_in_keyring(passphrase):
-        console.print("  Passphrase stored in OS keyring.")
-    else:
-        console.print(
-            "  [yellow]No keyring available.[/yellow] "
-            "Set MINDMELD_PASSPHRASE environment variable instead."
+    # Probe storage for mm-crypto-init BEFORE committing any local state.
+    fetch = fetch_crypto_init(backend)
+    if fetch.status == "corrupt":
+        _error(
+            "init: mm-crypto-init at storage root is corrupt. If another device "
+            "still has a valid copy in its local iCloud cache, wait for sync to "
+            "reconcile and retry. Otherwise remove mm-crypto-init manually and "
+            "retry init (WARNING: this destroys all existing v2 blobs)."
         )
 
-    # Save config
-    save_config(config)
-    console.print(f"  Config written to {CONFIG_PATH}")
+    is_first_device = fetch.status == "missing"
 
-    # Check for gstack and offer to add as sync source
+    # Device metadata.
+    device_id = uuid.uuid4().hex[:8]
+    device_name = typer.prompt("Device name", default=_default_device_name())
+
+    # Passphrase prompt. Double-prompt when setting a new secret (first-device),
+    # single-prompt when entering an existing secret we can verify (second-device).
+    if is_first_device:
+        passphrase = typer.prompt("Encryption passphrase", hide_input=True)
+        if not passphrase:
+            _error("Passphrase cannot be empty.")
+        passphrase_confirm = typer.prompt("Confirm passphrase", hide_input=True)
+        if passphrase != passphrase_confirm:
+            _error("Passphrases don't match.")
+    else:
+        passphrase = typer.prompt("Encryption passphrase", hide_input=True)
+        if not passphrase:
+            _error("Passphrase cannot be empty.")
+
+    # Bootstrap or verify.
+    argon2_memory_kb: int
+    root_salt: bytes
+    keycheck_blob: bytes
+
+    if is_first_device:
+        try:
+            bootstrap = bootstrap_crypto_init(
+                backend, passphrase, argon2_memory_kb=65_536
+            )
+        except _StorageError:
+            # Race: another device wrote mm-crypto-init between our fetch and
+            # our put. Fall through to second-device verify with the winner's blob.
+            console.print(
+                "  [dim]Another device bootstrapped concurrently \u2014 "
+                "verifying against their mm-crypto-init.[/dim]"
+            )
+            retry_fetch = fetch_crypto_init(backend)
+            if retry_fetch.status != "ok":
+                _error("init: lost bootstrap race but peer's mm-crypto-init not ok.")
+            assert retry_fetch.root_salt is not None
+            assert retry_fetch.argon2_memory_kb is not None
+            assert retry_fetch.keycheck_blob is not None
+            root_salt = retry_fetch.root_salt
+            argon2_memory_kb = retry_fetch.argon2_memory_kb
+            keycheck_blob = retry_fetch.keycheck_blob
+            set_crypto_session(root_salt, argon2_memory_kb)
+            master_key = load_master_key(passphrase, root_salt, argon2_memory_kb)
+            try:
+                verify_passphrase(master_key, keycheck_blob)
+            except CryptoError as e:
+                _error(str(e))
+            console.print("  Verified passphrase against peer mm-crypto-init.")
+        else:
+            assert bootstrap.root_salt is not None
+            assert bootstrap.argon2_memory_kb is not None
+            assert bootstrap.keycheck_blob is not None
+            root_salt = bootstrap.root_salt
+            argon2_memory_kb = bootstrap.argon2_memory_kb
+            keycheck_blob = bootstrap.keycheck_blob
+            set_crypto_session(root_salt, argon2_memory_kb)
+            console.print(
+                f"  mm-crypto-init bootstrapped "
+                f"(root_salt fp={root_salt_fingerprint(root_salt)})."
+            )
+    else:
+        assert fetch.root_salt is not None
+        assert fetch.argon2_memory_kb is not None
+        assert fetch.keycheck_blob is not None
+        root_salt = fetch.root_salt
+        argon2_memory_kb = fetch.argon2_memory_kb
+        keycheck_blob = fetch.keycheck_blob
+        set_crypto_session(root_salt, argon2_memory_kb)
+        master_key = load_master_key(passphrase, root_salt, argon2_memory_kb)
+        try:
+            verify_passphrase(master_key, keycheck_blob)
+        except CryptoError as e:
+            _error(str(e))
+        console.print(
+            f"  Verified passphrase against existing mm-crypto-init "
+            f"(root_salt fp={root_salt_fingerprint(root_salt)})."
+        )
+
+    # All crypto passed; it's safe to write local state.
+    config: dict = {
+        "device": {"id": device_id, "name": device_name},
+        "storage": {"path": storage_path},
+        "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
+        "crypto": {
+            "argon2_memory_kb": argon2_memory_kb,
+            "root_salt_fp": root_salt_fingerprint(root_salt),
+        },
+    }
+
+    # Check for gstack and offer to add as sync source.
     gstack_path = Path.home() / ".gstack"
     if gstack_path.exists():
         add_gstack = typer.confirm(
@@ -894,15 +1050,25 @@ def init() -> None:
                     ],
                 },
             ]
-            save_config(config)
-            console.print("  gstack source added to config.")
 
-    # Register device
-    backend = get_backend(load_config())
+    save_config(config)
+    console.print(f"  Config written to {CONFIG_PATH}")
+
+    # Register device AFTER config write AND after crypto validation.
     register_device(backend, device_id, device_name)
     console.print(f"  Device registered: {device_name} ({device_id})")
 
-    console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
+    # Store passphrase in keyring LAST. Gated on crypto validation so a typo'd
+    # passphrase on the second-device path never lands in Keychain.
+    if store_passphrase_in_keyring(passphrase):
+        console.print("  Passphrase stored in OS keyring.")
+    else:
+        console.print(
+            "  [yellow]No keyring available.[/yellow] "
+            "Set MINDMELD_PASSPHRASE environment variable instead."
+        )
+
+    console.print("\n[green]Mind Meld initialized. Run \'mm push\' to sync.[/green]")
 
 
 # ── push ──────────────────────────────────────────────────────────────
@@ -916,7 +1082,6 @@ def push(
     """Push local session data to storage."""
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
-    memory_kb = config["crypto"]["argon2_memory_kb"]
 
     try:
         acquire_lock()
@@ -924,6 +1089,11 @@ def push(
         _error(str(e))
 
     try:
+        backend = get_backend(config)
+        try:
+            memory_kb = _init_crypto_session(backend, passphrase, config)
+        except MindMeldError as e:
+            _error(str(e))
         result = _push_core(config, passphrase, memory_kb, verbose, dry_run)
 
         # Auto GC on interactive push only (not autopush).
@@ -1156,7 +1326,6 @@ def pull(
 
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
-    memory_kb = config["crypto"]["argon2_memory_kb"]
 
     try:
         acquire_lock()
@@ -1164,6 +1333,11 @@ def pull(
         _error(str(e))
 
     try:
+        backend = get_backend(config)
+        try:
+            memory_kb = _init_crypto_session(backend, passphrase, config)
+        except MindMeldError as e:
+            _error(str(e))
         _pull_core(
             config, passphrase, memory_kb, from_device, source, verbose, dry_run,
             interactive_resolve=resolve_interactive,
@@ -1443,12 +1617,15 @@ def status(
     """Show sync status: local vs remote state."""
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
-    memory_kb = config["crypto"]["argon2_memory_kb"]
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
     max_file_size = config["sync"]["max_file_size"]
 
     backend = get_backend(config)
+    try:
+        memory_kb = _init_crypto_session(backend, passphrase, config)
+    except MindMeldError as e:
+        _error(str(e))
 
     # Build local manifest (v2)
     sources_configs = get_sources(config)
@@ -1586,12 +1763,15 @@ def diff_cmd(
     """Show what would change without applying (dry run)."""
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
-    memory_kb = config["crypto"]["argon2_memory_kb"]
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
     max_file_size = config["sync"]["max_file_size"]
 
     backend = get_backend(config)
+    try:
+        memory_kb = _init_crypto_session(backend, passphrase, config)
+    except MindMeldError as e:
+        _error(str(e))
 
     target_id = from_device or device_id
 
@@ -1679,7 +1859,6 @@ def gc(
     """Garbage collect orphaned blobs. Optionally reap stale conflict files."""
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
-    memory_kb = config["crypto"]["argon2_memory_kb"]
 
     try:
         acquire_lock()
@@ -1687,6 +1866,11 @@ def gc(
         _error(str(e))
 
     try:
+        backend = get_backend(config)
+        try:
+            memory_kb = _init_crypto_session(backend, passphrase, config)
+        except MindMeldError as e:
+            _error(str(e))
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
         if prune_conflicts:
             _gc_old_conflict_files(config, dry_run, verbose)
@@ -2093,14 +2277,18 @@ def autopull() -> None:
         print("mm: no passphrase available \u2014 skipping pull", file=sys.stderr)
         return
 
-    memory_kb = config["crypto"]["argon2_memory_kb"]
-
     try:
         acquire_lock()
     except LockError:
         return  # another operation running — don't block Claude
 
     try:
+        backend = get_backend(config)
+        try:
+            memory_kb = _init_crypto_session(backend, passphrase, config)
+        except MindMeldError as e:
+            print(f"mm: pull failed — {e}", file=sys.stderr)
+            return
         # autopull is always silent + never-prompt (Claude Code hook context)
         result = _pull_core(config, passphrase, memory_kb, quiet=True, interactive_resolve=False)
 
@@ -2145,14 +2333,18 @@ def autopush() -> None:
         print("mm: no passphrase available \u2014 skipping push", file=sys.stderr)
         return
 
-    memory_kb = config["crypto"]["argon2_memory_kb"]
-
     try:
         acquire_lock()
     except LockError:
         return  # another operation running — don't block Claude
 
     try:
+        backend = get_backend(config)
+        try:
+            memory_kb = _init_crypto_session(backend, passphrase, config)
+        except MindMeldError as e:
+            print(f"mm: push failed — {e}", file=sys.stderr)
+            return
         # No auto-GC on autopush (prevents blob-deletion hole)
         result = _push_core(config, passphrase, memory_kb, quiet=True)
 
