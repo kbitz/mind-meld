@@ -8,7 +8,12 @@ from typer.testing import CliRunner
 
 from mind_meld.cli import app
 from mind_meld.config import save_config
-from mind_meld.crypto import decrypt, encrypt
+from mind_meld.crypto import (
+    bootstrap_crypto_init,
+    decrypt,
+    encrypt,
+    root_salt_fingerprint,
+)
 from mind_meld.devices import list_devices, register_device
 from mind_meld.manifest import (
     build_manifest,
@@ -324,6 +329,7 @@ class TestAutoCommands:
 
         # Register device A
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
 
         # Monkeypatch config path and passphrase
@@ -413,6 +419,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -479,6 +486,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -540,6 +548,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -597,6 +606,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -647,6 +657,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
 
         # Push (creates v2 manifest with both sources)
@@ -710,3 +721,167 @@ class TestMultiSourceSync:
         # The original "files" key should still be there for backward compat
         assert "files" in loaded
         assert len(loaded["files"]) == 2
+
+
+class TestInitFlow:
+    """Integration tests for mm init paths: first-device, second-device,
+    wrong-passphrase, bootstrap race, and convergence.
+
+    Uses CliRunner with monkeypatched CONFIG_PATH. Passphrases are provided
+    via stdin input rather than MINDMELD_PASSPHRASE env var, because init
+    needs to actually prompt to exercise the double/single-prompt branching.
+    """
+
+    def _setup_monkeypatch(self, tmp_path, monkeypatch):
+        """Isolate CONFIG_PATH and disable keyring."""
+        from pathlib import Path as _P
+
+        cfg_path = tmp_path / "config_test.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
+        # Make keyring a no-op so tests don't pollute the real Keychain.
+        monkeypatch.setattr(
+            "mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False
+        )
+        # get_passphrase falls back to env; tests set MINDMELD_PASSPHRASE as needed.
+        return cfg_path
+
+    def test_first_device_init_bootstraps(self, tmp_path, monkeypatch):
+        """Fresh storage: init prompts twice, bootstraps mm-crypto-init."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        # Inputs: storage path, device name, passphrase, confirm passphrase.
+        # If ~/.gstack exists (it does in a dev env), there's also a y/n prompt
+        # for gstack sync — answer "n" to keep the test minimal.
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "bootstrapped" in result.output
+
+        # mm-crypto-init exists at storage root.
+        backend = LocalBackend(storage)
+        assert backend.exists("mm-crypto-init")
+
+        # Config has crypto.root_salt_fp populated.
+        import tomllib
+        with open(cfg_path, "rb") as f:
+            cfg = tomllib.load(f)
+        assert "root_salt_fp" in cfg["crypto"]
+        assert cfg["crypto"]["argon2_memory_kb"] == 65_536
+
+    def test_first_device_passphrase_mismatch_aborts(self, tmp_path, monkeypatch):
+        """Passphrases don't match → abort, no state written."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        stdin = f"{storage}\nMac A\npw123\npw456\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code != 0
+        assert "don't match" in result.output or "don" in result.output
+
+        # Storage was created (mkdir), but mm-crypto-init was NOT written.
+        backend = LocalBackend(storage)
+        assert not backend.exists("mm-crypto-init")
+        # Config was NOT written.
+        assert not cfg_path.exists()
+
+    def test_second_device_init_verifies(self, tmp_path, monkeypatch):
+        """Existing mm-crypto-init: init prompts once, verifies keycheck."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+
+        # Pre-seed storage with mm-crypto-init bootstrapped at MEMORY_KB.
+        backend = LocalBackend(storage)
+        # Use reduced memory_kb for test speed; bootstrap writes it into the blob.
+        bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
+
+        # Second-device init: only 1 passphrase prompt (single, no confirm).
+        stdin = f"{storage}\nMac B\npw-shared\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "Verified passphrase against existing mm-crypto-init" in result.output
+
+        # Config's memory_kb comes from storage, not from 65_536 default.
+        import tomllib
+        with open(cfg_path, "rb") as f:
+            cfg = tomllib.load(f)
+        assert cfg["crypto"]["argon2_memory_kb"] == MEMORY_KB
+
+    def test_second_device_wrong_passphrase_aborts_cleanly(self, tmp_path, monkeypatch):
+        """Wrong passphrase on second-device: abort, NO config or device registered."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+
+        backend = LocalBackend(storage)
+        bootstrap_crypto_init(backend, "correct-pw", argon2_memory_kb=MEMORY_KB)
+
+        # Second device uses WRONG passphrase.
+        stdin = f"{storage}\nMac B\nwrong-pw\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code != 0
+        assert "does not match" in result.output
+
+        # No local state should have been written.
+        assert not cfg_path.exists()
+        # Storage devices/ should NOT have Mac B registered.
+        devices_dir = storage / "devices"
+        if devices_dir.exists():
+            # Only the one device from bootstrap_crypto_init helper (which doesn't
+            # register a device) — so there should be zero entries actually.
+            assert list(devices_dir.iterdir()) == []
+
+    def test_convergence_cross_device_via_conflict_copy(self, tmp_path, monkeypatch):
+        """Simulate post-iCloud-reconciliation state: canonical + 'mm-crypto-init 2'.
+
+        fetch_crypto_init picks the deterministic winner and canonicalizes.
+        Subsequent commands interoperate as if only one init had happened.
+        """
+        from mind_meld.storage.local import LocalBackend
+
+        self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+
+        # Device A bootstraps with one passphrase.
+        bootstrap_crypto_init(backend, "shared-pw", argon2_memory_kb=MEMORY_KB)
+        # Simulate device B losing the race: its mm-crypto-init landed as
+        # "mm-crypto-init 2". Build that blob manually.
+        from mind_meld import crypto as _crypto
+
+        _crypto.clear_crypto_session()
+        other_salt = bytes([0xFF] * 16)
+        _crypto.set_crypto_session(other_salt, MEMORY_KB)
+        other_mk = _crypto.load_master_key("shared-pw", other_salt, MEMORY_KB)
+        other_keycheck = _crypto._encrypt_with_master_key(
+            _crypto._KEYCHECK_PLAINTEXT, other_mk
+        )
+        other_blob = (
+            bytes([_crypto.FORMAT_VERSION])
+            + MEMORY_KB.to_bytes(4, "big")
+            + other_salt
+            + other_keycheck
+        )
+        (storage / "mm-crypto-init 2").write_bytes(other_blob)
+
+        # Now fetch_crypto_init is called (as if we just started a command).
+        # Lex-smallest salt wins. Our canonical salt is random; other_salt is 0xFF*16.
+        fetched = _crypto.fetch_crypto_init(backend)
+        assert fetched.status == "ok"
+        # Conflict copy is gone after canonicalization.
+        assert not (storage / "mm-crypto-init 2").exists()
+        # Canonical now holds the winner (whichever of the two had the smaller salt).
+        canonical_bytes = (storage / "mm-crypto-init").read_bytes()
+        winner_salt_in_canonical = canonical_bytes[5:21]
+        assert winner_salt_in_canonical == fetched.root_salt
