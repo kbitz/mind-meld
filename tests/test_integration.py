@@ -8,7 +8,12 @@ from typer.testing import CliRunner
 
 from mind_meld.cli import app
 from mind_meld.config import save_config
-from mind_meld.crypto import decrypt, encrypt
+from mind_meld.crypto import (
+    bootstrap_crypto_init,
+    decrypt,
+    encrypt,
+    root_salt_fingerprint,
+)
 from mind_meld.devices import list_devices, register_device
 from mind_meld.manifest import (
     build_manifest,
@@ -206,6 +211,35 @@ class TestSyncLog:
         )
         assert len(logs) == 0
 
+    def test_sync_log_routes_through_fsutil_with_fsync_false(
+        self, tmp_path, monkeypatch
+    ):
+        """Sync log writes must go through fsutil with fsync=False —
+        .mind-meld-log.md is cosmetic; per-file fsync would add pull latency."""
+        from mind_meld import synclog
+
+        claude_dir = tmp_path / ".claude"
+        (claude_dir / "projects" / "-foo").mkdir(parents=True)
+
+        calls: list[dict] = []
+        real_write = synclog.fsutil.atomic_write_bytes
+
+        def spy_write(path, data, *, fsync=False, mode=None):
+            calls.append({"path": path, "fsync": fsync, "mode": mode})
+            real_write(path, data, fsync=fsync, mode=mode)
+
+        monkeypatch.setattr(synclog.fsutil, "atomic_write_bytes", spy_write)
+        synclog.write_sync_log(
+            claude_dir=str(claude_dir),
+            device_name="Other",
+            device_id="xyz",
+            new_files=["projects/-foo/memory/x.md"],
+            modified_files=[],
+            deleted_files=[],
+        )
+        assert len(calls) == 1
+        assert calls[0]["fsync"] is False
+
 
 class TestGCSafety:
     def test_gc_never_deletes_referenced_blobs(self, storage):
@@ -295,6 +329,97 @@ class TestAutoCommands:
         assert result.exit_code == 0
         assert result.output == ""
 
+    def test_autopush_silent_when_lock_held(self, tmp_path, monkeypatch):
+        """autopush must exit silently if another mm process holds the lock.
+
+        Simulates the Claude Code hot-path where `mm autopush` and
+        `mm autopull` can fire simultaneously — exactly one acquires
+        the flock; the loser must not crash, bubble a traceback, or
+        write junk to stdout."""
+        import subprocess
+        import sys
+        import textwrap
+        import time
+        from pathlib import Path
+        from mind_meld.config import LOCK_PATH
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").write_text("x")
+
+        config_path = tmp_path / "config.toml"
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "claude_dir": str(claude_dir),
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+
+        # Redirect the lockfile to a per-test path so this doesn't
+        # contaminate the user's real ~/.config/mind-meld/mind-meld.lock.
+        test_lock = tmp_path / "test.lock"
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", test_lock)
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", test_lock)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # Spawn a child that grabs the lock and holds it until stdin closes.
+        repo_src = str(Path(__file__).parent.parent / "src")
+        ready_marker = tmp_path / "child-ready"
+        child_script = textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {repo_src!r})
+            from pathlib import Path
+            from mind_meld.lockfile import acquire_lock, release_lock
+
+            lp = Path({str(test_lock)!r})
+            acquire_lock(lp)
+            Path({str(ready_marker)!r}).write_text("ready")
+            sys.stdin.read()
+            release_lock(lp)
+        """).strip()
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_script],
+            stdin=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if ready_marker.exists():
+                    break
+                time.sleep(0.02)
+            else:
+                child.kill()
+                pytest.fail("child did not become ready")
+
+            # Now try autopush — must exit cleanly, not crash.
+            result = runner.invoke(app, ["autopush"])
+            assert result.exit_code == 0, (
+                f"autopush must handle lock contention gracefully, "
+                f"got exit={result.exit_code} output={result.output!r}"
+            )
+            # autopush is a silent command; a LockError must surface only
+            # as a short stderr line, never a traceback.
+            assert "Traceback" not in result.output
+            assert "Traceback" not in (result.stderr or "")
+        finally:
+            if child.stdin:
+                child.stdin.close()
+            child.wait(timeout=5)
+
     def test_autopush_round_trip(self, tmp_path, monkeypatch):
         """autopush should push changes and print a one-line summary."""
         storage_dir = tmp_path / "storage"
@@ -324,6 +449,7 @@ class TestAutoCommands:
 
         # Register device A
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
 
         # Monkeypatch config path and passphrase
@@ -413,6 +539,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -456,6 +583,91 @@ class TestMultiSourceSync:
         assert pulled_config.exists()
         assert pulled_config.read_text() == "version: 1"
 
+    def test_pull_calls_fsync_dir_per_unique_parent(self, tmp_path, monkeypatch):
+        """End-of-pull deferred durability: fsync_dir called once per
+        unique parent directory that received a write. Verifies the
+        durability is actually deferred (not per-file) AND actually
+        happens (not dropped entirely)."""
+        from pathlib import Path
+        from mind_meld import fsutil
+        from mind_meld import cli as cli_module
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+
+        # Seed 3 distinct parent dirs on the "sending" side.
+        (claude_dir / "projects" / "-app-a" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-app-a" / "memory" / "a.md").write_text("A")
+        (claude_dir / "projects" / "-app-b" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-app-b" / "memory" / "b.md").write_text("B")
+        (gstack_dir / "projects").mkdir(parents=True)
+        (gstack_dir / "projects" / "state.yaml").write_text("x")
+        (gstack_dir / "config.yaml").write_text("v: 1")
+
+        config_a_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A", gstack_dir
+        )
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+        register_device(backend, "dev-b", "Mac B")
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        runner.invoke(app, ["autopush"])
+
+        # Wipe local dirs to simulate Machine B.
+        import shutil
+        shutil.rmtree(str(claude_dir)); claude_dir.mkdir(parents=True)
+        shutil.rmtree(str(gstack_dir)); gstack_dir.mkdir(parents=True)
+        (gstack_dir / "projects").mkdir()
+
+        config_b_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
+
+        # Spy: capture every fsync_dir call Pull triggers.
+        calls: list[Path] = []
+        real_fsync_dir = fsutil.fsync_dir
+
+        def spy_fsync_dir(path):
+            calls.append(Path(path))
+            real_fsync_dir(path)
+
+        # cli.py does `from mind_meld import fsutil` at import time and
+        # calls `fsutil.fsync_dir(...)` through that alias, so patch the
+        # attribute on cli.fsutil (which IS the same module object).
+        monkeypatch.setattr(cli_module.fsutil, "fsync_dir", spy_fsync_dir)
+
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0
+
+        # At least 4 unique parent dirs should have been written to during pull:
+        #   <claude>/projects/-app-a/memory  (a.md)
+        #   <claude>/projects/-app-b/memory  (b.md)
+        #   <gstack>/projects                (state.yaml)
+        #   <gstack>                         (config.yaml)
+        # Synclog may add ".mind-meld-log.md" writes but those are internal.
+        unique_parents = set(calls)
+        expected = {
+            claude_dir / "projects" / "-app-a" / "memory",
+            claude_dir / "projects" / "-app-b" / "memory",
+            gstack_dir / "projects",
+            gstack_dir,
+        }
+        missing = expected - unique_parents
+        assert not missing, (
+            f"expected fsync_dir calls for {expected}, missing {missing}. "
+            f"actual: {unique_parents}"
+        )
+        # Deferred-durability invariant: fsync_dir called exactly once per
+        # unique parent (not per file).
+        assert len(calls) == len(unique_parents)
+
     def test_jsonl_merge_on_pull(self, tmp_path, monkeypatch):
         """JSONL files are merged (not overwritten) on pull."""
         from pathlib import Path
@@ -479,6 +691,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -540,6 +753,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -597,6 +811,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
         register_device(backend, "dev-b", "Mac B")
 
@@ -647,6 +862,7 @@ class TestMultiSourceSync:
         )
 
         backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
         register_device(backend, "dev-a", "Mac A")
 
         # Push (creates v2 manifest with both sources)
@@ -710,3 +926,167 @@ class TestMultiSourceSync:
         # The original "files" key should still be there for backward compat
         assert "files" in loaded
         assert len(loaded["files"]) == 2
+
+
+class TestInitFlow:
+    """Integration tests for mm init paths: first-device, second-device,
+    wrong-passphrase, bootstrap race, and convergence.
+
+    Uses CliRunner with monkeypatched CONFIG_PATH. Passphrases are provided
+    via stdin input rather than MINDMELD_PASSPHRASE env var, because init
+    needs to actually prompt to exercise the double/single-prompt branching.
+    """
+
+    def _setup_monkeypatch(self, tmp_path, monkeypatch):
+        """Isolate CONFIG_PATH and disable keyring."""
+        from pathlib import Path as _P
+
+        cfg_path = tmp_path / "config_test.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
+        # Make keyring a no-op so tests don't pollute the real Keychain.
+        monkeypatch.setattr(
+            "mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False
+        )
+        # get_passphrase falls back to env; tests set MINDMELD_PASSPHRASE as needed.
+        return cfg_path
+
+    def test_first_device_init_bootstraps(self, tmp_path, monkeypatch):
+        """Fresh storage: init prompts twice, bootstraps mm-crypto-init."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        # Inputs: storage path, device name, passphrase, confirm passphrase.
+        # If ~/.gstack exists (it does in a dev env), there's also a y/n prompt
+        # for gstack sync — answer "n" to keep the test minimal.
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "bootstrapped" in result.output
+
+        # mm-crypto-init exists at storage root.
+        backend = LocalBackend(storage)
+        assert backend.exists("mm-crypto-init")
+
+        # Config has crypto.root_salt_fp populated.
+        import tomllib
+        with open(cfg_path, "rb") as f:
+            cfg = tomllib.load(f)
+        assert "root_salt_fp" in cfg["crypto"]
+        assert cfg["crypto"]["argon2_memory_kb"] == 65_536
+
+    def test_first_device_passphrase_mismatch_aborts(self, tmp_path, monkeypatch):
+        """Passphrases don't match → abort, no state written."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        stdin = f"{storage}\nMac A\npw123\npw456\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code != 0
+        assert "don't match" in result.output or "don" in result.output
+
+        # Storage was created (mkdir), but mm-crypto-init was NOT written.
+        backend = LocalBackend(storage)
+        assert not backend.exists("mm-crypto-init")
+        # Config was NOT written.
+        assert not cfg_path.exists()
+
+    def test_second_device_init_verifies(self, tmp_path, monkeypatch):
+        """Existing mm-crypto-init: init prompts once, verifies keycheck."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+
+        # Pre-seed storage with mm-crypto-init bootstrapped at MEMORY_KB.
+        backend = LocalBackend(storage)
+        # Use reduced memory_kb for test speed; bootstrap writes it into the blob.
+        bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
+
+        # Second-device init: only 1 passphrase prompt (single, no confirm).
+        stdin = f"{storage}\nMac B\npw-shared\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "Verified passphrase against existing mm-crypto-init" in result.output
+
+        # Config's memory_kb comes from storage, not from 65_536 default.
+        import tomllib
+        with open(cfg_path, "rb") as f:
+            cfg = tomllib.load(f)
+        assert cfg["crypto"]["argon2_memory_kb"] == MEMORY_KB
+
+    def test_second_device_wrong_passphrase_aborts_cleanly(self, tmp_path, monkeypatch):
+        """Wrong passphrase on second-device: abort, NO config or device registered."""
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+
+        backend = LocalBackend(storage)
+        bootstrap_crypto_init(backend, "correct-pw", argon2_memory_kb=MEMORY_KB)
+
+        # Second device uses WRONG passphrase.
+        stdin = f"{storage}\nMac B\nwrong-pw\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code != 0
+        assert "does not match" in result.output
+
+        # No local state should have been written.
+        assert not cfg_path.exists()
+        # Storage devices/ should NOT have Mac B registered.
+        devices_dir = storage / "devices"
+        if devices_dir.exists():
+            # Only the one device from bootstrap_crypto_init helper (which doesn't
+            # register a device) — so there should be zero entries actually.
+            assert list(devices_dir.iterdir()) == []
+
+    def test_convergence_cross_device_via_conflict_copy(self, tmp_path, monkeypatch):
+        """Simulate post-iCloud-reconciliation state: canonical + 'mm-crypto-init 2'.
+
+        fetch_crypto_init picks the deterministic winner and canonicalizes.
+        Subsequent commands interoperate as if only one init had happened.
+        """
+        from mind_meld.storage.local import LocalBackend
+
+        self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+
+        # Device A bootstraps with one passphrase.
+        bootstrap_crypto_init(backend, "shared-pw", argon2_memory_kb=MEMORY_KB)
+        # Simulate device B losing the race: its mm-crypto-init landed as
+        # "mm-crypto-init 2". Build that blob manually.
+        from mind_meld import crypto as _crypto
+
+        _crypto.clear_crypto_session()
+        other_salt = bytes([0xFF] * 16)
+        _crypto.set_crypto_session(other_salt, MEMORY_KB)
+        other_mk = _crypto.load_master_key("shared-pw", other_salt, MEMORY_KB)
+        other_keycheck = _crypto._encrypt_with_master_key(
+            _crypto._KEYCHECK_PLAINTEXT, other_mk
+        )
+        other_blob = (
+            bytes([_crypto.FORMAT_VERSION])
+            + MEMORY_KB.to_bytes(4, "big")
+            + other_salt
+            + other_keycheck
+        )
+        (storage / "mm-crypto-init 2").write_bytes(other_blob)
+
+        # Now fetch_crypto_init is called (as if we just started a command).
+        # Lex-smallest salt wins. Our canonical salt is random; other_salt is 0xFF*16.
+        fetched = _crypto.fetch_crypto_init(backend)
+        assert fetched.status == "ok"
+        # Conflict copy is gone after canonicalization.
+        assert not (storage / "mm-crypto-init 2").exists()
+        # Canonical now holds the winner (whichever of the two had the smaller salt).
+        canonical_bytes = (storage / "mm-crypto-init").read_bytes()
+        winner_salt_in_canonical = canonical_bytes[5:21]
+        assert winner_salt_in_canonical == fetched.root_salt

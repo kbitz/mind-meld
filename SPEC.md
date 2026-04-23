@@ -219,21 +219,59 @@ All session data is encrypted on the device before it touches iCloud Drive. iClo
 
 **Algorithm:** AES-256-GCM (authenticated encryption — tamper-evident)
 
-**Key derivation:** Argon2id from a user-supplied passphrase (via `argon2-cffi`)
-- Argon2id parameters: 3 iterations, 64 MB memory (configurable via `crypto.argon2_memory_kb`), 1 parallelism
-- Produces a 256-bit derived key
-- Memory parameter is configurable in config.toml for constrained environments (CI, small VPS)
+**Key derivation (v2, v0.6.0+):** two-level — Argon2id → master_key → HKDF per file.
 
-**Per-file format:** `[version:1][salt:16][nonce:12][compressed_ciphertext+tag:*]`
-- **Version:** 1 byte — format version (`0x01` for initial release). Enables future format evolution without breaking migrations.
-- **Salt:** random 16 bytes, unique per file encryption — stored as bytes 2–17
-- **Nonce:** random 12 bytes, unique per file encryption — stored as bytes 18–29
-- **Ciphertext + GCM auth tag:** remaining bytes. Plaintext is gzip-compressed before encryption.
+1. **Root salt + keycheck are stored at the storage root** in an unencrypted
+   file named `mm-crypto-init`. Layout:
+   `[version=0x02:1][argon2_memory_kb:4 BE][root_salt:16][keycheck_blob:*]`.
+   `keycheck_blob` is itself a v2 blob containing the known plaintext
+   `b"mm-keycheck-v1"` encrypted under the master_key derived from the
+   first-device passphrase.
+2. **Per process (once, cached in memory):**
+   `master_key = Argon2id(passphrase, root_salt, time=3, memory=argon2_memory_kb, parallelism=1)` → 32 bytes.
+3. **Per file (microseconds):**
+   `file_key = HKDF-SHA256(master_key, salt=per_file_salt, info=b"mm-file-v2", L=32)`.
+4. **Encrypt:** AES-256-GCM with random per-file nonce over the gzip-compressed
+   plaintext.
 
-Each file gets a fresh random salt and nonce on every encrypt. Same plaintext produces different ciphertext each time. Plaintext is gzip-compressed (default level) before encryption — session JSONs typically compress 5-10x.
+`argon2_memory_kb` lives in `mm-crypto-init`, not per-device config. All
+devices must derive master_key with the same value; storing it with the salt
+eliminates silent cross-device drift. Local config's `[crypto].argon2_memory_kb`
+is a seed used only during first-device bootstrap.
+
+**Per-file blob format (v2):** `[version=0x02:1][salt:16][nonce:12][compressed_ciphertext+tag:*]`
+- **Version:** 1 byte — `0x02` for the v0.6 format. v1 (`0x01`) is recognized
+  and rejected with a clear error; Mind Meld is pre-release and has no v1
+  blobs in the wild.
+- **Salt:** random 16 bytes, unique per file — input to HKDF (NOT to Argon2).
+- **Nonce:** random 12 bytes, unique per file.
+- **Ciphertext + GCM auth tag:** remaining bytes. Plaintext is gzip-compressed
+  before encryption.
+
+Each file gets a fresh random salt and nonce on every encrypt. Same plaintext
+produces different ciphertext each time. Plaintext is gzip-compressed (default
+level) before encryption — session JSONs typically compress 5-10x.
+
+**iCloud convergence for mm-crypto-init.** If two devices run `mm init` nearly
+simultaneously, iCloud can leave both devices with different local blobs that
+reconcile later by renaming one to `mm-crypto-init 2`. `fetch_crypto_init` (run
+at the start of every command) scans for conflict copies, picks the
+deterministic winner (lex-smallest `root_salt`), canonicalizes it via
+`os.rename`, and deletes the losers. All devices converge on the same winner
+as iCloud replicates the reconciled state.
+
+**Cross-process drift detection.** Each device's local config stores
+`[crypto].root_salt_fp` — a 16-char hex fingerprint of the `root_salt` it was
+initialized against. Every command compares this to the current storage
+fingerprint and refuses on mismatch with an actionable error.
 
 **Passphrase handling:**
-- Prompted once during `mm init`
+- First device: `mm init` double-prompts, generates `root_salt` + keycheck, writes
+  `mm-crypto-init` atomically (via `os.link` EEXIST).
+- Subsequent devices: `mm init` single-prompts, fetches `mm-crypto-init`, decrypts
+  keycheck to verify the passphrase matches the first-device's. Wrong passphrase
+  aborts cleanly with no local state written (no config, no device registration,
+  no keyring write).
 - Derived key cached in the OS keyring via `keyring` library (macOS Keychain)
 - **Headless fallback:** if no keyring is available, fall back to `MINDMELD_PASSPHRASE` environment variable
 - **Single function:** `crypto.get_passphrase()` encapsulates the full fallback chain (keyring → env var → prompt). All commands call this — no duplication.

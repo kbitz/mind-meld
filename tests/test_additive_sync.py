@@ -396,17 +396,30 @@ class TestConflictManifestMerge:
         assert result.manifest is None
 
     def test_cleanup_only_from_mutating_ops(self, tmp_path):
-        """_cleanup_conflict_copies deletes conflict copies."""
+        """_cleanup_conflict_copies deletes only validator-approved conflicts."""
         from mind_meld.cli import _cleanup_conflict_copies
 
         backend = LocalBackend(tmp_path / "storage")
-        backend.put("manifests/abc/manifest.json.enc", b"data")
-        conflict = tmp_path / "storage" / "manifests" / "abc" / "manifest.json 2.enc"
-        conflict.write_bytes(b"conflict")
+        backend.put("manifests/abc/manifest.json.enc", b"original")
 
-        count = _cleanup_conflict_copies(backend, "abc")
+        # Write a REAL encrypted manifest as the conflict — validator approves.
+        real_manifest = {
+            "device_id": "abc",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "files": {},
+        }
+        enc = encrypt(serialize_manifest(real_manifest), PASSPHRASE, memory_kb=MEMORY_KB)
+        real_conflict = tmp_path / "storage" / "manifests" / "abc" / "manifest.json 2.enc"
+        real_conflict.write_bytes(enc)
+
+        # Also write a BOGUS file matching the same pattern — validator rejects.
+        bogus = tmp_path / "storage" / "manifests" / "abc" / "manifest.json 3.enc"
+        bogus.write_bytes(b"not a real manifest")
+
+        count = _cleanup_conflict_copies(backend, "abc", PASSPHRASE, MEMORY_KB)
         assert count == 1
-        assert not conflict.exists()
+        assert not real_conflict.exists(), "Real conflict copy must be deleted"
+        assert bogus.exists(), "Bogus sibling must be left alone"
 
 
 # ── Additive pull behavior ───────────────────────────────────────

@@ -336,44 +336,9 @@ class TestConflictDiscovery:
 # ── _predict_pull_outcome ────────────────────────────────────────────
 
 
-class TestAtomicWrite:
-    def test_cleans_up_tmp_on_write_failure(self, tmp_path: Path, monkeypatch) -> None:
-        """_atomic_write removes its .tmp sibling if write_bytes fails,
-        so the synced tree doesn't accumulate orphan .tmp files."""
-        from mind_meld.cli import _atomic_write
-
-        target = tmp_path / "out.md"
-
-        def fail_write(_self: Path, _data: bytes) -> None:
-            raise OSError("disk full")
-
-        monkeypatch.setattr(Path, "write_bytes", fail_write)
-
-        with pytest.raises(OSError):
-            _atomic_write(target, b"hello")
-
-        # No orphaned .tmp sibling
-        tmp_siblings = list(tmp_path.glob("*.tmp"))
-        assert tmp_siblings == []
-
-    def test_cleans_up_tmp_on_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
-        """If rename fails after write, the .tmp file is still cleaned up."""
-        from mind_meld.cli import _atomic_write
-
-        target = tmp_path / "out.md"
-
-        original_rename = Path.rename
-
-        def fail_rename(self: Path, target_path) -> Path:
-            raise OSError("cross-device link")
-
-        monkeypatch.setattr(Path, "rename", fail_rename)
-
-        with pytest.raises(OSError):
-            _atomic_write(target, b"hello")
-
-        tmp_siblings = list(tmp_path.glob("*.tmp"))
-        assert tmp_siblings == []
+# NOTE: cli.py:_atomic_write was deleted in Track 1D. Its tmp-cleanup
+# guarantees now live in fsutil.atomic_write_bytes — see tests/test_fsutil.py
+# (test_write_failure_unlinks_tmp, test_replace_failure_unlinks_tmp).
 
 
 class TestGcOldConflictFiles:

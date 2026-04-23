@@ -92,6 +92,32 @@ class TestSaveLoad:
         with pytest.raises(ConfigError, match="config not found"):
             load_config(tmp_path / "nonexistent.toml")
 
+    def test_save_routes_through_fsutil_with_fsync_true(
+        self, tmp_path, monkeypatch
+    ):
+        """save_config must use fsutil.atomic_write_bytes with fsync=True —
+        a corrupt config locks the user out of running mm entirely."""
+        from mind_meld import config as config_module
+
+        calls: list[dict] = []
+        real_write = config_module.fsutil.atomic_write_bytes
+
+        def spy_write(path, data, *, fsync=False, mode=None):
+            calls.append({"path": path, "fsync": fsync, "mode": mode})
+            real_write(path, data, fsync=fsync, mode=mode)
+
+        monkeypatch.setattr(config_module.fsutil, "atomic_write_bytes", spy_write)
+        config_path = tmp_path / "config.toml"
+        config = {
+            "device": {"id": "x", "name": "n"},
+            "storage": {"path": str(tmp_path / "s")},
+            "sync": {"claude_dir": str(tmp_path / ".claude"), "max_file_size": 1},
+            "crypto": {"argon2_memory_kb": 1},
+        }
+        save_config(config, config_path)
+        assert len(calls) == 1
+        assert calls[0]["fsync"] is True
+
 
 class TestGetSources:
     def _base_config(self, tmp_path):

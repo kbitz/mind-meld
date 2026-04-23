@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mind_meld import fsutil
+
 
 def write_sync_log(
     claude_dir: str | Path,
@@ -107,7 +109,11 @@ def write_sync_log(
                 lines.append(f"- {name}")
             lines.append("")
 
-        log_path.write_text("\n".join(lines))
+        # fsync=False: .mind-meld-log.md is a cosmetic signal for Claude
+        # Code to pick up; losing it on crash is harmless. Pull is the hot
+        # path — per-file fsync would add noticeable latency.
+        data = "\n".join(lines).encode("utf-8")
+        fsutil.atomic_write_bytes(log_path, data, fsync=False)
         written.append(log_path)
 
     return written
