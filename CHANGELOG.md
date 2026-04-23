@@ -2,6 +2,79 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.6.0] - 2026-04-22
+
+### Changed
+- **Crypto rewrite: process-scoped master key + HKDF per file (Track 1C).**
+  The per-file Argon2id derivation shipped in 0.5.x cost ~150ms per file. A
+  1000-file push burned ~4 minutes of CPU in crypto alone. v0.6 moves to the
+  pattern age, restic, and rclone use:
+  - `mm init` writes `mm-crypto-init` at the storage root: a single atomic
+    blob containing `[version][argon2_memory_kb][root_salt][keycheck_blob]`.
+  - Argon2id runs once per process to derive a master_key (cached).
+  - Per-file keys are HKDF-SHA256(master_key, per_file_salt, b"mm-file-v2"),
+    which takes microseconds.
+  - Measured speedup at production Argon2 params (64MB memory cost): encrypt
+    per-op 123ms → 0.07ms (~1760x), decrypt per-op 122ms → 0.01ms (~12200x).
+    End-to-end 100-file round-trip: 24.4s → 0.14s.
+- **Blob format v2.** `[version=0x02][salt:16][nonce:12][ciphertext+gcm_tag]`.
+  v1 blobs (format byte 0x01) are recognized and rejected loudly — Mind Meld
+  is pre-release and no v1 blobs exist in the wild. Downgrading to 0.5.x after
+  any v0.6 push will NOT work; stay on 0.6.x once you upgrade.
+- **`argon2_memory_kb` is now stored in `mm-crypto-init`**, not per-device
+  config. All devices use the value written by the first-device `mm init`.
+  `[crypto].argon2_memory_kb` in local config is a seed used only on
+  first-device bootstrap; subsequent devices read the authoritative value
+  from storage. Prevents silent key-derivation drift between devices.
+- **`mm init` now branches first-device vs second-device.** First device
+  double-prompts (set a new secret), generates mm-crypto-init, bootstraps.
+  Subsequent devices single-prompt, decrypt the keycheck blob to verify the
+  passphrase, and only then write local config + register the device +
+  store the passphrase in the keyring. A typo'd passphrase on a second device
+  aborts cleanly with no local state written.
+
+### Added
+- `LocalBackend.put_exclusive(key, data)` — atomic create-only primitive
+  implemented as temp-write + `os.link` (atomic AND EEXIST-exclusive). Used
+  by `bootstrap_crypto_init` for race-safe mm-crypto-init creation.
+- iCloud conflict resolution for `mm-crypto-init`. Two devices running
+  `mm init` simultaneously both write locally; iCloud reconciles later by
+  renaming one to `mm-crypto-init 2`. `fetch_crypto_init` picks the
+  deterministic winner (lex-smallest root_salt), canonicalizes it, and
+  deletes the loser. Every command runs this path at start so state stays
+  convergent.
+- `[crypto].root_salt_fp` in local config — 16-char hex fingerprint of the
+  storage's root_salt. On every command, we compare this to the current
+  storage fingerprint. Drift → refuse with actionable error ("Another device
+  may have bootstrapped concurrently. Re-run mm init.").
+- `tests/benchmarks/test_kdf_timing.py` — ad-hoc benchmark for before/after
+  crypto timing. Run locally via `python -m tests.benchmarks.test_kdf_timing`;
+  paste numbers in the PR description.
+
+### Fixed
+- Extensionless iCloud conflict copies (e.g. `mm-crypto-init 2`) are now
+  detected. Previously `_ICLOUD_CONFLICT_RE` required a file extension.
+- GCM tag mismatch error message now names all three causes (wrong
+  passphrase, wrong root_salt, corrupt blob) and suggests verifying
+  mm-crypto-init integrity.
+- Argon2 out-of-memory errors are translated to a user-actionable
+  `CryptoError` pointing at `[crypto].argon2_memory_kb`.
+
+### For contributors
+- 45 new tests under `tests/test_crypto.py`, `tests/test_storage_local.py`,
+  and `tests/test_integration.py` cover: master-key cache hits/misses,
+  HKDF determinism, mm-crypto-init tri-state fetch, bootstrap race,
+  deterministic winner + canonicalization, extensionless conflict regex,
+  first-device + second-device init paths, wrong-passphrase abort,
+  v1-blob refusal regression.
+- `tests/conftest.py` centralizes: default crypto session for tests that
+  call `encrypt`/`decrypt` directly, plus keyring isolation so the real OS
+  Keychain can't leak into tests.
+- See `docs/designs/crypto-v2.md` for the decision record, including the
+  alternatives considered and why the `LRU by (passphrase, salt)` proposal
+  in the original Track 1C entry was structurally broken (random per-file
+  salts mean ~0% cache-hit rate).
+
 ## [0.5.1] - 2026-04-22
 
 ### Fixed
