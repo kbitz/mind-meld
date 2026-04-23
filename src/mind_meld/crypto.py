@@ -452,8 +452,14 @@ def verify_passphrase(master_key: bytes, keycheck_blob: bytes) -> None:
 # ── passphrase retrieval ─────────────────────────────────────────────
 
 
-def get_passphrase() -> str:
-    """Retrieve passphrase via keyring → env var → prompt fallback chain."""
+def get_passphrase(non_interactive: bool = False) -> str:
+    """Retrieve passphrase via keyring → env var → prompt fallback chain.
+
+    When `non_interactive=True`, skip the `getpass` prompt and raise
+    CryptoError if neither keyring nor env var yielded a passphrase.
+    Hook-path callers (autopull/autopush) MUST pass non_interactive=True;
+    `getpass.getpass()` blocks on stdin and would hang the hook.
+    """
     try:
         import keyring as kr
 
@@ -466,6 +472,12 @@ def get_passphrase() -> str:
     env_passphrase = os.environ.get(ENV_VAR)
     if env_passphrase:
         return env_passphrase
+
+    if non_interactive:
+        raise CryptoError(
+            "no passphrase available (keyring empty and "
+            f"{ENV_VAR} unset); non-interactive caller cannot prompt."
+        )
 
     try:
         import getpass

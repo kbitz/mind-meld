@@ -61,8 +61,8 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Push with verbose output |
 | `mm pull` | Pull with verbose output |
-| `mm pull --resolve-interactive` | Pick a winner per-file at pull time instead of auto keep-both |
-| `mm pull --no-prompt` | Never prompt on conflicts — always keep-both (for scripting) |
+| `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
+| `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
 | `mm status` | Show local vs remote state |
 | `mm devices` | List registered devices |
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
@@ -91,7 +91,8 @@ Managing conflicts:
 
 - `mm conflicts` — list every `.sync-conflict-*` file across your sources, with age and canonical sibling.
 - `mm resolve` — walk each conflict interactively. Shows a unified diff and prompts: keep canonical / force conflict to canonical / keep both / abort. Acquires the mm lockfile so autopull can't race your decision.
-- `mm pull --resolve-interactive` — prompt per-conflict during the pull itself instead of auto keep-both.
+- `mm pull --conflict-mode prompt` — prompt per-conflict during the pull itself instead of auto keep-both.
+- `mm pull --conflict-mode fail` — preflight all files; if any would conflict, print the list and exit 3 (no writes) so CI can block on human review. Exit 3 is distinct from typer's usage-error exit 2, so a stale script still passing the removed `--no-prompt` flag can't be mistaken for a conflict refusal.
 - `mm gc --conflicts` — reap stale conflict files older than 30 days.
 - `mm diff` — predicts each modified file's pull outcome (write / merge / skip / conflict) before you run pull.
 
