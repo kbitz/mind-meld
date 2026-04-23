@@ -7,87 +7,30 @@ Group depends on the immediately preceding Group (single linear chain); Groups
 be fully parallel-safe (set-disjoint `_touches:_` footprints). Each track is
 one plan + implement session.
 
-All items originate from the 2026-04-22 `/full-review` audit (48 items) plus 3
-pre-existing P2/P3 feature bullets. Every item targets the v1.0 release
-(pre-1.0 cleanup sweep).
+All items originated from the 2026-04-22 `/full-review` audit plus review
+follow-ups accumulated across v0.5.1/v0.6.x. Every item targets the v1.0
+release.
+
+**Group 1 (Correctness foundation) shipped in v0.5.1–v0.6.2.** Track 1A tombstone
+loss landed as the tri-state `ManifestFetch` recovery chain (v0.5.1). Track 1A
+Task 2 (`_merge_manifests` union) was resolved via SPEC.md's "Merge invariants"
+section — files UNION + tombstones newest-wins is load-bearing because the
+walker is lossy; only tombstones drive deletion. Track 1B walker +
+manifest-read-path hardening shipped in v0.6.2. Track 1C crypto v2 shipped in
+v0.6.0. Track 1D storage hardening shipped in v0.6.1.
 
 ---
 
-## Group 1: Correctness foundation
-
-Critical tombstone and conflict-copy bugs that undermine the additive sync
-model shipped in v0.3/v0.4. Must land before any other refactor because other
-work assumes these are correct. Parallel wins in crypto and storage have no
-file overlap with correctness work, so they go alongside.
-
-**Pre-flight** (shared-infra; serial, one-at-a-time):
-- Unify version source of truth. `pyproject.toml` is canonical; `src/mind_meld/__init__.py` reads it via `importlib.metadata.version("mind-meld")` with a `"0.0.0+dev"` fallback for uninstalled source-tree runs. `VERSION` file is deleted. `mm --version` flag added.
-
-### Track 1A: CLI tombstone correctness
-_2 tasks · ~1 day (human) / ~15 min (CC) · high risk · [cli.py, integration tests]_
-_touches: src/mind_meld/cli.py, tests/test_integration.py, tests/test_additive_sync.py_
-
-Fix the CLI-side tombstone paths that can silently resurrect deleted files.
-
-- **Tombstone loss on empty-remote fallback** — `cli.py:815-821, 868-879`: if `_fetch_remote_manifest` returns None (all manifest copies corrupt), `generate_tombstones(local, None, device_id)` returns `{}` and push writes a manifest with no tombstones. Read tombstones from OTHER devices' manifests before accepting the empty fallback, or persist tombstones in a local sidecar. _src/mind_meld/cli.py, tests/test_additive_sync.py, ~50 lines._ (S)
-- **`_merge_manifests` union resurrects deletions** — `cli.py:172-213`: current merge takes `dict.update` union across conflict-copy manifests, so a file deleted in the newer manifest but present in an older copy survives. Rewrite to key off the newest-timestamp view of each source's file set; only carry forward older-copy entries not explicitly omitted by newer copies. _src/mind_meld/cli.py, tests/test_conflict_copy.py, ~150 lines._ (M)
-
-### Track 1B: Walker + manifest tombstone fixes
-_2 tasks · ~1 day (human) / ~12 min (CC) · high risk · [manifest.py, manifest tests]_
-_touches: src/mind_meld/manifest.py, tests/test_manifest.py, tests/test_conflict_copy.py_
-
-Stop conflict-copy files from propagating cross-device and normalize tombstone
-keys so legacy manifests migrate cleanly.
-
-- **Exclude `*.sync-conflict-*` from walker** — `manifest.py:25-41` EXCLUDED does not match conflict files, so the next push uploads them cross-device and other devices receive them as regular source files. Defeats the Syncthing model shipped in v0.4.0. Add the pattern plus a regression test that a conflict file in `memory/` is never walked. _src/mind_meld/manifest.py, tests/test_manifest.py, ~25 lines._ (S)
-- **Normalize tombstone keys at read time** — `manifest.py:463-569`: carry-forward preserves verbatim tombstone keys while new writes always use `src_name:path`. Pre-v2 bare-path tombstones silently fail to match `is_tombstoned(src, path, …)`. Normalize to `src_name:path` in `normalize_manifest` (or dual-check in `is_tombstoned`); add a regression test for mixed-format manifests. _src/mind_meld/manifest.py, tests/test_manifest.py, ~150 lines._ (M)
-
-### Track 1C: Argon2 KDF caching ✅ SHIPPED in v0.6.0
-_Shipped 2026-04-22. Final scope: ~900 LOC across 11 files. See
-`docs/designs/crypto-v2.md` for the full decision record._
-
-**Original proposal was structurally broken.** The entry below suggested an
-LRU keyed by `(passphrase-hash, salt)`. Per-file salts are `os.urandom(16)`,
-so the LRU hit rate is ~0% in every real code path — caught on
-`/plan-ceo-review`.
-
-**What actually shipped:** process-scoped master_key (Argon2 once per process,
-cached in `_MASTER_KEY_CACHE`) + HKDF-SHA256 per-file keys (microseconds).
-Mirrors the age/restic/rclone pattern. `mm-crypto-init` at the storage root
-carries root_salt + argon2_memory_kb + a keycheck blob used for second-device
-passphrase verification. Blob format v2 = `[0x02][salt][nonce][ct+tag]`.
-No v1 back-compat (pre-release, no users).
-
-**Measured speedup at production Argon2 (64MB):** encrypt per-op 123ms →
-0.07ms (~1760x), decrypt per-op 122ms → 0.01ms (~12200x). 100-file round-trip
-24.4s → 0.14s.
-
-**Coordination note:** Track 1C extended `storage/local.py` (`put_exclusive`
-via temp+`os.link`, iCloud conflict regex relaxed to optional extension).
-This overlaps Track 1D's footprint. Land 1D after 1C, OR fold 1D's
-atomic-write hardening into Track 1C — the "parallel-safe within Group 1"
-claim no longer holds for 1C ↔ 1D.
-
-### Track 1D: Storage layer hardening
-_3 tasks · ~1 day (human) / ~15 min (CC) · medium risk · [storage/local.py, lockfile.py]_
-_touches: src/mind_meld/storage/local.py, src/mind_meld/lockfile.py, tests/test_storage_local.py
-
-- **`LocalBackend.put` tmp-file cleanup** — `storage/local.py:31-43`: `tempfile.mkstemp(dir=path.parent, suffix=".tmp")` leaves stranded `tmp*.tmp` files on crash, ctrl-C, disk full, etc. Wrap put in try/except that unlinks on failure; add startup sweep of `data/**/tmp*.tmp`. _src/mind_meld/storage/local.py, tests/test_storage_local.py, ~50 lines._ (S)
-- **Tighten iCloud conflict regex** — `storage/local.py:17-23, 81-108`: `^(.+?)\s+(\d+)(\.[^.]+)$` matches any "name N.ext" sibling without verifying it's iCloud-generated. After matching, verify (decryptable as the expected type, or mtime near canonical) before `delete_conflict_copies` unlinks; add adversarial unit tests for "not a conflict copy" filenames. _src/mind_meld/storage/local.py, tests/test_storage_local.py, ~50 lines._ (S)
-- **Lockfile PID race** — `lockfile.py:28-68`: two concurrent mm processes can both pass the "stale detected" check before one atomically re-creates the lock. The `O_CREAT|O_EXCL` saves us, but the loser's LockError is misleading. Retry once after a 100ms sleep (or switch to `fcntl.flock`). _src/mind_meld/lockfile.py, tests/test_lockfile.py, ~40 lines._ (S)
-
----
-
-## Group 2: Error discipline
+## Group 1: Error discipline
 
 Typed-error hygiene across the CLI and eager config validation. These don't
-block user data integrity but they hide real bugs today. After Group 1's
-correctness work lands, the next concern is that failures surface clearly
+block user data integrity but they hide real bugs today. After the correctness
+foundation work landed, the next concern is that failures surface clearly
 instead of being swallowed.
 
-### Track 2A: Silent failures in cli.py
+### Track 1A: Silent failures in cli.py
 _5 tasks · ~1 day (human) / ~20 min (CC) · low risk · [cli.py]_
-_touches: src/mind_meld/cli.py, tests/test_integration.py
+_touches: src/mind_meld/cli.py, tests/test_integration.py_
 
 - **Typed catches in autopull/autopush** — `cli.py:1824-1907`: bare `except Exception` hides real bugs behind one-line stderr. Differentiate `Mind MeldError` (expected, one-liner) from `Exception` (unexpected, log traceback to `~/.config/mind_meld/autopull.log` with rotation). Since autopull is what Claude Code runs in the background, hidden data-integrity issues are the worst outcome. _src/mind_meld/cli.py, ~80 lines._ (M)
 - **Post-push auto-GC warning** — `cli.py:756-761`: `except Exception: pass` masks wrong-passphrase, storage-permission, and future refactor bugs. Catch `Mind MeldError` explicitly and emit a `[yellow]Warning:[/yellow]` line like the manifest-corruption warning; let unknown exceptions propagate. _src/mind_meld/cli.py, ~20 lines._ (S)
@@ -95,13 +38,37 @@ _touches: src/mind_meld/cli.py, tests/test_integration.py
 - **Document `--no-prompt` keep-both behavior** — `cli.py:940-941`: script mode silently keep-boths conflicts with no terminal feedback. Document the three resolve modes in the pull docstring; add `--fail-on-conflict` for CI-style usage. _src/mind_meld/cli.py, ~30 lines._ (S)
 - **Pull updates local `last_seen`** — push updates `last_seen` at `cli.py:882`, pull does not. A read-only device appears stale forever. Update on pull (or document "last_seen means last pushed" in a comment if the existing semantic is intentional). _src/mind_meld/cli.py, src/mind_meld/devices.py, ~20 lines._ (S)
 
-### Track 2B: Config eager validation + legacy cleanup
+### Track 1B: Config eager validation + legacy cleanup
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [config.py]_
-_touches: src/mind_meld/config.py, tests/test_config.py
+_touches: src/mind_meld/config.py, tests/test_config.py_
 
 - **Eager source validation** — `config.py:57-72, 103-116`: `_validate_sources` is only called from `get_sources`, not from `_validate`/`load_config`. Move it into `_validate` so TOML errors surface at load time, not mid-sync. _src/mind_meld/config.py, tests/test_config.py, ~40 lines._ (S)
 - **Delete Python 3.10 tomllib fallback** — `config.py:14-20`: `sys.version_info >= (3, 11)` / `tomli` fallback is unreachable (pyproject requires 3.11+). Replace with unconditional `import tomllib`; drop `import sys`. _src/mind_meld/config.py, ~10 lines._ (S)
 - **Scope legacy `claude_dir` defaulting** — `config.py:86-100`: `_apply_defaults` still treats `sync.claude_dir` as a first-class field, but `get_sources` only honors it in the legacy fallback branch. Delete the defaulting or document that `claude_dir` is only honored for legacy configs. Also: `.expanduser()` is applied without `.resolve()`, drifting from the canonical `.expanduser().resolve()` used everywhere else — fix both together. _src/mind_meld/config.py, tests/test_config.py, ~30 lines._ (S)
+
+---
+
+## Group 2: Post-v0.5.1 follow-ups
+
+Review-cycle residue from v0.5.1 (corrupt-manifest recovery) and v0.6.0 (crypto
+v2). Error-message and user-surface cleanups that were blocked on the tri-state
+`ManifestFetch` and `mm-crypto-init` bootstrap landing — both now shipped, so
+these are unblocked. Pre-flight holds three cli.py-only small additions; the
+track handles the meatier signature + stderr-contract work.
+
+**Pre-flight** (shared-infra; serial, one-at-a-time):
+- **`_merge_manifests` timestamp tiebreak determinism** — `cli.py:_merge_manifests` is non-deterministic across devices when two conflict copies carry identical ISO timestamps (same-second double-write). Add a `(timestamp, device_id, content-hash)` composite sort key so merged manifests are reproducible across devices. _src/mind_meld/cli.py, ~15 lines._ (S)
+- **`mm diag` subcommand** — dumps non-secret crypto state (format version bytes seen, `mm-crypto-init` fingerprint, argon2 params, cache state) for post-hoc debugging. After Track 1C a GCM-tag mismatch has three possible causes (wrong passphrase, wrong root_salt, corrupt blob); support triage needs a way to narrow it down without users posting raw blobs. _src/mind_meld/cli.py, ~40 lines._ (S)
+- **`mm init --force` guard** — currently re-running `mm init` on a storage root with existing devices silently re-bootstraps and bricks existing blobs. Require `--i-know-what-im-doing` (or interactive "type BRICK to proceed") before overwriting live crypto state. _src/mind_meld/cli.py, ~30 lines._ (S)
+
+### Track 2A: Error-surface follow-ups
+_4 tasks · ~0.5 day (human) / ~15 min (CC) · low risk · [cli.py, devices.py]_
+_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, tests/test_integration.py, tests/test_recovery.py_
+
+- **`_recover_prior_manifest` refuse-message rewrite** — current refuse message says "Run 'mm init' if storage is unrecoverable" but `mm init` doesn't delete the corrupt manifest, it generates a new device_id (which silently zeroes the deletion record fleet-wide). Either rewrite the guidance to say "delete `manifests/<device_id>/manifest.json.enc` from storage", or add a dedicated `mm recover --reset-manifest` subcommand. _src/mind_meld/cli.py, ~20 lines (message) or ~60 lines (subcommand)._ (S-M)
+- **`_error()` stderr routing** — `_error()` writes via `console.print`, which goes to stdout. In `autopush`/`autopull` quiet mode this violates the "silent, one-line output" contract documented for `mm autopull`/`mm autopush` in README.md, so failures currently emit both a rich stdout line AND the outer plain-text stderr line — confusing Claude Code integration. Route `_error` output to stderr. _src/mind_meld/cli.py, ~15 lines._ (S)
+- **`list_devices` corrupt entries warning** — `devices.py:53` silently drops corrupt `devices/*.json` entries; if a peer's `devices.json` is corrupt but its manifest is intact, peer fallback misses that peer and the corruption-recovery chain silently loses a data source. Log a warning per dropped peer, and consider blob directory listing as a secondary peer-discovery path. _src/mind_meld/devices.py, src/mind_meld/cli.py (`_collect_peer_tombstones`), ~40 lines._ (M)
+- **cli.py `Optional[X]` signature audit** — Codex flagged during Track 1A review that `_fetch_remote_manifest`'s `-> X | None` conflated "not-found" vs "error" and was the visible symptom of a wider pattern. Now that the tri-state migration has landed, sweep other `-> X | None` / `-> Optional[X]` signatures in `cli.py` and classify: (a) None is genuinely one meaning, (b) None conflates ≥2 states and callers would benefit from an explicit result type, (c) borderline — document the meaning of None in the docstring. Bound by time, not completeness. _src/mind_meld/cli.py, ~60 lines._ (S-M)
 
 ---
 
@@ -112,7 +79,7 @@ GC) alongside manifest dead-code removal. Parallel-safe across files.
 
 ### Track 3A: cli.py surgical hardening + `_delete_files` removal
 _5 tasks · ~1 day (human) / ~15 min (CC) · medium risk · [cli.py]_
-_touches: src/mind_meld/cli.py, tests/test_conflict_copy.py, tests/test_storage_local.py
+_touches: src/mind_meld/cli.py, tests/test_conflict_copy.py, tests/test_storage_local.py_
 
 - **`resolve --force` atomic rename** — `cli.py:1769-1775`: bare `Path.rename` fails across filesystems and has no tmp-then-rename safety. Use `shutil.move` or read-write-rename via `_atomic_write`; surface rename failure as a non-zero exit code. _src/mind_meld/cli.py, tests/test_conflict_copy.py, ~40 lines._ (S)
 - **16-char device_id in conflict filenames** — `cli.py:54, 541`: `device_id[:8]` truncation risks collision between two machines in same-second conflict-of-a-conflict scenarios. Widen to 16-char prefix (or full device_id). _src/mind_meld/cli.py, ~15 lines._ (S)
@@ -122,7 +89,7 @@ _touches: src/mind_meld/cli.py, tests/test_conflict_copy.py, tests/test_storage_
 
 ### Track 3B: Manifest dead code + v1-holdover cleanup
 _4 tasks · ~1 day (human) / ~15 min (CC) · low risk · [manifest.py, manifest tests]_
-_touches: src/mind_meld/manifest.py, tests/test_manifest.py, tests/test_additive_sync.py, tests/test_integration.py
+_touches: src/mind_meld/manifest.py, tests/test_manifest.py, tests/test_additive_sync.py, tests/test_integration.py_
 
 - **Delete `walk_directory` and `build_manifest`** — `manifest.py:182-209`: backward-compat aliases with no production callers; `test_manifest.py`/`test_integration.py`/`test_additive_sync.py` are the only users. Delete both and migrate the three test files to `walk_claude_source` / `build_manifest_v2`. _src/mind_meld/manifest.py, tests/test_manifest.py, tests/test_additive_sync.py, tests/test_integration.py, ~60 lines._ (M)
 - **Drop redundant v1 `"files"` key in v2 manifests** — `manifest.py:340-360`, `cli.py:200-202`: `build_manifest_v2` and `_merge_manifests` both write a top-level `"files"` key that no downstream reader consumes; `normalize_manifest`'s v1→v2 promotion is the only real compat shim. (Note: `cli.py:200-202` change also belongs logically here, but touches cli.py — land it as part of Track 3A instead if Group 3 ordering is preserved.) _src/mind_meld/manifest.py, ~20 lines._ (S)
@@ -143,14 +110,14 @@ across cli.py and manifest.py + merge.py.
 
 ### Track 4A: Decompose overgrown cli.py functions
 _2 tasks · ~1.5 days (human) / ~20 min (CC) · medium risk · [cli.py]_
-_touches: src/mind_meld/cli.py, tests/test_integration.py
+_touches: src/mind_meld/cli.py, tests/test_integration.py_
 
 - **Decompose `_pull_core` (247 lines)** — `cli.py:961-1208`: split into `_select_devices`, `_prefetch_manifests`, `_pull_one_source`, `_print_pull_summary` so the top-level reads as five orchestration calls. Also fix the double `list_devices` call (cli.py:994, 1008) while you're in there, and align `_predict_pull_outcome` return vocabulary with `ApplyOutcome` (cli.py:241-270). _src/mind_meld/cli.py, ~250 lines._ (L)
 - **Decompose `_apply_incoming_file` (114 lines)** — `cli.py:447-561`: extract `_apply_write`, `_apply_merge`, `_apply_conflict` helpers; `_apply_incoming_file` dispatches via outcome classification. _src/mind_meld/cli.py, ~150 lines._ (M)
 
 ### Track 4B: Walker + manifest + merge DRY
 _3 tasks · ~0.5 day (human) / ~12 min (CC) · low risk · [manifest.py, merge.py]_
-_touches: src/mind_meld/manifest.py, src/mind_meld/merge.py, tests/test_manifest.py, tests/test_merge.py
+_touches: src/mind_meld/manifest.py, src/mind_meld/merge.py, tests/test_manifest.py, tests/test_merge.py_
 
 - **Extract `_record_file` helper** — `manifest.py:143-177, 255-285`: 30 lines of per-file "stat → exclude → size-check → hash → record mtime/size/sha" duplicated verbatim between `walk_claude_source` and `walk_generic_source`. _src/mind_meld/manifest.py, ~50 lines._ (S)
 - **`_parse_tombstone_ts(iso_str)` helper** — `manifest.py:488-497, 553-563`: `generate_tombstones` and `collect_tombstones` both parse `deleted_at` with the same fromisoformat-add-utc-compare dance. _src/mind_meld/manifest.py, ~30 lines._ (S)
@@ -166,7 +133,7 @@ multi-source in day-to-day usage.
 
 ### Track 5A: Init decomposition + DEFAULT_SOURCES reuse + sync_log generalization
 _5 tasks · ~1.5 days (human) / ~25 min (CC) · medium risk · [cli.py, config.py, synclog.py]_
-_touches: src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/synclog.py, tests/test_integration.py, tests/test_synclog.py
+_touches: src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/synclog.py, tests/test_integration.py, tests/test_synclog.py_
 
 - **Decompose `init` (85 lines)** — `cli.py:645-730`: extract `_prompt_passphrase()`, `_maybe_add_gstack_source(config)`, `_save_and_register(config)` helpers. _src/mind_meld/cli.py, ~120 lines._ (M)
 - **Reuse `DEFAULT_SOURCES` in init** — `cli.py:663-668, 704-720`: `init()` hardcodes `"~/.claude"`, `52_428_800`, `65_536`, and re-inlines the full gstack source dict already in `config.DEFAULT_SOURCES`. Import and reuse `DEFAULT_CLAUDE_DIR` / `DEFAULT_MAX_FILE_SIZE` / `DEFAULT_ARGON2_MEMORY_KB`, and pick the gstack entry out of `DEFAULT_SOURCES`. _src/mind_meld/cli.py, src/mind_meld/config.py, ~40 lines._ (S)
@@ -182,7 +149,7 @@ Parallel-safe across tests and cli.py (style nits only).
 
 ### Track 6A: Test improvements
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [tests/]_
-_touches: tests/test_integration.py, tests/test_conflict_copy.py
+_touches: tests/test_integration.py, tests/test_conflict_copy.py_
 
 - **Migrate `TestPushPullRoundTrip` to CLI invocation** — `tests/test_integration.py:53-163`: bypasses the CLI entirely; uses `build_manifest`/`encrypt`/`storage.put` by hand. Does not exercise `_pull_core` or `_apply_incoming_file`. Replace with `runner.invoke(app, ["push"|"pull"])` like `TestMultiSourceSync`. Once migrated, the `build_manifest` import drops too. Add a CLI-driven end-to-end test covering push→pull→conflict→tombstone propagation together. _tests/test_integration.py, ~100 lines._ (M)
 - **Rename misleading test** — `tests/test_integration.py:103-163`: `test_deletion_propagation` is named after pre-additive behavior but the body asserts the opposite. Rename to `test_deletion_not_propagated_in_additive_model`. _tests/test_integration.py, ~5 lines._ (S)
@@ -190,7 +157,7 @@ _touches: tests/test_integration.py, tests/test_conflict_copy.py
 
 ### Track 6B: Style nits in cli.py
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [cli.py]_
-_touches: src/mind_meld/cli.py
+_touches: src/mind_meld/cli.py_
 
 - **Type hints on helper `backend` params** — `cli.py:108, 116, 124, 241, 273, 298, 332, 360, 381, 447, 564, 624, 766, 961`: helpers accept untyped `backend`, while `devices.py:13, 30, 43` types it as `LocalBackend`. Add `backend: LocalBackend` hints matching devices.py. _src/mind_meld/cli.py, ~20 lines._ (S)
 - **Standardize optional syntax** — `cli.py`: 6 `Optional[X]` and 11 `X | None` despite `from __future__ import annotations`. Standardize on `X | None` and drop `Optional` from the typing import. _src/mind_meld/cli.py, ~15 lines._ (S)
@@ -206,7 +173,7 @@ until post-cleanup so walker code is stable.
 
 ### Track 7A: `sync.include` / `sync.exclude` config
 _3 tasks · ~1.5 days (human) / ~20 min (CC) · medium risk · [config.py, manifest.py]_
-_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, tests/test_config.py, tests/test_manifest.py
+_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, tests/test_config.py, tests/test_manifest.py_
 
 - **Schema + validation for include/exclude globs** — add `sync.include` / `sync.exclude` arrays to config.toml schema; validate glob patterns; document precedence (exclude wins over include). _src/mind_meld/config.py, tests/test_config.py, ~80 lines._ (M)
 - **Walker applies filters** — integrate the filters into `walk_claude_source` / `walk_generic_source` so filtered projects never get hashed. _src/mind_meld/manifest.py, tests/test_manifest.py, ~60 lines._ (S)
@@ -215,7 +182,7 @@ _touches: src/mind_meld/config.py, src/mind_meld/manifest.py, tests/test_config.
 ---
 
 ## Group 8: Mtime hash cache (P3)
-_Depends on: Group 6_
+_Depends on: Group 6 (Test hygiene + style polish)_
 
 Push-side perf: skip re-hashing files whose mtime hasn't changed since the
 last push. Parallel to Group 7 — both depend on Group 6 but touch different
@@ -223,7 +190,7 @@ code paths.
 
 ### Track 8A: Local mtime→hash cache
 _3 tasks · ~1.5 days (human) / ~25 min (CC) · medium risk · [manifest.py, new local state]_
-_touches: src/mind_meld/manifest.py, src/mind_meld/cache.py, tests/test_manifest.py
+_touches: src/mind_meld/manifest.py, src/mind_meld/cache.py, tests/test_manifest.py_
 
 - **`~/.config/mind_meld/local-manifest.json` cache** — design + write a per-device local cache: path → (mtime, size, sha). Fallback semantics: if mtime is unreliable (network drives, clock drift), invalidate the cache entry. _src/mind_meld/cache.py, ~100 lines._ (M)
 - **Walker reads/writes the cache** — on hash, check cache first; on hash-miss or mtime-change, re-hash and update. _src/mind_meld/manifest.py, tests/test_manifest.py, ~80 lines._ (M)
@@ -232,7 +199,7 @@ _touches: src/mind_meld/manifest.py, src/mind_meld/cache.py, tests/test_manifest
 ---
 
 ## Group 9: Three-way merge base (P3)
-_Depends on: Group 6_
+_Depends on: Group 6 (Test hygiene + style polish)_
 
 Pull-side correctness upgrade: track "last-synced hash" per file to
 distinguish "remote changed, I didn't" from "we both changed." Revisit item
@@ -240,7 +207,7 @@ per v0.4.0 context note. Parallel to Groups 7-8.
 
 ### Track 9A: Stored last-synced hash
 _3 tasks · ~2 days (human) / ~30 min (CC) · high risk · [cli.py, new state file]_
-_touches: src/mind_meld/cli.py, src/mind_meld/sync_state.py, tests/test_conflict_copy.py
+_touches: src/mind_meld/cli.py, src/mind_meld/sync_state.py, tests/test_conflict_copy.py_
 
 - **`~/.config/mind_meld/sync-state.json`** — per-source, per-file last-synced hashes. Schema, persistence, corruption recovery. _src/mind_meld/sync_state.py, ~100 lines._ (M)
 - **Three-way conflict detection** — on pull, compare local hash, remote hash, and last-synced base. Fast-forward when only one side changed; conflict only when both diverged from base. _src/mind_meld/cli.py, tests/test_conflict_copy.py, ~150 lines._ (M)
@@ -267,16 +234,13 @@ Adjacency list (who depends on whom):
 Track detail per group:
 
 ```
-Group 1: Correctness foundation
-  Pre-flight ............... ~30 min
-  ├── Track 1A ............ ~1 day ... 2 tasks ... cli.py tombstone
-  ├── Track 1B ............ ~1 day ... 2 tasks ... walker + manifest tombstone
-  ├── Track 1C ............ ~0.5d .... 1 task .... Argon2 KDF caching
-  └── Track 1D ............ ~1 day ... 3 tasks ... storage hardening
+Group 1: Error discipline
+  ├── Track 1A ............ ~1 day ... 5 tasks ... silent failures (cli.py)
+  └── Track 1B ............ ~0.5d .... 3 tasks ... config eager validation
 
-Group 2: Error discipline
-  ├── Track 2A ............ ~1 day ... 5 tasks ... silent failures (cli.py)
-  └── Track 2B ............ ~0.5d .... 3 tasks ... config eager validation
+Group 2: Post-v0.5.1 follow-ups
+  Pre-flight ............... ~1 hr (3 cli.py-only additions)
+  └── Track 2A ............ ~0.5d .... 4 tasks ... error-surface follow-ups
 
 Group 3: cli.py hardening + dead code in manifest
   ├── Track 3A ............ ~1 day ... 5 tasks ... cli.py surgical hardening
@@ -304,14 +268,13 @@ Group 9: Three-way merge base (P3)
   └── Track 9A ............ ~2 days .. 3 tasks ... stored last-synced hash
 ```
 
-**Total: 9 groups · 13 tracks · 36 tasks**
+**Total: 9 groups · 13 tracks · 40 tasks** (+ 4 pre-flight items)
 
 ---
 
 ## Future (Phase 2+)
 
-No items currently deferred to Phase 2 — the user opted to run v0.x → v1.0 as
-one cleanup sweep.
+- **`mm rekey` passphrase rotation** — Format v2 makes `master_key` the rotation boundary but v2 blobs don't carry a `key_scheme` byte (dropped per /plan-ceo-review simplification). Rotation requires format v3: either re-wrap `master_key` under the new passphrase, or re-encrypt every blob under a freshly-derived `master_key`. Completes the crypto story but requires a format bump and migration path; explicitly deferred at plan-ceo-review on 2026-04-22. _src/mind_meld/crypto.py, src/mind_meld/cli.py, SPEC.md, ~200-400 lines._ (M-L) _Deferred because: post-1.0 P3 — requires format v3 and a migration dance; no users blocked pre-1.0._
 
 ---
 
