@@ -2,6 +2,42 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.7.0] - 2026-04-23
+
+Track 1A: silent-failure cleanup in `autopull`/`autopush` + pull-side conflict-mode
+unification. Continues the Group 1 error-discipline theme after Tracks 1B, 1C, 1D.
+
+### BREAKING
+- **`mm pull --no-prompt` and `--resolve-interactive` are removed.** Replaced by a single `--conflict-mode {prompt|keep-both|fail}` option (default `keep-both`). Migration:
+  - `mm pull` (no flags)              → `mm pull` (unchanged — default is keep-both).
+  - `mm pull --no-prompt`             → `mm pull` (the default IS keep-both).
+  - `mm pull --resolve-interactive`   → `mm pull --conflict-mode prompt`.
+  - *(new)* `mm pull --conflict-mode fail` — preflights every file via `_predict_pull_outcome`; if any would conflict, prints the list and exits **3** (not 2) with no writes. For CI. Exit 3 avoids colliding with typer/click's usage-error exit 2, so a stale script still passing the removed flags can't be misclassified as a conflict refusal.
+
+### Fixed
+- **`autopull`/`autopush` silently swallowed bugs.** The outer `except Exception` reduced every unexpected failure to a single cryptic stderr line. On the Claude Code hot path this hid data-integrity issues for days. Now: `FileNotFoundError`-equivalent (missing config) → silent; `MindMeldError` subclasses (`ConfigError`, `CryptoError`, `LockError`) → typed one-line stderr; anything else → one-line stderr + full traceback appended to `~/.config/mind-meld/autopull.log` or `autopush.log` (truncate-tail at 1 MB, keep last 512 KB). Shared prelude extracted into `_auto_command_setup` + `_log_unexpected` helpers so the contract can't drift between the two commands.
+- **`autopull`/`autopush` could hang on missing passphrase.** `get_passphrase()` previously fell through to `getpass.getpass()` when neither the keyring nor `MINDMELD_PASSPHRASE` yielded a secret — fine for interactive commands, a hang for hook-path callers. New `non_interactive: bool = False` parameter: when True, raise `CryptoError` instead of prompting. `autopull` and `autopush` pass `non_interactive=True`; every other caller keeps the interactive fallback.
+- **Corrupt peer manifests were silent in autopull.** The "manifest is corrupt, skipping pull from this device" warning in `_pull_core` was gated on `not quiet`, so autopull (`quiet=True`) never surfaced a load-bearing corruption signal. Now routed to stderr regardless of quiet — corrupt-manifest recovery is load-bearing (see CLAUDE.md) and silent skip = partial pull dressed up as success.
+- **Sidecar write failures were silent in autopush.** Same class: the "failed to write recovery sidecar" warning was gated on `not quiet`, so autopush silently lost its recovery path. Now routed to stderr regardless of quiet.
+- **Unknown remote sources silently skipped on pull.** When a peer advertised a source name the local config didn't know about (rename drift, missed migration), the `skipping unknown source '<name>'` message was gated on `--verbose and not quiet` — silent-partition risk. Now always warns, and `PullResult.total_skipped_unknown_source` counts `(device, source)` pairs for the summary line. `autopull` emits a one-line stderr summary when the count is non-zero.
+- **`mm devices` showed "Last Seen" but the value was really "last push".** `register_device` used to seed `last_seen` at registration time, so a registered-but-never-pushed device rendered as though it had just pushed. Seed removed: `last_seen` now means exactly what it says ("last push"), registered devices render as em-dash until the first push, and the column header is renamed to "Last Push."
+
+### Added
+- `mm pull --conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `fail` mode preflights via `_predict_pull_outcome`, exits **3** on any predicted conflict with no writes. Best-effort — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface late conflicts.
+- `_log_unexpected(verb, exc)` hand-rolled appender (stdlib-only, no `logging` module — avoids handler-duplication regressions in long-lived test runs). Writes ISO timestamp + mm version + full traceback. Any failure inside the logger itself is swallowed: a broken log file must never crash the hook.
+- `PullResult.total_skipped_unknown_source: int` — counts `(device, source_name)` pairs.
+- `get_passphrase(non_interactive: bool = False)` — new parameter.
+- 28 new tests in `tests/test_track_1a.py` covering: the 14 plan-derived cases (regressions, hook correctness, log rotation, conflict-mode preflight, non-interactive passphrase) plus 14 added during /review pass (typed-error no-log branches, --conflict-mode prompt threading, end-to-end no-passphrase flow, register_device storage-level contract, _log_unexpected swallow-failure, unexpected-crypto-error logging, cross-peer preflight overlap, breadcrumb on success / lock-held, `mm status` surfacing of breadcrumb, concurrent-writer log safety, typed-error-without-cause no-log, _log_unexpected truncate-tail idempotency, unwrapped config error logging). Total suite is now 402 tests.
+- `~/.config/mind-meld/last-autorun.json` breadcrumb on every `autopull` / `autopush` invocation (success, lock-skip, config-missing, crypto-error, failed). `mm status` surfaces it as "Last auto-pull: 2026-04-23T..." so a wedged flock is no longer invisible to the user.
+- `--conflict-mode fail` preflight now simulates **cross-peer** writes via an in-memory overlay. If peer A would write role.md=Y and peer B ships role.md=Z, the preflight now flags the B-vs-A conflict even though starting local state is empty — previously the contract "no writes on conflict" could be violated during multi-peer pulls.
+- `_log_unexpected` writes are serialized with `fcntl.flock(LOCK_EX)` so two concurrent failing hooks can't corrupt each other's traceback.
+- Wrapped typed errors (`ConfigError from tomllib.TOMLDecodeError`, future `X from OSError`) now log the full cause chain; pure validation errors (no `__cause__`) stay stderr-only. Preserves forensic value without spamming the log with expected conditions.
+
+### For contributors
+- `CLAUDE.md`, `SPEC.md`, `README.md` updated for the `--conflict-mode` unification and the `autopull`/`autopush` error contract.
+- Exit code 3 (new, for `--conflict-mode fail`) deliberately avoids typer/click's usage-error exit 2. Scripts that still pass the removed `--no-prompt` / `--resolve-interactive` flags will hit usage-error exit 2 — distinct from conflict refusal.
+- `docs/TODOS.md` gets `[plan-eng-review 2026-04-23 Track 1A]`: full `quiet`-path audit — classify every `if not quiet:` in cli.py as "verbose-only" vs "load-bearing." Two known load-bearing gates are patched in this release; the pattern is likely wider.
+
 ## [0.6.2] - 2026-04-23
 
 Track 1B: Walker conflict-file exclusion + manifest read-path hardening.
