@@ -30,7 +30,7 @@ pytest. Use tmp_path for local backend. Run: `pytest tests/`
 ## Commands
 mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | autopull | autopush
 
-Pull flags: `--resolve-interactive` (prompt per-file), `--no-prompt` (script mode, always keep-both).
+Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 2 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--conflicts` (also reap `.sync-conflict-*` files older than 30 days).
 
 ## Corrupt-manifest recovery (load-bearing)

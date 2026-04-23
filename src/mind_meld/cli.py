@@ -37,7 +37,7 @@ from mind_meld.crypto import (
     verify_passphrase,
 )
 from mind_meld.devices import list_devices, register_device, update_last_seen
-from mind_meld.errors import ConfigError, CryptoError, LockError, ManifestError, MindMeldError, StorageError
+from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError, StorageError
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -101,12 +101,18 @@ class PullResult:
                    .sync-conflict-*, remote written to canonical
       unchanged  — apply-time re-read showed local already matches remote
       failed     — rename/write error; local preserved, no change applied
+
+    `total_skipped_unknown_source` counts (device, source_name) pairs where
+    a peer advertised a source name the local config doesn't know about
+    (partition risk: if a user renames a source, peers' data stops syncing
+    silently). One increment per (device, source) pair per pull, not per file.
     """
     total_written: int = 0
     total_merged: int = 0
     total_skipped: int = 0
     total_conflicted: int = 0
     total_failed: int = 0
+    total_skipped_unknown_source: int = 0
     bytes_transferred: int = 0
     device_names: list[str] = field(default_factory=list)
     elapsed: float = 0.0
@@ -1291,10 +1297,20 @@ def _push_core(
 
     # Write sidecar (best-effort: failure warns but does not abort push;
     # the remote manifest succeeded, so peers still have a path to recovery).
+    # Warn on both paths: without the sidecar, future corruption recovery
+    # on THIS device can only rely on peers -- silently degrading that path
+    # defeats the TODOS #1 guarantee.
     try:
         sidecar.write(local_manifest)
     except (OSError, StorageError) as e:
-        if not quiet:
+        if quiet:
+            print(
+                f"mm: warning: failed to write recovery sidecar "
+                f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
+                f"corruption recovery will fall back to peer devices.",
+                file=sys.stderr,
+            )
+        else:
             console.print(
                 f"[yellow]Warning:[/yellow] failed to write recovery sidecar "
                 f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
@@ -1337,6 +1353,9 @@ def _push_core(
 # ── pull ──────────────────────────────────────────────────────────────
 
 
+ConflictMode = Literal["prompt", "keep-both", "fail"]
+
+
 @app.command()
 def pull(
     from_device: Optional[str] = typer.Option(
@@ -1347,24 +1366,35 @@ def pull(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     dry_run: bool = typer.Option(False, "--dry-run"),
-    no_prompt: bool = typer.Option(
-        False, "--no-prompt",
-        help="Don't prompt on conflicts — default keep-both (for scripting)",
-    ),
-    resolve_interactive: bool = typer.Option(
-        False, "--resolve-interactive",
-        help="Prompt for each conflict (default: auto keep-both)",
+    conflict_mode: ConflictMode = typer.Option(
+        "keep-both",
+        "--conflict-mode",
+        help=(
+            "How to handle conflicts (local edited, remote differs). "
+            "'keep-both' (default): auto-rename local to .sync-conflict-*, "
+            "remote wins canonical. 'prompt': ask per-file. 'fail': preflight "
+            "all files and exit 2 (no writes) if any would conflict -- for CI."
+        ),
+        case_sensitive=False,
     ),
 ) -> None:
     """Pull session data from storage to local.
 
-    Conflicts (local edited, remote differs) default to keep-both: remote
-    wins the canonical path, local is renamed to .sync-conflict-*. Use
-    --resolve-interactive to pick per-file at pull time.
-    """
-    if no_prompt and resolve_interactive:
-        _error("--no-prompt and --resolve-interactive are mutually exclusive")
+    Conflicts (local edited, remote differs) resolve per `--conflict-mode`:
+    - keep-both (default): remote wins canonical, local renamed to
+      .sync-conflict-*. Files preserved either way.
+    - prompt: interactively pick per file at pull time.
+    - fail: preflight all files via `_predict_pull_outcome`; if any would
+      conflict, print them and exit 3 with no writes (best-effort: a file
+      edited between preflight and apply may still produce a .sync-conflict-*,
+      re-run pull to surface it). For CI use.
 
+    Exit codes: 0 success, 1 internal error, 2 usage error (typer default),
+    3 --conflict-mode fail found conflicts. Exit 3 was chosen (not 2) so CI
+    scripts can distinguish "broken invocation" from "conflict refusal" --
+    the removal of --no-prompt / --resolve-interactive would otherwise cause
+    stale scripts to hit usage-error exit 2 and be misclassified as conflicts.
+    """
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
 
@@ -1381,7 +1411,7 @@ def pull(
             _error(str(e))
         _pull_core(
             config, passphrase, memory_kb, from_device, source, verbose, dry_run,
-            interactive_resolve=resolve_interactive,
+            conflict_mode=conflict_mode,
         )
     finally:
         release_lock()
@@ -1396,7 +1426,7 @@ def _pull_core(
     verbose: bool = False,
     dry_run: bool = False,
     quiet: bool = False,
-    interactive_resolve: bool = False,
+    conflict_mode: ConflictMode = "keep-both",
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
@@ -1405,10 +1435,19 @@ def _pull_core(
     line-merged. Non-mergeable files with divergent local edits are handled
     per the _apply_incoming_file decision tree: skip (local newer),
     conflict-copy (remote wins canonical, local preserved as .sync-conflict-*),
-    or interactively resolved if interactive_resolve=True.
+    or interactively resolved when `conflict_mode == "prompt"`.
+
+    `conflict_mode`:
+      - "keep-both": default; auto keep-both on conflict.
+      - "prompt": ask per-file (interactive only).
+      - "fail": preflight every file; if any would conflict, raise
+        typer.Exit(2) with no writes. Preflight is best-effort (TOCTOU: a
+        file edited between preflight and apply may still produce a
+        .sync-conflict-*).
 
     When quiet=True, suppresses all rich console output (for autopull).
     """
+    interactive_resolve_flag = (conflict_mode == "prompt")
     start = time.time()
     my_device_id = config["device"]["id"]
 
@@ -1442,12 +1481,23 @@ def _pull_core(
     for d in all_devices_list:
         did = d["device_id"]
         peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
-        if peer_fetch.status == "corrupt" and not quiet:
-            console.print(
-                f"[yellow]Warning:[/yellow] manifest for device "
-                f"{d.get('device_name', did)} ({did}) is corrupt — skipping "
-                f"pull from this device."
+        if peer_fetch.status == "corrupt":
+            # Corrupt peer manifest is load-bearing signal (silent skip =
+            # partial pull that looks like a successful pull). Surface
+            # to stderr even in quiet mode so autopull's hook caller sees it.
+            msg = (
+                f"mm: warning: manifest for device "
+                f"{d.get('device_name', did)} ({did}) is corrupt - "
+                f"skipping pull from this device."
             )
+            if quiet:
+                print(msg, file=sys.stderr)
+            else:
+                console.print(
+                    f"[yellow]Warning:[/yellow] manifest for device "
+                    f"{d.get('device_name', did)} ({did}) is corrupt - "
+                    f"skipping pull from this device."
+                )
         manifest_cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
 
     # Pre-collect all tombstones from ALL device manifests for O(1) lookup
@@ -1456,11 +1506,80 @@ def _pull_core(
         lambda did: manifest_cache.get(did),
     )
 
+    # Preflight for --conflict-mode fail: classify every file BEFORE any
+    # download/write. Any predicted conflict -> exit 3 with the full list,
+    # zero writes. Race-safe only best-effort (TOCTOU between preflight and
+    # apply is possible; re-run pull to surface late conflicts).
+    #
+    # Cross-peer simulation: walking peers in iteration order, we maintain
+    # an overlay of (src_name, rel_path) -> predicted-final-sha for files
+    # preflight said would be cleanly written. When a later peer's manifest
+    # ships the same path, we predict against the overlay's sha (what local
+    # WILL be after the earlier peer's write) rather than the stale on-disk
+    # sha. Without this, peer A writing Y then peer B writing Z is missed:
+    # preflight sees empty local for both, predicts clean, apply produces
+    # a .sync-conflict-* — exactly the "no writes on fail" violation we
+    # built the flag to prevent.
+    if conflict_mode == "fail":
+        predicted_conflicts: list[tuple[str, str, str]] = []  # (device_name, src_name, rel_path)
+        overlay: dict[tuple[str, str], str] = {}  # (src_name, rel_path) -> sha256
+        for device in devices:
+            did = device["device_id"]
+            dname = device["device_name"]
+            remote_manifest = manifest_cache.get(did)
+            if remote_manifest is None:
+                continue
+            for src_name, src_data in remote_manifest.get("sources", {}).items():
+                if source_filter and src_name != source_filter:
+                    continue
+                if src_name not in local_sources_map:
+                    continue  # unknown source is counted elsewhere, not a conflict
+                base_path = local_sources_map[src_name]
+                for rel_path, info in src_data.get("files", {}).items():
+                    if is_tombstoned(src_name, rel_path, all_tombstones):
+                        continue
+                    overlay_sha = overlay.get((src_name, rel_path))
+                    if overlay_sha is not None:
+                        # An earlier peer already predicted a clean write
+                        # for this path. Next peer conflicts iff its sha
+                        # differs from what the earlier peer will leave.
+                        if overlay_sha != info.get("sha256"):
+                            predicted_conflicts.append((dname, src_name, rel_path))
+                        # else: second peer's content matches what the
+                        # earlier write produces -> unchanged, no conflict.
+                        continue
+                    outcome = _predict_pull_outcome(rel_path, info, base_path)
+                    if outcome == "conflict":
+                        predicted_conflicts.append((dname, src_name, rel_path))
+                    elif outcome in ("write", "merge"):
+                        overlay[(src_name, rel_path)] = info.get("sha256", "")
+        if predicted_conflicts:
+            if not quiet:
+                console.print(
+                    f"[red]Pull refused:[/red] "
+                    f"{len(predicted_conflicts)} file(s) would conflict."
+                )
+                for dname, src_name, rel_path in predicted_conflicts:
+                    console.print(f"  [yellow]! conflict[/yellow] {src_name}/{rel_path} (from {dname})")
+                console.print(
+                    "\nResolve conflicts locally, or re-run with "
+                    "--conflict-mode keep-both to auto-rename."
+                )
+            else:
+                # quiet path (autopull): one-liner per conflict
+                for dname, src_name, rel_path in predicted_conflicts:
+                    print(
+                        f"mm: conflict {src_name}/{rel_path} (from {dname})",
+                        file=sys.stderr,
+                    )
+            raise typer.Exit(3)
+
     total_written = 0
     total_merged = 0
     total_skipped = 0
     total_conflicted = 0
     total_failed = 0
+    total_skipped_unknown_source = 0
     bytes_transferred = 0
     device_names: list[str] = []
     # Deferred durability: per-file writes skip fsync; at the end of pull
@@ -1491,8 +1610,18 @@ def _pull_core(
                 continue
 
             if src_name not in local_sources_map:
-                if verbose and not quiet:
-                    console.print(f"  [dim]skipping unknown source '{src_name}'[/dim]")
+                # Not verbose-only: a peer shipping data for a source the
+                # local config doesn't know about is a partition risk
+                # (rename drift, missed config migration). Always warn.
+                total_skipped_unknown_source += 1
+                msg = (
+                    f"skipping unknown source '{src_name}' from {dname} - "
+                    f"not configured locally"
+                )
+                if quiet:
+                    print(f"mm: warning: {msg}", file=sys.stderr)
+                else:
+                    console.print(f"  [yellow]Warning:[/yellow] {msg}")
                 continue
 
             remote_files = src_data.get("files", {})
@@ -1543,7 +1672,7 @@ def _pull_core(
 
             bt, outcomes = _download_and_apply(
                 backend, base_path, to_download, did, passphrase, memory_kb,
-                interactive_resolve=interactive_resolve,
+                interactive_resolve=interactive_resolve_flag,
                 verbose=(verbose and not quiet),
             )
             bytes_transferred += bt
@@ -1639,6 +1768,7 @@ def _pull_core(
         total_skipped=total_skipped,
         total_conflicted=total_conflicted,
         total_failed=total_failed,
+        total_skipped_unknown_source=total_skipped_unknown_source,
         bytes_transferred=bytes_transferred,
         device_names=device_names,
         elapsed=elapsed,
@@ -1657,6 +1787,10 @@ def _pull_core(
             parts.append(f"[yellow]{total_conflicted} conflicts[/yellow]")
         if total_failed:
             parts.append(f"[red]{total_failed} failed[/red]")
+        if total_skipped_unknown_source:
+            parts.append(
+                f"[yellow]{total_skipped_unknown_source} unknown source(s) skipped[/yellow]"
+            )
         if parts:
             console.print("  " + ", ".join(parts))
         else:
@@ -1714,6 +1848,22 @@ def status(
 
     console.print(f"\n[bold]Mind Meld Status[/bold]")
     console.print(f"  Device: {device_name} ({device_id})")
+
+    # Surface the last autopull/autopush breadcrumb so a wedged sync
+    # (silent lock contention, missing passphrase, bad config) is visible.
+    breadcrumb_path = _autorun_breadcrumb_path()
+    if breadcrumb_path.exists():
+        try:
+            import json as _json
+            crumb = _json.loads(breadcrumb_path.read_text())
+            ts = crumb.get("timestamp", "?")
+            verb = crumb.get("verb", "?")
+            outcome = crumb.get("outcome", "?")
+            detail = crumb.get("detail")
+            outcome_str = f"{outcome}: {detail}" if detail else outcome
+            console.print(f"  Last auto-{verb}: {ts} ({outcome_str})")
+        except (OSError, ValueError):
+            pass  # corrupt breadcrumb is not worth surfacing an error for
     if fetch.status == "missing":
         console.print(
             "  [dim]Remote manifest: not yet pushed from this device.[/dim]"
@@ -1801,15 +1951,18 @@ def devices() -> None:
     table = Table(title="Registered Devices")
     table.add_column("Name")
     table.add_column("ID")
-    table.add_column("Last Seen")
+    table.add_column("Last Push")
     table.add_column("")
 
     for d in device_list:
         marker = "[green]\u2190 this device[/green]" if d["device_id"] == my_id else ""
+        # `last_seen` is seeded only on push (not at register time), so a
+        # registered-but-never-pushed device renders as an em-dash rather
+        # than misleadingly showing its registration time.
         table.add_row(
             d.get("device_name", "?"),
             d["device_id"],
-            d.get("last_seen", "?"),
+            d.get("last_seen", "\u2014"),
             marker,
         )
 
@@ -2395,42 +2548,259 @@ def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
     return reaped
 
 
-# ── autopull ──────────────────────────────────────────────────────────
+# ── auto commands (hook-safe: silent, never-prompt, typed errors) ─────
+
+
+_AUTO_LOG_MAX_BYTES = 1_000_000
+_AUTO_LOG_KEEP_BYTES = 512_000
+
+
+def _autorun_breadcrumb_path() -> Path:
+    """`last-autorun.json` next to the recovery sidecar.
+
+    Resolves `sidecar.SIDECAR_DIR` at call time so tests that monkeypatch
+    the source constant get full isolation.
+    """
+    return sidecar.SIDECAR_DIR / "last-autorun.json"
+
+
+def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None:
+    """Record the last autopull/autopush attempt for forensic observability.
+
+    Written on EVERY invocation -- success, lock-skip, config-missing,
+    typed error, unexpected error. `mm status` surfaces this so a user can
+    see 'last auto-sync attempt: 3h ago, skipped (lock held)' instead of
+    wondering why sync appears wedged.
+
+    Silent contract preserved: nothing is printed. Any failure here is
+    swallowed -- a broken breadcrumb must never crash the hook.
+    """
+    try:
+        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "verb": verb,
+            "outcome": outcome,
+        }
+        if detail:
+            payload["detail"] = detail
+        import json as _json
+        _autorun_breadcrumb_path().write_text(_json.dumps(payload, indent=2))
+    except Exception:
+        pass
+
+
+def _auto_log_path(verb: str) -> Path:
+    """`auto{verb}.log` next to the recovery sidecar.
+
+    Resolves `sidecar.SIDECAR_DIR` at call time (not import time) so a test
+    monkeypatching `mind_meld.sidecar.SIDECAR_DIR` alone is enough to redirect
+    the log location. Import-time capture would be a foot-gun — a test that
+    forgets to patch both the source constant and this module's alias would
+    silently leak log writes to the user's real `~/.config/mind-meld/`.
+    """
+    return sidecar.SIDECAR_DIR / f"auto{verb}.log"
+
+
+def _log_unexpected(verb: str, exc: BaseException) -> None:
+    """Append a traceback block to ~/.config/mind-meld/auto{verb}.log.
+
+    Hand-rolled (not `logging.handlers.RotatingFileHandler`) because this runs
+    from short-lived typer commands: a named logger would either stack handlers
+    across in-process test calls, or need explicit teardown.
+
+    When the file exceeds `_AUTO_LOG_MAX_BYTES`, keep only the last
+    `_AUTO_LOG_KEEP_BYTES` so the freshest tracebacks survive. The whole
+    truncate/append sequence is guarded by `fcntl.flock(LOCK_EX)` so two
+    racing failed hooks can't corrupt the log -- the original concern was
+    that process A's truncate followed by process B's stat-read-truncate
+    could silently erase A's just-written traceback, killing the one forensic
+    artifact at the exact moment we needed it.
+
+    Cause-chain logging (see docstring in _should_log_cause): if `exc.__cause__`
+    is set (typed-error raised via `raise X from e`), we include the full
+    chain so a `ConfigError` wrapping a `PermissionError` doesn't lose the
+    original OSError + errno. For typed errors with no cause, this function
+    is not called -- the caller short-circuits to stderr-only.
+
+    Any failure here is swallowed; the caller has already emitted the
+    one-line stderr message, and a broken log file must never crash the hook.
+    """
+    import fcntl
+    import traceback
+
+    try:
+        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+        path = _auto_log_path(verb)
+        block = (
+            f"--- {datetime.now(timezone.utc).isoformat()} mm {__version__} "
+            f"auto{verb}\n"
+            f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}"
+            f"\n"
+        )
+        # Open read-write, create if missing. One fd, one lock, full rotate+append
+        # in a single critical section. "ab+" would truncate to end on open on
+        # some platforms; "a+b" is portable and gives us seek freedom.
+        with open(path, "a+b") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0, 2)  # end
+                size = f.tell()
+                if size > _AUTO_LOG_MAX_BYTES:
+                    f.seek(size - _AUTO_LOG_KEEP_BYTES)
+                    tail = f.read()
+                    f.seek(0)
+                    f.truncate()
+                    f.write(tail)
+                f.write(block.encode("utf-8"))
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        # Logging a traceback must never mask the real error.
+        pass
+
+
+@dataclass
+class _AutoSetup:
+    config: dict
+    passphrase: str
+    memory_kb: int
+
+
+def _should_log_cause(exc: BaseException) -> bool:
+    """Log a typed error iff it wraps a non-typed cause.
+
+    Pure validation errors like `ConfigError("missing [device] section")` are
+    raised without `from`, so `__cause__` is None and the stderr one-liner
+    already contains everything a user needs. Adversarial/environmental
+    errors wrap an underlying exception via `raise X from e` -- e.g.
+    `ConfigError("failed to parse config.toml - ...") from tomllib.TOMLDecodeError`
+    or a future `ConfigError from PermissionError`. In those cases the
+    stderr message loses the original traceback/errno, so the log is the
+    only place the original cause survives.
+    """
+    return exc.__cause__ is not None
+
+
+def _auto_command_setup(verb: str) -> _AutoSetup | None:
+    """Load config + passphrase + crypto session for autopull/autopush.
+
+    Returns None when the caller should exit (silent or after a typed error).
+    Logging policy:
+      - Typed error with no __cause__ (pure validation): stderr only, no log.
+        Expected conditions (missing passphrase, missing field) don't need
+        a traceback to diagnose.
+      - Typed error WITH __cause__ (wrapped OSError / TOMLDecodeError / etc.):
+        stderr + log. The wrapper message drops the underlying traceback +
+        errno, so the log is the only forensic artifact.
+      - Unexpected (non-MindMeldError) exception: always stderr + log.
+
+    Semantics:
+      - config missing          -> silent return (not initialized)
+      - config typed no-cause   -> typed one-line stderr (no log)
+      - config typed w/cause    -> typed one-line stderr + full chain to log
+      - config unexpected error -> one-line stderr + traceback to log
+      - keyring + env empty     -> typed one-line stderr (no log)
+      - crypto typed no-cause   -> typed one-line stderr (no log)
+      - crypto typed w/cause    -> typed one-line stderr + full chain to log
+      - crypto unexpected error -> one-line stderr + traceback to log
+
+    Does NOT acquire the lockfile; caller owns that and decides lock-policy.
+
+    Writes a breadcrumb (`last-autorun.json`) on every early-exit path so
+    `mm status` can surface silent-skip history.
+    """
+    if not CONFIG_PATH.exists():
+        _write_autorun_breadcrumb(verb, "config-missing")
+        return None
+
+    try:
+        config = load_config()
+    except MindMeldError as e:
+        print(f"mm: {verb} failed - {e}", file=sys.stderr)
+        if _should_log_cause(e):
+            _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "config-error", str(e))
+        return None
+    except Exception as e:
+        print(
+            f"mm: {verb} failed - unexpected config error "
+            f"(see auto{verb}.log)",
+            file=sys.stderr,
+        )
+        _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "config-error", type(e).__name__)
+        return None
+
+    try:
+        passphrase = get_passphrase(non_interactive=True)
+    except CryptoError as e:
+        print(f"mm: {verb} skipped - {e}", file=sys.stderr)
+        _write_autorun_breadcrumb(verb, "no-passphrase")
+        return None
+
+    # get_backend() can still raise on malformed config["storage"]["path"]
+    # (load_config validates presence, not types). Guard it the same way
+    # as the crypto-session call so the hook contract holds end-to-end.
+    try:
+        backend = get_backend(config)
+    except Exception as e:
+        print(
+            f"mm: {verb} failed - backend init failed (see auto{verb}.log)",
+            file=sys.stderr,
+        )
+        _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "backend-error", type(e).__name__)
+        return None
+
+    try:
+        memory_kb = _init_crypto_session(backend, passphrase, config)
+    except MindMeldError as e:
+        print(f"mm: {verb} failed - {e}", file=sys.stderr)
+        if _should_log_cause(e):
+            _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "crypto-error", str(e))
+        return None
+    except Exception as e:
+        print(
+            f"mm: {verb} failed - unexpected crypto error "
+            f"(see auto{verb}.log)",
+            file=sys.stderr,
+        )
+        _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "crypto-error", type(e).__name__)
+        return None
+
+    return _AutoSetup(config=config, passphrase=passphrase, memory_kb=memory_kb)
 
 
 @app.command()
 def autopull() -> None:
-    """Pull changes silently. Designed for Claude Code — no prompts, minimal output."""
-    if not CONFIG_PATH.exists():
-        return  # not initialized — silent exit
-    try:
-        config = load_config()
-    except ConfigError as e:
-        print(f"mm: pull failed — {e}", file=sys.stderr)
-        return
-    except Exception:
-        return  # unexpected load failure — stay silent for Claude Code
+    """Pull changes silently. Designed for Claude Code -- no prompts, minimal output.
 
-    try:
-        passphrase = get_passphrase()
-    except Exception:
-        print("mm: no passphrase available \u2014 skipping pull", file=sys.stderr)
+    Never prompts (`get_passphrase(non_interactive=True)`). Silent exit on:
+    missing config, missing passphrase, lock contention. Loud exit (one-line
+    stderr + traceback to `~/.config/mind-meld/autopull.log`) on: corrupt
+    config, crypto init failure, unexpected bug inside `_pull_core`.
+    """
+    setup = _auto_command_setup("pull")
+    if setup is None:
         return
 
     try:
         acquire_lock()
     except LockError:
-        return  # another operation running — don't block Claude
+        # Silent to Claude (never block the hook), but leave a breadcrumb
+        # so `mm status` can show repeated lock-skips -- a wedged flock
+        # used to produce hours of silent no-ops with no signal.
+        _write_autorun_breadcrumb("pull", "lock-held")
+        return
 
     try:
-        backend = get_backend(config)
-        try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
-        except MindMeldError as e:
-            print(f"mm: pull failed — {e}", file=sys.stderr)
-            return
-        # autopull is always silent + never-prompt (Claude Code hook context)
-        result = _pull_core(config, passphrase, memory_kb, quiet=True, interactive_resolve=False)
+        result = _pull_core(
+            setup.config, setup.passphrase, setup.memory_kb,
+            quiet=True, conflict_mode="keep-both",
+        )
 
         if result.total_applied:
             parts = []
@@ -2445,53 +2815,58 @@ def autopull() -> None:
             print(f"mm: pulled {total} files from {src_display} ({', '.join(parts)})")
             if result.total_conflicted:
                 print(
-                    f"mm: {result.total_conflicted} conflicts — "
+                    f"mm: {result.total_conflicted} conflicts - "
                     "run 'mm conflicts' to review",
                     file=sys.stderr,
                 )
+        if result.total_skipped_unknown_source:
+            print(
+                f"mm: skipped {result.total_skipped_unknown_source} unknown "
+                "source(s) - run 'mm sources' to reconcile config",
+                file=sys.stderr,
+            )
 
+        _write_autorun_breadcrumb("pull", "success")
+    except MindMeldError as e:
+        print(f"mm: pull failed - {e}", file=sys.stderr)
+        if _should_log_cause(e):
+            _log_unexpected("pull", e)
+        _write_autorun_breadcrumb("pull", "failed", str(e))
     except Exception as e:
-        print(f"mm: pull failed \u2014 {e}", file=sys.stderr)
+        print(
+            "mm: pull failed - unexpected error (see autopull.log)",
+            file=sys.stderr,
+        )
+        _log_unexpected("pull", e)
+        _write_autorun_breadcrumb("pull", "failed", type(e).__name__)
     finally:
         release_lock()
 
 
-# ── autopush ─────────────────────────────────────────────────────────
-
-
 @app.command()
 def autopush() -> None:
-    """Push changes silently. Designed for Claude Code — no prompts, minimal output."""
-    if not CONFIG_PATH.exists():
-        return  # not initialized — silent exit
-    try:
-        config = load_config()
-    except ConfigError as e:
-        print(f"mm: push failed — {e}", file=sys.stderr)
-        return
-    except Exception:
-        return  # unexpected load failure — stay silent for Claude Code
+    """Push changes silently. Designed for Claude Code -- no prompts, minimal output.
 
-    try:
-        passphrase = get_passphrase()
-    except Exception:
-        print("mm: no passphrase available \u2014 skipping push", file=sys.stderr)
+    Never prompts (`get_passphrase(non_interactive=True)`). Silent exit on:
+    missing config, missing passphrase, lock contention. Loud exit (one-line
+    stderr + traceback to `~/.config/mind-meld/autopush.log`) on: corrupt
+    config, crypto init failure, unexpected bug inside `_push_core`. No
+    auto-GC on autopush (prevents blob-deletion hole).
+    """
+    setup = _auto_command_setup("push")
+    if setup is None:
         return
 
     try:
         acquire_lock()
     except LockError:
-        return  # another operation running — don't block Claude
+        _write_autorun_breadcrumb("push", "lock-held")
+        return
 
     try:
-        backend = get_backend(config)
-        try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
-        except MindMeldError as e:
-            print(f"mm: push failed — {e}", file=sys.stderr)
-            return
-        # No auto-GC on autopush (prevents blob-deletion hole)
-        result = _push_core(config, passphrase, memory_kb, quiet=True)
+        result = _push_core(
+            setup.config, setup.passphrase, setup.memory_kb, quiet=True,
+        )
 
         if result:
             parts = []
@@ -2504,8 +2879,19 @@ def autopush() -> None:
             total = result.total_new + result.total_modified + result.total_deleted
             print(f"mm: pushed {total} files ({', '.join(parts)})")
 
+        _write_autorun_breadcrumb("push", "success")
+    except MindMeldError as e:
+        print(f"mm: push failed - {e}", file=sys.stderr)
+        if _should_log_cause(e):
+            _log_unexpected("push", e)
+        _write_autorun_breadcrumb("push", "failed", str(e))
     except Exception as e:
-        print(f"mm: push failed \u2014 {e}", file=sys.stderr)
+        print(
+            "mm: push failed - unexpected error (see autopush.log)",
+            file=sys.stderr,
+        )
+        _log_unexpected("push", e)
+        _write_autorun_breadcrumb("push", "failed", type(e).__name__)
     finally:
         release_lock()
 

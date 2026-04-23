@@ -2,19 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.6.3] - 2026-04-23
+## [0.7.1] - 2026-04-23
 
-Track 1B: Config eager validation + legacy cleanup. A malformed `sync.sources`
-block in `config.toml` now surfaces at load time with a clean error message
-instead of crashing mid-sync. Closes the silent-failure gap in `mm autopull` /
-`mm autopush` that let bad configs wedge Claude Code's background sync with
-exit 0 and no stderr.
+Track 1B: Config eager validation + legacy cleanup. Malformed `sync.sources`
+in `config.toml` now surfaces at load time with a typed `ConfigError` instead
+of a raw `TypeError` mid-sync. Complements Track 1A (v0.7.0) — Track 1A rebuilt
+the `autopull` / `autopush` error-surface machinery; Track 1B makes sure the
+config-loader actually produces typed errors that machinery can surface.
 
 ### Changed
-- **Eager source validation.** `_validate` now runs `_validate_sources` whenever `sync.sources` is present, so TOML typos surface at the load boundary with a clear `ConfigError` — no more deferring until the first push/pull attempt to notice a missing `path` or duplicate source name.
-- **Shape guards on source validation (cross-model adversarial finding).** Both Claude and Codex flagged that `_validate_sources` trusted `sync` to be a dict, `sources` to be a list, each entry to be a dict, and field values to be strings. Bad input (`sources = "claude"`, `sources = [42]`, `name = ["claude"]`) used to raise raw `TypeError` or crash at `.expanduser()`. Every malformed shape now raises `ConfigError` with a pointed message naming the offending field and its actual type.
-- **Unexpected load-time errors normalized to `ConfigError`.** `load_config` now wraps `_validate` + `_apply_defaults` so any non-`ConfigError` exception (e.g., `.resolve()` `RuntimeError` on a cyclic symlink) becomes a `ConfigError`. `mm autopull` / `mm autopush` surface those cleanly via the typed-error branch instead of falling through to the silent generic-Exception branch.
-- **Defensive `ConfigError` branch in `autopull` / `autopush`.** Both commands now check `CONFIG_PATH.exists()` first for the "not initialized" silent-exit case, then catch `ConfigError` explicitly and emit a one-line stderr message. The generic `except Exception: return` stays as the final fallback for truly unexpected load failures — Claude Code's hook context still gets silent exits for "no mm installed here" while bad configs now get a visible failure signal.
+- **Eager source validation.** `_validate` now runs `_validate_sources` whenever `sync.sources` is present, so TOML typos surface at the load boundary with a clear `ConfigError` instead of deferring until the first push/pull attempt.
+- **Shape + value-type guards on source validation (cross-model adversarial finding).** `_validate_sources` used to trust `sync` to be a dict, `sources` to be a list, each entry to be a dict, and field values to be strings. Bad input (`sources = "claude"`, `sources = [42]`, `name = ["claude"]`) raised raw `TypeError` or crashed at `.expanduser()` — neither was a `MindMeldError`, so Track 1A's new typed-error surface in `autopull` / `autopush` would not have caught them. Every malformed shape now raises `ConfigError` with a pointed message naming the offending field and its actual type.
+- **Unexpected load-time errors normalized to `ConfigError`.** `load_config` now wraps `_validate` + `_apply_defaults` so any non-`ConfigError` exception (e.g., `.resolve()` `RuntimeError` on a cyclic symlink) becomes a `ConfigError`. Feeds cleanly into Track 1A's `MindMeldError` branch in `_auto_command_setup`.
 - **`.resolve()` parity with the rest of the codebase.** `_apply_defaults` and explicit `sync.sources` paths now call `.expanduser().resolve()` to match the dominant pattern at 11 other call sites across `cli.py`, `manifest.py`, `storage/local.py`, and `synclog.py`. Keeps config-stored paths aligned with walker-emitted paths so symlinked setups don't silently disagree. `DEFAULT_SOURCES` and the auto-detected gstack fallback deliberately skip `.resolve()` here — the walker resolves at use time anyway, and resolving them up front would let a cyclic user symlink at `~/.gstack` break `get_sources` for every command.
 
 ### Removed
@@ -22,8 +21,44 @@ exit 0 and no stderr.
 - **Legacy `claude_dir` default in `_apply_defaults`.** `get_sources` already falls through to `DEFAULT_SOURCES` when neither `sync.sources` nor `sync.claude_dir` is present; the extra `setdefault` was redundant with that fallback and forced every new config through a "legacy" code path. `_apply_defaults` now expands `claude_dir` only when it is actually present.
 
 ### For contributors
-- 21 new tests in `tests/test_config.py` + 2 regression tests in `tests/test_integration.py` covering: eager validation paths, shape guards (non-list / non-dict / non-string field values), `.resolve()` parity and round-trip idempotency on symlinked paths, `claude_dir` absence, `load_config` error normalization, `autopull` / `autopush` stderr surfacing on bad configs. Total suite is now 392 tests.
+- 21 new tests in `tests/test_config.py` + 2 regression tests in `tests/test_integration.py` covering: eager validation paths, shape guards (non-list / non-dict / non-string field values), `.resolve()` parity and round-trip idempotency on symlinked paths, `claude_dir` absence, `load_config` error normalization, and `autopull` / `autopush` stderr surfacing on bad configs (verified against Track 1A's `_auto_command_setup`).
 - Two follow-up TODOs captured in `docs/TODOS.md`: (1) stop mutating config in `_apply_defaults` — compute expanded paths lazily in `get_sources` to avoid silent realpath rewrite on backfill save, and (2) rich `ConfigError` with TOML line numbers on parse failure.
+
+## [0.7.0] - 2026-04-23
+
+Track 1A: silent-failure cleanup in `autopull`/`autopush` + pull-side conflict-mode
+unification. Continues the Group 1 error-discipline theme after Tracks 1B, 1C, 1D.
+
+### BREAKING
+- **`mm pull --no-prompt` and `--resolve-interactive` are removed.** Replaced by a single `--conflict-mode {prompt|keep-both|fail}` option (default `keep-both`). Migration:
+  - `mm pull` (no flags)              → `mm pull` (unchanged — default is keep-both).
+  - `mm pull --no-prompt`             → `mm pull` (the default IS keep-both).
+  - `mm pull --resolve-interactive`   → `mm pull --conflict-mode prompt`.
+  - *(new)* `mm pull --conflict-mode fail` — preflights every file via `_predict_pull_outcome`; if any would conflict, prints the list and exits **3** (not 2) with no writes. For CI. Exit 3 avoids colliding with typer/click's usage-error exit 2, so a stale script still passing the removed flags can't be misclassified as a conflict refusal.
+
+### Fixed
+- **`autopull`/`autopush` silently swallowed bugs.** The outer `except Exception` reduced every unexpected failure to a single cryptic stderr line. On the Claude Code hot path this hid data-integrity issues for days. Now: `FileNotFoundError`-equivalent (missing config) → silent; `MindMeldError` subclasses (`ConfigError`, `CryptoError`, `LockError`) → typed one-line stderr; anything else → one-line stderr + full traceback appended to `~/.config/mind-meld/autopull.log` or `autopush.log` (truncate-tail at 1 MB, keep last 512 KB). Shared prelude extracted into `_auto_command_setup` + `_log_unexpected` helpers so the contract can't drift between the two commands.
+- **`autopull`/`autopush` could hang on missing passphrase.** `get_passphrase()` previously fell through to `getpass.getpass()` when neither the keyring nor `MINDMELD_PASSPHRASE` yielded a secret — fine for interactive commands, a hang for hook-path callers. New `non_interactive: bool = False` parameter: when True, raise `CryptoError` instead of prompting. `autopull` and `autopush` pass `non_interactive=True`; every other caller keeps the interactive fallback.
+- **Corrupt peer manifests were silent in autopull.** The "manifest is corrupt, skipping pull from this device" warning in `_pull_core` was gated on `not quiet`, so autopull (`quiet=True`) never surfaced a load-bearing corruption signal. Now routed to stderr regardless of quiet — corrupt-manifest recovery is load-bearing (see CLAUDE.md) and silent skip = partial pull dressed up as success.
+- **Sidecar write failures were silent in autopush.** Same class: the "failed to write recovery sidecar" warning was gated on `not quiet`, so autopush silently lost its recovery path. Now routed to stderr regardless of quiet.
+- **Unknown remote sources silently skipped on pull.** When a peer advertised a source name the local config didn't know about (rename drift, missed migration), the `skipping unknown source '<name>'` message was gated on `--verbose and not quiet` — silent-partition risk. Now always warns, and `PullResult.total_skipped_unknown_source` counts `(device, source)` pairs for the summary line. `autopull` emits a one-line stderr summary when the count is non-zero.
+- **`mm devices` showed "Last Seen" but the value was really "last push".** `register_device` used to seed `last_seen` at registration time, so a registered-but-never-pushed device rendered as though it had just pushed. Seed removed: `last_seen` now means exactly what it says ("last push"), registered devices render as em-dash until the first push, and the column header is renamed to "Last Push."
+
+### Added
+- `mm pull --conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `fail` mode preflights via `_predict_pull_outcome`, exits **3** on any predicted conflict with no writes. Best-effort — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface late conflicts.
+- `_log_unexpected(verb, exc)` hand-rolled appender (stdlib-only, no `logging` module — avoids handler-duplication regressions in long-lived test runs). Writes ISO timestamp + mm version + full traceback. Any failure inside the logger itself is swallowed: a broken log file must never crash the hook.
+- `PullResult.total_skipped_unknown_source: int` — counts `(device, source_name)` pairs.
+- `get_passphrase(non_interactive: bool = False)` — new parameter.
+- 28 new tests in `tests/test_track_1a.py` covering: the 14 plan-derived cases (regressions, hook correctness, log rotation, conflict-mode preflight, non-interactive passphrase) plus 14 added during /review pass (typed-error no-log branches, --conflict-mode prompt threading, end-to-end no-passphrase flow, register_device storage-level contract, _log_unexpected swallow-failure, unexpected-crypto-error logging, cross-peer preflight overlap, breadcrumb on success / lock-held, `mm status` surfacing of breadcrumb, concurrent-writer log safety, typed-error-without-cause no-log, _log_unexpected truncate-tail idempotency, unwrapped config error logging). Total suite is now 402 tests.
+- `~/.config/mind-meld/last-autorun.json` breadcrumb on every `autopull` / `autopush` invocation (success, lock-skip, config-missing, crypto-error, failed). `mm status` surfaces it as "Last auto-pull: 2026-04-23T..." so a wedged flock is no longer invisible to the user.
+- `--conflict-mode fail` preflight now simulates **cross-peer** writes via an in-memory overlay. If peer A would write role.md=Y and peer B ships role.md=Z, the preflight now flags the B-vs-A conflict even though starting local state is empty — previously the contract "no writes on conflict" could be violated during multi-peer pulls.
+- `_log_unexpected` writes are serialized with `fcntl.flock(LOCK_EX)` so two concurrent failing hooks can't corrupt each other's traceback.
+- Wrapped typed errors (`ConfigError from tomllib.TOMLDecodeError`, future `X from OSError`) now log the full cause chain; pure validation errors (no `__cause__`) stay stderr-only. Preserves forensic value without spamming the log with expected conditions.
+
+### For contributors
+- `CLAUDE.md`, `SPEC.md`, `README.md` updated for the `--conflict-mode` unification and the `autopull`/`autopush` error contract.
+- Exit code 3 (new, for `--conflict-mode fail`) deliberately avoids typer/click's usage-error exit 2. Scripts that still pass the removed `--no-prompt` / `--resolve-interactive` flags will hit usage-error exit 2 — distinct from conflict refusal.
+- `docs/TODOS.md` gets `[plan-eng-review 2026-04-23 Track 1A]`: full `quiet`-path audit — classify every `if not quiet:` in cli.py as "verbose-only" vs "load-bearing." Two known load-bearing gates are patched in this release; the pattern is likely wider.
 
 ## [0.6.2] - 2026-04-23
 

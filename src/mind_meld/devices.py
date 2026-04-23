@@ -15,12 +15,17 @@ def register_device(
     device_id: str,
     device_name: str,
 ) -> None:
-    """Write device metadata to storage."""
+    """Write device metadata to storage.
+
+    Does NOT seed `last_seen` at registration; `last_seen` means "time of
+    last push" (not "time of last activity"). Callers display missing
+    `last_seen` as em-dash so a registered-but-never-pushed device doesn't
+    look like it pushed at registration time.
+    """
     data = {
         "device_id": device_id,
         "device_name": device_name,
         "registered": datetime.now(timezone.utc).isoformat(),
-        "last_seen": datetime.now(timezone.utc).isoformat(),
     }
     key = f"devices/{device_id}.json"
     backend.put(key, json.dumps(data, indent=2).encode("utf-8"))
@@ -30,12 +35,17 @@ def update_last_seen(
     backend: LocalBackend,
     device_id: str,
 ) -> None:
-    """Update the last_seen timestamp for a device."""
+    """Update the `last_seen` timestamp for a device.
+
+    Semantic: `last_seen` records the time of this device's LAST PUSH.
+    Pull does NOT update it -- a read-only device is correctly shown as
+    "never pushed" rather than appearing active via pulls.
+    """
     key = f"devices/{device_id}.json"
     try:
         data = json.loads(backend.get(key))
     except StorageError:
-        return  # Device not registered yet — skip silently
+        return  # Device not registered yet -- skip silently
     data["last_seen"] = datetime.now(timezone.utc).isoformat()
     backend.put(key, json.dumps(data, indent=2).encode("utf-8"))
 
