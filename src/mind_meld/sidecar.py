@@ -8,6 +8,12 @@ the last good push but not yet propagated to peers).
 Plaintext JSON on the local filesystem. Same trust boundary as `~/.claude/`
 itself — the source files this tool syncs are plaintext on disk, so a
 plaintext manifest snapshot of them does not widen the threat model.
+
+Read-path invariant: `read()` returns a v2-normalized manifest, the same shape
+`_fetch_remote_manifest` returns. We deserialize first, run the structural-shape
+check on the RAW dict (so a tampered sidecar missing keys is rejected, not
+silently synthesized), then normalize. DO NOT add a new manifest-load path
+that bypasses this sequence.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from mind_meld.errors import ManifestError
+from mind_meld.manifest import deserialize_manifest, normalize_manifest
 
 SIDECAR_DIR = Path.home() / ".config" / "mind-meld"
 
@@ -76,18 +83,22 @@ def read(expected_device_id: str) -> dict[str, Any] | None:
     if not target.exists():
         return None
     try:
-        with open(target) as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        # Deserialize-then-validate-then-normalize: the structural-shape check
+        # MUST run against the raw parsed dict, NOT a normalized one. If we
+        # let `load_manifest` synthesize `sources`/`tombstones` first, a
+        # tampered sidecar missing those keys would pass the structural check
+        # and silently zero out tombstones on the next push.
+        raw = deserialize_manifest(target.read_bytes())
+    except (OSError, ManifestError):
         return None
-    if not isinstance(data, dict):
+    if not isinstance(raw, dict):
         return None
     # Structural shape check: sources and tombstones must be dicts.
-    sources = data.get("sources")
-    tombstones = data.get("tombstones")
+    sources = raw.get("sources")
+    tombstones = raw.get("tombstones")
     if not isinstance(sources, dict) or not isinstance(tombstones, dict):
         return None
     # Device-id scope check: refuse a sidecar from a different device/config.
-    if data.get("device_id") != expected_device_id:
+    if raw.get("device_id") != expected_device_id:
         return None
-    return data
+    return normalize_manifest(raw)

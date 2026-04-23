@@ -227,6 +227,33 @@ class TestSidecar:
         tmps = [n for n in names if n.endswith(".tmp")]
         assert tmps == [], f"leftover tmp files: {tmps}"
 
+    def test_read_returns_normalized_v2_shape(self, tmp_path, monkeypatch):
+        """Contract: sidecar.read goes through deserialize+validate+normalize,
+        so callers downstream of `_recover_prior_manifest` may rely on the
+        same v2 shape they get from `_fetch_remote_manifest`. The structural
+        check still runs against the RAW parsed dict (so a tampered sidecar
+        missing keys is still rejected — see test_read_rejects_missing_*)."""
+        _isolate_sidecar(monkeypatch, tmp_path)
+        manifest = _make_manifest("abc", {"a.md": {"sha256": "aaa"}})
+        sidecar.write(manifest)
+        loaded = sidecar.read("abc")
+        assert loaded is not None
+        assert isinstance(loaded.get("sources"), dict)
+        assert isinstance(loaded.get("tombstones"), dict)
+        # Round-trip preserves the source content.
+        assert loaded["sources"]["claude"]["files"] == {"a.md": {"sha256": "aaa"}}
+
+    def test_read_handles_manifesterror_path(self, tmp_path, monkeypatch):
+        """Bad bytes raise ManifestError inside deserialize_manifest; sidecar.read
+        catches it and returns None. Regression for the load_manifest refactor —
+        the old code caught json.JSONDecodeError, the new code catches the
+        wrapping ManifestError. Both paths must return None."""
+        _isolate_sidecar(monkeypatch, tmp_path)
+        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+        # Truncated UTF-16 (raises UnicodeDecodeError, wrapped as ManifestError)
+        sidecar.sidecar_path().write_bytes(b"\xff\xfe{ \x00")
+        assert sidecar.read("abc") is None
+
 
 # ── _collect_peer_tombstones ─────────────────────────────────────────
 

@@ -31,15 +31,16 @@ from mind_meld.devices import list_devices, register_device, update_last_seen
 from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
+    CONFLICT_INFIX,
     DiffResult,
     TOMBSTONE_TTL_DAYS,
     build_manifest_v2,
     collect_tombstones,
+    is_conflict_filename,
+    load_manifest,
     mtime_from_manifest,
     mtime_from_path,
-    normalize_manifest,
     read_and_hash,
-    deserialize_manifest,
     diff_manifests,
     generate_tombstones,
     serialize_manifest,
@@ -53,7 +54,6 @@ from mind_meld.synclog import write_sync_log
 
 ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
 FetchStatus = Literal["ok", "missing", "corrupt"]
-CONFLICT_INFIX = ".sync-conflict-"
 CONFLICT_AGE_DAYS = 30
 
 
@@ -176,6 +176,11 @@ def _fetch_remote_manifest(
     (no manifest at all — valid first-push state) from CORRUPT (manifest(s)
     exist but unreadable — needs recovery path). Conflating the two drops
     tombstones on every first push.
+
+    Returns a ManifestFetch whose `manifest` (when status="ok") is already
+    normalized via load_manifest — `sources` and `tombstones` keys are
+    guaranteed dicts with v2 shape. Callers may rely on this contract and
+    do not need to call normalize_manifest themselves.
     """
     manifest_key = f"manifests/{device_id}/manifest.json.enc"
     manifests: list[dict] = []
@@ -193,7 +198,7 @@ def _fetch_remote_manifest(
         try:
             enc_data = backend.get(manifest_key)
             plain = decrypt(enc_data, passphrase, memory_kb)
-            manifests.append(deserialize_manifest(plain))
+            manifests.append(load_manifest(plain))
         except (CryptoError, ManifestError, OSError, MindMeldError):
             pass  # canonical unreadable — try conflict copies
 
@@ -202,7 +207,7 @@ def _fetch_remote_manifest(
         try:
             enc_data = conflict_path.read_bytes()
             plain = decrypt(enc_data, passphrase, memory_kb)
-            manifests.append(deserialize_manifest(plain))
+            manifests.append(load_manifest(plain))
         except (CryptoError, ManifestError, OSError, MindMeldError):
             pass  # skip unreadable conflict copies
 
@@ -360,8 +365,9 @@ def _merge_manifests(manifests: list[dict]) -> dict:
     merged = dict(sorted_manifests[-1])  # start with latest as base
     merged_sources: dict[str, dict] = {}
 
+    # Inputs are pre-normalized via load_manifest at _fetch_remote_manifest;
+    # we may rely on `sources` and `tombstones` being present + v2-shaped.
     for m in sorted_manifests:
-        normalize_manifest(m)
         for src_name, src_data in m.get("sources", {}).items():
             if src_name not in merged_sources:
                 merged_sources[src_name] = {
@@ -995,12 +1001,12 @@ def _push_core(
             console.print(f"  [yellow]{len(skipped)} files skipped[/yellow]")
 
     # Fetch remote manifest (tri-state: ok / missing / corrupt).
+    # `fetch.manifest` (when ok) is pre-normalized via load_manifest;
+    # _recover_prior_manifest's sidecar/peer paths emit the same shape.
     fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     remote_manifest = _recover_prior_manifest(
         fetch, backend, device_id, passphrase, memory_kb, quiet=quiet
     )
-    if remote_manifest:
-        normalize_manifest(remote_manifest)
 
     # Generate tombstones for files that disappeared since last push
     tombstones = generate_tombstones(local_manifest, remote_manifest, device_id)
@@ -1015,8 +1021,6 @@ def _push_core(
     # Only the REAL remote manifest drives the diff (avoid re-uploading every
     # file just because we're recovering from corruption via the sidecar).
     real_remote = fetch.manifest if fetch.is_ok else None
-    if real_remote is not None:
-        normalize_manifest(real_remote)
     remote_sources = real_remote.get("sources", {}) if real_remote else {}
 
     for src_name, src_data in local_manifest["sources"].items():
@@ -1261,7 +1265,8 @@ def _pull_core(
                 console.print(f"  [yellow]No manifest for {dname}[/yellow]")
             continue
 
-        normalize_manifest(remote_manifest)
+        # manifest_cache values come from _fetch_remote_manifest → load_manifest
+        # → normalized v2 shape guaranteed.
         remote_sources = remote_manifest.get("sources", {})
 
         device_had_changes = False
@@ -1457,10 +1462,9 @@ def status(
     )
 
     # Fetch remote manifest (tri-state — surface missing/corrupt to user).
+    # fetch.manifest is pre-normalized via load_manifest.
     fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     remote_manifest = fetch.manifest if fetch.is_ok else None
-    if remote_manifest:
-        normalize_manifest(remote_manifest)
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
@@ -1613,9 +1617,8 @@ def diff_cmd(
             f"{'device ' + target_id if from_device else 'this device'} is "
             f"corrupt — showing diff against empty remote."
         )
+    # diff_fetch.manifest is pre-normalized via load_manifest.
     remote_manifest = diff_fetch.manifest if diff_fetch.is_ok else None
-    if remote_manifest:
-        normalize_manifest(remote_manifest)
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
@@ -1720,8 +1723,8 @@ def _do_gc(
             corrupt_devices.append(f"{device.get('device_name', did)} ({did})")
             continue
 
+        # gc_fetch.manifest is pre-normalized via load_manifest.
         manifest = gc_fetch.manifest
-        normalize_manifest(manifest)
 
         # Iterate sources.*.files to collect hashes
         for src_data in manifest.get("sources", {}).values():
@@ -1849,10 +1852,12 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
         if not base_path.exists():
             continue
         for scan_dir in _synced_scan_dirs(src_cfg, base_path):
+            # rglob is loose (substring); filter strictly via is_conflict_filename
+            # so user files like notes.sync-conflict-log.md are not listed/reaped.
             for conflict_path in scan_dir.rglob(f"*{CONFLICT_INFIX}*"):
                 if not conflict_path.is_file():
                     continue
-                if CONFLICT_INFIX not in conflict_path.name:
+                if not is_conflict_filename(conflict_path.name):
                     continue
                 canonical = _canonical_for_conflict(conflict_path)
                 hits.append((src_cfg["name"], conflict_path, canonical if canonical.exists() else None))

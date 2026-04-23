@@ -8,6 +8,7 @@ import pytest
 
 from mind_meld.errors import ManifestError
 from mind_meld.manifest import (
+    CONFLICT_PATTERN,
     DiffResult,
     _is_excluded,
     build_manifest,
@@ -15,6 +16,8 @@ from mind_meld.manifest import (
     deserialize_manifest,
     diff_manifests,
     hash_file,
+    is_conflict_filename,
+    load_manifest,
     normalize_manifest,
     read_and_hash,
     serialize_manifest,
@@ -57,6 +60,15 @@ class TestIsExcluded:
 
     def test_allows_nested(self):
         assert not _is_excluded("projects/-foo/todos/tasks.json")
+
+    def test_excludes_sync_conflict_file(self):
+        assert _is_excluded(
+            "projects/-foo/memory/notes.sync-conflict-20260422-120000-abc12345.md"
+        )
+
+    def test_does_not_exclude_user_sync_conflict_log(self):
+        # User file containing the infix without a timestamp is NOT excluded.
+        assert not _is_excluded("projects/-foo/memory/notes.sync-conflict-log.md")
 
 
 class TestHashFile:
@@ -546,3 +558,294 @@ class TestNormalizeManifest:
         m = {"device_id": "c", "files": {"a.md": {"sha256": "x"}}}
         result = normalize_manifest(m)
         assert result["sources"]["claude"]["base_path"] == ""
+
+
+class TestIsConflictFilename:
+    def test_happy_path_with_extension(self):
+        assert is_conflict_filename("notes.sync-conflict-20260422-120000-abc12345.md")
+
+    def test_happy_path_extensionless(self):
+        # conflict_filename() emits no trailing extension when canonical has none
+        # (e.g., a top-level README). Pattern must still match.
+        assert is_conflict_filename("README.sync-conflict-20260422-120000-abc12345")
+
+    def test_false_positive_guard_no_digits(self):
+        # User file that happens to contain ".sync-conflict-" but no timestamp.
+        assert not is_conflict_filename("notes.sync-conflict-log.md")
+
+    def test_false_positive_guard_word_after_infix(self):
+        assert not is_conflict_filename("foo.sync-conflict-abc.md")
+
+    def test_canonical_file_not_excluded(self):
+        assert not is_conflict_filename("foo.md")
+
+    def test_empty_string(self):
+        assert is_conflict_filename("") is False
+
+    def test_infix_alone_without_suffix(self):
+        # ".sync-conflict-" with nothing after
+        assert not is_conflict_filename("foo.sync-conflict-")
+
+    def test_false_positive_guard_short_digits(self):
+        # Cross-model adversarial catch: previous loose pattern matched
+        # `notes.sync-conflict-2024-summary.md` (only 4 digits before dash).
+        # Strict 8+6-digit timestamp pattern eliminates this class.
+        assert not is_conflict_filename("notes.sync-conflict-2024-summary.md")
+        assert not is_conflict_filename("notes.sync-conflict-1-a.md")
+
+    def test_pattern_constant_matches_documented_format(self):
+        # Lock the pattern so accidental edits to CONFLICT_PATTERN that drop
+        # the strict timestamp anchor fail loudly.
+        assert CONFLICT_PATTERN == (
+            "*.sync-conflict-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-"
+            "[0-9][0-9][0-9][0-9][0-9][0-9]-*"
+        )
+
+
+class TestWalkerExcludesConflictFiles:
+    """Walker MUST exclude Syncthing-style conflict copies in synced subdirs.
+
+    Regression: v0.4.0 shipped conflict-copy creation but missed the walker
+    exclusion. Result: next push uploaded the conflict file fleet-wide, with
+    other devices receiving it as a regular source file.
+    """
+
+    def test_claude_source_skips_conflict_in_memory(self, tmp_path):
+        claude = tmp_path / ".claude"
+        memory = claude / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "notes.md").write_text("canonical")
+        (memory / "notes.sync-conflict-20260422-120000-abc12345.md").write_text(
+            "local divergent"
+        )
+
+        files = walk_directory(claude)
+        paths = set(files.keys())
+        assert "projects/-Users-kb-myapp/memory/notes.md" in paths
+        # The conflict copy must NOT propagate.
+        assert all(".sync-conflict-" not in p for p in paths)
+
+    def test_claude_source_skips_conflict_in_todos(self, tmp_path):
+        claude = tmp_path / ".claude"
+        todos = claude / "projects" / "-Users-kb-myapp" / "todos"
+        todos.mkdir(parents=True)
+        (todos / "tasks.json").write_text("[]")
+        (todos / "tasks.sync-conflict-20260422-120000-abc12345.json").write_text(
+            "[1, 2]"
+        )
+
+        files = walk_directory(claude)
+        paths = set(files.keys())
+        assert "projects/-Users-kb-myapp/todos/tasks.json" in paths
+        assert all(".sync-conflict-" not in p for p in paths)
+
+    def test_claude_source_does_not_exclude_user_false_positive(self, tmp_path):
+        claude = tmp_path / ".claude"
+        memory = claude / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        # User-named file containing the infix but no timestamp digits.
+        (memory / "notes.sync-conflict-log.md").write_text("legitimate user file")
+
+        files = walk_directory(claude)
+        assert "projects/-Users-kb-myapp/memory/notes.sync-conflict-log.md" in files
+
+    def test_generic_source_skips_conflict_files(self, tmp_path):
+        # Same exclusion contract MUST hold for the gstack/generic source path
+        # (regression guard if EXCLUDED handling ever forks between walkers).
+        base = tmp_path / "generic_source"
+        memory = base / "memory"
+        memory.mkdir(parents=True)
+        (memory / "good.md").write_text("ok")
+        (memory / "good.sync-conflict-20260422-120000-abc12345.md").write_text(
+            "should not propagate"
+        )
+        config = {
+            "name": "gstack",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["memory"],
+            "include_files": [],
+        }
+
+        files = walk_generic_source(config)
+        paths = set(files.keys())
+        assert "memory/good.md" in paths
+        assert all(".sync-conflict-" not in p for p in paths)
+
+
+class TestNormalizeManifestTombstoneMigration:
+    """Bare-key tombstone migration MUST fire only at v1→v2 promotion.
+
+    For manifests already shaped as v2, unknown bare keys are preserved
+    verbatim — we don't speculate on adversarial/external data. `is_tombstoned`
+    returning False is the safe default for adversarial keys.
+    """
+
+    def test_v1_promotion_migrates_bare_tombstone_to_claude(self):
+        m = {
+            "device_id": "a",
+            "files": {},
+            "tombstones": {
+                "memory/foo.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "a"},
+            },
+        }
+        out = normalize_manifest(m)
+        assert "claude:memory/foo.md" in out["tombstones"]
+        assert "memory/foo.md" not in out["tombstones"]
+        assert out["tombstones"]["claude:memory/foo.md"]["device_id"] == "a"
+
+    def test_v1_promotion_leaves_already_normalized_keys_alone(self):
+        m = {
+            "device_id": "a",
+            "files": {},
+            "tombstones": {
+                "claude:memory/already.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "a"},
+            },
+        }
+        out = normalize_manifest(m)
+        assert "claude:memory/already.md" in out["tombstones"]
+        # No double-prefix.
+        assert "claude:claude:memory/already.md" not in out["tombstones"]
+
+    def test_v1_promotion_with_empty_tombstones_is_noop(self):
+        m = {"device_id": "a", "files": {}, "tombstones": {}}
+        out = normalize_manifest(m)
+        assert out["tombstones"] == {}
+
+    def test_v1_promotion_with_missing_tombstones_synthesizes_empty(self):
+        m = {"device_id": "a", "files": {}}
+        out = normalize_manifest(m)
+        assert out["tombstones"] == {}
+
+    def test_v2_manifest_with_bare_keys_preserves_them(self):
+        # Manifest has explicit `sources` → not a v1 promotion. We do NOT
+        # migrate ambiguous keys here. is_tombstoned will return False for
+        # this bare key under any source — safe default.
+        m = {
+            "device_id": "a",
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {
+                "memory/bare.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "a"},
+            },
+        }
+        out = normalize_manifest(m)
+        assert "memory/bare.md" in out["tombstones"]
+        assert "claude:memory/bare.md" not in out["tombstones"]
+
+    def test_v1_promotion_tolerates_malformed_value(self):
+        # A non-dict value (string, None, integer) must not crash the loop;
+        # entry passes through with the new key.
+        m = {
+            "device_id": "a",
+            "files": {},
+            "tombstones": {
+                "memory/foo.md": "not-a-dict",
+                "memory/bar.md": None,
+            },
+        }
+        out = normalize_manifest(m)
+        # Migration tolerates the malformed values; downstream `is_tombstoned`
+        # only checks key presence so the entries are still effective markers.
+        assert "claude:memory/foo.md" in out["tombstones"]
+        assert "claude:memory/bar.md" in out["tombstones"]
+
+    def test_normalize_is_idempotent_on_v1_input(self):
+        m = {
+            "device_id": "a",
+            "files": {},
+            "tombstones": {
+                "memory/foo.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "a"},
+            },
+        }
+        once = normalize_manifest(dict(m))
+        twice = normalize_manifest(dict(once))
+        assert once == twice
+
+
+class TestLoadManifest:
+    def test_loads_v2_manifest(self):
+        m = {
+            "device_id": "a",
+            "device_name": "laptop",
+            "timestamp": "2026-04-22T10:00:00+00:00",
+            "files": {},
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+        loaded = load_manifest(serialize_manifest(m))
+        assert loaded["device_id"] == "a"
+        assert isinstance(loaded["sources"], dict)
+        assert isinstance(loaded["tombstones"], dict)
+
+    def test_promotes_v1_with_tombstone_migration(self):
+        m = {
+            "device_id": "a",
+            "files": {"memory/x.md": {"sha256": "x", "size": 1, "mtime": "2026-04-22T10:00:00+00:00"}},
+            "tombstones": {
+                "memory/deleted.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "a"},
+            },
+        }
+        loaded = load_manifest(serialize_manifest(m))
+        assert "claude" in loaded["sources"]
+        assert "claude:memory/deleted.md" in loaded["tombstones"]
+
+    def test_raises_on_bad_json(self):
+        with pytest.raises(ManifestError):
+            load_manifest(b"{not valid json")
+
+    def test_raises_on_empty_bytes(self):
+        with pytest.raises(ManifestError):
+            load_manifest(b"")
+
+    def test_raises_on_non_dict_top_level(self):
+        with pytest.raises(ManifestError):
+            load_manifest(b'["array", "not", "object"]')
+
+    def test_round_trip_preserves_keys(self):
+        original = {
+            "device_id": "z",
+            "sources": {"claude": {"base_path": "/p", "files": {"a.md": {"sha256": "h", "size": 1, "mtime": "t"}}}},
+            "tombstones": {"claude:b.md": {"deleted_at": "t", "device_id": "z"}},
+        }
+        loaded = load_manifest(serialize_manifest(original))
+        assert loaded["sources"] == original["sources"]
+        assert loaded["tombstones"] == original["tombstones"]
+
+    def test_rejects_non_dict_sources(self):
+        # Hardening: enforce the load-boundary contract. A tampered or
+        # bit-corrupted peer manifest with `{"sources": "x"}` must fail
+        # at the front door instead of crashing downstream consumers.
+        with pytest.raises(ManifestError, match="sources"):
+            load_manifest(b'{"device_id":"a","sources":"x","tombstones":{}}')
+
+    def test_rejects_non_dict_tombstones(self):
+        with pytest.raises(ManifestError, match="tombstones"):
+            load_manifest(
+                b'{"device_id":"a","sources":{"claude":{"base_path":"","files":{}}},"tombstones":[]}'
+            )
+
+    def test_rejects_v1_with_non_dict_tombstones(self):
+        # v1 promotion path must not crash either. load_manifest catches.
+        with pytest.raises(ManifestError, match="tombstones"):
+            load_manifest(b'{"device_id":"a","files":{},"tombstones":"not-a-dict"}')
+
+    def test_rejects_non_dict_source_value(self):
+        # Cross-model adversarial catch: inner shape was not validated.
+        # `{"sources": {"claude": "x"}}` would survive load and crash deep
+        # in _merge_manifests / generate_tombstones with AttributeError.
+        with pytest.raises(ManifestError, match=r"sources\['claude'\]"):
+            load_manifest(
+                b'{"device_id":"a","sources":{"claude":"not-a-dict"},"tombstones":{}}'
+            )
+
+    def test_rejects_non_dict_source_files(self):
+        with pytest.raises(ManifestError, match=r"\['files'\]"):
+            load_manifest(
+                b'{"device_id":"a","sources":{"claude":{"base_path":"","files":"x"}},"tombstones":{}}'
+            )
+
+    def test_rejects_non_dict_tombstone_value(self):
+        with pytest.raises(ManifestError, match=r"tombstones\['claude:a.md'\]"):
+            load_manifest(
+                b'{"device_id":"a","sources":{"claude":{"base_path":"","files":{}}},"tombstones":{"claude:a.md":"x"}}'
+            )

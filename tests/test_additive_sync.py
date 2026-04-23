@@ -211,6 +211,128 @@ class TestNormalizeManifestTombstones:
         assert "a.md" in manifest["tombstones"]
 
 
+class TestV1TombstoneMigrationEndToEnd:
+    """A v1-shaped manifest with bare-path tombstones (defensive: no shipped
+    mm version emits this) loaded via load_manifest emerges with claude:-
+    prefixed keys, and is_tombstoned correctly reports the deletion under
+    source='claude'. Guards against silent deletion-resurrection if such a
+    manifest ever lands in storage (manual edit, external tooling, future
+    format)."""
+
+    def test_load_then_is_tombstoned(self):
+        from mind_meld.manifest import load_manifest
+
+        v1_blob = serialize_manifest({
+            "device_id": "peer1",
+            "files": {},
+            "tombstones": {
+                "memory/deleted.md": {
+                    "deleted_at": "2026-04-22T10:00:00+00:00",
+                    "device_id": "peer1",
+                },
+            },
+        })
+        loaded = load_manifest(v1_blob)
+        # is_tombstoned uses src:path keys; if migration didn't fire, this
+        # would silently return False and the deleted file would re-download.
+        assert is_tombstoned("claude", "memory/deleted.md", loaded["tombstones"])
+        # Cross-source check still safe: gstack source is unaffected.
+        assert not is_tombstoned("gstack", "memory/deleted.md", loaded["tombstones"])
+
+    def test_migrated_key_carries_forward_through_generate_tombstones(self):
+        """The whole point of migrating bare keys at v1→v2 promotion is that
+        the migrated `claude:foo.md` tombstone is treated as native v2 by
+        downstream code. Specifically: when load_manifest produces a migrated
+        tombstone and we then call generate_tombstones with that as the prior
+        remote, the migrated key must carry forward into the new manifest,
+        keeping the deletion record alive across the next push.
+        """
+        from mind_meld.manifest import load_manifest
+
+        # A v1 prior manifest someone hand-created (or external tooling did).
+        v1_prior = serialize_manifest({
+            "device_id": "peer1",
+            "files": {},
+            "tombstones": {
+                "memory/deleted.md": {
+                    "deleted_at": (
+                        datetime.now(timezone.utc) - timedelta(days=1)
+                    ).isoformat(),
+                    "device_id": "peer1",
+                },
+            },
+        })
+        prior_remote = load_manifest(v1_prior)
+
+        # Local has no record of the deleted file (matches the "deleted" state).
+        local_manifest = {
+            "device_id": "this-device",
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+
+        next_tombstones = generate_tombstones(
+            local_manifest, prior_remote, "this-device"
+        )
+        # The migrated `claude:memory/deleted.md` must survive carry-forward
+        # so the next push propagates the deletion to other devices.
+        assert "claude:memory/deleted.md" in next_tombstones, (
+            "carry-forward dropped the migrated tombstone — silent un-delete"
+        )
+
+
+class TestMergeManifestsAfterLoadRefactor:
+    """_merge_manifests no longer normalizes inputs in-loop (relies on
+    load_manifest at the fetch boundary). Pin the contract: when called
+    with two pre-normalized v2 manifests that overlap on a tombstone,
+    newest-timestamp wins."""
+
+    def test_pre_normalized_inputs_merge_correctly(self):
+        from mind_meld.cli import _merge_manifests
+        from mind_meld.manifest import load_manifest
+
+        old_blob = serialize_manifest({
+            "device_id": "peer1",
+            "device_name": "old",
+            "timestamp": "2026-04-20T10:00:00+00:00",
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"a.md": {"sha256": "old", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}},
+                },
+            },
+            "tombstones": {
+                "claude:b.md": {"deleted_at": "2026-04-20T10:00:00+00:00", "device_id": "peer1"},
+            },
+        })
+        new_blob = serialize_manifest({
+            "device_id": "peer1",
+            "device_name": "new",
+            "timestamp": "2026-04-22T10:00:00+00:00",
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"a.md": {"sha256": "new", "size": 2, "mtime": "2026-04-22T10:00:00+00:00"}},
+                },
+            },
+            "tombstones": {
+                "claude:b.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "peer1"},
+            },
+        })
+        old = load_manifest(old_blob)
+        new = load_manifest(new_blob)
+
+        merged = _merge_manifests([old, new])
+        # File entry: union with newer-timestamp manifest winning per-key.
+        assert merged["sources"]["claude"]["files"]["a.md"]["sha256"] == "new"
+        # Tombstone: newest-timestamp wins (this is the load-bearing
+        # asymmetry from SPEC.md "Merge invariants").
+        assert (
+            merged["tombstones"]["claude:b.md"]["deleted_at"]
+            == "2026-04-22T10:00:00+00:00"
+        )
+
+
 # ── Conflict manifest resolution ─────────────────────────────────
 
 

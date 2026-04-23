@@ -458,6 +458,64 @@ class TestFindConflictFilesClaudeType:
         assert out_of_scope not in hit_paths, "scope should exclude sessions/"
 
 
+class TestFindConflictFilesFalsePositiveGuard:
+    """Latent bug fix: _find_conflict_files used a substring check that
+    matched user files like `notes.sync-conflict-log.md`, so the reaper
+    would silently delete them after CONFLICT_AGE_DAYS. After the
+    is_conflict_filename refactor, the strict pattern guards them."""
+
+    def test_user_file_with_infix_no_timestamp_is_not_listed(self, tmp_path: Path) -> None:
+        src = tmp_path / "claude"
+        memory = src / "projects" / "proj1" / "memory"
+        memory.mkdir(parents=True)
+
+        # Real conflict file: matched.
+        real_conflict = memory / "notes.sync-conflict-20260421-143055-devA1234.md"
+        real_conflict.write_bytes(b"divergent")
+        # User file containing the infix but no timestamp: NOT matched.
+        user_file = memory / "notes.sync-conflict-log.md"
+        user_file.write_bytes(b"legitimate user file")
+
+        config = {
+            "sync": {"sources": [{"name": "claude", "path": str(src), "type": "claude"}]},
+        }
+
+        hits = _find_conflict_files(config)
+        hit_paths = [h[1] for h in hits]
+        assert real_conflict in hit_paths
+        assert user_file not in hit_paths, (
+            "user file with .sync-conflict- but no timestamp must NOT be listed/reapable"
+        )
+
+
+class TestWalkerExcludesConflictRegression:
+    """Regression: v0.4.0 shipped conflict-copy creation in cli but the
+    walker EXCLUDED list missed the pattern. Result: next push uploaded
+    the local conflict file fleet-wide. End-to-end check at the walker
+    layer that resolves the regression."""
+
+    def test_resolved_conflict_file_does_not_propagate_on_next_walk(self, tmp_path: Path) -> None:
+        from mind_meld.manifest import walk_claude_source
+
+        # Simulate what _apply_incoming_file leaves on disk after preserving
+        # a local divergent version (Syncthing convention).
+        claude = tmp_path / ".claude"
+        memory = claude / "projects" / "-myapp" / "memory"
+        memory.mkdir(parents=True)
+        canonical = memory / "notes.md"
+        canonical.write_text("remote-resolved content")
+        # Use the same helper the CLI uses to ensure naming alignment.
+        conflict = conflict_filename(canonical, device_id="abc12345dead", now=datetime(2026, 4, 22, 12, tzinfo=timezone.utc))
+        conflict.write_text("local divergent content")
+
+        files = walk_claude_source(claude)
+        paths = set(files.keys())
+        assert "projects/-myapp/memory/notes.md" in paths
+        assert all(".sync-conflict-" not in p for p in paths), (
+            f"walker uploaded a conflict file: {paths}"
+        )
+
+
 class TestResolveInteractiveLoop:
     """Tests for _resolve_interactive_loop — the interactive picker invoked by
     `mm resolve`. Uses monkeypatch on typer.prompt to simulate user input.
