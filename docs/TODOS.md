@@ -29,3 +29,19 @@ Inbox for unprocessed items. Other skills (`/full-review`, `/investigate`,
   - Cons: widens the trust surface — blob-presence becomes load-bearing evidence of a peer's existence, not just a device-registry entry. ~30 LOC. Schema for blob-dir → device_id mapping needs careful docstring.
   - Observation bar: land this when we see the first real support case where corrupt `devices.json` masks a recoverable manifest. Until then, the 2A.3 shape-validation + warning is enough.
   - Depends on: Track 2A.3 landing first (structural validation in `list_devices` is a prerequisite).
+
+- **[land-and-deploy 2026-04-23]** Add a minimal GitHub Actions CI workflow.
+  - What: `.github/workflows/test.yml` that runs `pytest tests/` on every push to main and every PR. Matrix across the Python versions declared in `pyproject.toml` classifiers (3.11, 3.12). ~30 lines.
+  - Why: project currently has NO CI. Pre-merge readiness for v0.8.0 depended on a human (or Claude session) running `pytest` locally. A drive-by docs/typo commit from another workspace could silently ship a broken tree to whoever installs from main. For a tool whose whole job is "never silently eat user deletions across machines," the absence of CI on main is a real risk surface — not a cosmetic one.
+  - Pros: makes every future `/land-and-deploy` and `/ship` actually enforceable (not trust-based); catches drive-by breakage; matrix validates the Python-version support claim in `pyproject.toml` (3.11/3.12 currently untested).
+  - Cons: first CI run surfaces latent flakes that have been hiding in the local-only workflow; need to manage any platform-specific test issues (keyring backend on Linux CI differs from macOS dev env). ~1-2 hours to get green the first time.
+  - Observation: `test_crypto.py` and `test_integration.py` reach into macOS keyring indirectly via `store_passphrase_in_keyring`. Linux CI will need that stubbed or skipped via the existing `MINDMELD_PASSPHRASE` env-var path.
+  - Depends on: nothing — can land anytime.
+
+- **[land-and-deploy 2026-04-23]** (Optional) PyPI publish workflow.
+  - What: `.github/workflows/release.yml` that builds + publishes to PyPI on git tag push (e.g. `v0.8.0` → trigger). Uses `hatchling` build backend (already configured in `pyproject.toml`).
+  - Why: currently users install mind-meld via `pip install -e .` from a local clone. PyPI distribution would let someone `pip install mind-meld` cleanly. Only worth doing if the distribution model should shift — staying source-install is also fine for a small-user-count tool.
+  - Pros: cleaner installs; discoverable via `pip search`; versioning is explicit via tags instead of "whatever's on main right now."
+  - Cons: commits to a public package namespace (name squatting, can't easily rename); need to decide on trusted-publisher vs API token auth with PyPI; introduces a new release discipline (`git tag` → wait → verify on PyPI).
+  - Observation bar: land this when someone asks "how do I install this" and the source-install answer becomes friction. No user demand signal today.
+  - Depends on: CI workflow landing first (you want tests green before publishing anything).
