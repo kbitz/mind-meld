@@ -51,15 +51,56 @@ def update_last_seen(
 
 
 def list_devices(backend: LocalBackend) -> list[dict[str, Any]]:
-    """List all registered devices from storage."""
+    """List all registered devices from storage.
+
+    Drops entries that fail to load OR fail shape validation. Callers index
+    `d["device_id"]` and `d["device_name"]` directly (e.g. cli.py's pull and
+    `mm devices` table), so a JSON-valid but shape-invalid entry (non-dict
+    top level, missing `device_id`, etc.) would crash the CLI without this
+    guard.
+
+    Dropped entries emit a per-entry warning via `stderr_console` at the
+    call site — see `_list_devices_with_warnings` in cli.py. Direct callers
+    that import this function get silent drops (unchanged default) so
+    library-mode consumers can read `devices` without side-effect output.
+    """
+    return _list_devices_impl(backend, on_drop=None)
+
+
+def _list_devices_impl(
+    backend: LocalBackend,
+    on_drop: "Any | None" = None,
+) -> list[dict[str, Any]]:
+    """Shared implementation. `on_drop`, if provided, is called with
+    (key, reason) for each dropped entry — cli.py uses this to emit warnings.
+    """
     keys = backend.list_keys("devices/")
     devices = []
     for key in keys:
         if not key.endswith(".json"):
             continue
         try:
-            data = json.loads(backend.get(key))
-            devices.append(data)
-        except (StorageError, json.JSONDecodeError):
-            continue  # Skip corrupt device files
+            raw = json.loads(backend.get(key))
+        except (StorageError, json.JSONDecodeError) as e:
+            if on_drop is not None:
+                on_drop(key, f"unreadable ({type(e).__name__})")
+            continue
+        # Shape validation: top-level must be a dict with a non-empty string
+        # device_id and a string device_name. Anything else would crash
+        # downstream `d["device_id"]` / `d["device_name"]` indexing.
+        if not isinstance(raw, dict):
+            if on_drop is not None:
+                on_drop(key, "not a JSON object")
+            continue
+        did = raw.get("device_id")
+        dname = raw.get("device_name")
+        if not isinstance(did, str) or not did:
+            if on_drop is not None:
+                on_drop(key, "missing or invalid device_id")
+            continue
+        if not isinstance(dname, str):
+            if on_drop is not None:
+                on_drop(key, "missing or invalid device_name")
+            continue
+        devices.append(raw)
     return devices

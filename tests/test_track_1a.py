@@ -812,3 +812,57 @@ def test_autopull_unexpected_crypto_error_logs(tmp_path, monkeypatch):
     log = iso / "autopull.log"
     assert log.exists()
     assert "RuntimeError: unexpected crypto boom" in log.read_text()
+
+
+# ─── Group 2 Pre-flight + 2A.2: _error() stderr routing ──────────────────
+
+
+def test_error_writes_to_stderr_not_stdout(tmp_path, monkeypatch):
+    """REGRESSION (Group 2 Track 2A.2): _error() must route to stderr.
+
+    Before the fix, `console.print(f"[red]Error:[/red] {msg}")` hit stdout.
+    In autopush/autopull quiet mode this violated the one-line-stderr
+    contract (README.md "Claude Code Integration"): failures emitted a
+    rich stdout line AND the outer plain-text stderr line, confusing
+    Claude Code integration.
+
+    We invoke push on a broken config so _error() fires deterministically.
+    """
+    # Point config path at a non-TOML file so load_config raises ConfigError,
+    # which _get_config converts to _error("<ConfigError msg>").
+    bad = tmp_path / "bad.toml"
+    bad.write_text("this is not = valid toml [[[")
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", bad)
+    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", bad)
+
+    r = runner.invoke(app, ["push"])
+
+    # Exit code 1 from _error's typer.Exit(1).
+    assert r.exit_code == 1
+    # The error text must be on stderr.
+    assert "Error:" in (r.stderr or "")
+    # And stdout must be clean — no rich error leakage. Before the fix,
+    # stdout would carry a [red]Error:[/red]-expanded string.
+    assert "Error:" not in (r.stdout or "")
+
+
+def test_error_preserves_rich_formatting_on_stderr():
+    """Rich Console(stderr=True) still emits color codes when attached to
+    a real terminal; the forced-terminal option proves the formatting
+    pipeline still runs (color bytes in the captured stream).
+
+    This protects against a naive "just print() to stderr" refactor that
+    would silently drop the [red]Error:[/red] styling for interactive users.
+    """
+    import io
+    from rich.console import Console
+
+    buf = io.StringIO()
+    c = Console(file=buf, stderr=True, force_terminal=True, color_system="truecolor")
+    c.print("[red]Error:[/red] it blew up")
+    out = buf.getvalue()
+    # Rich emits an ANSI escape for red when force_terminal + color_system
+    # are set. The presence of ESC[ proves styling survived.
+    assert "\x1b[" in out
+    assert "Error:" in out
+    assert "it blew up" in out

@@ -501,3 +501,206 @@ class TestPushRecoveryIntegration:
         assert any("kill.md" in key for key in tombstones_after), (
             f"tombstone for kill.md was lost during recovery; got {list(tombstones_after)}"
         )
+
+
+# ── Group 2 Track 2A.3: list_devices warnings + shape validation ─────
+
+
+class TestListDevicesShapeValidation:
+    """REGRESSION (Group 2 Track 2A.3): list_devices must drop shape-invalid
+    entries, not just unparseable JSON, and surface warnings for dropped
+    entries when called via cli.py's _list_devices_warn wrapper.
+
+    Before the fix, devices.py:53 silently dropped only parse failures.
+    Callers indexed d["device_id"] / d["device_name"] directly, so a
+    JSON-valid but shape-invalid entry (non-dict top level, missing keys)
+    would crash the CLI at the index site instead of being dropped at
+    the load boundary.
+    """
+
+    def _with_entries(self, tmp_path, entries: dict[str, bytes]) -> LocalBackend:
+        backend = LocalBackend(tmp_path / "storage")
+        for key, data in entries.items():
+            backend.put(f"devices/{key}", data)
+        return backend
+
+    def test_silent_variant_drops_parse_failure(self, tmp_path):
+        from mind_meld.devices import list_devices
+        backend = self._with_entries(tmp_path, {
+            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+            "bad.json": b"not-json{",
+        })
+        result = list_devices(backend)
+        assert len(result) == 1
+        assert result[0]["device_id"] == "g"
+
+    def test_silent_variant_drops_non_dict_top_level(self, tmp_path):
+        from mind_meld.devices import list_devices
+        backend = self._with_entries(tmp_path, {
+            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+            "array.json": json.dumps(["not", "a", "dict"]).encode(),
+            "scalar.json": json.dumps(42).encode(),
+        })
+        result = list_devices(backend)
+        assert len(result) == 1
+        assert result[0]["device_id"] == "g"
+
+    def test_silent_variant_drops_missing_device_id(self, tmp_path):
+        from mind_meld.devices import list_devices
+        backend = self._with_entries(tmp_path, {
+            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+            "noid.json": json.dumps({"device_name": "orphan"}).encode(),
+            "emptyid.json": json.dumps({"device_id": "", "device_name": "also-bad"}).encode(),
+            "nonstringid.json": json.dumps({"device_id": 42, "device_name": "numeric-id"}).encode(),
+        })
+        result = list_devices(backend)
+        assert len(result) == 1
+        assert result[0]["device_id"] == "g"
+
+    def test_silent_variant_drops_non_string_device_name(self, tmp_path):
+        from mind_meld.devices import list_devices
+        backend = self._with_entries(tmp_path, {
+            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+            "numname.json": json.dumps({"device_id": "x", "device_name": 42}).encode(),
+        })
+        result = list_devices(backend)
+        assert len(result) == 1
+
+    def test_warn_variant_emits_one_warning_per_dropped_entry(self, tmp_path, capsys):
+        """cli.py's _list_devices_warn wires drops to stderr_console. We
+        expect one warning line per dropped entry, none for good entries."""
+        from mind_meld.cli import _list_devices_warn
+        backend = self._with_entries(tmp_path, {
+            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+            "bad-json.json": b"not-json{",
+            "bad-shape.json": json.dumps({"device_name": "missing-id"}).encode(),
+        })
+        result = _list_devices_warn(backend)
+        captured = capsys.readouterr()
+        # Good entry survives.
+        assert len(result) == 1
+        assert result[0]["device_id"] == "g"
+        # Warnings for both drops, each on its own "line" — not batched.
+        assert captured.err.count("Warning:") == 2
+        assert "bad-json.json" in captured.err
+        assert "bad-shape.json" in captured.err
+
+
+# ── Group 2 Track 2A.1: mm recover --abandon-manifest destructive path ─
+
+
+class TestRecoverAbandonManifestDestructive:
+    """INTEGRATION (Group 2 Track 2A.1): the destructive path `mm recover
+    --abandon-manifest` exists for. Scenario: local manifest is corrupt,
+    NO sidecar on disk, NO peers with tombstones. The user ran `mm push`,
+    got the refuse-with-actionable-message, and now runs recover.
+
+    This test pins the accepted cost: after recover + push, any file the
+    user had deleted locally since the last successful push is NOT
+    propagated as a tombstone. Peers would see the file come back on
+    their next pull. That's the "amputation, not recovery" property
+    codex flagged during /plan-eng-review.
+    """
+
+    def test_abandon_manifest_loses_pending_deletion_records(
+        self, tmp_path, monkeypatch
+    ):
+        from typer.testing import CliRunner
+        from mind_meld.cli import app, _fetch_remote_manifest
+        from mind_meld.config import save_config
+        from mind_meld.crypto import bootstrap_crypto_init, set_crypto_session
+
+        runner = CliRunner()
+
+        # Setup: single device, single claude source, one file, push once.
+        storage = tmp_path / "icloud"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+
+        claude = tmp_path / "claude"
+        project = claude / "projects" / "-Users-kb-myapp" / "memory"
+        project.mkdir(parents=True)
+        kept = project / "kept.md"
+        deleted = project / "will-be-deleted.md"
+        kept.write_text("survives the whole test")
+        deleted.write_text("about to be deleted after first push")
+
+        cfg_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "mac-a", "name": "Mac A"},
+                "storage": {"path": str(storage)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {"name": "claude", "path": str(claude), "type": "claude"},
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            cfg_path,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr(
+            "mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # Isolate sidecar + autorun breadcrumb to tmp.
+        sc_dir = tmp_path / "sidecar"
+        monkeypatch.setattr(sidecar, "SIDECAR_DIR", sc_dir)
+
+        # Register + first push.
+        register_device(backend, "mac-a", "Mac A")
+        r = runner.invoke(app, ["push"])
+        assert r.exit_code == 0, r.output
+
+        # User deletes will-be-deleted.md locally — this is the deletion
+        # we want to prove is lost when abandon-manifest runs.
+        deleted.unlink()
+
+        # Corrupt the remote manifest to simulate the exact scenario.
+        backend.put("manifests/mac-a/manifest.json.enc", b"garbage-not-a-valid-blob")
+
+        # Nuke the sidecar so the recovery chain has NO non-destructive
+        # source (matching the codex-called-out scenario).
+        for p in sc_dir.glob("*"):
+            p.unlink()
+
+        # Run recover --abandon-manifest --yes.
+        r = runner.invoke(app, ["recover", "--abandon-manifest", "--yes"])
+        assert r.exit_code == 0, r.output
+
+        # After recover: next push starts fresh, no tombstones.
+        r = runner.invoke(app, ["push"])
+        assert r.exit_code == 0, r.output
+
+        # Verify: the remote manifest is readable, BUT contains no
+        # tombstone for will-be-deleted.md. This is the accepted loss.
+        fetch = _fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
+        assert fetch.is_ok, "post-recover push should produce a readable manifest"
+        tombstones = fetch.manifest.get("tombstones", {})
+        # The file was deleted locally between pushes, but with no prior-
+        # state manifest, generate_tombstones() had nothing to compare
+        # against, so no tombstone was emitted. That's the load-bearing
+        # cost codex flagged: peers would see will-be-deleted.md come back.
+        assert not any(
+            "will-be-deleted.md" in key for key in tombstones
+        ), (
+            "Expected no tombstone for will-be-deleted.md after "
+            "--abandon-manifest — if this assertion starts failing, the "
+            "recover command has stopped being destructive and now "
+            "preserves deletion records (safer, but re-read SPEC.md's "
+            "Last-resort escape hatch section before relaxing this test)."
+        )
+
+        # Sanity: the quarantine artifact is still on disk for post-mortem.
+        quarantine_siblings = [
+            p for p in (storage / "manifests" / "mac-a").glob("manifest.json.enc*")
+            if ".corrupt-" in p.name
+        ]
+        assert quarantine_siblings, (
+            "quarantine file missing — crash-durability may have failed"
+        )

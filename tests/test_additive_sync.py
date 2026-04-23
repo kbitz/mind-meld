@@ -332,6 +332,69 @@ class TestMergeManifestsAfterLoadRefactor:
             == "2026-04-22T10:00:00+00:00"
         )
 
+    def test_content_hash_tiebreak_is_deterministic(self):
+        """REGRESSION (Group 2 pre-flight 1): two conflict copies with
+        identical ISO-second timestamps but different contents must merge
+        to the SAME result regardless of input list order.
+
+        Before the fix, Python's stable sort preserved insertion order on
+        equal timestamps, and `find_conflict_copies` returns Path.glob
+        order (filesystem-dependent, not sorted cross-device). Two Macs
+        could briefly see different merged states for the same pair of
+        conflict copies.
+        """
+        from mind_meld.cli import _merge_manifests, _manifest_content_hash
+        from mind_meld.manifest import load_manifest
+
+        same_ts = "2026-04-22T10:00:00+00:00"
+
+        a_blob = serialize_manifest({
+            "device_id": "peer1",
+            "device_name": "hostA",
+            "timestamp": same_ts,
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"x.md": {"sha256": "aaaa", "size": 1, "mtime": same_ts}},
+                },
+            },
+            "tombstones": {},
+        })
+        b_blob = serialize_manifest({
+            "device_id": "peer1",
+            "device_name": "hostB",
+            "timestamp": same_ts,
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"y.md": {"sha256": "bbbb", "size": 1, "mtime": same_ts}},
+                },
+            },
+            "tombstones": {},
+        })
+        a = load_manifest(a_blob)
+        b = load_manifest(b_blob)
+
+        merged_ab = _merge_manifests([a, b])
+        merged_ba = _merge_manifests([b, a])
+
+        # Both inputs contribute files (UNION semantic).
+        assert set(merged_ab["sources"]["claude"]["files"].keys()) == {"x.md", "y.md"}
+        assert set(merged_ba["sources"]["claude"]["files"].keys()) == {"x.md", "y.md"}
+
+        # Base (device_name, the non-union field from sorted_manifests[-1])
+        # is identical regardless of input order — this is the determinism
+        # guarantee the tiebreak fix establishes.
+        assert merged_ab["device_name"] == merged_ba["device_name"]
+
+        # The winner is the manifest with the lexicographically LARGER
+        # content hash (per the sort key). Pin this explicitly so a future
+        # "oh let's flip to min instead of max" refactor gets caught.
+        hash_a = _manifest_content_hash(a)
+        hash_b = _manifest_content_hash(b)
+        winner = a if hash_a > hash_b else b
+        assert merged_ab["device_name"] == winner["device_name"]
+
 
 # ── Conflict manifest resolution ─────────────────────────────────
 

@@ -2,6 +2,35 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.0] - 2026-04-23
+
+Group 2 Pre-flight + Track 2A: error-surface hardening around corrupt-manifest
+recovery. Six items, one PR. `mm diag` and `mm recover` are new subcommands;
+`mm init` grows a two-tier destructive-op guard.
+
+### Added
+- **`mm diag` subcommand.** Support-triage state dump: mm-crypto-init status + root_salt fingerprint + argon2 params, local config state, sidecar presence + device_id match, storage inventory (peer counts, manifest/data prefixes), last-autorun breadcrumb. Explicit secrets allowlist — NEVER emits raw root_salt bytes, master_key, keycheck, passphrase, or peer device_ids. Plain text default + `--json` for scripting.
+- **`mm recover --abandon-manifest` subcommand (destructive).** Last-resort escape hatch when `mm push` refuses with "remote manifest corrupt, no local sidecar, and no peer manifests." Quarantines the corrupt manifest to `<key>.corrupt-<ts>` via crash-durable atomic-write + fsync + unlink (NOT plain rename) so power loss mid-quarantine never leaves both copies gone. Requires exact typed `RESET` confirmation (case-sensitive) or `--yes`. Refuses when the normal recovery chain has a viable source (manifest is ok, sidecar present, peer tombstones exist) — running this in those cases would throw away deletion records that push would otherwise preserve. See SPEC.md "Manifest corruption recovery / Last-resort escape hatch."
+- **`mm init` two-tier guard.** Pre-flight 3. `mm init` no longer silently re-inits over existing state. Two tiers gated on storage occupancy (authoritative, not `devices/` which can be silently corrupt):
+  - **Orphan case** — mm-crypto-init ok + any existing blobs/manifests/devices: warn that a new device entry gets created, orphaning the prior local device. Requires `typer.confirm`.
+  - **BRICK case** — mm-crypto-init missing + encrypted blobs/manifests still exist: re-bootstrap would generate a new root_salt and brick every existing blob. Refuse by default; require exact typed `BRICK` (case-sensitive).
+
+### Changed
+- **`_merge_manifests` tiebreak is deterministic across devices.** Pre-flight 1. Sort key changed from `timestamp` to `(timestamp, content_hash)` where `content_hash` = SHA-256 of canonical JSON of the manifest body. Without the tiebreak, Python's stable sort preserved `find_conflict_copies` insertion order, which comes from `Path.glob` — filesystem-dependent and not sorted cross-device. Two Macs pulling the same pair of same-second conflict copies could briefly produce different merged states until the next clean push. `device_id` is NOT in the key: every input to `_merge_manifests` is a conflict copy of the same device's manifest, so it'd be a no-op tiebreaker.
+- **`_error()` writes to stderr, not stdout.** Track 2A.2. Introduced `stderr_console = Console(stderr=True)` at module level; `_error` uses it. Interactive TTY keeps `[red]Error:[/red]` formatting; autopush/autopull quiet mode now has a clean stdout + one-line stderr per the README "Claude Code Integration" contract. Before this fix, quiet-mode failures emitted both a rich stdout line and the outer plain-text stderr line.
+- **`list_devices` now shape-validates entries, with warnings at CLI sites.** Track 2A.3. `devices.py:list_devices` used to silently drop only JSON parse failures; a JSON-valid but shape-invalid entry (non-dict top level, missing `device_id`, non-string `device_name`) would crash callers at `d["device_id"]` indexing. Now drops shape-invalid entries at the load boundary, and `cli.py` calls a new `_list_devices_warn` wrapper that surfaces one warning per dropped entry via `stderr_console`. Library callers (including tests) still import the silent `list_devices` to avoid stderr spam.
+
+### Technical
+- New module-level `_StorageOccupancy` dataclass + `_probe_storage_occupancy` helper driving the init guard decisions.
+- New `_manifest_content_hash` helper used by the tiebreak; canonical JSON (`sort_keys=True, ensure_ascii=False`).
+- `_quarantine_corrupt_manifest` uses `fsutil.atomic_write_bytes(fsync=True)` + `os.unlink` + `fsutil.fsync_dir` (best-effort) for crash durability.
+- 34 new tests across 6 files: tiebreak determinism regression (additive_sync), `_error` stderr + Rich-formatting preservation (track_1a), shape validation + warning emission (recovery), init two-tier guard (integration, 7 cases), `mm diag` secrets boundary + degraded scenarios (diag, 9 cases), `mm recover` unit + destructive integration that pins the accepted deletion-history loss as a regression.
+- Track 2A.4 (Optional[X] signature audit) dropped — the canonical conflation case was already resolved by the `ManifestFetch` tri-state migration in v0.5.1. Remaining `Optional[]` is 6 typer decorators (cosmetic); cleanup lives in Group 6B.
+- Deferred blob-directory-as-secondary-peer-discovery path captured in TODOS.md with observation bar: "first real support case where corrupt devices.json masks a recoverable manifest."
+
+### For contributors
+- `/plan-eng-review` run on 2026-04-23 produced 14 findings across architecture, code quality, tests; codex outside-voice round added 5 gaps (all accepted). Notable: codex correctly flagged that `mm recover --reset-manifest` as originally spec'd was "amputation, not recovery" — the integration test here now pins the accepted cost.
+
 ## [0.7.1] - 2026-04-23
 
 Track 1B: Config eager validation + legacy cleanup. Malformed `sync.sources`

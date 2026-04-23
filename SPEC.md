@@ -449,6 +449,8 @@ On `corrupt`, `push` runs the following recovery chain before writing a new mani
 2. **Peer fallback.** If no sidecar, iterate peer devices and aggregate their tombstones via `collect_tombstones`. This recovers only deletions that previously propagated. Fresh local deletions since the last good push are lost. A warning surfaces this explicitly.
 3. **Refuse.** If neither source yields prior state, exit nonzero with an actionable message. Silent empty-tombstone push is never acceptable: it would erase the deletion record across the device fleet.
 
+**Last-resort escape hatch:** `mm recover --abandon-manifest` exists for the corrupt + no-sidecar + no-peer scenario where step 3 refuses. The subcommand is **destructive by design** — it quarantines the corrupt manifest to `<key>.corrupt-<ts>` (crash-durable via atomic-write + fsync + unlink, not plain rename) and allows the next push to proceed with `remote_manifest=None`. The accepted cost: any files deleted locally since the last successful push lose their deletion records, so peers will see those files come back on their next pull. Typed-`RESET` confirmation gates the operation. Never call this path without surfacing the deletion-history loss to the user first.
+
 ### Merge invariants (load-bearing)
 
 When `_merge_manifests` combines multiple conflict copies of the same device's manifest, the file-merge and tombstone-merge policies are intentionally asymmetric:
@@ -692,9 +694,11 @@ mind-meld/
     ├── test_merge.py          # JSONL union-merge, MEMORY.md line-merge
     ├── test_additive_sync.py  # additive-only pull, tombstones, conflict manifest union
     ├── test_conflict_copy.py  # Syncthing-style conflict-copy preservation on pull
-    ├── test_recovery.py       # corrupt-manifest recovery chain (sidecar → peers → refuse)
+    ├── test_recovery.py       # corrupt-manifest recovery chain (sidecar → peers → refuse) + abandon-manifest destructive path
+    ├── test_recover.py        # mm recover --abandon-manifest unit tests (flag, typed RESET, quarantine durability, collision)
+    ├── test_diag.py           # mm diag secrets-boundary + degraded scenarios (missing/corrupt crypto_init, no config)
     ├── test_version.py        # importlib.metadata version wiring, --version flag
-    └── test_integration.py    # full push→pull round-trip, deletion propagation, GC safety
+    └── test_integration.py    # full push→pull round-trip, deletion propagation, GC safety, init two-tier guard
 ```
 
 ---

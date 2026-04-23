@@ -21,3 +21,11 @@ Inbox for unprocessed items. Other skills (`/full-review`, `/investigate`,
   - Context: relevant only for hand-edited configs.
 
 - **[plan-eng-review 2026-04-23 Track 1A]** Full `quiet`-path audit in `cli.py`. Classify every `if not quiet:` gate as "verbose-only" vs "load-bearing signal." Track 1A patches two known load-bearing gates (`_pull_core:1445` corrupt peer manifest, `_push_core:1297` sidecar write failure). The pattern is likely wider. _src/mind_meld/cli.py, ~60 lines._ (S)
+
+- **[plan-eng-review 2026-04-23 Track 2A]** Blob-directory as secondary peer-discovery path in corrupt-manifest recovery.
+  - What: in `_collect_peer_tombstones` (or a sibling helper), when a peer's `devices/<id>.json` is corrupt or missing but `data/<id>/` has blobs and `manifests/<id>/*.enc` decrypts, promote the blob-dir-derived `device_id` to the peer list. Recover tombstones from the otherwise-dropped peer.
+  - Why: codex flagged during /plan-eng-review 2026-04-23 that `list_devices()` silently dropping a peer masks a recoverable manifest. Corrupt-manifest recovery chain loses data this subtle way.
+  - Pros: tightens the corruption-recovery trust surface; no observed support case today but failure mode is plausible.
+  - Cons: widens the trust surface — blob-presence becomes load-bearing evidence of a peer's existence, not just a device-registry entry. ~30 LOC. Schema for blob-dir → device_id mapping needs careful docstring.
+  - Observation bar: land this when we see the first real support case where corrupt `devices.json` masks a recoverable manifest. Until then, the 2A.3 shape-validation + warning is enough.
+  - Depends on: Track 2A.3 landing first (structural validation in `list_devices` is a prerequisite).
