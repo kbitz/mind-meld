@@ -462,6 +462,16 @@ The asymmetry is correct because the manifest walker is **lossy** — it drops f
 
 Current gated consumers: pull-side `_pull_core` (via `collect_tombstones` across all peers, applied at the `to_download` filter step).
 
+### Read-path normalization invariant (load-bearing)
+
+**Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(bytes) -> dict`.** This single load boundary composes `deserialize_manifest + normalize_manifest` plus full inner-shape validation: `sources` and `tombstones` must be dicts, each source must have a dict `files`, each tombstone value must be a dict. Malformed manifests raise `ManifestError` at the front door instead of crashing downstream consumers (`_merge_manifests`, `collect_tombstones`, `generate_tombstones`, the diff loop) with `AttributeError`.
+
+`_fetch_remote_manifest` already catches `ManifestError` and falls through to the recovery chain (sidecar → peer fallback → refuse), so a malformed peer manifest degrades to a clean `corrupt` status.
+
+`sidecar.read` is the deliberate exception: it uses `deserialize_manifest + structural-shape-check on raw dict + normalize_manifest` (rather than `load_manifest`) so the anti-tampering check on missing `sources`/`tombstones` keys runs against the RAW parsed dict, before `normalize_manifest` would synthesize them.
+
+DO NOT add a new manifest-load path that bypasses `load_manifest` (or sidecar's deliberate variant). The 6 previously-scattered `normalize_manifest(remote_manifest)` calls in `cli.py` were removed in v0.6.0 once this invariant became load-time-guaranteed.
+
 ### Source-file conflicts (Syncthing-style conflict-copy preservation)
 
 If the local file has been edited independently of the remote version (local hash ≠ last-synced hash AND local hash ≠ remote hash), pull never destroys local edits. Behavior is decided per-file at apply time by a documented decision tree in `_apply_incoming_file`:

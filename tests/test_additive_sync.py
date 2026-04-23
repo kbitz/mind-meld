@@ -211,6 +211,128 @@ class TestNormalizeManifestTombstones:
         assert "a.md" in manifest["tombstones"]
 
 
+class TestV1TombstoneMigrationEndToEnd:
+    """A v1-shaped manifest with bare-path tombstones (defensive: no shipped
+    mm version emits this) loaded via load_manifest emerges with claude:-
+    prefixed keys, and is_tombstoned correctly reports the deletion under
+    source='claude'. Guards against silent deletion-resurrection if such a
+    manifest ever lands in storage (manual edit, external tooling, future
+    format)."""
+
+    def test_load_then_is_tombstoned(self):
+        from mind_meld.manifest import load_manifest
+
+        v1_blob = serialize_manifest({
+            "device_id": "peer1",
+            "files": {},
+            "tombstones": {
+                "memory/deleted.md": {
+                    "deleted_at": "2026-04-22T10:00:00+00:00",
+                    "device_id": "peer1",
+                },
+            },
+        })
+        loaded = load_manifest(v1_blob)
+        # is_tombstoned uses src:path keys; if migration didn't fire, this
+        # would silently return False and the deleted file would re-download.
+        assert is_tombstoned("claude", "memory/deleted.md", loaded["tombstones"])
+        # Cross-source check still safe: gstack source is unaffected.
+        assert not is_tombstoned("gstack", "memory/deleted.md", loaded["tombstones"])
+
+    def test_migrated_key_carries_forward_through_generate_tombstones(self):
+        """The whole point of migrating bare keys at v1→v2 promotion is that
+        the migrated `claude:foo.md` tombstone is treated as native v2 by
+        downstream code. Specifically: when load_manifest produces a migrated
+        tombstone and we then call generate_tombstones with that as the prior
+        remote, the migrated key must carry forward into the new manifest,
+        keeping the deletion record alive across the next push.
+        """
+        from mind_meld.manifest import load_manifest
+
+        # A v1 prior manifest someone hand-created (or external tooling did).
+        v1_prior = serialize_manifest({
+            "device_id": "peer1",
+            "files": {},
+            "tombstones": {
+                "memory/deleted.md": {
+                    "deleted_at": (
+                        datetime.now(timezone.utc) - timedelta(days=1)
+                    ).isoformat(),
+                    "device_id": "peer1",
+                },
+            },
+        })
+        prior_remote = load_manifest(v1_prior)
+
+        # Local has no record of the deleted file (matches the "deleted" state).
+        local_manifest = {
+            "device_id": "this-device",
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+
+        next_tombstones = generate_tombstones(
+            local_manifest, prior_remote, "this-device"
+        )
+        # The migrated `claude:memory/deleted.md` must survive carry-forward
+        # so the next push propagates the deletion to other devices.
+        assert "claude:memory/deleted.md" in next_tombstones, (
+            "carry-forward dropped the migrated tombstone — silent un-delete"
+        )
+
+
+class TestMergeManifestsAfterLoadRefactor:
+    """_merge_manifests no longer normalizes inputs in-loop (relies on
+    load_manifest at the fetch boundary). Pin the contract: when called
+    with two pre-normalized v2 manifests that overlap on a tombstone,
+    newest-timestamp wins."""
+
+    def test_pre_normalized_inputs_merge_correctly(self):
+        from mind_meld.cli import _merge_manifests
+        from mind_meld.manifest import load_manifest
+
+        old_blob = serialize_manifest({
+            "device_id": "peer1",
+            "device_name": "old",
+            "timestamp": "2026-04-20T10:00:00+00:00",
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"a.md": {"sha256": "old", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}},
+                },
+            },
+            "tombstones": {
+                "claude:b.md": {"deleted_at": "2026-04-20T10:00:00+00:00", "device_id": "peer1"},
+            },
+        })
+        new_blob = serialize_manifest({
+            "device_id": "peer1",
+            "device_name": "new",
+            "timestamp": "2026-04-22T10:00:00+00:00",
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"a.md": {"sha256": "new", "size": 2, "mtime": "2026-04-22T10:00:00+00:00"}},
+                },
+            },
+            "tombstones": {
+                "claude:b.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "peer1"},
+            },
+        })
+        old = load_manifest(old_blob)
+        new = load_manifest(new_blob)
+
+        merged = _merge_manifests([old, new])
+        # File entry: union with newer-timestamp manifest winning per-key.
+        assert merged["sources"]["claude"]["files"]["a.md"]["sha256"] == "new"
+        # Tombstone: newest-timestamp wins (this is the load-bearing
+        # asymmetry from SPEC.md "Merge invariants").
+        assert (
+            merged["tombstones"]["claude:b.md"]["deleted_at"]
+            == "2026-04-22T10:00:00+00:00"
+        )
+
+
 # ── Conflict manifest resolution ─────────────────────────────────
 
 
@@ -226,10 +348,7 @@ class TestConflictManifestMerge:
         unrelated = tmp_path / "storage" / "manifests" / "abc" / "other.json (conflicted copy 2026-03-18).enc"
         unrelated.write_bytes(b"unrelated")
 
-        conflicts = backend.find_conflict_copies(
-            "manifests/abc/manifest.json.enc",
-            lambda _: True,  # validator doesn't matter — regex already excludes
-        )
+        conflicts = backend.find_conflict_copies("manifests/abc/manifest.json.enc")
         assert len(conflicts) == 0, "Should not match unrelated .enc files"
 
     def test_conflict_copy_read_error_skipped(self, tmp_path):
@@ -274,61 +393,6 @@ class TestConflictManifestMerge:
 
         result = _fetch_remote_manifest(backend, "fresh-device", PASSPHRASE, MEMORY_KB)
         assert result.status == "missing"
-        assert result.manifest is None
-
-    def test_validator_magic_byte_shortcut_avoids_argon2(self, tmp_path, monkeypatch):
-        """Cheap shortcut: validator bails on first byte if it isn't the
-        Mind Meld format version (0x01) — avoids Argon2 per non-manifest
-        sibling. Without this, a user with 20 stale iCloud conflict
-        siblings would see 4-10s hang in recovery."""
-        from mind_meld import cli as cli_module
-        from mind_meld.cli import _make_manifest_validator
-
-        decrypt_calls: list[int] = []
-        real_decrypt = cli_module.decrypt
-
-        def spy_decrypt(data, passphrase, memory_kb):
-            decrypt_calls.append(len(data))
-            return real_decrypt(data, passphrase, memory_kb)
-
-        monkeypatch.setattr(cli_module, "decrypt", spy_decrypt)
-        validator = _make_manifest_validator(PASSPHRASE, MEMORY_KB)
-
-        # Candidate with wrong magic byte: validator rejects WITHOUT decrypt.
-        bogus = tmp_path / "bogus.enc"
-        bogus.write_bytes(b"\xff" + b"garbage payload" * 100)
-        assert validator(bogus) is False
-        assert decrypt_calls == [], (
-            "validator must NOT call decrypt for non-0x01 candidates"
-        )
-
-        # Empty file also rejected without decrypt.
-        empty = tmp_path / "empty.enc"
-        empty.write_bytes(b"")
-        assert validator(empty) is False
-        assert decrypt_calls == []
-
-    def test_bogus_sibling_does_not_flip_missing_to_corrupt(self, tmp_path):
-        """CRITICAL: a stray file in manifests/<device>/ whose name matches
-        the iCloud pattern but doesn't decrypt as a manifest must NOT flip
-        status=missing into status=corrupt. Without the validator, the
-        conflict-copy regex alone sets had_any_source=True and the caller
-        mis-routes to corrupt-recovery when storage is actually fine."""
-        from mind_meld.cli import _fetch_remote_manifest
-
-        backend = LocalBackend(tmp_path / "storage")
-        manifests_dir = tmp_path / "storage" / "manifests" / "fresh-device"
-        manifests_dir.mkdir(parents=True)
-        # No canonical manifest. User (or another tool) left a file whose
-        # name matches the iCloud conflict pattern but with random bytes.
-        (manifests_dir / "manifest.json 2.enc").write_bytes(
-            b"not a Mind Meld blob"
-        )
-
-        result = _fetch_remote_manifest(backend, "fresh-device", PASSPHRASE, MEMORY_KB)
-        assert result.status == "missing", (
-            "Bogus sibling must not flip missing → corrupt"
-        )
         assert result.manifest is None
 
     def test_cleanup_only_from_mutating_ops(self, tmp_path):
@@ -428,101 +492,3 @@ class TestAutoGC:
         assert count == 1
         assert storage.exists("data/dev1/hash1.enc")
         assert not storage.exists("data/dev1/hash_orphan.enc")
-
-
-class TestTmpSweep:
-    """`mm gc` sweeps stale tmp*.tmp files this device left behind."""
-
-    def _make_config(self, tmp_path, device_id: str) -> dict:
-        return {
-            "device": {"id": device_id, "name": f"dev-{device_id}"},
-            "storage": {"path": str(tmp_path / "storage")},
-            "crypto": {"argon2_memory_kb": MEMORY_KB},
-            "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
-        }
-
-    def test_sweeps_this_device_tmp_files(self, tmp_path):
-        """Orphan tmp*.tmp under this device's subtrees (data/, manifests/)
-        are reaped. devices/ is intentionally excluded — see docstring."""
-        from mind_meld.cli import _sweep_local_tmp_files
-
-        storage = LocalBackend(tmp_path / "storage")
-        (storage.root / "data" / "dev1").mkdir(parents=True)
-        (storage.root / "manifests" / "dev1").mkdir(parents=True)
-        (storage.root / "data" / "dev1" / "tmpabc.tmp").write_bytes(b"x")
-        (storage.root / "manifests" / "dev1" / "tmpdef.tmp").write_bytes(b"y")
-
-        count = _sweep_local_tmp_files(storage, "dev1", dry_run=False, verbose=False)
-        assert count == 2
-        assert not (storage.root / "data" / "dev1" / "tmpabc.tmp").exists()
-        assert not (storage.root / "manifests" / "dev1" / "tmpdef.tmp").exists()
-
-    def test_never_sweeps_devices_dir(self, tmp_path):
-        """devices/ is a flat shared directory — tmp files there could
-        be a peer's in-flight write. Never touched."""
-        from mind_meld.cli import _sweep_local_tmp_files
-
-        storage = LocalBackend(tmp_path / "storage")
-        (storage.root / "devices").mkdir(parents=True)
-        stranded = storage.root / "devices" / "tmpxyz.tmp"
-        stranded.write_bytes(b"z")
-
-        count = _sweep_local_tmp_files(storage, "dev1", dry_run=False, verbose=False)
-        assert count == 0
-        assert stranded.exists(), "devices/ tmp must never be touched"
-
-    def test_never_sweeps_peer_subtrees(self, tmp_path):
-        """CRITICAL: peer device subtrees must not be touched.
-
-        iCloud may be mid-uploading a peer's tmp file; reaping it would
-        corrupt a peer's in-flight write."""
-        from mind_meld.cli import _sweep_local_tmp_files
-
-        storage = LocalBackend(tmp_path / "storage")
-        # This device's tmp AND peer's tmp
-        (storage.root / "data" / "dev1").mkdir(parents=True)
-        (storage.root / "data" / "dev2-peer").mkdir(parents=True)
-        (storage.root / "manifests" / "dev1").mkdir(parents=True)
-        (storage.root / "manifests" / "dev2-peer").mkdir(parents=True)
-        mine_data = storage.root / "data" / "dev1" / "tmpA.tmp"
-        peer_data = storage.root / "data" / "dev2-peer" / "tmpB.tmp"
-        mine_manifest = storage.root / "manifests" / "dev1" / "tmpC.tmp"
-        peer_manifest = storage.root / "manifests" / "dev2-peer" / "tmpD.tmp"
-        for p in (mine_data, peer_data, mine_manifest, peer_manifest):
-            p.write_bytes(b"x")
-
-        count = _sweep_local_tmp_files(storage, "dev1", dry_run=False, verbose=False)
-        assert count == 2
-        assert not mine_data.exists()
-        assert not mine_manifest.exists()
-        assert peer_data.exists(), "peer subtree must never be touched"
-        assert peer_manifest.exists(), "peer subtree must never be touched"
-
-    def test_does_not_sweep_non_tmp_files(self, tmp_path):
-        """Normal .enc files in this device's subtree survive the sweep."""
-        from mind_meld.cli import _sweep_local_tmp_files
-
-        storage = LocalBackend(tmp_path / "storage")
-        (storage.root / "data" / "dev1").mkdir(parents=True)
-        (storage.root / "manifests" / "dev1").mkdir(parents=True)
-        normal_blob = storage.root / "data" / "dev1" / "abcdef123.enc"
-        normal_manifest = storage.root / "manifests" / "dev1" / "manifest.json.enc"
-        normal_blob.write_bytes(b"data")
-        normal_manifest.write_bytes(b"manifest")
-
-        count = _sweep_local_tmp_files(storage, "dev1", dry_run=False, verbose=False)
-        assert count == 0
-        assert normal_blob.exists()
-        assert normal_manifest.exists()
-
-    def test_dry_run_previews_without_deleting(self, tmp_path):
-        from mind_meld.cli import _sweep_local_tmp_files
-
-        storage = LocalBackend(tmp_path / "storage")
-        (storage.root / "data" / "dev1").mkdir(parents=True)
-        stranded = storage.root / "data" / "dev1" / "tmp123.tmp"
-        stranded.write_bytes(b"x")
-
-        count = _sweep_local_tmp_files(storage, "dev1", dry_run=True, verbose=False)
-        assert count == 1
-        assert stranded.exists(), "dry_run must not actually delete"

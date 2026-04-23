@@ -9,6 +9,13 @@ Manifest formats:
   v1 — flat "files" dict, single claude source (backward compat)
   v2 — "sources" dict keyed by source name, each with base_path + files
         Also carries "files" for v1 compat (claude source only)
+
+Read-path invariant: every manifest loaded from bytes/disk MUST go through
+`load_manifest`, which composes `deserialize_manifest` + `normalize_manifest`.
+This guarantees downstream code sees a v2-shaped manifest with `sources` and
+`tombstones` dicts and `<source>:<path>`-shaped tombstone keys (where keys
+were normalizable). Do NOT add a new manifest-load path that bypasses
+`load_manifest` — that's how silent deletion-resurrection bugs creep in.
 """
 
 from __future__ import annotations
@@ -21,6 +28,31 @@ from pathlib import Path
 from typing import Any
 
 from mind_meld.errors import ManifestError
+
+# Syncthing-style local conflict copies: <stem>.sync-conflict-<YYYYmmdd-HHMMSS>-<device>[.<ext>]
+# Pattern pinned to the exact timestamp shape `conflict_filename()` emits
+# (8 digits + dash + 6 digits + dash + suffix), so user files like
+# `notes.sync-conflict-log.md` or `notes.sync-conflict-2024-summary.md`
+# are NEVER false-positive-excluded. fnmatch char classes match exactly
+# one character, so the digit count is enforced precisely.
+CONFLICT_INFIX = ".sync-conflict-"
+_DIGITS_8 = "[0-9]" * 8
+_DIGITS_6 = "[0-9]" * 6
+CONFLICT_PATTERN = f"*{CONFLICT_INFIX}{_DIGITS_8}-{_DIGITS_6}-*"
+
+
+def is_conflict_filename(name: str) -> bool:
+    """Return True iff `name` is an mm/Syncthing-style conflict copy.
+
+    Strict matcher: the suffix after `.sync-conflict-` must start with a
+    digit (timestamp). Used by the walker to keep conflict files local-only
+    and by `mm conflicts`/`mm gc --conflicts` to avoid false-positives on
+    user files that happen to contain `.sync-conflict-` in their name.
+    """
+    if not name:
+        return False
+    return fnmatch.fnmatch(name, CONFLICT_PATTERN)
+
 
 EXCLUDED = [
     "node_modules/",
@@ -67,6 +99,12 @@ def mtime_from_path(path: Path) -> datetime:
 def _is_excluded(rel_path: str) -> bool:
     """Check if a relative path matches any exclude pattern."""
     parts = rel_path.split("/")
+    filename = parts[-1]
+    # Conflict copies stay local-only — uploading them would defeat the
+    # Syncthing-style preservation model (one local conflict turns into N
+    # cross-device conflict files).
+    if is_conflict_filename(filename):
+        return True
     for pattern in EXCLUDED:
         # Directory patterns (ending with /)
         if pattern.endswith("/"):
@@ -75,7 +113,6 @@ def _is_excluded(rel_path: str) -> bool:
                 return True
         # File patterns
         else:
-            filename = parts[-1]
             if fnmatch.fnmatch(filename, pattern):
                 return True
     return False
@@ -369,10 +406,19 @@ def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
     Always ensures "tombstones" key exists (empty dict for old manifests).
 
+    During the v1→v2 promotion, bare-path tombstone keys are migrated to
+    `claude:<path>` form. This is defensive: no shipped mm version emits
+    bare-path tombstones (they were introduced AFTER the v2 sources format),
+    but hand-edited v1 manifests, test fixtures, or external tooling could.
+    For manifests that already have `sources`, we do NOT speculate on the
+    meaning of unknown key shapes — `is_tombstoned` returning False is the
+    same safe default as today.
+
     Returns:
         The manifest dict (mutated in place) with "sources" and "tombstones" guaranteed.
     """
-    if "sources" not in manifest:
+    is_v1_promotion = "sources" not in manifest
+    if is_v1_promotion:
         manifest["sources"] = {
             "claude": {
                 "base_path": manifest.get("base_path", ""),
@@ -382,6 +428,17 @@ def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
     if "tombstones" not in manifest:
         manifest["tombstones"] = {}
+    elif is_v1_promotion and isinstance(manifest["tombstones"], dict):
+        # v1 → v2 was unambiguously claude-only; migrate bare-path keys.
+        # (Non-dict tombstones are caught by load_manifest's shape check;
+        # defensive guard here is for direct normalize_manifest callers.)
+        migrated: dict[str, Any] = {}
+        for key, info in manifest["tombstones"].items():
+            if isinstance(key, str) and ":" not in key:
+                migrated[f"claude:{key}"] = info
+            else:
+                migrated[key] = info
+        manifest["tombstones"] = migrated
 
     return manifest
 
@@ -392,11 +449,56 @@ def serialize_manifest(manifest: dict[str, Any]) -> bytes:
 
 
 def deserialize_manifest(data: bytes) -> dict[str, Any]:
-    """Deserialize manifest from JSON bytes."""
+    """Pure JSON-bytes → dict decode. Use `load_manifest` for the
+    decode + normalize pipeline that downstream consumers expect.
+    """
     try:
         return json.loads(data)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise ManifestError(f"manifest: failed to parse — {e}") from e
+
+
+def load_manifest(data: bytes) -> dict[str, Any]:
+    """Decode JSON bytes into a v2-normalized manifest dict.
+
+    Single load boundary for every manifest path (remote fetch, sidecar
+    recovery, test fixtures). Guarantees the returned dict has dict-typed
+    `sources` and `tombstones`, each source entry has a dict-typed `files`,
+    and each tombstone value is a dict. Callers may rely on these invariants.
+
+    Raises ManifestError on bad bytes, non-dict top-level JSON, or any
+    inner-shape violation. Enforcing the full shape at the load boundary
+    turns a downstream AttributeError (deep in collect_tombstones,
+    _merge_manifests, or the diff loop) into a clean recoverable error at
+    the front door — `_fetch_remote_manifest` already catches ManifestError
+    and falls through to the sidecar/peer recovery chain.
+    """
+    parsed = deserialize_manifest(data)
+    if not isinstance(parsed, dict):
+        raise ManifestError("manifest: top-level JSON value is not an object")
+    normalized = normalize_manifest(parsed)
+    sources = normalized.get("sources")
+    tombstones = normalized.get("tombstones")
+    if not isinstance(sources, dict):
+        raise ManifestError("manifest: 'sources' must be an object")
+    if not isinstance(tombstones, dict):
+        raise ManifestError("manifest: 'tombstones' must be an object")
+    for src_name, src_data in sources.items():
+        if not isinstance(src_data, dict):
+            raise ManifestError(
+                f"manifest: sources[{src_name!r}] must be an object"
+            )
+        files = src_data.get("files", {})
+        if not isinstance(files, dict):
+            raise ManifestError(
+                f"manifest: sources[{src_name!r}]['files'] must be an object"
+            )
+    for key, info in tombstones.items():
+        if not isinstance(info, dict):
+            raise ManifestError(
+                f"manifest: tombstones[{key!r}] must be an object"
+            )
+    return normalized
 
 
 class DiffResult:
