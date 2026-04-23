@@ -329,6 +329,53 @@ class TestAutoCommands:
         assert result.exit_code == 0
         assert result.output == ""
 
+    def test_autopull_bad_config_prints_stderr_and_exits_zero(self, tmp_path, monkeypatch):
+        """Regression for eager validation: a config file that exists but has
+        invalid sync.sources must NOT be silently swallowed — autopull should
+        emit a one-line stderr and exit cleanly (Claude Code hook must see the
+        failure instead of sync just stopping forever)."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "storage"}"\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            'type = "claude"\n'
+            # no path — eager validation catches it
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0
+        assert "mm: pull failed" in result.stderr
+        assert "missing required field" in result.stderr
+
+    def test_autopush_bad_config_prints_stderr_and_exits_zero(self, tmp_path, monkeypatch):
+        """Regression for eager validation: autopush must surface bad-config errors
+        on stderr rather than silently swallowing them."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "storage"}"\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            'type = "claude"\n'
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0
+        assert "mm: push failed" in result.stderr
+        assert "missing required field" in result.stderr
+
     def test_autopush_silent_when_lock_held(self, tmp_path, monkeypatch):
         """autopush must exit silently if another mm process holds the lock.
 

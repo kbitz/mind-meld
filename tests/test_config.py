@@ -1,5 +1,6 @@
 """Tests for mind_meld.config — TOML load/save, validation."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -307,3 +308,233 @@ class TestSaveConfigWithSources:
         # TOML arrays look like ["d1", "d2"]
         assert '["d1", "d2"]' in raw
         assert '["f1"]' in raw
+
+
+class TestEagerSourceValidation:
+    """_validate runs _validate_sources so malformed sync.sources surfaces at load
+    time instead of mid-sync."""
+
+    def _base_config(self, tmp_path):
+        return {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+        }
+
+    def test_validate_passes_with_valid_sync_sources(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "sources": [{"name": "claude", "path": "~/.claude", "type": "claude"}]
+        }
+        _validate(config)  # must not raise
+
+    def test_validate_raises_on_source_missing_field(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "sources": [{"name": "claude", "type": "claude"}]  # missing path
+        }
+        with pytest.raises(ConfigError, match="missing required field"):
+            _validate(config)
+
+    def test_validate_raises_on_duplicate_source_name(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "sources": [
+                {"name": "claude", "path": "~/.claude", "type": "claude"},
+                {"name": "claude", "path": "/elsewhere", "type": "claude"},
+            ]
+        }
+        with pytest.raises(ConfigError, match="duplicate source name"):
+            _validate(config)
+
+    def test_validate_passes_with_no_sync_sources_legacy(self, tmp_path):
+        """Legacy configs with only claude_dir (no sources array) must still pass."""
+        config = self._base_config(tmp_path)
+        config["sync"] = {"claude_dir": "~/.claude"}
+        _validate(config)  # must not raise
+
+    def test_load_config_raises_on_bad_sources_in_toml(self, tmp_path):
+        """Headline test: bad sync.sources in TOML raises at load boundary, not mid-push."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "storage"}"\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            'type = "claude"\n'
+            # no path — eager validation should catch this
+        )
+        with pytest.raises(ConfigError, match="missing required field"):
+            load_config(config_path)
+
+
+class TestApplyDefaultsAfterLegacyCleanup:
+    """_apply_defaults no longer defaults claude_dir; expansion is guarded and
+    uses .resolve() to match the walker / storage pattern."""
+
+    def test_no_claude_dir_injection_when_absent(self, tmp_path):
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+        }
+        _apply_defaults(config)
+        # claude_dir should NOT have been injected
+        assert "claude_dir" not in config["sync"]
+        # max_file_size still defaulted
+        assert config["sync"]["max_file_size"] == 52_428_800
+
+    def test_claude_dir_expanded_and_resolved_when_present(self, tmp_path):
+        # Create a real dir so .resolve() has something concrete to canonicalize
+        real_dir = tmp_path / "real_claude"
+        real_dir.mkdir()
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"claude_dir": str(real_dir)},
+        }
+        _apply_defaults(config)
+        # Resolved form should match Path.resolve() output exactly
+        assert config["sync"]["claude_dir"] == str(real_dir.resolve())
+
+    def test_symlinked_claude_dir_stores_resolved_target(self, tmp_path):
+        """If claude_dir is a symlink, .resolve() dereferences it.
+        Regression test for consistency with walker/storage which also .resolve()."""
+        real_dir = tmp_path / "real_claude"
+        real_dir.mkdir()
+        symlink = tmp_path / "link_claude"
+        os.symlink(real_dir, symlink)
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"claude_dir": str(symlink)},
+        }
+        _apply_defaults(config)
+        assert config["sync"]["claude_dir"] == str(real_dir.resolve())
+
+
+class TestGetSourcesResolve:
+    """get_sources must .resolve() source paths so they agree with walker-emitted paths."""
+
+    def test_symlinked_source_path_is_resolved(self, tmp_path, monkeypatch):
+        """Regression: get_sources dereferences symlinks on source paths."""
+        real_dir = tmp_path / "real_claude"
+        real_dir.mkdir()
+        symlink = tmp_path / "link_claude"
+        os.symlink(real_dir, symlink)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "sources": [{"name": "claude", "path": str(symlink), "type": "claude"}]
+            },
+        }
+        sources = get_sources(config)
+        assert len(sources) == 1
+        assert sources[0]["path"] == str(real_dir.resolve())
+
+    def test_minimal_sync_block_falls_through_to_default_sources(self, tmp_path, monkeypatch):
+        """Config with [sync] but no claude_dir and no sources must still work
+        (no KeyError) and resolve via DEFAULT_SOURCES. Regression for legacy-cleanup."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        # Create the default claude path so it survives the existence filter
+        (tmp_path / ".claude").mkdir()
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"max_file_size": 52_428_800},  # no claude_dir, no sources
+        }
+        # _apply_defaults must not KeyError on the missing claude_dir
+        _apply_defaults(config)
+        sources = get_sources(config)
+        names = [s["name"] for s in sources]
+        assert "claude" in names
+
+
+class TestLoadSaveRoundTripIdempotency:
+    """load → save → load on a symlinked path must produce the same resolved path.
+    Codex-tension test: the review flagged that backfill save at cli.py:227 can
+    silently rewrite user config paths. Test that at least the rewrite is stable."""
+
+    def test_symlinked_claude_dir_round_trip_is_idempotent(self, tmp_path):
+        real_dir = tmp_path / "real_claude"
+        real_dir.mkdir()
+        symlink = tmp_path / "link_claude"
+        os.symlink(real_dir, symlink)
+
+        config_path = tmp_path / "config.toml"
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"claude_dir": str(symlink), "max_file_size": 52_428_800},
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        # First save + load: symlink gets resolved on load
+        save_config(config, config_path)
+        loaded_1 = load_config(config_path)
+        resolved_once = loaded_1["sync"]["claude_dir"]
+        assert resolved_once == str(real_dir.resolve())
+
+        # Save the (now-resolved) config, load again — must be identical
+        save_config(loaded_1, config_path)
+        loaded_2 = load_config(config_path)
+        assert loaded_2["sync"]["claude_dir"] == resolved_once
+
+
+class TestValidateSourcesShapeGuards:
+    """_validate_sources raises ConfigError (not TypeError) on malformed input.
+    Codex-tension tests: the bare _validate_sources assumed dict/list shapes."""
+
+    def test_raises_on_non_list_sources(self):
+        with pytest.raises(ConfigError, match="sync.sources must be a list"):
+            _validate_sources("claude")  # string, not list
+
+    def test_raises_on_non_dict_source_item(self):
+        with pytest.raises(ConfigError, match="must be a table"):
+            _validate_sources([42])  # list with non-dict item
+
+    def test_raises_on_non_string_field_value(self):
+        """Name/path/type must be strings. A list-valued name would otherwise
+        hit TypeError at seen_names.add() and autopull/autopush would silently
+        swallow it via the generic-Exception branch."""
+        with pytest.raises(ConfigError, match="must be a string"):
+            _validate_sources([{"name": ["claude"], "path": "~/.claude", "type": "claude"}])
+
+    def test_raises_on_integer_path(self):
+        with pytest.raises(ConfigError, match="must be a string"):
+            _validate_sources([{"name": "claude", "path": 42, "type": "claude"}])
+
+
+class TestLoadConfigNormalizesUnexpectedErrors:
+    """load_config must normalize any non-ConfigError exception from validate or
+    apply_defaults (e.g. .resolve() RuntimeError on cyclic symlinks) into
+    ConfigError. Otherwise autopull/autopush fall through to the silent
+    generic-Exception branch instead of surfacing the failure."""
+
+    def test_unexpected_error_in_apply_defaults_becomes_config_error(
+        self, tmp_path, monkeypatch
+    ):
+        """Simulate a raw exception during _apply_defaults (e.g. what would happen
+        if .resolve() hit a symlink loop) and verify it surfaces as ConfigError."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "storage"}"\n'
+        )
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("simulated symlink loop")
+
+        from mind_meld import config as config_module
+        monkeypatch.setattr(config_module, "_apply_defaults", boom)
+
+        with pytest.raises(ConfigError, match="failed to load"):
+            load_config(config_path)

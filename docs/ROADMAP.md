@@ -11,13 +11,15 @@ All items originated from the 2026-04-22 `/full-review` audit plus review
 follow-ups accumulated across v0.5.1/v0.6.x. Every item targets the v1.0
 release.
 
-**Group 1 (Correctness foundation) shipped in v0.5.1–v0.6.2.** Track 1A tombstone
-loss landed as the tri-state `ManifestFetch` recovery chain (v0.5.1). Track 1A
-Task 2 (`_merge_manifests` union) was resolved via SPEC.md's "Merge invariants"
-section — files UNION + tombstones newest-wins is load-bearing because the
-walker is lossy; only tombstones drive deletion. Track 1B walker +
+**Group 1 (Correctness foundation + Error discipline) shipped in v0.5.1–v0.7.1.**
+Track 1A tombstone loss landed as the tri-state `ManifestFetch` recovery chain
+(v0.5.1). Track 1A Task 2 (`_merge_manifests` union) was resolved via SPEC.md's
+"Merge invariants" section — files UNION + tombstones newest-wins is load-bearing
+because the walker is lossy; only tombstones drive deletion. Track 1B walker +
 manifest-read-path hardening shipped in v0.6.2. Track 1C crypto v2 shipped in
-v0.6.0. Track 1D storage hardening shipped in v0.6.1.
+v0.6.0. Track 1D storage hardening shipped in v0.6.1. Track 1A silent-failure
+cleanup + `--conflict-mode` unification shipped in v0.7.0. Track 1B config eager
+validation + legacy cleanup shipped in v0.7.1.
 
 ---
 
@@ -28,23 +30,28 @@ block user data integrity but they hide real bugs today. After the correctness
 foundation work landed, the next concern is that failures surface clearly
 instead of being swallowed.
 
-### Track 1A: Silent failures in cli.py
+### Track 1A: Silent failures in cli.py — **shipped v0.7.0**
 _5 tasks · ~1 day (human) / ~20 min (CC) · low risk · [cli.py]_
-_touches: src/mind_meld/cli.py, tests/test_integration.py_
+_touches: src/mind_meld/cli.py, src/mind_meld/crypto.py, src/mind_meld/devices.py, tests/test_track_1a.py_
 
-- **Typed catches in autopull/autopush** — `cli.py:1824-1907`: bare `except Exception` hides real bugs behind one-line stderr. Differentiate `Mind MeldError` (expected, one-liner) from `Exception` (unexpected, log traceback to `~/.config/mind_meld/autopull.log` with rotation). Since autopull is what Claude Code runs in the background, hidden data-integrity issues are the worst outcome. _src/mind_meld/cli.py, ~80 lines._ (M)
-- **Post-push auto-GC warning** — `cli.py:756-761`: `except Exception: pass` masks wrong-passphrase, storage-permission, and future refactor bugs. Catch `Mind MeldError` explicitly and emit a `[yellow]Warning:[/yellow]` line like the manifest-corruption warning; let unknown exceptions propagate. _src/mind_meld/cli.py, ~20 lines._ (S)
-- **Unknown-source warning on pull** — `cli.py:1046-1053`: remote sources not configured locally are silently skipped (verbose-only dim message). Print a warning regardless of verbose and include `skipped_unknown_source` in the pull summary; silent-partition risk when source configuration drifts. _src/mind_meld/cli.py, ~30 lines._ (S)
-- **Document `--no-prompt` keep-both behavior** — `cli.py:940-941`: script mode silently keep-boths conflicts with no terminal feedback. Document the three resolve modes in the pull docstring; add `--fail-on-conflict` for CI-style usage. _src/mind_meld/cli.py, ~30 lines._ (S)
-- **Pull updates local `last_seen`** — push updates `last_seen` at `cli.py:882`, pull does not. A read-only device appears stale forever. Update on pull (or document "last_seen means last pushed" in a comment if the existing semantic is intentional). _src/mind_meld/cli.py, src/mind_meld/devices.py, ~20 lines._ (S)
+- ✅ **Typed catches in autopull/autopush** — bare `except Exception` replaced by shared `_auto_command_setup` helper + `_log_unexpected` that differentiates `MindMeldError` (one-line stderr) from unexpected `Exception` (stderr + traceback to `~/.config/mind-meld/autopull.log` / `autopush.log` with 1 MB / 512 KB truncate-tail rotation). `last-autorun.json` breadcrumb written on every invocation so `mm status` can surface wedged-flock history. _Shipped v0.7.0._
+- ✅ **`--conflict-mode {prompt|keep-both|fail}` unification** — `mm pull --no-prompt` and `--resolve-interactive` removed, replaced by a single option. `fail` mode preflights via `_predict_pull_outcome` with an in-memory cross-peer overlay and exits **3** (not 2) on predicted conflict. _BREAKING, Shipped v0.7.0._
+- ✅ **`autopull`/`autopush` non-interactive passphrase** — `get_passphrase(non_interactive=True)` parameter added; autopull/autopush pass True to prevent `getpass.getpass()` hangs in non-TTY hook contexts. _Shipped v0.7.0._
+- ✅ **Corrupt peer manifest + sidecar write failures surfaced in quiet mode** — two load-bearing `if not quiet:` gates in `_pull_core` and `_push_core` rerouted to stderr regardless of quiet. _Shipped v0.7.0._
+- ✅ **Unknown remote sources warn on every pull** — `_pull_core` skipped-unknown-source message no longer gated on `--verbose and not quiet`; `PullResult.total_skipped_unknown_source` counts `(device, source)` pairs and autopull emits a summary line when non-zero. _Shipped v0.7.0._
+- ✅ **`mm devices` "Last Seen" column renamed to "Last Push"** — `register_device` no longer seeds `last_seen`, so registered-but-never-pushed devices render as em-dash; column header now matches the actual semantic. _Shipped v0.7.0._
 
-### Track 1B: Config eager validation + legacy cleanup
+### Track 1B: Config eager validation + legacy cleanup — **shipped v0.7.1**
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [config.py]_
 _touches: src/mind_meld/config.py, tests/test_config.py_
 
-- **Eager source validation** — `config.py:57-72, 103-116`: `_validate_sources` is only called from `get_sources`, not from `_validate`/`load_config`. Move it into `_validate` so TOML errors surface at load time, not mid-sync. _src/mind_meld/config.py, tests/test_config.py, ~40 lines._ (S)
-- **Delete Python 3.10 tomllib fallback** — `config.py:14-20`: `sys.version_info >= (3, 11)` / `tomli` fallback is unreachable (pyproject requires 3.11+). Replace with unconditional `import tomllib`; drop `import sys`. _src/mind_meld/config.py, ~10 lines._ (S)
-- **Scope legacy `claude_dir` defaulting** — `config.py:86-100`: `_apply_defaults` still treats `sync.claude_dir` as a first-class field, but `get_sources` only honors it in the legacy fallback branch. Delete the defaulting or document that `claude_dir` is only honored for legacy configs. Also: `.expanduser()` is applied without `.resolve()`, drifting from the canonical `.expanduser().resolve()` used everywhere else — fix both together. _src/mind_meld/config.py, tests/test_config.py, ~30 lines._ (S)
+- ✅ **Eager source validation** — `_validate_sources` now runs from `_validate` whenever `sync.sources` is present, plus shape guards on every field so malformed TOML raises `ConfigError` at load time with a pointed message. Bonus: non-`ConfigError` exceptions from `_validate` / `_apply_defaults` (e.g. cyclic-symlink `.resolve()`) are normalized to `ConfigError` so Track 1A's `_auto_command_setup` surfaces them via the typed-error branch. _Shipped v0.7.1._
+- ✅ **Delete Python 3.10 tomllib fallback** — `sys.version_info` gate + `tomli` import branch removed; unconditional `import tomllib`. _Shipped v0.7.1._
+- ✅ **Scope legacy `claude_dir` defaulting** — `_apply_defaults` no longer injects a default `claude_dir`; expansion runs only when the field is present. `.expanduser().resolve()` now matches the canonical pattern at the 11 other call sites across `cli.py` / `manifest.py` / `storage/local.py` / `synclog.py`. `DEFAULT_SOURCES` and the auto-detected gstack fallback deliberately skip `.resolve()` to avoid cyclic-symlink failures at every command startup — walker resolves at use time. _Shipped v0.7.1._
+
+Two follow-ups captured in `docs/TODOS.md` (both Codex findings from /plan-eng-review):
+- Stop mutating config in `_apply_defaults`; compute expanded paths lazily in `get_sources` (avoids silent realpath rewrite on backfill save).
+- Rich `ConfigError` with TOML line numbers on parse failure.
 
 ---
 
