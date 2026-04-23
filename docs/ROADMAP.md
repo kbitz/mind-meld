@@ -11,13 +11,14 @@ All items originated from the 2026-04-22 `/full-review` audit plus review
 follow-ups accumulated across v0.5.1/v0.6.x. Every item targets the v1.0
 release.
 
-**Group 1 (Correctness foundation) shipped in v0.5.1–v0.6.2.** Track 1A tombstone
+**Group 1 (Correctness foundation) shipped in v0.5.1–v0.6.3.** Track 1A tombstone
 loss landed as the tri-state `ManifestFetch` recovery chain (v0.5.1). Track 1A
 Task 2 (`_merge_manifests` union) was resolved via SPEC.md's "Merge invariants"
 section — files UNION + tombstones newest-wins is load-bearing because the
 walker is lossy; only tombstones drive deletion. Track 1B walker +
-manifest-read-path hardening shipped in v0.6.2. Track 1C crypto v2 shipped in
-v0.6.0. Track 1D storage hardening shipped in v0.6.1.
+manifest-read-path hardening shipped in v0.6.2. Track 1B config eager validation
++ legacy cleanup shipped in v0.6.3. Track 1C crypto v2 shipped in v0.6.0.
+Track 1D storage hardening shipped in v0.6.1.
 
 ---
 
@@ -38,13 +39,17 @@ _touches: src/mind_meld/cli.py, tests/test_integration.py_
 - **Document `--no-prompt` keep-both behavior** — `cli.py:940-941`: script mode silently keep-boths conflicts with no terminal feedback. Document the three resolve modes in the pull docstring; add `--fail-on-conflict` for CI-style usage. _src/mind_meld/cli.py, ~30 lines._ (S)
 - **Pull updates local `last_seen`** — push updates `last_seen` at `cli.py:882`, pull does not. A read-only device appears stale forever. Update on pull (or document "last_seen means last pushed" in a comment if the existing semantic is intentional). _src/mind_meld/cli.py, src/mind_meld/devices.py, ~20 lines._ (S)
 
-### Track 1B: Config eager validation + legacy cleanup
+### Track 1B: Config eager validation + legacy cleanup — **shipped v0.6.3**
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [config.py]_
 _touches: src/mind_meld/config.py, tests/test_config.py_
 
-- **Eager source validation** — `config.py:57-72, 103-116`: `_validate_sources` is only called from `get_sources`, not from `_validate`/`load_config`. Move it into `_validate` so TOML errors surface at load time, not mid-sync. _src/mind_meld/config.py, tests/test_config.py, ~40 lines._ (S)
-- **Delete Python 3.10 tomllib fallback** — `config.py:14-20`: `sys.version_info >= (3, 11)` / `tomli` fallback is unreachable (pyproject requires 3.11+). Replace with unconditional `import tomllib`; drop `import sys`. _src/mind_meld/config.py, ~10 lines._ (S)
-- **Scope legacy `claude_dir` defaulting** — `config.py:86-100`: `_apply_defaults` still treats `sync.claude_dir` as a first-class field, but `get_sources` only honors it in the legacy fallback branch. Delete the defaulting or document that `claude_dir` is only honored for legacy configs. Also: `.expanduser()` is applied without `.resolve()`, drifting from the canonical `.expanduser().resolve()` used everywhere else — fix both together. _src/mind_meld/config.py, tests/test_config.py, ~30 lines._ (S)
+- ✅ **Eager source validation** — `_validate_sources` now runs from `_validate` whenever `sync.sources` is present, plus shape guards on every field so malformed TOML raises `ConfigError` at load time with a pointed message. Bonus: non-`ConfigError` exceptions from `_validate` / `_apply_defaults` (e.g. cyclic-symlink `.resolve()`) are normalized to `ConfigError` so `autopull` / `autopush` surface them via the typed-error branch instead of exiting 0 silently. _Shipped v0.6.3._
+- ✅ **Delete Python 3.10 tomllib fallback** — `sys.version_info` gate + `tomli` import branch removed; unconditional `import tomllib`. _Shipped v0.6.3._
+- ✅ **Scope legacy `claude_dir` defaulting** — `_apply_defaults` no longer injects a default `claude_dir`; expansion runs only when the field is present. `.expanduser().resolve()` now matches the canonical pattern at the 11 other call sites across `cli.py` / `manifest.py` / `storage/local.py` / `synclog.py`. `DEFAULT_SOURCES` and the auto-detected gstack fallback deliberately skip `.resolve()` to avoid cyclic-symlink failures at every command startup — walker resolves at use time. _Shipped v0.6.3._
+
+Two follow-ups captured in `docs/TODOS.md` (both Codex findings from /plan-eng-review):
+- Stop mutating config in `_apply_defaults`; compute expanded paths lazily in `get_sources` (avoids silent realpath rewrite on backfill save).
+- Rich `ConfigError` with TOML line numbers on parse failure.
 
 ---
 

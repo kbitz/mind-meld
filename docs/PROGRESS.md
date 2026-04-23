@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.6.3   | 2026-04-23 | Track 1B: config eager validation + legacy cleanup (bad `config.toml` now fails at load time with typed `ConfigError`) |
 | 0.6.2   | 2026-04-23 | Track 1B: walker conflict-file exclusion + manifest read-path hardening (`load_manifest` boundary) |
 | 0.6.1   | 2026-04-23 | Track 1D: storage layer hardening (`fsutil`, `fcntl.flock`, deferred-durability pull) |
 | 0.6.0   | 2026-04-22 | Track 1C: crypto v2 — process-scoped `master_key` + HKDF-SHA256 per-file keys |
@@ -32,7 +33,7 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   boundary (v0.6.2). Track 1A Task 2 (`_merge_manifests` union) resolved via
   SPEC.md "Merge invariants" — files UNION + tombstones newest-wins is the
   correct policy because the walker is lossy.
-- **Group 1 (Error discipline):** not started — next up.
+- **Group 1 (Error discipline):** Track 1B (config eager validation + legacy cleanup) shipped in v0.6.3. Track 1A (silent failures in cli.py) not started — next up.
 - **Group 2 (Post-v0.5.1 follow-ups):** not started — error-surface cleanups
   and small CLI safety additions unblocked by v0.5.1/v0.6.0 landing.
 - **Groups 3–6 (Refactor + hygiene):** not started — queued.

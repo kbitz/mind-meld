@@ -42,7 +42,8 @@ Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(by
 ## Auto Commands (for Claude Code integration)
 - `mm autopull` — silent pull, one-line output, never prompts, graceful on errors
 - `mm autopush` — silent push, one-line output, never prompts, graceful on errors
-- Both exit silently if mm is not initialized or no changes exist
+- Both exit silently if mm is not initialized (no config) or no changes exist
+- `ConfigError` (bad `config.toml`) surfaces as a one-line stderr message — not a silent exit. This is the visible-failure contract: truly unexpected errors still degrade silently via the generic `except Exception` fallback, but malformed config is loud so users don't wedge their background sync without noticing. Relies on `load_config` normalizing non-`ConfigError` exceptions (e.g. cyclic-symlink `.resolve()` failures) into `ConfigError` at the load boundary — do not bypass that by calling `_validate` / `_apply_defaults` directly from a new call site.
 - See README.md "Claude Code Integration" section for CLAUDE.md snippet
 
 ## Spec
