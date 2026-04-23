@@ -129,3 +129,94 @@ class TestConflictDetection:
         assert count == 2
         assert not icloud.exists()
         assert not dropbox.exists()
+
+
+class TestPutExclusive:
+    """Atomic create-only primitive for bootstrap blobs like mm-crypto-init."""
+
+    @pytest.fixture
+    def backend(self, tmp_path):
+        return LocalBackend(tmp_path / "storage")
+
+    def test_put_exclusive_creates_file(self, backend):
+        backend.put_exclusive("mm-crypto-init", b"hello")
+        assert backend.get("mm-crypto-init") == b"hello"
+
+    def test_put_exclusive_creates_parents(self, backend):
+        backend.put_exclusive("deep/nested/init.blob", b"data")
+        assert backend.get("deep/nested/init.blob") == b"data"
+
+    def test_put_exclusive_fails_if_target_exists(self, backend):
+        backend.put_exclusive("mm-crypto-init", b"first")
+        with pytest.raises(StorageError, match="already exists"):
+            backend.put_exclusive("mm-crypto-init", b"second")
+        # Original content unchanged.
+        assert backend.get("mm-crypto-init") == b"first"
+
+    def test_put_exclusive_leaves_no_temp_on_success(self, backend, tmp_path):
+        backend.put_exclusive("mm-crypto-init", b"data")
+        # Parent dir should only contain the target; no lingering .tmp.
+        parent = (tmp_path / "storage")
+        entries = sorted(p.name for p in parent.iterdir())
+        assert entries == ["mm-crypto-init"]
+
+    def test_put_exclusive_leaves_no_temp_on_failure(self, backend, tmp_path):
+        backend.put_exclusive("mm-crypto-init", b"first")
+        with pytest.raises(StorageError):
+            backend.put_exclusive("mm-crypto-init", b"second")
+        parent = (tmp_path / "storage")
+        entries = sorted(p.name for p in parent.iterdir())
+        assert entries == ["mm-crypto-init"]
+
+
+class TestExtensionlessConflictRegex:
+    """iCloud conflict detection for files without an extension (e.g. mm-crypto-init)."""
+
+    @pytest.fixture
+    def backend(self, tmp_path):
+        return LocalBackend(tmp_path / "storage")
+
+    def test_find_extensionless_icloud_conflict(self, backend):
+        backend.put("mm-crypto-init", b"canonical")
+        (backend.root / "mm-crypto-init 2").write_bytes(b"conflict")
+        conflicts = backend.find_conflict_copies("mm-crypto-init")
+        assert len(conflicts) == 1
+        assert conflicts[0].name == "mm-crypto-init 2"
+
+    def test_find_multiple_extensionless_icloud_conflicts(self, backend):
+        backend.put("mm-crypto-init", b"canonical")
+        for i in (2, 3, 5):
+            (backend.root / f"mm-crypto-init {i}").write_bytes(b"conflict")
+        conflicts = backend.find_conflict_copies("mm-crypto-init")
+        assert len(conflicts) == 3
+
+    def test_find_extensionless_dropbox_conflict(self, backend):
+        backend.put("mm-crypto-init", b"canonical")
+        (backend.root / "mm-crypto-init (conflicted copy 2026-04-22)").write_bytes(b"x")
+        conflicts = backend.find_conflict_copies("mm-crypto-init")
+        assert len(conflicts) == 1
+
+    def test_delete_extensionless_conflicts(self, backend):
+        backend.put("mm-crypto-init", b"canonical")
+        (backend.root / "mm-crypto-init 2").write_bytes(b"a")
+        (backend.root / "mm-crypto-init 3").write_bytes(b"b")
+        count = backend.delete_conflict_copies("mm-crypto-init")
+        assert count == 2
+        assert backend.exists("mm-crypto-init")
+
+    def test_extensionless_does_not_match_extension_file(self, backend):
+        """A file named 'mm-crypto-init 2.txt' is NOT a conflict copy of 'mm-crypto-init'."""
+        backend.put("mm-crypto-init", b"canonical")
+        (backend.root / "mm-crypto-init 2.txt").write_bytes(b"unrelated")
+        conflicts = backend.find_conflict_copies("mm-crypto-init")
+        assert conflicts == []
+
+    def test_extension_file_still_requires_matching_ext(self, backend):
+        """Regression: 'manifest.json 2.enc' still matches, 'manifest.json 2' doesn't."""
+        backend.put("manifests/abc/manifest.json.enc", b"x")
+        (backend.root / "manifests" / "abc" / "manifest.json 2.enc").write_bytes(b"y")
+        (backend.root / "manifests" / "abc" / "manifest.json 2").write_bytes(b"z")
+        conflicts = backend.find_conflict_copies("manifests/abc/manifest.json.enc")
+        # The extensionless "manifest.json 2" should NOT match (expected ext is .enc).
+        assert len(conflicts) == 1
+        assert conflicts[0].name == "manifest.json 2.enc"
