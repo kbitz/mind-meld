@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.8.0   | 2026-04-23 | Group 2 pre-flight + Track 2A: error-surface hardening (`_merge_manifests` tiebreak, `mm diag`, `mm init` two-tier guard, `mm recover --abandon-manifest`, `_error()` stderr routing, `list_devices` shape validation) |
 | 0.7.1   | 2026-04-23 | Track 1B: config eager validation + legacy cleanup (bad `config.toml` now fails at load time with typed `ConfigError`) |
 | 0.7.0   | 2026-04-23 | Track 1A: silent-failure cleanup in `autopull`/`autopush` + `--conflict-mode` unification (BREAKING: `mm pull --no-prompt` / `--resolve-interactive` removed) |
 | 0.6.2   | 2026-04-23 | Track 1B: walker conflict-file exclusion + manifest read-path hardening (`load_manifest` boundary) |
@@ -34,11 +35,24 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   boundary (v0.6.2). Track 1A Task 2 (`_merge_manifests` union) resolved via
   SPEC.md "Merge invariants" — files UNION + tombstones newest-wins is the
   correct policy because the walker is lossy.
-- **Group 1 (Error discipline):** ✅ complete. Track 1A (silent failures in cli.py + `--conflict-mode` unification) shipped in v0.7.0. Track 1B (config eager validation + legacy cleanup) shipped in v0.7.1.
-- **Group 2 (Post-v0.5.1 follow-ups):** not started — error-surface cleanups
-  and small CLI safety additions unblocked by v0.5.1/v0.6.0 landing.
-- **Groups 3–6 (Refactor + hygiene):** not started — queued.
-- **Groups 7–9 (P2/P3 features, parallel-safe after Group 6):** not started.
+- **Error discipline (was Group 1, now removed from roadmap):** ✅ complete.
+  Track 1A (silent failures in cli.py + `--conflict-mode` unification) shipped
+  in v0.7.0. Track 1B (config eager validation + legacy cleanup) shipped in
+  v0.7.1.
+- **Post-v0.5.1 follow-ups (was Group 2, now removed from roadmap):** ✅
+  complete. Group 2 pre-flight (`_merge_manifests` tiebreak, `mm diag`, `mm
+  init` two-tier guard) + Track 2A (`mm recover --abandon-manifest`, `_error()`
+  stderr routing, `list_devices` shape validation) shipped in v0.8.0.
+- **Roadmap renumbered after v0.8.0.** Groups 1+2 removed (entirely shipped);
+  former Groups 3–9 are now Groups 1–7. New Group 8 (Release infrastructure,
+  CI workflow) added. New Track 3B (Config polish — eng-review follow-ups)
+  added. New Track 1A task (full quiet-path audit in cli.py) added.
+- **Group 1 (cli.py hardening + manifest dead code):** not started — queued.
+- **Groups 2–4 (Decomposition + DRY, init flow + config polish, test hygiene
+  + style polish):** not started — queued.
+- **Groups 5–7 (P2/P3 features, parallel-safe after Group 4):** not started.
+- **Group 8 (Release infrastructure, GitHub Actions CI):** not started —
+  parallel-safe with everything; can land anytime.
 
 ### Version source of truth
 
