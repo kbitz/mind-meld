@@ -1,7 +1,22 @@
 """Local folder storage backend for Mind Meld.
 
 Writes encrypted blobs to a local directory synced by iCloud Drive.
-Includes conflict detection for iCloud and Dropbox-style conflicted copies.
+Includes conflict detection for iCloud and Dropbox-style conflicted
+copies. Writes route through `fsutil.atomic_write_bytes` for crash
+safety; durability policy is set per key prefix:
+
+    manifests/  → fsync=True (source of truth; loss = silent un-deletion)
+    devices/    → fsync=True (peer discovery / GC inputs)
+    data/       → fsync=False (hash-addressed blobs, self-healing via re-push)
+
+Conflict-copy detection accepts an optional validator predicate that
+confirms a candidate really IS a semantically valid match for the caller
+(e.g., decrypts as a Mind Meld manifest). Without a validator, a random
+file whose name happens to match the iCloud/Dropbox rename patterns
+would pollute the candidate set — that's fine for some callers (the
+crypto-v2 bootstrap path validates each candidate after the fact via
+`_parse_crypto_init`) and a real problem for others (manifest recovery,
+where a bogus sibling can spuriously flip status=missing→status=corrupt).
 """
 
 from __future__ import annotations
@@ -9,23 +24,32 @@ from __future__ import annotations
 import errno
 import os
 import re
+import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
+from mind_meld import fsutil
 from mind_meld.errors import StorageError
 
-# iCloud conflict pattern: "filename 2.ext", "filename 3.ext", or extensionless
-# like "mm-crypto-init 2". Extension is optional to accommodate bootstrap blobs
-# without a suffix.
-_ICLOUD_CONFLICT_RE = re.compile(
-    r"^(.+?)\s+(\d+)(\.[^.]+)?$"
-)
+# iCloud conflict pattern: "filename 2.ext", "filename 3.ext", or
+# extensionless like "mm-crypto-init 2" (no suffix).
+_ICLOUD_CONFLICT_RE = re.compile(r"^(.+?)\s+(\d+)(\.[^.]+)?$")
 
-# Dropbox conflict pattern: "filename (conflicted copy YYYY-MM-DD).ext", or
-# extensionless variant.
+# Dropbox conflict pattern: "filename (conflicted copy YYYY-MM-DD).ext",
+# or extensionless variant.
 _DROPBOX_CONFLICT_RE = re.compile(
     r"^(.+?)\s+\((?:.*?conflicted copy.*?)\)(\.[^.]+)?$", re.IGNORECASE
 )
+
+# Key prefixes whose writes must be durably flushed (F_FULLFSYNC on Darwin).
+# data/ blobs are hash-addressed and re-uploadable, so they skip fsync for
+# latency. See CLAUDE.md "truth-based manifests" for the durability model.
+_DURABLE_PREFIXES = ("manifests/", "devices/")
+
+
+def _needs_fsync(key: str) -> bool:
+    return key.startswith(_DURABLE_PREFIXES)
 
 
 class LocalBackend:
@@ -35,16 +59,12 @@ class LocalBackend:
     def put(self, key: str, data: bytes) -> None:
         path = self.root / key
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic write: write to temp file, then rename
-        try:
-            fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-            try:
-                os.write(fd, data)
-            finally:
-                os.close(fd)
-            os.rename(tmp_path, path)
-        except OSError as e:
-            raise StorageError(f"storage: failed to write {key} — {e}") from e
+        # All storage keys hold encrypted secrets (blobs, manifests,
+        # devices, crypto-init) — explicit 0600 so new files aren't
+        # world-readable via umask.
+        fsutil.atomic_write_bytes(
+            path, data, fsync=_needs_fsync(key), mode=0o600
+        )
 
     def put_exclusive(self, key: str, data: bytes) -> None:
         """Atomic create-only write. Fails StorageError if target already exists.
@@ -105,7 +125,6 @@ class LocalBackend:
         if not prefix_path.exists():
             return []
         result = []
-        # Walk the prefix directory
         base = prefix_path if prefix_path.is_dir() else prefix_path.parent
         if not base.exists():
             return []
@@ -122,53 +141,113 @@ class LocalBackend:
             try:
                 path.unlink()
             except OSError as e:
-                raise StorageError(f"storage: failed to delete {key} — {e}") from e
+                raise StorageError(
+                    f"storage: failed to delete {key} — {e}"
+                ) from e
 
     def exists(self, key: str) -> bool:
         return (self.root / key).exists()
 
-    def find_conflict_copies(self, key: str) -> list[Path]:
-        """Find iCloud or Dropbox-style conflicted copies of a file.
+    def find_conflict_copies(
+        self,
+        key: str,
+        is_valid: Callable[[Path], bool] | None = None,
+    ) -> list[Path]:
+        """Find iCloud/Dropbox-style conflict copies of `key`.
 
         iCloud creates: "manifest.json 2.enc", "manifest.json 3.enc", or
                        extensionless "mm-crypto-init 2" (no suffix).
         Dropbox creates: "manifest.json (conflicted copy 2026-03-18).enc"
+
+        The regex patterns here are loose by design — any sibling whose
+        name matches is a CANDIDATE. The optional `is_valid` predicate
+        is how the caller confirms a candidate is semantically legitimate
+        (e.g., decrypts as a Mind Meld manifest). Without the predicate,
+        ANY regex-matching sibling is returned — which is fine when the
+        caller validates each candidate itself (crypto-v2 bootstrap path)
+        and a correctness concern when it doesn't (manifest recovery,
+        where a bogus sibling can spuriously flip missing→corrupt).
+
+        Args:
+            key: storage key. Can be any path; the caller supplies whatever
+                validation semantics they need via `is_valid`.
+            is_valid: optional predicate. If provided, only candidates for
+                which `is_valid(path)` returns True are included. Exceptions
+                from the predicate are caught, logged to stderr, and the
+                candidate is treated as False (never as "conflict"). If
+                omitted, all regex-matching candidates are returned.
+
+        Returns:
+            List of conflict copy paths, sorted lexicographically.
         """
         path = self.root / key
         parent = path.parent
         if not parent.exists():
             return []
 
-        # Use path.name's stem/suffix split rather than Path.stem/suffix, which
-        # behave awkwardly when there's no extension. For "mm-crypto-init" the
-        # full name IS the stem and suffix is "".
+        # Use path.name's stem/suffix split rather than Path.stem/suffix,
+        # which behave awkwardly when there's no extension. For
+        # "mm-crypto-init" the full name IS the stem and suffix is "".
         name = path.name
         if "." in name:
-            # Last dot delimits stem/suffix as Path would do.
             stem_base = path.stem
             ext = path.suffix
         else:
             stem_base = name
             ext = ""
 
-        conflicts = []
+        candidates: list[Path] = []
         for f in parent.iterdir():
             if f == path or not f.is_file():
                 continue
-            # Check iCloud pattern
             m = _ICLOUD_CONFLICT_RE.match(f.name)
             if m and m.group(1) == stem_base and (m.group(3) or "") == ext:
-                conflicts.append(f)
+                candidates.append(f)
                 continue
-            # Check Dropbox pattern
             m = _DROPBOX_CONFLICT_RE.match(f.name)
             if m and m.group(1) == stem_base and (m.group(2) or "") == ext:
-                conflicts.append(f)
-        return sorted(conflicts)
+                candidates.append(f)
 
-    def delete_conflict_copies(self, key: str) -> int:
-        """Delete all conflicted copies. Returns count deleted."""
-        copies = self.find_conflict_copies(key)
+        if is_valid is None:
+            return sorted(candidates)
+
+        confirmed: list[Path] = []
+        for c in candidates:
+            try:
+                ok = is_valid(c)
+            except Exception as e:
+                sys.stderr.write(
+                    f"warning: ignoring suspicious file {c} "
+                    f"(validator raised: {e})\n"
+                )
+                continue
+            if ok:
+                confirmed.append(c)
+            else:
+                sys.stderr.write(
+                    f"warning: ignoring suspicious file {c} "
+                    f"(failed validation). If you re-ran `mm init` with "
+                    f"a new passphrase, old conflict copies stay "
+                    f"unreadable until you remove them manually or run "
+                    f"`mm gc --conflicts`.\n"
+                )
+        return sorted(confirmed)
+
+    def delete_conflict_copies(
+        self,
+        key: str,
+        is_valid: Callable[[Path], bool] | None = None,
+    ) -> int:
+        """Delete conflict copies of `key` (filtered by optional predicate).
+
+        When `is_valid` is provided, only candidates the predicate confirms
+        are deleted — predicate-rejected siblings (unrelated files, bytes
+        from an older passphrase) are left on disk with a stderr warning.
+        When `is_valid` is omitted, all regex-matching siblings are deleted.
+
+        Returns the count deleted.
+        """
+        copies = self.find_conflict_copies(key, is_valid)
         for c in copies:
             c.unlink(missing_ok=True)
         return len(copies)

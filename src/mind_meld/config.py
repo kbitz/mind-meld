@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from mind_meld import fsutil
 from mind_meld.errors import ConfigError
 
 if sys.version_info >= (3, 11):
@@ -211,7 +212,12 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> None:
                         lines.append(f"{key} = {_toml_value(val)}")
                     lines.append("")
 
-    config_path.write_text("\n".join(lines))
+    # fsync=True: config corruption leaves the user unable to run mm.
+    # Low call volume (only on save), so the durability cost is negligible.
+    # 0600: the config contains device identity and storage paths —
+    # internal state, not user-shared content.
+    data = "\n".join(lines).encode("utf-8")
+    fsutil.atomic_write_bytes(config_path, data, fsync=True, mode=0o600)
 
 
 def _toml_value(val: Any) -> str:

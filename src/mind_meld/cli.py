@@ -13,15 +13,17 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Literal, Optional
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from mind_meld import __version__
+from mind_meld import __version__, fsutil
 from mind_meld.config import CONFIG_PATH, DEFAULT_STORAGE_PATH, load_config, save_config, get_sources
 from mind_meld.crypto import (
+    FORMAT_VERSION,
     CryptoInitFetch,
     bootstrap_crypto_init,
     decrypt,
@@ -35,7 +37,7 @@ from mind_meld.crypto import (
     verify_passphrase,
 )
 from mind_meld.devices import list_devices, register_device, update_last_seen
-from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError
+from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError, StorageError
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     DiffResult,
@@ -232,6 +234,48 @@ def _init_crypto_session(backend, passphrase: str, config: dict) -> int:
     return fetch.argon2_memory_kb
 
 
+def _make_manifest_validator(
+    passphrase: str, memory_kb: int
+) -> Callable[[Path], bool]:
+    """Return a predicate that accepts `path` only if it decrypts AND
+    deserializes as a Mind Meld manifest.
+
+    Used by find_conflict_copies / delete_conflict_copies in storage/local.py
+    to reject bogus siblings (random files whose name happens to match the
+    iCloud or Dropbox rename pattern). Without this, `_fetch_remote_manifest`
+    can spuriously flip status=missing → status=corrupt when the user drops
+    a stray file into manifests/<device>/.
+
+    Catches the same exception set as _fetch_remote_manifest's inline
+    decrypt/deserialize (see cli.py:197) so the definitions of "valid" agree.
+    OSError is included to cover TOCTOU (the file disappears mid-read because
+    iCloud sync removed it) — the candidate is simply treated as "not a real
+    conflict" rather than crashing the caller.
+    """
+    def is_valid(path: Path) -> bool:
+        try:
+            enc_data = path.read_bytes()
+        except OSError:
+            # File vanished mid-scan (iCloud sync race). Treat as "not a
+            # conflict" — caller skips it, next fetch will re-evaluate.
+            return False
+        # Cheap magic-byte shortcut before paying Argon2. Non-Mind-Meld
+        # files (stray backups, user scratch files) bail out in ~1ms
+        # instead of ~200-500ms per candidate.
+        if not enc_data or enc_data[0] != FORMAT_VERSION:
+            return False
+        try:
+            plain = decrypt(enc_data, passphrase, memory_kb)
+            deserialize_manifest(plain)
+            return True
+        except Exception:
+            # Defense in depth: a single malformed candidate (e.g., stale
+            # passphrase after `mm init`, corrupt ciphertext, unexpected
+            # argon2 error) must never crash the whole recovery sweep.
+            return False
+    return is_valid
+
+
 def _fetch_remote_manifest(
     backend, device_id: str, passphrase: str, memory_kb: int
 ) -> ManifestFetch:
@@ -248,8 +292,9 @@ def _fetch_remote_manifest(
     manifest_key = f"manifests/{device_id}/manifest.json.enc"
     manifests: list[dict] = []
 
+    is_valid_manifest = _make_manifest_validator(passphrase, memory_kb)
     canonical_exists = backend.exists(manifest_key)
-    conflict_copies = backend.find_conflict_copies(manifest_key)
+    conflict_copies = backend.find_conflict_copies(manifest_key, is_valid_manifest)
     had_any_source = canonical_exists or bool(conflict_copies)
 
     # Try canonical manifest. Storage-layer errors (OSError, StorageError, any
@@ -456,14 +501,22 @@ def _merge_manifests(manifests: list[dict]) -> dict:
     return merged
 
 
-def _cleanup_conflict_copies(backend, device_id: str) -> int:
+def _cleanup_conflict_copies(
+    backend, device_id: str, passphrase: str, memory_kb: int
+) -> int:
     """Delete conflict copies for a device's manifest.
 
     Call ONLY from mutating operations (push, pull) after the manifest
     has been successfully used. Never from status, diff, gc, or dry-run.
+
+    A validator predicate (decrypt + deserialize_manifest) gates deletion:
+    candidates whose name matches the iCloud/Dropbox rename patterns but
+    which don't deserialize as Mind Meld manifests are left on disk with
+    a stderr warning. Only real manifest conflict copies are removed.
     """
     manifest_key = f"manifests/{device_id}/manifest.json.enc"
-    return backend.delete_conflict_copies(manifest_key)
+    is_valid = _make_manifest_validator(passphrase, memory_kb)
+    return backend.delete_conflict_copies(manifest_key, is_valid)
 
 
 def _print_diff_summary(diff: DiffResult, elapsed: float) -> None:
@@ -600,27 +653,6 @@ def conflict_filename(
     return path
 
 
-def _atomic_write(target: Path, data: bytes) -> None:
-    """Write bytes via tmp + rename. Raises OSError on failure.
-
-    Cleans up the .tmp sibling if either the write or the rename fails so
-    we don't strand orphan files in the synced tree (which would propagate
-    as regular files on the next push).
-    """
-    tmp_path = target.with_suffix(target.suffix + ".tmp")
-    try:
-        tmp_path.write_bytes(data)
-        tmp_path.rename(target)
-    except OSError:
-        # Best-effort cleanup; ignore errors trying to remove a file that
-        # never got created.
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-
 def _prompt_conflict_choice(
     rel_path: str,
     local_path: Path,
@@ -707,8 +739,10 @@ def _apply_incoming_file(
     # [W] local has no copy yet.
     if not local_path.exists():
         try:
-            _atomic_write(local_path, plain_data)
-        except OSError as e:
+            # Deferred durability: per-file fsync=False; end of pull calls
+            # fsutil.fsync_dir once per touched parent.
+            fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
+        except (OSError, StorageError) as e:
             console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
             return "failed"
         if verbose:
@@ -734,8 +768,8 @@ def _apply_incoming_file(
         try:
             local_bytes = local_path.read_bytes()
             merged = merge_file(rel_path, local_bytes, plain_data)
-            _atomic_write(local_path, merged)
-        except OSError as e:
+            fsutil.atomic_write_bytes(local_path, merged, fsync=False)
+        except (OSError, StorageError) as e:
             console.print(f"  [red]merge failed:[/red] {rel_path} \u2014 {e}")
             return "failed"
         if verbose:
@@ -770,8 +804,8 @@ def _apply_incoming_file(
             return "skipped"
         if choice == "keep-remote":
             try:
-                _atomic_write(local_path, plain_data)
-            except OSError as e:
+                fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
+            except (OSError, StorageError) as e:
                 console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
                 return "failed"
             if verbose:
@@ -789,8 +823,8 @@ def _apply_incoming_file(
         return "failed"
 
     try:
-        _atomic_write(local_path, plain_data)
-    except OSError as e:
+        fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
+    except (OSError, StorageError) as e:
         # Best-effort rollback so canonical still points at something.
         try:
             conflict_path.rename(local_path)
@@ -1254,7 +1288,7 @@ def _push_core(
     # the remote manifest succeeded, so peers still have a path to recovery).
     try:
         sidecar.write(local_manifest)
-    except OSError as e:
+    except (OSError, StorageError) as e:
         if not quiet:
             console.print(
                 f"[yellow]Warning:[/yellow] failed to write recovery sidecar "
@@ -1265,8 +1299,10 @@ def _push_core(
     # Update device last_seen
     update_last_seen(backend, device_id)
 
-    # Clean up conflict copies (write-path only)
-    _cleanup_conflict_copies(backend, device_id)
+    # Clean up conflict copies (write-path only). Validator gates deletion
+    # so a bogus sibling whose name matches the iCloud pattern but doesn't
+    # deserialize as a manifest is left on disk with a stderr warning.
+    _cleanup_conflict_copies(backend, device_id, passphrase, memory_kb)
 
     elapsed = time.time() - start
     result = PushResult(
@@ -1422,6 +1458,10 @@ def _pull_core(
     total_failed = 0
     bytes_transferred = 0
     device_names: list[str] = []
+    # Deferred durability: per-file writes skip fsync; at the end of pull
+    # we fsync each unique parent directory once so recent renames are
+    # durable against crash / power loss.
+    touched_parents: set[Path] = set()
 
     for device in devices:
         did = device["device_id"]
@@ -1502,6 +1542,14 @@ def _pull_core(
             )
             bytes_transferred += bt
 
+            # Collect parent dirs of every file that was successfully
+            # written (any outcome except "skipped" / "unchanged" / "failed").
+            # These get a single F_FULLFSYNC at end-of-pull.
+            for rel in (
+                outcomes["written"] + outcomes["merged"] + outcomes["conflicted"]
+            ):
+                touched_parents.add((base_path / rel).parent)
+
             src_written = len(outcomes["written"])
             src_merged = len(outcomes["merged"])
             src_skipped = len(outcomes["skipped"])
@@ -1561,7 +1609,22 @@ def _pull_core(
             device_names.append(dname)
             # Clean up iCloud/Dropbox manifest conflict copies. Unrelated to
             # .sync-conflict-* file copies — those live in the synced tree.
-            _cleanup_conflict_copies(backend, did)
+            _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
+
+    # Deferred-durability commit: fsync each unique parent directory we
+    # wrote into so recent renames survive crash or power loss. A failure
+    # here means some of this pull's renames may be non-durable — warn
+    # but don't roll back (files are already in place; a subsequent pull
+    # will simply re-apply if needed).
+    for parent_dir in sorted(touched_parents):
+        try:
+            fsutil.fsync_dir(parent_dir)
+        except StorageError as e:
+            if not quiet:
+                console.print(
+                    f"  [yellow]warning:[/yellow] durability fsync failed "
+                    f"on {parent_dir} — {e}"
+                )
 
     elapsed = time.time() - start
     result = PullResult(
@@ -1878,6 +1941,66 @@ def gc(
         release_lock()
 
 
+def _sweep_local_tmp_files(
+    backend,
+    my_device_id: str,
+    dry_run: bool,
+    verbose: bool,
+) -> int:
+    """Reap stale tmp*.tmp left by crashed atomic_write_bytes calls.
+
+    Scoped strictly to THIS device's subtrees:
+        <root>/data/<my_device_id>/
+        <root>/manifests/<my_device_id>/
+
+    Peer subtrees are never touched — the iCloud storage tree is shared
+    across machines but flock only serializes THIS Mac, so a file in
+    another device's subtree might be in the middle of being uploaded
+    by their iCloud daemon. Not our garbage to collect.
+
+    NOTE: devices/ is intentionally EXCLUDED. It is a flat directory
+    shared across machines (no per-device subdir), and tempfile.mkstemp
+    names are random — there is no reliable way to tell this device's
+    stranded tmp from a peer's in-flight write. The rare leak there is
+    accepted; see Track 3A GC sweep for global orphan reaping.
+
+    Returns the count swept (or would-be-swept if dry_run).
+    """
+    count = 0
+    scoped_dirs = [
+        backend.root / "data" / my_device_id,
+        backend.root / "manifests" / my_device_id,
+    ]
+    victims: list[Path] = []
+    for base in scoped_dirs:
+        if not base.exists():
+            continue
+        for p in base.rglob("tmp*.tmp"):
+            if p.is_file():
+                victims.append(p)
+
+    # devices/ deliberately excluded — see docstring.
+
+    for v in victims:
+        if dry_run:
+            if verbose:
+                console.print(f"  [dim]would sweep: {v}[/dim]")
+        else:
+            try:
+                v.unlink()
+            except OSError as e:
+                if verbose:
+                    console.print(f"  [yellow]sweep failed: {v} — {e}[/yellow]")
+                continue
+        count += 1
+
+    if count > 0 and not dry_run:
+        console.print(f"  [dim]swept {count} stale tmp files[/dim]")
+    elif count > 0 and dry_run:
+        console.print(f"  [dim]would sweep {count} stale tmp files[/dim]")
+    return count
+
+
 def _do_gc(
     config: dict,
     passphrase: str,
@@ -1887,6 +2010,12 @@ def _do_gc(
 ) -> int:
     """Run garbage collection. Returns number of orphaned blobs found/deleted."""
     backend = get_backend(config)
+    my_device_id = config["device"]["id"]
+
+    # Sweep this device's stale tmp*.tmp files before ref-counting.
+    # Runs UNDER the caller's lock (acquire_lock already held by gc()),
+    # so no concurrent writer can race with the sweep.
+    _sweep_local_tmp_files(backend, my_device_id, dry_run, verbose)
 
     # Collect all referenced hashes from ALL device manifests
     devices = list_devices(backend)

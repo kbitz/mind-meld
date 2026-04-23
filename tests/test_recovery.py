@@ -227,6 +227,42 @@ class TestSidecar:
         tmps = [n for n in names if n.endswith(".tmp")]
         assert tmps == [], f"leftover tmp files: {tmps}"
 
+    def test_write_routes_through_fsutil_with_fsync_true(
+        self, tmp_path, monkeypatch
+    ):
+        """Sidecar.write must go through fsutil.atomic_write_bytes with
+        fsync=True — durability is load-bearing for corrupt-manifest recovery."""
+        _isolate_sidecar(monkeypatch, tmp_path)
+        calls: list[dict] = []
+
+        real_write = sidecar.fsutil.atomic_write_bytes
+
+        def spy_write(path, data, *, fsync=False, mode=None):
+            calls.append({"path": path, "fsync": fsync, "mode": mode})
+            real_write(path, data, fsync=fsync, mode=mode)
+
+        monkeypatch.setattr(sidecar.fsutil, "atomic_write_bytes", spy_write)
+        sidecar.write(_make_manifest("abc", {}))
+        assert len(calls) == 1
+        assert calls[0]["fsync"] is True
+        assert calls[0]["mode"] == 0o600
+
+    def test_write_raises_storage_error_on_filesystem_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: sidecar.write raises StorageError (not OSError)
+        after the fsutil migration. Callers must catch both."""
+        from mind_meld.errors import StorageError
+
+        _isolate_sidecar(monkeypatch, tmp_path)
+
+        def bad_write(path, data, *, fsync=False, mode=None):
+            raise StorageError("simulated disk failure")
+
+        monkeypatch.setattr(sidecar.fsutil, "atomic_write_bytes", bad_write)
+        with pytest.raises(StorageError):
+            sidecar.write(_make_manifest("abc", {}))
+
 
 # ── _collect_peer_tombstones ─────────────────────────────────────────
 

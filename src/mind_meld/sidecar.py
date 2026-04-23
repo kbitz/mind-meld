@@ -13,12 +13,10 @@ plaintext manifest snapshot of them does not widen the threat model.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from mind_meld.errors import ManifestError
+from mind_meld import fsutil
 
 SIDECAR_DIR = Path.home() / ".config" / "mind-meld"
 
@@ -31,25 +29,21 @@ def sidecar_path() -> Path:
 def write(manifest: dict[str, Any]) -> None:
     """Atomically write the manifest as the last-successful-push sidecar.
 
-    Raises OSError on filesystem failures. Caller must handle (push writes
-    a sidecar best-effort; a failure warns but does not abort push).
+    Writes via fsutil.atomic_write_bytes with fsync=True — local crash
+    durability matters here because the sidecar is consulted on the next
+    push when peer manifests are corrupt (see cli.py corrupt-manifest
+    recovery chain). A sidecar that was renamed but not fsynced would
+    silently vanish on crash, defeating TODOS #1.
+
+    Raises StorageError on filesystem failures. Caller handles
+    (push writes best-effort; a failure warns but does not abort push).
     """
     SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
     target = sidecar_path()
-
-    fd, tmp_name = tempfile.mkstemp(
-        dir=SIDECAR_DIR, prefix="last-push.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(manifest, f, indent=2, sort_keys=True)
-        os.replace(tmp_name, target)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    data = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
+    # Sidecar holds this device's deletion record for corrupt-manifest
+    # recovery — 0600 because it's internal state, not user content.
+    fsutil.atomic_write_bytes(target, data, fsync=True, mode=0o600)
 
 
 def read(expected_device_id: str) -> dict[str, Any] | None:

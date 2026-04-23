@@ -211,6 +211,35 @@ class TestSyncLog:
         )
         assert len(logs) == 0
 
+    def test_sync_log_routes_through_fsutil_with_fsync_false(
+        self, tmp_path, monkeypatch
+    ):
+        """Sync log writes must go through fsutil with fsync=False —
+        .mind-meld-log.md is cosmetic; per-file fsync would add pull latency."""
+        from mind_meld import synclog
+
+        claude_dir = tmp_path / ".claude"
+        (claude_dir / "projects" / "-foo").mkdir(parents=True)
+
+        calls: list[dict] = []
+        real_write = synclog.fsutil.atomic_write_bytes
+
+        def spy_write(path, data, *, fsync=False, mode=None):
+            calls.append({"path": path, "fsync": fsync, "mode": mode})
+            real_write(path, data, fsync=fsync, mode=mode)
+
+        monkeypatch.setattr(synclog.fsutil, "atomic_write_bytes", spy_write)
+        synclog.write_sync_log(
+            claude_dir=str(claude_dir),
+            device_name="Other",
+            device_id="xyz",
+            new_files=["projects/-foo/memory/x.md"],
+            modified_files=[],
+            deleted_files=[],
+        )
+        assert len(calls) == 1
+        assert calls[0]["fsync"] is False
+
 
 class TestGCSafety:
     def test_gc_never_deletes_referenced_blobs(self, storage):
@@ -299,6 +328,97 @@ class TestAutoCommands:
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
         assert result.output == ""
+
+    def test_autopush_silent_when_lock_held(self, tmp_path, monkeypatch):
+        """autopush must exit silently if another mm process holds the lock.
+
+        Simulates the Claude Code hot-path where `mm autopush` and
+        `mm autopull` can fire simultaneously — exactly one acquires
+        the flock; the loser must not crash, bubble a traceback, or
+        write junk to stdout."""
+        import subprocess
+        import sys
+        import textwrap
+        import time
+        from pathlib import Path
+        from mind_meld.config import LOCK_PATH
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").write_text("x")
+
+        config_path = tmp_path / "config.toml"
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "claude_dir": str(claude_dir),
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+
+        # Redirect the lockfile to a per-test path so this doesn't
+        # contaminate the user's real ~/.config/mind-meld/mind-meld.lock.
+        test_lock = tmp_path / "test.lock"
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", test_lock)
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", test_lock)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # Spawn a child that grabs the lock and holds it until stdin closes.
+        repo_src = str(Path(__file__).parent.parent / "src")
+        ready_marker = tmp_path / "child-ready"
+        child_script = textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {repo_src!r})
+            from pathlib import Path
+            from mind_meld.lockfile import acquire_lock, release_lock
+
+            lp = Path({str(test_lock)!r})
+            acquire_lock(lp)
+            Path({str(ready_marker)!r}).write_text("ready")
+            sys.stdin.read()
+            release_lock(lp)
+        """).strip()
+
+        child = subprocess.Popen(
+            [sys.executable, "-c", child_script],
+            stdin=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if ready_marker.exists():
+                    break
+                time.sleep(0.02)
+            else:
+                child.kill()
+                pytest.fail("child did not become ready")
+
+            # Now try autopush — must exit cleanly, not crash.
+            result = runner.invoke(app, ["autopush"])
+            assert result.exit_code == 0, (
+                f"autopush must handle lock contention gracefully, "
+                f"got exit={result.exit_code} output={result.output!r}"
+            )
+            # autopush is a silent command; a LockError must surface only
+            # as a short stderr line, never a traceback.
+            assert "Traceback" not in result.output
+            assert "Traceback" not in (result.stderr or "")
+        finally:
+            if child.stdin:
+                child.stdin.close()
+            child.wait(timeout=5)
 
     def test_autopush_round_trip(self, tmp_path, monkeypatch):
         """autopush should push changes and print a one-line summary."""
@@ -462,6 +582,91 @@ class TestMultiSourceSync:
         pulled_config = gstack_dir / "config.yaml"
         assert pulled_config.exists()
         assert pulled_config.read_text() == "version: 1"
+
+    def test_pull_calls_fsync_dir_per_unique_parent(self, tmp_path, monkeypatch):
+        """End-of-pull deferred durability: fsync_dir called once per
+        unique parent directory that received a write. Verifies the
+        durability is actually deferred (not per-file) AND actually
+        happens (not dropped entirely)."""
+        from pathlib import Path
+        from mind_meld import fsutil
+        from mind_meld import cli as cli_module
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+
+        # Seed 3 distinct parent dirs on the "sending" side.
+        (claude_dir / "projects" / "-app-a" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-app-a" / "memory" / "a.md").write_text("A")
+        (claude_dir / "projects" / "-app-b" / "memory").mkdir(parents=True)
+        (claude_dir / "projects" / "-app-b" / "memory" / "b.md").write_text("B")
+        (gstack_dir / "projects").mkdir(parents=True)
+        (gstack_dir / "projects" / "state.yaml").write_text("x")
+        (gstack_dir / "config.yaml").write_text("v: 1")
+
+        config_a_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A", gstack_dir
+        )
+        backend = LocalBackend(storage_dir)
+        register_device(backend, "dev-a", "Mac A")
+        register_device(backend, "dev-b", "Mac B")
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        runner.invoke(app, ["autopush"])
+
+        # Wipe local dirs to simulate Machine B.
+        import shutil
+        shutil.rmtree(str(claude_dir)); claude_dir.mkdir(parents=True)
+        shutil.rmtree(str(gstack_dir)); gstack_dir.mkdir(parents=True)
+        (gstack_dir / "projects").mkdir()
+
+        config_b_path, _ = self._make_config(
+            tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
+
+        # Spy: capture every fsync_dir call Pull triggers.
+        calls: list[Path] = []
+        real_fsync_dir = fsutil.fsync_dir
+
+        def spy_fsync_dir(path):
+            calls.append(Path(path))
+            real_fsync_dir(path)
+
+        # cli.py does `from mind_meld import fsutil` at import time and
+        # calls `fsutil.fsync_dir(...)` through that alias, so patch the
+        # attribute on cli.fsutil (which IS the same module object).
+        monkeypatch.setattr(cli_module.fsutil, "fsync_dir", spy_fsync_dir)
+
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0
+
+        # At least 4 unique parent dirs should have been written to during pull:
+        #   <claude>/projects/-app-a/memory  (a.md)
+        #   <claude>/projects/-app-b/memory  (b.md)
+        #   <gstack>/projects                (state.yaml)
+        #   <gstack>                         (config.yaml)
+        # Synclog may add ".mind-meld-log.md" writes but those are internal.
+        unique_parents = set(calls)
+        expected = {
+            claude_dir / "projects" / "-app-a" / "memory",
+            claude_dir / "projects" / "-app-b" / "memory",
+            gstack_dir / "projects",
+            gstack_dir,
+        }
+        missing = expected - unique_parents
+        assert not missing, (
+            f"expected fsync_dir calls for {expected}, missing {missing}. "
+            f"actual: {unique_parents}"
+        )
+        # Deferred-durability invariant: fsync_dir called exactly once per
+        # unique parent (not per file).
+        assert len(calls) == len(unique_parents)
 
     def test_jsonl_merge_on_pull(self, tmp_path, monkeypatch):
         """JSONL files are merged (not overwritten) on pull."""
