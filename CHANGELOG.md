@@ -2,6 +2,29 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.6.3] - 2026-04-23
+
+Track 1B: Config eager validation + legacy cleanup. A malformed `sync.sources`
+block in `config.toml` now surfaces at load time with a clean error message
+instead of crashing mid-sync. Closes the silent-failure gap in `mm autopull` /
+`mm autopush` that let bad configs wedge Claude Code's background sync with
+exit 0 and no stderr.
+
+### Changed
+- **Eager source validation.** `_validate` now runs `_validate_sources` whenever `sync.sources` is present, so TOML typos surface at the load boundary with a clear `ConfigError` — no more deferring until the first push/pull attempt to notice a missing `path` or duplicate source name.
+- **Shape guards on source validation (cross-model adversarial finding).** Both Claude and Codex flagged that `_validate_sources` trusted `sync` to be a dict, `sources` to be a list, each entry to be a dict, and field values to be strings. Bad input (`sources = "claude"`, `sources = [42]`, `name = ["claude"]`) used to raise raw `TypeError` or crash at `.expanduser()`. Every malformed shape now raises `ConfigError` with a pointed message naming the offending field and its actual type.
+- **Unexpected load-time errors normalized to `ConfigError`.** `load_config` now wraps `_validate` + `_apply_defaults` so any non-`ConfigError` exception (e.g., `.resolve()` `RuntimeError` on a cyclic symlink) becomes a `ConfigError`. `mm autopull` / `mm autopush` surface those cleanly via the typed-error branch instead of falling through to the silent generic-Exception branch.
+- **Defensive `ConfigError` branch in `autopull` / `autopush`.** Both commands now check `CONFIG_PATH.exists()` first for the "not initialized" silent-exit case, then catch `ConfigError` explicitly and emit a one-line stderr message. The generic `except Exception: return` stays as the final fallback for truly unexpected load failures — Claude Code's hook context still gets silent exits for "no mm installed here" while bad configs now get a visible failure signal.
+- **`.resolve()` parity with the rest of the codebase.** `_apply_defaults` and explicit `sync.sources` paths now call `.expanduser().resolve()` to match the dominant pattern at 11 other call sites across `cli.py`, `manifest.py`, `storage/local.py`, and `synclog.py`. Keeps config-stored paths aligned with walker-emitted paths so symlinked setups don't silently disagree. `DEFAULT_SOURCES` and the auto-detected gstack fallback deliberately skip `.resolve()` here — the walker resolves at use time anyway, and resolving them up front would let a cyclic user symlink at `~/.gstack` break `get_sources` for every command.
+
+### Removed
+- **Python 3.10 `tomllib` fallback.** `pyproject.toml` requires Python 3.11+, so the `sys.version_info` gate and `tomli` import branch were unreachable dead code. Replaced with unconditional `import tomllib`.
+- **Legacy `claude_dir` default in `_apply_defaults`.** `get_sources` already falls through to `DEFAULT_SOURCES` when neither `sync.sources` nor `sync.claude_dir` is present; the extra `setdefault` was redundant with that fallback and forced every new config through a "legacy" code path. `_apply_defaults` now expands `claude_dir` only when it is actually present.
+
+### For contributors
+- 21 new tests in `tests/test_config.py` + 2 regression tests in `tests/test_integration.py` covering: eager validation paths, shape guards (non-list / non-dict / non-string field values), `.resolve()` parity and round-trip idempotency on symlinked paths, `claude_dir` absence, `load_config` error normalization, `autopull` / `autopush` stderr surfacing on bad configs. Total suite is now 392 tests.
+- Two follow-up TODOs captured in `docs/TODOS.md`: (1) stop mutating config in `_apply_defaults` — compute expanded paths lazily in `get_sources` to avoid silent realpath rewrite on backfill save, and (2) rich `ConfigError` with TOML line numbers on parse failure.
+
 ## [0.6.2] - 2026-04-23
 
 Track 1B: Walker conflict-file exclusion + manifest read-path hardening.
