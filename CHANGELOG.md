@@ -2,7 +2,79 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.8.2] - 2026-04-23
+## [0.8.3] - 2026-04-23
+
+Group 2 pre-flight + Track 2A: storage-key helpers and CLI decomposition.
+Extracts every storage-key string construction behind a typed helper module,
+splits the 393-line `_pull_core` into six focused helpers plus a single
+print-owner, and splits the 125-line `_apply_incoming_file` dispatcher into
+three per-outcome helpers. Internal refactor — zero user-visible behavior
+change. Two codex-found regressions in the initial decomp were caught and
+fixed before merge (see Fixed).
+
+### Added
+- `src/mind_meld/storage/keys.py` — pure string-construction helpers for every
+  storage key used in the repo: `manifest_key(device_id)`,
+  `blob_key(device_id, sha)`, `device_key(device_id)`, `parse_blob_key(key)`
+  (depth-only parser for `mm gc`), plus `MANIFESTS_PREFIX` / `DATA_PREFIX` /
+  `DEVICES_PREFIX` constants and re-exported `CRYPTO_INIT_KEY`. Validates path
+  components at construction time — rejects empty, `"."`, `".."`, `/`, `\`,
+  null bytes — so a corrupt or malicious peer manifest can't smuggle a
+  `sha256: "../../../etc/passwd"` through `backend.get`.
+- `_select_devices`, `_prefetch_manifests`, `_preflight_conflicts`,
+  `_pull_one_source`, `_fsync_touched_parents`, `_print_pull_summary` helpers
+  in cli.py. Each returns structured data (dataclasses for peer warnings,
+  predicted conflicts, fsync warnings, per-source results). The dispatcher
+  reads as ~50 lines of orchestration + one `_print_pull_summary` call.
+- `_apply_write`, `_apply_merge`, `_apply_conflict` helpers in cli.py. The
+  `_apply_incoming_file` dispatcher shrank from 125 to ~50 LOC.
+- `tests/test_preflight.py` (47 tests) — storage-key helpers including
+  path-traversal rejection for all three constructors.
+- `tests/test_track_2a.py` (38 tests) — unit pins for each extracted helper,
+  load-bearing stderr contracts (corrupt peer, unknown source, fsync failure
+  surviving quiet mode), and the two codex-found regression pins.
+
+### Changed
+- `_list_devices_warn` is called exactly once per pull (was twice). One
+  warning per dropped peer per pull is the correct semantic; the pre-refactor
+  double-print was a bug.
+- `write_sync_log` and `_cleanup_conflict_copies` are now best-effort in
+  `_pull_core` — wrapped in `try/except (OSError, StorageError)` that logs
+  to stderr and continues. Pull's outer loop is wrapped in `try/finally` so
+  accumulated corrupt-peer / unknown-source / fsync warnings reach stderr
+  even if an unexpected exception propagates. Preserves the v0.8.1
+  visible-failure contract under partial-pull conditions.
+- `_predict_pull_outcome` return vocabulary unchanged (`write` / `merge` /
+  `skip` / `conflict` / `unchanged`). Codex adversarial plan review flagged
+  the originally-planned past-tense rename as a worse abstraction; reversed.
+- `CONFLICT_AGE_DAYS` stays in cli.py (where `mm gc --conflicts` lives).
+  Roadmap proposed moving to manifest.py; codex flagged as module-boundary
+  mistake; reversed.
+- `crypto.py` re-exports `CRYPTO_INIT_KEY` from `storage.keys` for test
+  compatibility; constant moved to complete the storage-keys boundary.
+- `devices.py` uses `device_key(device_id)` and `DEVICES_PREFIX` helpers.
+- Four-line pattern comment above `_pull_core` documents the "helpers
+  return data, `_print_pull_summary` owns user-visible output" pattern, and
+  flags the style split with the rest of cli.py (push, status, diag,
+  recover still use side-effect-during-logic; migrate opportunistically).
+
+### Fixed
+- `_PerSourceResult.had_changes` excludes `"unchanged"` outcomes from the
+  "device had changes" signal. Found by Codex adversarial review: a
+  stale-diff TOCTOU where `_download_and_apply` returned only `unchanged`
+  would trigger `_cleanup_conflict_copies`, which deletes iCloud conflict
+  copies of the remote manifest. In the recovery scenario where a peer's
+  canonical manifest is corrupt and `_fetch_remote_manifest` recovered via
+  a valid conflict copy, that cleanup would delete the only good copy,
+  leaving only the corrupt canonical and permanent corruption for future
+  pulls. Pre-refactor `src_written + src_merged + src_conflicted +
+  src_skipped + src_failed > 0` correctly excluded `unchanged`; the
+  property-based rewrite regressed this. Regression test locks in the
+  exclusion.
+- Per-file blob-key validation in `_download_and_apply`: a `ValueError`
+  from `blob_key(source_device_id, info["sha256"])` is caught and mapped
+  to the `"failed"` outcome, preserving per-file isolation (matches the
+  v0.8.1 empty-device_id handling in `_apply_conflict`).
 
 Track 1B (Group 1): manifest dead-code cleanup + v1-holdover removal. Drops
 vestigial back-compat aliases and the redundant top-level `files` key from
