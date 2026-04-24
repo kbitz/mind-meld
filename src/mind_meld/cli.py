@@ -31,6 +31,7 @@ from mind_meld.config import (
     get_default_source,
     get_sources,
     load_config,
+    patch_config_on_disk,
     save_config,
 )
 from mind_meld.crypto import (
@@ -48,7 +49,7 @@ from mind_meld.crypto import (
     verify_passphrase,
 )
 from mind_meld.devices import _list_devices_impl, register_device, update_last_seen
-from mind_meld.errors import CryptoError, LockError, ManifestError, MindMeldError, StorageError
+from mind_meld.errors import ConfigError, CryptoError, LockError, ManifestError, MindMeldError, StorageError
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -288,13 +289,30 @@ def _init_crypto_session(backend, passphrase: str, config: dict) -> int:
 
     # Backfill local config if needed (first command after an upgrade or
     # a previously-uninitialized config). Silent one-time write.
+    #
+    # In-memory update serves this process's drift-check on later calls.
+    # Persist via patch_config_on_disk (re-reads raw TOML and merges only
+    # the crypto keys) so `_apply_defaults`' in-memory path canonicalization
+    # is NOT written back over the user's hand-edited paths. Without this,
+    # a user's `storage.path = "~/Library/..."` silently becomes the resolved
+    # absolute form on the first run after upgrade, and symlinks get
+    # dereferenced. See ROADMAP.md Track 2B / CLAUDE.md for the contract.
     if not local_fp:
-        config.setdefault("crypto", {})["root_salt_fp"] = storage_fp
-        config["crypto"]["argon2_memory_kb"] = fetch.argon2_memory_kb
+        crypto_patch = {
+            "root_salt_fp": storage_fp,
+            "argon2_memory_kb": fetch.argon2_memory_kb,
+        }
+        config.setdefault("crypto", {}).update(crypto_patch)
         try:
-            save_config(config)
+            patch_config_on_disk({"crypto": crypto_patch})
         except OSError:
             pass  # non-fatal; drift check just won't fire next run
+        except ConfigError as e:
+            # ConfigError here signals on-disk TOML became malformed between
+            # load_config and this call (concurrent editor crash, disk issue).
+            # Per CLAUDE.md v0.8.1 visible-failure contract: data-at-risk
+            # signals reach stderr even in quiet mode.
+            print(f"mm: warning: backfill skipped — {e}", file=sys.stderr)
 
     return fetch.argon2_memory_kb
 

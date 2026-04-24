@@ -2,6 +2,67 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.8] - 2026-04-24
+
+Track 2B: Config polish — eng-review follow-ups. Stops `mm` from silently
+rewriting your hand-edited `config.toml` paths on first-run-after-upgrade.
+If you wrote `storage.path = "~/Library/Mobile Documents/..."` or pointed
+at a symlinked storage root, the path now survives crypto-init backfill
+verbatim instead of being canonicalized to the resolved absolute form.
+
+Scope refined through `/plan-eng-review` + Codex outside-voice challenge
+(2026-04-24). Original plan removed path-mutation from `_apply_defaults`
+across six downstream readers; Codex flagged that as over-correction for
+a single-writer bug. Narrowed to the actual leak site: the backfill
+`save_config` call inside `_init_crypto_session`. One new helper, one
+call-site swap, two prefix renames, 37 new tests (21 unit + 4 CLI
+integration regressions + 12 from `/review` auto-fixes and follow-ups).
+
+### Added
+- `config.patch_config_on_disk(updates, path=None)` — re-reads raw TOML,
+  shallow-merges `updates` per field within each section, saves. Bypasses
+  `_validate` / `_apply_defaults` by design because the whole point is to
+  preserve user-authored text for fields outside the patch. Narrow contract:
+  only for partial patches; full writes still go through `save_config`.
+  Raises `ConfigError` on missing / malformed TOML / non-table section.
+- `tests/test_config.py::TestUpdateConfigOnDisk` (11 tests) — pins the
+  helper's contract: tilde paths preserved, symlinks preserved, legacy
+  `sync.claude_dir` preserved, sources array preserved, multi-section
+  patches merge independently, field overwrites don't disturb siblings,
+  missing file / malformed TOML raise `ConfigError`.
+- `tests/test_config.py::TestConfigErrorPrefixes` (3 tests) — pins the
+  rename: `init:` stays on the missing-file branch (correctly points at
+  `mm init`), `config:` on the parse-error and generic-wrap branches.
+- `tests/test_integration.py::TestBackfillPreservesRawPaths` (4 tests) —
+  CLI-level regressions via `CliRunner`. Headline test writes a config
+  with tilde-form paths, runs `mm autopush`, re-reads raw TOML bytes, and
+  asserts `storage.path`, `sync.claude_dir`, and `sources[*].path` are
+  unchanged. Also covers symlink preservation, push idempotency (second
+  push must not rewrite), and graceful degradation when the config file
+  disappears between load and backfill.
+
+### Changed
+- `_init_crypto_session` (cli.py): the first-run-after-upgrade backfill
+  of `crypto.root_salt_fp` + `crypto.argon2_memory_kb` now calls
+  `patch_config_on_disk` instead of `save_config(config)`. `_apply_defaults`
+  still canonicalizes paths in memory — that's consumed by six downstream
+  readers and shouldn't change. Only the on-disk persistence is narrowed.
+- Error prefixes: `init: failed to parse` → `config: failed to parse`,
+  `init: failed to load` → `config: failed to load`. `init: config not
+  found` stays because that branch genuinely tells the user to run
+  `mm init`. These fire on every command that calls `_get_config`
+  (push, pull, status, diag, recover), not just init.
+- `ConfigError` from `patch_config_on_disk` now emits
+  `mm: warning: backfill skipped — <error>` to stderr per the v0.8.1
+  visible-failure contract for data-at-risk signals. `OSError` stays
+  silently swallowed (transient permission issues).
+
+### Fixed
+- First-run-after-upgrade silently rewriting hand-edited config paths to
+  their canonical resolved forms (Codex flagged during /plan-eng-review
+  2026-04-23; v0.7.1's `.resolve()` addition had extended the footgun to
+  symlink dereference).
+
 ## [0.8.7] - 2026-04-24
 
 Track 2A: Init decomposition + DEFAULT_SOURCES reuse + sync_log generalization.
