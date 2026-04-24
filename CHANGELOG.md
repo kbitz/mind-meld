@@ -2,6 +2,106 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.7] - 2026-04-24
+
+Track 2A: Init decomposition + DEFAULT_SOURCES reuse + sync_log generalization.
+Five tasks — refined by `/plan-eng-review 2026-04-24` before landing. The review
+caught one critical implementation bug in the as-written roadmap (task 4 would
+have NameError'd at runtime because `_pull_one_source` had no `src_cfg` handle
+to key off `type`) plus several smaller issues. Delivered with 84 new unit
+tests across `test_track_2a.py` (init helpers + type-keyed sync log regression
+pins) and a fresh `test_synclog.py` (15 tests). Full suite at 639 passing.
+
+### Added
+- `config.get_default_source(name) -> dict | None` — returns a deep copy of the
+  `DEFAULT_SOURCES` entry matching `name`. Deep-copy guards against aliasing
+  pollution when callers mutate the returned dict (inserting it into a user's
+  config). Returns None for unknown names.
+- `cli.py` init helpers (decomposition of the 213-line `init()` command):
+  - `_load_prior_device_metadata() -> tuple[str | None, str | None]` — best-
+    effort read of the prior device `(id, name)` from any existing config.
+    Malformed or missing config returns `(None, None)` — the orphan-case
+    warning just loses the descriptive name.
+  - `_prompt_passphrase(is_first_device: bool) -> str` — double-prompts (with
+    confirm) on first-device, single-prompts otherwise. Exits via `_error` on
+    empty input or mismatch.
+  - `_bootstrap_or_verify_crypto(backend, passphrase, is_first_device, fetch) ->
+    tuple[bytes, int, bytes]` — owns the first-device-happy-path +
+    lost-bootstrap-race-falls-through-to-verify + second-device-verify branches
+    that were inline in `init()`. Sets the crypto session as a side effect.
+  - `_prompt_sources() -> list[dict]` — loops over `DEFAULT_SOURCES`, Y/n-
+    prompts each with `default=Y` iff the source's path exists on disk.
+    Returns only enabled entries, deep-copied via `get_default_source()`.
+  - `_save_and_register(config, backend, device_id, device_name, passphrase)`
+    — persists config → registers device → stores passphrase in keyring.
+    Order matters: if config write fails, device is NOT registered and
+    keyring does NOT hold an invalid secret.
+- `_PerSourceResult.claude_sync_base` is now gated on `src_type == "claude"`
+  inside `_pull_one_source` (not `src_name == "claude"`). New `src_type: str`
+  keyword-only parameter on `_pull_one_source` carries the local config's
+  `type` field through the pull pipeline. `local_sources_map` in `_pull_core`
+  widened from `dict[str, Path]` to `dict[str, dict]` carrying both `path`
+  (expanded Path) and `type` (str) per source.
+- `tests/test_synclog.py` (15 tests, NEW) — direct unit tests for
+  `write_sync_log` covering path expansion, `projects/` absence → empty
+  return, per-project grouping, all 5 change categories (new / modified /
+  deleted / conflicted / skipped), empty-bucket suppression, metadata
+  emission, and a regression pin that the old `claude_dir=` kwarg raises
+  TypeError (stale callers fail loudly, not silently to the wrong location).
+- 28 new tests in `tests/test_track_2a.py` covering the init helpers,
+  `_prompt_sources` aliasing guard, `_save_and_register` ordering, the
+  `_bootstrap_or_verify_crypto` lost-race branch, and two critical regression
+  pins for the type-keyed sync-log gate:
+  - `test_renamed_claude_source_still_logs` — renamed `"my-claude"` source
+    with `type="claude"` must still set `claude_sync_base` (pre-fix: silently
+    broke the sync log for anyone who customized source names).
+  - `test_claude_named_generic_does_not_log` — symmetric pin: a source
+    named `"claude"` but typed `"generic"` must NOT log.
+- `tests/test_integration.py::TestInitFlow` — 3 new integration tests:
+  `test_refuses_if_no_sources_enabled`, `test_first_device_gstack_only_init`,
+  `test_first_device_both_sources_init`. The gstack-only test pins that
+  `DEFAULT_SOURCES`'s `include_dirs` / `include_files` survive the indirection
+  through `get_default_source()`.
+
+### Changed
+- **BREAKING (CLI-only):** `mm init` now prompts per source type (claude Y/n,
+  gstack Y/n) instead of writing `sync.claude_dir = "~/.claude"`
+  unconditionally. Default is Y when the source's path exists on disk, N
+  otherwise. `init` refuses to finish (exit non-zero) if the user declines
+  every source — a config with zero sources left push/pull silently no-op'ing.
+  Existing configs are unaffected (`get_sources()` still reads the legacy
+  `sync.claude_dir` field as a fallback).
+- `cli.py::init()` body shrank from ~213 lines of inline logic to a ~60-line
+  orchestration of the five helpers above.
+- `cli.py::_pull_one_source` signature adds keyword-only `src_type: str`
+  parameter. Required for the type-keyed sync-log gate.
+- `cli.py::_preflight_conflicts` parameter `local_sources_map` retyped from
+  `dict[str, Path]` to `dict[str, dict[str, Any]]` to match the widened map
+  shape in `_pull_core`.
+- `synclog.py::write_sync_log` first parameter renamed `claude_dir` →
+  `claude_base`. The function is claude-specific (hardcodes the `projects/`
+  subdirectory layout); the new name tells the truth — "the on-disk root of
+  a claude-type source" — without implying the function generalizes to
+  non-claude sources. Docstring explicitly documents the claude-only
+  semantic and that the caller owns the type-gate.
+- `config.DEFAULT_CLAUDE_DIR` reshaped from the expanded
+  `str(Path.home() / ".claude")` to the literal `"~/.claude"`. Matches the
+  TOML-round-trip convention `get_sources()` already uses and unblocks
+  Track 2B ("stop mutating config in `_apply_defaults`").
+- `init()` now reuses `DEFAULT_MAX_FILE_SIZE`, `DEFAULT_ARGON2_MEMORY_KB`,
+  and the `DEFAULT_SOURCES` gstack entry (via `get_default_source`) instead
+  of re-inlining the hardcoded constants and dict. Previously `init` had a
+  ~20-line verbatim copy of the gstack source definition that would drift
+  from `config.DEFAULT_SOURCES` if one side updated.
+
+### Deprecated
+- The `claude_dir=` keyword argument to `write_sync_log` is removed (not
+  aliased). Any out-of-tree caller using the old name now raises
+  TypeError at call time — intentional: a silent alias would let a
+  stale caller write to the wrong location without noticing. Test
+  `tests/test_synclog.py::TestParamRenameRegression::test_old_kwarg_name_rejected`
+  pins the loud-failure contract.
+
 ## [0.8.6] - 2026-04-24
 
 Track 1C: Post-1A cli.py follow-ups. Three low-risk polish items cleaning up

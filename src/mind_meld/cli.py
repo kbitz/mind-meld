@@ -15,14 +15,24 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable, Iterator
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from mind_meld import __version__, fsutil
-from mind_meld.config import CONFIG_PATH, DEFAULT_STORAGE_PATH, load_config, save_config, get_sources
+from mind_meld.config import (
+    CONFIG_PATH,
+    DEFAULT_ARGON2_MEMORY_KB,
+    DEFAULT_MAX_FILE_SIZE,
+    DEFAULT_SOURCES,
+    DEFAULT_STORAGE_PATH,
+    get_default_source,
+    get_sources,
+    load_config,
+    save_config,
+)
 from mind_meld.crypto import (
     FORMAT_VERSION,
     CryptoInitFetch,
@@ -1187,6 +1197,174 @@ def _init_storage_guard(
     # is ok and nothing else exists.
 
 
+def _prompt_sources() -> list[dict[str, Any]]:
+    """Prompt for each known source type; return the enabled entries.
+
+    Each DEFAULT_SOURCES entry becomes a Y/n prompt. Default is Y when
+    the path exists on disk, N otherwise — this nudges users toward
+    only-enabling-what-they-have without making it impossible to enable
+    a source whose directory doesn't exist yet (e.g. new machine, same
+    project about to be cloned).
+
+    Source paths stay in tilde-form in the returned dicts so they round-
+    trip through TOML readably. `get_sources()` expands at use time.
+    """
+    enabled: list[dict[str, Any]] = []
+    for default in DEFAULT_SOURCES:
+        path_str = str(default["path"])
+        exists = Path(path_str).expanduser().exists()
+        detected = "detected" if exists else "not detected"
+        prompt = f"Sync '{default['name']}' source at {path_str}? ({detected})"
+        if typer.confirm(prompt, default=exists):
+            src = get_default_source(default["name"])
+            if src is not None:
+                enabled.append(src)
+    return enabled
+
+
+def _load_prior_device_metadata() -> tuple[str | None, str | None]:
+    """Return (id, name) from any existing config, best-effort.
+
+    Used to name the device that would be orphaned by re-init. Malformed
+    or missing config returns (None, None) — the orphan warning just
+    loses the descriptive name.
+    """
+    if not CONFIG_PATH.exists():
+        return None, None
+    try:
+        prior = load_config()
+    except MindMeldError:
+        return None, None
+    return prior.get("device", {}).get("id"), prior.get("device", {}).get("name")
+
+
+def _prompt_passphrase(is_first_device: bool) -> str:
+    """Prompt for the encryption passphrase. Double-prompt on first-device.
+
+    Exits via _error on empty input or (first-device) mismatch. Returns
+    the validated passphrase string — caller uses it for bootstrap or
+    verify but MUST NOT commit to keyring until crypto validation passes.
+    """
+    passphrase = typer.prompt("Encryption passphrase", hide_input=True)
+    if not passphrase:
+        _error("Passphrase cannot be empty.")
+    if is_first_device:
+        confirm = typer.prompt("Confirm passphrase", hide_input=True)
+        if passphrase != confirm:
+            _error("Passphrases don't match.")
+    return passphrase
+
+
+def _bootstrap_or_verify_crypto(
+    backend,
+    passphrase: str,
+    is_first_device: bool,
+    fetch: CryptoInitFetch,
+) -> tuple[bytes, int, bytes]:
+    """Return (root_salt, argon2_memory_kb, keycheck_blob).
+
+    First-device path: try to bootstrap. On StorageError (lost race), fall
+    through to verify against the winner's mm-crypto-init — this is the
+    same flow a second device would take.
+
+    Second-device path: verify the passphrase against the existing
+    mm-crypto-init. Failure aborts via _error; no local state is written.
+
+    Sets the crypto session as a side effect so downstream calls can
+    derive blob-level keys.
+    """
+    if is_first_device:
+        try:
+            bootstrap = bootstrap_crypto_init(
+                backend, passphrase, argon2_memory_kb=DEFAULT_ARGON2_MEMORY_KB
+            )
+        except StorageError:
+            # Race: another device wrote mm-crypto-init between our fetch and
+            # our put. Fall through to second-device verify with the winner's blob.
+            console.print(
+                "  [dim]Another device bootstrapped concurrently — "
+                "verifying against their mm-crypto-init.[/dim]"
+            )
+            retry_fetch = fetch_crypto_init(backend)
+            if retry_fetch.status != "ok":
+                _error("init: lost bootstrap race but peer's mm-crypto-init not ok.")
+            assert retry_fetch.root_salt is not None
+            assert retry_fetch.argon2_memory_kb is not None
+            assert retry_fetch.keycheck_blob is not None
+            root_salt = retry_fetch.root_salt
+            argon2_memory_kb = retry_fetch.argon2_memory_kb
+            keycheck_blob = retry_fetch.keycheck_blob
+            set_crypto_session(root_salt, argon2_memory_kb)
+            master_key = load_master_key(passphrase, root_salt, argon2_memory_kb)
+            try:
+                verify_passphrase(master_key, keycheck_blob)
+            except CryptoError as e:
+                _error(str(e))
+            console.print("  Verified passphrase against peer mm-crypto-init.")
+            return root_salt, argon2_memory_kb, keycheck_blob
+
+        assert bootstrap.root_salt is not None
+        assert bootstrap.argon2_memory_kb is not None
+        assert bootstrap.keycheck_blob is not None
+        root_salt = bootstrap.root_salt
+        argon2_memory_kb = bootstrap.argon2_memory_kb
+        keycheck_blob = bootstrap.keycheck_blob
+        set_crypto_session(root_salt, argon2_memory_kb)
+        console.print(
+            f"  mm-crypto-init bootstrapped "
+            f"(root_salt fp={root_salt_fingerprint(root_salt)})."
+        )
+        return root_salt, argon2_memory_kb, keycheck_blob
+
+    # Second-device: verify against the fetch we already did.
+    assert fetch.root_salt is not None
+    assert fetch.argon2_memory_kb is not None
+    assert fetch.keycheck_blob is not None
+    root_salt = fetch.root_salt
+    argon2_memory_kb = fetch.argon2_memory_kb
+    keycheck_blob = fetch.keycheck_blob
+    set_crypto_session(root_salt, argon2_memory_kb)
+    master_key = load_master_key(passphrase, root_salt, argon2_memory_kb)
+    try:
+        verify_passphrase(master_key, keycheck_blob)
+    except CryptoError as e:
+        _error(str(e))
+    console.print(
+        f"  Verified passphrase against existing mm-crypto-init "
+        f"(root_salt fp={root_salt_fingerprint(root_salt)})."
+    )
+    return root_salt, argon2_memory_kb, keycheck_blob
+
+
+def _save_and_register(
+    config: dict,
+    backend,
+    device_id: str,
+    device_name: str,
+    passphrase: str,
+) -> None:
+    """Persist config, register the device, and store the passphrase.
+
+    Order matters: config write → device register → keyring store. A
+    typo'd passphrase on the second-device path is caught in crypto
+    validation BEFORE this function runs, so keyring never holds an
+    invalid secret.
+    """
+    save_config(config)
+    console.print(f"  Config written to {CONFIG_PATH}")
+
+    register_device(backend, device_id, device_name)
+    console.print(f"  Device registered: {device_name} ({device_id})")
+
+    if store_passphrase_in_keyring(passphrase):
+        console.print("  Passphrase stored in OS keyring.")
+    else:
+        console.print(
+            "  [yellow]No keyring available.[/yellow] "
+            "Set MINDMELD_PASSPHRASE environment variable instead."
+        )
+
+
 @app.command()
 def init() -> None:
     """Initialize Mind Meld: generate device ID, configure iCloud storage, set passphrase.
@@ -1204,32 +1382,24 @@ def init() -> None:
         On failure, nothing local is written.
 
     Two-tier re-init guard (Group 2 pre-flight 3):
-        * Orphan case \u2014 mm-crypto-init ok + other occupancy: warn that
+        * Orphan case — mm-crypto-init ok + other occupancy: warn that
           a new device entry gets created alongside existing devices;
           require typer.confirm.
-        * BRICK case \u2014 mm-crypto-init missing + blobs/manifests exist:
+        * BRICK case — mm-crypto-init missing + blobs/manifests exist:
           re-bootstrap would generate a new root_salt and brick every
           existing blob. Refuse by default; require exact typed "BRICK".
     """
-    # Capture existing local-device metadata BEFORE any prompt, so the
-    # orphan-case warning can name the device that's about to be left
-    # behind. Best-effort \u2014 malformed config just loses the name.
-    existing_device_id: str | None = None
-    existing_device_name: str | None = None
+    # Capture prior device metadata BEFORE any prompt so the orphan-case
+    # warning can name the device about to be left behind.
+    existing_device_id, existing_device_name = _load_prior_device_metadata()
     if CONFIG_PATH.exists():
-        try:
-            _prior = load_config()
-            existing_device_id = _prior.get("device", {}).get("id")
-            existing_device_name = _prior.get("device", {}).get("name")
-        except MindMeldError:
-            pass  # prior config unreadable \u2014 best-effort None
         overwrite = typer.confirm(
             f"Config already exists at {CONFIG_PATH}. Overwrite?"
         )
         if not overwrite:
             raise typer.Exit()
 
-    console.print(f"[bold]Mind Meld v{__version__} \u2014 init[/bold]\n")
+    console.print(f"[bold]Mind Meld v{__version__} — init[/bold]\n")
 
     # Storage path first: we need a backend to probe mm-crypto-init.
     storage_path = typer.prompt("Storage folder path", default=DEFAULT_STORAGE_PATH)
@@ -1239,7 +1409,6 @@ def init() -> None:
 
     # Lightweight backend (config is not yet written; instantiate directly).
     from mind_meld.storage.local import LocalBackend
-    from mind_meld.errors import StorageError as _StorageError
     backend = LocalBackend(str(full_path))
 
     # Probe storage for mm-crypto-init BEFORE committing any local state.
@@ -1264,143 +1433,50 @@ def init() -> None:
 
     is_first_device = fetch.status == "missing"
 
-    # Device metadata.
     device_id = uuid.uuid4().hex[:8]
     device_name = typer.prompt("Device name", default=_default_device_name())
 
-    # Passphrase prompt. Double-prompt when setting a new secret (first-device),
-    # single-prompt when entering an existing secret we can verify (second-device).
-    if is_first_device:
-        passphrase = typer.prompt("Encryption passphrase", hide_input=True)
-        if not passphrase:
-            _error("Passphrase cannot be empty.")
-        passphrase_confirm = typer.prompt("Confirm passphrase", hide_input=True)
-        if passphrase != passphrase_confirm:
-            _error("Passphrases don't match.")
-    else:
-        passphrase = typer.prompt("Encryption passphrase", hide_input=True)
-        if not passphrase:
-            _error("Passphrase cannot be empty.")
+    passphrase = _prompt_passphrase(is_first_device)
+    root_salt, argon2_memory_kb, _keycheck_blob = _bootstrap_or_verify_crypto(
+        backend, passphrase, is_first_device, fetch
+    )
 
-    # Bootstrap or verify.
-    argon2_memory_kb: int
-    root_salt: bytes
-    keycheck_blob: bytes
-
-    if is_first_device:
-        try:
-            bootstrap = bootstrap_crypto_init(
-                backend, passphrase, argon2_memory_kb=65_536
-            )
-        except _StorageError:
-            # Race: another device wrote mm-crypto-init between our fetch and
-            # our put. Fall through to second-device verify with the winner's blob.
-            console.print(
-                "  [dim]Another device bootstrapped concurrently \u2014 "
-                "verifying against their mm-crypto-init.[/dim]"
-            )
-            retry_fetch = fetch_crypto_init(backend)
-            if retry_fetch.status != "ok":
-                _error("init: lost bootstrap race but peer's mm-crypto-init not ok.")
-            assert retry_fetch.root_salt is not None
-            assert retry_fetch.argon2_memory_kb is not None
-            assert retry_fetch.keycheck_blob is not None
-            root_salt = retry_fetch.root_salt
-            argon2_memory_kb = retry_fetch.argon2_memory_kb
-            keycheck_blob = retry_fetch.keycheck_blob
-            set_crypto_session(root_salt, argon2_memory_kb)
-            master_key = load_master_key(passphrase, root_salt, argon2_memory_kb)
-            try:
-                verify_passphrase(master_key, keycheck_blob)
-            except CryptoError as e:
-                _error(str(e))
-            console.print("  Verified passphrase against peer mm-crypto-init.")
-        else:
-            assert bootstrap.root_salt is not None
-            assert bootstrap.argon2_memory_kb is not None
-            assert bootstrap.keycheck_blob is not None
-            root_salt = bootstrap.root_salt
-            argon2_memory_kb = bootstrap.argon2_memory_kb
-            keycheck_blob = bootstrap.keycheck_blob
-            set_crypto_session(root_salt, argon2_memory_kb)
-            console.print(
-                f"  mm-crypto-init bootstrapped "
-                f"(root_salt fp={root_salt_fingerprint(root_salt)})."
-            )
-    else:
-        assert fetch.root_salt is not None
-        assert fetch.argon2_memory_kb is not None
-        assert fetch.keycheck_blob is not None
-        root_salt = fetch.root_salt
-        argon2_memory_kb = fetch.argon2_memory_kb
-        keycheck_blob = fetch.keycheck_blob
-        set_crypto_session(root_salt, argon2_memory_kb)
-        master_key = load_master_key(passphrase, root_salt, argon2_memory_kb)
-        try:
-            verify_passphrase(master_key, keycheck_blob)
-        except CryptoError as e:
-            _error(str(e))
-        console.print(
-            f"  Verified passphrase against existing mm-crypto-init "
-            f"(root_salt fp={root_salt_fingerprint(root_salt)})."
+    # All crypto passed; it's safe to prompt for sources and write state.
+    # Refuse if no sources enabled — a config with zero sources leaves
+    # push/pull silently no-op'ing.
+    #
+    # Ordering note: source prompt runs AFTER crypto bootstrap to keep the
+    # second-device wrong-passphrase path fast — we want "wrong pw" to
+    # surface BEFORE we ask about sources, not after. Consequence: on a
+    # FIRST-device refuse-all, mm-crypto-init is already written to storage
+    # and orphaned. This is benign: re-running init hits the second-device
+    # path (mm-crypto-init now exists), user's same passphrase verifies
+    # against their own earlier bootstrap, and the second attempt finishes
+    # cleanly. No data loss, just a storage-side breadcrumb. See
+    # TestInitFlow::test_first_device_refuse_all_is_recoverable.
+    sources = _prompt_sources()
+    if not sources:
+        _error(
+            "init: no sync sources enabled. Re-run 'mm init' and accept "
+            "at least one source."
         )
 
-    # All crypto passed; it's safe to write local state.
     config: dict = {
         "device": {"id": device_id, "name": device_name},
         "storage": {"path": storage_path},
-        "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
+        "sync": {
+            "sources": sources,
+            "max_file_size": DEFAULT_MAX_FILE_SIZE,
+        },
         "crypto": {
             "argon2_memory_kb": argon2_memory_kb,
             "root_salt_fp": root_salt_fingerprint(root_salt),
         },
     }
 
-    # Check for gstack and offer to add as sync source.
-    gstack_path = Path.home() / ".gstack"
-    if gstack_path.exists():
-        add_gstack = typer.confirm(
-            f"gstack detected at {gstack_path}/. Add as sync source?",
-            default=True,
-        )
-        if add_gstack:
-            claude_path = config.get("sync", {}).get("claude_dir", "~/.claude")
-            config.setdefault("sync", {})["sources"] = [
-                {"name": "claude", "path": claude_path, "type": "claude"},
-                {
-                    "name": "gstack",
-                    "path": "~/.gstack",
-                    "type": "generic",
-                    "include_dirs": ["projects", "analytics", "retros"],
-                    "include_files": [
-                        "config.yaml",
-                        ".completeness-intro-seen",
-                        ".telemetry-prompted",
-                        ".proactive-prompted",
-                        ".welcome-seen",
-                        ".codex-desc-healed",
-                    ],
-                },
-            ]
+    _save_and_register(config, backend, device_id, device_name, passphrase)
 
-    save_config(config)
-    console.print(f"  Config written to {CONFIG_PATH}")
-
-    # Register device AFTER config write AND after crypto validation.
-    register_device(backend, device_id, device_name)
-    console.print(f"  Device registered: {device_name} ({device_id})")
-
-    # Store passphrase in keyring LAST. Gated on crypto validation so a typo'd
-    # passphrase on the second-device path never lands in Keychain.
-    if store_passphrase_in_keyring(passphrase):
-        console.print("  Passphrase stored in OS keyring.")
-    else:
-        console.print(
-            "  [yellow]No keyring available.[/yellow] "
-            "Set MINDMELD_PASSPHRASE environment variable instead."
-        )
-
-    console.print("\n[green]Mind Meld initialized. Run \'mm push\' to sync.[/green]")
+    console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
 
 
 # ── push ──────────────────────────────────────────────────────────────
@@ -1743,7 +1819,18 @@ class _PerSourceResult:
     touched_parents: set[Path]
     # Non-empty only in dry-run mode; holds the diff for _print_pull_prediction.
     dry_run_diff: DiffResult | None = None
-    # Set for src_name=="claude" to trigger write_sync_log in the caller.
+    # Set when src_cfg["type"] == "claude" to trigger write_sync_log in the
+    # caller. Keyed off type (not name) so a user renaming their claude
+    # source to "my-claude" still gets sync-log entries written — otherwise
+    # the rename silently breaks project-level activity logging.
+    #
+    # Scope: this fix covers SAME-DEVICE rename only. Manifests are still
+    # keyed by src_name (see manifest.py), so if device A renames "claude"
+    # → "work-claude" but device B keeps "claude", B's pull skips A's
+    # remote source entirely (unknown-source warning path). Cross-device
+    # rename drift is a bigger design question tracked as a known
+    # limitation; this flag just makes sure single-device rename doesn't
+    # silently break the per-project sync log.
     claude_sync_base: str | None = None
 
     @property
@@ -1816,7 +1903,7 @@ def _prefetch_manifests(
 def _preflight_conflicts(
     pull_targets: list[dict],
     manifest_cache: dict[str, dict | None],
-    local_sources_map: dict[str, Path],
+    local_sources_map: dict[str, dict[str, Any]],
     source_filter: str | None,
     all_tombstones: dict[str, dict[str, str]],
 ) -> list[_PredictedConflict]:
@@ -1848,7 +1935,7 @@ def _preflight_conflicts(
                 continue
             if src_name not in local_sources_map:
                 continue  # unknown source counted elsewhere, not a conflict
-            base_path = local_sources_map[src_name]
+            base_path = local_sources_map[src_name]["path"]
             for rel_path, info in src_data.get("files", {}).items():
                 if is_tombstoned(src_name, rel_path, all_tombstones):
                     continue
@@ -1887,6 +1974,7 @@ def _pull_one_source(
     backend,
     *,
     src_name: str,
+    src_type: str,
     src_data: dict,
     did: str,
     dname: str,
@@ -1899,6 +1987,11 @@ def _pull_one_source(
     verbose_console: bool,
 ) -> _PerSourceResult:
     """Pull one source from one peer. Returns _PerSourceResult.
+
+    `src_type` is the source's `type` field from the local config. Used
+    to gate sync-log behavior: only claude-type sources get a per-project
+    `.mind-meld-log.md`. Passing type explicitly (rather than re-deriving
+    from name) lets users rename the claude source without losing sync-log.
 
     `verbose_console` is `(verbose and not quiet)` — controls per-file
     console output inside _download_and_apply.
@@ -1966,7 +2059,7 @@ def _pull_one_source(
         outcomes=outcomes,
         bytes_transferred=bt,
         touched_parents=touched_parents,
-        claude_sync_base=str(base_path) if src_name == "claude" else None,
+        claude_sync_base=str(base_path) if src_type == "claude" else None,
     )
 
 
@@ -2201,8 +2294,14 @@ def _pull_core(
     my_device_id = config["device"]["id"]
     backend = get_backend(config)
 
-    local_sources_map: dict[str, Path] = {
-        src_cfg["name"]: Path(src_cfg["path"]).expanduser().resolve()
+    # Widened to carry path + type per source. Type is load-bearing for
+    # the sync-log gate in _pull_one_source — keying on type (not name)
+    # lets users rename the claude source without losing per-project logs.
+    local_sources_map: dict[str, dict[str, Any]] = {
+        src_cfg["name"]: {
+            "path": Path(src_cfg["path"]).expanduser().resolve(),
+            "type": src_cfg["type"],
+        }
         for src_cfg in get_sources(config)
     }
 
@@ -2276,13 +2375,16 @@ def _pull_core(
                     )
                     continue
 
-                base_path = local_sources_map[src_name]
+                src_info = local_sources_map[src_name]
+                base_path = src_info["path"]
+                src_type = src_info["type"]
                 if verbose and not quiet:
                     console.print(f"  [bold]Source '{src_name}' ({base_path}):[/bold]")
 
                 per_source = _pull_one_source(
                     backend,
                     src_name=src_name,
+                    src_type=src_type,
                     src_data=src_data,
                     did=did,
                     dname=dname,
@@ -2326,7 +2428,7 @@ def _pull_core(
                 if per_source.claude_sync_base is not None:
                     try:
                         logs = write_sync_log(
-                            claude_dir=per_source.claude_sync_base,
+                            claude_base=per_source.claude_sync_base,
                             device_name=dname,
                             device_id=did,
                             new_files=per_source.outcomes["written"],

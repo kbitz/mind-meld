@@ -188,7 +188,7 @@ class TestSyncLog:
         project_dir.mkdir(parents=True)
 
         logs = write_sync_log(
-            claude_dir=str(claude_dir),
+            claude_base=str(claude_dir),
             device_name="MacBook Pro",
             device_id="abc123",
             new_files=["projects/-Users-kb-myapp/memory/user_role.md"],
@@ -212,7 +212,7 @@ class TestSyncLog:
         (claude_dir / "projects" / "-foo").mkdir(parents=True)
 
         logs = write_sync_log(
-            claude_dir=str(claude_dir),
+            claude_base=str(claude_dir),
             device_name="Other",
             device_id="xyz",
             new_files=[],
@@ -240,7 +240,7 @@ class TestSyncLog:
 
         monkeypatch.setattr(synclog.fsutil, "atomic_write_bytes", spy_write)
         synclog.write_sync_log(
-            claude_dir=str(claude_dir),
+            claude_base=str(claude_dir),
             device_name="Other",
             device_id="xyz",
             new_files=["projects/-foo/memory/x.md"],
@@ -1036,10 +1036,10 @@ class TestInitFlow:
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
 
-        # Inputs: storage path, device name, passphrase, confirm passphrase.
-        # If ~/.gstack exists (it does in a dev env), there's also a y/n prompt
-        # for gstack sync — answer "n" to keep the test minimal.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\n"
+        # Inputs: storage path, device name, passphrase, confirm passphrase,
+        # then per-source prompts (claude Y, gstack n) — we need at least
+        # one source enabled for init to succeed.
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "bootstrapped" in result.output
@@ -1054,6 +1054,108 @@ class TestInitFlow:
             cfg = tomllib.load(f)
         assert "root_salt_fp" in cfg["crypto"]
         assert cfg["crypto"]["argon2_memory_kb"] == 65_536
+
+    def test_refuses_if_no_sources_enabled(self, tmp_path, monkeypatch):
+        """User declines every source prompt → init refuses to finish.
+
+        Behavior on first-device refuse-all (pinned here):
+          * exit code != 0, clear error message
+          * local config NOT written
+          * mm-crypto-init IS written to storage (bootstrap ran before
+            source prompt). This is benign — re-running init on the same
+            storage hits the second-device verify path; the user's same
+            passphrase verifies against their own earlier bootstrap. See
+            test_first_device_refuse_all_is_recoverable below.
+
+        Ordering rationale (see init() docstring): source prompt runs
+        AFTER crypto bootstrap because the second-device wrong-passphrase
+        path must fail fast, before we ask about sources. The cost is
+        a benign orphan mm-crypto-init on first-device refuse-all.
+        """
+        from mind_meld.storage.local import LocalBackend
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        # Decline both claude and gstack.
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code != 0, result.output
+        assert "no sync sources enabled" in result.output
+
+        # Local config NOT written.
+        assert not cfg_path.exists()
+        # Storage-side bootstrap IS committed (documented behavior).
+        backend = LocalBackend(storage)
+        assert backend.exists("mm-crypto-init")
+
+    def test_first_device_refuse_all_is_recoverable(self, tmp_path, monkeypatch):
+        """First-device refuse-all leaves mm-crypto-init orphaned. Re-running
+        init with the same passphrase should succeed via the second-device
+        verify path (against the orphaned bootstrap).
+        """
+        import tomllib
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        # First attempt: refuse all, leaves mm-crypto-init orphan.
+        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\n"
+        result1 = runner.invoke(app, ["init"], input=stdin1)
+        assert result1.exit_code != 0
+
+        # Second attempt: same passphrase, accept claude. Takes the
+        # second-device path against the orphaned bootstrap.
+        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\n"
+        result2 = runner.invoke(app, ["init"], input=stdin2)
+        assert result2.exit_code == 0, result2.output
+        assert "Verified passphrase against existing mm-crypto-init" in result2.output
+
+        # Config now written, with claude enabled.
+        with open(cfg_path, "rb") as f:
+            cfg = tomllib.load(f)
+        assert [s["name"] for s in cfg["sync"]["sources"]] == ["claude"]
+
+    def test_first_device_gstack_only_init(self, tmp_path, monkeypatch):
+        """Decline claude, accept gstack → sources list has gstack only."""
+        import tomllib
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        # Decline claude, accept gstack.
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+
+        with open(cfg_path, "rb") as f:
+            cfg = tomllib.load(f)
+        names = [s["name"] for s in cfg["sync"]["sources"]]
+        assert names == ["gstack"]
+        # DEFAULT_SOURCES fields survive the indirection (Issue 1C regression pin).
+        gstack = cfg["sync"]["sources"][0]
+        assert "projects" in gstack["include_dirs"]
+        assert "config.yaml" in gstack["include_files"]
+
+    def test_first_device_both_sources_init(self, tmp_path, monkeypatch):
+        """Accept both → sources list has claude AND gstack."""
+        import tomllib
+
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "icloud"
+
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+
+        with open(cfg_path, "rb") as f:
+            cfg = tomllib.load(f)
+        names = [s["name"] for s in cfg["sync"]["sources"]]
+        assert names == ["claude", "gstack"]
+        # Paths round-trip in tilde-form (Issue 1C regression pin: the
+        # config must not silently rewrite ~/.claude to an absolute path).
+        claude = next(s for s in cfg["sync"]["sources"] if s["name"] == "claude")
+        assert claude["path"] == "~/.claude"
 
     def test_first_device_passphrase_mismatch_aborts(self, tmp_path, monkeypatch):
         """Passphrases don't match → abort, no state written."""
@@ -1086,8 +1188,9 @@ class TestInitFlow:
         # Use reduced memory_kb for test speed; bootstrap writes it into the blob.
         bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
 
-        # Second-device init: only 1 passphrase prompt (single, no confirm).
-        stdin = f"{storage}\nMac B\npw-shared\nn\n"
+        # Second-device init: only 1 passphrase prompt (single, no confirm),
+        # then per-source prompts (claude Y, gstack n).
+        stdin = f"{storage}\nMac B\npw-shared\nY\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
@@ -1201,8 +1304,9 @@ class TestInitTwoTierGuard:
         # Seed a blob so occupancy.has_any_blobs is True.
         backend.put("data/oldpeer/decafbad.enc", b"stub-blob")
 
-        # Inputs: storage path, orphan-confirm y, device name, passphrase, gstack n
-        stdin = f"{storage}\ny\nMac B\npw-shared\nn\n"
+        # Inputs: storage path, orphan-confirm y, device name, passphrase,
+        # per-source (claude Y, gstack n).
+        stdin = f"{storage}\ny\nMac B\npw-shared\nY\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # existing_device_id is None (no prior config in this test), so the
@@ -1277,8 +1381,8 @@ class TestInitTwoTierGuard:
         backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
 
         # After BRICK, init continues on the first-device path:
-        # device name, passphrase, confirm passphrase, gstack n.
-        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nn\n"
+        # device name, passphrase, confirm passphrase, per-source (claude Y, gstack n).
+        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nY\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # New mm-crypto-init bootstrapped.
@@ -1293,7 +1397,7 @@ class TestInitTwoTierGuard:
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # No orphan or BRICK output polluted the happy path.
@@ -1322,7 +1426,7 @@ class TestInitTwoTierGuard:
             _json.dumps({"device_id": "stale", "device_name": "stale-dev"}).encode(),
         )
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         # BRICK did NOT fire (no typed token consumed from stdin).
         assert result.exit_code == 0, result.output

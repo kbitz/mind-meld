@@ -5,6 +5,7 @@ Reads and writes ~/.config/mind-meld/config.toml.
 
 from __future__ import annotations
 
+import copy
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -16,15 +17,17 @@ CONFIG_DIR = Path.home() / ".config" / "mind-meld"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 LOCK_PATH = CONFIG_DIR / "mind-meld.lock"
 
-# Defaults
+# Defaults. Paths use tilde-form so they round-trip through TOML readably.
+# Expansion happens at use sites (get_sources, walker, storage) — keeping
+# this as a literal avoids mutating user config on first-run-after-upgrade.
 DEFAULT_MAX_FILE_SIZE = 52_428_800  # 50MB
 DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
-DEFAULT_CLAUDE_DIR = str(Path.home() / ".claude")
+DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
 )
 DEFAULT_SOURCES: list[dict[str, Any]] = [
-    {"name": "claude", "path": "~/.claude", "type": "claude"},
+    {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
         "name": "gstack",
         "path": "~/.gstack",
@@ -40,6 +43,19 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         ],
     },
 ]
+
+
+def get_default_source(name: str) -> dict[str, Any] | None:
+    """Return a deep copy of the DEFAULT_SOURCES entry matching name.
+
+    Callers mutate the returned dict (inserting it into a user config),
+    so deep-copy protects DEFAULT_SOURCES from aliasing pollution.
+    Returns None if no default exists for this name.
+    """
+    for src in DEFAULT_SOURCES:
+        if src["name"] == name:
+            return copy.deepcopy(src)
+    return None
 
 REQUIRED_FIELDS = {
     "device": ["id", "name"],

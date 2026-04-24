@@ -15,7 +15,7 @@ from mind_meld import fsutil
 
 
 def write_sync_log(
-    claude_dir: str | Path,
+    claude_base: str | Path,
     device_name: str,
     device_id: str,
     new_files: list[str],
@@ -31,9 +31,15 @@ def write_sync_log(
     additions and merges — conflicts in particular are things the user
     should resolve (mm conflicts / mm resolve).
 
+    `claude_base` is the on-disk root of a claude-type source. This function
+    is claude-specific (it hardcodes the `projects/` layout below); the name
+    reflects "this is the base path of the claude source we're logging for",
+    not "any source's base path". Callers must pass the base path only for
+    claude-type sources; gating on source type lives in the caller.
+
     Returns list of log files written.
     """
-    claude_path = Path(claude_dir).expanduser().resolve()
+    claude_path = Path(claude_base).expanduser().resolve()
     projects_dir = claude_path / "projects"
     if not projects_dir.exists():
         return []
