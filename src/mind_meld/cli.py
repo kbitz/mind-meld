@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Literal, Optional
 
 import typer
@@ -125,6 +125,13 @@ class PullResult:
     bytes_transferred: int = 0
     device_names: list[str] = field(default_factory=list)
     elapsed: float = 0.0
+    # Degradation signals: set to non-zero when the pull succeeded overall
+    # but some part of it is at-risk. autopull() aggregates these into the
+    # `degraded` breadcrumb outcome. Counts only — detailed failure records
+    # live in fsync_warnings / corrupt_peers inside _pull_core and are
+    # surfaced to stderr by _print_pull_summary.
+    durability_fsync_failures: int = 0
+    corrupt_peer_count: int = 0
 
     @property
     def total_applied(self) -> int:
@@ -1519,13 +1526,9 @@ def _push_core(
     real_remote = fetch.manifest if fetch.is_ok else None
     remote_sources = real_remote.get("sources", {}) if real_remote else {}
 
-    for src_name, src_data in local_manifest["sources"].items():
-        remote_src = remote_sources.get(src_name, {"files": {}})
-        diff = diff_files(src_data["files"], remote_src.get("files", {}))
-
-        if not diff.has_changes:
-            continue
-
+    for src_name, src_data, _remote_src, diff in iter_source_diffs(
+        local_manifest, remote_sources, skip_unchanged=True
+    ):
         if dry_run:
             if not quiet:
                 console.print(f"\n[bold]Source '{src_name}':[/bold]")
@@ -2119,6 +2122,41 @@ def _print_pull_summary(
         )
 
 
+# ── iter_source_diffs: shared push/status/diff iteration ──────────────
+#
+# Three call sites (_push_core, status, diff) shared a 3-line per-source
+# boilerplate: fetch remote_src, run diff_files, optionally filter by
+# --source / skip unchanged. Extracted here. The pull path cannot use
+# this helper — it calls diff_files(remote, local) with arguments swapped
+# (see diff_files docstring's "Arg-swap convention" note), so the
+# semantics of .new/.modified/.deleted flip and a shared iterator would
+# obscure that. Pull stays inline.
+#
+def iter_source_diffs(
+    local_manifest: dict,
+    remote_sources: dict,
+    *,
+    source_filter: str | None = None,
+    skip_unchanged: bool = False,
+) -> Iterator[tuple[str, dict, dict, DiffResult]]:
+    """Yield (src_name, src_data, remote_src, diff) per local source.
+
+    Args:
+      local_manifest: local manifest v2 with a "sources" dict.
+      remote_sources: remote manifest's sources dict (`{}` if no remote).
+      source_filter: if set, yield only this one source.
+      skip_unchanged: if True, skip sources where `diff.has_changes` is False.
+    """
+    for src_name, src_data in local_manifest["sources"].items():
+        if source_filter is not None and src_name != source_filter:
+            continue
+        remote_src = remote_sources.get(src_name, {"files": {}})
+        diff = diff_files(src_data["files"], remote_src.get("files", {}))
+        if skip_unchanged and not diff.has_changes:
+            continue
+        yield src_name, src_data, remote_src, diff
+
+
 # ── _pull_core: decomposition pattern ──────────────────────────────────
 #
 # _pull_core follows a "helpers return data, _print_pull_summary owns
@@ -2339,6 +2377,8 @@ def _pull_core(
             bytes_transferred=bytes_transferred,
             device_names=device_names,
             elapsed=time.time() - start,
+            durability_fsync_failures=len(fsync_warnings),
+            corrupt_peer_count=len(corrupt_peers),
         )
         _print_pull_summary(
             _partial_result,
@@ -2426,15 +2466,11 @@ def status(
     total_modified = 0
     total_deleted = 0
 
-    for src_name, src_data in local_manifest["sources"].items():
-        if source and src_name != source:
-            continue
-
+    for src_name, src_data, remote_src, diff in iter_source_diffs(
+        local_manifest, remote_sources, source_filter=source
+    ):
         local_files = src_data["files"]
-        remote_src = remote_sources.get(src_name, {"files": {}})
         remote_files = remote_src.get("files", {})
-
-        diff = diff_files(local_files, remote_files)
 
         local_count = len(local_files)
         remote_count = len(remote_files)
@@ -2786,16 +2822,10 @@ def diff_cmd(
     }
 
     any_changes = False
-    for src_name, src_data in local_manifest["sources"].items():
-        if source and src_name != source:
-            continue
-
-        remote_src = remote_sources.get(src_name, {"files": {}})
+    for src_name, src_data, remote_src, diff in iter_source_diffs(
+        local_manifest, remote_sources, source_filter=source, skip_unchanged=True
+    ):
         remote_files = remote_src.get("files", {})
-        diff = diff_files(src_data["files"], remote_files)
-
-        if not diff.has_changes:
-            continue
 
         any_changes = True
         console.print(f"\n  [bold]Source '{src_name}':[/bold]")
@@ -3820,7 +3850,36 @@ def autopull() -> None:
                 file=sys.stderr,
             )
 
-        _write_autorun_breadcrumb("pull", "success")
+        # Degraded outcome: pull succeeded overall but some part of it is
+        # at-risk. Mirrors the v0.8.1 `no-sources` autopush breadcrumb
+        # pattern — without a distinct outcome, `mm status` shows the last
+        # run as "success" indefinitely while data may not survive crash
+        # (fsync) or may be partition-drifting (corrupt peers, unknown
+        # sources, per-file failures). Stderr warnings for the same signals
+        # already fire in _print_pull_summary (corrupt_peers/fsync_warnings)
+        # and in the total_skipped_unknown_source / total_failed prints
+        # earlier in this function. The breadcrumb makes the degradation
+        # state persistent for monitoring on top of `mm status` / `mm diag`.
+        degradations: list[str] = []
+        if result.durability_fsync_failures:
+            degradations.append(
+                f"fsync failed on {result.durability_fsync_failures} parent dir(s)"
+            )
+        if result.corrupt_peer_count:
+            degradations.append(
+                f"{result.corrupt_peer_count} corrupt peer manifest(s)"
+            )
+        if result.total_skipped_unknown_source:
+            degradations.append(
+                f"{result.total_skipped_unknown_source} unknown source(s)"
+            )
+        if result.total_failed:
+            degradations.append(f"{result.total_failed} file(s) failed")
+
+        if degradations:
+            _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
+        else:
+            _write_autorun_breadcrumb("pull", "success")
     except MindMeldError as e:
         print(f"mm: pull failed - {e}", file=sys.stderr)
         if _should_log_cause(e):

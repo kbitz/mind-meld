@@ -2,6 +2,79 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.6] - 2026-04-24
+
+Track 1C: Post-1A cli.py follow-ups. Three low-risk polish items cleaning up
+Track 1A's landing — a shared push/status/diff iterator, stricter safety on
+garbage-collected blob paths, and a persistent `degraded` signal on the
+autopull breadcrumb. All three tasks went through `/plan-eng-review` with
+Codex outside-voice challenge, `/review` with testing + maintainability
+specialists, and a fresh Codex adversarial pass before landing. 16 new
+tests in `test_track_1c.py`, full suite at 592 passing. Shipped as 0.8.6
+because Track 1B (Group 1 walker/manifest/merge DRY) landed as 0.8.5 while
+1C was in review.
+
+### Added
+- `iter_source_diffs(local_manifest, remote_sources, *, source_filter, skip_unchanged)`
+  in `cli.py` — shared generator consolidating the 3-line per-source diff
+  boilerplate that lived at 3 call sites (`_push_core`, `status`, `diff_cmd`).
+  Pull path intentionally does not use the helper (it calls `diff_files` with
+  arguments swapped — see `diff_files` docstring).
+- `PullResult.durability_fsync_failures: int` and `PullResult.corrupt_peer_count: int`
+  — degradation-signal counters populated from `_pull_core`'s finally block.
+  Exposed so `autopull` can persist a "degraded" breadcrumb outcome instead
+  of hiding data-at-risk conditions behind `success`.
+- `mm autopull` now writes `outcome: "degraded"` to the breadcrumb (readable
+  via `mm status` and `mm diag`) when any of four signals fire: fsync failure
+  on a touched parent dir, corrupt peer manifest(s), unknown source(s) from a
+  peer, or per-file apply failure(s). `detail` enumerates every firing signal
+  joined with `"; "`. Mirrors the v0.8.1 `no-sources` breadcrumb precedent —
+  stderr warnings surface immediately; the breadcrumb makes the degradation
+  state persistent for monitoring. Previously `outcome` stayed `success` for
+  degradation cases, making `mm status`-based monitoring selectively honest.
+- `tests/conftest.py` — canonical home for shared CLI-integration helpers
+  (`_make_config`, `_populate_claude`, `_redirect_sidecar`, `_redirect_lock`,
+  `_setup_real_config`, `PASSPHRASE`, `MEMORY_KB`). Previously lived in
+  `test_track_1a.py` and were cross-imported; now imported from conftest by
+  both `test_track_1a.py` and `test_track_1c.py`.
+- `tests/test_track_1c.py` (16 tests) — 7 unit tests for `iter_source_diffs`,
+  3 for PullResult degradation fields, 5 for every combination of the 4
+  degraded-breadcrumb signals (including a deterministic stub that pins the
+  `"; "` join delimiter when all four signals fire together), and a REG-1
+  integration test proving `mm gc` never reaps a non-hex-sha blob.
+- Sha hex-shape validation in `tests/test_preflight.py` (11 new parametrized
+  cases) plus a REG-1 pin: `parse_blob_key("data/dev1/not-a-sha.enc") is None`.
+
+### Changed
+- `src/mind_meld/storage/keys.py`: `blob_key(device_id, sha)` now validates
+  that `sha` matches `[0-9a-f]{64}` (fullmatch). `parse_blob_key(key)` now
+  returns `None` when the leaf sha is non-hex, routing malformed blob paths
+  through `_do_gc`'s `malformed_count` path (skipped, never reaped as
+  "orphans"). `device_id` remains lax per Codex-surfaced fixture-compat
+  audit: production IDs are `uuid4().hex[:8]` but 22 test fixtures and
+  historical installs use short non-hex IDs like `dev-a`, `mac-a`.
+- `_validate_hex_sha()` converts non-string input (corrupt manifest shipping
+  `{"sha256": null}` or numeric) to `ValueError` via an `isinstance` guard,
+  so `_download_and_apply`'s `except ValueError` catches it and the pull
+  continues per-file instead of crashing on a `TypeError` escape.
+
+### Fixed
+- `mm gc` safety: a 3-segment `data/{device}/{non-hex-leaf}.enc` path was
+  previously parsed by `parse_blob_key` and then reaped as an "orphan" by
+  `_do_gc` since its non-hex leaf could never be in `referenced_hashes`. Now
+  the leaf is hex-validated at parse time and the file is routed through
+  `malformed_count` (preserved, surfaced in verbose output).
+- Autopull breadcrumb selective-honesty: `mm status` would show
+  `Last auto-pull: ... (success)` indefinitely after a pull that experienced
+  fsync-durability failure, corrupt peer manifest, unknown-source partition,
+  or per-file apply failure. All four now flow into `outcome: "degraded"`.
+
+### Known limitations (not addressed in 1C, documented for future tracks)
+- `corrupt_peer_count` is only incremented for peers discovered via
+  `_list_devices_warn()`. A corrupt or missing `devices/*.json` entry hides
+  a peer entirely, so its bad manifest never surfaces in the degradation
+  signal. Tracked as "Blob-directory as secondary peer-discovery path" TODO.
+
 ## [0.8.5] - 2026-04-24
 
 Track 1B (Group 1) — Walker + manifest + merge DRY. Three private helpers

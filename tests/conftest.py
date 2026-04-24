@@ -58,3 +58,84 @@ def test_root_salt() -> bytes:
 def test_memory_kb() -> int:
     """Exported for tests that need the fixture's memory_kb explicitly."""
     return _TEST_MEMORY_KB
+
+
+# ─── Shared CLI integration helpers ──────────────────────────────────────
+#
+# Plain module-level functions imported by tests that drive the CLI via
+# CliRunner (test_track_1a.py, test_track_1c.py). Previously lived in
+# test_track_1a.py and were cross-imported — moved here so both test
+# modules pull from a stable, canonical location.
+
+PASSPHRASE = "track-1a-test-passphrase"
+MEMORY_KB = 1024
+
+
+def _make_config(tmp_path, storage_dir, claude_dir, device_id="dev-a", device_name="Mac A"):
+    """Write a valid config.toml for a single-claude-source setup."""
+    from pathlib import Path as _Path  # local import keeps conftest import-light
+    from mind_meld.config import save_config
+
+    config_path = tmp_path / "config.toml"
+    config = {
+        "device": {"id": device_id, "name": device_name},
+        "storage": {"path": str(storage_dir)},
+        "sync": {
+            "max_file_size": 52_428_800,
+            "sources": [
+                {"name": "claude", "path": str(claude_dir), "type": "claude"},
+            ],
+        },
+        "crypto": {"argon2_memory_kb": MEMORY_KB},
+    }
+    save_config(config, config_path)
+    return config_path, config
+
+
+def _populate_claude(claude_dir, contents: str = "Data scientist") -> None:
+    """Populate a claude_dir with a single memory file so push has work to do."""
+    memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "role.md").write_text(contents)
+
+
+def _redirect_sidecar(monkeypatch, tmp_path):
+    """Redirect SIDECAR_DIR to a tmp path so log writes are hermetic.
+
+    `_auto_log_path` reads `sidecar.SIDECAR_DIR` at call time, so patching
+    the one constant is sufficient — no `mind_meld.cli._AUTO_LOG_DIR` alias
+    to keep in sync.
+    """
+    iso = tmp_path / "sidecar"
+    iso.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", iso)
+    return iso
+
+
+def _redirect_lock(monkeypatch, tmp_path):
+    lp = tmp_path / "test.lock"
+    monkeypatch.setattr("mind_meld.config.LOCK_PATH", lp)
+    monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", lp)
+    return lp
+
+
+def _setup_real_config(tmp_path, monkeypatch):
+    """Full working config so we reach _pull_core / _push_core."""
+    from mind_meld.crypto import bootstrap_crypto_init
+    from mind_meld.devices import register_device
+    from mind_meld.storage.local import LocalBackend
+
+    storage_dir = tmp_path / "storage"
+    claude_dir = tmp_path / ".claude"
+    _populate_claude(claude_dir)
+    config_path, _ = _make_config(tmp_path, storage_dir, claude_dir)
+
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-a", "Mac A")
+
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+    _redirect_lock(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    return claude_dir

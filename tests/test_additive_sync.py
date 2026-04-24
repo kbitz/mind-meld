@@ -573,26 +573,29 @@ class TestAutoGC:
 
         register_device(storage, "dev1", "Test")
 
-        # Create a manifest referencing hash1
+        # Create a manifest referencing sha_ref (post-1C: blob/parse_blob_key
+        # require 64-hex sha shape, so fixtures use real hex).
+        sha_ref = "a" * 64
+        sha_orphan = "b" * 64
         manifest = {
             "device_id": "dev1",
             "device_name": "Test",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "files": {"a.md": {"sha256": "hash1", "size": 10, "mtime": "2026-01-01"}},
-            "sources": {"claude": {"base_path": "", "files": {"a.md": {"sha256": "hash1", "size": 10, "mtime": "2026-01-01"}}}},
+            "files": {"a.md": {"sha256": sha_ref, "size": 10, "mtime": "2026-01-01"}},
+            "sources": {"claude": {"base_path": "", "files": {"a.md": {"sha256": sha_ref, "size": 10, "mtime": "2026-01-01"}}}},
             "tombstones": {},
         }
         enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
         storage.put("manifests/dev1/manifest.json.enc", enc)
 
         # Create referenced + orphaned blobs
-        storage.put("data/dev1/hash1.enc", b"referenced")
-        storage.put("data/dev1/hash_orphan.enc", b"orphaned")
+        storage.put(f"data/dev1/{sha_ref}.enc", b"referenced")
+        storage.put(f"data/dev1/{sha_orphan}.enc", b"orphaned")
 
         count = _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
         assert count == 1
-        assert storage.exists("data/dev1/hash1.enc")
-        assert not storage.exists("data/dev1/hash_orphan.enc")
+        assert storage.exists(f"data/dev1/{sha_ref}.enc")
+        assert not storage.exists(f"data/dev1/{sha_orphan}.enc")
 
     def test_gc_logs_malformed_blob_paths_in_verbose(self, tmp_path, capsys):
         """Wrong-depth .enc files under data/ are surfaced in verbose mode and

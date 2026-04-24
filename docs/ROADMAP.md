@@ -50,10 +50,9 @@ _touches: src/mind_meld/manifest.py, src/mind_meld/merge.py, tests/test_manifest
 - ✅ **`merge.py` dispatch + join helpers** — `should_merge`/`merge_file` duplicated strategy classification; `merge_jsonl`/`merge_lines` shared an identical join-lines tail. Shipped as `_merge_strategy(rel_path) -> Callable | None` (direct callable, no registry — codex review correctly flagged the original `_STRATEGIES` dict as YAGNI machinery for two predicates) + `_join_lines(lines)` helper. _src/mind_meld/merge.py_. (S) _Shipped in v0.8.5._
 - ✅ **Drop redundant `normalize_manifest(remote_manifest)` call at manifest.py:607 + enforce caller contract at runtime** — added during /plan-eng-review 2026-04-24 after auditing all three caller paths (`_fetch_remote_manifest` → `load_manifest`; `sidecar.read` → explicit normalize; peer-fallback synthetic dict) and finding the call was positionally wrong (ran AFTER the carry-forward loop had already consumed tombstone keys). /review cross-model adversarial (Claude + Codex, 2026-04-24) independently found that the dropped call was also doing load-bearing v1→v2 `files`→`sources` promotion right before new-tombstone detection — so a hand-built v1-shaped dict would silently produce zero new tombstones (delete-propagation loss) instead of the original `claude:<path>` entries. Fixed by enforcing the contract at runtime: `generate_tombstones` now raises `ManifestError` on a v1-shaped `remote_manifest` instead of failing silently. Tests `TestGenerateTombstonesContract::test_raises_on_v1_shaped_input` and `test_none_remote_still_allowed` pin the contract. _src/mind_meld/manifest.py, tests/test_manifest.py_. (S) _Shipped in v0.8.5._
 
-### Track 1C: Post-1A cli.py follow-ups
+### Track 1C: Post-1A cli.py follow-ups ✅ shipped in v0.8.6
 _3 tasks · ~0.5 day (human) / ~15 min (CC) · low risk · [cli.py]_
-_touches: src/mind_meld/cli.py, tests/test_storage_local.py_
-_Depends on: Track 1A landing first (avoids cli.py merge conflicts with decomposition)._
+_touches: src/mind_meld/cli.py, src/mind_meld/storage/keys.py, tests/test_preflight.py, tests/test_track_1c.py (new)_
 
 - **diff-call-site DRY pass** — `cli.py:1454-1459, 1843-1868, 2101-2112, 2464-2473`: the four `diff_files` call sites share a per-source iteration pattern but diverge on filtering (push filters by `has_changes`, status/diff filter by `--source` arg, pull builds local_files by hashing). Track 1A's `_pull_core` decomposition resolves one of the four; the other three (push, status, diff) still carry the boilerplate. Candidate primitive: a helper that takes local + remote source dicts and yields `(src_name, src_data, remote_src, diff)` tuples, callers filter. [plan-eng-review 2026-04-23] _src/mind_meld/cli.py, ~40 lines._ (S)
 - **GC: validate blob shape, not just depth** — `_do_gc` (cli.py:2660-2698) now flags wrong-depth `data/` entries (v0.8.1 fix), but a 3-segment path with bogus middle/leaf still gets reaped as an "orphan" if not in `referenced_hashes`. Examples: `data//foo.enc` (empty device_id), `data/dev/not-a-sha.enc` (non-hex leaf). Add a stricter validator: device_id segment matches `[0-9a-f]{8,}`, leaf matches `[0-9a-f]{64}`. [codex-adversarial 2026-04-23] _src/mind_meld/cli.py, ~20 lines._ (S)
@@ -142,7 +141,7 @@ Group 1: Decomposition + DRY
   Pre-flight .............. ~2 hr (constants + storage key helpers) [storage keys ✅ v0.8.4]
   ├── Track 1A ........... ~1.5d .. 2 tasks .. decompose _pull_core + _apply_incoming_file [✅ v0.8.4]
   ├── Track 1B ........... ~0.5d .. 3 tasks .. walker + manifest + merge DRY [✅ v0.8.5]
-  └── Track 1C ........... ~0.5d .. 3 tasks .. post-1A cli.py follow-ups
+  └── Track 1C ........... ~0.5d .. 3 tasks .. post-1A cli.py follow-ups [✅ v0.8.6]
 
 Group 2: Init flow + sync_log generalization + config polish
   ├── Track 2A ........... ~1.5d .. 5 tasks .. init + sync_log

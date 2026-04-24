@@ -14,6 +14,8 @@ Key shapes:
 
 from __future__ import annotations
 
+import re
+
 MANIFESTS_PREFIX = "manifests/"
 DATA_PREFIX = "data/"
 DEVICES_PREFIX = "devices/"
@@ -21,6 +23,34 @@ DEVICES_PREFIX = "devices/"
 # Storage-root bootstrap blob (not device-scoped). Plaintext root_salt +
 # keycheck blob. See crypto.py for the byte layout.
 CRYPTO_INIT_KEY = "mm-crypto-init"
+
+# SHA-256 hex shape: exactly 64 lowercase hex chars. Used by both blob_key()
+# construction and parse_blob_key() parsing so a corrupt peer manifest
+# shipping `data/{dev}/not-a-sha.enc` can't be smuggled through GC as an
+# "orphan" (it was reaped in v0.8.x). device_id is intentionally NOT
+# shape-validated because historical/test fixtures use short non-hex IDs.
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _validate_hex_sha(value: str) -> None:
+    """Reject a sha component that isn't exactly 64 lowercase hex chars.
+
+    Threat model: corrupt or malicious peer manifests ship sha values. A
+    non-hex sha landing in `data/{dev}/{sha}.enc` was previously reaped by
+    `mm gc` as an orphan (since it can't match anything in
+    `referenced_hashes`). Reject at construction and parse to route those
+    through the malformed-count path in `_do_gc` instead.
+
+    Guards against non-string input (e.g. `{"sha256": null}` or a numeric
+    JSON value from a corrupt peer manifest) by raising ValueError, not
+    TypeError — callers catching ValueError stay uniform. Without the
+    isinstance guard, fullmatch() would raise TypeError on non-strings and
+    escape per-file error handling in _download_and_apply().
+    """
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise ValueError(
+            f"storage key: sha must be 64 lowercase hex chars, got {value!r}"
+        )
 
 
 def _validate_component(value: str, name: str) -> None:
@@ -51,7 +81,10 @@ def manifest_key(device_id: str) -> str:
 def blob_key(device_id: str, sha: str) -> str:
     """Key for a content-addressed encrypted file blob."""
     _validate_component(device_id, "device_id")
-    _validate_component(sha, "sha")
+    # _validate_hex_sha strictly subsumes _validate_component for sha: every
+    # value the latter would reject (empty, '.', '..', path separator, null
+    # byte) is already non-hex and fails the 64-lowercase-hex fullmatch.
+    _validate_hex_sha(sha)
     return f"{DATA_PREFIX}{device_id}/{sha}.enc"
 
 
@@ -64,10 +97,12 @@ def device_key(device_id: str) -> str:
 def parse_blob_key(key: str) -> tuple[str, str] | None:
     """Parse a blob key into (device_id, sha256). Returns None on malformed.
 
-    Depth-only validation: must start with `data/`, end with `.enc`, and
-    have exactly 3 segments. Does NOT validate hex shape of sha or the
-    format of device_id — shape validation is a separate concern (see
-    TODOS.md 'GC: validate blob shape, not just depth').
+    Depth + sha-shape validation: must start with `data/`, end with `.enc`,
+    have exactly 3 segments, and the leaf sha must match `[0-9a-f]{64}`
+    (fullmatch). device_id is NOT shape-validated — historical registrations
+    and test fixtures use short non-hex IDs. The sha check is what keeps a
+    corrupt peer manifest's `data/{dev}/not-a-sha.enc` out of `_do_gc`'s
+    orphan-reaping set — such entries land in the malformed-count path.
     """
     if not key.startswith(DATA_PREFIX) or not key.endswith(".enc"):
         return None
@@ -78,6 +113,6 @@ def parse_blob_key(key: str) -> tuple[str, str] | None:
     if not device_id:
         return None
     sha = leaf[: -len(".enc")]
-    if not sha:
+    if not _SHA256_RE.fullmatch(sha):
         return None
     return device_id, sha
