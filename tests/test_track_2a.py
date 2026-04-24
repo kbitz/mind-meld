@@ -24,13 +24,19 @@ from mind_meld.cli import (
     _apply_conflict,
     _apply_merge,
     _apply_write,
+    _bootstrap_or_verify_crypto,
     _empty_outcomes,
     _fsync_touched_parents,
+    _load_prior_device_metadata,
     _preflight_conflicts,
     _prefetch_manifests,
+    _prompt_passphrase,
+    _prompt_sources,
     _pull_one_source,
+    _save_and_register,
     _select_devices,
 )
+from mind_meld.config import DEFAULT_SOURCES, get_default_source
 from mind_meld.errors import StorageError
 
 
@@ -310,7 +316,7 @@ class TestPreflightConflicts:
                 "tombstones": {},
             },
         }
-        local_sources = {"claude": tmp_path}
+        local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
             pull_targets, manifest_cache, local_sources,
             source_filter=None, all_tombstones={},
@@ -338,7 +344,7 @@ class TestPreflightConflicts:
                 "tombstones": {},
             },
         }
-        local_sources = {"claude": tmp_path}
+        local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
             pull_targets, manifest_cache, local_sources,
             source_filter=None, all_tombstones={},
@@ -368,7 +374,7 @@ class TestPreflightConflicts:
                 "tombstones": {},
             },
         }
-        local_sources = {"claude": tmp_path}
+        local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
             pull_targets, manifest_cache, local_sources,
             source_filter=None, all_tombstones={},
@@ -387,7 +393,8 @@ class TestPreflightConflicts:
                 "tombstones": {},
             },
         }
-        local_sources = {"claude": tmp_path}  # no gstack mapping
+        # no gstack mapping — only claude source configured locally
+        local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
             pull_targets, manifest_cache, local_sources,
             source_filter=None, all_tombstones={},
@@ -403,6 +410,7 @@ class TestPullOneSource:
         result = _pull_one_source(
             backend=None,
             src_name="claude",
+            src_type="claude",
             src_data={"files": {}},
             did="peerA",
             dname="A",
@@ -422,6 +430,7 @@ class TestPullOneSource:
         result = _pull_one_source(
             backend=None,
             src_name="claude",
+            src_type="claude",
             src_data={"files": {"new.md": _info("abc")}},
             did="peerA",
             dname="A",
@@ -437,7 +446,7 @@ class TestPullOneSource:
         assert "new.md" in result.dry_run_diff.new
 
     def test_claude_sync_base_set_for_claude(self, tmp_path: Path, monkeypatch) -> None:
-        """Non-dry-run with changes — claude_sync_base is set for src=='claude'."""
+        """Non-dry-run with changes — claude_sync_base is set for type=='claude'."""
         from mind_meld import cli as cli_module
 
         # Stub _download_and_apply to pretend one file was written.
@@ -456,6 +465,7 @@ class TestPullOneSource:
         result = _pull_one_source(
             backend=None,
             src_name="claude",
+            src_type="claude",
             src_data={"files": {"new.md": _info("abc")}},
             did="peerA",
             dname="A",
@@ -470,6 +480,52 @@ class TestPullOneSource:
         assert result.claude_sync_base == str(tmp_path)
         assert result.bytes_transferred == 42
 
+    def test_renamed_claude_source_still_logs(self, tmp_path: Path, monkeypatch) -> None:
+        """REGRESSION PIN (same-device scope): user renames their local
+        claude source from 'claude' to 'my-claude' — claude_sync_base
+        MUST still fire because the gate is type-keyed, not name-keyed.
+        Pre-fix this silently broke the per-project sync log for anyone
+        who customized source names.
+
+        OUT OF SCOPE: cross-device rename drift. Manifests are keyed by
+        src_name, so if device A renames locally but device B keeps the
+        original name, B's pull skips A's remote source entirely. That's
+        a bigger design change (cross-device source identity) tracked as
+        a known limitation, not fixed here.
+        """
+        from mind_meld import cli as cli_module
+
+        def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
+            return 1, {
+                "written": list(to_download.keys()),
+                "merged": [],
+                "skipped": [],
+                "conflicted": [],
+                "unchanged": [],
+                "failed": [],
+            }
+
+        monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
+        result = _pull_one_source(
+            backend=None,
+            src_name="my-claude",   # user renamed
+            src_type="claude",      # but type is still claude
+            src_data={"files": {"a.md": _info("abc")}},
+            did="peerA",
+            dname="A",
+            base_path=tmp_path,
+            all_tombstones={},
+            passphrase="pp",
+            memory_kb=1024,
+            interactive_resolve=False,
+            dry_run=False,
+            verbose_console=False,
+        )
+        assert result.claude_sync_base == str(tmp_path), (
+            "Renamed claude source must still set claude_sync_base — "
+            "gate is type-keyed, not name-keyed."
+        )
+
     def test_non_claude_sync_base_none(self, tmp_path: Path, monkeypatch) -> None:
         from mind_meld import cli as cli_module
 
@@ -482,6 +538,40 @@ class TestPullOneSource:
         result = _pull_one_source(
             backend=None,
             src_name="gstack",
+            src_type="generic",
+            src_data={"files": {"x.md": _info("abc")}},
+            did="peerA",
+            dname="A",
+            base_path=tmp_path,
+            all_tombstones={},
+            passphrase="pp",
+            memory_kb=1024,
+            interactive_resolve=False,
+            dry_run=False,
+            verbose_console=False,
+        )
+        assert result.claude_sync_base is None
+
+    def test_claude_named_generic_does_not_log(self, tmp_path: Path, monkeypatch) -> None:
+        """Symmetric pin: a source named 'claude' but typed 'generic' must
+        NOT write a sync log. Name is cosmetic; type drives behavior."""
+        from mind_meld import cli as cli_module
+
+        def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
+            return 1, {
+                "written": list(to_download.keys()),
+                "merged": [],
+                "skipped": [],
+                "conflicted": [],
+                "unchanged": [],
+                "failed": [],
+            }
+
+        monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
+        result = _pull_one_source(
+            backend=None,
+            src_name="claude",      # name-only
+            src_type="generic",     # but NOT a claude-typed source
             src_data={"files": {"x.md": _info("abc")}},
             did="peerA",
             dname="A",
@@ -512,6 +602,7 @@ class TestPullOneSource:
         _pull_one_source(
             backend=None,
             src_name="claude",
+            src_type="claude",
             src_data={"files": {
                 "old.md": _info("abc"),
                 "keep.md": _info("def"),
@@ -939,3 +1030,232 @@ class TestWriteSyncLogBestEffort:
         captured = capsys.readouterr()
         assert "sync log write failed" in captured.err
         assert "disk full" in captured.err
+
+
+# ── init helpers (Track 2A decomposition) ────────────────────────────
+
+
+class TestLoadPriorDeviceMetadata:
+    """_load_prior_device_metadata — best-effort read of prior (id, name)."""
+
+    def test_no_config_returns_none_tuple(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
+        assert _load_prior_device_metadata() == (None, None)
+
+    def test_readable_config_returns_id_and_name(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            '[device]\nid = "abc123"\nname = "OldMac"\n'
+            '[storage]\npath = "/tmp/x"\n'
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
+        assert _load_prior_device_metadata() == ("abc123", "OldMac")
+
+    def test_malformed_config_returns_none_tuple(self, tmp_path: Path, monkeypatch) -> None:
+        """Broken config doesn't crash init; best-effort returns Nones so
+        the orphan-case warning just loses the descriptive name."""
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("this is not: valid [toml at all\n")
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
+        assert _load_prior_device_metadata() == (None, None)
+
+
+class TestPromptPassphrase:
+    """_prompt_passphrase — double-prompt on first-device, single otherwise."""
+
+    def test_first_device_match(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        responses = iter(["pw123", "pw123"])
+        monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
+        assert _prompt_passphrase(is_first_device=True) == "pw123"
+
+    def test_first_device_mismatch_exits(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        import typer as _typer
+        responses = iter(["pw123", "pw456"])
+        monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
+        with pytest.raises(_typer.Exit):
+            _prompt_passphrase(is_first_device=True)
+
+    def test_first_device_empty_exits(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        import typer as _typer
+        monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: "")
+        with pytest.raises(_typer.Exit):
+            _prompt_passphrase(is_first_device=True)
+
+    def test_second_device_single_prompt(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        calls: list[int] = []
+
+        def counting_prompt(*a, **kw):
+            calls.append(1)
+            return "pw-shared"
+
+        monkeypatch.setattr(cli_module.typer, "prompt", counting_prompt)
+        assert _prompt_passphrase(is_first_device=False) == "pw-shared"
+        assert len(calls) == 1  # single prompt, no confirm
+
+    def test_second_device_empty_exits(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        import typer as _typer
+        monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: "")
+        with pytest.raises(_typer.Exit):
+            _prompt_passphrase(is_first_device=False)
+
+
+class TestPromptSources:
+    """_prompt_sources — per-source Y/n prompt; returns enabled entries."""
+
+    def test_all_declined_returns_empty(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: False)
+        assert _prompt_sources() == []
+
+    def test_all_accepted_returns_every_default(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: True)
+        result = _prompt_sources()
+        names = [s["name"] for s in result]
+        assert names == [s["name"] for s in DEFAULT_SOURCES]
+
+    def test_returns_deep_copies_not_aliases(self, monkeypatch) -> None:
+        """Mutating the returned dict must not pollute DEFAULT_SOURCES —
+        Issue 1C's aliasing guard (get_default_source deep-copies)."""
+        from mind_meld import cli as cli_module
+        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: True)
+        result = _prompt_sources()
+        for src in result:
+            src["path"] = "/mutated/value"
+        # DEFAULT_SOURCES still has its original paths
+        assert DEFAULT_SOURCES[0]["path"] == "~/.claude"
+
+    def test_claude_only(self, monkeypatch) -> None:
+        from mind_meld import cli as cli_module
+        responses = iter([True, False])  # Y claude, n gstack
+        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
+        result = _prompt_sources()
+        assert [s["name"] for s in result] == ["claude"]
+
+    def test_gstack_only_preserves_include_fields(self, monkeypatch) -> None:
+        """The gstack default carries include_dirs / include_files — they
+        must survive the indirection through get_default_source."""
+        from mind_meld import cli as cli_module
+        responses = iter([False, True])  # n claude, Y gstack
+        monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
+        result = _prompt_sources()
+        assert [s["name"] for s in result] == ["gstack"]
+        gstack = result[0]
+        assert "projects" in gstack["include_dirs"]
+        assert "config.yaml" in gstack["include_files"]
+
+
+class TestSaveAndRegister:
+    """_save_and_register — config write → device register → keyring store."""
+
+    def test_ordering(self, tmp_path: Path, monkeypatch) -> None:
+        """Order matters: if config write fails we must NOT have registered
+        the device or stored the passphrase. Pin the sequence."""
+        from mind_meld import cli as cli_module
+
+        cfg = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
+
+        call_order: list[str] = []
+
+        original_save = cli_module.save_config
+
+        def tracking_save(c, path=None):
+            call_order.append("save")
+            return original_save(c, path)
+
+        def tracking_register(backend, did, dname):
+            call_order.append("register")
+
+        def tracking_keyring(pw):
+            call_order.append("keyring")
+            return True
+
+        monkeypatch.setattr(cli_module, "save_config", tracking_save)
+        monkeypatch.setattr(cli_module, "register_device", tracking_register)
+        monkeypatch.setattr(cli_module, "store_passphrase_in_keyring", tracking_keyring)
+
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path)},
+        }
+        _save_and_register(config, backend=None, device_id="d1",
+                           device_name="Mac", passphrase="pw")
+        assert call_order == ["save", "register", "keyring"]
+
+    def test_no_keyring_still_succeeds(self, tmp_path: Path, monkeypatch) -> None:
+        """Keyring unavailable (lambda _pw: False) → function completes
+        without raising; caller sees a yellow warning on stdout."""
+        from mind_meld import cli as cli_module
+
+        cfg = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
+
+        monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
+        monkeypatch.setattr(cli_module, "store_passphrase_in_keyring", lambda _pw: False)
+
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path)},
+        }
+        # Must not raise.
+        _save_and_register(config, backend=None, device_id="d1",
+                           device_name="Mac", passphrase="pw")
+
+
+class TestBootstrapOrVerifyCrypto:
+    """_bootstrap_or_verify_crypto — one spot check for the lost-race path.
+
+    The happy-path branches are covered end-to-end by TestInitFlow; here
+    we pin the lost-race path that's hard to exercise via CliRunner.
+    """
+
+    def test_first_device_lost_race_falls_through_to_verify(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """bootstrap raises StorageError → fall through to retry_fetch +
+        verify_passphrase. Pins the rare lost-race branch."""
+        from mind_meld import cli as cli_module
+        from mind_meld.crypto import CryptoInitFetch
+
+        # bootstrap raises (simulating race)
+        def raising_bootstrap(backend, pp, argon2_memory_kb):
+            raise StorageError("concurrent put")
+
+        # retry_fetch returns a valid winner
+        winner_salt = b"\x00" * 16
+        winner_keycheck = b"\x00" * 32
+
+        def fake_retry_fetch(backend):
+            return CryptoInitFetch(
+                status="ok",
+                root_salt=winner_salt,
+                argon2_memory_kb=1024,
+                keycheck_blob=winner_keycheck,
+            )
+
+        monkeypatch.setattr(cli_module, "bootstrap_crypto_init", raising_bootstrap)
+        monkeypatch.setattr(cli_module, "fetch_crypto_init", fake_retry_fetch)
+        monkeypatch.setattr(cli_module, "load_master_key", lambda *a, **kw: b"\x00" * 32)
+        monkeypatch.setattr(cli_module, "verify_passphrase", lambda *a, **kw: None)
+        monkeypatch.setattr(cli_module, "set_crypto_session", lambda *a, **kw: None)
+
+        # Seed fetch (not used on first-device path but required as param)
+        seed_fetch = CryptoInitFetch(status="missing")
+        rs, mk, kc = _bootstrap_or_verify_crypto(
+            backend=None, passphrase="pw", is_first_device=True, fetch=seed_fetch
+        )
+        assert rs == winner_salt
+        assert mk == 1024
+        assert kc == winner_keycheck
