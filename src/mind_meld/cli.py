@@ -43,7 +43,6 @@ from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
     DiffResult,
-    TOMBSTONE_TTL_DAYS,
     build_manifest_v2,
     collect_tombstones,
     deserialize_manifest,
@@ -420,12 +419,17 @@ def _recover_prior_manifest(
     # status == "corrupt" — recovery chain
     sidecar_manifest = sidecar.read(device_id)
     if sidecar_manifest is not None:
-        if not quiet:
-            console.print(
-                "[yellow]Warning:[/yellow] remote manifest corrupt; "
-                "recovered prior state from local sidecar "
-                f"({sidecar.sidecar_path()})."
-            )
+        msg = (
+            "remote manifest corrupt; recovered prior state from local "
+            f"sidecar ({sidecar.sidecar_path()})."
+        )
+        if quiet:
+            # Load-bearing: silently swallowing a corrupt-manifest recovery
+            # in autopush leaves the user with no signal that storage is
+            # degrading. Always surface to stderr.
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
         return sidecar_manifest
 
     # No sidecar — try peer fallback
@@ -433,13 +437,19 @@ def _recover_prior_manifest(
         backend, device_id, passphrase, memory_kb
     )
     if peer_tombstones:
-        if not quiet:
-            console.print(
-                f"[yellow]Warning:[/yellow] remote manifest corrupt and no "
-                f"local sidecar; recovered {len(peer_tombstones)} tombstone(s) "
-                f"from peer device(s). Recent local deletions may be lost — "
-                f"verify no files have resurrected."
-            )
+        msg = (
+            "remote manifest corrupt and no local sidecar; recovered "
+            f"{len(peer_tombstones)} tombstone(s) from peer device(s). "
+            "Recent local deletions may be lost — verify no files have "
+            "resurrected."
+        )
+        if quiet:
+            # Load-bearing: peer-fallback recovery is the riskiest branch
+            # (recent deletions can be lost). Must reach the user even in
+            # autopush.
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
         # Synthetic prior manifest: no prior file list (so fresh-deletion
         # detection is disabled — we have no basis for it), but the
         # carry-forward loop in generate_tombstones() preserves these.
@@ -718,10 +728,17 @@ def conflict_filename(
 
     If the computed path already exists (same-second double-conflict on the
     same device), append a 4-char random suffix. Filenames are never overwritten.
+
+    Raises ValueError on empty/None `device_id`. The caller (peer manifest or
+    local config) is responsible for supplying a non-empty id; the previous
+    `"unknown"` fallback silently minted cross-device-colliding filenames when
+    a corrupted peer manifest fed an empty id, which is a data-loss footgun.
     """
+    if not device_id:
+        raise ValueError("conflict_filename: device_id must be non-empty")
     now = now or datetime.now(timezone.utc)
     ts = now.strftime("%Y%m%d-%H%M%S")
-    device_short = (device_id or "unknown")[:8]
+    device_short = device_id[:8]
 
     stem = canonical.stem
     suffix = canonical.suffix
@@ -897,7 +914,15 @@ def _apply_incoming_file(
             raise typer.Abort()
         # choice == "keep-both" -> fall through to default conflict path
 
-    conflict_path = conflict_filename(local_path, remote_device_id)
+    try:
+        conflict_path = conflict_filename(local_path, remote_device_id)
+    except ValueError as e:
+        # Empty/None remote_device_id (corrupted peer manifest). Preserve
+        # per-file isolation: warn and fail this file only, keep walking.
+        # The pull summary's `failed` count surfaces the issue without
+        # losing progress on N other peer files.
+        console.print(f"  [red]conflict path build failed (local preserved):[/red] {rel_path} \u2014 {e}")
+        return "failed"
     try:
         local_path.rename(conflict_path)
     except OSError as e:
@@ -978,23 +1003,6 @@ def _download_and_apply(
         outcomes[outcome].append(rel_path)
 
     return bytes_transferred, outcomes
-
-
-def _delete_files(
-    base_path: Path,
-    to_delete: list[str],
-    verbose: bool = False,
-) -> int:
-    """Delete files from base_path. Returns count of files deleted."""
-    count = 0
-    for rel_path in to_delete:
-        local_path = base_path / rel_path
-        if local_path.exists():
-            local_path.unlink()
-            count += 1
-            if verbose:
-                console.print(f"  [red]\u2715[/red] {rel_path}")
-    return count
 
 
 # ── init ──────────────────────────────────────────────────────────────
@@ -1404,8 +1412,15 @@ def _push_core(
     # Build local manifest (v2 with sources)
     sources = get_sources(config)
     if not sources:
-        if not quiet:
-            console.print("[yellow]No sync sources found. Run 'mm init' to configure.[/yellow]")
+        msg = "no sync sources found. Run 'mm init' to configure."
+        if quiet:
+            # Load-bearing: a misconfigured sources list silently no-ops every
+            # autopush forever. Surface to stderr so the user notices the
+            # broken state (this is distinct from "no config at all", which
+            # the caller filters before reaching here).
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
         return None
 
     skipped: list[tuple[str, str]] = []
@@ -1970,11 +1985,15 @@ def _pull_core(
         try:
             fsutil.fsync_dir(parent_dir)
         except StorageError as e:
-            if not quiet:
-                console.print(
-                    f"  [yellow]warning:[/yellow] durability fsync failed "
-                    f"on {parent_dir} — {e}"
-                )
+            msg = f"durability fsync failed on {parent_dir} — {e}"
+            if quiet:
+                # Load-bearing: an fsync failure means recent renames may
+                # not survive crash/power loss. Silent suppression in
+                # autopull leaves the user thinking pulls are durable
+                # when they aren't.
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"  [yellow]warning:[/yellow] {msg}")
 
     elapsed = time.time() - start
     result = PullResult(
@@ -2641,6 +2660,7 @@ def _do_gc(
     # List all blobs across all devices
     all_blobs = backend.list_keys("data/")
     orphan_count = 0
+    malformed_count = 0
 
     for blob_key in all_blobs:
         if not blob_key.endswith(".enc"):
@@ -2648,6 +2668,15 @@ def _do_gc(
         # Extract hash from key: data/{device_id}/{sha256}.enc
         parts = blob_key.split("/")
         if len(parts) != 3:
+            # Wrong-depth .enc under data/ — not a known blob shape. Could be
+            # a misplaced artifact from a future format, an external write, or
+            # corruption. Surface it (verbose/dry-run) so the user can audit;
+            # never auto-reap (we don't know what it is). `.tmp` artifacts from
+            # crashed pushes are handled separately by _sweep_local_tmp_files
+            # at the start of _do_gc, so they're not seen here.
+            malformed_count += 1
+            if verbose or dry_run:
+                console.print(f"  [yellow]malformed (skipped):[/yellow] {blob_key}")
             continue
         sha = parts[2].removesuffix(".enc")
         if sha not in referenced_hashes:
@@ -2656,6 +2685,14 @@ def _do_gc(
                 console.print(f"  [red]orphan:[/red] {blob_key}")
             if not dry_run:
                 backend.delete(blob_key)
+
+    if malformed_count and not (verbose or dry_run):
+        # Always summarize malformed-path count even in non-verbose mode, so
+        # the user has a signal that something weird is sitting in storage.
+        console.print(
+            f"  [yellow]warning:[/yellow] {malformed_count} blob(s) at unexpected "
+            f"path depth (skipped; run with --verbose to see)."
+        )
 
     if dry_run:
         console.print(f"\n[bold]Dry run:[/bold] {orphan_count} orphaned blobs found.")
@@ -3022,6 +3059,7 @@ def resolve(
     except LockError as e:
         _error(str(e))
 
+    failed = 0
     try:
         hits = _find_conflict_files(config)
 
@@ -3034,17 +3072,32 @@ def resolve(
         if not hits:
             console.print("[green]No conflict files.[/green]")
             return
-        _resolve_interactive_loop(hits)
+        _, failed = _resolve_interactive_loop(hits)
     finally:
         release_lock()
 
+    if failed:
+        # Surface partial-failure as a non-zero exit so CI / scripts driving
+        # `mm resolve` can detect that some conflicts were not actually
+        # resolved (rename/unlink/read errors mid-walk). Walk continues
+        # through every conflict; only the exit code reflects the failure.
+        raise typer.Exit(1)
 
-def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> None:
+
+def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tuple[int, int]:
     """Walk each conflict and prompt for resolution. Extracted so `resolve`
-    stays a thin wrapper around acquire/release lock boilerplate."""
+    stays a thin wrapper around acquire/release lock boilerplate.
+
+    Returns (resolved, failed). `failed` covers per-conflict OSErrors
+    (rename/unlink/read) that left the conflict file in place. `resolve`
+    uses the failure count to decide its exit code; the walk itself does
+    not abort on per-file errors (so the user gets to triage every conflict
+    in one pass).
+    """
     import difflib
 
     resolved = 0
+    failed = 0
     for src_name, cpath, canonical in hits:
         console.print(f"\n[bold yellow]Conflict in {src_name}:[/bold yellow] {cpath}")
 
@@ -3066,6 +3119,7 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> None
                     resolved += 1
                 except OSError as e:
                     console.print(f"  [red]promote failed:[/red] {e}")
+                    failed += 1
             elif choice.startswith("d"):
                 try:
                     cpath.unlink()
@@ -3073,6 +3127,7 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> None
                     resolved += 1
                 except OSError as e:
                     console.print(f"  [red]delete failed:[/red] {e}")
+                    failed += 1
             continue
 
         try:
@@ -3080,6 +3135,7 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> None
             conflict_text = cpath.read_text(errors="replace").splitlines()
         except OSError as e:
             console.print(f"  [red]read failed:[/red] {e}")
+            failed += 1
             continue
 
         diff = list(difflib.unified_diff(
@@ -3114,6 +3170,7 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> None
                 resolved += 1
             except OSError as e:
                 console.print(f"  [red]delete failed:[/red] {e}")
+                failed += 1
         elif choice.startswith("f"):
             try:
                 cpath.rename(canonical)
@@ -3121,12 +3178,17 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> None
                 resolved += 1
             except OSError as e:
                 console.print(f"  [red]rename failed:[/red] {e}")
+                failed += 1
         elif choice.startswith("a"):
             raise typer.Abort()
         else:
             console.print("  [dim]kept both; no change[/dim]")
 
-    console.print(f"\n[bold]Resolved {resolved} of {len(hits)}.[/bold]")
+    if failed:
+        console.print(f"\n[bold]Resolved {resolved} of {len(hits)}; {failed} failed.[/bold]")
+    else:
+        console.print(f"\n[bold]Resolved {resolved} of {len(hits)}.[/bold]")
+    return resolved, failed
 
 
 def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
@@ -3435,6 +3497,18 @@ def autopull() -> None:
                 "source(s) - run 'mm sources' to reconcile config",
                 file=sys.stderr,
             )
+        if result.total_failed:
+            # Per-file failures (decrypt error, conflict rename failure, write
+            # failure, ValueError on corrupted device_id) increment total_failed
+            # in _apply_incoming_file. Without this stderr surface, autopull's
+            # quiet contract silently swallows the summary too — exactly the
+            # silent-failure pattern Track 1A's helper-level audit was meant
+            # to close.
+            print(
+                f"mm: {result.total_failed} file(s) failed - "
+                "run 'mm pull --verbose' to see details",
+                file=sys.stderr,
+            )
 
         _write_autorun_breadcrumb("pull", "success")
     except MindMeldError as e:
@@ -3477,6 +3551,14 @@ def autopush() -> None:
         result = _push_core(
             setup.config, setup.passphrase, setup.memory_kb, quiet=True,
         )
+
+        if result is None and not get_sources(setup.config):
+            # Distinguish "broken config no-op" from "nothing to push" no-op
+            # in the breadcrumb. _push_core already printed the stderr warning;
+            # if `mm status` only sees "success" forever, monitoring never
+            # catches the wedge.
+            _write_autorun_breadcrumb("push", "no-sources")
+            return
 
         if result:
             parts = []
