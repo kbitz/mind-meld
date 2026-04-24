@@ -2,6 +2,92 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.10] - 2026-04-24
+
+Group 3 — Test hygiene + style polish. Closes the pre-1.0 cleanup Group
+dedicated to CLI-driven end-to-end coverage + lint polish. Pre-flight
+items migrate cli.py style to the same shape as devices.py (typed
+`backend`, `X | None` everywhere, no dead `f` prefixes) and narrow the
+keyring exception catch so non-KeyringError failures stop hiding behind
+the env-var fallback. Track 3A migrates `TestPushPullRoundTrip` from
+direct-API bypass to `CliRunner.invoke`, adds a combined
+push → pull → conflict → tombstone end-to-end test, renames a misleading
+test, and hoists 86 lazy in-function imports to module level. 669 tests
+passing (was 658), zero behavior regressions. Scope confirmed through
+`/plan-eng-review` (2026-04-24) — 3 decisions approved. Codex
+adversarial pass during `/review` caught a P0 gap in the keyring
+narrowing: the hook wrapper and interactive-command helper both
+catch only `CryptoError`, so non-KeyringError propagation would have
+crashed uncaught. Fixed in-line with 3 more regression pins before
+merge. One TODO captured for later (ruff F541/PYI041 enforcement).
+
+### Added
+- 5 `TestGetPassphraseExceptNarrow` regression pins + 2
+  `TestStorePassphraseInKeyringExceptNarrow` pins in `test_crypto.py`:
+  locks the new catch-set contract. KeyringError + ImportError caught;
+  OSError + RuntimeError propagate. Happy-path sanity pin.
+- 3 `TestAutoCommands` regression pins for the keyring-propagation
+  follow-through (hook breadcrumb outcome, interactive-command stderr
+  banner, init graceful-degradation). These pin the boundary behavior
+  Codex caught: non-KeyringError exceptions must become visible
+  failures, not uncaught tracebacks.
+- `test_integration.py::TestPushPullRoundTrip::test_push_pull_conflict_tombstone_combined`:
+  new CliRunner E2E walking push → pull → divergent-edit conflict-copy →
+  delete + tombstone propagation in a single run. Exercises the
+  interaction surface that isolated test_conflict_copy.py and
+  test_additive_sync.py didn't cover together.
+- `backend: LocalBackend` type hints on 17 cli.py helpers (matches
+  `devices.py`'s existing pattern).
+
+### Changed
+- `crypto.get_passphrase` and `crypto.store_passphrase_in_keyring`:
+  narrowed `except Exception` to `(keyring.errors.KeyringError,
+  ImportError)` via try/except/else split. Non-KeyringError failures
+  (OSError, RuntimeError, DBus surprises on Linux) now propagate to the
+  caller. The three call sites were hardened in this same release so
+  the propagation lands in the right place:
+  - `_auto_command_setup` (autopull/autopush hook wrapper) gained an
+    `except Exception` guard that writes a new `keyring-error`
+    breadcrumb outcome and emits `mm: <verb> failed - keyring error`
+    to stderr. Honors the v0.8.1 visible-failure contract for hook
+    paths; without this the narrowing would have crashed the hook
+    uncaught (Codex adversarial review flagged this gap).
+  - `_get_passphrase_or_exit` (interactive commands — push, pull, diff,
+    gc, recover, resolve) routes non-CryptoError exceptions through
+    `_error()` with a `keyring backend failure: <type>: <msg>` banner
+    instead of a raw traceback.
+  - `_save_and_register` (init) wraps the keyring-write call so a
+    post-config-save keyring failure degrades gracefully to the
+    env-var-fallback path (yellow warning) rather than leaving the
+    user half-initialized.
+- `TestPushPullRoundTrip` (test_integration.py): migrated from direct
+  `build_manifest_v2` / `encrypt` / `storage.put` wiring to `CliRunner`
+  invocations of `mm push` and `mm pull`. Now exercises `_pull_core` →
+  `_apply_incoming_file` for real, which is the only path production
+  traverses.
+- `test_deletion_propagation` → `test_deletion_not_propagated_in_additive_model`:
+  body always asserted the additive behavior; name was a pre-additive
+  holdover.
+- Style cleanup in cli.py: 6 `Optional[X]` → `X | None` (dropped
+  `Optional` from the typing import); 10 placeholderless f-strings
+  stripped of their `f` prefix (AST-verified; no adjacent-concat groups
+  lost interpolation).
+- Hoisted 52 in-function imports in `tests/test_integration.py` and 34
+  in `tests/test_conflict_copy.py` to module-level (Path, shutil,
+  tomllib, hashlib, subprocess, sys, textwrap, typer, and a dozen
+  `mind_meld.*` modules). One existing alias `_json` renamed to `json`
+  and one `_crypto` renamed to `crypto_module` in-place.
+- `test_env_var_fallback` (test_crypto.py) updated: the pre-narrow
+  strategy of `delattr("keyring.get_password")` triggered
+  `AttributeError` which is no longer swallowed. Now uses a realistic
+  `NoKeyringError` raise.
+
+### Fixed
+- Two separate lazy imports of `LocalBackend` inside cli.py
+  (`init` + `diag`) removed; hoisted to the module-level import alongside
+  `storage.keys`. Same symbol, no import-time cost change (already
+  transitively loaded).
+
 ## [0.8.9] - 2026-04-24
 
 Docs: multi-machine usage guide. README now explains that `mm` reads its config
