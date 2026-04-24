@@ -162,20 +162,13 @@ argon2_memory_kb = 65536   # Argon2id memory parameter in KB (default: 64MB). Lo
 
 The manifest is a **truth-based snapshot** of the local filesystem state. It always reflects the complete current state — files present locally are listed, files not present locally are omitted. Deletions propagate naturally: when a file is deleted locally, the next push produces a manifest without it.
 
-**v2 manifests** include both `files` (v1 backward compat) and `sources` (v2 multi-source):
+**v2 manifests** carry a `sources` dict keyed by source name:
 
 ```json
 {
   "device_id": "a1b2c3d4",
   "device_name": "MacBook Pro",
   "timestamp": "2026-04-08T12:00:00Z",
-  "files": {
-    "projects/-Users-kb-myapp/memory/user_role.md": {
-      "sha256": "e3b0c44298fc...",
-      "size": 4096,
-      "mtime": "2026-04-08T11:30:00Z"
-    }
-  },
   "sources": {
     "claude": {
       "base_path": "/Users/kb/.claude",
@@ -202,9 +195,8 @@ The manifest is a **truth-based snapshot** of the local filesystem state. It alw
 ```
 
 **Backward compatibility:**
-- Old code reads `files`, gets claude data, syncs normally (ignores `sources`).
-- New code reads `sources`, gets everything.
-- New code reading v1 manifests: falls back to `files`, wraps as a claude source.
+- v1 manifests (pre-v0.4 on-disk, top-level `files`, no `sources`) are auto-promoted to v2 shape by `normalize_manifest` on load: the files get wrapped as a `claude` source entry.
+- Pre-Track-1B v2 manifests emitted a redundant top-level `files` mirror of the claude source. `normalize_manifest` now strips that mirror unconditionally (both v1 promotion and v2 passthrough) so the single source of truth is `sources[<name>]["files"]`. Every manifest loaded from disk goes through `load_manifest`, which enforces this — callers may rely on `manifest["sources"]` being the only place file data lives.
 
 ### End-to-End Encryption
 
@@ -593,13 +585,11 @@ The merged result becomes the new local truth and propagates on the next push.
 
 ### Backward Compatibility
 
-v2 manifests include both `files` (containing only claude source files) and `sources` (containing all sources). This allows:
+v2 manifests carry a `sources` dict keyed by source name. Compat with older on-disk manifests is handled at the read boundary, not by mirroring keys in the write format:
 
-- **Old clients** to read `files` and sync claude data normally, ignoring `sources`.
-- **New clients** to read `sources` for full multi-source sync.
-- **New clients reading v1 manifests** to fall back to `files` and wrap it as a claude source.
-
-Old configs using `sync.claude_dir` are auto-converted to a single claude source on load.
+- **v1 manifests on disk** (pre-v0.4 shape: top-level `files`, no `sources`) are auto-promoted by `normalize_manifest`: the files become a `claude` source entry under `sources`, and the top-level `files` key is scrubbed post-copy so downstream consumers see a single-source-of-truth shape.
+- **Pre-Track-1B v2 manifests** (v2 shape but with a redundant top-level `files` mirror) have that mirror scrubbed on load for the same reason. No data is lost: the payload already lives under `sources.claude.files`.
+- **Old configs** using `sync.claude_dir` are auto-converted to a single claude source on load.
 
 ### Auto-Detection
 

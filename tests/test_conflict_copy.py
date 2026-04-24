@@ -252,7 +252,7 @@ class TestApplyIncomingFile:
         )
         assert first == "conflicted"
 
-        # Apply #2: local now matches remote (we just wrote remote). diff_manifests
+        # Apply #2: local now matches remote (we just wrote remote). diff_files
         # upstream would have filtered this out as unchanged, but if it somehow
         # still reaches _apply_incoming_file, the re-read hash branch catches it.
         second = _apply_incoming_file(

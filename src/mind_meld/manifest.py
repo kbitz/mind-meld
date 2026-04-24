@@ -6,9 +6,8 @@ Also supports generic sources with configurable include_dirs/include_files.
 Builds truth-based manifest snapshots and diffs them to find changes.
 
 Manifest formats:
-  v1 — flat "files" dict, single claude source (backward compat)
+  v1 — flat "files" dict, single claude source (pre-v0.4 on-disk only)
   v2 — "sources" dict keyed by source name, each with base_path + files
-        Also carries "files" for v1 compat (claude source only)
 
 Read-path invariant: every manifest loaded from bytes/disk MUST go through
 `load_manifest`, which composes `deserialize_manifest` + `normalize_manifest`.
@@ -16,6 +15,13 @@ This guarantees downstream code sees a v2-shaped manifest with `sources` and
 `tombstones` dicts and `<source>:<path>`-shaped tombstone keys (where keys
 were normalizable). Do NOT add a new manifest-load path that bypasses
 `load_manifest` — that's how silent deletion-resurrection bugs creep in.
+
+Top-level "files" key: pre-Track-1B v2 writers also emitted a redundant
+top-level "files" mirror of the claude source. `normalize_manifest` now
+strips it unconditionally (both v1 promotion and v2 passthrough) so
+shallow dict-copies (e.g. `_merge_manifests` at cli.py:553) can't carry
+it forward from an old on-disk manifest. The payload itself is never
+lost: v1 promotion copies it into `sources.claude.files` first.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -216,36 +223,6 @@ def walk_claude_source(
     return files
 
 
-def walk_directory(
-    base_dir: str | Path,
-    max_file_size: int = 52_428_800,
-    on_skip: Any = None,
-) -> dict[str, dict[str, Any]]:
-    """Walk a directory and build the files dict for a manifest.
-
-    Backward-compat alias for walk_claude_source().
-    """
-    return walk_claude_source(base_dir, max_file_size, on_skip)
-
-
-def build_manifest(
-    device_id: str,
-    device_name: str,
-    claude_dir: str,
-    max_file_size: int = 52_428_800,
-    on_skip: Any = None,
-) -> dict[str, Any]:
-    """Build a complete manifest dict."""
-    files = walk_directory(claude_dir, max_file_size, on_skip)
-    return {
-        "device_id": device_id,
-        "device_name": device_name,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "base_path": str(Path(claude_dir).expanduser().resolve()),
-        "files": files,
-    }
-
-
 def walk_generic_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
@@ -372,10 +349,9 @@ def build_manifest_v2(
         on_skip: Optional callback(path, reason) for skipped files.
 
     Returns:
-        v2 manifest dict with both "files" (v1 compat) and "sources".
+        v2 manifest dict with a "sources" dict keyed by source name.
     """
     sources: dict[str, dict[str, Any]] = {}
-    claude_files: dict[str, dict[str, Any]] = {}
 
     for src_cfg in sources_configs:
         name = src_cfg["name"]
@@ -384,15 +360,11 @@ def build_manifest_v2(
             "base_path": base_path,
             "files": files,
         }
-        # v1 compat: "files" at top level is the claude source only
-        if name == "claude":
-            claude_files = files
 
     return {
         "device_id": device_id,
         "device_name": device_name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "files": claude_files,
         "sources": sources,
     }
 
@@ -400,7 +372,8 @@ def build_manifest_v2(
 def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     """Ensure a manifest has the v2 "sources" structure and tombstones.
 
-    If the manifest already has "sources", return as-is.
+    If the manifest already has "sources", return as-is (with the redundant
+    top-level "files" key scrubbed — see below).
     If it only has "files" (v1 format), wrap the files into a
     claude source entry under "sources".
 
@@ -414,6 +387,15 @@ def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     meaning of unknown key shapes — `is_tombstoned` returning False is the
     same safe default as today.
 
+    Top-level "files" scrub: pre-Track-1B v2 writers emitted a redundant
+    top-level "files" mirror of the claude source. Strip it unconditionally
+    on both the v1 promotion and v2 passthrough paths so a shallow dict-copy
+    (e.g. `_merge_manifests` at cli.py:553) can't carry a stale mirror
+    through when merging an old on-disk manifest. The v1 payload is not
+    lost: promotion has already copied it into `sources.claude.files`
+    before the scrub runs. Unconditional scrub also makes `normalize_manifest`
+    idempotent on v1 input — important for the fuzz suite.
+
     Returns:
         The manifest dict (mutated in place) with "sources" and "tombstones" guaranteed.
     """
@@ -425,6 +407,13 @@ def normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 "files": manifest.get("files", {}),
             }
         }
+    # Single enforcement point: strip the redundant top-level "files" on
+    # every normalize path. v1 promotion has already copied the payload
+    # into `sources.claude.files` above; v2 passthrough drops the stale
+    # mirror that pre-Track-1B writers emitted. Running unconditionally
+    # makes normalize idempotent on v1 input and closes the dict-copy
+    # carry-forward path in _merge_manifests at cli.py:553.
+    manifest.pop("files", None)
 
     if "tombstones" not in manifest:
         manifest["tombstones"] = {}
@@ -501,45 +490,59 @@ def load_manifest(data: bytes) -> dict[str, Any]:
     return normalized
 
 
+@dataclass(eq=False, repr=False)
 class DiffResult:
-    """Result of diffing two manifests."""
+    """Result of diffing two file dicts.
 
-    def __init__(
-        self,
-        new: dict[str, dict],
-        modified: dict[str, dict],
-        deleted: list[str],
-        unchanged: list[str],
-    ):
-        self.new = new
-        self.modified = modified
-        self.deleted = deleted
-        self.unchanged = unchanged
+    `eq=False` preserves identity-based equality (and default-id-based hashing)
+    from the pre-Track-1B hand-written class. Nothing in the codebase relies
+    on structural equality or hashability today, but locking in identity
+    semantics keeps the shape change purely additive (count-based __repr__
+    + type hints + default_factory) rather than smuggling in a behavioral
+    drift. Flip to `eq=True` (or `frozen=True`) only with intent and tests
+    covering the new contract.
+    """
+
+    new: dict[str, dict] = field(default_factory=dict)
+    modified: dict[str, dict] = field(default_factory=dict)
+    deleted: list[str] = field(default_factory=list)
+    unchanged: list[str] = field(default_factory=list)
 
     @property
     def has_changes(self) -> bool:
         return bool(self.new or self.modified or self.deleted)
 
     def __repr__(self) -> str:
+        # Count-format preserved from the pre-dataclass version: the default
+        # dataclass repr dumps every dict entry, which on a 500-file manifest
+        # is a 50KB line of log noise. Counts are what every caller actually
+        # wants to see.
         return (
             f"DiffResult(new={len(self.new)}, modified={len(self.modified)}, "
             f"deleted={len(self.deleted)}, unchanged={len(self.unchanged)})"
         )
 
 
-def diff_manifests(
-    local: dict[str, Any],
-    remote: dict[str, Any] | None,
+def diff_files(
+    local_files: dict[str, dict],
+    remote_files: dict[str, dict] | None = None,
 ) -> DiffResult:
-    """Diff local manifest against remote. Returns what changed.
+    """Diff a local files dict against a remote files dict. Returns what changed.
 
-    Truth-based: local manifest is the source of truth.
+    Truth-based: `local_files` is the source of truth.
     Files in local but not remote → new.
     Files in both but different hash → modified.
     Files in remote but not local → deleted.
+
+    Arg-swap convention: the pull path (cli.py, `_pull_core`) intentionally
+    calls `diff_files(remote_files, local_files)` with arguments swapped.
+    Under the additive-pull model, that call's `new`/`modified` are files
+    the puller should DOWNLOAD (present on remote, missing or stale locally)
+    and `deleted` is ignored (additive pull never deletes local files).
+    See also `test_additive_sync.py::TestAdditivePull`.
     """
-    local_files = local.get("files", {})
-    remote_files = remote.get("files", {}) if remote else {}
+    if remote_files is None:
+        remote_files = {}
 
     new: dict[str, dict] = {}
     modified: dict[str, dict] = {}

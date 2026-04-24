@@ -2,6 +2,56 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.2] - 2026-04-23
+
+Track 1B (Group 1): manifest dead-code cleanup + v1-holdover removal. Drops
+vestigial back-compat aliases and the redundant top-level `files` key from
+v2 manifests. Zero behavior change for current users; tightens the data
+model so future contributors have one shape to reason about instead of two.
+Lands alongside Track 1A (0.8.1) which hardened cli.py; footprints are
+disjoint.
+
+### Added
+- `DiffResult.__repr__` now count-formatted (preserved from the pre-dataclass
+  version) so logging a diff on a 500-file manifest emits
+  `DiffResult(new=3, modified=1, deleted=0, unchanged=496)` instead of a 50KB
+  dump of every entry.
+- Regression test locking in that `_merge_manifests` output has no top-level
+  `files` key, so a future commit can't silently re-introduce the mirror.
+
+### Changed
+- `manifest.py:diff_manifests(local, remote)` → `diff_files(local_files, remote_files)`.
+  Old signature took `{"files": ...}`-shaped dicts; new one takes raw file dicts.
+  Docstring now documents the pull-path arg-swap convention (`_pull_core` calls
+  `diff_files(remote_files, local_files)` intentionally — under additive pull,
+  `diff.new`/`modified` are files to download and `diff.deleted` is ignored).
+- `DiffResult` converted to `@dataclass(eq=False, repr=False)`. Identity-based
+  equality and default hashability preserved exactly — the change is purely
+  additive (type hints + default_factory + less boilerplate).
+- `normalize_manifest` now unconditionally strips the top-level `files` key on
+  both v1 promotion and v2 passthrough. Payload is preserved — v1 promotion
+  copies it into `sources.claude.files` before the scrub. Makes normalize
+  idempotent on v1 input and closes a dict-copy carry-forward path in
+  `_merge_manifests` at cli.py:553.
+- `build_manifest_v2` no longer writes a redundant top-level `files` mirror.
+  v2 manifests now have a single source of truth: `sources[<name>]["files"]`.
+- `SPEC.md` updated: manifest schema section no longer describes the dead
+  mirror; backward-compat section explains how v1 on-disk manifests are
+  auto-promoted on load and how pre-v0.8.2 v2 manifests are auto-scrubbed.
+- `TestGCSafety::test_gc_never_deletes_referenced_blobs` migrated from v1-shape
+  dict literals to v2 shape + `load_manifest`, so the test exercises the same
+  normalization path production `_do_gc` hits.
+
+### Removed
+- `manifest.walk_directory` — back-compat alias for `walk_claude_source` with
+  zero production callers. Deleted.
+- `manifest.build_manifest` — back-compat alias for `build_manifest_v2` with
+  zero production callers. Deleted.
+
+### Fixed
+- Stale line-number references in `docs/ROADMAP.md` pointing at the old v1
+  `"files"` key write sites.
+
 ## [0.8.1] - 2026-04-23
 
 Track 1A (Group 1): cli.py surgical hardening. Five surgical fixes plus two

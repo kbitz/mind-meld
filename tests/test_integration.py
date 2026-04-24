@@ -16,10 +16,9 @@ from mind_meld.crypto import (
 )
 from mind_meld.devices import list_devices, register_device
 from mind_meld.manifest import (
-    build_manifest,
     build_manifest_v2,
     deserialize_manifest,
-    diff_manifests,
+    diff_files,
     normalize_manifest,
     serialize_manifest,
 )
@@ -66,13 +65,15 @@ class TestPushPullRoundTrip:
         register_device(storage, device_b, "Machine B")
 
         # ── Push from A ──
-        manifest_a = build_manifest(
-            device_a, "Machine A", str(claude_dir_a)
+        manifest_a = build_manifest_v2(
+            device_a, "Machine A",
+            [{"name": "claude", "type": "claude", "path": str(claude_dir_a)}],
         )
-        assert len(manifest_a["files"]) == 2
+        files_a = manifest_a["sources"]["claude"]["files"]
+        assert len(files_a) == 2
 
         # Upload blobs
-        for rel_path, info in manifest_a["files"].items():
+        for rel_path, info in files_a.items():
             file_path = claude_dir_a / rel_path
             data = file_path.read_bytes()
             enc = encrypt(data, PASSPHRASE, memory_kb=MEMORY_KB)
@@ -88,9 +89,10 @@ class TestPushPullRoundTrip:
         enc_manifest_b = storage.get(f"manifests/{device_a}/manifest.json.enc")
         manifest_data = decrypt(enc_manifest_b, PASSPHRASE, memory_kb=MEMORY_KB)
         remote_manifest = deserialize_manifest(manifest_data)
+        remote_files = remote_manifest["sources"]["claude"]["files"]
 
         # Download and decrypt files
-        for rel_path, info in remote_manifest["files"].items():
+        for rel_path, info in remote_files.items():
             blob_key = f"data/{device_a}/{info['sha256']}.enc"
             enc_blob = storage.get(blob_key)
             plain = decrypt(enc_blob, PASSPHRASE, memory_kb=MEMORY_KB)
@@ -100,7 +102,7 @@ class TestPushPullRoundTrip:
             target.write_bytes(plain)
 
         # ── Verify ──
-        for rel_path in manifest_a["files"]:
+        for rel_path in files_a:
             original = (claude_dir_a / rel_path).read_bytes()
             pulled = (claude_dir_b / rel_path).read_bytes()
             assert original == pulled, f"Mismatch: {rel_path}"
@@ -111,10 +113,14 @@ class TestPushPullRoundTrip:
         register_device(storage, device_a, "Machine A")
 
         # Initial push with 2 files
-        manifest_1 = build_manifest(device_a, "A", str(claude_dir_a))
-        assert len(manifest_1["files"]) == 2
+        manifest_1 = build_manifest_v2(
+            device_a, "A",
+            [{"name": "claude", "type": "claude", "path": str(claude_dir_a)}],
+        )
+        files_1 = manifest_1["sources"]["claude"]["files"]
+        assert len(files_1) == 2
 
-        for rel_path, info in manifest_1["files"].items():
+        for rel_path, info in files_1.items():
             data = (claude_dir_a / rel_path).read_bytes()
             enc = encrypt(data, PASSPHRASE, memory_kb=MEMORY_KB)
             storage.put(f"data/{device_a}/{info['sha256']}.enc", enc)
@@ -125,7 +131,7 @@ class TestPushPullRoundTrip:
         # Pull to B first (so B has both files)
         enc_m = storage.get(f"manifests/{device_a}/manifest.json.enc")
         remote = deserialize_manifest(decrypt(enc_m, PASSPHRASE, memory_kb=MEMORY_KB))
-        for rel_path, info in remote["files"].items():
+        for rel_path, info in remote["sources"]["claude"]["files"].items():
             enc_blob = storage.get(f"data/{device_a}/{info['sha256']}.enc")
             plain = decrypt(enc_blob, PASSPHRASE, memory_kb=MEMORY_KB)
             target = claude_dir_b / rel_path
@@ -137,8 +143,12 @@ class TestPushPullRoundTrip:
         role_path.unlink()
 
         # Push again — manifest should reflect deletion
-        manifest_2 = build_manifest(device_a, "A", str(claude_dir_a))
-        assert len(manifest_2["files"]) == 1  # Only feedback.md remains
+        manifest_2 = build_manifest_v2(
+            device_a, "A",
+            [{"name": "claude", "type": "claude", "path": str(claude_dir_a)}],
+        )
+        files_2 = manifest_2["sources"]["claude"]["files"]
+        assert len(files_2) == 1  # Only feedback.md remains
 
         enc_m2 = encrypt(serialize_manifest(manifest_2), PASSPHRASE, memory_kb=MEMORY_KB)
         storage.put(f"manifests/{device_a}/manifest.json.enc", enc_m2)
@@ -157,9 +167,9 @@ class TestPushPullRoundTrip:
                     rel = str(path.relative_to(claude_dir_b))
                     b_files[rel] = {"sha256": hash_file(path)}
 
-        # diff_manifests still computes deleted (for push context),
+        # diff_files still computes deleted (for push context),
         # but the additive pull model ignores it.
-        diff = diff_manifests({"files": remote["files"]}, {"files": b_files})
+        diff = diff_files(remote["sources"]["claude"]["files"], b_files)
         assert len(diff.deleted) == 1
         assert "user_role.md" in diff.deleted[0]
 
@@ -243,17 +253,29 @@ class TestSyncLog:
 
 class TestGCSafety:
     def test_gc_never_deletes_referenced_blobs(self, storage):
-        """GC must check ALL manifests before deleting."""
+        """GC must check ALL manifests before deleting.
+
+        Manifests use the v2 shape (sources dict) that production emits, and
+        the ref-counting loop reads via `load_manifest` so it exercises the
+        same normalization path `_do_gc` hits (see cli.py:_do_gc).
+        """
+        from mind_meld.manifest import load_manifest
+
         # Device A has hash1 and hash2
         manifest_a = {
             "device_id": "a",
             "device_name": "A",
             "timestamp": "2026-01-01T00:00:00Z",
-            "base_path": "/tmp",
-            "files": {
-                "file1.json": {"sha256": "hash1", "size": 100, "mtime": "2026-01-01T00:00:00Z"},
-                "file2.json": {"sha256": "hash2", "size": 200, "mtime": "2026-01-01T00:00:00Z"},
+            "sources": {
+                "claude": {
+                    "base_path": "/tmp",
+                    "files": {
+                        "file1.json": {"sha256": "hash1", "size": 100, "mtime": "2026-01-01T00:00:00Z"},
+                        "file2.json": {"sha256": "hash2", "size": 200, "mtime": "2026-01-01T00:00:00Z"},
+                    },
+                },
             },
+            "tombstones": {},
         }
 
         # Device B has only hash1
@@ -261,10 +283,15 @@ class TestGCSafety:
             "device_id": "b",
             "device_name": "B",
             "timestamp": "2026-01-01T00:00:00Z",
-            "base_path": "/tmp",
-            "files": {
-                "file1.json": {"sha256": "hash1", "size": 100, "mtime": "2026-01-01T00:00:00Z"},
+            "sources": {
+                "claude": {
+                    "base_path": "/tmp",
+                    "files": {
+                        "file1.json": {"sha256": "hash1", "size": 100, "mtime": "2026-01-01T00:00:00Z"},
+                    },
+                },
             },
+            "tombstones": {},
         }
 
         register_device(storage, "a", "A")
@@ -280,7 +307,7 @@ class TestGCSafety:
         storage.put("data/a/hash2.enc", encrypt(b"blob2", PASSPHRASE, memory_kb=MEMORY_KB))
         storage.put("data/a/hash3.enc", encrypt(b"orphan", PASSPHRASE, memory_kb=MEMORY_KB))
 
-        # Collect referenced hashes from ALL manifests
+        # Collect referenced hashes from ALL manifests — same shape _do_gc uses.
         all_devices = list_devices(storage)
         referenced = set()
         for d in all_devices:
@@ -289,9 +316,10 @@ class TestGCSafety:
             if storage.exists(key):
                 enc = storage.get(key)
                 plain = decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB)
-                m = deserialize_manifest(plain)
-                for info in m["files"].values():
-                    referenced.add(info["sha256"])
+                m = load_manifest(plain)
+                for src_data in m["sources"].values():
+                    for info in src_data["files"].values():
+                        referenced.add(info["sha256"])
 
         # hash1 and hash2 are referenced, hash3 is not
         assert "hash1" in referenced
@@ -970,9 +998,10 @@ class TestMultiSourceSync:
         assert len(claude_src["files"]) == 2
         assert claude_src["files"]["projects/-myapp/memory/role.md"]["sha256"] == "abc123"
 
-        # The original "files" key should still be there for backward compat
-        assert "files" in loaded
-        assert len(loaded["files"]) == 2
+        # Track 1B: normalize_manifest strips the top-level "files" key on
+        # all paths (v1 promotion and v2 passthrough). The payload moves
+        # into sources.claude.files — nothing is lost.
+        assert "files" not in loaded
 
 
 class TestInitFlow:
