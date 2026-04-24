@@ -52,6 +52,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopull` checks all other registered devices for changes and applies them locally. It writes a `.mind-meld-log.md` breadcrumb to each affected project so Claude Code knows what changed.
 - `mm autopush` builds a manifest of local memory/todos, diffs against the last push, and uploads only what changed.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
+- "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr as a single `mm: warning: ...` line so a wedged background sync surfaces instead of rotting. Autopush also writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources, so `mm status` and any monitoring on top of it can catch the wedge.
 
 ### Manual commands
 
@@ -70,7 +71,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 | `mm gc --conflicts` | Also delete `.sync-conflict-*` files older than 30 days |
 | `mm sources` | List configured sync sources |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
-| `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff) |
+| `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 
 ### Syncing gstack
 
