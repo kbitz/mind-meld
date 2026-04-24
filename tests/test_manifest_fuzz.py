@@ -81,7 +81,9 @@ v2_manifest_strategy = st.fixed_dictionaries({
     "device_id": st.text(min_size=1, max_size=40),
     "device_name": st.text(min_size=0, max_size=40),
     "timestamp": st.text(min_size=0, max_size=40),
-    "files": source_files_strategy,
+    # Track 1B: v2 writers no longer emit a redundant top-level "files".
+    # `normalize_manifest` strips it on passthrough; don't generate it here
+    # so fuzz shapes match what the current writers emit.
     "sources": st.dictionaries(st.sampled_from(["claude", "gstack"]), v2_source_strategy, max_size=2),
     # Round-trip tests use VALID tombstone values; load_manifest rejects garbage.
     "tombstones": st.dictionaries(tombstone_key_strategy, valid_tombstone_value_strategy, max_size=6),

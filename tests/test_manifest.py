@@ -11,17 +11,16 @@ from mind_meld.manifest import (
     CONFLICT_PATTERN,
     DiffResult,
     _is_excluded,
-    build_manifest,
     build_manifest_v2,
     deserialize_manifest,
-    diff_manifests,
+    diff_files,
     hash_file,
     is_conflict_filename,
     load_manifest,
     normalize_manifest,
     read_and_hash,
     serialize_manifest,
-    walk_directory,
+    walk_claude_source,
     walk_generic_source,
     walk_source,
 )
@@ -94,7 +93,7 @@ class TestHashFile:
         assert hash_file(f1) != hash_file(f2)
 
 
-class TestWalkDirectory:
+class TestWalkClaudeSource:
     def _setup_claude_dir(self, tmp_path: Path) -> Path:
         """Create a mock ~/.claude structure."""
         claude = tmp_path / ".claude"
@@ -116,7 +115,7 @@ class TestWalkDirectory:
 
     def test_walks_memory_and_todos_only(self, tmp_path):
         claude = self._setup_claude_dir(tmp_path)
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         assert len(files) == 2
         paths = set(files.keys())
         assert "projects/-Users-kb-myapp/memory/user_role.md" in paths
@@ -130,13 +129,13 @@ class TestWalkDirectory:
         todos = claude / "projects" / "-Users-kb-myapp" / "todos"
         todos.mkdir(parents=True)
         (todos / "tasks.json").write_text('{"task": "do stuff"}')
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         paths = set(files.keys())
         assert "projects/-Users-kb-myapp/todos/tasks.json" in paths
 
     def test_excludes_patterns(self, tmp_path):
         claude = self._setup_claude_dir(tmp_path)
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         paths = set(files.keys())
         for p in paths:
             assert ".DS_Store" not in p
@@ -151,7 +150,7 @@ class TestWalkDirectory:
         (memory / "big.bin").write_bytes(b"x" * 200)
 
         skipped = []
-        files = walk_directory(claude, max_file_size=100, on_skip=lambda p, r: skipped.append((p, r)))
+        files = walk_claude_source(claude, max_file_size=100, on_skip=lambda p, r: skipped.append((p, r)))
         assert len(files) == 1
         assert len(skipped) == 1
         assert "big.bin" in skipped[0][0]
@@ -159,18 +158,18 @@ class TestWalkDirectory:
     def test_empty_projects_dir(self, tmp_path):
         claude = tmp_path / ".claude"
         (claude / "projects").mkdir(parents=True)
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         assert files == {}
 
     def test_no_projects_dir(self, tmp_path):
         claude = tmp_path / ".claude"
         claude.mkdir()
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         assert files == {}
 
     def test_file_info_structure(self, tmp_path):
         claude = self._setup_claude_dir(tmp_path)
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         for info in files.values():
             assert "sha256" in info
             assert "size" in info
@@ -178,50 +177,68 @@ class TestWalkDirectory:
             assert len(info["sha256"]) == 64
 
 
-class TestDiffManifests:
+class TestDiffFiles:
     def test_all_new(self):
-        local = {"files": {"a.json": {"sha256": "aaa"}, "b.json": {"sha256": "bbb"}}}
-        diff = diff_manifests(local, None)
+        local = {"a.json": {"sha256": "aaa"}, "b.json": {"sha256": "bbb"}}
+        diff = diff_files(local)
         assert len(diff.new) == 2
         assert len(diff.modified) == 0
         assert len(diff.deleted) == 0
 
+    def test_all_new_explicit_none(self):
+        local = {"a.json": {"sha256": "aaa"}}
+        diff = diff_files(local, None)
+        assert len(diff.new) == 1
+
     def test_no_changes(self):
         files = {"a.json": {"sha256": "aaa"}}
-        diff = diff_manifests({"files": files}, {"files": files})
+        diff = diff_files(files, files)
         assert not diff.has_changes
         assert len(diff.unchanged) == 1
 
     def test_modified(self):
-        local = {"files": {"a.json": {"sha256": "new-hash"}}}
-        remote = {"files": {"a.json": {"sha256": "old-hash"}}}
-        diff = diff_manifests(local, remote)
+        local = {"a.json": {"sha256": "new-hash"}}
+        remote = {"a.json": {"sha256": "old-hash"}}
+        diff = diff_files(local, remote)
         assert len(diff.modified) == 1
         assert "a.json" in diff.modified
 
     def test_deleted(self):
-        local = {"files": {}}
-        remote = {"files": {"a.json": {"sha256": "aaa"}}}
-        diff = diff_manifests(local, remote)
+        local = {}
+        remote = {"a.json": {"sha256": "aaa"}}
+        diff = diff_files(local, remote)
         assert len(diff.deleted) == 1
         assert "a.json" in diff.deleted
 
     def test_mixed(self):
-        local = {"files": {
+        local = {
             "new.json": {"sha256": "nnn"},
             "modified.json": {"sha256": "new-m"},
             "same.json": {"sha256": "sss"},
-        }}
-        remote = {"files": {
+        }
+        remote = {
             "modified.json": {"sha256": "old-m"},
             "same.json": {"sha256": "sss"},
             "deleted.json": {"sha256": "ddd"},
-        }}
-        diff = diff_manifests(local, remote)
+        }
+        diff = diff_files(local, remote)
         assert len(diff.new) == 1
         assert len(diff.modified) == 1
         assert len(diff.deleted) == 1
         assert len(diff.unchanged) == 1
+
+    def test_repr_is_count_formatted(self):
+        # Track 1B invariant: DiffResult.__repr__ must remain count-based,
+        # not the dataclass default dict-dump. A 500-file manifest would
+        # produce a 50KB wall of noise under the default repr.
+        local = {"a.json": {"sha256": "aaa"}, "b.json": {"sha256": "bbb"}}
+        remote = {"b.json": {"sha256": "bbb"}, "c.json": {"sha256": "ccc"}}
+        diff = diff_files(local, remote)
+        rep = repr(diff)
+        assert rep == "DiffResult(new=1, modified=0, deleted=1, unchanged=1)"
+        # No dict contents should leak into the repr.
+        assert "sha256" not in rep
+        assert "aaa" not in rep
 
 
 class TestSerialize:
@@ -440,14 +457,16 @@ class TestBuildManifestV2:
         (d / "config.yaml").write_text("version: 1")
         return d
 
-    def test_produces_files_and_sources_keys(self, tmp_path):
+    def test_produces_sources_key_only(self, tmp_path):
+        # Track 1B: v2 writers no longer emit a redundant top-level "files"
+        # mirror. Sources-only is the contract.
         claude = self._make_claude_dir(tmp_path)
         sources = [{"name": "claude", "path": str(claude), "type": "claude"}]
         m = build_manifest_v2("dev1", "Mac", sources)
-        assert "files" in m
+        assert "files" not in m
         assert "sources" in m
 
-    def test_files_contains_only_claude_files(self, tmp_path):
+    def test_sources_are_per_source(self, tmp_path):
         claude = self._make_claude_dir(tmp_path)
         gstack = self._make_generic_dir(tmp_path)
         sources = [
@@ -461,12 +480,12 @@ class TestBuildManifestV2:
             },
         ]
         m = build_manifest_v2("dev1", "Mac", sources)
-        # "files" should only have claude source files
-        for key in m["files"]:
-            assert key.startswith("projects/")
-        # "sources" should have both
+        assert "files" not in m
         assert "claude" in m["sources"]
         assert "gstack" in m["sources"]
+        # Claude source contains only synced-subdir paths.
+        for key in m["sources"]["claude"]["files"]:
+            assert key.startswith("projects/")
 
     def test_sources_contain_base_path_and_files(self, tmp_path):
         claude = self._make_claude_dir(tmp_path)
@@ -483,7 +502,7 @@ class TestBuildManifestV2:
         m = build_manifest_v2("dev1", "Mac", sources)
         assert len(m["sources"]) == 1
         assert "claude" in m["sources"]
-        assert len(m["files"]) == 1
+        assert len(m["sources"]["claude"]["files"]) == 1
 
     def test_multiple_sources(self, tmp_path):
         claude = self._make_claude_dir(tmp_path)
@@ -619,7 +638,7 @@ class TestWalkerExcludesConflictFiles:
             "local divergent"
         )
 
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         paths = set(files.keys())
         assert "projects/-Users-kb-myapp/memory/notes.md" in paths
         # The conflict copy must NOT propagate.
@@ -634,7 +653,7 @@ class TestWalkerExcludesConflictFiles:
             "[1, 2]"
         )
 
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         paths = set(files.keys())
         assert "projects/-Users-kb-myapp/todos/tasks.json" in paths
         assert all(".sync-conflict-" not in p for p in paths)
@@ -646,7 +665,7 @@ class TestWalkerExcludesConflictFiles:
         # User-named file containing the infix but no timestamp digits.
         (memory / "notes.sync-conflict-log.md").write_text("legitimate user file")
 
-        files = walk_directory(claude)
+        files = walk_claude_source(claude)
         assert "projects/-Users-kb-myapp/memory/notes.sync-conflict-log.md" in files
 
     def test_generic_source_skips_conflict_files(self, tmp_path):
