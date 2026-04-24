@@ -195,7 +195,11 @@ class TestGetSources:
         # Create dirs that gstack source expects
         (gstack_dir / "projects").mkdir()
 
+        # Path.home() is used for the existence check; $HOME is read by
+        # Path.expanduser() when resolving the "~/.gstack" default source
+        # path. Patch both or a fresh CI runner's real $HOME leaks through.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         config = self._base_config(tmp_path)
         config["sync"] = {
@@ -434,7 +438,12 @@ class TestGetSourcesResolve:
     def test_minimal_sync_block_falls_through_to_default_sources(self, tmp_path, monkeypatch):
         """Config with [sync] but no claude_dir and no sources must still work
         (no KeyError) and resolve via DEFAULT_SOURCES. Regression for legacy-cleanup."""
+        # DEFAULT_SOURCES paths (~/.claude, ~/.gstack) go through
+        # Path.expanduser() which reads $HOME, not Path.home(). Patch both
+        # or a fresh CI runner's real $HOME leaks through and the default
+        # claude source resolves to a non-existent /Users/runner/.claude.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         # Create the default claude path so it survives the existence filter
         (tmp_path / ".claude").mkdir()
 
