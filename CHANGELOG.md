@@ -5,32 +5,24 @@ All notable changes to Mind Meld will be documented in this file.
 ## [0.8.11] - 2026-04-24
 
 Group 4 — Release infrastructure. Adds GitHub Actions CI on every push to
-main and every PR. Matrix covers both supported platforms (ubuntu + macos)
-across all classified Python versions (3.11, 3.12, 3.13) — 5 test jobs
-per run, with macos-3.12 excluded since macOS runners are ~5x slower and
-min/max coverage is sufficient. macOS jobs additionally verify that the
-real Keychain backend loads (assert-based smoke, not just print) and the
-macos+3.13 cell builds + installs the wheel + runs `mm --version` to catch
-packaging bugs that editable installs can't. A separate lint job runs
-`ruff check` + `ruff format --check` on ubuntu/3.12 to keep Group 3's
-style-polish discipline enforced going forward. No path filter (avoids
-the GitHub branch-protection pending-forever footgun codex flagged during
-outside-voice review). Scope shaped by `/plan-ceo-review` + codex outside
-voice + `/plan-eng-review` on 2026-04-24 — 8 expansions accepted, 1
-reversed after codex, 5 eng-review nits applied. 669 tests passing, ruff
-clean, zero behavior regressions.
+main and every PR. Single job on `macos-latest` + Python 3.13 — mind-meld
+is a macOS tool, so a multi-OS + multi-Python matrix is theater for this
+project. The job runs `ruff check`, `ruff format --check`, `pytest tests/`,
+and a wheel build + install + `mm --version` smoke. Also asserts the real
+Keychain backend loads (guards against silent `fail.Keyring` fallback). No
+path filter (avoids the GitHub branch-protection pending-forever footgun).
+669 tests passing, ruff clean, zero behavior regressions.
 
 ### Added
-- `.github/workflows/ci.yml` — single workflow with `test` + `lint` jobs,
-  5-cell test matrix (ubuntu × {3.11, 3.12, 3.13} + macos × {3.11, 3.13}),
-  pip cache via `actions/setup-python@v6`, `fail-fast: false`,
-  `timeout-minutes: 20` (test) / 10 (lint), `permissions: contents: read`,
-  concurrency cancel-in-progress keyed on PR number
-- macOS keyring backend assert-smoke: `python -c "import keyring; b =
+- `.github/workflows/ci.yml` — single job on `macos-latest` + Python 3.13,
+  pip cache via `actions/setup-python@v6`, `timeout-minutes: 20`,
+  `permissions: contents: read`, concurrency cancel-in-progress keyed on
+  PR number
+- Keyring backend assert-smoke: `python -c "import keyring; b =
   str(keyring.get_keyring()); assert 'macOS' in b or 'Keychain' in b;
   print(b)"` — fails loudly if the `fail.Keyring` fallback loads
-- Installed-artifact wheel smoke on macos+3.13 cell: `python -m build`
-  then `pip install --force-reinstall dist/*.whl` then `mm --version`
+- Installed-artifact wheel smoke: `python -m build` then `pip install
+  --force-reinstall dist/*.whl` then `mm --version`
 - CI status badge in README.md (top of file)
 - `ruff` (exact-pinned to `0.15.12`) in `dev` optional-dependencies
 - `[tool.ruff]` config in pyproject.toml: `line-length = 100`,

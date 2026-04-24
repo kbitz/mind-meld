@@ -120,10 +120,10 @@ across machines," the absence of CI on main is a real risk surface.
 Parallel-safe with every other group.
 
 ### Track 4A: GitHub Actions CI workflow
-_1 task (expanded in /plan-ceo-review + /plan-eng-review 2026-04-24) · ~1-2 hours (human) / ~30 min (CC) · low risk · [.github/workflows/, pyproject.toml, README.md]_
+_1 task · ~1-2 hours (human) / ~30 min (CC) · low risk · [.github/workflows/, pyproject.toml, README.md]_
 _touches: .github/workflows/ci.yml (new), pyproject.toml, README.md, one ruff-drift commit_
 
-- **Add `.github/workflows/ci.yml`** — single workflow with `test` + `lint` jobs, running `pytest tests/` + `ruff check`/`ruff format --check` on every push to main and every PR. Matrix: `ubuntu-latest` × {3.11, 3.12, 3.13} + `macos-latest` × {3.11, 3.13} = 5 test jobs (macos-3.12 excluded; macOS is ~5x slower and min/max Python is enough coverage). Adds ruff to dev-deps (exact-pinned), `[tool.ruff]` config in pyproject.toml, README CI badge, pip cache, concurrency-cancel-in-progress, `permissions: contents: read`, `timeout-minutes: 20` (test) / 10 (lint). macOS jobs include a keyring-backend assert-smoke; macOS+3.13 additionally builds + installs the wheel and runs `mm --version`. No path filter (prevents branch-protection `pending` footgun). conftest.py already autouse-stubs keyring so Linux tests are hermetic — the original "macOS keyring tests need stubbing" concern in this track was stale. _.github/workflows/ci.yml (~90 lines), pyproject.toml, README.md, one ruff-drift commit._ (S)
+- **Add `.github/workflows/ci.yml`** — single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool; multi-OS + multi-Python is theater). Runs `ruff check`, `ruff format --check`, `pytest tests/`, and a wheel build + install + `mm --version` smoke on every push to main and every PR. Also asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). Adds ruff to dev-deps (exact-pinned), `[tool.ruff]` config in pyproject.toml, README CI badge, pip cache, concurrency-cancel-in-progress, `permissions: contents: read`, `timeout-minutes: 20`. No path filter (avoids the branch-protection pending-forever footgun for path-skipped required checks). _.github/workflows/ci.yml (~50 lines), pyproject.toml, README.md, one ruff-drift commit._ (S)
 
 ---
 
@@ -156,7 +156,7 @@ Group 3: Test hygiene + style polish
   └── Track 3A ........... ~0.5d .. 3 tasks .. tests (CLI-driven, rename, hoist) [✅ v0.8.10]
 
 Group 4: Release infrastructure
-  └── Track 4A ........... ~1-2 hr .. 1 task .. GitHub Actions CI (single ci.yml + ruff lint + 5-cell matrix)
+  └── Track 4A ........... ~1-2 hr .. 1 task .. GitHub Actions CI (single macos+py3.13 job, ruff + pytest + wheel smoke)
 ```
 
 **Total: 4 groups · 7 tracks · 19 tasks (+ 4 pre-flight items)**
