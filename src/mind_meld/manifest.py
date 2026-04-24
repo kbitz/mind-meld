@@ -149,6 +149,71 @@ def read_and_hash(path: Path) -> tuple[bytes, str]:
     return data, digest
 
 
+# Per-file walker pipeline (single source of truth, called by both
+# walk_claude_source and walk_generic_source):
+#
+#   path ──► relative_to(base) ──► rel
+#                                   │
+#                          _is_excluded(rel)? ──► None
+#                                   │
+#                                 stat() ─── PermissionError ──► on_skip("permission denied") ──► None
+#                                   │
+#                              size > cap? ──► on_skip("exceeds max_file_size (...MB)") ──► None
+#                                   │
+#                             hash_file() ─── Permission/OSError ──► on_skip("read error") ──► None
+#                                   │
+#                          (rel, {sha256, size, mtime})
+#
+# "None" returns are NOT causal evidence of deletion — the walker is
+# intentionally lossy. Only explicit tombstones are. See SPEC.md
+# "Merge invariants."
+def _record_file(
+    path: Path,
+    base: Path,
+    max_file_size: int,
+    on_skip: Any = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Apply the per-file walker pipeline to `path` under `base`.
+
+    Returns (rel_path, {"sha256", "size", "mtime"}) on success, or None if
+    the file should be skipped. Skip reasons are reported via `on_skip(rel,
+    reason)` — the exact reason strings ("permission denied", "read error",
+    f"exceeds max_file_size ({size_mb:.1f}MB)") are load-bearing because
+    cli.py surfaces them in verbose walker output. Do not reshape them
+    without updating callers and tests.
+    """
+    rel = str(path.relative_to(base))
+
+    if _is_excluded(rel):
+        return None
+
+    try:
+        stat = path.stat()
+    except PermissionError:
+        if on_skip:
+            on_skip(rel, "permission denied")
+        return None
+
+    if stat.st_size > max_file_size:
+        if on_skip:
+            size_mb = stat.st_size / (1024 * 1024)
+            on_skip(rel, f"exceeds max_file_size ({size_mb:.1f}MB)")
+        return None
+
+    try:
+        sha = hash_file(path)
+    except (PermissionError, OSError):
+        if on_skip:
+            on_skip(rel, "read error")
+        return None
+
+    return rel, {
+        "sha256": sha,
+        "size": stat.st_size,
+        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    }
+
+
 def walk_claude_source(
     base_dir: str | Path,
     max_file_size: int = 52_428_800,
@@ -188,37 +253,9 @@ def walk_claude_source(
         for path in scan_dir.rglob("*"):
             if not path.is_file():
                 continue
-
-            rel = str(path.relative_to(base))
-
-            if _is_excluded(rel):
-                continue
-
-            try:
-                stat = path.stat()
-            except PermissionError:
-                if on_skip:
-                    on_skip(rel, "permission denied")
-                continue
-
-            if stat.st_size > max_file_size:
-                if on_skip:
-                    size_mb = stat.st_size / (1024 * 1024)
-                    on_skip(rel, f"exceeds max_file_size ({size_mb:.1f}MB)")
-                continue
-
-            try:
-                sha = hash_file(path)
-            except (PermissionError, OSError):
-                if on_skip:
-                    on_skip(rel, "read error")
-                continue
-
-            files[rel] = {
-                "sha256": sha,
-                "size": stat.st_size,
-                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            }
+            if result := _record_file(path, base, max_file_size, on_skip):
+                rel, info = result
+                files[rel] = info
 
     return files
 
@@ -267,36 +304,9 @@ def walk_generic_source(
             collected_paths.append(path)
 
     for path in collected_paths:
-        rel = str(path.relative_to(base))
-
-        if _is_excluded(rel):
-            continue
-
-        try:
-            stat = path.stat()
-        except PermissionError:
-            if on_skip:
-                on_skip(rel, "permission denied")
-            continue
-
-        if stat.st_size > max_file_size:
-            if on_skip:
-                size_mb = stat.st_size / (1024 * 1024)
-                on_skip(rel, f"exceeds max_file_size ({size_mb:.1f}MB)")
-            continue
-
-        try:
-            sha = hash_file(path)
-        except (PermissionError, OSError):
-            if on_skip:
-                on_skip(rel, "read error")
-            continue
-
-        files[rel] = {
-            "sha256": sha,
-            "size": stat.st_size,
-            "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-        }
+        if result := _record_file(path, base, max_file_size, on_skip):
+            rel, info = result
+            files[rel] = info
 
     return files
 
@@ -569,6 +579,33 @@ def diff_files(
 TOMBSTONE_TTL_DAYS = 30
 
 
+def _is_active_tombstone(info: dict[str, Any], cutoff: datetime) -> bool:
+    """True iff `info`'s `deleted_at` parses to a tz-aware datetime past `cutoff`.
+
+    Single source of truth for "is this tombstone still live?" — shared by
+    `generate_tombstones` (carry-forward) and `collect_tombstones` (fleet
+    aggregation). Both sites previously duplicated the fromisoformat +
+    tzinfo-None guard + cutoff compare + (ValueError, TypeError) handling.
+
+    The naive-datetime → UTC guard is load-bearing: an older client may have
+    written a timezone-naive `deleted_at`, and comparing a naive datetime
+    against a tz-aware `cutoff` raises TypeError. We always repair naive
+    inputs to UTC; we never silently succeed-with-wrong-offset.
+
+    Returns False on any parse failure (unparseable ISO string, missing key,
+    non-string value). Returning False means the caller drops the tombstone
+    — the conservative choice, since a corrupt `deleted_at` could live
+    forever otherwise.
+    """
+    try:
+        ts = datetime.fromisoformat(info.get("deleted_at", ""))
+    except (ValueError, TypeError):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts > cutoff
+
+
 def generate_tombstones(
     local_manifest: dict[str, Any],
     remote_manifest: dict[str, Any] | None,
@@ -580,9 +617,37 @@ def generate_tombstones(
     Files that were in remote but are no longer in local get a tombstone.
     Existing non-expired tombstones from the remote manifest carry forward.
 
+    Caller contract (load-bearing, enforced at runtime): `remote_manifest`
+    MUST be v2-shaped — i.e. have a top-level `"sources"` key, either
+    because it came through `load_manifest` or because it was hand-built
+    v2 (e.g. the peer-fallback synthetic dict at `cli.py:_resolve_prior_manifest`).
+    A dict with a top-level `"files"` key and no `"sources"` key (the v1
+    shape) raises `ManifestError` at entry — previously this was silently
+    promoted in-line via a positionally-broken `normalize_manifest` call
+    at line 607, which (cross-model adversarial review, 2026-04-24)
+    ran AFTER the carry-forward loop had already consumed tombstone keys
+    AND was the only thing allowing v1 `"files"` dicts to produce
+    `claude:<path>` tombstones during new-tombstone detection. Dropping
+    it without a runtime guard would turn the latter into silent delete-
+    propagation loss. We enforce instead of repair because every internal
+    caller already routes through `load_manifest` (via `_fetch_remote_manifest`
+    / `sidecar.read`) or hand-builds v2 shape, so a v1-shaped input is a
+    bug at the call site, not something to silently paper over.
+
     Returns:
         Dict mapping relative paths to {"deleted_at": ISO timestamp, "device_id": str}.
+
+    Raises:
+        ManifestError: if `remote_manifest` is non-None and lacks a
+            `"sources"` key (e.g. a raw v1-shaped dict that bypassed
+            `load_manifest`).
     """
+    if remote_manifest is not None and "sources" not in remote_manifest:
+        raise ManifestError(
+            "generate_tombstones: remote_manifest must be v2-normalized "
+            "(missing 'sources' key). Route through load_manifest() first."
+        )
+
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=TOMBSTONE_TTL_DAYS)
     now_iso = now.isoformat()
@@ -591,20 +656,12 @@ def generate_tombstones(
     # Carry forward non-expired tombstones from remote manifest
     if remote_manifest:
         for path, info in remote_manifest.get("tombstones", {}).items():
-            deleted_at = info.get("deleted_at", "")
-            try:
-                ts = datetime.fromisoformat(deleted_at)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts > cutoff:
-                    tombstones[path] = info
-            except (ValueError, TypeError):
-                pass  # drop unparseable tombstones
+            if _is_active_tombstone(info, cutoff):
+                tombstones[path] = info
 
     # Detect new tombstones: files in remote manifest but not in local
     # Keys are "source:path" to prevent cross-source suppression
     if remote_manifest:
-        normalize_manifest(remote_manifest)
         local_sources = local_manifest.get("sources", {})
         remote_sources = remote_manifest.get("sources", {})
 
@@ -657,16 +714,9 @@ def collect_tombstones(
         if manifest is None:
             continue
         for path, info in manifest.get("tombstones", {}).items():
+            if not _is_active_tombstone(info, cutoff):
+                continue
             deleted_at = info.get("deleted_at", "")
-            try:
-                ts = datetime.fromisoformat(deleted_at)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts <= cutoff:
-                    continue  # expired
-            except (ValueError, TypeError):
-                continue  # unparseable
-
             existing = all_tombstones.get(path)
             if existing is None or deleted_at > existing.get("deleted_at", ""):
                 all_tombstones[path] = info

@@ -2,6 +2,78 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.5] - 2026-04-24
+
+Track 1B (Group 1) — Walker + manifest + merge DRY. Three private helpers
+collapse duplicated logic in `manifest.py` and `merge.py`, plus a load-bearing
+contract change on `generate_tombstones`. Zero user-visible behavior change
+for any caller that routes input through `load_manifest` (every internal
+caller does). Two rounds of adversarial review landed corrections pre-merge:
+`/plan-eng-review` with Codex outside voice caught 5 design misses (including
+the full-predicate `_is_active_tombstone` vs a parse-only helper, and the
+direct `_merge_strategy -> Callable` vs an over-engineered registry);
+`/review` with Claude + Codex cross-model adversarial caught a silent
+delete-propagation regression on v1-shaped input that made the shipped
+contract *enforced at runtime* instead of documented in a docstring.
+
+### Added
+- `_record_file(path, base, max_file_size, on_skip) -> tuple[str, dict] | None`
+  in manifest.py. Single source of truth for the per-file walker pipeline
+  (exclude check → stat → size cap → hash → record mtime/size/sha). Exact
+  `on_skip(rel, reason)` strings are now pinned by tests — they surface in
+  cli.py verbose walker output so their shape is load-bearing user contract.
+  Both `walk_claude_source` and `walk_generic_source` collapse to 3-line
+  per-file loops.
+- `_is_active_tombstone(info, cutoff) -> bool` in manifest.py. Full predicate
+  covering the fromisoformat + tzinfo-None → UTC guard + cutoff compare +
+  `(ValueError, TypeError)` fallthrough. `generate_tombstones` (carry-forward)
+  and `collect_tombstones` (fleet aggregation) both collapse their 9-line
+  duplicated blocks to a single 2-line guard. The naive-datetime → UTC
+  repair is the load-bearing bit — prevents a TypeError crash when an older
+  client wrote a timezone-naive `deleted_at`.
+- `_merge_strategy(rel_path) -> Callable | None` and
+  `_join_lines(lines) -> bytes` in merge.py. `should_merge` / `merge_file`
+  share a single dispatch predicate; `merge_jsonl` / `merge_lines` share the
+  UTF-8 join tail. No behavior change; `.jsonl` still takes precedence over
+  `MEMORY.md` basename check.
+- Ten new tests in `tests/test_manifest.py`: `TestRecordFile` (happy path,
+  silent exclusion, stat PermissionError, size-cap exact reason format,
+  hash OSError), `TestIsActiveTombstone` (tz-aware + tz-naive active, expired,
+  unparseable), `TestGenerateTombstonesContract` (raises on v1-shaped input,
+  allows None).
+
+### Changed
+- `generate_tombstones` now raises `ManifestError` at entry if `remote_manifest`
+  is non-None and lacks a top-level `"sources"` key. Previously it silently
+  produced zero new tombstones on v1-shaped input (the positionally-broken
+  `normalize_manifest` call at line 607 had been doing in-line v1 → v2
+  promotion right before new-tombstone detection). Dropping the call without
+  a runtime guard would have turned that into silent delete-propagation loss
+  for any future caller that bypassed `load_manifest`. Cross-model adversarial
+  review (Claude + Codex independently) reproduced the regression with
+  `generate_tombstones(local, raw_v1_remote, 'dev') == {}`; the fix converts
+  the failure mode from silent-loss to loud-fail. Every internal caller
+  (`_fetch_remote_manifest` → `load_manifest`; `sidecar.read` → explicit
+  normalize; peer-fallback synthetic dict → v2-shaped by construction)
+  complies with the enforced contract.
+
+### Removed
+- Redundant `normalize_manifest(remote_manifest)` call at manifest.py:607.
+  It was positionally wrong (ran AFTER the carry-forward loop had already
+  consumed tombstone keys using whatever shape was there) and mutated the
+  caller's dict as a side effect. Replaced by the runtime contract guard
+  described above.
+
+### Fixed
+- `from typing import Callable` → `from collections.abc import Callable` in
+  `merge.py`. PEP 585 modernization; no runtime effect under
+  `from __future__ import annotations`. Caught by `/review` as a free
+  modernization adjacent to the new helper.
+- `test_stat_permission_error_emits_on_skip` in `tests/test_manifest.py`
+  now scopes its `Path.stat` monkeypatch to the target file only. Previously
+  patched globally — would silently mis-attribute coverage if `_record_file`
+  ever gained a second stat call (symlink sniff, etc.).
+
 ## [0.8.4] - 2026-04-23
 
 Group 2 pre-flight + Track 2A: storage-key helpers and CLI decomposition.
