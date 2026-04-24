@@ -13,9 +13,7 @@ Covers:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from mind_meld.cli import (
@@ -23,9 +21,8 @@ from mind_meld.cli import (
     app,
     iter_source_diffs,
 )
-from mind_meld.crypto import bootstrap_crypto_init, encrypt
+from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
-from mind_meld.manifest import DiffResult
 from mind_meld.storage.local import LocalBackend
 
 # Shared CLI-integration helpers live in tests/conftest.py.
@@ -49,8 +46,7 @@ def _fake_manifest(sources: dict[str, dict[str, dict]]) -> dict:
     """Build a minimal v2-shaped local manifest for iter_source_diffs tests."""
     return {
         "sources": {
-            name: {"base_path": f"/fake/{name}", "files": files}
-            for name, files in sources.items()
+            name: {"base_path": f"/fake/{name}", "files": files} for name, files in sources.items()
         }
     }
 
@@ -67,23 +63,29 @@ def _fi(sha: str, size: int = 10) -> dict:
 
 class TestIterSourceDiffs:
     def test_yields_all_sources_when_no_filter(self):
-        local = _fake_manifest({
-            "claude": {"a.md": _fi("aa")},
-            "gstack": {"b.md": _fi("bb")},
-        })
-        remote = _fake_remote({
-            "claude": {"a.md": _fi("aa")},
-            "gstack": {},
-        })
+        local = _fake_manifest(
+            {
+                "claude": {"a.md": _fi("aa")},
+                "gstack": {"b.md": _fi("bb")},
+            }
+        )
+        remote = _fake_remote(
+            {
+                "claude": {"a.md": _fi("aa")},
+                "gstack": {},
+            }
+        )
         out = list(iter_source_diffs(local, remote))
         names = [t[0] for t in out]
         assert names == ["claude", "gstack"]
 
     def test_source_filter_narrows_to_one(self):
-        local = _fake_manifest({
-            "claude": {"a.md": _fi("aa")},
-            "gstack": {"b.md": _fi("bb")},
-        })
+        local = _fake_manifest(
+            {
+                "claude": {"a.md": _fi("aa")},
+                "gstack": {"b.md": _fi("bb")},
+            }
+        )
         out = list(iter_source_diffs(local, {}, source_filter="claude"))
         assert [t[0] for t in out] == ["claude"]
 
@@ -103,14 +105,18 @@ class TestIterSourceDiffs:
 
     def test_skip_unchanged_drops_in_sync_sources(self):
         """skip_unchanged=True: filter out sources where diff.has_changes is False."""
-        local = _fake_manifest({
-            "claude": {"a.md": _fi("aa")},
-            "gstack": {"b.md": _fi("bb")},
-        })
-        remote = _fake_remote({
-            "claude": {"a.md": _fi("aa")},        # in sync → should be skipped
-            "gstack": {"b.md": _fi("changed")},   # diverged → should yield
-        })
+        local = _fake_manifest(
+            {
+                "claude": {"a.md": _fi("aa")},
+                "gstack": {"b.md": _fi("bb")},
+            }
+        )
+        remote = _fake_remote(
+            {
+                "claude": {"a.md": _fi("aa")},  # in sync → should be skipped
+                "gstack": {"b.md": _fi("changed")},  # diverged → should yield
+            }
+        )
         out = list(iter_source_diffs(local, remote, skip_unchanged=True))
         assert [t[0] for t in out] == ["gstack"]
 
@@ -198,8 +204,8 @@ class TestAutopullDegradedBreadcrumb:
         test_track_1a.py:1017 already pins the stderr line. This pins
         the breadcrumb state, which mm status and ops monitoring read.
         """
-        from mind_meld.errors import StorageError
         import mind_meld.fsutil as _fsu
+        from mind_meld.errors import StorageError
 
         self._prime_two_devices(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -241,8 +247,8 @@ class TestAutopullDegradedBreadcrumb:
         Uses a synthetic PullResult so the test doesn't depend on the corrupt-
         peer short-circuit ordering inside _pull_core.
         """
-        from mind_meld.cli import PullResult
         import mind_meld.cli as cli_module
+        from mind_meld.cli import PullResult
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -260,8 +266,8 @@ class TestAutopullDegradedBreadcrumb:
 
     def test_degraded_on_per_file_failure(self, tmp_path, monkeypatch):
         """Deterministic stub: PullResult with total_failed > 0 → degraded."""
-        from mind_meld.cli import PullResult
         import mind_meld.cli as cli_module
+        from mind_meld.cli import PullResult
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -284,8 +290,8 @@ class TestAutopullDegradedBreadcrumb:
         The prior integration-style test depended on corrupt-peer short-
         circuit ordering and could only assert one signal in practice.
         """
-        from mind_meld.cli import PullResult
         import mind_meld.cli as cli_module
+        from mind_meld.cli import PullResult
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -325,7 +331,7 @@ def test_gc_does_not_reap_non_hex_sha_blob(tmp_path, monkeypatch):
     planted blob to get reaped as an "orphan" silently.
     """
     _setup_real_config(tmp_path, monkeypatch)
-    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    _redirect_sidecar(monkeypatch, tmp_path)
 
     # Push so storage has a real manifest + referenced blobs.
     assert runner.invoke(app, ["push"]).exit_code == 0
@@ -341,8 +347,7 @@ def test_gc_does_not_reap_non_hex_sha_blob(tmp_path, monkeypatch):
     r = runner.invoke(app, ["gc", "--verbose"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
     assert backend.exists(planted_key), (
-        "GC reaped a malformed (non-hex-sha) blob as an orphan — "
-        "Track 1C safety invariant broken."
+        "GC reaped a malformed (non-hex-sha) blob as an orphan — Track 1C safety invariant broken."
     )
     # Verbose output should surface it as malformed.
     assert "malformed" in r.stdout

@@ -48,9 +48,7 @@ def _validate_hex_sha(value: str) -> None:
     escape per-file error handling in _download_and_apply().
     """
     if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
-        raise ValueError(
-            f"storage key: sha must be 64 lowercase hex chars, got {value!r}"
-        )
+        raise ValueError(f"storage key: sha must be 64 lowercase hex chars, got {value!r}")
 
 
 def _validate_component(value: str, name: str) -> None:

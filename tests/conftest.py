@@ -73,7 +73,6 @@ MEMORY_KB = 1024
 
 def _make_config(tmp_path, storage_dir, claude_dir, device_id="dev-a", device_name="Mac A"):
     """Write a valid config.toml for a single-claude-source setup."""
-    from pathlib import Path as _Path  # local import keeps conftest import-light
     from mind_meld.config import save_config
 
     config_path = tmp_path / "config.toml"

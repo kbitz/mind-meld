@@ -16,8 +16,7 @@ from typer.testing import CliRunner
 from mind_meld import cli as cli_module
 from mind_meld import config as config_module
 from mind_meld import crypto as crypto_module
-from mind_meld import fsutil
-from mind_meld import synclog
+from mind_meld import fsutil, synclog
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import (
@@ -128,8 +127,10 @@ class TestPushPullRoundTrip:
         assert result.exit_code == 0, result.output
 
         # Files arrive verbatim on B's claude_dir.
-        for rel in ("projects/-Users-kb-myapp/memory/user_role.md",
-                    "projects/-Users-kb-myapp/memory/feedback.md"):
+        for rel in (
+            "projects/-Users-kb-myapp/memory/user_role.md",
+            "projects/-Users-kb-myapp/memory/feedback.md",
+        ):
             original = (claude_a / rel).read_bytes()
             pulled = (claude_b / rel).read_bytes()
             assert original == pulled, f"Mismatch: {rel}"
@@ -293,9 +294,7 @@ class TestSyncLog:
         )
         assert len(logs) == 0
 
-    def test_sync_log_routes_through_fsutil_with_fsync_false(
-        self, tmp_path, monkeypatch
-    ):
+    def test_sync_log_routes_through_fsutil_with_fsync_false(self, tmp_path, monkeypatch):
         """Sync log writes must go through fsutil with fsync=False —
         .mind-meld-log.md is cosmetic; per-file fsync would add pull latency."""
 
@@ -340,8 +339,16 @@ class TestGCSafety:
                 "claude": {
                     "base_path": "/tmp",
                     "files": {
-                        "file1.json": {"sha256": "hash1", "size": 100, "mtime": "2026-01-01T00:00:00Z"},
-                        "file2.json": {"sha256": "hash2", "size": 200, "mtime": "2026-01-01T00:00:00Z"},
+                        "file1.json": {
+                            "sha256": "hash1",
+                            "size": 100,
+                            "mtime": "2026-01-01T00:00:00Z",
+                        },
+                        "file2.json": {
+                            "sha256": "hash2",
+                            "size": 200,
+                            "mtime": "2026-01-01T00:00:00Z",
+                        },
                     },
                 },
             },
@@ -357,7 +364,11 @@ class TestGCSafety:
                 "claude": {
                     "base_path": "/tmp",
                     "files": {
-                        "file1.json": {"sha256": "hash1", "size": 100, "mtime": "2026-01-01T00:00:00Z"},
+                        "file1.json": {
+                            "sha256": "hash1",
+                            "size": 100,
+                            "mtime": "2026-01-01T00:00:00Z",
+                        },
                     },
                 },
             },
@@ -434,12 +445,12 @@ class TestAutoCommands:
         failure instead of sync just stopping forever)."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "storage"}"\n'
-            '[[sync.sources]]\n'
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             'type = "claude"\n'
             # no path — eager validation catches it
@@ -457,12 +468,12 @@ class TestAutoCommands:
         on stderr rather than silently swallowing them."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "storage"}"\n'
-            '[[sync.sources]]\n'
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             'type = "claude"\n'
         )
@@ -483,12 +494,12 @@ class TestAutoCommands:
         visible `keyring-error` breadcrumb outcome."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "storage"}"\n'
-            '[[sync.sources]]\n'
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             'type = "claude"\n'
             f'path = "{tmp_path / ".claude"}"\n'
@@ -501,8 +512,10 @@ class TestAutoCommands:
         monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
         # Force the narrowed get_passphrase to propagate a non-KeyringError.
         import mind_meld.cli as cli_mod
+
         def boom(*_a, **_kw):
             raise RuntimeError("dbus session bus went away")
+
         monkeypatch.setattr(cli_mod, "get_passphrase", boom)
         monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
 
@@ -516,21 +529,19 @@ class TestAutoCommands:
         assert breadcrumb["outcome"] == "keyring-error"
         assert breadcrumb["detail"] == "RuntimeError"
 
-    def test_interactive_command_surfaces_keyring_backend_failure(
-        self, tmp_path, monkeypatch
-    ):
+    def test_interactive_command_surfaces_keyring_backend_failure(self, tmp_path, monkeypatch):
         """Regression: interactive commands (mm push / pull / diff / gc) must
         not traceback when crypto.get_passphrase leaks a non-KeyringError.
         _get_passphrase_or_exit now routes these through _error() so the
         user sees the one-line red banner and a clean exit(1)."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "storage"}"\n'
-            '[[sync.sources]]\n'
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             'type = "claude"\n'
             f'path = "{tmp_path / ".claude"}"\n'
@@ -539,8 +550,10 @@ class TestAutoCommands:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         import mind_meld.cli as cli_mod
+
         def boom(*_a, **_kw):
             raise OSError("keychain is locked")
+
         monkeypatch.setattr(cli_mod, "get_passphrase", boom)
 
         result = runner.invoke(app, ["push"])
@@ -563,8 +576,10 @@ class TestAutoCommands:
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         # Force store_passphrase_in_keyring to leak a non-KeyringError.
         import mind_meld.cli as cli_mod
+
         def boom(*_a, **_kw):
             raise RuntimeError("keyring backend exploded")
+
         monkeypatch.setattr(cli_mod, "store_passphrase_in_keyring", boom)
 
         # Inputs match TestInitFlow pattern: storage, device name, passphrase,
@@ -672,7 +687,6 @@ class TestAutoCommands:
         """autopush should push changes and print a one-line summary."""
         storage_dir = tmp_path / "storage"
         claude_dir_a = tmp_path / "machine_a" / ".claude"
-        claude_dir_b = tmp_path / "machine_b" / ".claude"
 
         # Create memory files on machine A
         memory = claude_dir_a / "projects" / "-Users-kb-myapp" / "memory"
@@ -730,19 +744,23 @@ class TestMultiSourceSync:
         (d / "config.yaml").write_text("version: 1")
         return d
 
-    def _make_config(self, tmp_path, storage_dir, claude_dir, device_id, device_name, gstack_dir=None):
+    def _make_config(
+        self, tmp_path, storage_dir, claude_dir, device_id, device_name, gstack_dir=None
+    ):
         config_path = tmp_path / f"config_{device_id}.toml"
         sources = [
             {"name": "claude", "path": str(claude_dir), "type": "claude"},
         ]
         if gstack_dir is not None:
-            sources.append({
-                "name": "gstack",
-                "path": str(gstack_dir),
-                "type": "generic",
-                "include_dirs": ["projects"],
-                "include_files": ["config.yaml"],
-            })
+            sources.append(
+                {
+                    "name": "gstack",
+                    "path": str(gstack_dir),
+                    "type": "generic",
+                    "include_dirs": ["projects"],
+                    "include_files": ["config.yaml"],
+                }
+            )
         config = {
             "device": {"id": device_id, "name": device_name},
             "storage": {"path": str(storage_dir)},
@@ -860,8 +878,10 @@ class TestMultiSourceSync:
         runner.invoke(app, ["autopush"])
 
         # Wipe local dirs to simulate Machine B.
-        shutil.rmtree(str(claude_dir)); claude_dir.mkdir(parents=True)
-        shutil.rmtree(str(gstack_dir)); gstack_dir.mkdir(parents=True)
+        shutil.rmtree(str(claude_dir))
+        claude_dir.mkdir(parents=True)
+        shutil.rmtree(str(gstack_dir))
+        gstack_dir.mkdir(parents=True)
         (gstack_dir / "projects").mkdir()
 
         config_b_path, _ = self._make_config(
@@ -901,8 +921,7 @@ class TestMultiSourceSync:
         }
         missing = expected - unique_parents
         assert not missing, (
-            f"expected fsync_dir calls for {expected}, missing {missing}. "
-            f"actual: {unique_parents}"
+            f"expected fsync_dir calls for {expected}, missing {missing}. actual: {unique_parents}"
         )
         # Deferred-durability invariant: fsync_dir called exactly once per
         # unique parent (not per file).
@@ -925,9 +944,7 @@ class TestMultiSourceSync:
         ]
         (memory / "learnings.jsonl").write_text("\n".join(lines_a) + "\n")
 
-        config_a_path, _ = self._make_config(
-            tmp_path, storage_dir, claude_dir, "dev-a", "Mac A"
-        )
+        config_a_path, _ = self._make_config(tmp_path, storage_dir, claude_dir, "dev-a", "Mac A")
 
         backend = LocalBackend(storage_dir)
         bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
@@ -948,9 +965,7 @@ class TestMultiSourceSync:
         ]
         (memory / "learnings.jsonl").write_text("\n".join(lines_b) + "\n")
 
-        config_b_path, _ = self._make_config(
-            tmp_path, storage_dir, claude_dir, "dev-b", "Mac B"
-        )
+        config_b_path, _ = self._make_config(tmp_path, storage_dir, claude_dir, "dev-b", "Mac B")
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
@@ -959,7 +974,7 @@ class TestMultiSourceSync:
 
         # B should have all 4 lines merged
         merged_text = (memory / "learnings.jsonl").read_text()
-        merged_lines = [l for l in merged_text.strip().splitlines() if l.strip()]
+        merged_lines = [line for line in merged_text.strip().splitlines() if line.strip()]
         keys = set()
         for line in merged_lines:
             obj = json.loads(line)
@@ -1073,7 +1088,9 @@ class TestMultiSourceSync:
 
         # B's claude files must still exist (not deleted by gstack-only pull)
         assert (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").exists()
-        assert (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md").read_text() == "Data scientist"
+        assert (
+            claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
+        ).read_text() == "Data scientist"
 
     def test_gc_with_v2_manifest(self, tmp_path, monkeypatch):
         """GC collects hashes from all sources in v2 manifests."""
@@ -1182,9 +1199,7 @@ class TestInitFlow:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
         # Make keyring a no-op so tests don't pollute the real Keychain.
-        monkeypatch.setattr(
-            "mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False
-        )
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         # get_passphrase falls back to env; tests set MINDMELD_PASSPHRASE as needed.
         return cfg_path
 
@@ -1432,16 +1447,14 @@ class TestInitTwoTierGuard:
         cfg = tmp_path / "config_test.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
-        monkeypatch.setattr(
-            "mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False
-        )
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         return cfg
 
     def test_orphan_case_warns_and_confirms(self, tmp_path, monkeypatch):
         """Existing mm-crypto-init + existing blob + we answer 'y' to orphan
         prompt → init proceeds on the second-device path."""
 
-        cfg = self._setup(tmp_path, monkeypatch)
+        self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
@@ -1514,7 +1527,7 @@ class TestInitTwoTierGuard:
     def test_brick_case_accepts_exact_BRICK(self, tmp_path, monkeypatch):
         """Exact typed 'BRICK' proceeds to first-device bootstrap path."""
 
-        cfg = self._setup(tmp_path, monkeypatch)
+        self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
@@ -1535,7 +1548,7 @@ class TestInitTwoTierGuard:
         Regression guard: the two-tier logic must not fire on fresh init.
         """
 
-        cfg = self._setup(tmp_path, monkeypatch)
+        self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
@@ -1544,9 +1557,7 @@ class TestInitTwoTierGuard:
         assert "orphaning" not in result.output
         assert "DANGER" not in (result.stderr or "") + result.output
 
-    def test_devices_only_occupancy_triggers_orphan_not_brick(
-        self, tmp_path, monkeypatch
-    ):
+    def test_devices_only_occupancy_triggers_orphan_not_brick(self, tmp_path, monkeypatch):
         """If only devices/ is populated (no blobs, no manifests, no
         mm-crypto-init), BRICK must NOT fire — no encrypted state is at risk.
 
@@ -1554,7 +1565,7 @@ class TestInitTwoTierGuard:
         has_crypto_init is False, fall through to first-device path.
         """
 
-        cfg = self._setup(tmp_path, monkeypatch)
+        self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
@@ -1577,9 +1588,7 @@ class TestBackfillPreservesRawPaths:
     user's hand-written TOML paths. `~/.claude` stays `~/.claude`;
     symlinked storage roots stay symlinks. See ROADMAP.md Track 2B."""
 
-    def _setup_config_and_storage(
-        self, tmp_path, storage_path_value, storage_real_path
-    ):
+    def _setup_config_and_storage(self, tmp_path, storage_path_value, storage_real_path):
         """Write a config pointing at a real storage dir, using storage_path_value
         as the raw storage.path field (which may be a symlink or tilde)."""
 
@@ -1590,20 +1599,20 @@ class TestBackfillPreservesRawPaths:
 
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "dev-a"\n'
             'name = "Mac A"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{storage_path_value}"\n'
-            '[sync]\n'
+            "[sync]\n"
             f'claude_dir = "{claude_dir}"\n'
-            'max_file_size = 52428800\n'
-            '[[sync.sources]]\n'
+            "max_file_size = 52428800\n"
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             f'path = "{claude_dir}"\n'
             'type = "claude"\n'
-            '[crypto]\n'
-            f'argon2_memory_kb = {MEMORY_KB}\n'
+            "[crypto]\n"
+            f"argon2_memory_kb = {MEMORY_KB}\n"
             # NOTE: no root_salt_fp — backfill must fire
         )
 
@@ -1618,14 +1627,11 @@ class TestBackfillPreservesRawPaths:
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0, (
-            f"autopush must succeed; got exit={result.exit_code} "
-            f"output={result.output!r}"
+            f"autopush must succeed; got exit={result.exit_code} output={result.output!r}"
         )
         return result
 
-    def test_symlinked_storage_path_preserved_through_backfill(
-        self, tmp_path, monkeypatch
-    ):
+    def test_symlinked_storage_path_preserved_through_backfill(self, tmp_path, monkeypatch):
         """CRITICAL REGRESSION: symlinked storage.path is NOT dereferenced
         by the crypto-init backfill save."""
 
@@ -1651,9 +1657,7 @@ class TestBackfillPreservesRawPaths:
         assert "root_salt_fp" in raw["crypto"]
         assert raw["crypto"]["argon2_memory_kb"] == MEMORY_KB
 
-    def test_sync_sources_array_preserved_through_backfill(
-        self, tmp_path, monkeypatch
-    ):
+    def test_sync_sources_array_preserved_through_backfill(self, tmp_path, monkeypatch):
         """Modern multi-source config: every sources[*].path string survives
         backfill byte-identical."""
 
@@ -1682,9 +1686,7 @@ class TestBackfillPreservesRawPaths:
         original_claude_path = str(tmp_path / "claude")
         assert sources[0]["path"] == original_claude_path
 
-    def test_tilde_storage_path_preserved_through_backfill(
-        self, tmp_path, monkeypatch
-    ):
+    def test_tilde_storage_path_preserved_through_backfill(self, tmp_path, monkeypatch):
         """CRITICAL REGRESSION (end-to-end): a config with tilde-form paths
         survives the full `mm autopush` backfill flow. Monkeypatches HOME so
         `~/...` resolves inside the test sandbox."""
@@ -1700,20 +1702,20 @@ class TestBackfillPreservesRawPaths:
 
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "dev-a"\n'
             'name = "Mac A"\n'
-            '[storage]\n'
+            "[storage]\n"
             'path = "~/real_storage"\n'
-            '[sync]\n'
+            "[sync]\n"
             'claude_dir = "~/claude"\n'
-            'max_file_size = 52428800\n'
-            '[[sync.sources]]\n'
+            "max_file_size = 52428800\n"
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             'path = "~/claude"\n'
             'type = "claude"\n'
-            '[crypto]\n'
-            f'argon2_memory_kb = {MEMORY_KB}\n'
+            "[crypto]\n"
+            f"argon2_memory_kb = {MEMORY_KB}\n"
             # NOTE: no root_salt_fp — backfill must fire
         )
 
@@ -1762,9 +1764,7 @@ class TestBackfillPreservesRawPaths:
         # mtime stability is a strong signal — no write happened.
         assert config_path.stat().st_mtime_ns == first_push_mtime
 
-    def test_backfill_survives_if_config_file_moved(
-        self, tmp_path, monkeypatch
-    ):
+    def test_backfill_survives_if_config_file_moved(self, tmp_path, monkeypatch):
         """Non-fatal: if the config file is missing when the backfill helper
         runs (user deleted it, or some concurrent process clobbered it after
         load_config read it into memory), the ConfigError swallow keeps

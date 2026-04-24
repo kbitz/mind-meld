@@ -5,7 +5,6 @@ from __future__ import annotations
 import errno
 import os
 import stat
-import sys
 
 import pytest
 
@@ -49,8 +48,7 @@ class TestAtomicWriteBytes:
         mode = stat.S_IMODE(target.stat().st_mode)
         expected = fsutil._default_new_file_mode()
         assert mode == expected, (
-            f"new file should honor umask (expected {oct(expected)}, "
-            f"got {oct(mode)})"
+            f"new file should honor umask (expected {oct(expected)}, got {oct(mode)})"
         )
 
     def test_overwrite_preserves_existing_mode(self, tmp_path):
@@ -62,9 +60,7 @@ class TestAtomicWriteBytes:
         os.chmod(target, 0o644)
         fsutil.atomic_write_bytes(target, b"updated")
         mode = stat.S_IMODE(target.stat().st_mode)
-        assert mode == 0o644, (
-            f"existing file mode must be preserved, got {oct(mode)}"
-        )
+        assert mode == 0o644, f"existing file mode must be preserved, got {oct(mode)}"
 
     def test_explicit_mode_overrides_default(self, tmp_path):
         """Explicit mode=0o600 (for secret-class writes) is respected."""
@@ -103,7 +99,6 @@ class TestAtomicWriteBytes:
 
         def bad_fdopen(fd, mode, *args, **kwargs):
             f = real_fdopen(fd, mode, *args, **kwargs)
-            orig_write = f.write
 
             def failing_write(data):
                 raise OSError(errno.EIO, "simulated disk error")
@@ -215,9 +210,7 @@ class TestFsyncFd:
         assert all(op == fsutil.fcntl.F_FULLFSYNC for _fd, op in fcntl_calls)
         assert fsync_calls == []
 
-    def test_darwin_fullfsync_enotsup_falls_back_to_fsync(
-        self, tmp_path, monkeypatch
-    ):
+    def test_darwin_fullfsync_enotsup_falls_back_to_fsync(self, tmp_path, monkeypatch):
         """On Darwin, F_FULLFSYNC returning ENOTSUP must fall back to os.fsync."""
         monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
         fsync_calls: list[int] = []
@@ -235,9 +228,7 @@ class TestFsyncFd:
         fsutil.atomic_write_bytes(target, b"data", fsync=True)
         assert len(fsync_calls) == 2  # file + parent dir
 
-    def test_darwin_fullfsync_real_io_error_propagates(
-        self, tmp_path, monkeypatch
-    ):
+    def test_darwin_fullfsync_real_io_error_propagates(self, tmp_path, monkeypatch):
         """On Darwin, a non-ENOTSUP OSError from F_FULLFSYNC must NOT fall back."""
         monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
 

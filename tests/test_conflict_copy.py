@@ -44,7 +44,6 @@ from mind_meld.manifest import (
     walk_claude_source,
 )
 
-
 # ── helpers ──────────────────────────────────────────────────────────
 
 
@@ -248,15 +247,17 @@ class TestApplyIncomingFile:
         local.write_bytes(b"local content")
         _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
 
-
         # Simulated remote info that _apply_incoming_file reaches via diff.
         # Apply #1 creates a conflict.
         remote_sha = hashlib.sha256(b"remote content").hexdigest()
         info = _remote_info(remote_sha, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
 
         first = _apply_incoming_file(
-            local_path=local, rel_path=rel, plain_data=b"remote content",
-            remote_info=info, remote_device_id="devA1234",
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
         )
         assert first == "conflicted"
 
@@ -264,8 +265,11 @@ class TestApplyIncomingFile:
         # upstream would have filtered this out as unchanged, but if it somehow
         # still reaches _apply_incoming_file, the re-read hash branch catches it.
         second = _apply_incoming_file(
-            local_path=local, rel_path=rel, plain_data=b"remote content",
-            remote_info=info, remote_device_id="devA1234",
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
         )
         assert second == "unchanged"
 
@@ -374,8 +378,17 @@ class TestConflictDiscovery:
 
         config = {
             "device": {"id": "me"},
-            "sync": {"sources": [{"name": "s1", "path": str(src), "type": "generic",
-                                  "include_dirs": ["memory"], "include_files": []}]},
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
         }
 
         hits = _find_conflict_files(config)
@@ -412,10 +425,17 @@ class TestGcOldConflictFiles:
         # Fresh mtime (now) so it falls inside the retention window
 
         config = {
-            "sync": {"sources": [{
-                "name": "s1", "path": str(src), "type": "generic",
-                "include_dirs": ["memory"], "include_files": [],
-            }]},
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
         }
 
         reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False)
@@ -434,10 +454,17 @@ class TestGcOldConflictFiles:
         os.utime(old, (ancient, ancient))
 
         config = {
-            "sync": {"sources": [{
-                "name": "s1", "path": str(src), "type": "generic",
-                "include_dirs": ["memory"], "include_files": [],
-            }]},
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
         }
         _gc_old_conflict_files(config, dry_run=True, verbose=False)
         assert old.exists(), "dry-run must not delete"
@@ -458,10 +485,14 @@ class TestFindConflictFilesClaudeType:
         (src / "projects" / "proj1" / "todos").mkdir(parents=True)
         (src / "projects" / "proj1" / "sessions").mkdir(parents=True)
 
-        in_scope = src / "projects" / "proj1" / "memory" / "a.sync-conflict-20260421-143055-devA1234.md"
+        in_scope = (
+            src / "projects" / "proj1" / "memory" / "a.sync-conflict-20260421-143055-devA1234.md"
+        )
         in_scope.write_bytes(b"conflict")
 
-        out_of_scope = src / "projects" / "proj1" / "sessions" / "b.sync-conflict-20260421-143055-devA1234.md"
+        out_of_scope = (
+            src / "projects" / "proj1" / "sessions" / "b.sync-conflict-20260421-143055-devA1234.md"
+        )
         out_of_scope.write_bytes(b"should not be listed")
 
         config = {
@@ -520,7 +551,9 @@ class TestWalkerExcludesConflictRegression:
         canonical = memory / "notes.md"
         canonical.write_text("remote-resolved content")
         # Use the same helper the CLI uses to ensure naming alignment.
-        conflict = conflict_filename(canonical, device_id="abc12345dead", now=datetime(2026, 4, 22, 12, tzinfo=timezone.utc))
+        conflict = conflict_filename(
+            canonical, device_id="abc12345dead", now=datetime(2026, 4, 22, 12, tzinfo=timezone.utc)
+        )
         conflict.write_text("local divergent content")
 
         files = walk_claude_source(claude)
@@ -567,7 +600,9 @@ class TestResolveInteractiveLoop:
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
         assert canonical.exists()
-        assert canonical.read_bytes() == b"conflict content", "canonical should now have conflict's content"
+        assert canonical.read_bytes() == b"conflict content", (
+            "canonical should now have conflict's content"
+        )
         assert not conflict.exists(), "conflict path should be gone (renamed)"
 
     def test_keep_both_is_noop(self, tmp_path: Path, monkeypatch) -> None:
@@ -675,6 +710,7 @@ class TestResolveExitCode:
 
         def boom(*a, **kw):
             raise OSError("simulated rename failure")
+
         monkeypatch.setattr(Path, "rename", boom)
 
         resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
@@ -691,6 +727,7 @@ class TestResolveExitCode:
 
         def boom(self):
             raise OSError("simulated unlink failure")
+
         monkeypatch.setattr(Path, "unlink", boom)
 
         resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
@@ -706,6 +743,7 @@ class TestResolveExitCode:
 
         def boom(self, *a, **kw):
             raise OSError("simulated read failure")
+
         monkeypatch.setattr(Path, "read_text", boom)
 
         resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
@@ -732,6 +770,7 @@ class TestResolveExitCode:
             if call_idx["n"] == 2:
                 raise OSError("simulated mid-walk failure")
             return real_unlink(self)
+
         monkeypatch.setattr(Path, "unlink", maybe_boom)
 
         resolved, failed = _resolve_interactive_loop(items)
@@ -752,15 +791,18 @@ class TestResolveExitCode:
         conflict.write_bytes(b"conflict")
 
         cfg_path = tmp_path / "config.toml"
-        save_config({
-            "device": {"id": "dev-x", "name": "Mac X"},
-            "storage": {"path": str(storage)},
-            "sync": {
-                "max_file_size": 52_428_800,
-                "sources": [{"name": "claude", "path": str(claude), "type": "claude"}],
+        save_config(
+            {
+                "device": {"id": "dev-x", "name": "Mac X"},
+                "storage": {"path": str(storage)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [{"name": "claude", "path": str(claude), "type": "claude"}],
+                },
+                "crypto": {"argon2_memory_kb": 1024},
             },
-            "crypto": {"argon2_memory_kb": 1024},
-        }, cfg_path)
+            cfg_path,
+        )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
@@ -771,6 +813,7 @@ class TestResolveExitCode:
 
         def boom(*a, **kw):
             raise OSError("simulated rename failure")
+
         monkeypatch.setattr(Path, "rename", boom)
 
         result = CliRunner().invoke(app, ["resolve"])

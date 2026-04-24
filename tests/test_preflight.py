@@ -70,11 +70,11 @@ class TestBlobKey:
     @pytest.mark.parametrize(
         "bad_sha",
         [
-            "a" * 63,                    # one char short
-            "a" * 65,                    # one char too long
-            "A" * 64,                    # uppercase hex (we require lowercase)
-            "z" * 64,                    # non-hex char at every position
-            "not-a-sha",                 # nonsense
+            "a" * 63,  # one char short
+            "a" * 65,  # one char too long
+            "A" * 64,  # uppercase hex (we require lowercase)
+            "z" * 64,  # non-hex char at every position
+            "not-a-sha",  # nonsense
             "0123456789abcdef" * 3 + "0123456789abcdeX",  # one bad char
         ],
     )
@@ -158,7 +158,7 @@ class TestParseBlobKey:
     @pytest.mark.parametrize(
         "bad_sha_key",
         [
-            "data/dev1/not-a-sha.enc",   # non-hex leaf (was accepted pre-1C)
+            "data/dev1/not-a-sha.enc",  # non-hex leaf (was accepted pre-1C)
             "data/dev1/" + "a" * 63 + ".enc",  # 63 chars
             "data/dev1/" + "a" * 65 + ".enc",  # 65 chars
             "data/dev1/" + "A" * 64 + ".enc",  # uppercase hex

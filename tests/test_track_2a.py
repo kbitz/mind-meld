@@ -10,35 +10,32 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from mind_meld.cli import (
-    _CorruptPeer,
-    _FsyncWarning,
-    _PerSourceResult,
-    _PredictedConflict,
-    _UnknownSourceWarning,
     _apply_conflict,
     _apply_merge,
     _apply_write,
     _bootstrap_or_verify_crypto,
+    _CorruptPeer,
     _empty_outcomes,
     _fsync_touched_parents,
+    _FsyncWarning,
     _load_prior_device_metadata,
-    _preflight_conflicts,
+    _PerSourceResult,
     _prefetch_manifests,
+    _preflight_conflicts,
     _prompt_passphrase,
     _prompt_sources,
     _pull_one_source,
     _save_and_register,
     _select_devices,
+    _UnknownSourceWarning,
 )
-from mind_meld.config import DEFAULT_SOURCES, get_default_source
+from mind_meld.config import DEFAULT_SOURCES
 from mind_meld.errors import StorageError
-
 
 # ── fixtures ─────────────────────────────────────────────────────────
 
@@ -115,15 +112,11 @@ class TestApplyConflict:
     def test_happy_path_renames_and_writes(self, tmp_path: Path) -> None:
         local = tmp_path / "doc.md"
         local.write_bytes(b"local content")
-        outcome = _apply_conflict(
-            local, "doc.md", b"remote content", "devAAAA1234"
-        )
+        outcome = _apply_conflict(local, "doc.md", b"remote content", "devAAAA1234")
         assert outcome == "conflicted"
         assert local.read_bytes() == b"remote content"
         # Exactly one conflict sibling, holding local's original bytes.
-        siblings = [
-            p for p in tmp_path.iterdir() if p.name.startswith("doc.sync-conflict-")
-        ]
+        siblings = [p for p in tmp_path.iterdir() if p.name.startswith("doc.sync-conflict-")]
         assert len(siblings) == 1
         assert siblings[0].read_bytes() == b"local content"
 
@@ -159,7 +152,12 @@ class TestEmptyOutcomes:
     def test_has_all_six_keys(self) -> None:
         outcomes = _empty_outcomes()
         assert set(outcomes.keys()) == {
-            "written", "merged", "skipped", "conflicted", "unchanged", "failed",
+            "written",
+            "merged",
+            "skipped",
+            "conflicted",
+            "unchanged",
+            "failed",
         }
         assert all(outcomes[k] == [] for k in outcomes)
 
@@ -180,16 +178,15 @@ class TestSelectDevices:
         from mind_meld import cli as cli_module
 
         monkeypatch.setattr(
-            cli_module, "_list_devices_warn",
+            cli_module,
+            "_list_devices_warn",
             lambda b: [
                 {"device_id": "self1", "device_name": "me"},
                 {"device_id": "peerA", "device_name": "A"},
                 {"device_id": "peerB", "device_name": "B"},
             ],
         )
-        all_devs, targets = _select_devices(
-            backend=None, my_device_id="self1", from_device="peerA"
-        )
+        all_devs, targets = _select_devices(backend=None, my_device_id="self1", from_device="peerA")
         assert len(all_devs) == 3
         assert [d["device_id"] for d in targets] == ["peerA"]
 
@@ -197,7 +194,8 @@ class TestSelectDevices:
         from mind_meld import cli as cli_module
 
         monkeypatch.setattr(
-            cli_module, "_list_devices_warn",
+            cli_module,
+            "_list_devices_warn",
             lambda b: [
                 {"device_id": "self1", "device_name": "me"},
                 {"device_id": "peerA", "device_name": "A"},
@@ -213,16 +211,15 @@ class TestSelectDevices:
         from mind_meld import cli as cli_module
 
         monkeypatch.setattr(
-            cli_module, "_list_devices_warn",
+            cli_module,
+            "_list_devices_warn",
             lambda b: [
                 {"device_id": "self1", "device_name": "me"},
                 {"device_id": "peerA", "device_name": "A"},
                 {"device_id": "peerB", "device_name": "B"},
             ],
         )
-        all_devs, targets = _select_devices(
-            backend=None, my_device_id="self1", from_device=None
-        )
+        all_devs, targets = _select_devices(backend=None, my_device_id="self1", from_device=None)
         assert {d["device_id"] for d in targets} == {"peerA", "peerB"}
 
     def test_dedup_single_call(self, monkeypatch) -> None:
@@ -318,8 +315,11 @@ class TestPreflightConflicts:
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
-            pull_targets, manifest_cache, local_sources,
-            source_filter=None, all_tombstones={},
+            pull_targets,
+            manifest_cache,
+            local_sources,
+            source_filter=None,
+            all_tombstones={},
         )
         assert predicted == []
 
@@ -346,8 +346,11 @@ class TestPreflightConflicts:
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
-            pull_targets, manifest_cache, local_sources,
-            source_filter=None, all_tombstones={},
+            pull_targets,
+            manifest_cache,
+            local_sources,
+            source_filter=None,
+            all_tombstones={},
         )
         assert len(predicted) == 1
         assert predicted[0].rel_path == "a.md"
@@ -376,8 +379,11 @@ class TestPreflightConflicts:
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
-            pull_targets, manifest_cache, local_sources,
-            source_filter=None, all_tombstones={},
+            pull_targets,
+            manifest_cache,
+            local_sources,
+            source_filter=None,
+            all_tombstones={},
         )
         # B conflicts with A's overlay.
         assert len(predicted) == 1
@@ -396,8 +402,11 @@ class TestPreflightConflicts:
         # no gstack mapping — only claude source configured locally
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
         predicted = _preflight_conflicts(
-            pull_targets, manifest_cache, local_sources,
-            source_filter=None, all_tombstones={},
+            pull_targets,
+            manifest_cache,
+            local_sources,
+            source_filter=None,
+            all_tombstones={},
         )
         assert predicted == []
 
@@ -508,8 +517,8 @@ class TestPullOneSource:
         monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
         result = _pull_one_source(
             backend=None,
-            src_name="my-claude",   # user renamed
-            src_type="claude",      # but type is still claude
+            src_name="my-claude",  # user renamed
+            src_type="claude",  # but type is still claude
             src_data={"files": {"a.md": _info("abc")}},
             did="peerA",
             dname="A",
@@ -530,9 +539,17 @@ class TestPullOneSource:
         from mind_meld import cli as cli_module
 
         def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
-            return 0, {k: [] for k in [
-                "written", "merged", "skipped", "conflicted", "unchanged", "failed",
-            ]}
+            return 0, {
+                k: []
+                for k in [
+                    "written",
+                    "merged",
+                    "skipped",
+                    "conflicted",
+                    "unchanged",
+                    "failed",
+                ]
+            }
 
         monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
         result = _pull_one_source(
@@ -570,8 +587,8 @@ class TestPullOneSource:
         monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
         result = _pull_one_source(
             backend=None,
-            src_name="claude",      # name-only
-            src_type="generic",     # but NOT a claude-typed source
+            src_name="claude",  # name-only
+            src_type="generic",  # but NOT a claude-typed source
             src_data={"files": {"x.md": _info("abc")}},
             did="peerA",
             dname="A",
@@ -592,9 +609,17 @@ class TestPullOneSource:
 
         def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
             downloaded_keys.extend(to_download.keys())
-            return 0, {k: [] for k in [
-                "written", "merged", "skipped", "conflicted", "unchanged", "failed",
-            ]}
+            return 0, {
+                k: []
+                for k in [
+                    "written",
+                    "merged",
+                    "skipped",
+                    "conflicted",
+                    "unchanged",
+                    "failed",
+                ]
+            }
 
         monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
         # is_tombstoned uses f"{source}:{rel_path}" as the flat key.
@@ -603,10 +628,12 @@ class TestPullOneSource:
             backend=None,
             src_name="claude",
             src_type="claude",
-            src_data={"files": {
-                "old.md": _info("abc"),
-                "keep.md": _info("def"),
-            }},
+            src_data={
+                "files": {
+                    "old.md": _info("abc"),
+                    "keep.md": _info("def"),
+                }
+            },
             did="peerA",
             dname="A",
             base_path=tmp_path,
@@ -924,7 +951,7 @@ class TestWarningsSurvivePartialPull:
         )
 
         # Run in quiet mode to assert stderr routing survives.
-        result = _pull_core(
+        _pull_core(
             config=config,
             passphrase="pp",
             memory_kb=1024,
@@ -1046,10 +1073,7 @@ class TestLoadPriorDeviceMetadata:
 
     def test_readable_config_returns_id_and_name(self, tmp_path: Path, monkeypatch) -> None:
         cfg = tmp_path / "config.toml"
-        cfg.write_text(
-            '[device]\nid = "abc123"\nname = "OldMac"\n'
-            '[storage]\npath = "/tmp/x"\n'
-        )
+        cfg.write_text('[device]\nid = "abc123"\nname = "OldMac"\n[storage]\npath = "/tmp/x"\n')
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         assert _load_prior_device_metadata() == ("abc123", "OldMac")
@@ -1069,27 +1093,33 @@ class TestPromptPassphrase:
 
     def test_first_device_match(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
+
         responses = iter(["pw123", "pw123"])
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
         assert _prompt_passphrase(is_first_device=True) == "pw123"
 
     def test_first_device_mismatch_exits(self, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
         import typer as _typer
+
+        from mind_meld import cli as cli_module
+
         responses = iter(["pw123", "pw456"])
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
         with pytest.raises(_typer.Exit):
             _prompt_passphrase(is_first_device=True)
 
     def test_first_device_empty_exits(self, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
         import typer as _typer
+
+        from mind_meld import cli as cli_module
+
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: "")
         with pytest.raises(_typer.Exit):
             _prompt_passphrase(is_first_device=True)
 
     def test_second_device_single_prompt(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
+
         calls: list[int] = []
 
         def counting_prompt(*a, **kw):
@@ -1101,8 +1131,10 @@ class TestPromptPassphrase:
         assert len(calls) == 1  # single prompt, no confirm
 
     def test_second_device_empty_exits(self, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
         import typer as _typer
+
+        from mind_meld import cli as cli_module
+
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: "")
         with pytest.raises(_typer.Exit):
             _prompt_passphrase(is_first_device=False)
@@ -1113,11 +1145,13 @@ class TestPromptSources:
 
     def test_all_declined_returns_empty(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
+
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: False)
         assert _prompt_sources() == []
 
     def test_all_accepted_returns_every_default(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
+
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: True)
         result = _prompt_sources()
         names = [s["name"] for s in result]
@@ -1127,6 +1161,7 @@ class TestPromptSources:
         """Mutating the returned dict must not pollute DEFAULT_SOURCES —
         Issue 1C's aliasing guard (get_default_source deep-copies)."""
         from mind_meld import cli as cli_module
+
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: True)
         result = _prompt_sources()
         for src in result:
@@ -1136,6 +1171,7 @@ class TestPromptSources:
 
     def test_claude_only(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
+
         responses = iter([True, False])  # Y claude, n gstack
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
@@ -1145,6 +1181,7 @@ class TestPromptSources:
         """The gstack default carries include_dirs / include_files — they
         must survive the indirection through get_default_source."""
         from mind_meld import cli as cli_module
+
         responses = iter([False, True])  # n claude, Y gstack
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
@@ -1189,8 +1226,7 @@ class TestSaveAndRegister:
             "device": {"id": "d1", "name": "Mac"},
             "storage": {"path": str(tmp_path)},
         }
-        _save_and_register(config, backend=None, device_id="d1",
-                           device_name="Mac", passphrase="pw")
+        _save_and_register(config, backend=None, device_id="d1", device_name="Mac", passphrase="pw")
         assert call_order == ["save", "register", "keyring"]
 
     def test_no_keyring_still_succeeds(self, tmp_path: Path, monkeypatch) -> None:
@@ -1210,8 +1246,7 @@ class TestSaveAndRegister:
             "storage": {"path": str(tmp_path)},
         }
         # Must not raise.
-        _save_and_register(config, backend=None, device_id="d1",
-                           device_name="Mac", passphrase="pw")
+        _save_and_register(config, backend=None, device_id="d1", device_name="Mac", passphrase="pw")
 
 
 class TestBootstrapOrVerifyCrypto:

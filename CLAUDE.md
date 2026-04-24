@@ -33,6 +33,11 @@ Version source of truth: `pyproject.toml` (read by `__init__.py` via `importlib.
 ## Testing
 pytest. Use tmp_path for local backend. Run: `pytest tests/`
 
+Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). Run `ruff check .` and `ruff format --check .` locally before pushing — CI runs both as a separate `lint` job and will block merges on drift. Rule set: `E`/`F`/`W`/`I` (isort enforcement locks in Group 3's hoisted imports).
+
+## CI
+GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool — multi-OS + multi-Python matrix is theater for this project). Runs ruff check + ruff format --check + pytest + wheel build + `mm --version` smoke. Asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). pip cache keyed on `pyproject.toml`. No `paths:` filter — every PR runs CI (avoids the branch-protection pending-forever footgun for path-skipped required checks).
+
 ## Commands
 mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | autopull | autopush
 

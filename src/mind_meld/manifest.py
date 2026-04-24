@@ -156,7 +156,7 @@ def read_and_hash(path: Path) -> tuple[bytes, str]:
 #                                   │
 #                          _is_excluded(rel)? ──► None
 #                                   │
-#                                 stat() ─── PermissionError ──► on_skip("permission denied") ──► None
+#                               stat() ─── PermissionError ──► on_skip("permission denied") ──► None
 #                                   │
 #                              size > cap? ──► on_skip("exceeds max_file_size (...MB)") ──► None
 #                                   │
@@ -484,19 +484,13 @@ def load_manifest(data: bytes) -> dict[str, Any]:
         raise ManifestError("manifest: 'tombstones' must be an object")
     for src_name, src_data in sources.items():
         if not isinstance(src_data, dict):
-            raise ManifestError(
-                f"manifest: sources[{src_name!r}] must be an object"
-            )
+            raise ManifestError(f"manifest: sources[{src_name!r}] must be an object")
         files = src_data.get("files", {})
         if not isinstance(files, dict):
-            raise ManifestError(
-                f"manifest: sources[{src_name!r}]['files'] must be an object"
-            )
+            raise ManifestError(f"manifest: sources[{src_name!r}]['files'] must be an object")
     for key, info in tombstones.items():
         if not isinstance(info, dict):
-            raise ManifestError(
-                f"manifest: tombstones[{key!r}] must be an object"
-            )
+            raise ManifestError(f"manifest: tombstones[{key!r}] must be an object")
     return normalized
 
 
@@ -683,10 +677,7 @@ def generate_tombstones(
     for src_name, src_data in local_manifest.get("sources", {}).items():
         for path in src_data.get("files", {}).keys():
             all_local_keys.add(f"{src_name}:{path}")
-    tombstones = {
-        key: info for key, info in tombstones.items()
-        if key not in all_local_keys
-    }
+    tombstones = {key: info for key, info in tombstones.items() if key not in all_local_keys}
 
     return tombstones
 

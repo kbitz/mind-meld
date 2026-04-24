@@ -6,14 +6,13 @@ from pathlib import Path
 import pytest
 
 from mind_meld.config import (
-    DEFAULT_SOURCES,
     _apply_defaults,
     _validate,
     _validate_sources,
     get_sources,
     load_config,
-    save_config,
     patch_config_on_disk,
+    save_config,
 )
 from mind_meld.errors import ConfigError
 
@@ -94,9 +93,7 @@ class TestSaveLoad:
         with pytest.raises(ConfigError, match="config not found"):
             load_config(tmp_path / "nonexistent.toml")
 
-    def test_save_routes_through_fsutil_with_fsync_true(
-        self, tmp_path, monkeypatch
-    ):
+    def test_save_routes_through_fsutil_with_fsync_true(self, tmp_path, monkeypatch):
         """save_config must use fsutil.atomic_write_bytes with fsync=True —
         a corrupt config locks the user out of running mm entirely."""
         from mind_meld import config as config_module
@@ -198,7 +195,11 @@ class TestGetSources:
         # Create dirs that gstack source expects
         (gstack_dir / "projects").mkdir()
 
+        # Path.home() is used for the existence check; $HOME is read by
+        # Path.expanduser() when resolving the "~/.gstack" default source
+        # path. Patch both or a fresh CI runner's real $HOME leaks through.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         config = self._base_config(tmp_path)
         config["sync"] = {
@@ -323,9 +324,7 @@ class TestEagerSourceValidation:
 
     def test_validate_passes_with_valid_sync_sources(self, tmp_path):
         config = self._base_config(tmp_path)
-        config["sync"] = {
-            "sources": [{"name": "claude", "path": "~/.claude", "type": "claude"}]
-        }
+        config["sync"] = {"sources": [{"name": "claude", "path": "~/.claude", "type": "claude"}]}
         _validate(config)  # must not raise
 
     def test_validate_raises_on_source_missing_field(self, tmp_path):
@@ -357,12 +356,12 @@ class TestEagerSourceValidation:
         """Headline test: bad sync.sources in TOML raises at load boundary, not mid-push."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "storage"}"\n'
-            '[[sync.sources]]\n'
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             'type = "claude"\n'
             # no path — eager validation should catch this
@@ -430,9 +429,7 @@ class TestGetSourcesResolve:
         config = {
             "device": {"id": "abc", "name": "Mac"},
             "storage": {"path": str(tmp_path / "storage")},
-            "sync": {
-                "sources": [{"name": "claude", "path": str(symlink), "type": "claude"}]
-            },
+            "sync": {"sources": [{"name": "claude", "path": str(symlink), "type": "claude"}]},
         }
         sources = get_sources(config)
         assert len(sources) == 1
@@ -441,7 +438,12 @@ class TestGetSourcesResolve:
     def test_minimal_sync_block_falls_through_to_default_sources(self, tmp_path, monkeypatch):
         """Config with [sync] but no claude_dir and no sources must still work
         (no KeyError) and resolve via DEFAULT_SOURCES. Regression for legacy-cleanup."""
+        # DEFAULT_SOURCES paths (~/.claude, ~/.gstack) go through
+        # Path.expanduser() which reads $HOME, not Path.home(). Patch both
+        # or a fresh CI runner's real $HOME leaks through and the default
+        # claude source resolves to a non-existent /Users/runner/.claude.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         # Create the default claude path so it survives the existence filter
         (tmp_path / ".claude").mkdir()
 
@@ -517,24 +519,19 @@ class TestLoadConfigNormalizesUnexpectedErrors:
     ConfigError. Otherwise autopull/autopush fall through to the silent
     generic-Exception branch instead of surfacing the failure."""
 
-    def test_unexpected_error_in_apply_defaults_becomes_config_error(
-        self, tmp_path, monkeypatch
-    ):
+    def test_unexpected_error_in_apply_defaults_becomes_config_error(self, tmp_path, monkeypatch):
         """Simulate a raw exception during _apply_defaults (e.g. what would happen
         if .resolve() hit a symlink loop) and verify it surfaces as ConfigError."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
-            'id = "abc"\n'
-            'name = "Mac"\n'
-            '[storage]\n'
-            f'path = "{tmp_path / "storage"}"\n'
+            f'[device]\nid = "abc"\nname = "Mac"\n[storage]\npath = "{tmp_path / "storage"}"\n'
         )
 
         def boom(*_args, **_kwargs):
             raise RuntimeError("simulated symlink loop")
 
         from mind_meld import config as config_module
+
         monkeypatch.setattr(config_module, "_apply_defaults", boom)
 
         with pytest.raises(ConfigError, match="failed to load"):
@@ -550,30 +547,22 @@ class TestConfigErrorPrefixes:
     def test_parse_error_prefix_is_config_not_init(self, tmp_path):
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
-            'id = "abc"\n'
-            'name = "Mac"\n'
-            '[storage\n'  # unclosed table header — parse error
+            '[device]\nid = "abc"\nname = "Mac"\n[storage\n'  # unclosed table header — parse error
         )
         with pytest.raises(ConfigError, match=r"^config: failed to parse"):
             load_config(config_path)
 
-    def test_generic_load_error_prefix_is_config_not_init(
-        self, tmp_path, monkeypatch
-    ):
+    def test_generic_load_error_prefix_is_config_not_init(self, tmp_path, monkeypatch):
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
-            'id = "abc"\n'
-            'name = "Mac"\n'
-            '[storage]\n'
-            f'path = "{tmp_path / "storage"}"\n'
+            f'[device]\nid = "abc"\nname = "Mac"\n[storage]\npath = "{tmp_path / "storage"}"\n'
         )
 
         def boom(*_args, **_kwargs):
             raise RuntimeError("simulated post-parse failure")
 
         from mind_meld import config as config_module
+
         monkeypatch.setattr(config_module, "_apply_defaults", boom)
 
         with pytest.raises(ConfigError, match=r"^config: failed to load"):
@@ -597,26 +586,26 @@ class TestUpdateConfigOnDisk:
     def _write_minimal_config(self, config_path, storage_path_value):
         """Write a minimal valid config with the given storage.path value verbatim."""
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{storage_path_value}"\n'
-            '[sync]\n'
+            "[sync]\n"
             'claude_dir = "~/.claude"\n'
-            'max_file_size = 52428800\n'
+            "max_file_size = 52428800\n"
         )
 
     def test_merges_into_existing_section(self, tmp_path):
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "s"}"\n'
-            '[crypto]\n'
-            'argon2_memory_kb = 1024\n'
+            "[crypto]\n"
+            "argon2_memory_kb = 1024\n"
         )
         patch_config_on_disk(
             {"crypto": {"root_salt_fp": "deadbeef"}},
@@ -651,6 +640,7 @@ class TestUpdateConfigOnDisk:
         )
         # Re-read raw TOML (not through load_config, which would mutate in memory)
         import tomllib
+
         with open(config_path, "rb") as f:
             raw = tomllib.load(f)
         assert raw["storage"]["path"] == "~/Library/Mobile Documents/CloudDocs/mm"
@@ -670,6 +660,7 @@ class TestUpdateConfigOnDisk:
             path=config_path,
         )
         import tomllib
+
         with open(config_path, "rb") as f:
             raw = tomllib.load(f)
         assert raw["storage"]["path"] == str(symlink)
@@ -683,6 +674,7 @@ class TestUpdateConfigOnDisk:
             path=config_path,
         )
         import tomllib
+
         with open(config_path, "rb") as f:
             raw = tomllib.load(f)
         assert raw["sync"]["claude_dir"] == "~/.claude"
@@ -691,18 +683,18 @@ class TestUpdateConfigOnDisk:
         """Modern multi-source config: sources array stays byte-identical."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "s"}"\n'
-            '[sync]\n'
-            'max_file_size = 52428800\n'
-            '[[sync.sources]]\n'
+            "[sync]\n"
+            "max_file_size = 52428800\n"
+            "[[sync.sources]]\n"
             'name = "claude"\n'
             'path = "~/.claude"\n'
             'type = "claude"\n'
-            '[[sync.sources]]\n'
+            "[[sync.sources]]\n"
             'name = "gstack"\n'
             'path = "~/.gstack"\n'
             'type = "generic"\n'
@@ -714,6 +706,7 @@ class TestUpdateConfigOnDisk:
             path=config_path,
         )
         import tomllib
+
         with open(config_path, "rb") as f:
             raw = tomllib.load(f)
         assert raw["sync"]["sources"][0]["path"] == "~/.claude"
@@ -749,14 +742,14 @@ class TestUpdateConfigOnDisk:
         for argon2_memory_kb."""
         config_path = tmp_path / "config.toml"
         config_path.write_text(
-            '[device]\n'
+            "[device]\n"
             'id = "abc"\n'
             'name = "Mac"\n'
-            '[storage]\n'
+            "[storage]\n"
             f'path = "{tmp_path / "s"}"\n'
-            '[crypto]\n'
+            "[crypto]\n"
             'root_salt_fp = "OLD"\n'
-            'argon2_memory_kb = 1024\n'
+            "argon2_memory_kb = 1024\n"
         )
         patch_config_on_disk(
             {"crypto": {"root_salt_fp": "NEW"}},

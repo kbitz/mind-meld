@@ -16,20 +16,18 @@ Contract under test:
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from mind_meld.cli import app, _quarantine_corrupt_manifest
+from mind_meld import sidecar as sidecar_mod
+from mind_meld.cli import _quarantine_corrupt_manifest, app
 from mind_meld.config import save_config
-from mind_meld.crypto import bootstrap_crypto_init, encrypt, set_crypto_session, fetch_crypto_init
+from mind_meld.crypto import bootstrap_crypto_init, encrypt, fetch_crypto_init, set_crypto_session
 from mind_meld.devices import register_device
 from mind_meld.manifest import serialize_manifest
 from mind_meld.storage.local import LocalBackend
-from mind_meld import sidecar as sidecar_mod
 
 PASSPHRASE = "recover-test-passphrase"
 MEMORY_KB = 1024
@@ -124,7 +122,12 @@ def test_recover_refuses_when_sidecar_present(tmp_path, monkeypatch):
         "device_id": "mac-a",
         "device_name": "Mac A",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "sources": {"claude": {"base_path": "", "files": {"a.md": {"sha256": "x", "size": 1, "mtime": "2026-04-22T10:00:00+00:00"}}}},
+        "sources": {
+            "claude": {
+                "base_path": "",
+                "files": {"a.md": {"sha256": "x", "size": 1, "mtime": "2026-04-22T10:00:00+00:00"}},
+            }
+        },
         "tombstones": {},
     }
     sidecar_mod.write(sidecar_manifest)

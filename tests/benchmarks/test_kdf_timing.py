@@ -22,7 +22,7 @@ _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 if _REPO not in sys.path:
     sys.path.insert(0, os.path.join(_REPO, "src"))
 
-from mind_meld.crypto import decrypt, encrypt, set_crypto_session
+from mind_meld.crypto import decrypt, encrypt, set_crypto_session  # noqa: E402
 
 PASSPHRASE = "benchmark-passphrase-kdf-timing"
 N_FILES = 100
@@ -42,7 +42,7 @@ def _quantile(samples: list[float], p: float) -> float:
 
 
 def main() -> None:
-    print(f"Mind Meld KDF benchmark")
+    print("Mind Meld KDF benchmark")
     print(f"  N_FILES={N_FILES}, FILE_SIZE={FILE_SIZE}B, MEMORY_KB={MEMORY_KB}")
     print()
 
@@ -75,10 +75,10 @@ def main() -> None:
         p95 = _quantile(samples, 0.95)
         p99 = _quantile(samples, 0.99)
         print(
-            f"  {name:8s} total={total*1000:8.1f}ms  "
-            f"median={median*1000:7.2f}ms  "
-            f"p95={p95*1000:7.2f}ms  "
-            f"p99={p99*1000:7.2f}ms  "
+            f"  {name:8s} total={total * 1000:8.1f}ms  "
+            f"median={median * 1000:7.2f}ms  "
+            f"p95={p95 * 1000:7.2f}ms  "
+            f"p99={p99 * 1000:7.2f}ms  "
             f"(per-op, N={len(samples)})"
         )
 

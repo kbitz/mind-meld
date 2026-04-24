@@ -13,16 +13,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from typer.testing import CliRunner
 
+from mind_meld import sidecar as sidecar_mod
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
 from mind_meld.storage.local import LocalBackend
-from mind_meld import sidecar as sidecar_mod
 
 PASSPHRASE = "diag-test-passphrase"
 MEMORY_KB = 1024
@@ -136,7 +135,7 @@ def test_diag_json_never_leaks_secrets(tmp_path, monkeypatch):
         "keycheck",
         "keycheck_blob",
         "passphrase",
-        "root_salt\":",  # raw bytes (JSON quote) — fingerprint uses root_salt_fp
+        'root_salt":',  # raw bytes (JSON quote) — fingerprint uses root_salt_fp
         # Peer device_ids: the registered "peer-decafbad" must not appear.
         "peer-decafbad",
     ):

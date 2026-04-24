@@ -8,9 +8,7 @@ critical v1-blob regression (must fail loud post-Track-1C).
 
 from __future__ import annotations
 
-import hashlib
 import os
-import threading
 from pathlib import Path
 
 import pytest
@@ -23,7 +21,6 @@ from mind_meld.crypto import (
     NONCE_LEN,
     ROOT_SALT_LEN,
     SALT_LEN,
-    CryptoInitFetch,
     bootstrap_crypto_init,
     decrypt,
     derive_key,
@@ -88,9 +85,7 @@ class TestMasterKeyCache:
         key = load_master_key(PASSPHRASE, test_root_salt, test_memory_kb)
         assert len(key) == 32
 
-    def test_second_load_same_tuple_is_cached(
-        self, test_root_salt, test_memory_kb, monkeypatch
-    ):
+    def test_second_load_same_tuple_is_cached(self, test_root_salt, test_memory_kb, monkeypatch):
         crypto.clear_crypto_session()
         crypto.set_crypto_session(test_root_salt, test_memory_kb)
         load_master_key(PASSPHRASE, test_root_salt, test_memory_kb)
@@ -172,9 +167,7 @@ class TestSession:
         with pytest.raises(CryptoError, match="no active session"):
             encrypt(b"hello", PASSPHRASE, memory_kb=1024)
 
-    def test_encrypt_with_memory_kb_drift_raises(
-        self, test_root_salt, test_memory_kb
-    ):
+    def test_encrypt_with_memory_kb_drift_raises(self, test_root_salt, test_memory_kb):
         crypto.clear_crypto_session()
         set_crypto_session(test_root_salt, test_memory_kb)
         with pytest.raises(CryptoError, match="memory_kb mismatch"):
@@ -281,27 +274,19 @@ class TestVerifyPassphrase:
         crypto.clear_crypto_session()
         set_crypto_session(test_root_salt, test_memory_kb)
         master_key = load_master_key(PASSPHRASE, test_root_salt, test_memory_kb)
-        keycheck_blob = crypto._encrypt_with_master_key(
-            crypto._KEYCHECK_PLAINTEXT, master_key
-        )
+        keycheck_blob = crypto._encrypt_with_master_key(crypto._KEYCHECK_PLAINTEXT, master_key)
         verify_passphrase(master_key, keycheck_blob)  # no raise
 
-    def test_verify_with_wrong_master_key_raises(
-        self, test_root_salt, test_memory_kb
-    ):
+    def test_verify_with_wrong_master_key_raises(self, test_root_salt, test_memory_kb):
         crypto.clear_crypto_session()
         set_crypto_session(test_root_salt, test_memory_kb)
         correct = load_master_key(PASSPHRASE, test_root_salt, test_memory_kb)
         wrong = load_master_key("different-pw", test_root_salt, test_memory_kb)
-        keycheck_blob = crypto._encrypt_with_master_key(
-            crypto._KEYCHECK_PLAINTEXT, correct
-        )
+        keycheck_blob = crypto._encrypt_with_master_key(crypto._KEYCHECK_PLAINTEXT, correct)
         with pytest.raises(CryptoError, match="does not match"):
             verify_passphrase(wrong, keycheck_blob)
 
-    def test_verify_with_tampered_keycheck_raises(
-        self, test_root_salt, test_memory_kb
-    ):
+    def test_verify_with_tampered_keycheck_raises(self, test_root_salt, test_memory_kb):
         crypto.clear_crypto_session()
         set_crypto_session(test_root_salt, test_memory_kb)
         master_key = load_master_key(PASSPHRASE, test_root_salt, test_memory_kb)
@@ -406,12 +391,7 @@ class TestConflictConvergence:
         crypto.set_crypto_session(root_salt, argon2_memory_kb)
         mk = load_master_key(PASSPHRASE, root_salt, argon2_memory_kb)
         keycheck = crypto._encrypt_with_master_key(crypto._KEYCHECK_PLAINTEXT, mk)
-        blob = (
-            bytes([FORMAT_VERSION])
-            + argon2_memory_kb.to_bytes(4, "big")
-            + root_salt
-            + keycheck
-        )
+        blob = bytes([FORMAT_VERSION]) + argon2_memory_kb.to_bytes(4, "big") + root_salt + keycheck
         path.write_bytes(blob)
 
     def test_conflict_copy_deterministic_winner(self, tmp_path):

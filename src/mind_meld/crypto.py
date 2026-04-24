@@ -317,9 +317,7 @@ def _parse_crypto_init(data: bytes) -> CryptoInitFetch:
     version = data[0]
     if version != FORMAT_VERSION:
         return CryptoInitFetch(status="corrupt")
-    argon2_memory_kb = int.from_bytes(
-        data[1 : 1 + MEMORY_KB_FIELD_LEN], "big"
-    )
+    argon2_memory_kb = int.from_bytes(data[1 : 1 + MEMORY_KB_FIELD_LEN], "big")
     # Sanity bounds: 1KB floor, 1GB ceiling (argon2 would OOM long before 1GB).
     if argon2_memory_kb < 1_024 or argon2_memory_kb > 1_048_576:
         return CryptoInitFetch(status="corrupt")
@@ -336,9 +334,7 @@ def _parse_crypto_init(data: bytes) -> CryptoInitFetch:
     )
 
 
-def _serialize_crypto_init(
-    argon2_memory_kb: int, root_salt: bytes, keycheck_blob: bytes
-) -> bytes:
+def _serialize_crypto_init(argon2_memory_kb: int, root_salt: bytes, keycheck_blob: bytes) -> bytes:
     if len(root_salt) != ROOT_SALT_LEN:
         raise CryptoError("crypto: root_salt wrong length at serialize.")
     return (
@@ -414,9 +410,7 @@ def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
     return winner_parsed
 
 
-def bootstrap_crypto_init(
-    backend: Any, passphrase: str, argon2_memory_kb: int
-) -> CryptoInitFetch:
+def bootstrap_crypto_init(backend: Any, passphrase: str, argon2_memory_kb: int) -> CryptoInitFetch:
     """Generate mm-crypto-init for a fresh storage root. Called only on first device.
 
     Raises StorageError("already exists") if another device won the bootstrap race.

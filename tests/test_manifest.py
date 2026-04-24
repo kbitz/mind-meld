@@ -10,7 +10,6 @@ from mind_meld.errors import ManifestError
 from mind_meld.manifest import (
     CONFLICT_PATTERN,
     TOMBSTONE_TTL_DAYS,
-    DiffResult,
     _is_active_tombstone,
     _is_excluded,
     _record_file,
@@ -65,9 +64,7 @@ class TestIsExcluded:
         assert not _is_excluded("projects/-foo/todos/tasks.json")
 
     def test_excludes_sync_conflict_file(self):
-        assert _is_excluded(
-            "projects/-foo/memory/notes.sync-conflict-20260422-120000-abc12345.md"
-        )
+        assert _is_excluded("projects/-foo/memory/notes.sync-conflict-20260422-120000-abc12345.md")
 
     def test_does_not_exclude_user_sync_conflict_log(self):
         # User file containing the infix without a timestamp is NOT excluded.
@@ -154,7 +151,9 @@ class TestWalkClaudeSource:
         (memory / "big.bin").write_bytes(b"x" * 200)
 
         skipped = []
-        files = walk_claude_source(claude, max_file_size=100, on_skip=lambda p, r: skipped.append((p, r)))
+        files = walk_claude_source(
+            claude, max_file_size=100, on_skip=lambda p, r: skipped.append((p, r))
+        )
         assert len(files) == 1
         assert len(skipped) == 1
         assert "big.bin" in skipped[0][0]
@@ -258,6 +257,7 @@ class TestSerialize:
 
     def test_invalid_json_raises(self):
         from mind_meld.errors import ManifestError
+
         with pytest.raises(ManifestError):
             deserialize_manifest(b"not json")
 
@@ -383,7 +383,9 @@ class TestWalkGenericSource:
             "include_files": [],
         }
         skipped: list[tuple[str, str]] = []
-        files = walk_generic_source(config, max_file_size=100, on_skip=lambda p, r: skipped.append((p, r)))
+        files = walk_generic_source(
+            config, max_file_size=100, on_skip=lambda p, r: skipped.append((p, r))
+        )
         assert "data/small.txt" in files
         assert "data/big.bin" not in files
         assert len(skipped) == 1
@@ -566,7 +568,9 @@ class TestNormalizeManifest:
         result = normalize_manifest(m)
         assert "sources" in result
         assert "claude" in result["sources"]
-        assert result["sources"]["claude"]["files"]["projects/-foo/memory/role.md"]["sha256"] == "aaa"
+        assert (
+            result["sources"]["claude"]["files"]["projects/-foo/memory/role.md"]["sha256"] == "aaa"
+        )
 
     def test_preserves_base_path_from_v1(self):
         m = {
@@ -638,9 +642,7 @@ class TestWalkerExcludesConflictFiles:
         memory = claude / "projects" / "-Users-kb-myapp" / "memory"
         memory.mkdir(parents=True)
         (memory / "notes.md").write_text("canonical")
-        (memory / "notes.sync-conflict-20260422-120000-abc12345.md").write_text(
-            "local divergent"
-        )
+        (memory / "notes.sync-conflict-20260422-120000-abc12345.md").write_text("local divergent")
 
         files = walk_claude_source(claude)
         paths = set(files.keys())
@@ -653,9 +655,7 @@ class TestWalkerExcludesConflictFiles:
         todos = claude / "projects" / "-Users-kb-myapp" / "todos"
         todos.mkdir(parents=True)
         (todos / "tasks.json").write_text("[]")
-        (todos / "tasks.sync-conflict-20260422-120000-abc12345.json").write_text(
-            "[1, 2]"
-        )
+        (todos / "tasks.sync-conflict-20260422-120000-abc12345.json").write_text("[1, 2]")
 
         files = walk_claude_source(claude)
         paths = set(files.keys())
@@ -722,7 +722,10 @@ class TestNormalizeManifestTombstoneMigration:
             "device_id": "a",
             "files": {},
             "tombstones": {
-                "claude:memory/already.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "a"},
+                "claude:memory/already.md": {
+                    "deleted_at": "2026-04-22T10:00:00+00:00",
+                    "device_id": "a",
+                },
             },
         }
         out = normalize_manifest(m)
@@ -803,7 +806,9 @@ class TestLoadManifest:
     def test_promotes_v1_with_tombstone_migration(self):
         m = {
             "device_id": "a",
-            "files": {"memory/x.md": {"sha256": "x", "size": 1, "mtime": "2026-04-22T10:00:00+00:00"}},
+            "files": {
+                "memory/x.md": {"sha256": "x", "size": 1, "mtime": "2026-04-22T10:00:00+00:00"}
+            },
             "tombstones": {
                 "memory/deleted.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "a"},
             },
@@ -827,7 +832,12 @@ class TestLoadManifest:
     def test_round_trip_preserves_keys(self):
         original = {
             "device_id": "z",
-            "sources": {"claude": {"base_path": "/p", "files": {"a.md": {"sha256": "h", "size": 1, "mtime": "t"}}}},
+            "sources": {
+                "claude": {
+                    "base_path": "/p",
+                    "files": {"a.md": {"sha256": "h", "size": 1, "mtime": "t"}},
+                }
+            },
             "tombstones": {"claude:b.md": {"deleted_at": "t", "device_id": "z"}},
         }
         loaded = load_manifest(serialize_manifest(original))
@@ -857,9 +867,7 @@ class TestLoadManifest:
         # `{"sources": {"claude": "x"}}` would survive load and crash deep
         # in _merge_manifests / generate_tombstones with AttributeError.
         with pytest.raises(ManifestError, match=r"sources\['claude'\]"):
-            load_manifest(
-                b'{"device_id":"a","sources":{"claude":"not-a-dict"},"tombstones":{}}'
-            )
+            load_manifest(b'{"device_id":"a","sources":{"claude":"not-a-dict"},"tombstones":{}}')
 
     def test_rejects_non_dict_source_files(self):
         with pytest.raises(ManifestError, match=r"\['files'\]"):
@@ -906,7 +914,9 @@ class TestRecordFile:
         f.write_text("")
         skipped: list[tuple[str, str]] = []
         result = _record_file(
-            f, base, max_file_size=1_000_000,
+            f,
+            base,
+            max_file_size=1_000_000,
             on_skip=lambda p, r: skipped.append((p, r)),
         )
         assert result is None
@@ -933,7 +943,9 @@ class TestRecordFile:
         monkeypatch.setattr(Path, "stat", scoped_raise)
         skipped: list[tuple[str, str]] = []
         result = _record_file(
-            f, base, max_file_size=1_000_000,
+            f,
+            base,
+            max_file_size=1_000_000,
             on_skip=lambda p, r: skipped.append((p, r)),
         )
         assert result is None
@@ -946,7 +958,9 @@ class TestRecordFile:
         f.write_bytes(b"x" * 2048)  # 2 KB
         skipped: list[tuple[str, str]] = []
         result = _record_file(
-            f, base, max_file_size=1024,
+            f,
+            base,
+            max_file_size=1024,
             on_skip=lambda p, r: skipped.append((p, r)),
         )
         assert result is None
@@ -970,7 +984,9 @@ class TestRecordFile:
         monkeypatch.setattr(m, "hash_file", raise_os)
         skipped: list[tuple[str, str]] = []
         result = _record_file(
-            f, base, max_file_size=1_000_000,
+            f,
+            base,
+            max_file_size=1_000_000,
             on_skip=lambda p, r: skipped.append((p, r)),
         )
         assert result is None
@@ -986,11 +1002,13 @@ class TestIsActiveTombstone:
     """
 
     def _cutoff_now(self):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         return datetime.now(timezone.utc) - timedelta(days=TOMBSTONE_TTL_DAYS)
 
     def test_tz_aware_non_expired_is_active(self):
         from datetime import datetime, timezone
+
         info = {"deleted_at": datetime.now(timezone.utc).isoformat()}
         assert _is_active_tombstone(info, self._cutoff_now()) is True
 
@@ -1000,6 +1018,7 @@ class TestIsActiveTombstone:
         write naive timestamps; the guard here prevents a fleet-wide
         TypeError crash."""
         from datetime import datetime, timezone
+
         # Drop tzinfo to get a naive datetime in UTC without using the
         # deprecated datetime.utcnow().
         naive_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -1007,10 +1026,9 @@ class TestIsActiveTombstone:
         assert _is_active_tombstone(info, self._cutoff_now()) is True
 
     def test_expired_is_not_active(self):
-        from datetime import datetime, timezone, timedelta
-        expired = (
-            datetime.now(timezone.utc) - timedelta(days=TOMBSTONE_TTL_DAYS + 1)
-        ).isoformat()
+        from datetime import datetime, timedelta, timezone
+
+        expired = (datetime.now(timezone.utc) - timedelta(days=TOMBSTONE_TTL_DAYS + 1)).isoformat()
         info = {"deleted_at": expired}
         assert _is_active_tombstone(info, self._cutoff_now()) is False
 
@@ -1052,16 +1070,16 @@ class TestGenerateTombstonesContract:
         """A v1-shaped dict (with `files` but no `sources`) fed DIRECTLY
         raises ManifestError — rather than silently producing zero
         tombstones, which would be silent delete-propagation loss."""
-        from datetime import datetime, timezone, timedelta
-        recent_iso = (
-            datetime.now(timezone.utc) - timedelta(days=1)
-        ).isoformat()
+        from datetime import datetime, timedelta, timezone
+
+        recent_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
         raw_v1 = {
             "device_id": "peer1",
             "files": {
                 "memory/foo.md": {
-                    "sha256": "a" * 64, "size": 1,
+                    "sha256": "a" * 64,
+                    "size": 1,
                     "mtime": "2026-04-20T00:00:00+00:00",
                 },
             },
