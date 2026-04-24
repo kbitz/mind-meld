@@ -41,13 +41,14 @@ _touches: src/mind_meld/cli.py, tests/test_integration.py_
 - ✅ **Decompose `_pull_core` (247 lines)** — `cli.py:961-1208`: split into `_select_devices`, `_prefetch_manifests`, `_pull_one_source`, `_print_pull_summary` so the top-level reads as five orchestration calls. Also fix the double `list_devices` call (cli.py:994, 1008) while you're in there, and align `_predict_pull_outcome` return vocabulary with `ApplyOutcome` (cli.py:241-270). _src/mind_meld/cli.py, ~250 lines._ (L) _Shipped in v0.8.4 as 6 helpers (`_select_devices`, `_prefetch_manifests`, `_preflight_conflicts`, `_pull_one_source`, `_fsync_touched_parents`, `_print_pull_summary`); double `list_devices` fixed. Codex adversarial review flagged the planned `_predict_pull_outcome` vocabulary rename as a worse abstraction — reversed, vocabulary unchanged._
 - ✅ **Decompose `_apply_incoming_file` (114 lines)** — `cli.py:447-561`: extract `_apply_write`, `_apply_merge`, `_apply_conflict` helpers; `_apply_incoming_file` dispatches via outcome classification. _src/mind_meld/cli.py, ~150 lines._ (M) _Shipped in v0.8.4; dispatcher shrank 125 → ~50 LOC._
 
-### Track 1B: Walker + manifest + merge DRY
-_3 tasks · ~0.5 day (human) / ~12 min (CC) · low risk · [manifest.py, merge.py]_
-_touches: src/mind_meld/manifest.py, src/mind_meld/merge.py, tests/test_manifest.py, tests/test_merge.py_
+### Track 1B: Walker + manifest + merge DRY ✅ shipped in v0.8.5
+_3 tasks + 1 contract-change cleanup · ~0.5 day (human) / ~12 min (CC) · low risk · [manifest.py, merge.py]_
+_touches: src/mind_meld/manifest.py, src/mind_meld/merge.py, tests/test_manifest.py_
 
-- **Extract `_record_file` helper** — `manifest.py:143-177, 255-285`: 30 lines of per-file "stat → exclude → size-check → hash → record mtime/size/sha" duplicated verbatim between `walk_claude_source` and `walk_generic_source`. _src/mind_meld/manifest.py, ~50 lines._ (S)
-- **`_parse_tombstone_ts(iso_str)` helper** — `manifest.py:488-497, 553-563`: `generate_tombstones` and `collect_tombstones` both parse `deleted_at` with the same fromisoformat-add-utc-compare dance. _src/mind_meld/manifest.py, ~30 lines._ (S)
-- **`merge.py` dispatch + join helpers** — `merge.py:16-35, 64, 80`: `should_merge`/`merge_file` duplicate strategy classification; `merge_jsonl`/`merge_lines` share an identical join-lines tail. Introduce `_merge_strategy(rel_path)` dispatch and `_join_lines(lines)` helper. _src/mind_meld/merge.py, tests/test_merge.py, ~40 lines._ (S)
+- ✅ **Extract `_record_file` helper** — per-file "exclude → stat → size-check → hash → record" block duplicated verbatim between `walk_claude_source` and `walk_generic_source`. Shipped in v0.8.5 as a maximalist helper that also owns `relative_to(base)` (codex adversarial review caught the original signature, which would have left rel-path computation duplicated across call sites). _src/mind_meld/manifest.py_. (S) _Shipped in v0.8.5._
+- ✅ **Extract `_is_active_tombstone(info, cutoff) -> bool` helper** — `generate_tombstones` (carry-forward) and `collect_tombstones` (fleet aggregation) both duplicated the fromisoformat + tzinfo-UTC guard + cutoff compare + `(ValueError, TypeError)` handling. Shipped as the full predicate (codex adversarial review correctly flagged the originally-planned parse-only `_parse_tombstone_ts` as beneath the abstraction threshold — extracting just the parse would have left the cutoff-comparison and try/except duplicated). _src/mind_meld/manifest.py_. (S) _Shipped in v0.8.5._
+- ✅ **`merge.py` dispatch + join helpers** — `should_merge`/`merge_file` duplicated strategy classification; `merge_jsonl`/`merge_lines` shared an identical join-lines tail. Shipped as `_merge_strategy(rel_path) -> Callable | None` (direct callable, no registry — codex review correctly flagged the original `_STRATEGIES` dict as YAGNI machinery for two predicates) + `_join_lines(lines)` helper. _src/mind_meld/merge.py_. (S) _Shipped in v0.8.5._
+- ✅ **Drop redundant `normalize_manifest(remote_manifest)` call at manifest.py:607 + enforce caller contract at runtime** — added during /plan-eng-review 2026-04-24 after auditing all three caller paths (`_fetch_remote_manifest` → `load_manifest`; `sidecar.read` → explicit normalize; peer-fallback synthetic dict) and finding the call was positionally wrong (ran AFTER the carry-forward loop had already consumed tombstone keys). /review cross-model adversarial (Claude + Codex, 2026-04-24) independently found that the dropped call was also doing load-bearing v1→v2 `files`→`sources` promotion right before new-tombstone detection — so a hand-built v1-shaped dict would silently produce zero new tombstones (delete-propagation loss) instead of the original `claude:<path>` entries. Fixed by enforcing the contract at runtime: `generate_tombstones` now raises `ManifestError` on a v1-shaped `remote_manifest` instead of failing silently. Tests `TestGenerateTombstonesContract::test_raises_on_v1_shaped_input` and `test_none_remote_still_allowed` pin the contract. _src/mind_meld/manifest.py, tests/test_manifest.py_. (S) _Shipped in v0.8.5._
 
 ### Track 1C: Post-1A cli.py follow-ups
 _3 tasks · ~0.5 day (human) / ~15 min (CC) · low risk · [cli.py]_
@@ -140,7 +141,7 @@ Track detail per group:
 Group 1: Decomposition + DRY
   Pre-flight .............. ~2 hr (constants + storage key helpers) [storage keys ✅ v0.8.4]
   ├── Track 1A ........... ~1.5d .. 2 tasks .. decompose _pull_core + _apply_incoming_file [✅ v0.8.4]
-  ├── Track 1B ........... ~0.5d .. 3 tasks .. walker + manifest + merge DRY
+  ├── Track 1B ........... ~0.5d .. 3 tasks .. walker + manifest + merge DRY [✅ v0.8.5]
   └── Track 1C ........... ~0.5d .. 3 tasks .. post-1A cli.py follow-ups
 
 Group 2: Init flow + sync_log generalization + config polish
