@@ -27,15 +27,19 @@ Break up overgrown functions and extract duplicated logic. Parallel-safe
 across cli.py (Track 1A) and manifest.py + merge.py (Track 1B). Track 1C is
 serial after 1A (cli.py follow-ups).
 
-**Pre-flight** (shared-infra; serial, one-at-a-time):
-- Create `src/mind_meld/constants.py` and move `CONFLICT_INFIX`, `CONFLICT_AGE_DAYS`, `TOMBSTONE_TTL_DAYS`, `FORMAT_VERSION`. Add `_manifest_key(device_id)` / `_blob_key(device_id, sha)` (and a parser) in the storage package. Migrate the 6 string-literal construction sites in cli.py (lines 136, 222, 322, 591, 878, 1486) and the parse site. ~100 LOC across cli.py, manifest.py, storage/local.py, new constants.py.
+**Track 1A ✅ shipped in v0.8.3** (decomposition + storage-key portion of
+pre-flight). Pre-flight's `constants.py` extraction + the cli.py literal-site
+migration is still open.
 
-### Track 1A: Decompose overgrown cli.py functions
+**Pre-flight** (shared-infra; serial, one-at-a-time):
+- Create `src/mind_meld/constants.py` and move `CONFLICT_INFIX`, `CONFLICT_AGE_DAYS`, `TOMBSTONE_TTL_DAYS`, `FORMAT_VERSION`. Add `_manifest_key(device_id)` / `_blob_key(device_id, sha)` (and a parser) in the storage package. Migrate the 6 string-literal construction sites in cli.py (lines 136, 222, 322, 591, 878, 1486) and the parse site. ~100 LOC across cli.py, manifest.py, storage/local.py, new constants.py. _Storage-key helpers + all construction/parse sites ✅ shipped in v0.8.3 (`src/mind_meld/storage/keys.py` with path-traversal validation). Remaining: `constants.py` for CONFLICT_INFIX / CONFLICT_AGE_DAYS / TOMBSTONE_TTL_DAYS / FORMAT_VERSION._
+
+### Track 1A: Decompose overgrown cli.py functions ✅ shipped in v0.8.3
 _2 tasks · ~1.5 days (human) / ~20 min (CC) · medium risk · [cli.py]_
 _touches: src/mind_meld/cli.py, tests/test_integration.py_
 
-- **Decompose `_pull_core` (247 lines)** — `cli.py:961-1208`: split into `_select_devices`, `_prefetch_manifests`, `_pull_one_source`, `_print_pull_summary` so the top-level reads as five orchestration calls. Also fix the double `list_devices` call (cli.py:994, 1008) while you're in there, and align `_predict_pull_outcome` return vocabulary with `ApplyOutcome` (cli.py:241-270). _src/mind_meld/cli.py, ~250 lines._ (L)
-- **Decompose `_apply_incoming_file` (114 lines)** — `cli.py:447-561`: extract `_apply_write`, `_apply_merge`, `_apply_conflict` helpers; `_apply_incoming_file` dispatches via outcome classification. _src/mind_meld/cli.py, ~150 lines._ (M)
+- ✅ **Decompose `_pull_core` (247 lines)** — `cli.py:961-1208`: split into `_select_devices`, `_prefetch_manifests`, `_pull_one_source`, `_print_pull_summary` so the top-level reads as five orchestration calls. Also fix the double `list_devices` call (cli.py:994, 1008) while you're in there, and align `_predict_pull_outcome` return vocabulary with `ApplyOutcome` (cli.py:241-270). _src/mind_meld/cli.py, ~250 lines._ (L) _Shipped in v0.8.3 as 6 helpers (`_select_devices`, `_prefetch_manifests`, `_preflight_conflicts`, `_pull_one_source`, `_fsync_touched_parents`, `_print_pull_summary`); double `list_devices` fixed. Codex adversarial review flagged the planned `_predict_pull_outcome` vocabulary rename as a worse abstraction — reversed, vocabulary unchanged._
+- ✅ **Decompose `_apply_incoming_file` (114 lines)** — `cli.py:447-561`: extract `_apply_write`, `_apply_merge`, `_apply_conflict` helpers; `_apply_incoming_file` dispatches via outcome classification. _src/mind_meld/cli.py, ~150 lines._ (M) _Shipped in v0.8.3; dispatcher shrank 125 → ~50 LOC._
 
 ### Track 1B: Walker + manifest + merge DRY
 _3 tasks · ~0.5 day (human) / ~12 min (CC) · low risk · [manifest.py, merge.py]_
@@ -134,8 +138,8 @@ Track detail per group:
 
 ```
 Group 1: Decomposition + DRY
-  Pre-flight .............. ~2 hr (constants + storage key helpers)
-  ├── Track 1A ........... ~1.5d .. 2 tasks .. decompose _pull_core + _apply_incoming_file
+  Pre-flight .............. ~2 hr (constants + storage key helpers) [storage keys ✅ v0.8.3]
+  ├── Track 1A ........... ~1.5d .. 2 tasks .. decompose _pull_core + _apply_incoming_file [✅ v0.8.3]
   ├── Track 1B ........... ~0.5d .. 3 tasks .. walker + manifest + merge DRY
   └── Track 1C ........... ~0.5d .. 3 tasks .. post-1A cli.py follow-ups
 

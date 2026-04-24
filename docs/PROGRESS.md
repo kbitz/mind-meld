@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.8.3   | 2026-04-23 | Group 2 pre-flight + Track 2A: storage-key helpers (`storage/keys.py` with path-traversal validation) + cli.py decomposition (`_pull_core` → 6 helpers + single print-owner, `_apply_incoming_file` → 3 per-outcome helpers). Internal refactor, zero user-visible behavior change; two codex-found regressions (`had_changes` exclusion of `unchanged`, per-file `blob_key` validation) caught and fixed pre-merge. |
 | 0.8.2   | 2026-04-23 | Track 1B (Group 1): manifest dead-code cleanup + v1-holdover removal (delete `walk_directory`/`build_manifest`, drop top-level `"files"` mirror, `diff_manifests` → `diff_files`, `DiffResult` → `@dataclass`) |
 | 0.8.1   | 2026-04-23 | Track 1A (Group 1): cli.py surgical hardening (resolve exit-code propagation, conflict_filename ValueError on empty device_id, GC malformed-blob visibility, quiet-path audit for autopull/autopush recovery + no-sources + fsync failures, total_failed surfacing) |
 | 0.8.0   | 2026-04-23 | Group 2 pre-flight + Track 2A: error-surface hardening (`_merge_manifests` tiebreak, `mm diag`, `mm init` two-tier guard, `mm recover --abandon-manifest`, `_error()` stderr routing, `list_devices` shape validation) |
@@ -52,15 +53,26 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   `walk_directory`/`build_manifest` backward-compat aliases, dropped top-level
   `"files"` mirror in v2 manifests, converted `DiffResult` to `@dataclass`,
   renamed `diff_manifests` → `diff_files`.
+- **Storage-key helpers + cli.py decomposition:** ✅ shipped in v0.8.3.
+  `storage/keys.py` (manifest_key/blob_key/device_key/parse_blob_key) with
+  path-traversal validation at construction; `_pull_core` decomposed into
+  `_select_devices`/`_prefetch_manifests`/`_preflight_conflicts`/
+  `_pull_one_source`/`_fsync_touched_parents`/`_print_pull_summary`;
+  `_apply_incoming_file` split into `_apply_write`/`_apply_merge`/
+  `_apply_conflict`. Two codex-found regressions (had_changes excluding
+  `unchanged`, per-file blob_key ValueError isolation) fixed before merge.
 - **Roadmap slimmed for v1.0 (2026-04-23).** Groups 5/6/7 (selective sync,
   mtime hash cache, three-way merge base) moved to Future — all were labeled
   P2/P3 with no user demand, and mtime cache's motivating problem was
   already solved by crypto v2. Style nits collapsed into pre-flight. Three
   follow-up items from TODOS.md slotted into new Track 1C. Now 4 groups / 7
   tracks / 19 tasks (down from 8 groups / 12 tracks / 38 tasks).
-- **Group 1 (Decomposition + DRY):** in progress. Pre-flight (constants.py +
-  storage key helpers) and Track 1A (`_pull_core` + `_apply_incoming_file`
-  decomposition) active.
+- **Group 1 (Decomposition + DRY):** Track 1A ✅ shipped in v0.8.3
+  (decomposition + storage-key portion of pre-flight). Remaining: pre-flight
+  `constants.py` extraction (CONFLICT_INFIX, CONFLICT_AGE_DAYS,
+  TOMBSTONE_TTL_DAYS, FORMAT_VERSION) and the cli.py literal-site migration;
+  Track 1B (walker + manifest + merge DRY) and Track 1C (post-1A cli.py
+  follow-ups) queued.
 - **Group 2 (Init flow + sync_log generalization + config polish):** queued.
 - **Group 3 (Test hygiene + style polish):** queued.
 - **Group 4 (Release infrastructure, GitHub Actions CI):** queued —
