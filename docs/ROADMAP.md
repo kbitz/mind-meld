@@ -77,7 +77,7 @@ _touches: src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/synclog.p
 - ✅ **`write_sync_log` keyed off source type** — `cli.py:1969, 2345-2347`: called only when `src_name == "claude"`; a user renaming their claude source broke sync-log entirely. Now gated on `src_type == "claude"` inside `_pull_one_source`. **Required widening `local_sources_map` from `dict[str, Path]` to `dict[str, dict]` carrying both `path` and `type`** (Issue 1A critical finding: `_pull_one_source` had no `src_cfg` handle before — blindly keying on type in the existing signature would have NameError'd at runtime). `_pull_one_source` now takes `src_type` explicitly. Regression pins: `test_renamed_claude_source_still_logs` (renamed-name + type-claude) and `test_claude_named_generic_does_not_log` (claude-name + type-generic). _src/mind_meld/cli.py, tests/test_track_2a.py._ (S) _Shipped in v0.8.7._
 - ✅ **`synclog.py` param rename `claude_dir` → `claude_base`** — `synclog.py:17`: NOT `base_path` as originally planned (Issue 1E: `base_path` would lie about scope since the function hardcodes `projects/` subdir lookup, a claude-wire-format detail). `claude_base` tells the truth: "the on-disk root of a claude-type source". Docstring explicitly documents the claude-only semantic and that the caller owns the type-gate. Added dedicated `tests/test_synclog.py` (15 unit tests) covering path handling, per-project grouping, all 5 change categories, metadata emission, and a regression pin that the old `claude_dir=` kwarg raises TypeError (so stale callers fail loudly, not silently to the wrong location). _src/mind_meld/synclog.py, tests/test_synclog.py (new), tests/test_integration.py._ (S) _Shipped in v0.8.7._
 
-### Track 2B: Config polish — eng-review follow-ups
+### Track 2B: Config polish — eng-review follow-ups ✅ shipped in v0.8.8
 _2 tasks · ~30 min (human) / ~15 min (CC) · low risk · [config.py, cli.py]_
 _touches: src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_integration.py_
 _Depends on: Track 2A landing first so the `cli.py:1076` config-read pattern is consolidated. Otherwise the refactor fights with in-flight init work._
@@ -86,8 +86,8 @@ _Scope revised 2026-04-24 after /plan-eng-review + Codex outside-voice challenge
 original "stop mutating config in `_apply_defaults`" fix was a broad runtime-semantics
 change for a single-writer bug. Narrowed to the actual leak site._
 
-- **Stop persisting canonicalized paths during the crypto-init backfill save** — `_init_crypto_session` (cli.py:281-287) currently calls `save_config(config)` on first-run-after-upgrade to persist `crypto.root_salt_fp` + `crypto.argon2_memory_kb`. Because `_apply_defaults` canonicalized paths in memory, that backfill silently rewrites the user's TOML (`~/.claude` → `/Users/alice/.claude`; symlinked paths dereferenced). The fresh-init save at cli.py:1386 is safe (writes what the user just typed). Fix: add a `config.patch_config_on_disk(updates, path=None)` helper that re-reads the raw TOML, shallow-merges only the provided `updates`, and calls `save_config`. Backfill uses the helper for the two crypto fields; all other fields stay byte-identical on disk. Keep in-memory canonicalization (`_apply_defaults`) unchanged — it's consumed correctly by 6 downstream readers and preserves the load-time cyclic-symlink → ConfigError invariant from CLAUDE.md. Codex flagged the underlying UX footgun during /plan-eng-review 2026-04-23 (v0.7.1's `.resolve()` addition extended it to symlink dereference). _src/mind_meld/config.py, src/mind_meld/cli.py, ~25 lines._ (S)
-- **Rename ConfigError prefix on non-init load paths** — config.py:61 and config.py:73 both prefix errors with `init:` (e.g. `init: failed to parse`, `init: failed to load`). These fire on any command that calls `_get_config` (push, pull, status, diag, recover...), not just `init`. Rename both to `config:`. Line 55's `init: config not found` stays — that branch genuinely points the user at running `mm init`. _src/mind_meld/config.py, tests/test_config.py, ~8 lines._ (S)
+- ✅ **Stop persisting canonicalized paths during the crypto-init backfill save** — `_init_crypto_session` (cli.py:281-287) currently calls `save_config(config)` on first-run-after-upgrade to persist `crypto.root_salt_fp` + `crypto.argon2_memory_kb`. Because `_apply_defaults` canonicalized paths in memory, that backfill silently rewrites the user's TOML (`~/.claude` → `/Users/alice/.claude`; symlinked paths dereferenced). The fresh-init save at cli.py:1386 is safe (writes what the user just typed). Fix: add a `config.patch_config_on_disk(updates, path=None)` helper that re-reads the raw TOML, shallow-merges only the provided `updates`, and calls `save_config`. Backfill uses the helper for the two crypto fields; all other fields stay byte-identical on disk. Keep in-memory canonicalization (`_apply_defaults`) unchanged — it's consumed correctly by 6 downstream readers and preserves the load-time cyclic-symlink → ConfigError invariant from CLAUDE.md. Codex flagged the underlying UX footgun during /plan-eng-review 2026-04-23 (v0.7.1's `.resolve()` addition extended it to symlink dereference). _src/mind_meld/config.py, src/mind_meld/cli.py, ~25 lines._ (S) _Shipped in v0.8.8._
+- ✅ **Rename ConfigError prefix on non-init load paths** — config.py:61 and config.py:73 both prefix errors with `init:` (e.g. `init: failed to parse`, `init: failed to load`). These fire on any command that calls `_get_config` (push, pull, status, diag, recover...), not just `init`. Rename both to `config:`. Line 55's `init: config not found` stays — that branch genuinely points the user at running `mm init`. _src/mind_meld/config.py, tests/test_config.py, ~8 lines._ (S) _Shipped in v0.8.8._
 
 ---
 
@@ -120,10 +120,10 @@ across machines," the absence of CI on main is a real risk surface.
 Parallel-safe with every other group.
 
 ### Track 4A: GitHub Actions CI workflow
-_1 task · ~1-2 hours (human) / ~10 min (CC) · low risk · [.github/workflows/]_
-_touches: .github/workflows/test.yml (new)_
+_1 task (expanded in /plan-ceo-review + /plan-eng-review 2026-04-24) · ~1-2 hours (human) / ~30 min (CC) · low risk · [.github/workflows/, pyproject.toml, README.md]_
+_touches: .github/workflows/ci.yml (new), pyproject.toml, README.md, one ruff-drift commit_
 
-- **Add `.github/workflows/test.yml`** — runs `pytest tests/` on every push to main and every PR. Matrix across the Python versions in `pyproject.toml` classifiers (3.11, 3.12). First CI run will surface latent flakes hiding in the local-only workflow; macOS keyring tests need stubbing or skipping on Linux runners via the existing `MINDMELD_PASSPHRASE` env-var path (`test_crypto.py`, `test_integration.py` reach into keyring indirectly via `store_passphrase_in_keyring`). _.github/workflows/test.yml, ~30 lines._ (S)
+- **Add `.github/workflows/ci.yml`** — single workflow with `test` + `lint` jobs, running `pytest tests/` + `ruff check`/`ruff format --check` on every push to main and every PR. Matrix: `ubuntu-latest` × {3.11, 3.12, 3.13} + `macos-latest` × {3.11, 3.13} = 5 test jobs (macos-3.12 excluded; macOS is ~5x slower and min/max Python is enough coverage). Adds ruff to dev-deps (exact-pinned), `[tool.ruff]` config in pyproject.toml, README CI badge, pip cache, concurrency-cancel-in-progress, `permissions: contents: read`, `timeout-minutes: 20` (test) / 10 (lint). macOS jobs include a keyring-backend assert-smoke; macOS+3.13 additionally builds + installs the wheel and runs `mm --version`. No path filter (prevents branch-protection `pending` footgun). conftest.py already autouse-stubs keyring so Linux tests are hermetic — the original "macOS keyring tests need stubbing" concern in this track was stale. _.github/workflows/ci.yml (~90 lines), pyproject.toml, README.md, one ruff-drift commit._ (S)
 
 ---
 
@@ -156,7 +156,7 @@ Group 3: Test hygiene + style polish
   └── Track 3A ........... ~0.5d .. 3 tasks .. tests (CLI-driven, rename, hoist) [✅ v0.8.10]
 
 Group 4: Release infrastructure
-  └── Track 4A ........... ~1-2 hr .. 1 task .. GitHub Actions CI
+  └── Track 4A ........... ~1-2 hr .. 1 task .. GitHub Actions CI (single ci.yml + ruff lint + 5-cell matrix)
 ```
 
 **Total: 4 groups · 7 tracks · 19 tasks (+ 4 pre-flight items)**

@@ -2,7 +2,56 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.8.10] - 2026-04-24
+## [0.8.11] - 2026-04-24
+
+Group 4 — Release infrastructure. Adds GitHub Actions CI on every push to
+main and every PR. Matrix covers both supported platforms (ubuntu + macos)
+across all classified Python versions (3.11, 3.12, 3.13) — 5 test jobs
+per run, with macos-3.12 excluded since macOS runners are ~5x slower and
+min/max coverage is sufficient. macOS jobs additionally verify that the
+real Keychain backend loads (assert-based smoke, not just print) and the
+macos+3.13 cell builds + installs the wheel + runs `mm --version` to catch
+packaging bugs that editable installs can't. A separate lint job runs
+`ruff check` + `ruff format --check` on ubuntu/3.12 to keep Group 3's
+style-polish discipline enforced going forward. No path filter (avoids
+the GitHub branch-protection pending-forever footgun codex flagged during
+outside-voice review). Scope shaped by `/plan-ceo-review` + codex outside
+voice + `/plan-eng-review` on 2026-04-24 — 8 expansions accepted, 1
+reversed after codex, 5 eng-review nits applied. 669 tests passing, ruff
+clean, zero behavior regressions.
+
+### Added
+- `.github/workflows/ci.yml` — single workflow with `test` + `lint` jobs,
+  5-cell test matrix (ubuntu × {3.11, 3.12, 3.13} + macos × {3.11, 3.13}),
+  pip cache via `actions/setup-python@v6`, `fail-fast: false`,
+  `timeout-minutes: 20` (test) / 10 (lint), `permissions: contents: read`,
+  concurrency cancel-in-progress keyed on PR number
+- macOS keyring backend assert-smoke: `python -c "import keyring; b =
+  str(keyring.get_keyring()); assert 'macOS' in b or 'Keychain' in b;
+  print(b)"` — fails loudly if the `fail.Keyring` fallback loads
+- Installed-artifact wheel smoke on macos+3.13 cell: `python -m build`
+  then `pip install --force-reinstall dist/*.whl` then `mm --version`
+- CI status badge in README.md (top of file)
+- `ruff` (exact-pinned to `0.15.12`) in `dev` optional-dependencies
+- `[tool.ruff]` config in pyproject.toml: `line-length = 100`,
+  `target-version = "py311"`, rule selection E/F/W/I (isort enforcement
+  locks in Group 3's import hoisting)
+
+### Changed
+- docs/ROADMAP.md Track 4A section — rewrites the baseline spec to match
+  what shipped (filename `ci.yml` not `test.yml`, 5-cell matrix with
+  macos-3.12 exclude, ruff lint job, macOS smoke tests, no path filter).
+  Deletes the stale `macOS keyring tests need stubbing or skipping on
+  Linux runners` note that was already solved by `tests/conftest.py`'s
+  autouse keyring stub
+- Auto-formatted 28 Python files under `src/` and `tests/` via `ruff
+  format` (89 imports reordered by isort, 29 unused imports removed, 9
+  unused local variables deleted, 1 line-too-long in `manifest.py` ASCII
+  diagram trimmed, 1 `noqa: E402` on the deliberate post-sys.path import
+  in `tests/benchmarks/test_kdf_timing.py`, 1 `l` → `line` rename). All
+  pure style — zero behavior changes; 669 tests pass unchanged
+
+
 
 Group 3 — Test hygiene + style polish. Closes the pre-1.0 cleanup Group
 dedicated to CLI-driven end-to-end coverage + lint polish. Pre-flight
