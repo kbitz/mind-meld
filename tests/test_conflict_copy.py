@@ -16,22 +16,33 @@ mm conflicts / resolve / gc --conflicts commands.
 
 from __future__ import annotations
 
+import hashlib
 import os
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import typer
+from typer.testing import CliRunner
 
 from mind_meld.cli import (
     CONFLICT_INFIX,
     _apply_incoming_file,
     _canonical_for_conflict,
     _find_conflict_files,
+    _gc_old_conflict_files,
     _predict_pull_outcome,
+    _resolve_interactive_loop,
+    app,
     conflict_filename,
 )
-from mind_meld.manifest import mtime_from_manifest, mtime_from_path
+from mind_meld.config import save_config
+from mind_meld.manifest import (
+    hash_file,
+    mtime_from_manifest,
+    mtime_from_path,
+    walk_claude_source,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -77,7 +88,6 @@ class TestApplyIncomingFile:
 
     def test_unchanged_when_local_matches_remote(self, tmp_path: Path) -> None:
         """[U] Local hash == remote hash -> no-op, idempotent."""
-        from mind_meld.manifest import hash_file
 
         rel = "memory/unchanged.md"
         local = tmp_path / rel
@@ -238,11 +248,9 @@ class TestApplyIncomingFile:
         local.write_bytes(b"local content")
         _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
 
-        from mind_meld.manifest import hash_file
 
         # Simulated remote info that _apply_incoming_file reaches via diff.
         # Apply #1 creates a conflict.
-        import hashlib
         remote_sha = hashlib.sha256(b"remote content").hexdigest()
         info = _remote_info(remote_sha, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
 
@@ -390,7 +398,6 @@ class TestGcOldConflictFiles:
     def test_reaps_files_older_than_cutoff(self, tmp_path: Path, monkeypatch) -> None:
         """_gc_old_conflict_files deletes .sync-conflict-* files older than
         CONFLICT_AGE_DAYS. Fresh files are preserved."""
-        from mind_meld.cli import CONFLICT_AGE_DAYS, _gc_old_conflict_files
 
         src = tmp_path / "src"
         (src / "memory").mkdir(parents=True)
@@ -418,7 +425,6 @@ class TestGcOldConflictFiles:
 
     def test_dry_run_does_not_delete(self, tmp_path: Path) -> None:
         """dry_run=True lists but preserves everything."""
-        from mind_meld.cli import _gc_old_conflict_files
 
         src = tmp_path / "src"
         (src / "memory").mkdir(parents=True)
@@ -505,7 +511,6 @@ class TestWalkerExcludesConflictRegression:
     layer that resolves the regression."""
 
     def test_resolved_conflict_file_does_not_propagate_on_next_walk(self, tmp_path: Path) -> None:
-        from mind_meld.manifest import walk_claude_source
 
         # Simulate what _apply_incoming_file leaves on disk after preserving
         # a local divergent version (Syncthing convention).
@@ -543,8 +548,6 @@ class TestResolveInteractiveLoop:
 
     def test_keep_canonical_deletes_conflict(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'c' — conflict file is deleted, canonical preserved."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
@@ -557,8 +560,6 @@ class TestResolveInteractiveLoop:
 
     def test_force_promotes_conflict_over_canonical(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'f' — conflict renamed to canonical (overwriting canonical)."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
@@ -571,8 +572,6 @@ class TestResolveInteractiveLoop:
 
     def test_keep_both_is_noop(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'b' (default) — both files remain unchanged."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "b")
@@ -584,8 +583,6 @@ class TestResolveInteractiveLoop:
 
     def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "a")
@@ -595,8 +592,6 @@ class TestResolveInteractiveLoop:
 
     def test_canonical_missing_promote(self, tmp_path: Path, monkeypatch) -> None:
         """Canonical is gone, user picks 'p' — conflict is renamed to recovered canonical path."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict content")
@@ -612,8 +607,6 @@ class TestResolveInteractiveLoop:
 
     def test_canonical_missing_delete(self, tmp_path: Path, monkeypatch) -> None:
         """Canonical is gone, user picks 'd' — conflict file is deleted."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict content")
@@ -625,8 +618,6 @@ class TestResolveInteractiveLoop:
 
     def test_walks_multiple_conflicts(self, tmp_path: Path, monkeypatch) -> None:
         """Given multiple hits, each is prompted sequentially."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         c1 = tmp_path / "a.md"
         c1.write_bytes(b"a-canon")
@@ -664,8 +655,6 @@ class TestResolveExitCode:
 
     def test_loop_returns_resolved_failed_tuple(self, tmp_path: Path, monkeypatch) -> None:
         """Happy path: 1 resolved, 0 failed."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         canonical = tmp_path / "f.md"
         canonical.write_bytes(b"canon")
@@ -678,8 +667,6 @@ class TestResolveExitCode:
 
     def test_loop_counts_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
         """Promote choice + rename raises OSError -> failed += 1, walk continues."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict")
@@ -695,8 +682,6 @@ class TestResolveExitCode:
 
     def test_loop_counts_unlink_failure(self, tmp_path: Path, monkeypatch) -> None:
         """Keep-canonical choice + unlink raises OSError -> failed += 1."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         canonical = tmp_path / "f.md"
         canonical.write_bytes(b"canon")
@@ -713,7 +698,6 @@ class TestResolveExitCode:
 
     def test_loop_counts_read_failure(self, tmp_path: Path, monkeypatch) -> None:
         """Read failure during diff display leaves the conflict unresolved -> failed."""
-        from mind_meld.cli import _resolve_interactive_loop
 
         canonical = tmp_path / "f.md"
         canonical.write_bytes(b"canon")
@@ -729,8 +713,6 @@ class TestResolveExitCode:
 
     def test_loop_mixed_pass_fail_continues_walk(self, tmp_path: Path, monkeypatch) -> None:
         """3 conflicts where the middle one fails. All three get prompted."""
-        import typer
-        from mind_meld.cli import _resolve_interactive_loop
 
         items = []
         for n in ("a", "b", "c"):
@@ -758,10 +740,6 @@ class TestResolveExitCode:
 
     def test_resolve_command_exits_1_on_any_failure(self, tmp_path: Path, monkeypatch) -> None:
         """End-to-end: resolve walks, encounters one rename failure, exits 1."""
-        import typer
-        from typer.testing import CliRunner
-        from mind_meld.cli import app
-        from mind_meld.config import save_config
 
         storage = tmp_path / "storage"
         storage.mkdir()
@@ -805,7 +783,6 @@ class TestPredictPullOutcome:
         assert _predict_pull_outcome("missing.md", info, tmp_path) == "write"
 
     def test_predicts_unchanged_for_matching_hash(self, tmp_path: Path) -> None:
-        from mind_meld.manifest import hash_file
         f = tmp_path / "a.md"
         f.write_bytes(b"same")
         info = _remote_info(hash_file(f), datetime.now(timezone.utc))

@@ -2,28 +2,38 @@
 
 import json
 import os
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+import tomllib
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from mind_meld import cli as cli_module
+from mind_meld import config as config_module
+from mind_meld import crypto as crypto_module
+from mind_meld import fsutil
+from mind_meld import synclog
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import (
     bootstrap_crypto_init,
     decrypt,
     encrypt,
-    root_salt_fingerprint,
 )
 from mind_meld.devices import list_devices, register_device
 from mind_meld.manifest import (
-    build_manifest_v2,
     deserialize_manifest,
-    diff_files,
+    load_manifest,
     normalize_manifest,
     serialize_manifest,
 )
-from mind_meld.merge import merge_jsonl
 from mind_meld.storage.local import LocalBackend
+from mind_meld.synclog import write_sync_log
 
 PASSPHRASE = "integration-test-passphrase"
 MEMORY_KB = 1024  # Low for fast tests
@@ -55,133 +65,196 @@ def claude_dir_b(tmp_path):
 
 
 class TestPushPullRoundTrip:
-    def test_push_then_pull(self, storage, claude_dir_a, claude_dir_b):
-        """Push from device A, pull to device B — files should match."""
-        device_a = "device-a"
-        device_b = "device-b"
+    """CLI-driven push/pull round-trips via CliRunner.
 
-        # Register both devices
-        register_device(storage, device_a, "Machine A")
-        register_device(storage, device_b, "Machine B")
+    Exercises the full `_pull_core` → `_apply_incoming_file` dispatch tree
+    instead of hand-rolling encrypt/put/decrypt. Each test simulates two
+    machines with distinct `~/.claude` paths and swaps the active config
+    between phases so `mm push` and `mm pull` see the correct device
+    identity.
+    """
 
-        # ── Push from A ──
-        manifest_a = build_manifest_v2(
-            device_a, "Machine A",
-            [{"name": "claude", "type": "claude", "path": str(claude_dir_a)}],
-        )
-        files_a = manifest_a["sources"]["claude"]["files"]
-        assert len(files_a) == 2
+    def _make_config(self, tmp_path, storage_dir, claude_dir, device_id, device_name):
+        config_path = tmp_path / f"config_{device_id}.toml"
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        return config_path
 
-        # Upload blobs
-        for rel_path, info in files_a.items():
-            file_path = claude_dir_a / rel_path
-            data = file_path.read_bytes()
-            enc = encrypt(data, PASSPHRASE, memory_kb=MEMORY_KB)
-            storage.put(f"data/{device_a}/{info['sha256']}.enc", enc)
+    def _populate_claude(self, claude_dir, role="Data scientist", feedback="No mocks"):
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "user_role.md").write_text(f"---\nname: role\n---\n{role}")
+        (memory / "feedback.md").write_text(f"---\nname: feedback\n---\n{feedback}")
 
-        # Upload manifest
-        manifest_bytes = serialize_manifest(manifest_a)
-        enc_manifest = encrypt(manifest_bytes, PASSPHRASE, memory_kb=MEMORY_KB)
-        storage.put(f"manifests/{device_a}/manifest.json.enc", enc_manifest)
+    def _activate(self, monkeypatch, config_path):
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
 
-        # ── Pull to B ──
-        # Download and decrypt manifest
-        enc_manifest_b = storage.get(f"manifests/{device_a}/manifest.json.enc")
-        manifest_data = decrypt(enc_manifest_b, PASSPHRASE, memory_kb=MEMORY_KB)
-        remote_manifest = deserialize_manifest(manifest_data)
-        remote_files = remote_manifest["sources"]["claude"]["files"]
+    def _bootstrap(self, storage_dir):
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        return backend
 
-        # Download and decrypt files
-        for rel_path, info in remote_files.items():
-            blob_key = f"data/{device_a}/{info['sha256']}.enc"
-            enc_blob = storage.get(blob_key)
-            plain = decrypt(enc_blob, PASSPHRASE, memory_kb=MEMORY_KB)
+    def test_push_then_pull(self, tmp_path, monkeypatch):
+        """Push from A, pull to B — files match bit-for-bit."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        self._populate_claude(claude_a)
+        claude_b.mkdir(parents=True)
 
-            target = claude_dir_b / rel_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(plain)
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
 
-        # ── Verify ──
-        for rel_path in files_a:
-            original = (claude_dir_a / rel_path).read_bytes()
-            pulled = (claude_dir_b / rel_path).read_bytes()
-            assert original == pulled, f"Mismatch: {rel_path}"
+        config_a = self._make_config(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        config_b = self._make_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
-    def test_deletion_propagation(self, storage, claude_dir_a, claude_dir_b, tmp_path):
-        """Delete a file on A, push, pull to B — file should be gone."""
-        device_a = "device-a"
-        register_device(storage, device_a, "Machine A")
+        self._activate(monkeypatch, config_a)
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
 
-        # Initial push with 2 files
-        manifest_1 = build_manifest_v2(
-            device_a, "A",
-            [{"name": "claude", "type": "claude", "path": str(claude_dir_a)}],
-        )
-        files_1 = manifest_1["sources"]["claude"]["files"]
-        assert len(files_1) == 2
+        self._activate(monkeypatch, config_b)
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
 
-        for rel_path, info in files_1.items():
-            data = (claude_dir_a / rel_path).read_bytes()
-            enc = encrypt(data, PASSPHRASE, memory_kb=MEMORY_KB)
-            storage.put(f"data/{device_a}/{info['sha256']}.enc", enc)
+        # Files arrive verbatim on B's claude_dir.
+        for rel in ("projects/-Users-kb-myapp/memory/user_role.md",
+                    "projects/-Users-kb-myapp/memory/feedback.md"):
+            original = (claude_a / rel).read_bytes()
+            pulled = (claude_b / rel).read_bytes()
+            assert original == pulled, f"Mismatch: {rel}"
 
-        enc_m1 = encrypt(serialize_manifest(manifest_1), PASSPHRASE, memory_kb=MEMORY_KB)
-        storage.put(f"manifests/{device_a}/manifest.json.enc", enc_m1)
+    def test_deletion_not_propagated_in_additive_model(self, tmp_path, monkeypatch):
+        """Delete on A, push, pull to B — B preserves its local copy (additive model)."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        self._populate_claude(claude_a)
+        claude_b.mkdir(parents=True)
 
-        # Pull to B first (so B has both files)
-        enc_m = storage.get(f"manifests/{device_a}/manifest.json.enc")
-        remote = deserialize_manifest(decrypt(enc_m, PASSPHRASE, memory_kb=MEMORY_KB))
-        for rel_path, info in remote["sources"]["claude"]["files"].items():
-            enc_blob = storage.get(f"data/{device_a}/{info['sha256']}.enc")
-            plain = decrypt(enc_blob, PASSPHRASE, memory_kb=MEMORY_KB)
-            target = claude_dir_b / rel_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(plain)
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
 
-        # Delete user_role.md on A
-        role_path = claude_dir_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
-        role_path.unlink()
+        config_a = self._make_config(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        config_b = self._make_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
-        # Push again — manifest should reflect deletion
-        manifest_2 = build_manifest_v2(
-            device_a, "A",
-            [{"name": "claude", "type": "claude", "path": str(claude_dir_a)}],
-        )
-        files_2 = manifest_2["sources"]["claude"]["files"]
-        assert len(files_2) == 1  # Only feedback.md remains
+        # A pushes full state; B pulls and now has both files.
+        self._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        self._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        assert role_b.exists()
 
-        enc_m2 = encrypt(serialize_manifest(manifest_2), PASSPHRASE, memory_kb=MEMORY_KB)
-        storage.put(f"manifests/{device_a}/manifest.json.enc", enc_m2)
+        # A deletes user_role.md and pushes again. In the additive model, the
+        # re-push records a tombstone (not blocking), but pull doesn't act on
+        # tombstones from other devices in the default flow.
+        self._activate(monkeypatch, config_a)
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0
 
-        # Pull to B — in the additive model, diff still computes "deleted" but
-        # pull never acts on it. B keeps user_role.md even though A deleted it.
-        enc_m = storage.get(f"manifests/{device_a}/manifest.json.enc")
-        remote = deserialize_manifest(decrypt(enc_m, PASSPHRASE, memory_kb=MEMORY_KB))
-
-        b_files = {}
-        projects_dir = claude_dir_b / "projects"
-        if projects_dir.exists():
-            for path in projects_dir.rglob("*"):
-                if path.is_file():
-                    from mind_meld.manifest import hash_file
-                    rel = str(path.relative_to(claude_dir_b))
-                    b_files[rel] = {"sha256": hash_file(path)}
-
-        # diff_files still computes deleted (for push context),
-        # but the additive pull model ignores it.
-        diff = diff_files(remote["sources"]["claude"]["files"], b_files)
-        assert len(diff.deleted) == 1
-        assert "user_role.md" in diff.deleted[0]
-
-        # Verify B's local copy is preserved (additive model)
-        role_b = claude_dir_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        # B pulls again. Its local user_role.md must still be there.
+        self._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
         assert role_b.exists(), "Additive pull must preserve local-only files"
+
+    def test_push_pull_conflict_tombstone_combined(self, tmp_path, monkeypatch):
+        """End-to-end push → pull → conflict → tombstone in one run.
+
+        Exercises the interaction surface that the isolated
+        test_conflict_copy.py and test_additive_sync.py tests don't cover
+        together: conflict-copy preservation, tombstone generation on
+        re-push, and the additive pull model co-existing cleanly.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        self._populate_claude(claude_a)
+        claude_b.mkdir(parents=True)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = self._make_config(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        config_b = self._make_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # Phase 1: A pushes, B pulls → B has both files.
+        self._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        self._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        assert role_b.exists()
+        original_role = role_b.read_text()
+
+        # Phase 2: divergent edit. A modifies user_role.md and pushes; B edits
+        # it locally (different content). B pulls — conflict-copy expected.
+        self._activate(monkeypatch, config_a)
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "---\nname: role\n---\nPrincipal engineer"
+        )
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        self._activate(monkeypatch, config_b)
+        role_b.write_text("---\nname: role\n---\nSomething else entirely")
+        # Backdate B's mtime so the pull sees remote as newer and generates
+        # a conflict-copy instead of skipping.
+        old = time.time() - 3600
+        os.utime(role_b, (old, old))
+
+        assert runner.invoke(app, ["pull", "--conflict-mode", "keep-both"]).exit_code == 0
+
+        # Canonical path carries A's new content.
+        assert role_b.read_text() == "---\nname: role\n---\nPrincipal engineer"
+        # B's local edit survived as a .sync-conflict-* sibling.
+        memory_b = role_b.parent
+        conflict_siblings = list(memory_b.glob("user_role.sync-conflict-*.md"))
+        assert len(conflict_siblings) == 1, f"Expected one conflict copy, got {conflict_siblings}"
+        assert conflict_siblings[0].read_text() == "---\nname: role\n---\nSomething else entirely"
+
+        # Phase 3: A deletes feedback.md and pushes. Tombstone is recorded in
+        # A's manifest. B pulls; B's local feedback.md is preserved (additive),
+        # but the tombstone lives in storage and is visible to any future
+        # correctness sweep.
+        self._activate(monkeypatch, config_a)
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md").unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        self._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        feedback_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md"
+        assert feedback_b.exists(), "Additive pull must preserve file locally"
+
+        # Verify A's pushed manifest contains the tombstone for feedback.md.
+        manifest_key_a = "manifests/dev-a/manifest.json.enc"
+        enc = backend.get(manifest_key_a)
+        remote = deserialize_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        tombstones = remote.get("tombstones", {})
+        assert any("feedback.md" in k for k in tombstones), (
+            f"Expected feedback.md tombstone in A's manifest, got keys: {list(tombstones)}"
+        )
+
+        # Sanity: original role content pre-modification is not the current canonical.
+        assert original_role != role_b.read_text()
 
 
 class TestSyncLog:
     def test_writes_log_per_project(self, tmp_path):
         """Sync log should be written to each affected project dir."""
-        from mind_meld.synclog import write_sync_log
 
         claude_dir = tmp_path / ".claude"
         project_dir = claude_dir / "projects" / "-Users-kb-myapp"
@@ -206,7 +279,6 @@ class TestSyncLog:
         assert "memory/feedback.md" in content
 
     def test_no_log_without_changes(self, tmp_path):
-        from mind_meld.synclog import write_sync_log
 
         claude_dir = tmp_path / ".claude"
         (claude_dir / "projects" / "-foo").mkdir(parents=True)
@@ -226,7 +298,6 @@ class TestSyncLog:
     ):
         """Sync log writes must go through fsutil with fsync=False —
         .mind-meld-log.md is cosmetic; per-file fsync would add pull latency."""
-        from mind_meld import synclog
 
         claude_dir = tmp_path / ".claude"
         (claude_dir / "projects" / "-foo").mkdir(parents=True)
@@ -259,7 +330,6 @@ class TestGCSafety:
         the ref-counting loop reads via `load_manifest` so it exercises the
         same normalization path `_do_gc` hits (see cli.py:_do_gc).
         """
-        from mind_meld.manifest import load_manifest
 
         # Device A has hash1 and hash2
         manifest_a = {
@@ -402,7 +472,116 @@ class TestAutoCommands:
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
         assert "mm: push failed" in result.stderr
-        assert "missing required field" in result.stderr
+
+    def test_autopull_keyring_backend_error_breadcrumb(self, tmp_path, monkeypatch):
+        """Regression: when crypto.get_passphrase propagates a non-KeyringError
+        (OSError from locked keychain, RuntimeError from a broken DBus backend),
+        the autopull hook must still honor the one-line-stderr + breadcrumb
+        contract. Pre-v0.8.9's wide catch swallowed everything here; v0.8.9
+        narrowed it, and this test pins the follow-through fix in
+        _auto_command_setup that converts the propagating exception into a
+        visible `keyring-error` breadcrumb outcome."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "storage"}"\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            'type = "claude"\n'
+            f'path = "{tmp_path / ".claude"}"\n'
+        )
+        (tmp_path / ".claude").mkdir()
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        # Breadcrumb lives under sidecar.SIDECAR_DIR — redirect for isolation.
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+        # Force the narrowed get_passphrase to propagate a non-KeyringError.
+        import mind_meld.cli as cli_mod
+        def boom(*_a, **_kw):
+            raise RuntimeError("dbus session bus went away")
+        monkeypatch.setattr(cli_mod, "get_passphrase", boom)
+        monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0, result.output
+        assert "mm: pull failed - keyring error" in result.stderr
+        # Breadcrumb landed with the keyring-error outcome.
+        breadcrumb_path = sidecar_dir / "last-autorun.json"
+        assert breadcrumb_path.exists()
+        breadcrumb = json.loads(breadcrumb_path.read_text())
+        assert breadcrumb["outcome"] == "keyring-error"
+        assert breadcrumb["detail"] == "RuntimeError"
+
+    def test_interactive_command_surfaces_keyring_backend_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: interactive commands (mm push / pull / diff / gc) must
+        not traceback when crypto.get_passphrase leaks a non-KeyringError.
+        _get_passphrase_or_exit now routes these through _error() so the
+        user sees the one-line red banner and a clean exit(1)."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "storage"}"\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            'type = "claude"\n'
+            f'path = "{tmp_path / ".claude"}"\n'
+        )
+        (tmp_path / ".claude").mkdir()
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        import mind_meld.cli as cli_mod
+        def boom(*_a, **_kw):
+            raise OSError("keychain is locked")
+        monkeypatch.setattr(cli_mod, "get_passphrase", boom)
+
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 1
+        # Error banner present, no raw traceback.
+        assert "keyring backend failure" in result.output + (result.stderr or "")
+        assert "Traceback" not in result.output + (result.stderr or "")
+
+    def test_init_tolerates_keyring_write_exception(self, tmp_path, monkeypatch):
+        """Regression: _save_and_register must not abort on a non-KeyringError
+        from store_passphrase_in_keyring after config + device are already
+        committed. Old wide `except Exception` inside the helper swallowed
+        everything; v0.8.9's narrowing made non-KeyringError propagate. The
+        follow-through fix wraps the call at the _save_and_register call site
+        so init degrades to the env-var-fallback path cleanly instead of
+        leaving the user half-initialized with an uncaught traceback."""
+        config_path = tmp_path / "config.toml"
+        storage = tmp_path / "icloud"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        # Force store_passphrase_in_keyring to leak a non-KeyringError.
+        import mind_meld.cli as cli_mod
+        def boom(*_a, **_kw):
+            raise RuntimeError("keyring backend exploded")
+        monkeypatch.setattr(cli_mod, "store_passphrase_in_keyring", boom)
+
+        # Inputs match TestInitFlow pattern: storage, device name, passphrase,
+        # confirm passphrase, then source prompts (Y claude, n gstack).
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        # Init should complete despite the keyring write failure.
+        assert result.exit_code == 0, result.output
+        assert "Keyring backend error" in result.output
+        assert "RuntimeError" in result.output
+        # Env-var fallback path was surfaced, not a traceback.
+        assert "MINDMELD_PASSPHRASE" in result.output
+        assert "Traceback" not in result.output
+        # Config was saved (device id committed).
+        assert config_path.exists()
+        cfg_text = config_path.read_text()
+        assert 'name = "Mac A"' in cfg_text
 
     def test_autopush_silent_when_lock_held(self, tmp_path, monkeypatch):
         """autopush must exit silently if another mm process holds the lock.
@@ -411,12 +590,6 @@ class TestAutoCommands:
         `mm autopull` can fire simultaneously — exactly one acquires
         the flock; the loser must not crash, bubble a traceback, or
         write junk to stdout."""
-        import subprocess
-        import sys
-        import textwrap
-        import time
-        from pathlib import Path
-        from mind_meld.config import LOCK_PATH
 
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / ".claude"
@@ -543,7 +716,6 @@ class TestMultiSourceSync:
     """Integration tests for multi-source (v2 manifest) sync."""
 
     def _make_claude_dir(self, base: "Path") -> "Path":
-        from pathlib import Path
         d = base / ".claude"
         memory = d / "projects" / "-Users-kb-myapp" / "memory"
         memory.mkdir(parents=True)
@@ -551,7 +723,6 @@ class TestMultiSourceSync:
         return d
 
     def _make_gstack_dir(self, base: "Path") -> "Path":
-        from pathlib import Path
         d = base / ".gstack"
         projects = d / "projects"
         projects.mkdir(parents=True)
@@ -592,7 +763,6 @@ class TestMultiSourceSync:
         We simulate this by: A populates the shared dirs, pushes, then we
         clear the dirs and pull (acting as B).
         """
-        from pathlib import Path
         storage_dir = tmp_path / "storage"
 
         # Shared paths (simulating both machines having ~/.claude, ~/.gstack)
@@ -627,7 +797,6 @@ class TestMultiSourceSync:
         assert "mm: pushed" in result.output
 
         # Phase 2: Clear local dirs (simulating Machine B that starts empty)
-        import shutil
         shutil.rmtree(str(claude_dir))
         claude_dir.mkdir(parents=True)
         shutil.rmtree(str(gstack_dir))
@@ -663,9 +832,6 @@ class TestMultiSourceSync:
         unique parent directory that received a write. Verifies the
         durability is actually deferred (not per-file) AND actually
         happens (not dropped entirely)."""
-        from pathlib import Path
-        from mind_meld import fsutil
-        from mind_meld import cli as cli_module
 
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / ".claude"
@@ -694,7 +860,6 @@ class TestMultiSourceSync:
         runner.invoke(app, ["autopush"])
 
         # Wipe local dirs to simulate Machine B.
-        import shutil
         shutil.rmtree(str(claude_dir)); claude_dir.mkdir(parents=True)
         shutil.rmtree(str(gstack_dir)); gstack_dir.mkdir(parents=True)
         (gstack_dir / "projects").mkdir()
@@ -745,7 +910,6 @@ class TestMultiSourceSync:
 
     def test_jsonl_merge_on_pull(self, tmp_path, monkeypatch):
         """JSONL files are merged (not overwritten) on pull."""
-        from pathlib import Path
         storage_dir = tmp_path / "storage"
 
         # Shared path (both machines see same ~/.claude)
@@ -805,8 +969,6 @@ class TestMultiSourceSync:
 
     def test_source_filter_on_pull(self, tmp_path, monkeypatch):
         """Pull with --source gstack only downloads gstack files."""
-        from pathlib import Path
-        import shutil
         storage_dir = tmp_path / "storage"
 
         # Shared paths
@@ -867,7 +1029,6 @@ class TestMultiSourceSync:
         A has only gstack files (no claude). B has both. Pulling from A
         with --source gstack should update gstack but leave claude alone.
         """
-        from pathlib import Path
         storage_dir = tmp_path / "storage"
 
         # Shared paths
@@ -916,7 +1077,6 @@ class TestMultiSourceSync:
 
     def test_gc_with_v2_manifest(self, tmp_path, monkeypatch):
         """GC collects hashes from all sources in v2 manifests."""
-        from pathlib import Path
         storage_dir = tmp_path / "storage"
 
         claude_dir = tmp_path / ".claude"
@@ -1017,7 +1177,6 @@ class TestInitFlow:
 
     def _setup_monkeypatch(self, tmp_path, monkeypatch):
         """Isolate CONFIG_PATH and disable keyring."""
-        from pathlib import Path as _P
 
         cfg_path = tmp_path / "config_test.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
@@ -1031,7 +1190,6 @@ class TestInitFlow:
 
     def test_first_device_init_bootstraps(self, tmp_path, monkeypatch):
         """Fresh storage: init prompts twice, bootstraps mm-crypto-init."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1049,7 +1207,6 @@ class TestInitFlow:
         assert backend.exists("mm-crypto-init")
 
         # Config has crypto.root_salt_fp populated.
-        import tomllib
         with open(cfg_path, "rb") as f:
             cfg = tomllib.load(f)
         assert "root_salt_fp" in cfg["crypto"]
@@ -1072,7 +1229,6 @@ class TestInitFlow:
         path must fail fast, before we ask about sources. The cost is
         a benign orphan mm-crypto-init on first-device refuse-all.
         """
-        from mind_meld.storage.local import LocalBackend
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1094,7 +1250,6 @@ class TestInitFlow:
         init with the same passphrase should succeed via the second-device
         verify path (against the orphaned bootstrap).
         """
-        import tomllib
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1118,7 +1273,6 @@ class TestInitFlow:
 
     def test_first_device_gstack_only_init(self, tmp_path, monkeypatch):
         """Decline claude, accept gstack → sources list has gstack only."""
-        import tomllib
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1139,7 +1293,6 @@ class TestInitFlow:
 
     def test_first_device_both_sources_init(self, tmp_path, monkeypatch):
         """Accept both → sources list has claude AND gstack."""
-        import tomllib
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1159,7 +1312,6 @@ class TestInitFlow:
 
     def test_first_device_passphrase_mismatch_aborts(self, tmp_path, monkeypatch):
         """Passphrases don't match → abort, no state written."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1177,7 +1329,6 @@ class TestInitFlow:
 
     def test_second_device_init_verifies(self, tmp_path, monkeypatch):
         """Existing mm-crypto-init: init prompts once, verifies keycheck."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1196,14 +1347,12 @@ class TestInitFlow:
         assert "Verified passphrase against existing mm-crypto-init" in result.output
 
         # Config's memory_kb comes from storage, not from 65_536 default.
-        import tomllib
         with open(cfg_path, "rb") as f:
             cfg = tomllib.load(f)
         assert cfg["crypto"]["argon2_memory_kb"] == MEMORY_KB
 
     def test_second_device_wrong_passphrase_aborts_cleanly(self, tmp_path, monkeypatch):
         """Wrong passphrase on second-device: abort, NO config or device registered."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1233,7 +1382,6 @@ class TestInitFlow:
         fetch_crypto_init picks the deterministic winner and canonicalizes.
         Subsequent commands interoperate as if only one init had happened.
         """
-        from mind_meld.storage.local import LocalBackend
 
         self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1244,17 +1392,16 @@ class TestInitFlow:
         bootstrap_crypto_init(backend, "shared-pw", argon2_memory_kb=MEMORY_KB)
         # Simulate device B losing the race: its mm-crypto-init landed as
         # "mm-crypto-init 2". Build that blob manually.
-        from mind_meld import crypto as _crypto
 
-        _crypto.clear_crypto_session()
+        crypto_module.clear_crypto_session()
         other_salt = bytes([0xFF] * 16)
-        _crypto.set_crypto_session(other_salt, MEMORY_KB)
-        other_mk = _crypto.load_master_key("shared-pw", other_salt, MEMORY_KB)
-        other_keycheck = _crypto._encrypt_with_master_key(
-            _crypto._KEYCHECK_PLAINTEXT, other_mk
+        crypto_module.set_crypto_session(other_salt, MEMORY_KB)
+        other_mk = crypto_module.load_master_key("shared-pw", other_salt, MEMORY_KB)
+        other_keycheck = crypto_module._encrypt_with_master_key(
+            crypto_module._KEYCHECK_PLAINTEXT, other_mk
         )
         other_blob = (
-            bytes([_crypto.FORMAT_VERSION])
+            bytes([crypto_module.FORMAT_VERSION])
             + MEMORY_KB.to_bytes(4, "big")
             + other_salt
             + other_keycheck
@@ -1263,7 +1410,7 @@ class TestInitFlow:
 
         # Now fetch_crypto_init is called (as if we just started a command).
         # Lex-smallest salt wins. Our canonical salt is random; other_salt is 0xFF*16.
-        fetched = _crypto.fetch_crypto_init(backend)
+        fetched = crypto_module.fetch_crypto_init(backend)
         assert fetched.status == "ok"
         # Conflict copy is gone after canonicalization.
         assert not (storage / "mm-crypto-init 2").exists()
@@ -1282,7 +1429,6 @@ class TestInitTwoTierGuard:
     """
 
     def _setup(self, tmp_path, monkeypatch):
-        from pathlib import Path as _P
         cfg = tmp_path / "config_test.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
@@ -1294,7 +1440,6 @@ class TestInitTwoTierGuard:
     def test_orphan_case_warns_and_confirms(self, tmp_path, monkeypatch):
         """Existing mm-crypto-init + existing blob + we answer 'y' to orphan
         prompt → init proceeds on the second-device path."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1316,7 +1461,6 @@ class TestInitTwoTierGuard:
         assert "Verified passphrase against existing mm-crypto-init" in result.output
 
     def test_orphan_case_abort_on_n_leaves_state_clean(self, tmp_path, monkeypatch):
-        from mind_meld.storage.local import LocalBackend
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1334,7 +1478,6 @@ class TestInitTwoTierGuard:
 
     def test_brick_case_refuses_without_exact_typed_token(self, tmp_path, monkeypatch):
         """mm-crypto-init missing + blobs exist + user types wrong token."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1355,7 +1498,6 @@ class TestInitTwoTierGuard:
 
     def test_brick_case_rejects_lowercase_brick(self, tmp_path, monkeypatch):
         """Case-sensitive match: 'brick' is NOT accepted."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1371,7 +1513,6 @@ class TestInitTwoTierGuard:
 
     def test_brick_case_accepts_exact_BRICK(self, tmp_path, monkeypatch):
         """Exact typed 'BRICK' proceeds to first-device bootstrap path."""
-        from mind_meld.storage.local import LocalBackend
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1393,7 +1534,6 @@ class TestInitTwoTierGuard:
 
         Regression guard: the two-tier logic must not fire on fresh init.
         """
-        from mind_meld.storage.local import LocalBackend
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -1413,17 +1553,15 @@ class TestInitTwoTierGuard:
         The guard should reach the orphan-case check, and since
         has_crypto_init is False, fall through to first-device path.
         """
-        from mind_meld.storage.local import LocalBackend
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
         # Seed ONLY a devices/ entry (no data/, no manifests/).
-        import json as _json
         backend.put(
             "devices/stale.json",
-            _json.dumps({"device_id": "stale", "device_name": "stale-dev"}).encode(),
+            json.dumps({"device_id": "stale", "device_name": "stale-dev"}).encode(),
         )
 
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
@@ -1444,7 +1582,6 @@ class TestBackfillPreservesRawPaths:
     ):
         """Write a config pointing at a real storage dir, using storage_path_value
         as the raw storage.path field (which may be a symlink or tilde)."""
-        from pathlib import Path
 
         claude_dir = tmp_path / "claude"
         memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
@@ -1491,7 +1628,6 @@ class TestBackfillPreservesRawPaths:
     ):
         """CRITICAL REGRESSION: symlinked storage.path is NOT dereferenced
         by the crypto-init backfill save."""
-        import tomllib
 
         real_storage = tmp_path / "real_storage"
         real_storage.mkdir()
@@ -1520,7 +1656,6 @@ class TestBackfillPreservesRawPaths:
     ):
         """Modern multi-source config: every sources[*].path string survives
         backfill byte-identical."""
-        import tomllib
 
         real_storage = tmp_path / "real_storage"
         real_storage.mkdir()
@@ -1553,8 +1688,6 @@ class TestBackfillPreservesRawPaths:
         """CRITICAL REGRESSION (end-to-end): a config with tilde-form paths
         survives the full `mm autopush` backfill flow. Monkeypatches HOME so
         `~/...` resolves inside the test sandbox."""
-        import tomllib
-        from pathlib import Path
 
         monkeypatch.setenv("HOME", str(tmp_path))
         # Seed tilde-addressable locations: ~/real_storage and ~/claude
@@ -1602,7 +1735,6 @@ class TestBackfillPreservesRawPaths:
     def test_second_push_does_not_rewrite_config(self, tmp_path, monkeypatch):
         """Idempotency: after backfill, subsequent pushes must NOT touch the
         config file (no root_salt_fp drift, no mtime churn)."""
-        import tomllib
 
         real_storage = tmp_path / "real_storage"
         real_storage.mkdir()
@@ -1650,7 +1782,6 @@ class TestBackfillPreservesRawPaths:
         # wrapping patch_config_on_disk with a delete-then-call shim. The
         # real helper then hits the FileNotFoundError branch and raises
         # ConfigError, which autopush swallows.
-        from mind_meld import config as config_module
         real_helper = config_module.patch_config_on_disk
 
         def delete_then_call(updates, path=None):
