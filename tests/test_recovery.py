@@ -12,12 +12,11 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest import mock
 
 import pytest
 import typer
 
+from mind_meld import sidecar
 from mind_meld.cli import (
     ManifestFetch,
     _collect_peer_tombstones,
@@ -29,7 +28,6 @@ from mind_meld.crypto import encrypt
 from mind_meld.devices import register_device
 from mind_meld.manifest import serialize_manifest
 from mind_meld.storage.local import LocalBackend
-from mind_meld import sidecar
 
 PASSPHRASE = "test-passphrase"
 MEMORY_KB = 1024
@@ -71,9 +69,7 @@ class TestRecoverPriorManifest:
         manifest = _make_manifest("abc", {"a.md": {"sha256": "aaa"}})
         fetch = ManifestFetch(status="ok", manifest=manifest)
 
-        out = _recover_prior_manifest(
-            fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True
-        )
+        out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is manifest
 
     def test_missing_returns_none(self, tmp_path):
@@ -82,9 +78,7 @@ class TestRecoverPriorManifest:
         backend = LocalBackend(tmp_path / "storage")
         fetch = ManifestFetch(status="missing")
 
-        out = _recover_prior_manifest(
-            fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True
-        )
+        out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is None
 
     def test_corrupt_recovers_from_sidecar(self, tmp_path, monkeypatch):
@@ -94,14 +88,14 @@ class TestRecoverPriorManifest:
         prior = _make_manifest(
             "abc",
             {"a.md": {"sha256": "aaa"}},
-            tombstones={"claude:gone.md": {"deleted_at": "2026-04-21T00:00:00+00:00", "device_id": "abc"}},
+            tombstones={
+                "claude:gone.md": {"deleted_at": "2026-04-21T00:00:00+00:00", "device_id": "abc"}
+            },
         )
         sidecar.write(prior)
 
         fetch = ManifestFetch(status="corrupt")
-        out = _recover_prior_manifest(
-            fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True
-        )
+        out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is not None
         assert out["tombstones"] == prior["tombstones"]
         assert out["sources"] == prior["sources"]
@@ -116,17 +110,17 @@ class TestRecoverPriorManifest:
         peer_manifest = _make_manifest(
             "peer1",
             {"a.md": {"sha256": "aaa"}},
-            tombstones={"claude:deleted-by-peer.md": {
-                "deleted_at": datetime.now(timezone.utc).isoformat(),
-                "device_id": "peer1",
-            }},
+            tombstones={
+                "claude:deleted-by-peer.md": {
+                    "deleted_at": datetime.now(timezone.utc).isoformat(),
+                    "device_id": "peer1",
+                }
+            },
         )
         _put_manifest(backend, "peer1", peer_manifest)
 
         fetch = ManifestFetch(status="corrupt")
-        out = _recover_prior_manifest(
-            fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True
-        )
+        out = _recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is not None
         # Synthetic prior: empty sources, peer tombstones carried forward
         assert out["sources"] == {}
@@ -140,9 +134,7 @@ class TestRecoverPriorManifest:
 
         fetch = ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
-            _recover_prior_manifest(
-                fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True
-            )
+            _recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
 
     def test_corrupt_peers_all_corrupt_refuses(self, tmp_path, monkeypatch):
         """Corrupt + no sidecar + peers exist but all corrupt → refuse."""
@@ -154,9 +146,7 @@ class TestRecoverPriorManifest:
 
         fetch = ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
-            _recover_prior_manifest(
-                fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True
-            )
+            _recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
 
 
 # ── sidecar ──────────────────────────────────────────────────────────
@@ -187,9 +177,7 @@ class TestSidecar:
         manifest = _make_manifest("device-a", {"a.md": {"sha256": "aaa"}})
         sidecar.write(manifest)
         # Same file, read by the "wrong" device id:
-        assert sidecar.read("device-b") is None, (
-            "sidecar.read must refuse cross-device reuse"
-        )
+        assert sidecar.read("device-b") is None, "sidecar.read must refuse cross-device reuse"
         # Same device id still works:
         assert sidecar.read("device-a") == manifest
 
@@ -198,9 +186,7 @@ class TestSidecar:
         corrupt — guards against tampered sidecars injecting fake tombstones."""
         _isolate_sidecar(monkeypatch, tmp_path)
         sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
-        sidecar.sidecar_path().write_text(
-            json.dumps({"device_id": "abc", "totally": "bogus"})
-        )
+        sidecar.sidecar_path().write_text(json.dumps({"device_id": "abc", "totally": "bogus"}))
         assert sidecar.read("abc") is None
 
     def test_read_rejects_non_dict_sources(self, tmp_path, monkeypatch):
@@ -209,11 +195,13 @@ class TestSidecar:
         _isolate_sidecar(monkeypatch, tmp_path)
         sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
         sidecar.sidecar_path().write_text(
-            json.dumps({
-                "device_id": "abc",
-                "sources": ["not a dict"],
-                "tombstones": {},
-            })
+            json.dumps(
+                {
+                    "device_id": "abc",
+                    "sources": ["not a dict"],
+                    "tombstones": {},
+                }
+            )
         )
         assert sidecar.read("abc") is None
 
@@ -254,9 +242,7 @@ class TestSidecar:
         sidecar.sidecar_path().write_bytes(b"\xff\xfe{ \x00")
         assert sidecar.read("abc") is None
 
-    def test_write_routes_through_fsutil_with_fsync_true(
-        self, tmp_path, monkeypatch
-    ):
+    def test_write_routes_through_fsutil_with_fsync_true(self, tmp_path, monkeypatch):
         """Sidecar.write must go through fsutil.atomic_write_bytes with
         fsync=True — durability is load-bearing for corrupt-manifest recovery."""
         _isolate_sidecar(monkeypatch, tmp_path)
@@ -274,9 +260,7 @@ class TestSidecar:
         assert calls[0]["fsync"] is True
         assert calls[0]["mode"] == 0o600
 
-    def test_write_raises_storage_error_on_filesystem_failure(
-        self, tmp_path, monkeypatch
-    ):
+    def test_write_raises_storage_error_on_filesystem_failure(self, tmp_path, monkeypatch):
         """Regression: sidecar.write raises StorageError (not OSError)
         after the fsutil migration. Callers must catch both."""
         from mind_meld.errors import StorageError
@@ -301,13 +285,19 @@ class TestCollectPeerTombstones:
         register_device(backend, "peer1", "peer-host")
 
         my_manifest = _make_manifest(
-            "me", {}, tombstones={"claude:mine.md": {"deleted_at": "2026-04-21", "device_id": "me"}},
+            "me",
+            {},
+            tombstones={"claude:mine.md": {"deleted_at": "2026-04-21", "device_id": "me"}},
         )
         peer_manifest = _make_manifest(
-            "peer1", {}, tombstones={"claude:theirs.md": {
-                "deleted_at": datetime.now(timezone.utc).isoformat(),
-                "device_id": "peer1",
-            }},
+            "peer1",
+            {},
+            tombstones={
+                "claude:theirs.md": {
+                    "deleted_at": datetime.now(timezone.utc).isoformat(),
+                    "device_id": "peer1",
+                }
+            },
         )
         _put_manifest(backend, "me", my_manifest)
         _put_manifest(backend, "peer1", peer_manifest)
@@ -333,9 +323,7 @@ class TestPushRewriteOnRecovery:
     the corrupt manifest stays in place and recovered tombstones never
     republish (Codex finding X1)."""
 
-    def test_corrupt_remote_healed_when_no_file_changes(
-        self, tmp_path, monkeypatch
-    ):
+    def test_corrupt_remote_healed_when_no_file_changes(self, tmp_path, monkeypatch):
         _isolate_sidecar(monkeypatch, tmp_path)
 
         storage_path = tmp_path / "icloud"
@@ -432,9 +420,7 @@ class TestPushRecoveryIntegration:
     recovers the deletion from the sidecar so Mac B pull still respects
     the deletion.'"""
 
-    def test_sidecar_recovery_preserves_deletion_across_corruption(
-        self, tmp_path, monkeypatch
-    ):
+    def test_sidecar_recovery_preserves_deletion_across_corruption(self, tmp_path, monkeypatch):
         _isolate_sidecar(monkeypatch, tmp_path)
 
         # Shared storage (simulates iCloud)
@@ -469,10 +455,7 @@ class TestPushRecoveryIntegration:
         # Sidecar was written — verify it captured the initial state.
         first_sidecar = sidecar.read("mac-a")
         assert first_sidecar is not None
-        assert any(
-            "kill.md" in path
-            for path in first_sidecar["sources"]["claude"]["files"].keys()
-        )
+        assert any("kill.md" in path for path in first_sidecar["sources"]["claude"]["files"].keys())
 
         # Delete kill.md locally, push again — tombstone should propagate.
         (claude_a / "projects" / "p1" / "memory" / "kill.md").unlink()
@@ -526,43 +509,61 @@ class TestListDevicesShapeValidation:
 
     def test_silent_variant_drops_parse_failure(self, tmp_path):
         from mind_meld.devices import list_devices
-        backend = self._with_entries(tmp_path, {
-            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
-            "bad.json": b"not-json{",
-        })
+
+        backend = self._with_entries(
+            tmp_path,
+            {
+                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "bad.json": b"not-json{",
+            },
+        )
         result = list_devices(backend)
         assert len(result) == 1
         assert result[0]["device_id"] == "g"
 
     def test_silent_variant_drops_non_dict_top_level(self, tmp_path):
         from mind_meld.devices import list_devices
-        backend = self._with_entries(tmp_path, {
-            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
-            "array.json": json.dumps(["not", "a", "dict"]).encode(),
-            "scalar.json": json.dumps(42).encode(),
-        })
+
+        backend = self._with_entries(
+            tmp_path,
+            {
+                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "array.json": json.dumps(["not", "a", "dict"]).encode(),
+                "scalar.json": json.dumps(42).encode(),
+            },
+        )
         result = list_devices(backend)
         assert len(result) == 1
         assert result[0]["device_id"] == "g"
 
     def test_silent_variant_drops_missing_device_id(self, tmp_path):
         from mind_meld.devices import list_devices
-        backend = self._with_entries(tmp_path, {
-            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
-            "noid.json": json.dumps({"device_name": "orphan"}).encode(),
-            "emptyid.json": json.dumps({"device_id": "", "device_name": "also-bad"}).encode(),
-            "nonstringid.json": json.dumps({"device_id": 42, "device_name": "numeric-id"}).encode(),
-        })
+
+        backend = self._with_entries(
+            tmp_path,
+            {
+                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "noid.json": json.dumps({"device_name": "orphan"}).encode(),
+                "emptyid.json": json.dumps({"device_id": "", "device_name": "also-bad"}).encode(),
+                "nonstringid.json": json.dumps(
+                    {"device_id": 42, "device_name": "numeric-id"}
+                ).encode(),
+            },
+        )
         result = list_devices(backend)
         assert len(result) == 1
         assert result[0]["device_id"] == "g"
 
     def test_silent_variant_drops_non_string_device_name(self, tmp_path):
         from mind_meld.devices import list_devices
-        backend = self._with_entries(tmp_path, {
-            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
-            "numname.json": json.dumps({"device_id": "x", "device_name": 42}).encode(),
-        })
+
+        backend = self._with_entries(
+            tmp_path,
+            {
+                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "numname.json": json.dumps({"device_id": "x", "device_name": 42}).encode(),
+            },
+        )
         result = list_devices(backend)
         assert len(result) == 1
 
@@ -570,11 +571,15 @@ class TestListDevicesShapeValidation:
         """cli.py's _list_devices_warn wires drops to stderr_console. We
         expect one warning line per dropped entry, none for good entries."""
         from mind_meld.cli import _list_devices_warn
-        backend = self._with_entries(tmp_path, {
-            "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
-            "bad-json.json": b"not-json{",
-            "bad-shape.json": json.dumps({"device_name": "missing-id"}).encode(),
-        })
+
+        backend = self._with_entries(
+            tmp_path,
+            {
+                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "bad-json.json": b"not-json{",
+                "bad-shape.json": json.dumps({"device_name": "missing-id"}).encode(),
+            },
+        )
         result = _list_devices_warn(backend)
         captured = capsys.readouterr()
         # Good entry survives.
@@ -602,13 +607,12 @@ class TestRecoverAbandonManifestDestructive:
     codex flagged during /plan-eng-review.
     """
 
-    def test_abandon_manifest_loses_pending_deletion_records(
-        self, tmp_path, monkeypatch
-    ):
+    def test_abandon_manifest_loses_pending_deletion_records(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
-        from mind_meld.cli import app, _fetch_remote_manifest
+
+        from mind_meld.cli import _fetch_remote_manifest, app
         from mind_meld.config import save_config
-        from mind_meld.crypto import bootstrap_crypto_init, set_crypto_session
+        from mind_meld.crypto import bootstrap_crypto_init
 
         runner = CliRunner()
 
@@ -643,9 +647,7 @@ class TestRecoverAbandonManifestDestructive:
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
-        monkeypatch.setattr(
-            "mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False
-        )
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         # Isolate sidecar + autorun breadcrumb to tmp.
@@ -686,9 +688,7 @@ class TestRecoverAbandonManifestDestructive:
         # state manifest, generate_tombstones() had nothing to compare
         # against, so no tombstone was emitted. That's the load-bearing
         # cost codex flagged: peers would see will-be-deleted.md come back.
-        assert not any(
-            "will-be-deleted.md" in key for key in tombstones
-        ), (
+        assert not any("will-be-deleted.md" in key for key in tombstones), (
             "Expected no tombstone for will-be-deleted.md after "
             "--abandon-manifest — if this assertion starts failing, the "
             "recover command has stopped being destructive and now "
@@ -698,9 +698,8 @@ class TestRecoverAbandonManifestDestructive:
 
         # Sanity: the quarantine artifact is still on disk for post-mortem.
         quarantine_siblings = [
-            p for p in (storage / "manifests" / "mac-a").glob("manifest.json.enc*")
+            p
+            for p in (storage / "manifests" / "mac-a").glob("manifest.json.enc*")
             if ".corrupt-" in p.name
         ]
-        assert quarantine_siblings, (
-            "quarantine file missing — crash-durability may have failed"
-        )
+        assert quarantine_siblings, "quarantine file missing — crash-durability may have failed"

@@ -9,17 +9,12 @@ These tests cover the behavioral changes in the additive-only sync model:
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-import pytest
-
-from mind_meld.crypto import decrypt, encrypt
+from mind_meld.crypto import encrypt
 from mind_meld.manifest import (
     TOMBSTONE_TTL_DAYS,
     collect_tombstones,
-    deserialize_manifest,
     diff_files,
     generate_tombstones,
     is_tombstoned,
@@ -43,10 +38,14 @@ class TestGenerateTombstones:
             "tombstones": {},
         }
         remote = {
-            "sources": {"claude": {"files": {
-                "a.md": {"sha256": "aaa"},
-                "b.md": {"sha256": "bbb"},
-            }}},
+            "sources": {
+                "claude": {
+                    "files": {
+                        "a.md": {"sha256": "aaa"},
+                        "b.md": {"sha256": "bbb"},
+                    }
+                }
+            },
             "tombstones": {},
         }
         tombstones = generate_tombstones(local, remote, "dev1")
@@ -221,16 +220,18 @@ class TestV1TombstoneMigrationEndToEnd:
     def test_load_then_is_tombstoned(self):
         from mind_meld.manifest import load_manifest
 
-        v1_blob = serialize_manifest({
-            "device_id": "peer1",
-            "files": {},
-            "tombstones": {
-                "memory/deleted.md": {
-                    "deleted_at": "2026-04-22T10:00:00+00:00",
-                    "device_id": "peer1",
+        v1_blob = serialize_manifest(
+            {
+                "device_id": "peer1",
+                "files": {},
+                "tombstones": {
+                    "memory/deleted.md": {
+                        "deleted_at": "2026-04-22T10:00:00+00:00",
+                        "device_id": "peer1",
+                    },
                 },
-            },
-        })
+            }
+        )
         loaded = load_manifest(v1_blob)
         # is_tombstoned uses src:path keys; if migration didn't fire, this
         # would silently return False and the deleted file would re-download.
@@ -249,18 +250,18 @@ class TestV1TombstoneMigrationEndToEnd:
         from mind_meld.manifest import load_manifest
 
         # A v1 prior manifest someone hand-created (or external tooling did).
-        v1_prior = serialize_manifest({
-            "device_id": "peer1",
-            "files": {},
-            "tombstones": {
-                "memory/deleted.md": {
-                    "deleted_at": (
-                        datetime.now(timezone.utc) - timedelta(days=1)
-                    ).isoformat(),
-                    "device_id": "peer1",
+        v1_prior = serialize_manifest(
+            {
+                "device_id": "peer1",
+                "files": {},
+                "tombstones": {
+                    "memory/deleted.md": {
+                        "deleted_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+                        "device_id": "peer1",
+                    },
                 },
-            },
-        })
+            }
+        )
         prior_remote = load_manifest(v1_prior)
 
         # Local has no record of the deleted file (matches the "deleted" state).
@@ -270,9 +271,7 @@ class TestV1TombstoneMigrationEndToEnd:
             "tombstones": {},
         }
 
-        next_tombstones = generate_tombstones(
-            local_manifest, prior_remote, "this-device"
-        )
+        next_tombstones = generate_tombstones(local_manifest, prior_remote, "this-device")
         # The migrated `claude:memory/deleted.md` must survive carry-forward
         # so the next push propagates the deletion to other devices.
         assert "claude:memory/deleted.md" in next_tombstones, (
@@ -290,34 +289,56 @@ class TestMergeManifestsAfterLoadRefactor:
         from mind_meld.cli import _merge_manifests
         from mind_meld.manifest import load_manifest
 
-        old_blob = serialize_manifest({
-            "device_id": "peer1",
-            "device_name": "old",
-            "timestamp": "2026-04-20T10:00:00+00:00",
-            "sources": {
-                "claude": {
-                    "base_path": "",
-                    "files": {"a.md": {"sha256": "old", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}},
+        old_blob = serialize_manifest(
+            {
+                "device_id": "peer1",
+                "device_name": "old",
+                "timestamp": "2026-04-20T10:00:00+00:00",
+                "sources": {
+                    "claude": {
+                        "base_path": "",
+                        "files": {
+                            "a.md": {
+                                "sha256": "old",
+                                "size": 1,
+                                "mtime": "2026-04-20T10:00:00+00:00",
+                            }
+                        },
+                    },
                 },
-            },
-            "tombstones": {
-                "claude:b.md": {"deleted_at": "2026-04-20T10:00:00+00:00", "device_id": "peer1"},
-            },
-        })
-        new_blob = serialize_manifest({
-            "device_id": "peer1",
-            "device_name": "new",
-            "timestamp": "2026-04-22T10:00:00+00:00",
-            "sources": {
-                "claude": {
-                    "base_path": "",
-                    "files": {"a.md": {"sha256": "new", "size": 2, "mtime": "2026-04-22T10:00:00+00:00"}},
+                "tombstones": {
+                    "claude:b.md": {
+                        "deleted_at": "2026-04-20T10:00:00+00:00",
+                        "device_id": "peer1",
+                    },
                 },
-            },
-            "tombstones": {
-                "claude:b.md": {"deleted_at": "2026-04-22T10:00:00+00:00", "device_id": "peer1"},
-            },
-        })
+            }
+        )
+        new_blob = serialize_manifest(
+            {
+                "device_id": "peer1",
+                "device_name": "new",
+                "timestamp": "2026-04-22T10:00:00+00:00",
+                "sources": {
+                    "claude": {
+                        "base_path": "",
+                        "files": {
+                            "a.md": {
+                                "sha256": "new",
+                                "size": 2,
+                                "mtime": "2026-04-22T10:00:00+00:00",
+                            }
+                        },
+                    },
+                },
+                "tombstones": {
+                    "claude:b.md": {
+                        "deleted_at": "2026-04-22T10:00:00+00:00",
+                        "device_id": "peer1",
+                    },
+                },
+            }
+        )
         old = load_manifest(old_blob)
         new = load_manifest(new_blob)
 
@@ -326,10 +347,7 @@ class TestMergeManifestsAfterLoadRefactor:
         assert merged["sources"]["claude"]["files"]["a.md"]["sha256"] == "new"
         # Tombstone: newest-timestamp wins (this is the load-bearing
         # asymmetry from SPEC.md "Merge invariants").
-        assert (
-            merged["tombstones"]["claude:b.md"]["deleted_at"]
-            == "2026-04-22T10:00:00+00:00"
-        )
+        assert merged["tombstones"]["claude:b.md"]["deleted_at"] == "2026-04-22T10:00:00+00:00"
 
     def test_merge_output_has_no_top_level_files_key(self):
         """REGRESSION (Track 1B): v2 writers do not emit a redundant top-level
@@ -345,19 +363,29 @@ class TestMergeManifestsAfterLoadRefactor:
         # Simulate a pre-Track-1B manifest that still carries the mirror.
         # After load_manifest (which normalizes), the mirror is scrubbed —
         # but if someone regresses normalize_manifest, this test catches it.
-        blob = serialize_manifest({
-            "device_id": "peer1",
-            "device_name": "old",
-            "timestamp": "2026-04-20T10:00:00+00:00",
-            "files": {"a.md": {"sha256": "stale", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}},
-            "sources": {
-                "claude": {
-                    "base_path": "",
-                    "files": {"a.md": {"sha256": "fresh", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}},
+        blob = serialize_manifest(
+            {
+                "device_id": "peer1",
+                "device_name": "old",
+                "timestamp": "2026-04-20T10:00:00+00:00",
+                "files": {
+                    "a.md": {"sha256": "stale", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}
                 },
-            },
-            "tombstones": {},
-        })
+                "sources": {
+                    "claude": {
+                        "base_path": "",
+                        "files": {
+                            "a.md": {
+                                "sha256": "fresh",
+                                "size": 1,
+                                "mtime": "2026-04-20T10:00:00+00:00",
+                            }
+                        },
+                    },
+                },
+                "tombstones": {},
+            }
+        )
         loaded = load_manifest(blob)
         # Read-path invariant: scrubbed on v2 passthrough.
         assert "files" not in loaded
@@ -379,35 +407,39 @@ class TestMergeManifestsAfterLoadRefactor:
         could briefly see different merged states for the same pair of
         conflict copies.
         """
-        from mind_meld.cli import _merge_manifests, _manifest_content_hash
+        from mind_meld.cli import _manifest_content_hash, _merge_manifests
         from mind_meld.manifest import load_manifest
 
         same_ts = "2026-04-22T10:00:00+00:00"
 
-        a_blob = serialize_manifest({
-            "device_id": "peer1",
-            "device_name": "hostA",
-            "timestamp": same_ts,
-            "sources": {
-                "claude": {
-                    "base_path": "",
-                    "files": {"x.md": {"sha256": "aaaa", "size": 1, "mtime": same_ts}},
+        a_blob = serialize_manifest(
+            {
+                "device_id": "peer1",
+                "device_name": "hostA",
+                "timestamp": same_ts,
+                "sources": {
+                    "claude": {
+                        "base_path": "",
+                        "files": {"x.md": {"sha256": "aaaa", "size": 1, "mtime": same_ts}},
+                    },
                 },
-            },
-            "tombstones": {},
-        })
-        b_blob = serialize_manifest({
-            "device_id": "peer1",
-            "device_name": "hostB",
-            "timestamp": same_ts,
-            "sources": {
-                "claude": {
-                    "base_path": "",
-                    "files": {"y.md": {"sha256": "bbbb", "size": 1, "mtime": same_ts}},
+                "tombstones": {},
+            }
+        )
+        b_blob = serialize_manifest(
+            {
+                "device_id": "peer1",
+                "device_name": "hostB",
+                "timestamp": same_ts,
+                "sources": {
+                    "claude": {
+                        "base_path": "",
+                        "files": {"y.md": {"sha256": "bbbb", "size": 1, "mtime": same_ts}},
+                    },
                 },
-            },
-            "tombstones": {},
-        })
+                "tombstones": {},
+            }
+        )
         a = load_manifest(a_blob)
         b = load_manifest(b_blob)
 
@@ -444,7 +476,13 @@ class TestConflictManifestMerge:
         backend.put("manifests/abc/manifest.json.enc", b"data")
 
         # Create an unrelated .enc file with Dropbox conflict pattern
-        unrelated = tmp_path / "storage" / "manifests" / "abc" / "other.json (conflicted copy 2026-03-18).enc"
+        unrelated = (
+            tmp_path
+            / "storage"
+            / "manifests"
+            / "abc"
+            / "other.json (conflicted copy 2026-03-18).enc"
+        )
         unrelated.write_bytes(b"unrelated")
 
         conflicts = backend.find_conflict_copies("manifests/abc/manifest.json.enc")
@@ -457,7 +495,11 @@ class TestConflictManifestMerge:
         backend = LocalBackend(tmp_path / "storage")
 
         # Write a valid canonical manifest
-        manifest = {"device_id": "abc", "timestamp": "2026-01-01T00:00:00Z", "files": {"a.md": {"sha256": "aaa", "size": 10, "mtime": "2026-01-01"}}}
+        manifest = {
+            "device_id": "abc",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "files": {"a.md": {"sha256": "aaa", "size": 10, "mtime": "2026-01-01"}},
+        }
         enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
         backend.put("manifests/abc/manifest.json.enc", enc)
 
@@ -560,7 +602,6 @@ class TestAutoGC:
     def test_gc_returns_count(self, tmp_path):
         """_do_gc should return the number of orphaned blobs deleted."""
         from mind_meld.cli import _do_gc
-        from mind_meld.config import save_config
         from mind_meld.devices import register_device
 
         storage = LocalBackend(tmp_path / "storage")
@@ -582,7 +623,12 @@ class TestAutoGC:
             "device_name": "Test",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "files": {"a.md": {"sha256": sha_ref, "size": 10, "mtime": "2026-01-01"}},
-            "sources": {"claude": {"base_path": "", "files": {"a.md": {"sha256": sha_ref, "size": 10, "mtime": "2026-01-01"}}}},
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"a.md": {"sha256": sha_ref, "size": 10, "mtime": "2026-01-01"}},
+                }
+            },
             "tombstones": {},
         }
         enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)

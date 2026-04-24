@@ -137,9 +137,7 @@ def atomic_write_bytes(
                 os.unlink(tmp_name)
             except OSError:
                 pass
-        raise StorageError(
-            f"storage: atomic_write_bytes({path}) — {e}"
-        ) from e
+        raise StorageError(f"storage: atomic_write_bytes({path}) — {e}") from e
 
 
 def fsync_dir(path: Path) -> None:
@@ -160,14 +158,10 @@ def fsync_dir(path: Path) -> None:
     try:
         fd = os.open(str(path), os.O_RDONLY)
     except OSError as e:
-        raise StorageError(
-            f"storage: fsync_dir open({path}) — {e}"
-        ) from e
+        raise StorageError(f"storage: fsync_dir open({path}) — {e}") from e
     try:
         _fsync_fd(fd)
     except OSError as e:
-        raise StorageError(
-            f"storage: fsync_dir fsync({path}) — {e}"
-        ) from e
+        raise StorageError(f"storage: fsync_dir fsync({path}) — {e}") from e
     finally:
         os.close(fd)

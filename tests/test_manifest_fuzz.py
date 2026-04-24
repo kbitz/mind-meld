@@ -30,16 +30,17 @@ from mind_meld.manifest import (
     serialize_manifest,
 )
 
-
 # Strategies ----------------------------------------------------------------
 
 # Valid tombstone values are always dicts. Strategy used for round-trip
 # tests where load_manifest must succeed.
 valid_tombstone_value_strategy = st.one_of(
-    st.fixed_dictionaries({
-        "deleted_at": st.text(min_size=0, max_size=40),
-        "device_id": st.text(min_size=0, max_size=40),
-    }),
+    st.fixed_dictionaries(
+        {
+            "deleted_at": st.text(min_size=0, max_size=40),
+            "device_id": st.text(min_size=0, max_size=40),
+        }
+    ),
     st.dictionaries(st.text(min_size=0, max_size=10), st.text(min_size=0, max_size=20), max_size=4),
 )
 
@@ -57,52 +58,65 @@ wild_tombstone_value_strategy = st.one_of(
 # Tombstone keys span "obviously normalized", "clearly bare path", and "weird".
 tombstone_key_strategy = st.one_of(
     st.text(min_size=1, max_size=60).filter(lambda s: ":" not in s),  # bare paths
-    st.tuples(st.sampled_from(["claude", "gstack", "other"]), st.text(min_size=1, max_size=40))
-    .map(lambda t: f"{t[0]}:{t[1]}"),  # already-normalized
+    st.tuples(st.sampled_from(["claude", "gstack", "other"]), st.text(min_size=1, max_size=40)).map(
+        lambda t: f"{t[0]}:{t[1]}"
+    ),  # already-normalized
     st.text(min_size=0, max_size=80),  # anything-goes including empty + multi-colon
 )
 
 source_files_strategy = st.dictionaries(
     st.text(min_size=1, max_size=40),
-    st.fixed_dictionaries({
-        "sha256": st.text(min_size=64, max_size=64, alphabet="0123456789abcdef"),
-        "size": st.integers(min_value=0, max_value=10**9),
-        "mtime": st.text(min_size=0, max_size=40),
-    }),
+    st.fixed_dictionaries(
+        {
+            "sha256": st.text(min_size=64, max_size=64, alphabet="0123456789abcdef"),
+            "size": st.integers(min_value=0, max_value=10**9),
+            "mtime": st.text(min_size=0, max_size=40),
+        }
+    ),
     max_size=6,
 )
 
-v2_source_strategy = st.fixed_dictionaries({
-    "base_path": st.text(min_size=0, max_size=80),
-    "files": source_files_strategy,
-})
+v2_source_strategy = st.fixed_dictionaries(
+    {
+        "base_path": st.text(min_size=0, max_size=80),
+        "files": source_files_strategy,
+    }
+)
 
-v2_manifest_strategy = st.fixed_dictionaries({
-    "device_id": st.text(min_size=1, max_size=40),
-    "device_name": st.text(min_size=0, max_size=40),
-    "timestamp": st.text(min_size=0, max_size=40),
-    # Track 1B: v2 writers no longer emit a redundant top-level "files".
-    # `normalize_manifest` strips it on passthrough; don't generate it here
-    # so fuzz shapes match what the current writers emit.
-    "sources": st.dictionaries(st.sampled_from(["claude", "gstack"]), v2_source_strategy, max_size=2),
-    # Round-trip tests use VALID tombstone values; load_manifest rejects garbage.
-    "tombstones": st.dictionaries(tombstone_key_strategy, valid_tombstone_value_strategy, max_size=6),
-})
+v2_manifest_strategy = st.fixed_dictionaries(
+    {
+        "device_id": st.text(min_size=1, max_size=40),
+        "device_name": st.text(min_size=0, max_size=40),
+        "timestamp": st.text(min_size=0, max_size=40),
+        # Track 1B: v2 writers no longer emit a redundant top-level "files".
+        # `normalize_manifest` strips it on passthrough; don't generate it here
+        # so fuzz shapes match what the current writers emit.
+        "sources": st.dictionaries(
+            st.sampled_from(["claude", "gstack"]), v2_source_strategy, max_size=2
+        ),
+        # Round-trip tests use VALID tombstone values; load_manifest rejects garbage.
+        "tombstones": st.dictionaries(
+            tombstone_key_strategy, valid_tombstone_value_strategy, max_size=6
+        ),
+    }
+)
 
-v1_manifest_strategy = st.fixed_dictionaries({
-    "device_id": st.text(min_size=1, max_size=40),
-    "device_name": st.text(min_size=0, max_size=40),
-    "timestamp": st.text(min_size=0, max_size=40),
-    "base_path": st.text(min_size=0, max_size=80),
-    "files": source_files_strategy,
-    # Bare-path tombstones that the v1→v2 promotion is supposed to migrate.
-    # Values must be dicts so load_manifest's hardened shape check accepts them.
-    "tombstones": st.dictionaries(
-        st.text(min_size=1, max_size=60).filter(lambda s: ":" not in s),
-        valid_tombstone_value_strategy,
-        max_size=6,
-    ),
-})
+v1_manifest_strategy = st.fixed_dictionaries(
+    {
+        "device_id": st.text(min_size=1, max_size=40),
+        "device_name": st.text(min_size=0, max_size=40),
+        "timestamp": st.text(min_size=0, max_size=40),
+        "base_path": st.text(min_size=0, max_size=80),
+        "files": source_files_strategy,
+        # Bare-path tombstones that the v1→v2 promotion is supposed to migrate.
+        # Values must be dicts so load_manifest's hardened shape check accepts them.
+        "tombstones": st.dictionaries(
+            st.text(min_size=1, max_size=60).filter(lambda s: ":" not in s),
+            valid_tombstone_value_strategy,
+            max_size=6,
+        ),
+    }
+)
 
 arbitrary_dict_strategy = st.dictionaries(
     st.text(min_size=0, max_size=20),
@@ -120,6 +134,7 @@ arbitrary_dict_strategy = st.dictionaries(
 
 # Tests ---------------------------------------------------------------------
 
+
 @given(arbitrary_dict_strategy)
 @settings(max_examples=200)
 def test_normalize_never_crashes_on_arbitrary_dict(d: dict) -> None:
@@ -136,7 +151,9 @@ def test_normalize_is_idempotent(d: dict) -> None:
     once_copy = json.loads(json.dumps(once, default=str))
     twice = normalize_manifest(once_copy)
     # Compare via JSON round-trip to dodge in-place mutation aliasing.
-    assert json.dumps(once, sort_keys=True, default=str) == json.dumps(twice, sort_keys=True, default=str)
+    assert json.dumps(once, sort_keys=True, default=str) == json.dumps(
+        twice, sort_keys=True, default=str
+    )
 
 
 @given(v2_manifest_strategy)

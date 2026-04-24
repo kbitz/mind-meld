@@ -11,17 +11,17 @@ import secrets
 import sys
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections.abc import Callable, Iterator
 from typing import Any, Literal
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from mind_meld import __version__, fsutil
+from mind_meld import __version__, fsutil, sidecar
 from mind_meld.config import (
     CONFIG_PATH,
     DEFAULT_ARGON2_MEMORY_KB,
@@ -49,7 +49,14 @@ from mind_meld.crypto import (
     verify_passphrase,
 )
 from mind_meld.devices import _list_devices_impl, register_device, update_last_seen
-from mind_meld.errors import ConfigError, CryptoError, LockError, ManifestError, MindMeldError, StorageError
+from mind_meld.errors import (
+    ConfigError,
+    CryptoError,
+    LockError,
+    ManifestError,
+    MindMeldError,
+    StorageError,
+)
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -75,12 +82,10 @@ from mind_meld.storage.keys import (
     DEVICES_PREFIX,
     MANIFESTS_PREFIX,
     blob_key,
-    device_key,
     manifest_key,
     parse_blob_key,
 )
 from mind_meld.storage.local import LocalBackend
-from mind_meld import sidecar
 from mind_meld.synclog import write_sync_log
 
 ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
@@ -102,6 +107,7 @@ class ManifestFetch:
                 state (push, gc) must NOT silently treat this as missing
                 because doing so drops tombstones / orphans blobs.
     """
+
     status: FetchStatus
     manifest: dict | None = None
 
@@ -128,6 +134,7 @@ class PullResult:
     (partition risk: if a user renames a source, peers' data stops syncing
     silently). One increment per (device, source) pair per pull, not per file.
     """
+
     total_written: int = 0
     total_merged: int = 0
     total_skipped: int = 0
@@ -154,11 +161,13 @@ class PullResult:
 @dataclass
 class PushResult:
     """Result of a push operation."""
+
     total_new: int = 0
     total_modified: int = 0
     total_deleted: int = 0
     bytes_transferred: int = 0
     elapsed: float = 0.0
+
 
 app = typer.Typer(
     name="mm",
@@ -217,10 +226,10 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     `devices.list_devices` — that variant is intentionally silent so
     programmatic consumers don't spam stderr.
     """
+
     def _warn(key: str, reason: str) -> None:
-        stderr_console.print(
-            f"[yellow]Warning:[/yellow] dropped device entry {key} — {reason}"
-        )
+        stderr_console.print(f"[yellow]Warning:[/yellow] dropped device entry {key} — {reason}")
+
     return _list_devices_impl(backend, on_drop=_warn)
 
 
@@ -292,9 +301,7 @@ def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -
         )
 
     set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
-    master_key = load_master_key(
-        passphrase, fetch.root_salt, fetch.argon2_memory_kb
-    )
+    master_key = load_master_key(passphrase, fetch.root_salt, fetch.argon2_memory_kb)
     assert fetch.keycheck_blob is not None
     verify_passphrase(master_key, fetch.keycheck_blob)
 
@@ -328,9 +335,7 @@ def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -
     return fetch.argon2_memory_kb
 
 
-def _make_manifest_validator(
-    passphrase: str, memory_kb: int
-) -> Callable[[Path], bool]:
+def _make_manifest_validator(passphrase: str, memory_kb: int) -> Callable[[Path], bool]:
     """Return a predicate that accepts `path` only if it decrypts AND
     deserializes as a Mind Meld manifest.
 
@@ -346,6 +351,7 @@ def _make_manifest_validator(
     iCloud sync removed it) — the candidate is simply treated as "not a real
     conflict" rather than crashing the caller.
     """
+
     def is_valid(path: Path) -> bool:
         try:
             enc_data = path.read_bytes()
@@ -367,6 +373,7 @@ def _make_manifest_validator(
             # passphrase after `mm init`, corrupt ciphertext, unexpected
             # argon2 error) must never crash the whole recovery sweep.
             return False
+
     return is_valid
 
 
@@ -488,9 +495,7 @@ def _recover_prior_manifest(
         return sidecar_manifest
 
     # No sidecar — try peer fallback
-    peer_tombstones = _collect_peer_tombstones(
-        backend, device_id, passphrase, memory_kb
-    )
+    peer_tombstones = _collect_peer_tombstones(backend, device_id, passphrase, memory_kb)
     if peer_tombstones:
         msg = (
             "remote manifest corrupt and no local sidecar; recovered "
@@ -542,12 +547,8 @@ def _collect_peer_tombstones(
             continue
         # Per-peer try/except — one flaky peer must not abort recovery.
         try:
-            peer_fetch = _fetch_remote_manifest(
-                backend, did, passphrase, memory_kb
-            )
-            peer_manifests[did] = (
-                peer_fetch.manifest if peer_fetch.is_ok else None
-            )
+            peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+            peer_manifests[did] = peer_fetch.manifest if peer_fetch.is_ok else None
         except (OSError, MindMeldError):
             peer_manifests[did] = None
 
@@ -570,6 +571,7 @@ def _manifest_content_hash(manifest: dict) -> str:
     """
     import hashlib
     import json
+
     canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -730,7 +732,9 @@ def _print_pull_prediction(diff: DiffResult, base_path: Path, src_name: str) -> 
     for path in sorted(buckets["skip"]):
         console.print(f"    [dim]= skip[/dim]     {path} (local newer)")
     for path in sorted(buckets["conflict"]):
-        console.print(f"    [yellow]! conflict[/yellow] {path} (would rename local to .sync-conflict-*)")
+        console.print(
+            f"    [yellow]! conflict[/yellow] {path} (would rename local to .sync-conflict-*)"
+        )
     for path in sorted(buckets["unchanged"]):
         console.print(f"    [dim]  unchanged[/dim] {path}")
 
@@ -821,13 +825,16 @@ def _prompt_conflict_choice(
         local_text = ["<unreadable>"]
     remote_text = remote_data.decode("utf-8", errors="replace").splitlines()
 
-    diff = list(difflib.unified_diff(
-        local_text, remote_text,
-        fromfile=f"local {rel_path}",
-        tofile=f"remote {rel_path}",
-        lineterm="",
-        n=3,
-    ))
+    diff = list(
+        difflib.unified_diff(
+            local_text,
+            remote_text,
+            fromfile=f"local {rel_path}",
+            tofile=f"remote {rel_path}",
+            lineterm="",
+            n=3,
+        )
+    )
 
     console.print(f"\n[bold yellow]Conflict:[/bold yellow] {rel_path}")
     if diff:
@@ -844,8 +851,7 @@ def _prompt_conflict_choice(
         console.print("  [dim](files differ but text diff is empty \u2014 likely binary)[/dim]")
 
     console.print(
-        "[bold]Keep which version?[/bold] "
-        "(b)oth [default] / (l)ocal / (r)emote / (a)bort pull"
+        "[bold]Keep which version?[/bold] (b)oth [default] / (l)ocal / (r)emote / (a)bort pull"
     )
     choice = typer.prompt("Choice", default="b", show_default=False).strip().lower()
     if choice in ("l", "local", "keep-canonical"):
@@ -872,6 +878,7 @@ def _prompt_conflict_choice(
 #
 #   Failures (rename / write) are isolated per-file: the local file is never
 #   left destroyed without a recoverable trail. Returns "failed" on error.
+
 
 def _apply_write(
     local_path: Path,
@@ -929,12 +936,16 @@ def _apply_conflict(
         # per-file isolation: warn and fail this file only, keep walking.
         # The pull summary's `failed` count surfaces the issue without
         # losing progress on N other peer files.
-        console.print(f"  [red]conflict path build failed (local preserved):[/red] {rel_path} \u2014 {e}")
+        console.print(
+            f"  [red]conflict path build failed (local preserved):[/red] {rel_path} \u2014 {e}"
+        )
         return "failed"
     try:
         local_path.rename(conflict_path)
     except OSError as e:
-        console.print(f"  [red]conflict rename failed (local preserved):[/red] {rel_path} \u2014 {e}")
+        console.print(
+            f"  [red]conflict rename failed (local preserved):[/red] {rel_path} \u2014 {e}"
+        )
         return "failed"
 
     try:
@@ -997,7 +1008,9 @@ def _apply_incoming_file(
             remote_mtime = mtime_from_manifest(remote_mtime_str)
     except (ValueError, OSError) as e:
         # Malformed mtime or filesystem error: fall through to conflict path.
-        console.print(f"  [yellow]mtime parse failed (forcing conflict):[/yellow] {rel_path} \u2014 {e}")
+        console.print(
+            f"  [yellow]mtime parse failed (forcing conflict):[/yellow] {rel_path} \u2014 {e}"
+        )
         local_mtime = None
         remote_mtime = None
 
@@ -1029,9 +1042,7 @@ def _apply_incoming_file(
             raise typer.Abort()
         # choice == "keep-both" -> fall through to _apply_conflict
 
-    return _apply_conflict(
-        local_path, rel_path, plain_data, remote_device_id, verbose=verbose
-    )
+    return _apply_conflict(local_path, rel_path, plain_data, remote_device_id, verbose=verbose)
 
 
 def _download_and_apply(
@@ -1116,11 +1127,12 @@ class _StorageOccupancy:
     hold load-bearing encrypted state. The init guard checks the stronger
     signals (mm-crypto-init + blobs + manifests) first.
     """
-    has_crypto_init: bool       # fetch_crypto_init().status == "ok"
+
+    has_crypto_init: bool  # fetch_crypto_init().status == "ok"
     has_corrupt_crypto_init: bool
-    has_any_blobs: bool         # any data/**/*.enc
-    has_any_manifests: bool     # any manifests/**/*.enc
-    has_any_devices: bool       # devices/ non-empty (weakest signal)
+    has_any_blobs: bool  # any data/**/*.enc
+    has_any_manifests: bool  # any manifests/**/*.enc
+    has_any_devices: bool  # devices/ non-empty (weakest signal)
 
 
 def _probe_storage_occupancy(backend: LocalBackend) -> _StorageOccupancy:
@@ -1179,9 +1191,7 @@ def _init_storage_guard(
         no longer pushes or pulls. Warn + typer.confirm. Non-TTY aborts.
     """
     # BRICK first: most severe.
-    if not occupancy.has_crypto_init and (
-        occupancy.has_any_blobs or occupancy.has_any_manifests
-    ):
+    if not occupancy.has_crypto_init and (occupancy.has_any_blobs or occupancy.has_any_manifests):
         stderr_console.print(
             "[red]DANGER:[/red] mm-crypto-init is missing from storage, but "
             "encrypted blobs/manifests still exist. Initializing now generates "
@@ -1190,9 +1200,7 @@ def _init_storage_guard(
             "mm-crypto-init in its iCloud cache, wait for sync to reconcile "
             "and retry init instead."
         )
-        typed = typer.prompt(
-            'Type "BRICK" (case-sensitive) to confirm and proceed'
-        )
+        typed = typer.prompt('Type "BRICK" (case-sensitive) to confirm and proceed')
         if typed != "BRICK":
             stderr_console.print("[yellow]Aborted.[/yellow] No state changed.")
             raise typer.Exit(1)
@@ -1200,9 +1208,7 @@ def _init_storage_guard(
 
     # Orphan case: storage has state and we're about to add a device entry.
     any_storage = (
-        occupancy.has_any_blobs
-        or occupancy.has_any_manifests
-        or occupancy.has_any_devices
+        occupancy.has_any_blobs or occupancy.has_any_manifests or occupancy.has_any_devices
     )
     if occupancy.has_crypto_init and any_storage:
         if existing_device_id:
@@ -1340,8 +1346,7 @@ def _bootstrap_or_verify_crypto(
         keycheck_blob = bootstrap.keycheck_blob
         set_crypto_session(root_salt, argon2_memory_kb)
         console.print(
-            f"  mm-crypto-init bootstrapped "
-            f"(root_salt fp={root_salt_fingerprint(root_salt)})."
+            f"  mm-crypto-init bootstrapped (root_salt fp={root_salt_fingerprint(root_salt)})."
         )
         return root_salt, argon2_memory_kb, keycheck_blob
 
@@ -1395,9 +1400,7 @@ def _save_and_register(
     try:
         stored = store_passphrase_in_keyring(passphrase)
     except Exception as e:
-        console.print(
-            f"  [yellow]Keyring backend error ({type(e).__name__}):[/yellow] {e}"
-        )
+        console.print(f"  [yellow]Keyring backend error ({type(e).__name__}):[/yellow] {e}")
         stored = False
 
     if stored:
@@ -1437,9 +1440,7 @@ def init() -> None:
     # warning can name the device about to be left behind.
     existing_device_id, existing_device_name = _load_prior_device_metadata()
     if CONFIG_PATH.exists():
-        overwrite = typer.confirm(
-            f"Config already exists at {CONFIG_PATH}. Overwrite?"
-        )
+        overwrite = typer.confirm(f"Config already exists at {CONFIG_PATH}. Overwrite?")
         if not overwrite:
             raise typer.Exit()
 
@@ -1499,10 +1500,7 @@ def init() -> None:
     # TestInitFlow::test_first_device_refuse_all_is_recoverable.
     sources = _prompt_sources()
     if not sources:
-        _error(
-            "init: no sync sources enabled. Re-run 'mm init' and accept "
-            "at least one source."
-        )
+        _error("init: no sync sources enabled. Re-run 'mm init' and accept at least one source.")
 
     config: dict = {
         "device": {"id": device_id, "name": device_name},
@@ -1610,15 +1608,15 @@ def _push_core(
 
     if not quiet:
         console.print("[bold]Building manifest...[/bold]")
-    local_manifest = build_manifest_v2(
-        device_id, device_name, sources, max_file_size, on_skip
-    )
+    local_manifest = build_manifest_v2(device_id, device_name, sources, max_file_size, on_skip)
 
     total_file_count = sum(
         len(src_data["files"]) for src_data in local_manifest["sources"].values()
     )
     if not quiet:
-        console.print(f"  {total_file_count} files scanned across {len(local_manifest['sources'])} source(s)")
+        console.print(
+            f"  {total_file_count} files scanned across {len(local_manifest['sources'])} source(s)"
+        )
         if skipped:
             console.print(f"  [yellow]{len(skipped)} files skipped[/yellow]")
 
@@ -1661,7 +1659,12 @@ def _push_core(
             console.print(f"\n[bold]Uploading {len(to_upload)} files from '{src_name}'...[/bold]")
 
         total_bytes += _upload_changed_blobs(
-            backend, base_path, to_upload, device_id, passphrase, memory_kb,
+            backend,
+            base_path,
+            to_upload,
+            device_id,
+            passphrase,
+            memory_kb,
             verbose=(verbose and not quiet),
         )
         total_new += len(diff.new)
@@ -1689,9 +1692,7 @@ def _push_core(
     # Upload manifest (includes tombstones)
     if not quiet:
         if recovering_from_corrupt and not (total_new or total_modified or total_deleted):
-            console.print(
-                "\n[bold]Rewriting manifest to heal remote corruption...[/bold]"
-            )
+            console.print("\n[bold]Rewriting manifest to heal remote corruption...[/bold]")
         else:
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     manifest_data = serialize_manifest(local_manifest)
@@ -1762,9 +1763,7 @@ ConflictMode = Literal["prompt", "keep-both", "fail"]
 
 @app.command()
 def pull(
-    from_device: str | None = typer.Option(
-        None, "--from", help="Pull from a specific device ID"
-    ),
+    from_device: str | None = typer.Option(None, "--from", help="Pull from a specific device ID"),
     source: str | None = typer.Option(
         None, "--source", help="Only pull a specific source (e.g., 'claude', 'gstack')"
     ),
@@ -1814,7 +1813,13 @@ def pull(
         except MindMeldError as e:
             _error(str(e))
         _pull_core(
-            config, passphrase, memory_kb, from_device, source, verbose, dry_run,
+            config,
+            passphrase,
+            memory_kb,
+            from_device,
+            source,
+            verbose,
+            dry_run,
             conflict_mode=conflict_mode,
         )
     finally:
@@ -1854,6 +1859,7 @@ class _PerSourceResult:
     passes the full list to _print_pull_summary for per-source line
     rendering.
     """
+
     src_name: str
     device_name: str
     device_id: str
@@ -1891,9 +1897,7 @@ class _PerSourceResult:
         local-newer = all skipped) still need cleanup to run or iCloud dup
         files accumulate forever.
         """
-        return any(
-            self.outcomes[k] for k in self.outcomes if k != "unchanged"
-        )
+        return any(self.outcomes[k] for k in self.outcomes if k != "unchanged")
 
 
 def _select_devices(
@@ -1936,9 +1940,7 @@ def _prefetch_manifests(
         did = d["device_id"]
         peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
         if peer_fetch.status == "corrupt":
-            corrupt.append(
-                _CorruptPeer(device_id=did, device_name=d.get("device_name", did))
-            )
+            corrupt.append(_CorruptPeer(device_id=did, device_name=d.get("device_name", did)))
         cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
     return cache, corrupt
 
@@ -1988,15 +1990,11 @@ def _preflight_conflicts(
                     # Next peer conflicts iff its sha differs from what
                     # the earlier peer will leave.
                     if overlay_sha != info.get("sha256"):
-                        predicted.append(
-                            _PredictedConflict(dname, src_name, rel_path)
-                        )
+                        predicted.append(_PredictedConflict(dname, src_name, rel_path))
                     continue
                 outcome = _predict_pull_outcome(rel_path, info, base_path)
                 if outcome == "conflict":
-                    predicted.append(
-                        _PredictedConflict(dname, src_name, rel_path)
-                    )
+                    predicted.append(_PredictedConflict(dname, src_name, rel_path))
                 elif outcome in ("write", "merge"):
                     overlay[(src_name, rel_path)] = info.get("sha256", "")
     return predicted
@@ -2122,9 +2120,7 @@ def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
     return warnings
 
 
-def _print_preflight_conflicts(
-    predicted: list[_PredictedConflict], quiet: bool
-) -> None:
+def _print_preflight_conflicts(predicted: list[_PredictedConflict], quiet: bool) -> None:
     """Print predicted conflicts before --conflict-mode=fail raises.
 
     Quiet (autopull): one-liner per conflict to stderr.
@@ -2137,17 +2133,13 @@ def _print_preflight_conflicts(
                 file=sys.stderr,
             )
         return
-    console.print(
-        f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict."
-    )
+    console.print(f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict.")
     for p in predicted:
         console.print(
-            f"  [yellow]! conflict[/yellow] {p.src_name}/{p.rel_path} "
-            f"(from {p.device_name})"
+            f"  [yellow]! conflict[/yellow] {p.src_name}/{p.rel_path} (from {p.device_name})"
         )
     console.print(
-        "\nResolve conflicts locally, or re-run with "
-        "--conflict-mode keep-both to auto-rename."
+        "\nResolve conflicts locally, or re-run with --conflict-mode keep-both to auto-rename."
     )
 
 
@@ -2357,9 +2349,7 @@ def _pull_core(
             console.print("[yellow]No other devices found to pull from.[/yellow]")
         return PullResult(elapsed=time.time() - start)
 
-    manifest_cache, corrupt_peers = _prefetch_manifests(
-        backend, all_devices, passphrase, memory_kb
-    )
+    manifest_cache, corrupt_peers = _prefetch_manifests(backend, all_devices, passphrase, memory_kb)
 
     all_tombstones = collect_tombstones(
         list(manifest_cache.keys()),
@@ -2443,9 +2433,7 @@ def _pull_core(
                 if dry_run and per_source.dry_run_diff is not None:
                     if not quiet:
                         console.print(f"  Dry run for {dname}/{src_name}:")
-                        _print_pull_prediction(
-                            per_source.dry_run_diff, base_path, src_name
-                        )
+                        _print_pull_prediction(per_source.dry_run_diff, base_path, src_name)
                     continue
 
                 if not per_source.had_changes:
@@ -2562,9 +2550,7 @@ def status(
 
     # Build local manifest (v2)
     sources_configs = get_sources(config)
-    local_manifest = build_manifest_v2(
-        device_id, device_name, sources_configs, max_file_size
-    )
+    local_manifest = build_manifest_v2(device_id, device_name, sources_configs, max_file_size)
 
     # Fetch remote manifest (tri-state — surface missing/corrupt to user).
     # fetch.manifest is pre-normalized via load_manifest.
@@ -2585,6 +2571,7 @@ def status(
     if breadcrumb_path.exists():
         try:
             import json as _json
+
             crumb = _json.loads(breadcrumb_path.read_text())
             ts = crumb.get("timestamp", "?")
             verb = crumb.get("verb", "?")
@@ -2595,9 +2582,7 @@ def status(
         except (OSError, ValueError):
             pass  # corrupt breadcrumb is not worth surfacing an error for
     if fetch.status == "missing":
-        console.print(
-            "  [dim]Remote manifest: not yet pushed from this device.[/dim]"
-        )
+        console.print("  [dim]Remote manifest: not yet pushed from this device.[/dim]")
     elif fetch.status == "corrupt":
         console.print(
             "  [yellow]Remote manifest: CORRUPT[/yellow] — next 'mm push' "
@@ -2645,7 +2630,9 @@ def status(
 
     if total_new or total_modified or total_deleted:
         console.print("\n  [yellow]Overall pending push:[/yellow]")
-        console.print(f"    + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted")
+        console.print(
+            f"    + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted"
+        )
     elif not source:
         console.print("\n  [green]All sources in sync.[/green]")
 
@@ -2743,9 +2730,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             # Predicate is validator-free because we don't need to decrypt;
             # count all sibling files that match the conflict-name pattern.
             own_conflict_copies = len(
-                backend.find_conflict_copies(
-                    manifest_key(dev_id), lambda p: True
-                )
+                backend.find_conflict_copies(manifest_key(dev_id), lambda p: True)
             )
         except Exception:
             pass
@@ -2779,8 +2764,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         },
         "crypto_init": crypto_init,
         "root_salt_drift": (
-            "ok" if (local_fp and crypto_init.get("root_salt_fp") == local_fp)
-            else "mismatch" if (local_fp and crypto_init.get("status") == "ok")
+            "ok"
+            if (local_fp and crypto_init.get("root_salt_fp") == local_fp)
+            else "mismatch"
+            if (local_fp and crypto_init.get("status") == "ok")
             else "n/a"
         ),
         "sidecar": sidecar_info,
@@ -2817,6 +2804,7 @@ def diag(
 
     if as_json:
         import json as _json
+
         # Emit via typer.echo, NOT console.print: Rich would reflow the JSON
         # (word-wrap, style markup) and break downstream consumers.
         typer.echo(_json.dumps(state, indent=2, sort_keys=True, default=str))
@@ -2913,12 +2901,8 @@ def devices() -> None:
 
 @app.command(name="diff")
 def diff_cmd(
-    from_device: str | None = typer.Option(
-        None, "--from", help="Diff against a specific device"
-    ),
-    source: str | None = typer.Option(
-        None, "--source", help="Diff a specific source only"
-    ),
+    from_device: str | None = typer.Option(None, "--from", help="Diff against a specific device"),
+    source: str | None = typer.Option(None, "--source", help="Diff a specific source only"),
 ) -> None:
     """Show what would change without applying (dry run)."""
     config = _get_config()
@@ -2937,9 +2921,7 @@ def diff_cmd(
 
     # Build local manifest (v2)
     sources_configs = get_sources(config)
-    local_manifest = build_manifest_v2(
-        device_id, device_name, sources_configs, max_file_size
-    )
+    local_manifest = build_manifest_v2(device_id, device_name, sources_configs, max_file_size)
 
     diff_fetch = _fetch_remote_manifest(backend, target_id, passphrase, memory_kb)
     if diff_fetch.status == "missing":
@@ -2958,7 +2940,9 @@ def diff_cmd(
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
-    console.print(f"\n[bold]Diff against {'device ' + target_id if from_device else 'remote'}:[/bold]")
+    console.print(
+        f"\n[bold]Diff against {'device ' + target_id if from_device else 'remote'}:[/bold]"
+    )
 
     # Map source names → local base paths for pull-outcome prediction
     src_base_paths: dict[str, Path] = {
@@ -3002,7 +2986,8 @@ def gc(
     dry_run: bool = typer.Option(False, "--dry-run", help="List orphans without deleting"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     prune_conflicts: bool = typer.Option(
-        False, "--conflicts",
+        False,
+        "--conflicts",
         help=f"Also delete .sync-conflict-* files older than {CONFLICT_AGE_DAYS} days",
     ),
 ) -> None:
@@ -3182,8 +3167,7 @@ def _do_gc(
         console.print(f"\n[bold]Dry run:[/bold] {orphan_count} orphaned blobs found.")
     else:
         console.print(
-            f"\n[bold green]GC complete.[/bold green] "
-            f"Deleted {orphan_count} orphaned blobs."
+            f"\n[bold green]GC complete.[/bold green] Deleted {orphan_count} orphaned blobs."
         )
 
     return orphan_count
@@ -3231,6 +3215,7 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     src_type = src_cfg.get("type", "claude")
     if src_type == "claude":
         from mind_meld.manifest import SYNCED_SUBDIRS
+
         projects = base_path / "projects"
         if not projects.exists():
             return []
@@ -3274,7 +3259,9 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
                 if not is_conflict_filename(conflict_path.name):
                     continue
                 canonical = _canonical_for_conflict(conflict_path)
-                hits.append((src_cfg["name"], conflict_path, canonical if canonical.exists() else None))
+                hits.append(
+                    (src_cfg["name"], conflict_path, canonical if canonical.exists() else None)
+                )
     return hits
 
 
@@ -3292,7 +3279,7 @@ def _canonical_for_conflict(conflict_path: Path) -> Path:
         return conflict_path
     before = name[:idx]
     # Everything after the infix up to the final suffix is conflict metadata.
-    after = name[idx + len(CONFLICT_INFIX):]
+    after = name[idx + len(CONFLICT_INFIX) :]
     suffix = ""
     if "." in after:
         suffix = "." + after.rsplit(".", 1)[-1]
@@ -3457,9 +3444,7 @@ def recover(
             f"sidecar to preserve fresh deletions. --abandon-manifest "
             f"would throw those deletion records away."
         )
-    peer_tombstones = _collect_peer_tombstones(
-        backend, device_id, passphrase, memory_kb
-    )
+    peer_tombstones = _collect_peer_tombstones(backend, device_id, passphrase, memory_kb)
     if peer_tombstones:
         _error(
             f"peer manifests carry {len(peer_tombstones)} tombstone(s) that "
@@ -3484,29 +3469,19 @@ def recover(
     )
 
     if not yes:
-        typed = typer.prompt(
-            'Type "RESET" (case-sensitive) to confirm and proceed'
-        )
+        typed = typer.prompt('Type "RESET" (case-sensitive) to confirm and proceed')
         if typed != "RESET":
             stderr_console.print("[yellow]Aborted.[/yellow] Nothing changed.")
             raise typer.Exit(1)
 
     try:
-        quarantine_path = _quarantine_corrupt_manifest(
-            backend, storage_root, device_id
-        )
+        quarantine_path = _quarantine_corrupt_manifest(backend, storage_root, device_id)
     except FileNotFoundError:
-        _error(
-            f"{manifest_key(device_id)} not found on disk. "
-            f"Nothing to quarantine."
-        )
+        _error(f"{manifest_key(device_id)} not found on disk. Nothing to quarantine.")
     except OSError as e:
         _error(f"quarantine failed: {e}")
 
-    console.print(
-        f"[green]Quarantined[/green] corrupt manifest to "
-        f"[dim]{quarantine_path}[/dim]."
-    )
+    console.print(f"[green]Quarantined[/green] corrupt manifest to [dim]{quarantine_path}[/dim].")
     console.print(
         "Next 'mm push' will start fresh with no prior-state manifest. "
         "The quarantined copy is preserved for post-mortem and can be "
@@ -3590,16 +3565,22 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 "  [dim]Canonical version no longer exists. "
                 "Promote conflict to canonical or delete it?[/dim]"
             )
-            choice = typer.prompt(
-                "  (p)romote / (d)elete / (s)kip",
-                default="s",
-                show_default=False,
-            ).strip().lower()
+            choice = (
+                typer.prompt(
+                    "  (p)romote / (d)elete / (s)kip",
+                    default="s",
+                    show_default=False,
+                )
+                .strip()
+                .lower()
+            )
             if choice.startswith("p"):
                 target_canonical = _canonical_for_conflict(cpath)
                 try:
                     cpath.rename(target_canonical)
-                    console.print(f"  [green]promoted[/green] {cpath.name} -> {target_canonical.name}")
+                    console.print(
+                        f"  [green]promoted[/green] {cpath.name} -> {target_canonical.name}"
+                    )
                     resolved += 1
                 except OSError as e:
                     console.print(f"  [red]promote failed:[/red] {e}")
@@ -3622,13 +3603,16 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
             failed += 1
             continue
 
-        diff = list(difflib.unified_diff(
-            local_text, conflict_text,
-            fromfile=f"canonical {canonical.name}",
-            tofile=f"conflict  {cpath.name}",
-            lineterm="",
-            n=3,
-        ))
+        diff = list(
+            difflib.unified_diff(
+                local_text,
+                conflict_text,
+                fromfile=f"canonical {canonical.name}",
+                tofile=f"conflict  {cpath.name}",
+                lineterm="",
+                n=3,
+            )
+        )
         if diff:
             for line in diff[:80]:
                 if line.startswith("+") and not line.startswith("+++"):
@@ -3698,8 +3682,7 @@ def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
                     pass
     label = "would reap" if dry_run else "reaped"
     console.print(
-        f"[bold]{label}[/bold] {reaped} stale conflict files "
-        f"(older than {CONFLICT_AGE_DAYS} days)"
+        f"[bold]{label}[/bold] {reaped} stale conflict files (older than {CONFLICT_AGE_DAYS} days)"
     )
     return reaped
 
@@ -3741,6 +3724,7 @@ def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None
         if detail:
             payload["detail"] = detail
         import json as _json
+
         _autorun_breadcrumb_path().write_text(_json.dumps(payload, indent=2))
     except Exception:
         pass
@@ -3880,8 +3864,7 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
         return None
     except Exception as e:
         print(
-            f"mm: {verb} failed - unexpected config error "
-            f"(see auto{verb}.log)",
+            f"mm: {verb} failed - unexpected config error (see auto{verb}.log)",
             file=sys.stderr,
         )
         _log_unexpected(verb, e)
@@ -3933,8 +3916,7 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
         return None
     except Exception as e:
         print(
-            f"mm: {verb} failed - unexpected crypto error "
-            f"(see auto{verb}.log)",
+            f"mm: {verb} failed - unexpected crypto error (see auto{verb}.log)",
             file=sys.stderr,
         )
         _log_unexpected(verb, e)
@@ -3968,8 +3950,11 @@ def autopull() -> None:
 
     try:
         result = _pull_core(
-            setup.config, setup.passphrase, setup.memory_kb,
-            quiet=True, conflict_mode="keep-both",
+            setup.config,
+            setup.passphrase,
+            setup.memory_kb,
+            quiet=True,
+            conflict_mode="keep-both",
         )
 
         if result.total_applied:
@@ -3985,8 +3970,7 @@ def autopull() -> None:
             print(f"mm: pulled {total} files from {src_display} ({', '.join(parts)})")
             if result.total_conflicted:
                 print(
-                    f"mm: {result.total_conflicted} conflicts - "
-                    "run 'mm conflicts' to review",
+                    f"mm: {result.total_conflicted} conflicts - run 'mm conflicts' to review",
                     file=sys.stderr,
                 )
         if result.total_skipped_unknown_source:
@@ -4020,17 +4004,11 @@ def autopull() -> None:
         # state persistent for monitoring on top of `mm status` / `mm diag`.
         degradations: list[str] = []
         if result.durability_fsync_failures:
-            degradations.append(
-                f"fsync failed on {result.durability_fsync_failures} parent dir(s)"
-            )
+            degradations.append(f"fsync failed on {result.durability_fsync_failures} parent dir(s)")
         if result.corrupt_peer_count:
-            degradations.append(
-                f"{result.corrupt_peer_count} corrupt peer manifest(s)"
-            )
+            degradations.append(f"{result.corrupt_peer_count} corrupt peer manifest(s)")
         if result.total_skipped_unknown_source:
-            degradations.append(
-                f"{result.total_skipped_unknown_source} unknown source(s)"
-            )
+            degradations.append(f"{result.total_skipped_unknown_source} unknown source(s)")
         if result.total_failed:
             degradations.append(f"{result.total_failed} file(s) failed")
 
@@ -4076,7 +4054,10 @@ def autopush() -> None:
 
     try:
         result = _push_core(
-            setup.config, setup.passphrase, setup.memory_kb, quiet=True,
+            setup.config,
+            setup.passphrase,
+            setup.memory_kb,
+            quiet=True,
         )
 
         if result is None and not get_sources(setup.config):

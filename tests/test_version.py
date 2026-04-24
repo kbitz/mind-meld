@@ -21,6 +21,7 @@ def test_version_installed_package_returns_pyproject_version():
     # pyproject.toml is the single source of truth
     import tomllib
     from pathlib import Path
+
     repo_root = Path(__file__).resolve().parents[1]
     with open(repo_root / "pyproject.toml", "rb") as f:
         pyproject = tomllib.load(f)
@@ -51,6 +52,7 @@ def test_version_missing_package_returns_dev_sentinel():
 def test_mm_version_cli_flag(tmp_path, monkeypatch):
     """`mm --version` prints the version and exits 0."""
     from typer.testing import CliRunner
+
     from mind_meld.cli import app
 
     runner = CliRunner()

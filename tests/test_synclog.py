@@ -150,9 +150,7 @@ class TestChangeCategories:
         assert "memory/z.md" in body
 
     def test_conflicted_section(self, tmp_path: Path) -> None:
-        body = self._log(
-            tmp_path, conflicted_files=["projects/-foo/memory/c.md"]
-        )
+        body = self._log(tmp_path, conflicted_files=["projects/-foo/memory/c.md"])
         assert "Conflicts" in body
         assert "memory/c.md" in body
         # Surfaces the mm commands for resolution
@@ -208,6 +206,7 @@ class TestLogMetadata:
         assert "Mind Meld Activity" in body
         # Timestamp in ISO-like form
         import re
+
         assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC", body)
 
 

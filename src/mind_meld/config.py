@@ -57,6 +57,7 @@ def get_default_source(name: str) -> dict[str, Any] | None:
             return copy.deepcopy(src)
     return None
 
+
 REQUIRED_FIELDS = {
     "device": ["id", "name"],
     "storage": ["path"],
@@ -67,9 +68,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     """Load and validate config.toml."""
     config_path = path or CONFIG_PATH
     if not config_path.exists():
-        raise ConfigError(
-            f"init: config not found at {config_path} — run 'mm init' first."
-        )
+        raise ConfigError(f"init: config not found at {config_path} — run 'mm init' first.")
     try:
         with open(config_path, "rb") as f:
             config = tomllib.load(f)
@@ -117,9 +116,7 @@ def _apply_defaults(config: dict[str, Any]) -> None:
 
     # Canonicalize paths: expanduser + resolve matches the walker / storage pattern.
     # claude_dir is only present in legacy configs; guard the expansion accordingly.
-    config["storage"]["path"] = str(
-        Path(config["storage"]["path"]).expanduser().resolve()
-    )
+    config["storage"]["path"] = str(Path(config["storage"]["path"]).expanduser().resolve())
     if "claude_dir" in sync:
         sync["claude_dir"] = str(Path(sync["claude_dir"]).expanduser().resolve())
 
@@ -127,20 +124,14 @@ def _apply_defaults(config: dict[str, Any]) -> None:
 def _validate_sources(sources: Any) -> None:
     """Check sync.sources is a list of dicts with required fields and unique names."""
     if not isinstance(sources, list):
-        raise ConfigError(
-            f"config: sync.sources must be a list, got {type(sources).__name__}."
-        )
+        raise ConfigError(f"config: sync.sources must be a list, got {type(sources).__name__}.")
     seen_names: set[str] = set()
     for i, src in enumerate(sources):
         if not isinstance(src, dict):
-            raise ConfigError(
-                f"config: source #{i} must be a table, got {type(src).__name__}."
-            )
+            raise ConfigError(f"config: source #{i} must be a table, got {type(src).__name__}.")
         for field in ("name", "path", "type"):
             if field not in src:
-                raise ConfigError(
-                    f"config: source #{i} missing required field '{field}'."
-                )
+                raise ConfigError(f"config: source #{i} missing required field '{field}'.")
             if not isinstance(src[field], str):
                 raise ConfigError(
                     f"config: source #{i} field '{field}' must be a string, "
@@ -186,10 +177,7 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
         # here — the walker / storage re-resolve at use time, so skipping
         # .resolve() here keeps a cyclic user symlink (e.g. broken ~/.gstack)
         # from breaking get_sources for every command startup.
-        sources = [
-            {**src, "path": str(Path(src["path"]).expanduser())}
-            for src in DEFAULT_SOURCES
-        ]
+        sources = [{**src, "path": str(Path(src["path"]).expanduser())} for src in DEFAULT_SOURCES]
 
     # Auto-detect: append default gstack source if ~/.gstack exists but
     # no gstack source is already in the list.
@@ -197,9 +185,7 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     gstack_path = Path.home() / ".gstack"
     has_gstack = any(s["name"] == "gstack" for s in sources)
     if not explicit_sources and gstack_path.exists() and not has_gstack:
-        default_gstack = next(
-            (s for s in DEFAULT_SOURCES if s["name"] == "gstack"), None
-        )
+        default_gstack = next((s for s in DEFAULT_SOURCES if s["name"] == "gstack"), None)
         if default_gstack:
             # Same rationale as the DEFAULT_SOURCES branch above: walker resolves
             # at use time, so no need to .resolve() a hardcoded ~/.gstack here
@@ -266,9 +252,7 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> None:
     fsutil.atomic_write_bytes(config_path, data, fsync=True, mode=0o600)
 
 
-def patch_config_on_disk(
-    updates: dict[str, dict[str, Any]], path: Path | None = None
-) -> None:
+def patch_config_on_disk(updates: dict[str, dict[str, Any]], path: Path | None = None) -> None:
     """Re-read TOML from disk, shallow-merge `updates` per field within each
     section, save.
 
@@ -301,9 +285,7 @@ def patch_config_on_disk(
         with open(config_path, "rb") as f:
             on_disk = tomllib.load(f)
     except FileNotFoundError as e:
-        raise ConfigError(
-            f"config: cannot update — {config_path} does not exist."
-        ) from e
+        raise ConfigError(f"config: cannot update — {config_path} does not exist.") from e
     except Exception as e:
         raise ConfigError(f"config: failed to parse {config_path} — {e}") from e
 
@@ -311,8 +293,7 @@ def patch_config_on_disk(
         section_dict = on_disk.setdefault(section, {})
         if not isinstance(section_dict, dict):
             raise ConfigError(
-                f"config: cannot patch — section [{section}] in "
-                f"{config_path} is not a table."
+                f"config: cannot patch — section [{section}] in {config_path} is not a table."
             )
         section_dict.update(field_updates)
 

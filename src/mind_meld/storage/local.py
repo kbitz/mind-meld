@@ -62,9 +62,7 @@ class LocalBackend:
         # All storage keys hold encrypted secrets (blobs, manifests,
         # devices, crypto-init) — explicit 0600 so new files aren't
         # world-readable via umask.
-        fsutil.atomic_write_bytes(
-            path, data, fsync=_needs_fsync(key), mode=0o600
-        )
+        fsutil.atomic_write_bytes(path, data, fsync=_needs_fsync(key), mode=0o600)
 
     def put_exclusive(self, key: str, data: bytes) -> None:
         """Atomic create-only write. Fails StorageError if target already exists.
@@ -97,9 +95,7 @@ class LocalBackend:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
-                raise StorageError(
-                    f"storage: {key} already exists (put_exclusive)."
-                ) from e
+                raise StorageError(f"storage: {key} already exists (put_exclusive).") from e
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -141,9 +137,7 @@ class LocalBackend:
             try:
                 path.unlink()
             except OSError as e:
-                raise StorageError(
-                    f"storage: failed to delete {key} — {e}"
-                ) from e
+                raise StorageError(f"storage: failed to delete {key} — {e}") from e
 
     def exists(self, key: str) -> bool:
         return (self.root / key).exists()
@@ -216,10 +210,7 @@ class LocalBackend:
             try:
                 ok = is_valid(c)
             except Exception as e:
-                sys.stderr.write(
-                    f"warning: ignoring suspicious file {c} "
-                    f"(validator raised: {e})\n"
-                )
+                sys.stderr.write(f"warning: ignoring suspicious file {c} (validator raised: {e})\n")
                 continue
             if ok:
                 confirmed.append(c)

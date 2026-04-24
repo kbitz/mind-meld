@@ -23,7 +23,6 @@ from mind_meld import lockfile
 from mind_meld.errors import LockError
 from mind_meld.lockfile import acquire_lock, release_lock
 
-
 # Repo root for subprocess children to import from.
 _REPO_SRC = str(Path(__file__).parent.parent / "src")
 
@@ -106,8 +105,9 @@ class TestSameProcessSemantics:
 
 
 class TestCrossProcess:
-    def _child_script(self, lock_path: Path, ready_marker: Path,
-                      behavior: str = "wait_then_exit") -> str:
+    def _child_script(
+        self, lock_path: Path, ready_marker: Path, behavior: str = "wait_then_exit"
+    ) -> str:
         """Build a child script that imports lockfile fresh."""
         return textwrap.dedent(f"""
             import sys, time
@@ -133,13 +133,12 @@ class TestCrossProcess:
 
         child = subprocess.Popen(
             [sys.executable, "-c", script],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         try:
-            assert _wait_for(lambda: ready_marker.exists()), (
-                "child never signaled ready"
-            )
+            assert _wait_for(lambda: ready_marker.exists()), "child never signaled ready"
             # Parent cannot acquire while child holds it.
             with pytest.raises(LockError, match="Another mm operation"):
                 acquire_lock(lock_path)
@@ -279,9 +278,7 @@ class TestStatePostRelease:
         acquire_lock(lock_path)
         assert lock_path.exists()
         release_lock(lock_path)
-        assert lock_path.exists(), (
-            "Lockfile must NOT be unlinked on release — creates inode race"
-        )
+        assert lock_path.exists(), "Lockfile must NOT be unlinked on release — creates inode race"
 
     def test_reacquire_after_release_works(self, tmp_path):
         """Re-acquiring after release must succeed and rewrite PID."""

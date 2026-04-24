@@ -102,9 +102,14 @@ class TestFsyncRouting:
         real_write = fsutil.atomic_write_bytes
 
         def spy_write(path, data, *, fsync=False, mode=None):
-            calls.append({
-                "path": path, "fsync": fsync, "mode": mode, "len": len(data),
-            })
+            calls.append(
+                {
+                    "path": path,
+                    "fsync": fsync,
+                    "mode": mode,
+                    "len": len(data),
+                }
+            )
             real_write(path, data, fsync=fsync, mode=mode)
 
         # Patch the symbol used inside storage_local, which binds
@@ -141,9 +146,7 @@ class TestFsyncRouting:
         backend.put("data/dev1/abc.enc", b"c")
         assert len(spy) == 3
         for c in spy:
-            assert c["mode"] == 0o600, (
-                f"storage write to {c['path']} used mode {c['mode']!r}"
-            )
+            assert c["mode"] == 0o600, f"storage write to {c['path']} used mode {c['mode']!r}"
 
 
 class TestConflictDetection:
@@ -201,8 +204,7 @@ class TestConflictDetection:
         icloud = backend.root / "manifests" / "abc" / "manifest.json 2.enc"
         icloud.write_bytes(b"icloud conflict")
         dropbox = (
-            backend.root / "manifests" / "abc"
-            / "manifest.json (conflicted copy 2026-03-18).enc"
+            backend.root / "manifests" / "abc" / "manifest.json (conflicted copy 2026-03-18).enc"
         )
         dropbox.write_bytes(b"dropbox conflict")
 
@@ -238,7 +240,7 @@ class TestPutExclusive:
 
     def test_put_exclusive_leaves_no_temp_on_success(self, backend, tmp_path):
         backend.put_exclusive("mm-crypto-init", b"data")
-        parent = (tmp_path / "storage")
+        parent = tmp_path / "storage"
         entries = sorted(p.name for p in parent.iterdir())
         assert entries == ["mm-crypto-init"]
 
@@ -246,7 +248,7 @@ class TestPutExclusive:
         backend.put_exclusive("mm-crypto-init", b"first")
         with pytest.raises(StorageError):
             backend.put_exclusive("mm-crypto-init", b"second")
-        parent = (tmp_path / "storage")
+        parent = tmp_path / "storage"
         entries = sorted(p.name for p in parent.iterdir())
         assert entries == ["mm-crypto-init"]
 
@@ -323,9 +325,7 @@ class TestPredicateBehavior:
         bogus = backend.root / "manifests" / "abc" / "manifest.json 2.enc"
         bogus.write_bytes(b"random bytes")
 
-        conflicts = backend.find_conflict_copies(
-            "manifests/abc/manifest.json.enc"
-        )
+        conflicts = backend.find_conflict_copies("manifests/abc/manifest.json.enc")
         assert len(conflicts) == 1
 
     def test_predicate_false_rejects_all(self, backend):

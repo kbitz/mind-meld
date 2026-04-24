@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import traceback
 from pathlib import Path
 
 import pytest
@@ -27,7 +26,7 @@ from typer.testing import CliRunner
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
-from mind_meld.devices import list_devices, register_device
+from mind_meld.devices import register_device
 from mind_meld.storage.local import LocalBackend
 
 # Shared CLI-integration helpers live in tests/conftest.py so both
@@ -133,6 +132,7 @@ def test_autopull_logs_traceback_on_unexpected_config_error(tmp_path, monkeypatc
 
     def boom(*a, **kw):
         raise RuntimeError("simulated unwrapped error from load_config")
+
     monkeypatch.setattr("mind_meld.cli.load_config", boom)
 
     result = runner.invoke(app, ["autopull"])
@@ -153,6 +153,7 @@ def test_autopull_logs_traceback_on_unexpected_exception(tmp_path, monkeypatch):
 
     def boom(*args, **kwargs):
         raise AttributeError("NoneType has no attribute 'bogus'")
+
     monkeypatch.setattr("mind_meld.cli._pull_core", boom)
 
     result = runner.invoke(app, ["autopull"])
@@ -173,6 +174,7 @@ def test_autopush_logs_traceback_on_unexpected_exception(tmp_path, monkeypatch):
 
     def boom(*args, **kwargs):
         raise RuntimeError("wat")
+
     monkeypatch.setattr("mind_meld.cli._push_core", boom)
 
     result = runner.invoke(app, ["autopush"])
@@ -291,22 +293,27 @@ def test_pull_warns_on_unknown_source(tmp_path, monkeypatch):
     (gstack_a / "config.yaml").write_text("version: 1")
 
     config_a = tmp_path / "config_a.toml"
-    save_config({
-        "device": {"id": "dev-a", "name": "Mac A"},
-        "storage": {"path": str(storage_dir)},
-        "sync": {
-            "max_file_size": 52_428_800,
-            "sources": [
-                {"name": "claude", "path": str(claude_a), "type": "claude"},
-                {
-                    "name": "gstack", "path": str(gstack_a), "type": "generic",
-                    "include_dirs": ["projects"],
-                    "include_files": ["config.yaml"],
-                },
-            ],
+    save_config(
+        {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_a), "type": "claude"},
+                    {
+                        "name": "gstack",
+                        "path": str(gstack_a),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "include_files": ["config.yaml"],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
         },
-        "crypto": {"argon2_memory_kb": MEMORY_KB},
-    }, config_a)
+        config_a,
+    )
 
     backend = LocalBackend(storage_dir)
     bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
@@ -325,17 +332,20 @@ def test_pull_warns_on_unknown_source(tmp_path, monkeypatch):
     claude_b = tmp_path / "machine_b" / ".claude"
     claude_b.mkdir(parents=True)
     config_b = tmp_path / "config_b.toml"
-    save_config({
-        "device": {"id": "dev-b", "name": "Mac B"},
-        "storage": {"path": str(storage_dir)},
-        "sync": {
-            "max_file_size": 52_428_800,
-            "sources": [
-                {"name": "claude", "path": str(claude_b), "type": "claude"},
-            ],
+    save_config(
+        {
+            "device": {"id": "dev-b", "name": "Mac B"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_b), "type": "claude"},
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
         },
-        "crypto": {"argon2_memory_kb": MEMORY_KB},
-    }, config_b)
+        config_b,
+    )
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
     monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b)
 
@@ -361,7 +371,6 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
     # Force a deterministic mtime gap with `os.utime` so the test doesn't
     # depend on filesystem mtime resolution (APFS is sub-second but slow CI
     # runners or NFS can collapse two close writes to the same second).
-    import os
     storage_dir = tmp_path / "storage"
     claude_a = tmp_path / "machine_a" / ".claude"
     claude_b = tmp_path / "machine_b" / ".claude"
@@ -438,11 +447,13 @@ def test_get_passphrase_non_interactive_raises_instead_of_hanging(monkeypatch):
         raise AssertionError("getpass.getpass was reached under non_interactive=True")
 
     import getpass
+
     monkeypatch.setattr(getpass, "getpass", explode)
 
     # And stub keyring to return None (so keyring doesn't fulfil the request).
     try:
         import keyring as kr
+
         monkeypatch.setattr(kr, "get_password", lambda *a, **kw: None)
     except ImportError:
         pass
@@ -456,7 +467,7 @@ def test_get_passphrase_non_interactive_raises_instead_of_hanging(monkeypatch):
 
 def test_autopull_surfaces_corrupt_peer_manifest_in_quiet_mode(tmp_path, monkeypatch):
     """autopull (quiet=True) must still print corrupt-peer-manifest warning."""
-    claude_dir = _setup_real_config(tmp_path, monkeypatch)
+    _setup_real_config(tmp_path, monkeypatch)
     # Register a peer and plant a bogus manifest blob that won't decrypt.
     backend = LocalBackend(tmp_path / "storage")
     register_device(backend, "dev-b", "Mac B")
@@ -475,6 +486,7 @@ def test_autopush_surfaces_sidecar_write_failure_in_quiet_mode(tmp_path, monkeyp
 
     def exploding_sidecar_write(*a, **kw):
         raise OSError("simulated disk full")
+
     monkeypatch.setattr("mind_meld.sidecar.write", exploding_sidecar_write)
 
     r = runner.invoke(app, ["autopush"])
@@ -497,6 +509,7 @@ def test_autopull_mindmelderror_stderr_no_log(tmp_path, monkeypatch):
 
     def typed_boom(*a, **kw):
         raise CryptoError("decrypt failed on peer blob")
+
     monkeypatch.setattr("mind_meld.cli._pull_core", typed_boom)
 
     r = runner.invoke(app, ["autopull"])
@@ -515,6 +528,7 @@ def test_autopush_mindmelderror_stderr_no_log(tmp_path, monkeypatch):
 
     def typed_boom(*a, **kw):
         raise StorageError("backend refused")
+
     monkeypatch.setattr("mind_meld.cli._push_core", typed_boom)
 
     r = runner.invoke(app, ["autopush"])
@@ -532,6 +546,7 @@ def test_autopull_no_passphrase_prints_skipped_line(tmp_path, monkeypatch):
     monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
     try:
         import keyring
+
         monkeypatch.setattr(keyring, "get_password", lambda *a, **kw: None)
     except ImportError:
         pass
@@ -556,7 +571,10 @@ def test_pull_conflict_mode_prompt_threads_interactive_flag(tmp_path, monkeypatc
     def spy_download(*a, **kw):
         seen["called"] = True
         seen["interactive_resolve"] = kw.get("interactive_resolve")
-        return 0, {k: [] for k in ("written", "merged", "skipped", "conflicted", "unchanged", "failed")}
+        return 0, {
+            k: [] for k in ("written", "merged", "skipped", "conflicted", "unchanged", "failed")
+        }
+
     monkeypatch.setattr("mind_meld.cli._download_and_apply", spy_download)
 
     # Push something so there's work for pull to do on a second device.
@@ -603,6 +621,7 @@ def test_log_unexpected_swallows_write_failure(tmp_path, monkeypatch):
         if str(path).endswith("autopull.log"):
             raise PermissionError("simulated perms denied")
         return real_open(path, *a, **kw)
+
     monkeypatch.setattr("builtins.open", selective_boom)
 
     # Must not raise.
@@ -634,7 +653,9 @@ def test_autopull_writes_breadcrumb_on_lock_held(tmp_path, monkeypatch):
 
     def boom(*a, **kw):
         from mind_meld.errors import LockError
+
         raise LockError("already held by PID 12345")
+
     monkeypatch.setattr("mind_meld.cli.acquire_lock", boom)
 
     r = runner.invoke(app, ["autopull"])
@@ -650,11 +671,15 @@ def test_mm_status_surfaces_breadcrumb(tmp_path, monkeypatch):
     _setup_real_config(tmp_path, monkeypatch)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
     # Plant a breadcrumb.
-    (iso / "last-autorun.json").write_text(json.dumps({
-        "timestamp": "2026-04-23T12:00:00+00:00",
-        "verb": "pull",
-        "outcome": "lock-held",
-    }))
+    (iso / "last-autorun.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-04-23T12:00:00+00:00",
+                "verb": "pull",
+                "outcome": "lock-held",
+            }
+        )
+    )
 
     r = runner.invoke(app, ["status"])
     assert r.exit_code == 0
@@ -721,6 +746,7 @@ def test_log_unexpected_survives_concurrent_writers(tmp_path, monkeypatch):
     Without flock, truncate-tail could race; this test exercises the lock.
     """
     import threading
+
     from mind_meld import cli as cli_mod
 
     _redirect_sidecar(monkeypatch, tmp_path)
@@ -752,6 +778,7 @@ def test_autopull_unexpected_crypto_error_logs(tmp_path, monkeypatch):
 
     def boom(*a, **kw):
         raise RuntimeError("unexpected crypto boom")
+
     monkeypatch.setattr("mind_meld.cli._init_crypto_session", boom)
 
     r = runner.invoke(app, ["autopull"])
@@ -803,6 +830,7 @@ def test_error_preserves_rich_formatting_on_stderr():
     would silently drop the [red]Error:[/red] styling for interactive users.
     """
     import io
+
     from rich.console import Console
 
     buf = io.StringIO()
@@ -819,9 +847,7 @@ def test_error_preserves_rich_formatting_on_stderr():
 # ─── Group 1 / Track 1A: quiet-path audit fixes ──────────────────────────
 
 
-def test_autopush_surfaces_corrupt_manifest_sidecar_recovery_in_quiet_mode(
-    tmp_path, monkeypatch
-):
+def test_autopush_surfaces_corrupt_manifest_sidecar_recovery_in_quiet_mode(tmp_path, monkeypatch):
     """When THIS device's remote manifest is corrupt and we recover from the
     local sidecar during autopush, the recovery must surface to stderr.
     Silently swallowing this leaves the user blind to storage degradation.
@@ -868,28 +894,31 @@ def test_autopull_surfaces_total_failed_count_on_stderr(tmp_path, monkeypatch):
     assert "mm pull --verbose" in (r.stderr or "")
 
 
-def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(
-    tmp_path, monkeypatch, capsys
-):
+def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(tmp_path, monkeypatch, capsys):
     """When the remote manifest is corrupt AND no local sidecar exists, recovery
     falls through to peer-fallback. That branch carries the riskiest semantics
     (recent local deletions can be lost) and must surface to stderr in quiet
     mode. Unit-tested at the helper boundary because reproducing the full
     multi-device, multi-tombstone push-side scenario via CliRunner is heavy.
     """
-    import sys
-    from mind_meld.cli import _recover_prior_manifest, ManifestFetch
+    from mind_meld.cli import ManifestFetch, _recover_prior_manifest
 
     fetch = ManifestFetch(status="corrupt", manifest=None)
     monkeypatch.setattr("mind_meld.sidecar.read", lambda *a, **kw: None)
-    fake_tombstones = {"claude:projects/x/memory/foo.md": {"deleted_at": "2026-04-23T00:00:00+00:00"}}
+    fake_tombstones = {
+        "claude:projects/x/memory/foo.md": {"deleted_at": "2026-04-23T00:00:00+00:00"}
+    }
     monkeypatch.setattr(
         "mind_meld.cli._collect_peer_tombstones",
         lambda *a, **kw: fake_tombstones,
     )
 
     result = _recover_prior_manifest(
-        fetch, backend=None, device_id="dev-a", passphrase="x", memory_kb=1024,
+        fetch,
+        backend=None,
+        device_id="dev-a",
+        passphrase="x",
+        memory_kb=1024,
         quiet=True,
     )
 
@@ -910,12 +939,15 @@ def test_autopush_breadcrumb_no_sources_distinguishes_from_success(tmp_path, mon
     """
     storage_dir = tmp_path / "storage"
     config_path = tmp_path / "config.toml"
-    save_config({
-        "device": {"id": "dev-empty", "name": "Empty"},
-        "storage": {"path": str(storage_dir)},
-        "sync": {"max_file_size": 52_428_800, "sources": []},
-        "crypto": {"argon2_memory_kb": MEMORY_KB},
-    }, config_path)
+    save_config(
+        {
+            "device": {"id": "dev-empty", "name": "Empty"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {"max_file_size": 52_428_800, "sources": []},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        config_path,
+    )
 
     backend = LocalBackend(storage_dir)
     bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
@@ -941,12 +973,15 @@ def test_autopush_surfaces_no_sources_warning_in_quiet_mode(tmp_path, monkeypatc
     """
     storage_dir = tmp_path / "storage"
     config_path = tmp_path / "config.toml"
-    save_config({
-        "device": {"id": "dev-empty", "name": "Empty"},
-        "storage": {"path": str(storage_dir)},
-        "sync": {"max_file_size": 52_428_800, "sources": []},
-        "crypto": {"argon2_memory_kb": MEMORY_KB},
-    }, config_path)
+    save_config(
+        {
+            "device": {"id": "dev-empty", "name": "Empty"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {"max_file_size": 52_428_800, "sources": []},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        config_path,
+    )
 
     backend = LocalBackend(storage_dir)
     bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
@@ -1000,12 +1035,14 @@ def test_autopull_surfaces_fsync_failure_in_quiet_mode(tmp_path, monkeypatch):
     # does a one-time config backfill that uses fsync_dir too — leaving that
     # alone keeps the test focused on the warning we want to assert.
     import mind_meld.fsutil as _fsu
+
     real_fsync_dir = _fsu.fsync_dir
 
     def selective_boom(path):
         if "claude" in str(path) or "memory" in str(path):
             raise StorageError("simulated fsync failure")
         return real_fsync_dir(path)
+
     monkeypatch.setattr("mind_meld.fsutil.fsync_dir", selective_boom)
 
     r = runner.invoke(app, ["autopull"])

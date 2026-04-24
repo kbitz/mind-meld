@@ -70,17 +70,12 @@ def acquire_lock(path: Path | None = None) -> None:
     key = _resolve_key(lock_path)
 
     if key in _LOCK_FDS:
-        raise LockError(
-            f"This process (PID {os.getpid()}) already holds the lock "
-            f"at {lock_path}."
-        )
+        raise LockError(f"This process (PID {os.getpid()}) already holds the lock at {lock_path}.")
 
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     except OSError as e:
-        raise LockError(
-            f"Could not open lockfile {lock_path}: {e}"
-        ) from e
+        raise LockError(f"Could not open lockfile {lock_path}: {e}") from e
 
     # Retry once on EINTR; any other failure releases fd and raises.
     for attempt in (1, 2):
@@ -90,9 +85,7 @@ def acquire_lock(path: Path | None = None) -> None:
         except InterruptedError:
             if attempt == 2:
                 os.close(fd)
-                raise LockError(
-                    f"flock on {lock_path} interrupted repeatedly."
-                )
+                raise LockError(f"flock on {lock_path} interrupted repeatedly.")
             continue
         except BlockingIOError:
             stored_pid = _read_pid(lock_path)
@@ -104,9 +97,7 @@ def acquire_lock(path: Path | None = None) -> None:
             )
         except OSError as e:
             os.close(fd)
-            raise LockError(
-                f"flock on {lock_path} failed: {e}"
-            ) from e
+            raise LockError(f"flock on {lock_path} failed: {e}") from e
 
     # Write PID to body for diagnostics. If this fails, release the
     # flock cleanly so the kernel isn't holding a lock on a file whose
@@ -121,9 +112,7 @@ def acquire_lock(path: Path | None = None) -> None:
         except OSError:
             pass
         os.close(fd)
-        raise LockError(
-            f"flock acquired on {lock_path} but PID write failed: {e}"
-        ) from e
+        raise LockError(f"flock acquired on {lock_path} but PID write failed: {e}") from e
 
     _LOCK_FDS[key] = fd
 
