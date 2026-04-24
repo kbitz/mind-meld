@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from mind_meld.errors import StorageError
+from mind_meld.storage.keys import DEVICES_PREFIX, device_key
 from mind_meld.storage.local import LocalBackend
 
 
@@ -27,7 +28,7 @@ def register_device(
         "device_name": device_name,
         "registered": datetime.now(timezone.utc).isoformat(),
     }
-    key = f"devices/{device_id}.json"
+    key = device_key(device_id)
     backend.put(key, json.dumps(data, indent=2).encode("utf-8"))
 
 
@@ -41,7 +42,7 @@ def update_last_seen(
     Pull does NOT update it -- a read-only device is correctly shown as
     "never pushed" rather than appearing active via pulls.
     """
-    key = f"devices/{device_id}.json"
+    key = device_key(device_id)
     try:
         data = json.loads(backend.get(key))
     except StorageError:
@@ -74,7 +75,7 @@ def _list_devices_impl(
     """Shared implementation. `on_drop`, if provided, is called with
     (key, reason) for each dropped entry — cli.py uses this to emit warnings.
     """
-    keys = backend.list_keys("devices/")
+    keys = backend.list_keys(DEVICES_PREFIX)
     devices = []
     for key in keys:
         if not key.endswith(".json"):

@@ -43,6 +43,26 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from mind_meld.errors import CryptoError, StorageError
+from mind_meld.storage.keys import CRYPTO_INIT_KEY
+
+__all__ = [
+    "CRYPTO_INIT_KEY",  # re-exported for tests and legacy callers
+    "CryptoInitFetch",
+    "FORMAT_VERSION",
+    "FORMAT_VERSION_LEGACY_V1",
+    "bootstrap_crypto_init",
+    "decrypt",
+    "derive_key",
+    "encrypt",
+    "fetch_crypto_init",
+    "get_passphrase",
+    "load_master_key",
+    "root_salt_fingerprint",
+    "set_crypto_session",
+    "clear_crypto_session",
+    "store_passphrase_in_keyring",
+    "verify_passphrase",
+]
 
 FORMAT_VERSION = 0x02
 FORMAT_VERSION_LEGACY_V1 = 0x01  # recognized to fail loud; no back-compat decryption
@@ -58,8 +78,6 @@ ARGON2_PARALLELISM = 1
 
 HKDF_INFO = b"mm-file-v2"
 _KEYCHECK_PLAINTEXT = b"mm-keycheck-v1"
-
-CRYPTO_INIT_KEY = "mm-crypto-init"
 
 KEYRING_SERVICE = "mind-meld"
 KEYRING_USERNAME = "passphrase"
