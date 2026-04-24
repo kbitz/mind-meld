@@ -7,8 +7,10 @@ Sync Claude Code memory, todos, and gstack context across Macs via iCloud Drive.
 ## Install
 
 ```bash
-pipx install mind-meld
+pipx install git+https://github.com/kbitz/mind-meld.git
 ```
+
+Not on PyPI — install straight from GitHub.
 
 ## Quick Start
 
@@ -22,7 +24,7 @@ Config lives at `~/.config/mind-meld/config.toml` — not tied to your current d
 
 ## Setting up a second (or third) Mac
 
-1. `pipx install mind-meld` on the new machine.
+1. `pipx install git+https://github.com/kbitz/mind-meld.git` on the new machine.
 2. `mm init` — point it at the **same iCloud folder** as your first Mac and enter the **same passphrase**. This registers the new device against the existing roster.
 3. `mm pull` — downloads everything the other machine(s) have pushed.
 4. `mm push` — uploads anything this machine has that the others don't.
