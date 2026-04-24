@@ -41,7 +41,7 @@ Every piece of documentation targets one of two audiences:
 
 **README structure:**
 - One-liner description + badges (PyPI, license, CI)
-- 30-second install (`pipx install mind-meld`)
+- 30-second install (`pipx install git+https://github.com/kbitz/mind-meld.git`)
 - 2-minute quickstart (init → push → pull)
 - Links to detailed docs
 - "How it works" section with the architecture diagram

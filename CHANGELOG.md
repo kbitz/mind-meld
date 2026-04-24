@@ -2,6 +2,17 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.12] - 2026-04-24
+
+Docs fix. The README and SPEC both told users to `pipx install mind-meld`,
+but the package isn't on PyPI — that command 404s. Swap to
+`pipx install git+https://github.com/kbitz/mind-meld.git`, which actually
+works today, and add a one-liner noting the package isn't on PyPI.
+
+### Fixed
+- README.md install + second-Mac setup commands now use the GitHub URL
+- SPEC.md "30-second install" reference matches reality
+
 ## [0.8.11] - 2026-04-24
 
 Group 4 — Release infrastructure. Adds GitHub Actions CI on every push to
