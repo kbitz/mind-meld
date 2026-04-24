@@ -59,6 +59,15 @@ from mind_meld.manifest import (
 )
 from mind_meld.merge import merge_file, should_merge
 from mind_meld.storage import get_backend
+from mind_meld.storage.keys import (
+    DATA_PREFIX,
+    DEVICES_PREFIX,
+    MANIFESTS_PREFIX,
+    blob_key,
+    device_key,
+    manifest_key,
+    parse_blob_key,
+)
 from mind_meld import sidecar
 from mind_meld.synclog import write_sync_log
 
@@ -333,12 +342,12 @@ def _fetch_remote_manifest(
     guaranteed dicts with v2 shape. Callers may rely on this contract and
     do not need to call normalize_manifest themselves.
     """
-    manifest_key = f"manifests/{device_id}/manifest.json.enc"
+    mkey = manifest_key(device_id)
     manifests: list[dict] = []
 
     is_valid_manifest = _make_manifest_validator(passphrase, memory_kb)
-    canonical_exists = backend.exists(manifest_key)
-    conflict_copies = backend.find_conflict_copies(manifest_key, is_valid_manifest)
+    canonical_exists = backend.exists(mkey)
+    conflict_copies = backend.find_conflict_copies(mkey, is_valid_manifest)
     had_any_source = canonical_exists or bool(conflict_copies)
 
     # Try canonical manifest. Storage-layer errors (OSError, StorageError, any
@@ -348,7 +357,7 @@ def _fetch_remote_manifest(
     # exception and crash recovery.
     if canonical_exists:
         try:
-            enc_data = backend.get(manifest_key)
+            enc_data = backend.get(mkey)
             plain = decrypt(enc_data, passphrase, memory_kb)
             manifests.append(load_manifest(plain))
         except (CryptoError, ManifestError, OSError, MindMeldError):
@@ -606,9 +615,9 @@ def _cleanup_conflict_copies(
     which don't deserialize as Mind Meld manifests are left on disk with
     a stderr warning. Only real manifest conflict copies are removed.
     """
-    manifest_key = f"manifests/{device_id}/manifest.json.enc"
+    mkey = manifest_key(device_id)
     is_valid = _make_manifest_validator(passphrase, memory_kb)
-    return backend.delete_conflict_copies(manifest_key, is_valid)
+    return backend.delete_conflict_copies(mkey, is_valid)
 
 
 def _print_diff_summary(diff: DiffResult, elapsed: float) -> None:
@@ -707,8 +716,8 @@ def _upload_changed_blobs(
 
         data, _sha = read_and_hash(file_path)
         enc_data = encrypt(data, passphrase, memory_kb)
-        blob_key = f"data/{device_id}/{info['sha256']}.enc"
-        backend.put(blob_key, enc_data)
+        bkey = blob_key(device_id, info["sha256"])
+        backend.put(bkey, enc_data)
         bytes_transferred += len(enc_data)
 
         if verbose:
@@ -818,102 +827,55 @@ def _prompt_conflict_choice(
 #   Failures (rename / write) are isolated per-file: the local file is never
 #   left destroyed without a recoverable trail. Returns "failed" on error.
 
-def _apply_incoming_file(
+def _apply_write(
     local_path: Path,
     rel_path: str,
     plain_data: bytes,
-    remote_info: dict,
-    remote_device_id: str,
-    interactive_resolve: bool = False,
     verbose: bool = False,
 ) -> ApplyOutcome:
-    """Apply one decrypted remote file to the local tree.
-
-    See the decision-tree comment above for branch semantics. The local file
-    is never destroyed without a recoverable trail (either conflict copy
-    or rollback).
-    """
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # [W] local has no copy yet.
-    if not local_path.exists():
-        try:
-            # Deferred durability: per-file fsync=False; end of pull calls
-            # fsutil.fsync_dir once per touched parent.
-            fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
-        except (OSError, StorageError) as e:
-            console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
-            return "failed"
-        if verbose:
-            console.print(f"  [green]\u2193[/green] {rel_path}")
-        return "written"
-
-    # Re-read local state. Precomputed snapshot can be stale if the user
-    # edited the file after _pull_core built its diff.
+    """[W] local has no copy \u2014 atomic_write remote to canonical."""
     try:
-        local_hash = hash_file(local_path)
-    except (PermissionError, OSError) as e:
-        console.print(f"  [yellow]read failed:[/yellow] {rel_path} \u2014 {e}")
+        # Deferred durability: per-file fsync=False; end of pull calls
+        # fsutil.fsync_dir once per touched parent.
+        fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
+    except (OSError, StorageError) as e:
+        console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
         return "failed"
+    if verbose:
+        console.print(f"  [green]\u2193[/green] {rel_path}")
+    return "written"
 
-    remote_hash = remote_info.get("sha256")
 
-    # [U] already in sync.
-    if local_hash == remote_hash:
-        return "unchanged"
-
-    # [M] mergeable: jsonl / MEMORY.md are line-union safe.
-    if should_merge(rel_path):
-        try:
-            local_bytes = local_path.read_bytes()
-            merged = merge_file(rel_path, local_bytes, plain_data)
-            fsutil.atomic_write_bytes(local_path, merged, fsync=False)
-        except (OSError, StorageError) as e:
-            console.print(f"  [red]merge failed:[/red] {rel_path} \u2014 {e}")
-            return "failed"
-        if verbose:
-            console.print(f"  [cyan]merged[/cyan] {rel_path}")
-        return "merged"
-
-    # [S] local is newer. Keep local at canonical path \u2014 next push propagates it.
-    remote_mtime_str = remote_info.get("mtime")
-    local_mtime: datetime | None = None
-    remote_mtime: datetime | None = None
+def _apply_merge(
+    local_path: Path,
+    rel_path: str,
+    plain_data: bytes,
+    verbose: bool = False,
+) -> ApplyOutcome:
+    """[M] mergeable: jsonl / MEMORY.md are line-union safe."""
     try:
-        local_mtime = mtime_from_path(local_path)
-        if remote_mtime_str:
-            remote_mtime = mtime_from_manifest(remote_mtime_str)
-    except (ValueError, OSError) as e:
-        # Malformed mtime or filesystem error: fall through to conflict path.
-        console.print(f"  [yellow]mtime parse failed (forcing conflict):[/yellow] {rel_path} \u2014 {e}")
-        local_mtime = None
-        remote_mtime = None
+        local_bytes = local_path.read_bytes()
+        merged = merge_file(rel_path, local_bytes, plain_data)
+        fsutil.atomic_write_bytes(local_path, merged, fsync=False)
+    except (OSError, StorageError) as e:
+        console.print(f"  [red]merge failed:[/red] {rel_path} \u2014 {e}")
+        return "failed"
+    if verbose:
+        console.print(f"  [cyan]merged[/cyan] {rel_path}")
+    return "merged"
 
-    if local_mtime is not None and remote_mtime is not None and local_mtime > remote_mtime:
-        if verbose:
-            console.print(f"  [dim]= {rel_path} (local newer, kept)[/dim]")
-        return "skipped"
 
-    # [C] conflict path. Optionally prompt the user; default keep-both.
-    if interactive_resolve:
-        choice = _prompt_conflict_choice(rel_path, local_path, plain_data)
-        if choice == "keep-canonical":
-            if verbose:
-                console.print(f"  [dim]= {rel_path} (kept canonical by user)[/dim]")
-            return "skipped"
-        if choice == "keep-remote":
-            try:
-                fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
-            except (OSError, StorageError) as e:
-                console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
-                return "failed"
-            if verbose:
-                console.print(f"  [yellow]\u2193[/yellow] {rel_path} (remote kept by user)")
-            return "written"
-        if choice == "abort":
-            raise typer.Abort()
-        # choice == "keep-both" -> fall through to default conflict path
+def _apply_conflict(
+    local_path: Path,
+    rel_path: str,
+    plain_data: bytes,
+    remote_device_id: str,
+    verbose: bool = False,
+) -> ApplyOutcome:
+    """[C] conflict path: rename local to .sync-conflict-*, write remote to canonical.
 
+    Rollback on write failure so canonical still points at something.
+    """
     try:
         conflict_path = conflict_filename(local_path, remote_device_id)
     except ValueError as e:
@@ -945,6 +907,87 @@ def _apply_incoming_file(
     return "conflicted"
 
 
+def _apply_incoming_file(
+    local_path: Path,
+    rel_path: str,
+    plain_data: bytes,
+    remote_info: dict,
+    remote_device_id: str,
+    interactive_resolve: bool = False,
+    verbose: bool = False,
+) -> ApplyOutcome:
+    """Dispatch one decrypted remote file to the appropriate _apply_* helper.
+
+    See the decision-tree comment above for branch semantics. The local file
+    is never destroyed without a recoverable trail (either conflict copy
+    or rollback).
+    """
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not local_path.exists():
+        return _apply_write(local_path, rel_path, plain_data, verbose=verbose)
+
+    # Re-read local state. Precomputed snapshot can be stale if the user
+    # edited the file after _pull_core built its diff.
+    try:
+        local_hash = hash_file(local_path)
+    except (PermissionError, OSError) as e:
+        console.print(f"  [yellow]read failed:[/yellow] {rel_path} \u2014 {e}")
+        return "failed"
+
+    if local_hash == remote_info.get("sha256"):
+        return "unchanged"
+
+    if should_merge(rel_path):
+        return _apply_merge(local_path, rel_path, plain_data, verbose=verbose)
+
+    # [S] local is newer. Keep local at canonical path \u2014 next push propagates it.
+    remote_mtime_str = remote_info.get("mtime")
+    local_mtime: datetime | None = None
+    remote_mtime: datetime | None = None
+    try:
+        local_mtime = mtime_from_path(local_path)
+        if remote_mtime_str:
+            remote_mtime = mtime_from_manifest(remote_mtime_str)
+    except (ValueError, OSError) as e:
+        # Malformed mtime or filesystem error: fall through to conflict path.
+        console.print(f"  [yellow]mtime parse failed (forcing conflict):[/yellow] {rel_path} \u2014 {e}")
+        local_mtime = None
+        remote_mtime = None
+
+    if local_mtime is not None and remote_mtime is not None and local_mtime > remote_mtime:
+        if verbose:
+            console.print(f"  [dim]= {rel_path} (local newer, kept)[/dim]")
+        return "skipped"
+
+    # [C] conflict path. Optionally prompt the user; default keep-both.
+    if interactive_resolve:
+        choice = _prompt_conflict_choice(rel_path, local_path, plain_data)
+        if choice == "keep-canonical":
+            if verbose:
+                console.print(f"  [dim]= {rel_path} (kept canonical by user)[/dim]")
+            return "skipped"
+        if choice == "keep-remote":
+            # User overrode default keep-both by picking remote \u2014 overwrite
+            # canonical with remote bytes. Same I/O as _apply_write but with
+            # a different verbose string ("remote kept by user").
+            try:
+                fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
+            except (OSError, StorageError) as e:
+                console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
+                return "failed"
+            if verbose:
+                console.print(f"  [yellow]\u2193[/yellow] {rel_path} (remote kept by user)")
+            return "written"
+        if choice == "abort":
+            raise typer.Abort()
+        # choice == "keep-both" -> fall through to _apply_conflict
+
+    return _apply_conflict(
+        local_path, rel_path, plain_data, remote_device_id, verbose=verbose
+    )
+
+
 def _download_and_apply(
     backend,
     base_path: Path,
@@ -972,12 +1015,21 @@ def _download_and_apply(
     }
 
     for rel_path, info in to_download.items():
-        blob_key = f"data/{source_device_id}/{info['sha256']}.enc"
         try:
-            enc_data = backend.get(blob_key)
+            bkey = blob_key(source_device_id, info.get("sha256", ""))
+        except ValueError as e:
+            # Malicious or corrupt manifest shipped a sha256 with path
+            # separators / parent-dir refs / null bytes / empty. Per-file
+            # isolation: fail this file, keep walking — matches the
+            # v0.8.1 empty-device_id handling in _apply_conflict.
+            console.print(f"  [red]bad blob key (local preserved):[/red] {rel_path} — {e}")
+            outcomes["failed"].append(rel_path)
+            continue
+        try:
+            enc_data = backend.get(bkey)
         except MindMeldError:
             if verbose:
-                console.print(f"  [yellow]blob missing: {blob_key}[/yellow]")
+                console.print(f"  [yellow]blob missing: {bkey}[/yellow]")
             outcomes["failed"].append(rel_path)
             continue
 
@@ -1045,7 +1097,7 @@ def _probe_storage_occupancy(backend) -> _StorageOccupancy:
 
     def _has_devices() -> bool:
         try:
-            for _ in backend.list_keys("devices/"):
+            for _ in backend.list_keys(DEVICES_PREFIX):
                 return True
         except Exception:
             return False
@@ -1054,8 +1106,8 @@ def _probe_storage_occupancy(backend) -> _StorageOccupancy:
     return _StorageOccupancy(
         has_crypto_init=(fetch.status == "ok"),
         has_corrupt_crypto_init=(fetch.status == "corrupt"),
-        has_any_blobs=_any_enc("data/"),
-        has_any_manifests=_any_enc("manifests/"),
+        has_any_blobs=_any_enc(DATA_PREFIX),
+        has_any_manifests=_any_enc(MANIFESTS_PREFIX),
         has_any_devices=_has_devices(),
     )
 
@@ -1522,8 +1574,8 @@ def _push_core(
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     manifest_data = serialize_manifest(local_manifest)
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
-    manifest_key = f"manifests/{device_id}/manifest.json.enc"
-    backend.put(manifest_key, enc_manifest)
+    mkey = manifest_key(device_id)
+    backend.put(mkey, enc_manifest)
 
     # Write sidecar (best-effort: failure warns but does not abort push;
     # the remote manifest succeeded, so peers still have a path to recovery).
@@ -1647,6 +1699,438 @@ def pull(
         release_lock()
 
 
+@dataclass
+class _CorruptPeer:
+    device_id: str
+    device_name: str
+
+
+@dataclass
+class _PredictedConflict:
+    device_name: str
+    src_name: str
+    rel_path: str
+
+
+@dataclass
+class _FsyncWarning:
+    parent_dir: Path
+    error: str
+
+
+@dataclass
+class _UnknownSourceWarning:
+    src_name: str
+    device_name: str
+
+
+@dataclass
+class _PerSourceResult:
+    """Result of pulling one source from one peer.
+
+    Helpers return this; the main loop aggregates into PullResult and
+    passes the full list to _print_pull_summary for per-source line
+    rendering.
+    """
+    src_name: str
+    device_name: str
+    device_id: str
+    outcomes: dict[ApplyOutcome, list[str]]
+    bytes_transferred: int
+    touched_parents: set[Path]
+    # Non-empty only in dry-run mode; holds the diff for _print_pull_prediction.
+    dry_run_diff: DiffResult | None = None
+    # Set for src_name=="claude" to trigger write_sync_log in the caller.
+    claude_sync_base: str | None = None
+
+    @property
+    def had_changes(self) -> bool:
+        """True if ANY file was PROCESSED (written/merged/skipped/conflicted/failed).
+
+        Excludes "unchanged" deliberately. "unchanged" means the apply-time
+        re-read matched remote — nothing happened. Treating unchanged-only as
+        "had changes" would trigger _cleanup_conflict_copies, which deletes
+        valid iCloud conflict copies of the remote manifest. If we recovered
+        from a corrupt canonical manifest via a valid conflict copy, that
+        deletion leaves only the corrupt canonical → permanent corruption.
+
+        Includes skipped/failed intentionally: one-way-sync setups (always
+        local-newer = all skipped) still need cleanup to run or iCloud dup
+        files accumulate forever.
+        """
+        return any(
+            self.outcomes[k] for k in self.outcomes if k != "unchanged"
+        )
+
+
+def _select_devices(
+    backend, my_device_id: str, from_device: str | None
+) -> tuple[list[dict], list[dict]]:
+    """Return (all_devices, pull_targets).
+
+    Single call to _list_devices_warn — dedups the double-call bug
+    (cli.py:1692 + 1709 pre-decomp) that emitted each dropped-device
+    warning twice per pull. One warning per dropped peer per pull is
+    the correct semantic.
+
+    `all_devices` is used for tombstone collection (every peer's
+    manifest feeds tombstones; we don't pull data from ourselves but
+    we DO read our own tombstones via collect_tombstones).
+
+    `pull_targets` is filtered: only the peer `from_device` matches, or
+    all peers excluding self.
+    """
+    all_devices = _list_devices_warn(backend)
+    if from_device:
+        pull_targets = [d for d in all_devices if d["device_id"] == from_device]
+    else:
+        pull_targets = [d for d in all_devices if d["device_id"] != my_device_id]
+    return all_devices, pull_targets
+
+
+def _prefetch_manifests(
+    backend, devices: list[dict], passphrase: str, memory_kb: int
+) -> tuple[dict[str, dict | None], list[_CorruptPeer]]:
+    """Fetch every device's manifest. Missing/corrupt both map to None.
+
+    Returns (cache, corrupt_peers). Callers route corrupt_peers to stderr
+    via _print_pull_summary (load-bearing signal: silent skip = partial
+    pull that looks like a successful pull).
+    """
+    cache: dict[str, dict | None] = {}
+    corrupt: list[_CorruptPeer] = []
+    for d in devices:
+        did = d["device_id"]
+        peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+        if peer_fetch.status == "corrupt":
+            corrupt.append(
+                _CorruptPeer(device_id=did, device_name=d.get("device_name", did))
+            )
+        cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
+    return cache, corrupt
+
+
+def _preflight_conflicts(
+    pull_targets: list[dict],
+    manifest_cache: dict[str, dict | None],
+    local_sources_map: dict[str, Path],
+    source_filter: str | None,
+    all_tombstones: dict[str, dict[str, str]],
+) -> list[_PredictedConflict]:
+    """Classify every file preflight; return predicted conflicts.
+
+    Cross-peer simulation: walking peers in iteration order, maintain
+    an overlay of (src_name, rel_path) -> predicted-final-sha for files
+    preflight said would be cleanly written. When a later peer ships
+    the same path, predict against the overlay (what local WILL be
+    after the earlier peer's write) rather than the stale on-disk sha.
+    Without this, peer A writing Y then peer B writing Z is missed:
+    preflight sees empty local for both, predicts clean, apply
+    produces a .sync-conflict-* — exactly the "no writes on fail"
+    violation the flag prevents.
+
+    Caller (pull_core) exits 3 if the list is non-empty. Race-safe
+    only best-effort (TOCTOU between preflight and apply is possible;
+    re-run pull to surface late conflicts).
+    """
+    predicted: list[_PredictedConflict] = []
+    overlay: dict[tuple[str, str], str] = {}
+    for device in pull_targets:
+        dname = device["device_name"]
+        remote_manifest = manifest_cache.get(device["device_id"])
+        if remote_manifest is None:
+            continue
+        for src_name, src_data in remote_manifest.get("sources", {}).items():
+            if source_filter and src_name != source_filter:
+                continue
+            if src_name not in local_sources_map:
+                continue  # unknown source counted elsewhere, not a conflict
+            base_path = local_sources_map[src_name]
+            for rel_path, info in src_data.get("files", {}).items():
+                if is_tombstoned(src_name, rel_path, all_tombstones):
+                    continue
+                overlay_sha = overlay.get((src_name, rel_path))
+                if overlay_sha is not None:
+                    # An earlier peer already predicted a clean write.
+                    # Next peer conflicts iff its sha differs from what
+                    # the earlier peer will leave.
+                    if overlay_sha != info.get("sha256"):
+                        predicted.append(
+                            _PredictedConflict(dname, src_name, rel_path)
+                        )
+                    continue
+                outcome = _predict_pull_outcome(rel_path, info, base_path)
+                if outcome == "conflict":
+                    predicted.append(
+                        _PredictedConflict(dname, src_name, rel_path)
+                    )
+                elif outcome in ("write", "merge"):
+                    overlay[(src_name, rel_path)] = info.get("sha256", "")
+    return predicted
+
+
+def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
+    return {
+        "written": [],
+        "merged": [],
+        "skipped": [],
+        "conflicted": [],
+        "unchanged": [],
+        "failed": [],
+    }
+
+
+def _pull_one_source(
+    backend,
+    *,
+    src_name: str,
+    src_data: dict,
+    did: str,
+    dname: str,
+    base_path: Path,
+    all_tombstones: dict[str, dict[str, str]],
+    passphrase: str,
+    memory_kb: int,
+    interactive_resolve: bool,
+    dry_run: bool,
+    verbose_console: bool,
+) -> _PerSourceResult:
+    """Pull one source from one peer. Returns _PerSourceResult.
+
+    `verbose_console` is `(verbose and not quiet)` — controls per-file
+    console output inside _download_and_apply.
+    """
+    remote_files = src_data.get("files", {})
+    base_result = _PerSourceResult(
+        src_name=src_name,
+        device_name=dname,
+        device_id=did,
+        outcomes=_empty_outcomes(),
+        bytes_transferred=0,
+        touched_parents=set(),
+    )
+    if not remote_files:
+        return base_result
+
+    # Build local state for diff. mtime is re-read at apply time so it
+    # reflects what the file actually looks like when we act on it.
+    local_files: dict[str, dict] = {}
+    for rel_path in remote_files:
+        local_path = base_path / rel_path
+        if local_path.exists():
+            try:
+                sha = hash_file(local_path)
+                local_files[rel_path] = {"sha256": sha}
+            except (PermissionError, OSError):
+                pass
+
+    # Arg-swap: this is the additive pull path. See diff_files docstring
+    # — `new`/`modified` are files to download; `deleted` is ignored.
+    diff = diff_files(remote_files, local_files)
+
+    if dry_run:
+        base_result.dry_run_diff = diff
+        return base_result
+
+    to_download = {**diff.new, **diff.modified}
+    to_download = {
+        path: info
+        for path, info in to_download.items()
+        if not is_tombstoned(src_name, path, all_tombstones)
+    }
+    if not to_download:
+        return base_result
+
+    bt, outcomes = _download_and_apply(
+        backend,
+        base_path,
+        to_download,
+        did,
+        passphrase,
+        memory_kb,
+        interactive_resolve=interactive_resolve,
+        verbose=verbose_console,
+    )
+
+    touched_parents: set[Path] = set()
+    for rel in outcomes["written"] + outcomes["merged"] + outcomes["conflicted"]:
+        touched_parents.add((base_path / rel).parent)
+
+    return _PerSourceResult(
+        src_name=src_name,
+        device_name=dname,
+        device_id=did,
+        outcomes=outcomes,
+        bytes_transferred=bt,
+        touched_parents=touched_parents,
+        claude_sync_base=str(base_path) if src_name == "claude" else None,
+    )
+
+
+def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
+    """Deferred-durability commit: fsync each unique parent directory.
+
+    A failure means some of this pull's renames may be non-durable —
+    caller surfaces to stderr but does not roll back (files are already
+    in place; a subsequent pull will simply re-apply if needed).
+    """
+    warnings: list[_FsyncWarning] = []
+    for parent_dir in sorted(touched_parents):
+        try:
+            fsutil.fsync_dir(parent_dir)
+        except StorageError as e:
+            warnings.append(_FsyncWarning(parent_dir=parent_dir, error=str(e)))
+    return warnings
+
+
+def _print_preflight_conflicts(
+    predicted: list[_PredictedConflict], quiet: bool
+) -> None:
+    """Print predicted conflicts before --conflict-mode=fail raises.
+
+    Quiet (autopull): one-liner per conflict to stderr.
+    Non-quiet: rich console with resolution hint.
+    """
+    if quiet:
+        for p in predicted:
+            print(
+                f"mm: conflict {p.src_name}/{p.rel_path} (from {p.device_name})",
+                file=sys.stderr,
+            )
+        return
+    console.print(
+        f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict."
+    )
+    for p in predicted:
+        console.print(
+            f"  [yellow]! conflict[/yellow] {p.src_name}/{p.rel_path} "
+            f"(from {p.device_name})"
+        )
+    console.print(
+        "\nResolve conflicts locally, or re-run with "
+        "--conflict-mode keep-both to auto-rename."
+    )
+
+
+def _print_pull_summary(
+    result: PullResult,
+    corrupt_peers: list[_CorruptPeer],
+    unknown_sources: list[_UnknownSourceWarning],
+    fsync_warnings: list[_FsyncWarning],
+    per_source_results: list[_PerSourceResult],
+    quiet: bool,
+    verbose: bool,
+) -> None:
+    """Single I/O owner for pull output.
+
+    Load-bearing warnings (corrupt peers, unknown sources, fsync
+    failures, per-source conflicts/failures) ALWAYS to stderr — they
+    survive quiet mode because silent suppression would mask
+    data-at-risk conditions (see CLAUDE.md "Load-bearing warnings").
+
+    Cosmetic summary (totals, bytes transferred, elapsed, per-source
+    verbose lines) goes to console only when !quiet.
+    """
+    # Load-bearing: corrupt peers (silent skip = partial pull masquerading
+    # as successful pull).
+    for peer in corrupt_peers:
+        msg = (
+            f"manifest for device {peer.device_name} ({peer.device_id}) "
+            f"is corrupt - skipping pull from this device."
+        )
+        if quiet:
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
+
+    # Load-bearing: unknown sources (partition risk — rename drift or
+    # missed config migration).
+    for unk in unknown_sources:
+        msg = (
+            f"skipping unknown source '{unk.src_name}' from "
+            f"{unk.device_name} - not configured locally"
+        )
+        if quiet:
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"  [yellow]Warning:[/yellow] {msg}")
+
+    # Load-bearing: fsync failures (pulls non-durable).
+    for w in fsync_warnings:
+        msg = f"durability fsync failed on {w.parent_dir} — {w.error}"
+        if quiet:
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"  [yellow]warning:[/yellow] {msg}")
+
+    if quiet:
+        return
+
+    # Per-source lines (conflicts/failures always; verbose otherwise).
+    for r in per_source_results:
+        src_written = len(r.outcomes["written"])
+        src_merged = len(r.outcomes["merged"])
+        src_skipped = len(r.outcomes["skipped"])
+        src_conflicted = len(r.outcomes["conflicted"])
+        src_failed = len(r.outcomes["failed"])
+        if src_conflicted or src_failed or verbose:
+            line = f"  [bold]{r.src_name}:[/bold]"
+            if src_written:
+                line += f" [green]{src_written} written[/green]"
+            if src_merged:
+                line += f" [cyan]{src_merged} merged[/cyan]"
+            if src_skipped:
+                line += f" [dim]{src_skipped} skipped (local newer)[/dim]"
+            if src_conflicted:
+                line += f" [yellow]{src_conflicted} conflicts[/yellow]"
+            if src_failed:
+                line += f" [red]{src_failed} failed[/red]"
+            console.print(line)
+
+    # Totals.
+    console.print("\n[bold green]Pull complete.[/bold green]")
+    parts = []
+    if result.total_written:
+        parts.append(f"{result.total_written} written")
+    if result.total_merged:
+        parts.append(f"{result.total_merged} merged")
+    if result.total_skipped:
+        parts.append(f"{result.total_skipped} skipped (local newer)")
+    if result.total_conflicted:
+        parts.append(f"[yellow]{result.total_conflicted} conflicts[/yellow]")
+    if result.total_failed:
+        parts.append(f"[red]{result.total_failed} failed[/red]")
+    if result.total_skipped_unknown_source:
+        parts.append(
+            f"[yellow]{result.total_skipped_unknown_source} unknown source(s) skipped[/yellow]"
+        )
+    if parts:
+        console.print("  " + ", ".join(parts))
+    else:
+        console.print("  nothing to apply")
+    if result.bytes_transferred:
+        mb = result.bytes_transferred / (1024 * 1024)
+        console.print(f"  {mb:.1f}MB transferred")
+    console.print(f"  Completed in {result.elapsed:.1f}s")
+    if result.total_conflicted:
+        console.print(
+            "  [yellow]Run [bold]mm conflicts[/bold] to review, "
+            "[bold]mm resolve[/bold] to pick a winner.[/yellow]"
+        )
+
+
+# ── _pull_core: decomposition pattern ──────────────────────────────────
+#
+# _pull_core follows a "helpers return data, _print_pull_summary owns
+# user-visible output" pattern. Each helper performs its own storage /
+# filesystem I/O but does NOT call console.print. Load-bearing warnings
+# (corrupt peers, unknown sources, fsync failures, per-source
+# conflicts/failures) are accumulated into lists and routed to stderr by
+# _print_pull_summary — they survive quiet-mode suppression.
+#
+# The rest of cli.py (push, status, diag, recover) still uses the older
+# side-effect-during-logic style. Migrate opportunistically when touching.
+#
 def _pull_core(
     config: dict,
     passphrase: str,
@@ -1660,386 +2144,213 @@ def _pull_core(
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
-    Additive-only: downloads new and modified files, never deletes local files.
-    Tombstoned files are skipped. JSONL files are merged. MEMORY.md files are
-    line-merged. Non-mergeable files with divergent local edits are handled
-    per the _apply_incoming_file decision tree: skip (local newer),
-    conflict-copy (remote wins canonical, local preserved as .sync-conflict-*),
-    or interactively resolved when `conflict_mode == "prompt"`.
+    Additive-only: downloads new and modified files, never deletes local
+    files. Tombstoned files are skipped. JSONL files are merged. MEMORY.md
+    files are line-merged. Non-mergeable files with divergent local edits
+    follow the _apply_incoming_file decision tree.
 
     `conflict_mode`:
       - "keep-both": default; auto keep-both on conflict.
-      - "prompt": ask per-file (interactive only).
-      - "fail": preflight every file; if any would conflict, raise
-        typer.Exit(2) with no writes. Preflight is best-effort (TOCTOU: a
-        file edited between preflight and apply may still produce a
-        .sync-conflict-*).
+      - "prompt":    ask per-file (interactive only).
+      - "fail":      preflight every file; if any would conflict, raise
+                     typer.Exit(3) with no writes. Best-effort (TOCTOU).
 
-    When quiet=True, suppresses all rich console output (for autopull).
+    When quiet=True, load-bearing warnings still reach stderr; cosmetic
+    progress chatter is suppressed.
     """
-    interactive_resolve_flag = (conflict_mode == "prompt")
+    interactive_resolve_flag = conflict_mode == "prompt"
     start = time.time()
     my_device_id = config["device"]["id"]
-
     backend = get_backend(config)
 
-    # Build local source path map (use LOCAL config, not remote manifest base_path)
-    local_sources_map: dict[str, Path] = {}
-    for src_cfg in get_sources(config):
-        local_sources_map[src_cfg["name"]] = Path(src_cfg["path"]).expanduser().resolve()
+    local_sources_map: dict[str, Path] = {
+        src_cfg["name"]: Path(src_cfg["path"]).expanduser().resolve()
+        for src_cfg in get_sources(config)
+    }
 
-    # Find devices to pull from
-    devices = _list_devices_warn(backend)
-    if from_device:
-        devices = [d for d in devices if d["device_id"] == from_device]
-        if not devices and not quiet:
+    all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
+    if from_device and not pull_targets:
+        if not quiet:
             _error(f"Device not found: {from_device}")
-    else:
-        devices = [d for d in devices if d["device_id"] != my_device_id]
-
-    if not devices:
+    if not pull_targets:
         if not quiet:
             console.print("[yellow]No other devices found to pull from.[/yellow]")
         return PullResult(elapsed=time.time() - start)
 
-    # Pre-fetch all device manifests (used for tombstone collection + pull).
-    # Missing and corrupt manifests are both mapped to None — pull is read-
-    # only on remote state, so skipping either is safe. Corrupt manifests
-    # are surfaced as a warning so the user can investigate.
-    all_devices_list = _list_devices_warn(backend)
-    manifest_cache: dict[str, dict | None] = {}
-    for d in all_devices_list:
-        did = d["device_id"]
-        peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
-        if peer_fetch.status == "corrupt":
-            # Corrupt peer manifest is load-bearing signal (silent skip =
-            # partial pull that looks like a successful pull). Surface
-            # to stderr even in quiet mode so autopull's hook caller sees it.
-            msg = (
-                f"mm: warning: manifest for device "
-                f"{d.get('device_name', did)} ({did}) is corrupt - "
-                f"skipping pull from this device."
-            )
-            if quiet:
-                print(msg, file=sys.stderr)
-            else:
-                console.print(
-                    f"[yellow]Warning:[/yellow] manifest for device "
-                    f"{d.get('device_name', did)} ({did}) is corrupt - "
-                    f"skipping pull from this device."
-                )
-        manifest_cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
+    manifest_cache, corrupt_peers = _prefetch_manifests(
+        backend, all_devices, passphrase, memory_kb
+    )
 
-    # Pre-collect all tombstones from ALL device manifests for O(1) lookup
     all_tombstones = collect_tombstones(
         list(manifest_cache.keys()),
         lambda did: manifest_cache.get(did),
     )
 
-    # Preflight for --conflict-mode fail: classify every file BEFORE any
-    # download/write. Any predicted conflict -> exit 3 with the full list,
-    # zero writes. Race-safe only best-effort (TOCTOU between preflight and
-    # apply is possible; re-run pull to surface late conflicts).
-    #
-    # Cross-peer simulation: walking peers in iteration order, we maintain
-    # an overlay of (src_name, rel_path) -> predicted-final-sha for files
-    # preflight said would be cleanly written. When a later peer's manifest
-    # ships the same path, we predict against the overlay's sha (what local
-    # WILL be after the earlier peer's write) rather than the stale on-disk
-    # sha. Without this, peer A writing Y then peer B writing Z is missed:
-    # preflight sees empty local for both, predicts clean, apply produces
-    # a .sync-conflict-* — exactly the "no writes on fail" violation we
-    # built the flag to prevent.
     if conflict_mode == "fail":
-        predicted_conflicts: list[tuple[str, str, str]] = []  # (device_name, src_name, rel_path)
-        overlay: dict[tuple[str, str], str] = {}  # (src_name, rel_path) -> sha256
-        for device in devices:
+        predicted = _preflight_conflicts(
+            pull_targets,
+            manifest_cache,
+            local_sources_map,
+            source_filter,
+            all_tombstones,
+        )
+        if predicted:
+            _print_preflight_conflicts(predicted, quiet)
+            raise typer.Exit(3)
+
+    # Aggregate accumulators. Load-bearing warnings go through lists,
+    # routed to stderr by _print_pull_summary. The try/finally below
+    # guarantees _print_pull_summary runs even on unexpected exceptions
+    # so accumulated warnings (corrupt peers, unknown sources, fsync
+    # failures) still reach stderr — preserving the v0.8.1 visible-
+    # failure contract.
+    per_source_results: list[_PerSourceResult] = []
+    unknown_sources: list[_UnknownSourceWarning] = []
+    touched_parents: set[Path] = set()
+    device_names: list[str] = []
+    fsync_warnings: list[_FsyncWarning] = []
+    total_written = total_merged = total_skipped = total_conflicted = 0
+    total_failed = total_skipped_unknown_source = bytes_transferred = 0
+
+    try:
+        for device in pull_targets:
             did = device["device_id"]
             dname = device["device_name"]
+            if not quiet:
+                console.print(f"\n[bold]Pulling from {dname} ({did})...[/bold]")
+
             remote_manifest = manifest_cache.get(did)
             if remote_manifest is None:
+                if not quiet:
+                    console.print(f"  [yellow]No manifest for {dname}[/yellow]")
                 continue
+
+            device_had_changes = False
+
             for src_name, src_data in remote_manifest.get("sources", {}).items():
                 if source_filter and src_name != source_filter:
                     continue
+
                 if src_name not in local_sources_map:
-                    continue  # unknown source is counted elsewhere, not a conflict
-                base_path = local_sources_map[src_name]
-                for rel_path, info in src_data.get("files", {}).items():
-                    if is_tombstoned(src_name, rel_path, all_tombstones):
-                        continue
-                    overlay_sha = overlay.get((src_name, rel_path))
-                    if overlay_sha is not None:
-                        # An earlier peer already predicted a clean write
-                        # for this path. Next peer conflicts iff its sha
-                        # differs from what the earlier peer will leave.
-                        if overlay_sha != info.get("sha256"):
-                            predicted_conflicts.append((dname, src_name, rel_path))
-                        # else: second peer's content matches what the
-                        # earlier write produces -> unchanged, no conflict.
-                        continue
-                    outcome = _predict_pull_outcome(rel_path, info, base_path)
-                    if outcome == "conflict":
-                        predicted_conflicts.append((dname, src_name, rel_path))
-                    elif outcome in ("write", "merge"):
-                        overlay[(src_name, rel_path)] = info.get("sha256", "")
-        if predicted_conflicts:
-            if not quiet:
-                console.print(
-                    f"[red]Pull refused:[/red] "
-                    f"{len(predicted_conflicts)} file(s) would conflict."
-                )
-                for dname, src_name, rel_path in predicted_conflicts:
-                    console.print(f"  [yellow]! conflict[/yellow] {src_name}/{rel_path} (from {dname})")
-                console.print(
-                    "\nResolve conflicts locally, or re-run with "
-                    "--conflict-mode keep-both to auto-rename."
-                )
-            else:
-                # quiet path (autopull): one-liner per conflict
-                for dname, src_name, rel_path in predicted_conflicts:
-                    print(
-                        f"mm: conflict {src_name}/{rel_path} (from {dname})",
-                        file=sys.stderr,
+                    total_skipped_unknown_source += 1
+                    unknown_sources.append(
+                        _UnknownSourceWarning(src_name=src_name, device_name=dname)
                     )
-            raise typer.Exit(3)
+                    continue
 
-    total_written = 0
-    total_merged = 0
-    total_skipped = 0
-    total_conflicted = 0
-    total_failed = 0
-    total_skipped_unknown_source = 0
-    bytes_transferred = 0
-    device_names: list[str] = []
-    # Deferred durability: per-file writes skip fsync; at the end of pull
-    # we fsync each unique parent directory once so recent renames are
-    # durable against crash / power loss.
-    touched_parents: set[Path] = set()
-
-    for device in devices:
-        did = device["device_id"]
-        dname = device["device_name"]
-        if not quiet:
-            console.print(f"\n[bold]Pulling from {dname} ({did})...[/bold]")
-
-        remote_manifest = manifest_cache.get(did)
-        if remote_manifest is None:
-            if not quiet:
-                console.print(f"  [yellow]No manifest for {dname}[/yellow]")
-            continue
-
-        # manifest_cache values come from _fetch_remote_manifest → load_manifest
-        # → normalized v2 shape guaranteed.
-        remote_sources = remote_manifest.get("sources", {})
-
-        device_had_changes = False
-
-        for src_name, src_data in remote_sources.items():
-            if source_filter and src_name != source_filter:
-                continue
-
-            if src_name not in local_sources_map:
-                # Not verbose-only: a peer shipping data for a source the
-                # local config doesn't know about is a partition risk
-                # (rename drift, missed config migration). Always warn.
-                total_skipped_unknown_source += 1
-                msg = (
-                    f"skipping unknown source '{src_name}' from {dname} - "
-                    f"not configured locally"
-                )
-                if quiet:
-                    print(f"mm: warning: {msg}", file=sys.stderr)
-                else:
-                    console.print(f"  [yellow]Warning:[/yellow] {msg}")
-                continue
-
-            remote_files = src_data.get("files", {})
-            if not remote_files:
-                continue
-
-            base_path = local_sources_map[src_name]
-
-            if verbose and not quiet:
-                console.print(f"  [bold]Source '{src_name}' ({base_path}):[/bold]")
-
-            # Build local state for diff. mtime is re-read at apply time so it
-            # reflects what the file actually looks like when we act on it.
-            local_files: dict[str, dict] = {}
-            for rel_path in remote_files:
-                local_path = base_path / rel_path
-                if local_path.exists():
-                    try:
-                        sha = hash_file(local_path)
-                        local_files[rel_path] = {"sha256": sha}
-                    except (PermissionError, OSError):
-                        pass
-
-            # Arg-swap: this is the additive pull path. See diff_files
-            # docstring — `new`/`modified` are files to download; `deleted`
-            # is ignored (additive pull never deletes local files).
-            diff = diff_files(remote_files, local_files)
-
-            if dry_run:
-                if not quiet:
-                    console.print(f"  Dry run for {dname}/{src_name}:")
-                    _print_pull_prediction(diff, base_path, src_name)
-                continue
-
-            # Check if there's anything to download (ignore deleted — additive model)
-            to_download = {**diff.new, **diff.modified}
-
-            # Filter out tombstoned files
-            to_download = {
-                path: info for path, info in to_download.items()
-                if not is_tombstoned(src_name, path, all_tombstones)
-            }
-
-            if not to_download:
+                base_path = local_sources_map[src_name]
                 if verbose and not quiet:
-                    console.print(f"  [green]Up to date with {dname}/{src_name}.[/green]")
-                continue
+                    console.print(f"  [bold]Source '{src_name}' ({base_path}):[/bold]")
 
-            bt, outcomes = _download_and_apply(
-                backend, base_path, to_download, did, passphrase, memory_kb,
-                interactive_resolve=interactive_resolve_flag,
-                verbose=(verbose and not quiet),
-            )
-            bytes_transferred += bt
+                per_source = _pull_one_source(
+                    backend,
+                    src_name=src_name,
+                    src_data=src_data,
+                    did=did,
+                    dname=dname,
+                    base_path=base_path,
+                    all_tombstones=all_tombstones,
+                    passphrase=passphrase,
+                    memory_kb=memory_kb,
+                    interactive_resolve=interactive_resolve_flag,
+                    dry_run=dry_run,
+                    verbose_console=(verbose and not quiet),
+                )
 
-            # Collect parent dirs of every file that was successfully
-            # written (any outcome except "skipped" / "unchanged" / "failed").
-            # These get a single F_FULLFSYNC at end-of-pull.
-            for rel in (
-                outcomes["written"] + outcomes["merged"] + outcomes["conflicted"]
-            ):
-                touched_parents.add((base_path / rel).parent)
+                if dry_run and per_source.dry_run_diff is not None:
+                    if not quiet:
+                        console.print(f"  Dry run for {dname}/{src_name}:")
+                        _print_pull_prediction(
+                            per_source.dry_run_diff, base_path, src_name
+                        )
+                    continue
 
-            src_written = len(outcomes["written"])
-            src_merged = len(outcomes["merged"])
-            src_skipped = len(outcomes["skipped"])
-            src_conflicted = len(outcomes["conflicted"])
-            src_failed = len(outcomes["failed"])
+                if not per_source.had_changes:
+                    if verbose and not quiet:
+                        console.print(f"  [green]Up to date with {dname}/{src_name}.[/green]")
+                    continue
 
-            total_written += src_written
-            total_merged += src_merged
-            total_skipped += src_skipped
-            total_conflicted += src_conflicted
-            total_failed += src_failed
-
-            # "had changes" drives the manifest-level iCloud conflict-copy
-            # cleanup downstream. Fire if we *processed* any files for this
-            # device, including skipped/failed — otherwise one-way-sync
-            # setups (always local-newer) never run the manifest cleanup
-            # and accumulate iCloud duplicates forever.
-            if src_written + src_merged + src_conflicted + src_skipped + src_failed > 0:
+                per_source_results.append(per_source)
+                bytes_transferred += per_source.bytes_transferred
+                touched_parents |= per_source.touched_parents
+                total_written += len(per_source.outcomes["written"])
+                total_merged += len(per_source.outcomes["merged"])
+                total_skipped += len(per_source.outcomes["skipped"])
+                total_conflicted += len(per_source.outcomes["conflicted"])
+                total_failed += len(per_source.outcomes["failed"])
                 device_had_changes = True
 
-            # Per-source status line. Conflicts/failures are load-bearing —
-            # print them even without --verbose so the user notices.
-            if not quiet and (src_conflicted or src_failed or verbose):
-                line = f"  [bold]{src_name}:[/bold]"
-                if src_written:
-                    line += f" [green]{src_written} written[/green]"
-                if src_merged:
-                    line += f" [cyan]{src_merged} merged[/cyan]"
-                if src_skipped:
-                    line += f" [dim]{src_skipped} skipped (local newer)[/dim]"
-                if src_conflicted:
-                    line += f" [yellow]{src_conflicted} conflicts[/yellow]"
-                if src_failed:
-                    line += f" [red]{src_failed} failed[/red]"
-                console.print(line)
+                # Claude sync log is best-effort: log file is cosmetic
+                # signal for Claude Code, losing it on error is harmless.
+                # Swallowing the exception here protects the accumulated
+                # corrupt-peer / unknown-source warnings from being lost
+                # if write_sync_log raises.
+                if per_source.claude_sync_base is not None:
+                    try:
+                        logs = write_sync_log(
+                            claude_dir=per_source.claude_sync_base,
+                            device_name=dname,
+                            device_id=did,
+                            new_files=per_source.outcomes["written"],
+                            modified_files=per_source.outcomes["merged"],
+                            deleted_files=[],
+                            conflicted_files=per_source.outcomes["conflicted"],
+                            skipped_files=per_source.outcomes["skipped"],
+                        )
+                    except (OSError, StorageError) as e:
+                        msg = f"sync log write failed: {e}"
+                        if quiet:
+                            print(f"mm: warning: {msg}", file=sys.stderr)
+                        else:
+                            console.print(f"  [yellow]warning:[/yellow] {msg}")
+                    else:
+                        if verbose and not quiet and logs:
+                            for log in logs:
+                                console.print(f"  [dim]wrote sync log: {log}[/dim]")
 
-            # Write sync log only for claude source. Group by outcome so a user
-            # reading .mind-meld-log.md can tell what was applied vs what needs
-            # manual conflict resolution.
-            if src_name == "claude":
-                claude_dir = str(base_path)
-                logs = write_sync_log(
-                    claude_dir=claude_dir,
-                    device_name=dname,
-                    device_id=did,
-                    new_files=outcomes["written"],
-                    modified_files=outcomes["merged"],
-                    deleted_files=[],
-                    conflicted_files=outcomes["conflicted"],
-                    skipped_files=outcomes["skipped"],
-                )
-                if verbose and not quiet and logs:
-                    for log in logs:
-                        console.print(f"  [dim]wrote sync log: {log}[/dim]")
+            if device_had_changes:
+                device_names.append(dname)
+                # Clean up iCloud/Dropbox manifest conflict copies is best-
+                # effort: a failure here just leaves dup conflict copies on
+                # disk for the next pull to retry. Swallowing protects
+                # accumulated warnings from the visible-failure contract.
+                try:
+                    _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
+                except (OSError, StorageError) as e:
+                    msg = f"manifest conflict-copy cleanup failed for {dname}: {e}"
+                    if quiet:
+                        print(f"mm: warning: {msg}", file=sys.stderr)
+                    else:
+                        console.print(f"  [yellow]warning:[/yellow] {msg}")
 
-        if device_had_changes:
-            device_names.append(dname)
-            # Clean up iCloud/Dropbox manifest conflict copies. Unrelated to
-            # .sync-conflict-* file copies — those live in the synced tree.
-            _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
+        fsync_warnings = _fsync_touched_parents(touched_parents)
+    finally:
+        # Even if an unexpected exception propagates from the loop above,
+        # emit accumulated load-bearing warnings to stderr. The v0.8.1
+        # contract requires corrupt-peer / unknown-source / fsync-failure
+        # warnings to survive quiet mode AND partial pulls.
+        _partial_result = PullResult(
+            total_written=total_written,
+            total_merged=total_merged,
+            total_skipped=total_skipped,
+            total_conflicted=total_conflicted,
+            total_failed=total_failed,
+            total_skipped_unknown_source=total_skipped_unknown_source,
+            bytes_transferred=bytes_transferred,
+            device_names=device_names,
+            elapsed=time.time() - start,
+        )
+        _print_pull_summary(
+            _partial_result,
+            corrupt_peers=corrupt_peers,
+            unknown_sources=unknown_sources,
+            fsync_warnings=fsync_warnings,
+            per_source_results=per_source_results,
+            quiet=quiet,
+            verbose=verbose,
+        )
 
-    # Deferred-durability commit: fsync each unique parent directory we
-    # wrote into so recent renames survive crash or power loss. A failure
-    # here means some of this pull's renames may be non-durable — warn
-    # but don't roll back (files are already in place; a subsequent pull
-    # will simply re-apply if needed).
-    for parent_dir in sorted(touched_parents):
-        try:
-            fsutil.fsync_dir(parent_dir)
-        except StorageError as e:
-            msg = f"durability fsync failed on {parent_dir} — {e}"
-            if quiet:
-                # Load-bearing: an fsync failure means recent renames may
-                # not survive crash/power loss. Silent suppression in
-                # autopull leaves the user thinking pulls are durable
-                # when they aren't.
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"  [yellow]warning:[/yellow] {msg}")
-
-    elapsed = time.time() - start
-    result = PullResult(
-        total_written=total_written,
-        total_merged=total_merged,
-        total_skipped=total_skipped,
-        total_conflicted=total_conflicted,
-        total_failed=total_failed,
-        total_skipped_unknown_source=total_skipped_unknown_source,
-        bytes_transferred=bytes_transferred,
-        device_names=device_names,
-        elapsed=elapsed,
-    )
-
-    if not quiet:
-        console.print(f"\n[bold green]Pull complete.[/bold green]")
-        parts = []
-        if total_written:
-            parts.append(f"{total_written} written")
-        if total_merged:
-            parts.append(f"{total_merged} merged")
-        if total_skipped:
-            parts.append(f"{total_skipped} skipped (local newer)")
-        if total_conflicted:
-            parts.append(f"[yellow]{total_conflicted} conflicts[/yellow]")
-        if total_failed:
-            parts.append(f"[red]{total_failed} failed[/red]")
-        if total_skipped_unknown_source:
-            parts.append(
-                f"[yellow]{total_skipped_unknown_source} unknown source(s) skipped[/yellow]"
-            )
-        if parts:
-            console.print("  " + ", ".join(parts))
-        else:
-            console.print("  nothing to apply")
-        if bytes_transferred:
-            mb = bytes_transferred / (1024 * 1024)
-            console.print(f"  {mb:.1f}MB transferred")
-        console.print(f"  Completed in {elapsed:.1f}s")
-        if total_conflicted:
-            console.print(
-                "  [yellow]Run [bold]mm conflicts[/bold] to review, "
-                "[bold]mm resolve[/bold] to pick a winner.[/yellow]"
-            )
-
-    return result
+    return _partial_result
 
 
 # ── status ────────────────────────────────────────────────────────────
@@ -2252,17 +2563,17 @@ def _collect_diag_state(backend) -> dict:
             # count all sibling files that match the conflict-name pattern.
             own_conflict_copies = len(
                 backend.find_conflict_copies(
-                    f"manifests/{dev_id}/manifest.json.enc", lambda p: True
+                    manifest_key(dev_id), lambda p: True
                 )
             )
         except Exception:
             pass
 
     storage_inv = {
-        "manifests_total": _count("manifests/"),
-        "manifest_peer_count": _count_device_prefixes("manifests/"),
-        "data_peer_count": _count_device_prefixes("data/"),
-        "devices_total": _count("devices/", suffix=".json"),
+        "manifests_total": _count(MANIFESTS_PREFIX),
+        "manifest_peer_count": _count_device_prefixes(MANIFESTS_PREFIX),
+        "data_peer_count": _count_device_prefixes(DATA_PREFIX),
+        "devices_total": _count(DEVICES_PREFIX, suffix=".json"),
         "own_manifest_conflict_copies": own_conflict_copies,
     }
 
@@ -2658,16 +2969,15 @@ def _do_gc(
         _error(msg)
 
     # List all blobs across all devices
-    all_blobs = backend.list_keys("data/")
+    all_blobs = backend.list_keys(DATA_PREFIX)
     orphan_count = 0
     malformed_count = 0
 
-    for blob_key in all_blobs:
-        if not blob_key.endswith(".enc"):
+    for bkey in all_blobs:
+        if not bkey.endswith(".enc"):
             continue
-        # Extract hash from key: data/{device_id}/{sha256}.enc
-        parts = blob_key.split("/")
-        if len(parts) != 3:
+        parsed = parse_blob_key(bkey)
+        if parsed is None:
             # Wrong-depth .enc under data/ — not a known blob shape. Could be
             # a misplaced artifact from a future format, an external write, or
             # corruption. Surface it (verbose/dry-run) so the user can audit;
@@ -2676,15 +2986,15 @@ def _do_gc(
             # at the start of _do_gc, so they're not seen here.
             malformed_count += 1
             if verbose or dry_run:
-                console.print(f"  [yellow]malformed (skipped):[/yellow] {blob_key}")
+                console.print(f"  [yellow]malformed (skipped):[/yellow] {bkey}")
             continue
-        sha = parts[2].removesuffix(".enc")
+        _did, sha = parsed
         if sha not in referenced_hashes:
             orphan_count += 1
             if verbose:
-                console.print(f"  [red]orphan:[/red] {blob_key}")
+                console.print(f"  [red]orphan:[/red] {bkey}")
             if not dry_run:
-                backend.delete(blob_key)
+                backend.delete(bkey)
 
     if malformed_count and not (verbose or dry_run):
         # Always summarize malformed-path count even in non-verbose mode, so
@@ -2869,8 +3179,8 @@ def _quarantine_corrupt_manifest(
     import secrets as _secrets
     from datetime import datetime, timezone
 
-    manifest_key = f"manifests/{device_id}/manifest.json.enc"
-    src = storage_root / manifest_key
+    mkey = manifest_key(device_id)
+    src = storage_root / mkey
     if not src.exists():
         raise FileNotFoundError(str(src))
 
@@ -2959,7 +3269,7 @@ def recover(
     if fetch.status == "missing":
         _error(
             "no manifest exists for this device at "
-            f"manifests/{device_id}/manifest.json.enc — nothing to quarantine."
+            f"{manifest_key(device_id)} — nothing to quarantine."
         )
 
     # Sidecar and peer tombstones are the non-destructive paths. If either
@@ -2992,10 +3302,10 @@ def recover(
         "last successful push will no longer propagate as deletions — peers "
         "will see those files come back on their next pull.\n"
     )
+    _mkey_display = manifest_key(device_id)
     stderr_console.print(
-        f"  Source blob:      manifests/{device_id}/manifest.json.enc\n"
-        f"  Quarantine name:  manifests/{device_id}/manifest.json.enc."
-        f"corrupt-<timestamp>\n"
+        f"  Source blob:      {_mkey_display}\n"
+        f"  Quarantine name:  {_mkey_display}.corrupt-<timestamp>\n"
         f"  Storage root:     {storage_root}\n"
     )
 
@@ -3013,7 +3323,7 @@ def recover(
         )
     except FileNotFoundError:
         _error(
-            f"manifests/{device_id}/manifest.json.enc not found on disk. "
+            f"{manifest_key(device_id)} not found on disk. "
             f"Nothing to quarantine."
         )
     except OSError as e:

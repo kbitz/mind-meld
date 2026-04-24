@@ -20,7 +20,13 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 
 ## Source Layout
 src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar}.py
-src/mind_meld/storage/{local}.py
+src/mind_meld/storage/{local,keys}.py
+
+Storage keys are constructed via helpers in `storage/keys.py`
+(`manifest_key`, `blob_key`, `device_key`, `parse_blob_key`) which validate
+components at construction time — a corrupt or malicious peer manifest cannot
+smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. Do NOT build
+storage keys with raw f-strings at new call sites.
 
 Version source of truth: `pyproject.toml` (read by `__init__.py` via `importlib.metadata.version("mind-meld")`, fallback `"0.0.0+dev"` for uninstalled source-tree runs). No `VERSION` file.
 
