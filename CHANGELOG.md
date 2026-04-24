@@ -2,6 +2,37 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.1] - 2026-04-23
+
+Track 1A (Group 1): cli.py surgical hardening. Five surgical fixes plus two
+review-driven follow-ups. Close the gaps audit caught, add tests, no new
+features. One behavior change for users: `mm resolve` now exits 1 when any
+conflict failed to resolve instead of always exiting 0.
+
+### Changed
+- **`mm resolve` exits 1 on partial failure.** `_resolve_interactive_loop` returns `(resolved, failed)`; `resolve` propagates the failure count as a non-zero exit so CI / scripts driving the command can detect that some conflicts were not actually resolved (rename / unlink / read errors mid-walk). Walk continues through every conflict so the user can triage everything in one pass — only the exit code reflects partial failure. Previously: any per-conflict OSError printed a red warning and the command exited 0, making automation think everything was clean.
+- **`conflict_filename` raises `ValueError` on empty `device_id`.** The previous `(device_id or "unknown")[:8]` fallback silently minted cross-device-colliding filenames whenever a corrupted peer manifest fed an empty id — exactly the silent data-loss footgun Track 1A exists to close. Caller (`_apply_incoming_file`) catches the `ValueError` and treats it as a per-file failure (matches the existing `OSError`/`StorageError` isolation pattern in the same function), so a single corrupted manifest entry no longer aborts the entire pull.
+- **GC malformed-blob-path visibility.** `_do_gc` used to silently `continue` on `data/` entries that did not match the expected `data/{device}/{sha}.enc` shape. Now: verbose / dry-run modes print each malformed key, and non-verbose runs emit a one-line summary count with a hint to re-run with `--verbose`. Never auto-reaped — we don't know what these are. `.tmp` artifacts from crashed pushes are still handled separately by `_sweep_local_tmp_files` at the start of GC.
+- **Quiet-path audit (autopull / autopush).** Walked all 20 `if not quiet:` and `if quiet:` sites in cli.py and converted four load-bearing warnings that were silently swallowed in autopull / autopush quiet mode:
+  - **Corrupt-manifest sidecar recovery** — `_recover_prior_manifest` now surfaces `mm: warning: remote manifest corrupt; recovered prior state from local sidecar` to stderr in quiet mode.
+  - **Corrupt-manifest peer-fallback recovery** — same surface for the peer-tombstone aggregation branch (the riskiest recovery branch — recent local deletions can be lost).
+  - **No sync sources misconfig** — `_push_core` now warns to stderr when `get_sources` returns empty in autopush, instead of silently no-opping forever. Autopush also writes a `no-sources` breadcrumb instead of `success` so `mm status` and any monitoring on top of it catch the wedge.
+  - **Durability fsync failure on pull** — the deferred-durability `fsutil.fsync_dir` failure warning now reaches stderr in autopull. (Per-result `durability_degraded` field for downstream breadcrumb routing is captured as a follow-up TODO.)
+- **Autopull surfaces `total_failed` count.** `_pull_core` increments `total_failed` for per-file failures (decrypt, conflict rename, write, ValueError on corrupted device_id), but autopull used to swallow the summary. Now: a one-line stderr summary with a hint to re-run with `--verbose` for details. Same intent as the helper-level audit, applied at the result-summary level.
+
+### Removed
+- **Dead `_delete_files` function.** Never called after the additive-only refactor in v0.3.0. Removing it before a future maintainer re-wires delete-on-pull behavior the spec forbids.
+- **Unused `TOMBSTONE_TTL_DAYS` import in cli.py.** Imported but never referenced (consumers live in `manifest.py` and `tests/test_additive_sync.py`). Group 2 pre-flight will move the constant to `constants.py` later; dropping the dead import now is mechanical.
+
+### Technical
+- 14 new tests covering every new code path: 2 for `conflict_filename` empty/None, 6 for resolve exit-code semantics + per-file failure isolation, 2 for GC malformed-blob handling, 4 for the quiet-mode warnings (sidecar recovery, peer-fallback recovery via unit test, no-sources, fsync failure), 1 for `_apply_incoming_file` ValueError isolation, 1 for `total_failed` autopull surface, 1 for `no-sources` breadcrumb downgrade. 472 tests total in the suite.
+- `_resolve_interactive_loop` signature changed from `-> None` to `-> tuple[int, int]`. Existing call sites discarded the return value, so the change is backward-compatible at the Python boundary; the user-visible change is the resolve exit code.
+
+### For contributors
+- `/plan-eng-review` on 2026-04-23 dropped Task 2 (16-char `device_short`) as misframed — `init` itself generates 8-hex-char device IDs, so widening the conflict-filename slice was meaningless. Replaced with the empty-`device_id` `ValueError` raise.
+- `/review` (pre-landing) caught a per-file isolation gap: the new `ValueError` was uncaught at the call site and would have aborted entire pulls as "unexpected error" if a peer manifest ever had an empty `device_id`. Wrapped at the call site to match existing OSError/StorageError handling.
+- Codex adversarial review caught the `total_failed` summary gap and the `no-sources` breadcrumb regression; both fixed in the same PR. Two findings deferred to TODOS.md: stricter GC blob-shape validation (depth check is in; hash-shape check is the obvious next step), and `durability_degraded` field on `PullResult` for breadcrumb routing.
+
 ## [0.8.0] - 2026-04-23
 
 Group 2 Pre-flight + Track 2A: error-surface hardening around corrupt-manifest
