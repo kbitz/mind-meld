@@ -16,6 +16,23 @@ mm push    # upload memory/todos
 mm pull    # download from another device
 ```
 
+Config lives at `~/.config/mind-meld/config.toml` — not tied to your current directory. Install `mm` anywhere, run from anywhere; it always syncs the sources configured in your global config (`~/.claude` and `~/.gstack` by default).
+
+## Setting up a second (or third) Mac
+
+1. `pipx install mind-meld` on the new machine.
+2. `mm init` — point it at the **same iCloud folder** as your first Mac and enter the **same passphrase**. This registers the new device against the existing roster.
+3. `mm pull` — downloads everything the other machine(s) have pushed.
+4. `mm push` — uploads anything this machine has that the others don't.
+
+Push and pull on each Mac over time and the state converges toward the union of all three. Nothing is destroyed:
+
+- **`.jsonl` files and `MEMORY.md`** deep-merge by line-union (deduped, sorted by `ts`). Entries from all machines accumulate — this is why telemetry, learnings, and timeline files stay coherent across devices.
+- **Other divergent files** use mtime-skip: if your local file is newer than the remote, pull leaves it alone. Otherwise the remote wins the canonical path and your local version is preserved as `<stem>.sync-conflict-<ts>-<device>.<ext>` sitting next to it (Syncthing convention). See [Handling conflicts](#handling-conflicts) below.
+- **Deletions** propagate via tombstones in the manifest — delete a file on one machine, and `mm pull` on the others removes it cleanly.
+
+First-run-from-divergent-state is explicitly supported: if each Mac already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
+
 ## Claude Code Integration
 
 Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they run silently, never prompt, and output a single line summary (or nothing if already in sync).
@@ -75,14 +92,43 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 ### Syncing gstack
 
-If `~/.gstack` is detected during `mm init`, it is automatically added as a sync source. gstack data (projects, analytics, retros, and config files) syncs alongside Claude Code data using the same encrypted push/pull workflow.
+If `~/.gstack` is detected during `mm init`, it is automatically added as a sync source. gstack uses a **whitelist walker** — unlike the Claude source (which has hardcoded subdirs), the gstack source only syncs the directories and files you explicitly list.
 
-- gstack uses a **whitelist-based** walker: only configured `include_dirs` and `include_files` are synced.
-- `.jsonl` files (review logs, analytics) are **merged** on pull instead of overwritten, preserving entries from both machines.
-- To check configured sources: `mm sources`
-- To pull only gstack data: `mm pull --source gstack`
+**Defaults out of the box:**
 
-No extra setup needed — if gstack is present, it syncs.
+- `include_dirs`: `projects/`, `analytics/`, `retros/`
+- `include_files`: `config.yaml`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
+
+This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped, sorted by `ts`). Append-only telemetry from 3 machines converges cleanly into one timeline.
+
+**Not synced by default** (machine-local by design): `sessions/`, `sidebar-sessions/`, `slug-cache/`, `worktrees/`, `builder-profile.jsonl`, `developer-profile.json`. If you want any of these on every Mac, add them to your config (see below).
+
+**Adding files or dirs:** edit `~/.config/mind-meld/config.toml` and extend the gstack source. For example, to sync the writing-style prompt marker and a custom notes file:
+
+```toml
+[[sync.sources]]
+name = "gstack"
+path = "~/.gstack"
+type = "generic"
+include_dirs = ["projects", "analytics", "retros"]
+include_files = [
+    "config.yaml",
+    ".completeness-intro-seen",
+    ".telemetry-prompted",
+    ".proactive-prompted",
+    ".welcome-seen",
+    ".codex-desc-healed",
+    "retro-context.md",       # added
+    "greptile-history.md",    # added
+]
+```
+
+Supplying `sync.sources` replaces the defaults wholesale — copy the full list, don't just add your extras. Run `mm sources` to confirm the resolved source list.
+
+**Useful flags:**
+
+- `mm sources` — show the resolved source list after config + auto-detection.
+- `mm pull --source gstack` — pull only the gstack source (skip Claude).
 
 ## Handling conflicts
 
