@@ -9,11 +9,15 @@ import pytest
 from mind_meld.errors import ManifestError
 from mind_meld.manifest import (
     CONFLICT_PATTERN,
+    TOMBSTONE_TTL_DAYS,
     DiffResult,
+    _is_active_tombstone,
     _is_excluded,
+    _record_file,
     build_manifest_v2,
     deserialize_manifest,
     diff_files,
+    generate_tombstones,
     hash_file,
     is_conflict_filename,
     load_manifest,
@@ -868,3 +872,223 @@ class TestLoadManifest:
             load_manifest(
                 b'{"device_id":"a","sources":{"claude":{"base_path":"","files":{}}},"tombstones":{"claude:a.md":"x"}}'
             )
+
+
+class TestRecordFile:
+    """Direct coverage of the _record_file pipeline helper.
+
+    Closes the long-standing gap where stat-PermissionError and hash-OSError
+    branches were unreachable via the walker-level tests (which operate on
+    real filesystems). Also pins the exact on_skip reason strings — those
+    are surfaced in cli.py verbose walker output, so their shape is
+    load-bearing user-visible contract.
+    """
+
+    def test_happy_path_returns_rel_and_info(self, tmp_path):
+        base = tmp_path
+        sub = base / "sub"
+        sub.mkdir()
+        f = sub / "a.md"
+        f.write_text("hello")
+        result = _record_file(f, base, max_file_size=1_000_000)
+        assert result is not None
+        rel, info = result
+        assert rel == "sub/a.md"
+        assert info["sha256"] == hashlib.sha256(b"hello").hexdigest()
+        assert info["size"] == 5
+        assert "mtime" in info
+
+    def test_excluded_returns_none_without_on_skip(self, tmp_path):
+        """_is_excluded path returns None and does NOT invoke on_skip —
+        excluded files are silent (by design; they're filtered, not skipped)."""
+        base = tmp_path
+        f = base / ".DS_Store"
+        f.write_text("")
+        skipped: list[tuple[str, str]] = []
+        result = _record_file(
+            f, base, max_file_size=1_000_000,
+            on_skip=lambda p, r: skipped.append((p, r)),
+        )
+        assert result is None
+        assert skipped == []  # exclusion is silent
+
+    def test_stat_permission_error_emits_on_skip(self, tmp_path, monkeypatch):
+        """Permission-denied on stat() surfaces the exact reason string.
+
+        Scope the stat patch to the target path only, so that any incidental
+        .stat() call elsewhere in the pipeline (future symlink sniffing,
+        etc.) isn't silently absorbed by this test.
+        """
+        base = tmp_path
+        f = base / "a.md"
+        f.write_text("x")
+
+        real_stat = Path.stat
+
+        def scoped_raise(self, *args, **kwargs):
+            if self == f:
+                raise PermissionError("simulated")
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", scoped_raise)
+        skipped: list[tuple[str, str]] = []
+        result = _record_file(
+            f, base, max_file_size=1_000_000,
+            on_skip=lambda p, r: skipped.append((p, r)),
+        )
+        assert result is None
+        assert skipped == [("a.md", "permission denied")]
+
+    def test_size_exceeded_emits_formatted_on_skip(self, tmp_path):
+        """Size-cap skip pins the exact reason format: `exceeds max_file_size (<N.N>MB)`."""
+        base = tmp_path
+        f = base / "big.bin"
+        f.write_bytes(b"x" * 2048)  # 2 KB
+        skipped: list[tuple[str, str]] = []
+        result = _record_file(
+            f, base, max_file_size=1024,
+            on_skip=lambda p, r: skipped.append((p, r)),
+        )
+        assert result is None
+        assert len(skipped) == 1
+        rel, reason = skipped[0]
+        assert rel == "big.bin"
+        # 2048 bytes / (1024 * 1024) = 0.001953125 MB, rounded to 0.0MB
+        assert reason == "exceeds max_file_size (0.0MB)"
+
+    def test_hash_os_error_emits_on_skip(self, tmp_path, monkeypatch):
+        """hash_file raising OSError (e.g. mid-walk unlink) surfaces the `read error` reason."""
+        import mind_meld.manifest as m
+
+        base = tmp_path
+        f = base / "a.md"
+        f.write_text("x")
+
+        def raise_os(path):
+            raise OSError("simulated read error")
+
+        monkeypatch.setattr(m, "hash_file", raise_os)
+        skipped: list[tuple[str, str]] = []
+        result = _record_file(
+            f, base, max_file_size=1_000_000,
+            on_skip=lambda p, r: skipped.append((p, r)),
+        )
+        assert result is None
+        assert skipped == [("a.md", "read error")]
+
+
+class TestIsActiveTombstone:
+    """Direct coverage of _is_active_tombstone — the shared predicate for
+    `generate_tombstones` (carry-forward) and `collect_tombstones` (fleet
+    aggregation). Pins the tz-naive → UTC guard (load-bearing: naive vs
+    tz-aware comparison raises TypeError) and the (ValueError, TypeError)
+    fallthrough.
+    """
+
+    def _cutoff_now(self):
+        from datetime import datetime, timezone, timedelta
+        return datetime.now(timezone.utc) - timedelta(days=TOMBSTONE_TTL_DAYS)
+
+    def test_tz_aware_non_expired_is_active(self):
+        from datetime import datetime, timezone
+        info = {"deleted_at": datetime.now(timezone.utc).isoformat()}
+        assert _is_active_tombstone(info, self._cutoff_now()) is True
+
+    def test_tz_naive_non_expired_is_active(self):
+        """Naive `deleted_at` string must be treated as UTC, not raise on
+        the cutoff comparison. Older mm versions or external tooling could
+        write naive timestamps; the guard here prevents a fleet-wide
+        TypeError crash."""
+        from datetime import datetime, timezone
+        # Drop tzinfo to get a naive datetime in UTC without using the
+        # deprecated datetime.utcnow().
+        naive_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        info = {"deleted_at": naive_iso}
+        assert _is_active_tombstone(info, self._cutoff_now()) is True
+
+    def test_expired_is_not_active(self):
+        from datetime import datetime, timezone, timedelta
+        expired = (
+            datetime.now(timezone.utc) - timedelta(days=TOMBSTONE_TTL_DAYS + 1)
+        ).isoformat()
+        info = {"deleted_at": expired}
+        assert _is_active_tombstone(info, self._cutoff_now()) is False
+
+    def test_unparseable_returns_false(self):
+        """Empty string, garbage string, and non-string all return False —
+        conservative: a corrupt `deleted_at` drops the tombstone rather than
+        living forever."""
+        cutoff = self._cutoff_now()
+        assert _is_active_tombstone({"deleted_at": ""}, cutoff) is False
+        assert _is_active_tombstone({"deleted_at": "not-a-date"}, cutoff) is False
+        assert _is_active_tombstone({}, cutoff) is False  # missing key
+        assert _is_active_tombstone({"deleted_at": 12345}, cutoff) is False  # non-string
+
+
+class TestGenerateTombstonesContract:
+    """Pins the post-Track-1B caller contract on generate_tombstones:
+    `remote_manifest` MUST be v2-normalized (or None).
+
+    Previously, generate_tombstones defensively called normalize_manifest
+    on its input at line 607. Cross-model adversarial review (Claude + Codex,
+    2026-04-24) found that this call did DOUBLE duty: migrate bare-path
+    tombstone keys (cosmetic) AND promote v1 `"files"` → v2 `"sources"`
+    right before the new-tombstone detection loop. Dropping it silently
+    turned v1-shaped input into a zero-tombstone result — a silent
+    delete-propagation loss.
+
+    Fix: enforce the contract at the function boundary. A v1-shaped dict
+    (no `"sources"` key) now raises ManifestError instead of silently
+    producing wrong output. Every internal caller already routes through
+    load_manifest or hand-builds v2 shape, so this is a loud-fail guard
+    for future-caller bugs, not a behavior break for current code.
+
+    The happy-path carry-forward semantics (v1 → load_manifest → migrated
+    `claude:<path>` tombstones survive through generate_tombstones) is
+    covered by test_additive_sync.py::test_migrated_key_carries_forward_through_generate_tombstones.
+    """
+
+    def test_raises_on_v1_shaped_input(self):
+        """A v1-shaped dict (with `files` but no `sources`) fed DIRECTLY
+        raises ManifestError — rather than silently producing zero
+        tombstones, which would be silent delete-propagation loss."""
+        from datetime import datetime, timezone, timedelta
+        recent_iso = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).isoformat()
+
+        raw_v1 = {
+            "device_id": "peer1",
+            "files": {
+                "memory/foo.md": {
+                    "sha256": "a" * 64, "size": 1,
+                    "mtime": "2026-04-20T00:00:00+00:00",
+                },
+            },
+            "tombstones": {
+                "memory/foo.md": {
+                    "deleted_at": recent_iso,
+                    "device_id": "peer1",
+                },
+            },
+        }
+        local_manifest = {
+            "device_id": "this-device",
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+
+        with pytest.raises(ManifestError, match="v2-normalized"):
+            generate_tombstones(local_manifest, raw_v1, "this-device")
+
+    def test_none_remote_still_allowed(self):
+        """None remote (first-push case) is still valid — the guard only
+        triggers on a non-None dict that's missing the `sources` key."""
+        local_manifest = {
+            "device_id": "this-device",
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+        # Must not raise.
+        result = generate_tombstones(local_manifest, None, "this-device")
+        assert result == {}

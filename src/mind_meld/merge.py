@@ -11,6 +11,31 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
+
+
+# Merge dispatch (single source of truth for "is this file mergeable?"):
+#
+#   rel_path ──► endswith(".jsonl")?        ─── yes ──► merge_jsonl
+#                    │
+#                    no
+#                    ▼
+#                basename == "MEMORY.md"?   ─── yes ──► merge_lines
+#                    │
+#                    no
+#                    ▼
+#                  None  (caller overwrites with remote_bytes)
+#
+# `.jsonl` is checked first: a file that happened to be literally named
+# `MEMORY.md.jsonl` is JSONL-merged, not line-union merged. The check
+# order IS the precedence contract.
+def _merge_strategy(rel_path: str) -> Callable[[bytes, bytes], bytes] | None:
+    """Return the merge function for `rel_path`, or None if the file should be overwritten."""
+    if rel_path.endswith(".jsonl"):
+        return merge_jsonl
+    if os.path.basename(rel_path) == "MEMORY.md":
+        return merge_lines
+    return None
 
 
 def should_merge(rel_path: str) -> bool:
@@ -18,21 +43,15 @@ def should_merge(rel_path: str) -> bool:
 
     Returns True for .jsonl files and MEMORY.md index files.
     """
-    if rel_path.endswith(".jsonl"):
-        return True
-    # MEMORY.md is the Claude Code memory index — line-oriented, safe to merge
-    if os.path.basename(rel_path) == "MEMORY.md":
-        return True
-    return False
+    return _merge_strategy(rel_path) is not None
 
 
 def merge_file(rel_path: str, local_bytes: bytes, remote_bytes: bytes) -> bytes:
     """Dispatch to the appropriate merge strategy based on file type."""
-    if rel_path.endswith(".jsonl"):
-        return merge_jsonl(local_bytes, remote_bytes)
-    if os.path.basename(rel_path) == "MEMORY.md":
-        return merge_lines(local_bytes, remote_bytes)
-    return remote_bytes  # fallback: overwrite
+    strategy = _merge_strategy(rel_path)
+    if strategy is None:
+        return remote_bytes  # fallback: overwrite
+    return strategy(local_bytes, remote_bytes)
 
 
 def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
@@ -61,7 +80,7 @@ def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
     non_timestamped.sort()
 
     result_lines = [line for _, line in timestamped] + non_timestamped
-    return "\n".join(result_lines).encode("utf-8") + b"\n" if result_lines else b""
+    return _join_lines(result_lines)
 
 
 def merge_lines(local_bytes: bytes, remote_bytes: bytes) -> bytes:
@@ -77,7 +96,7 @@ def merge_lines(local_bytes: bytes, remote_bytes: bytes) -> bytes:
     merged = set(local_lines) | set(remote_lines)
     result_lines = sorted(merged)
 
-    return "\n".join(result_lines).encode("utf-8") + b"\n" if result_lines else b""
+    return _join_lines(result_lines)
 
 
 def _split_lines(data: bytes) -> list[str]:
@@ -86,6 +105,17 @@ def _split_lines(data: bytes) -> list[str]:
         return []
     text = data.decode("utf-8", errors="replace")
     return [line.rstrip() for line in text.splitlines() if line.strip()]
+
+
+def _join_lines(lines: list[str]) -> bytes:
+    """Serialize a list of lines to UTF-8 bytes with a trailing newline.
+
+    Returns b"" (NOT b"\\n") for an empty list so that an empty merge result
+    does not round-trip into a single blank line on the next merge.
+    """
+    if not lines:
+        return b""
+    return "\n".join(lines).encode("utf-8") + b"\n"
 
 
 def _extract_ts(line: str) -> str | None:
