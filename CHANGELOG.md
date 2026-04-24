@@ -2,6 +2,32 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.9] - 2026-04-24
+
+Docs: multi-machine usage guide. README now explains that `mm` reads its config
+from `~/.config/mind-meld/config.toml` (install anywhere, run from anywhere) and
+adds a "Setting up a second (or third) Mac" section with the bootstrap recipe:
+install, `mm init` with the same passphrase, push, pull. Documents the
+three-way convergence guarantee — `.jsonl` and `MEMORY.md` line-union merge,
+other divergent files use mtime-skip with `.sync-conflict-*` preservation, and
+deletions propagate via tombstones — so users know divergent-state first-runs
+are safe.
+
+Expanded "Syncing gstack" with the concrete default `include_dirs` /
+`include_files` lists, explicit note that `analytics/*.jsonl` and
+`projects/<slug>/*.jsonl` set-union merge (why `/retro global` converges across
+Macs), the files that are intentionally machine-local (`sessions/`, `builder-profile.jsonl`),
+and a TOML snippet for extending `include_files` — with the load-bearing caveat
+that `sync.sources` replaces defaults wholesale.
+
+No code or behavior changes. Companion TODOS entry proposes adding
+`retro-context.md` and `greptile-history.md` to default gstack `include_files`
+so richer retro inputs sync automatically.
+
+### Changed
+- `README.md` — new "Setting up a second (or third) Mac" section, expanded
+  "Syncing gstack" block with default enumeration and custom-config snippet.
+
 ## [0.8.8] - 2026-04-24
 
 Track 2B: Config polish — eng-review follow-ups. Stops `mm` from silently
