@@ -947,9 +947,11 @@ class TestMultiSourceSync:
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
 
-        # Plant an orphan blob
+        # Plant an orphan blob. Post-1C: path must match the 64-hex sha
+        # shape or _do_gc routes it through the malformed-count path.
+        orphan_sha = "de" * 32  # 64-hex
         orphan_data = encrypt(b"orphan content", PASSPHRASE, memory_kb=MEMORY_KB)
-        backend.put("data/dev-a/deadbeef.enc", orphan_data)
+        backend.put(f"data/dev-a/{orphan_sha}.enc", orphan_data)
 
         # Run GC
         result = runner.invoke(app, ["gc"])
@@ -957,7 +959,7 @@ class TestMultiSourceSync:
         assert "1" in result.output  # 1 orphan deleted
 
         # Verify the orphan is gone
-        assert not backend.exists("data/dev-a/deadbeef.enc")
+        assert not backend.exists(f"data/dev-a/{orphan_sha}.enc")
 
         # Verify referenced blobs still exist
         all_blobs = backend.list_keys("data/")
