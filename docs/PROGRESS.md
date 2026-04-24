@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.8.5   | 2026-04-24 | Track 1B (Group 1) — Walker + manifest + merge DRY: `_record_file` helper (collapses walk_claude_source + walk_generic_source per-file blocks), `_is_active_tombstone` helper (collapses generate_tombstones carry-forward + collect_tombstones aggregation), `_merge_strategy` + `_join_lines` helpers. Also drops redundant `normalize_manifest` call at manifest.py:607 — the call was positionally wrong (ran after the carry-forward loop had already consumed tombstone keys) and all three caller paths already satisfy the load-path invariant. `generate_tombstones` now enforces the caller contract at runtime: a v1-shaped dict (no `"sources"` key) raises `ManifestError` rather than silently producing zero tombstones. Two review passes landed corrections pre-merge: /plan-eng-review codex outside-voice (5 design corrections — `_record_file` signature taking `(path, base)`; direct `_merge_strategy -> Callable` instead of a registry; full-predicate `_is_active_tombstone` instead of parse-only helper; exact on_skip reason strings pinned in tests; Task 4 contract change owned with a test); /review cross-model adversarial (Claude + Codex independently confirmed a silent-delete-propagation regression on raw v1 input — fixed by promoting the documented contract to a runtime `ManifestError` guard). 10 new tests, 571 pass, zero regression against any v2-normalized caller. |
 | 0.8.4   | 2026-04-23 | Group 2 pre-flight + Track 2A: storage-key helpers (`storage/keys.py` with path-traversal validation) + cli.py decomposition (`_pull_core` → 6 helpers + single print-owner, `_apply_incoming_file` → 3 per-outcome helpers). Internal refactor, zero user-visible behavior change; two codex-found regressions (`had_changes` exclusion of `unchanged`, per-file `blob_key` validation) caught and fixed pre-merge. |
 | 0.8.3   | 2026-04-23 | Public-release prep: adds MIT `LICENSE` file (closes the gap where `pyproject.toml` declared `license = "MIT"` but the text wasn't shipped) and scrubs the placeholder `/Users/kb/` username out of SPEC.md, sync-gstack-context design doc, and one test fixture. No runtime behavior change. |
 | 0.8.2   | 2026-04-23 | Track 1B (Group 1): manifest dead-code cleanup + v1-holdover removal (delete `walk_directory`/`build_manifest`, drop top-level `"files"` mirror, `diff_manifests` → `diff_files`, `DiffResult` → `@dataclass`) |
@@ -71,11 +72,13 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
 - **Public-release prep:** ✅ shipped in v0.8.3. MIT `LICENSE` file added
   + `/Users/kb/` placeholder scrubbed from SPEC / design doc / test fixture.
 - **Group 1 (Decomposition + DRY):** Track 1A ✅ shipped in v0.8.4
-  (decomposition + storage-key portion of pre-flight). Remaining: pre-flight
-  `constants.py` extraction (CONFLICT_INFIX, CONFLICT_AGE_DAYS,
-  TOMBSTONE_TTL_DAYS, FORMAT_VERSION) and the cli.py literal-site migration;
-  Track 1B (walker + manifest + merge DRY) and Track 1C (post-1A cli.py
-  follow-ups) queued.
+  (decomposition + storage-key portion of pre-flight). Track 1B ✅ shipped
+  in v0.8.5 (`_record_file`, `_is_active_tombstone`, `_merge_strategy` +
+  `_join_lines`, plus dropped redundant `normalize_manifest` at
+  manifest.py:607 with the contract change owned by a dedicated test).
+  Remaining: pre-flight `constants.py` extraction (CONFLICT_INFIX,
+  CONFLICT_AGE_DAYS, TOMBSTONE_TTL_DAYS, FORMAT_VERSION) and the cli.py
+  literal-site migration; Track 1C (post-1A cli.py follow-ups) queued.
 - **Group 2 (Init flow + sync_log generalization + config polish):** queued.
 - **Group 3 (Test hygiene + style polish):** queued.
 - **Group 4 (Release infrastructure, GitHub Actions CI):** queued —
