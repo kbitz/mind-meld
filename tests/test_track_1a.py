@@ -866,3 +866,200 @@ def test_error_preserves_rich_formatting_on_stderr():
     assert "\x1b[" in out
     assert "Error:" in out
     assert "it blew up" in out
+
+
+# ─── Group 1 / Track 1A: quiet-path audit fixes ──────────────────────────
+
+
+def test_autopush_surfaces_corrupt_manifest_sidecar_recovery_in_quiet_mode(
+    tmp_path, monkeypatch
+):
+    """When THIS device's remote manifest is corrupt and we recover from the
+    local sidecar during autopush, the recovery must surface to stderr.
+    Silently swallowing this leaves the user blind to storage degradation.
+    """
+    _setup_real_config(tmp_path, monkeypatch)
+
+    # First push to produce a valid sidecar + remote manifest.
+    r = runner.invoke(app, ["push"])
+    assert r.exit_code == 0, r.stderr
+
+    # Corrupt this device's remote manifest so the next push triggers recovery.
+    backend = LocalBackend(tmp_path / "storage")
+    backend.put("manifests/dev-a/manifest.json.enc", b"definitely-not-a-real-blob")
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    # Sidecar recovery branch fired — must be visible on stderr in quiet mode.
+    assert "corrupt" in (r.stderr or "")
+    assert "sidecar" in (r.stderr or "")
+
+
+def test_autopull_surfaces_total_failed_count_on_stderr(tmp_path, monkeypatch):
+    """REGRESSION (adversarial review finding): autopull surfaces total_conflicted
+    and total_skipped_unknown_source on stderr, but used to silently swallow
+    total_failed. Per-file failures (decrypt, write, ValueError on corrupted
+    device_id) incremented the count without ever reaching the user.
+    """
+    from mind_meld.cli import PullResult
+
+    _setup_real_config(tmp_path, monkeypatch)
+
+    # Stub _pull_core to return a PullResult that simulates per-file failures.
+    fake_result = PullResult(
+        total_written=2,
+        total_failed=3,
+        device_names=["Mac B"],
+        elapsed=0.1,
+    )
+    monkeypatch.setattr("mind_meld.cli._pull_core", lambda *a, **kw: fake_result)
+
+    r = runner.invoke(app, ["autopull"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    assert "3 file(s) failed" in (r.stderr or "")
+    assert "mm pull --verbose" in (r.stderr or "")
+
+
+def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(
+    tmp_path, monkeypatch, capsys
+):
+    """When the remote manifest is corrupt AND no local sidecar exists, recovery
+    falls through to peer-fallback. That branch carries the riskiest semantics
+    (recent local deletions can be lost) and must surface to stderr in quiet
+    mode. Unit-tested at the helper boundary because reproducing the full
+    multi-device, multi-tombstone push-side scenario via CliRunner is heavy.
+    """
+    import sys
+    from mind_meld.cli import _recover_prior_manifest, ManifestFetch
+
+    fetch = ManifestFetch(status="corrupt", manifest=None)
+    monkeypatch.setattr("mind_meld.sidecar.read", lambda *a, **kw: None)
+    fake_tombstones = {"claude:projects/x/memory/foo.md": {"deleted_at": "2026-04-23T00:00:00+00:00"}}
+    monkeypatch.setattr(
+        "mind_meld.cli._collect_peer_tombstones",
+        lambda *a, **kw: fake_tombstones,
+    )
+
+    result = _recover_prior_manifest(
+        fetch, backend=None, device_id="dev-a", passphrase="x", memory_kb=1024,
+        quiet=True,
+    )
+
+    captured = capsys.readouterr()
+    # Returned the synthetic manifest with the peer tombstones intact.
+    assert result is not None
+    assert result["tombstones"] == fake_tombstones
+    # Quiet-mode warning landed on stderr (load-bearing path).
+    assert "corrupt" in captured.err
+    assert "tombstone" in captured.err
+    assert "may be lost" in captured.err
+
+
+def test_autopush_breadcrumb_no_sources_distinguishes_from_success(tmp_path, monkeypatch):
+    """REGRESSION (codex adversarial): empty-sources autopush used to write a
+    'success' breadcrumb, masking the wedge from monitoring (mm status). The
+    stderr warning helps a human; the breadcrumb downgrade catches automation.
+    """
+    storage_dir = tmp_path / "storage"
+    config_path = tmp_path / "config.toml"
+    save_config({
+        "device": {"id": "dev-empty", "name": "Empty"},
+        "storage": {"path": str(storage_dir)},
+        "sync": {"max_file_size": 52_428_800, "sources": []},
+        "crypto": {"argon2_memory_kb": MEMORY_KB},
+    }, config_path)
+
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-empty", "Empty")
+
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+    _redirect_lock(monkeypatch, tmp_path)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    crumb = iso / "last-autorun.json"
+    assert crumb.exists()
+    assert json.loads(crumb.read_text())["outcome"] == "no-sources"
+
+
+def test_autopush_surfaces_no_sources_warning_in_quiet_mode(tmp_path, monkeypatch):
+    """A config with an empty sources list silently no-ops every autopush
+    forever. After the audit, autopush surfaces a one-line stderr warning so
+    the user can fix the config.
+    """
+    storage_dir = tmp_path / "storage"
+    config_path = tmp_path / "config.toml"
+    save_config({
+        "device": {"id": "dev-empty", "name": "Empty"},
+        "storage": {"path": str(storage_dir)},
+        "sync": {"max_file_size": 52_428_800, "sources": []},
+        "crypto": {"argon2_memory_kb": MEMORY_KB},
+    }, config_path)
+
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-empty", "Empty")
+
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+    _redirect_lock(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    assert "no sync sources" in (r.stderr or "")
+
+
+def test_autopull_surfaces_fsync_failure_in_quiet_mode(tmp_path, monkeypatch):
+    """A durability fsync failure during pull means recently-pulled files may
+    not survive crash/power loss. Silently suppressing this in autopull leaves
+    the user thinking pulls are durable when they aren't.
+    """
+    from mind_meld.errors import StorageError
+
+    # Two devices, one push, then pull on the second so there's something
+    # to fsync.
+    storage_dir = tmp_path / "storage"
+    claude_a = tmp_path / "machine_a" / ".claude"
+    claude_b = tmp_path / "machine_b" / ".claude"
+    _populate_claude(claude_a)
+    claude_b.mkdir(parents=True)
+
+    config_a, _ = _make_config(tmp_path / "a", storage_dir, claude_a, "dev-a", "Mac A")
+    config_b, _ = _make_config(tmp_path / "b", storage_dir, claude_b, "dev-b", "Mac B")
+
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-a", "Mac A")
+    register_device(backend, "dev-b", "Mac B")
+
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
+    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a)
+    _redirect_lock(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+
+    # Switch to device B and force fsync to fail during the upcoming autopull.
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b)
+
+    # Path-aware mock: only raise on the deferred-durability fsync (which
+    # targets the claude tree where pulled files landed). _init_crypto_session
+    # does a one-time config backfill that uses fsync_dir too — leaving that
+    # alone keeps the test focused on the warning we want to assert.
+    import mind_meld.fsutil as _fsu
+    real_fsync_dir = _fsu.fsync_dir
+
+    def selective_boom(path):
+        if "claude" in str(path) or "memory" in str(path):
+            raise StorageError("simulated fsync failure")
+        return real_fsync_dir(path)
+    monkeypatch.setattr("mind_meld.fsutil.fsync_dir", selective_boom)
+
+    r = runner.invoke(app, ["autopull"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    assert "fsync failed" in (r.stderr or "")

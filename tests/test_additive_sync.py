@@ -555,3 +555,75 @@ class TestAutoGC:
         assert count == 1
         assert storage.exists("data/dev1/hash1.enc")
         assert not storage.exists("data/dev1/hash_orphan.enc")
+
+    def test_gc_logs_malformed_blob_paths_in_verbose(self, tmp_path, capsys):
+        """Wrong-depth .enc files under data/ are surfaced in verbose mode and
+        NEVER auto-reaped. Before this change, _do_gc silently skipped them
+        (`if len(parts) != 3: continue`), making them invisible accumulators.
+        """
+        from mind_meld.cli import _do_gc
+        from mind_meld.devices import register_device
+
+        storage = LocalBackend(tmp_path / "storage")
+        config = {
+            "device": {"id": "dev1", "name": "Test"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+            "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
+        }
+        register_device(storage, "dev1", "Test")
+
+        manifest = {
+            "device_id": "dev1",
+            "device_name": "Test",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "files": {},
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+        enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
+        storage.put("manifests/dev1/manifest.json.enc", enc)
+
+        # Malformed blob: depth 2 (data/foo.enc) instead of expected depth 3.
+        storage.put("data/stray_artifact.enc", b"who put this here")
+
+        _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=True, verbose=True)
+        captured = capsys.readouterr()
+        assert "malformed" in captured.out
+        assert "data/stray_artifact.enc" in captured.out
+        # Even in non-dry-run, the malformed file is NEVER deleted.
+        _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
+        assert storage.exists("data/stray_artifact.enc")
+
+    def test_gc_summarizes_malformed_count_when_not_verbose(self, tmp_path, capsys):
+        """In non-verbose, non-dry-run mode the user still gets a one-line
+        warning that N malformed blobs were skipped — silent accumulation
+        is exactly the bug this test pins.
+        """
+        from mind_meld.cli import _do_gc
+        from mind_meld.devices import register_device
+
+        storage = LocalBackend(tmp_path / "storage")
+        config = {
+            "device": {"id": "dev1", "name": "Test"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+            "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
+        }
+        register_device(storage, "dev1", "Test")
+        manifest = {
+            "device_id": "dev1",
+            "device_name": "Test",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "files": {},
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+        enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
+        storage.put("manifests/dev1/manifest.json.enc", enc)
+        storage.put("data/stray.enc", b"x")
+
+        _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
+        captured = capsys.readouterr()
+        assert "1 blob(s) at unexpected path depth" in captured.out
+        assert storage.exists("data/stray.enc")

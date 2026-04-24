@@ -199,6 +199,36 @@ class TestApplyIncomingFile:
         assert conflicts[0].read_bytes() == b"local content"
         assert conflicts[0].name.endswith(".md")
 
+    def test_empty_remote_device_id_returns_failed_not_raises(self, tmp_path: Path) -> None:
+        """REGRESSION: a corrupted peer manifest with empty device_id used to
+        crash the entire pull as 'unexpected error' (ValueError from
+        conflict_filename propagating uncaught). Per-file isolation now
+        catches it: the bad file fails, the local file is preserved at
+        canonical, and the pull walk continues for other files.
+        """
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+
+        remote_mtime = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+        info = _remote_info("remotehash", remote_mtime)
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="",  # corrupted peer manifest
+        )
+
+        assert outcome == "failed"
+        # Local file is preserved unchanged at the canonical path.
+        assert local.read_bytes() == b"local content"
+        # No conflict file was created (the build failed before rename).
+        assert list(local.parent.glob(f"*{CONFLICT_INFIX}*")) == []
+
     def test_pull_is_idempotent_after_conflict(self, tmp_path: Path) -> None:
         """Second apply of the same remote data should be unchanged, not a
         second conflict. This is the critical convergence property."""
@@ -270,6 +300,21 @@ class TestConflictFilename:
         path = conflict_filename(canonical, "devA1234", now=now)
         assert path.name.startswith("config.local")
         assert path.suffix == ".yaml"
+
+    def test_empty_device_id_raises(self, tmp_path: Path) -> None:
+        """Empty device_id used to silently fall back to literal "unknown",
+        causing cross-device filename collisions when two peers hit the same
+        path. Now raises so the caller surfaces the corruption.
+        """
+        canonical = tmp_path / "f.md"
+        with pytest.raises(ValueError, match="device_id must be non-empty"):
+            conflict_filename(canonical, "")
+
+    def test_none_device_id_raises(self, tmp_path: Path) -> None:
+        """None falls into the same trap as empty string under the old fallback."""
+        canonical = tmp_path / "f.md"
+        with pytest.raises(ValueError, match="device_id must be non-empty"):
+            conflict_filename(canonical, None)  # type: ignore[arg-type]
 
 
 # ── manifest mtime helpers ───────────────────────────────────────────
@@ -605,6 +650,153 @@ class TestResolveInteractiveLoop:
         # Second pair: conflict promoted over canonical
         assert c2.read_bytes() == b"b-conflict"
         assert not conflict2.exists()
+
+
+class TestResolveExitCode:
+    """Tests for the (resolved, failed) return shape and resolve()'s exit code.
+
+    Before this change, mid-walk OSError on rename/unlink/read was printed to
+    stderr but the command exited 0, leaving CI scripts unable to detect that
+    the user still had unresolved conflicts. Now: walk continues through every
+    conflict (so the user can triage everything in one pass), and the command
+    exits 1 if anything failed.
+    """
+
+    def test_loop_returns_resolved_failed_tuple(self, tmp_path: Path, monkeypatch) -> None:
+        """Happy path: 1 resolved, 0 failed."""
+        import typer
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "f.md"
+        canonical.write_bytes(b"canon")
+        conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict")
+
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+
+    def test_loop_counts_rename_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """Promote choice + rename raises OSError -> failed += 1, walk continues."""
+        import typer
+        from mind_meld.cli import _resolve_interactive_loop
+
+        conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict")
+        # canonical=None branch -> 'p' choice -> rename
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+
+        def boom(*a, **kw):
+            raise OSError("simulated rename failure")
+        monkeypatch.setattr(Path, "rename", boom)
+
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (0, 1)
+
+    def test_loop_counts_unlink_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """Keep-canonical choice + unlink raises OSError -> failed += 1."""
+        import typer
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "f.md"
+        canonical.write_bytes(b"canon")
+        conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+
+        def boom(self):
+            raise OSError("simulated unlink failure")
+        monkeypatch.setattr(Path, "unlink", boom)
+
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (0, 1)
+
+    def test_loop_counts_read_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """Read failure during diff display leaves the conflict unresolved -> failed."""
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "f.md"
+        canonical.write_bytes(b"canon")
+        conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict")
+
+        def boom(self, *a, **kw):
+            raise OSError("simulated read failure")
+        monkeypatch.setattr(Path, "read_text", boom)
+
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (0, 1)
+
+    def test_loop_mixed_pass_fail_continues_walk(self, tmp_path: Path, monkeypatch) -> None:
+        """3 conflicts where the middle one fails. All three get prompted."""
+        import typer
+        from mind_meld.cli import _resolve_interactive_loop
+
+        items = []
+        for n in ("a", "b", "c"):
+            canonical = tmp_path / f"{n}.md"
+            canonical.write_bytes(b"canon")
+            conflict = tmp_path / f"{n}.sync-conflict-20260421-143055-devA1234.md"
+            conflict.write_bytes(b"conflict")
+            items.append(("s1", conflict, canonical))
+
+        # Three 'c' choices. Middle unlink fails.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+        real_unlink = Path.unlink
+        call_idx = {"n": 0}
+
+        def maybe_boom(self):
+            call_idx["n"] += 1
+            if call_idx["n"] == 2:
+                raise OSError("simulated mid-walk failure")
+            return real_unlink(self)
+        monkeypatch.setattr(Path, "unlink", maybe_boom)
+
+        resolved, failed = _resolve_interactive_loop(items)
+        assert resolved == 2
+        assert failed == 1
+
+    def test_resolve_command_exits_1_on_any_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """End-to-end: resolve walks, encounters one rename failure, exits 1."""
+        import typer
+        from typer.testing import CliRunner
+        from mind_meld.cli import app
+        from mind_meld.config import save_config
+
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        claude = tmp_path / ".claude"
+        memory = claude / "projects" / "-Users-kb-app" / "memory"
+        memory.mkdir(parents=True)
+        canonical = memory / "role.md"
+        canonical.write_bytes(b"canon")
+        conflict = memory / "role.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"conflict")
+
+        cfg_path = tmp_path / "config.toml"
+        save_config({
+            "device": {"id": "dev-x", "name": "Mac X"},
+            "storage": {"path": str(storage)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [{"name": "claude", "path": str(claude), "type": "claude"}],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }, cfg_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
+
+        # Force 'f' (force conflict -> canonical) and make rename fail.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
+
+        def boom(*a, **kw):
+            raise OSError("simulated rename failure")
+        monkeypatch.setattr(Path, "rename", boom)
+
+        result = CliRunner().invoke(app, ["resolve"])
+        assert result.exit_code == 1, (result.stdout, result.stderr)
 
 
 class TestPredictPullOutcome:
