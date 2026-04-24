@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections.abc import Callable, Iterator
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import typer
 from rich.console import Console
@@ -79,6 +79,7 @@ from mind_meld.storage.keys import (
     manifest_key,
     parse_blob_key,
 )
+from mind_meld.storage.local import LocalBackend
 from mind_meld import sidecar
 from mind_meld.synclog import write_sync_log
 
@@ -203,7 +204,7 @@ def _error(msg: str) -> None:
     raise typer.Exit(1)
 
 
-def _list_devices_warn(backend) -> list[dict]:
+def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     """list_devices variant that surfaces dropped entries to stderr.
 
     Loss of a peer's device entry is load-bearing during corrupt-manifest
@@ -237,9 +238,19 @@ def _get_passphrase_or_exit() -> str:
     except CryptoError as e:
         _error(str(e))
         raise
+    except Exception as e:
+        # crypto.get_passphrase narrowed its keyring catch to
+        # (KeyringError, ImportError) in v0.8.9. Other exception kinds
+        # (OSError, RuntimeError from a misbehaving backend) now
+        # propagate. Route them through _error() so interactive commands
+        # print the one-line red banner instead of an uncaught traceback —
+        # break-glass path (MINDMELD_PASSPHRASE env var) is already past,
+        # so the user needs to see exactly why the keyring hiccuped.
+        _error(f"keyring backend failure: {type(e).__name__}: {e}")
+        raise
 
 
-def _init_crypto_session(backend, passphrase: str, config: dict) -> int:
+def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -> int:
     """Read mm-crypto-init, drift-check against local config, pin process crypto session.
 
     Called at the top of every crypto-using command (push/pull/status/diff/gc/etc).
@@ -360,7 +371,7 @@ def _make_manifest_validator(
 
 
 def _fetch_remote_manifest(
-    backend, device_id: str, passphrase: str, memory_kb: int
+    backend: LocalBackend, device_id: str, passphrase: str, memory_kb: int
 ) -> ManifestFetch:
     """Fetch and decrypt remote manifest, merging any conflict copies.
 
@@ -433,7 +444,7 @@ def _fetch_remote_manifest(
 
 def _recover_prior_manifest(
     fetch: ManifestFetch,
-    backend,
+    backend: LocalBackend,
     device_id: str,
     passphrase: str,
     memory_kb: int,
@@ -510,7 +521,7 @@ def _recover_prior_manifest(
 
 
 def _collect_peer_tombstones(
-    backend, my_device_id: str, passphrase: str, memory_kb: int
+    backend: LocalBackend, my_device_id: str, passphrase: str, memory_kb: int
 ) -> dict[str, dict[str, str]]:
     """Aggregate tombstones from all peer devices. Returns {} if none.
 
@@ -638,7 +649,7 @@ def _merge_manifests(manifests: list[dict]) -> dict:
 
 
 def _cleanup_conflict_copies(
-    backend, device_id: str, passphrase: str, memory_kb: int
+    backend: LocalBackend, device_id: str, passphrase: str, memory_kb: int
 ) -> int:
     """Delete conflict copies for a device's manifest.
 
@@ -728,7 +739,7 @@ def _print_pull_prediction(diff: DiffResult, base_path: Path, src_name: str) -> 
 
 
 def _upload_changed_blobs(
-    backend,
+    backend: LocalBackend,
     base_path: Path,
     to_upload: dict[str, dict],
     device_id: str,
@@ -1024,7 +1035,7 @@ def _apply_incoming_file(
 
 
 def _download_and_apply(
-    backend,
+    backend: LocalBackend,
     base_path: Path,
     to_download: dict[str, dict],
     source_device_id: str,
@@ -1112,7 +1123,7 @@ class _StorageOccupancy:
     has_any_devices: bool       # devices/ non-empty (weakest signal)
 
 
-def _probe_storage_occupancy(backend) -> _StorageOccupancy:
+def _probe_storage_occupancy(backend: LocalBackend) -> _StorageOccupancy:
     """Check which kinds of state a storage root already holds.
 
     Called by `init` before prompting for a passphrase. Each probe is
@@ -1274,7 +1285,7 @@ def _prompt_passphrase(is_first_device: bool) -> str:
 
 
 def _bootstrap_or_verify_crypto(
-    backend,
+    backend: LocalBackend,
     passphrase: str,
     is_first_device: bool,
     fetch: CryptoInitFetch,
@@ -1356,7 +1367,7 @@ def _bootstrap_or_verify_crypto(
 
 def _save_and_register(
     config: dict,
-    backend,
+    backend: LocalBackend,
     device_id: str,
     device_name: str,
     passphrase: str,
@@ -1374,7 +1385,22 @@ def _save_and_register(
     register_device(backend, device_id, device_name)
     console.print(f"  Device registered: {device_name} ({device_id})")
 
-    if store_passphrase_in_keyring(passphrase):
+    # store_passphrase_in_keyring narrowed its own catch to
+    # (KeyringError, ImportError) in v0.8.9. Init has already committed
+    # config + device registration at this point, so aborting on a
+    # non-KeyringError kind (e.g., RuntimeError from a broken backend)
+    # would leave the user half-initialized with a cryptic traceback.
+    # Treat any keyring failure as "not available" + warn; env-var is a
+    # valid fallback and the user can re-run init if they want to retry.
+    try:
+        stored = store_passphrase_in_keyring(passphrase)
+    except Exception as e:
+        console.print(
+            f"  [yellow]Keyring backend error ({type(e).__name__}):[/yellow] {e}"
+        )
+        stored = False
+
+    if stored:
         console.print("  Passphrase stored in OS keyring.")
     else:
         console.print(
@@ -1426,7 +1452,6 @@ def init() -> None:
     console.print(f"  Storage: {full_path}")
 
     # Lightweight backend (config is not yet written; instantiate directly).
-    from mind_meld.storage.local import LocalBackend
     backend = LocalBackend(str(full_path))
 
     # Probe storage for mm-crypto-init BEFORE committing any local state.
@@ -1646,7 +1671,7 @@ def _push_core(
     if dry_run:
         if not quiet:
             elapsed = time.time() - start
-            console.print(f"\n[bold]Dry run complete.[/bold]")
+            console.print("\n[bold]Dry run complete.[/bold]")
             console.print(f"  Completed in {elapsed:.1f}s")
         return None
 
@@ -1714,7 +1739,7 @@ def _push_core(
     )
 
     if not quiet:
-        console.print(f"\n[bold green]Push complete.[/bold green]")
+        console.print("\n[bold green]Push complete.[/bold green]")
         if total_new:
             console.print(f"  [green]+ {total_new} new[/green]")
         if total_modified:
@@ -1737,10 +1762,10 @@ ConflictMode = Literal["prompt", "keep-both", "fail"]
 
 @app.command()
 def pull(
-    from_device: Optional[str] = typer.Option(
+    from_device: str | None = typer.Option(
         None, "--from", help="Pull from a specific device ID"
     ),
-    source: Optional[str] = typer.Option(
+    source: str | None = typer.Option(
         None, "--source", help="Only pull a specific source (e.g., 'claude', 'gstack')"
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -1872,7 +1897,7 @@ class _PerSourceResult:
 
 
 def _select_devices(
-    backend, my_device_id: str, from_device: str | None
+    backend: LocalBackend, my_device_id: str, from_device: str | None
 ) -> tuple[list[dict], list[dict]]:
     """Return (all_devices, pull_targets).
 
@@ -1897,7 +1922,7 @@ def _select_devices(
 
 
 def _prefetch_manifests(
-    backend, devices: list[dict], passphrase: str, memory_kb: int
+    backend: LocalBackend, devices: list[dict], passphrase: str, memory_kb: int
 ) -> tuple[dict[str, dict | None], list[_CorruptPeer]]:
     """Fetch every device's manifest. Missing/corrupt both map to None.
 
@@ -1989,7 +2014,7 @@ def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
 
 
 def _pull_one_source(
-    backend,
+    backend: LocalBackend,
     *,
     src_name: str,
     src_type: str,
@@ -2518,7 +2543,7 @@ def _pull_core(
 
 @app.command()
 def status(
-    source: Optional[str] = typer.Option(
+    source: str | None = typer.Option(
         None, "--source", help="Show status for a specific source only"
     ),
 ) -> None:
@@ -2551,7 +2576,7 @@ def status(
     # Devices
     devices = _list_devices_warn(backend)
 
-    console.print(f"\n[bold]Mind Meld Status[/bold]")
+    console.print("\n[bold]Mind Meld Status[/bold]")
     console.print(f"  Device: {device_name} ({device_id})")
 
     # Surface the last autopull/autopush breadcrumb so a wedged sync
@@ -2605,7 +2630,7 @@ def status(
         console.print(f"    Remote files: {remote_count}")
 
         if diff.has_changes:
-            console.print(f"    [yellow]Pending push:[/yellow]")
+            console.print("    [yellow]Pending push:[/yellow]")
             if diff.new:
                 console.print(f"      + {len(diff.new)} new")
             if diff.modified:
@@ -2613,19 +2638,19 @@ def status(
             if diff.deleted:
                 console.print(f"      - {len(diff.deleted)} deleted")
         else:
-            console.print(f"    [green]In sync.[/green]")
+            console.print("    [green]In sync.[/green]")
 
     if not source:
         console.print(f"\n  Total local: {total_local}, Total remote: {total_remote}")
 
     if total_new or total_modified or total_deleted:
-        console.print(f"\n  [yellow]Overall pending push:[/yellow]")
+        console.print("\n  [yellow]Overall pending push:[/yellow]")
         console.print(f"    + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted")
     elif not source:
-        console.print(f"\n  [green]All sources in sync.[/green]")
+        console.print("\n  [green]All sources in sync.[/green]")
 
     if len(devices) > 1:
-        console.print(f"\n  Other devices:")
+        console.print("\n  Other devices:")
         for d in devices:
             if d["device_id"] != device_id:
                 console.print(f"    {d['device_name']} ({d['device_id']})")
@@ -2634,7 +2659,7 @@ def status(
 # ── diag ──────────────────────────────────────────────────────────────
 
 
-def _collect_diag_state(backend) -> dict:
+def _collect_diag_state(backend: LocalBackend) -> dict:
     """Gather non-secret state for support triage.
 
     Secrets allowlist — NEVER include:
@@ -2780,7 +2805,6 @@ def diag(
     # Resolve storage path WITHOUT a valid config: diag has to run even
     # when config is broken (that's literally one of the things users run
     # it to debug). Fall back to the default storage path.
-    from mind_meld.storage.local import LocalBackend
     try:
         cfg = load_config()
         storage_path = cfg["storage"]["path"]
@@ -2839,7 +2863,7 @@ def diag(
     if br is None:
         console.print("  (no autopull/autopush has run on this device yet)")
     elif "error" in br:
-        console.print(f"  [yellow]breadcrumb unreadable[/yellow]")
+        console.print("  [yellow]breadcrumb unreadable[/yellow]")
     else:
         console.print(f"  verb:       {br.get('verb')}")
         console.print(f"  outcome:    {br.get('outcome')}")
@@ -2889,10 +2913,10 @@ def devices() -> None:
 
 @app.command(name="diff")
 def diff_cmd(
-    from_device: Optional[str] = typer.Option(
+    from_device: str | None = typer.Option(
         None, "--from", help="Diff against a specific device"
     ),
-    source: Optional[str] = typer.Option(
+    source: str | None = typer.Option(
         None, "--source", help="Diff a specific source only"
     ),
 ) -> None:
@@ -2949,7 +2973,7 @@ def diff_cmd(
 
         any_changes = True
         console.print(f"\n  [bold]Source '{src_name}':[/bold]")
-        console.print(f"  [dim](push direction: local → remote)[/dim]")
+        console.print("  [dim](push direction: local → remote)[/dim]")
         for path in sorted(diff.new):
             console.print(f"    [green]+ push  [/green] {path}")
         for path in sorted(diff.modified):
@@ -3005,7 +3029,7 @@ def gc(
 
 
 def _sweep_local_tmp_files(
-    backend,
+    backend: LocalBackend,
     my_device_id: str,
     dry_run: bool,
     verbose: bool,
@@ -3310,7 +3334,7 @@ def conflicts() -> None:
 
 
 def _quarantine_corrupt_manifest(
-    backend,
+    backend: LocalBackend,
     storage_root: Path,
     device_id: str,
 ) -> Path:
@@ -3492,7 +3516,7 @@ def recover(
 
 @app.command()
 def resolve(
-    path: Optional[str] = typer.Argument(
+    path: str | None = typer.Argument(
         None,
         help="Specific conflict path to resolve. If omitted, walks all conflicts.",
     ),
@@ -3869,6 +3893,20 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
     except CryptoError as e:
         print(f"mm: {verb} skipped - {e}", file=sys.stderr)
         _write_autorun_breadcrumb(verb, "no-passphrase")
+        return None
+    except Exception as e:
+        # crypto.get_passphrase narrowed its keyring catch to
+        # (KeyringError, ImportError) in v0.8.9. Other exception kinds
+        # (OSError from a locked keychain, RuntimeError from a broken
+        # Linux DBus backend) now propagate here. Without this guard they
+        # would escape the hook entirely — no breadcrumb, no stderr line,
+        # silent sync stop. Mirrors the backend-error shape below.
+        print(
+            f"mm: {verb} failed - keyring error (see auto{verb}.log)",
+            file=sys.stderr,
+        )
+        _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "keyring-error", type(e).__name__)
         return None
 
     # get_backend() can still raise on malformed config["storage"]["path"]

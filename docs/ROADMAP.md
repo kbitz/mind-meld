@@ -91,23 +91,23 @@ change for a single-writer bug. Narrowed to the actual leak site._
 
 ---
 
-## Group 3: Test hygiene + style polish
+## Group 3: Test hygiene + style polish ✅ shipped in v0.8.10
 
 CLI-driven end-to-end coverage + lint polish. Style nits collapse into
 pre-flight; the CLI E2E migration is the one load-bearing piece.
 
-**Pre-flight** (any agent, <30 min each, style-only):
-- Type hints on helper `backend` params — `cli.py:108, 116, 124, 241, 273, 298, 332, 360, 381, 447, 564, 624, 766, 961`: helpers accept untyped `backend`, while `devices.py:13, 30, 43` types it as `LocalBackend`. Add `backend: LocalBackend` hints matching devices.py.
-- Standardize optional syntax — `cli.py`: 6 `Optional[X]` and 11 `X | None` despite `from __future__ import annotations`. Standardize on `X | None` and drop `Optional` from the typing import.
-- Drop placeholderless f-strings + narrow keyring bare-except — `cli.py:897, 1246, 1377, 1502, 1864`: literal strings marked `f"..."` with no interpolation. Also narrow `crypto.py:97, 104, 120, 147` keyring bare-except to `keyring.errors.KeyringError` + `ImportError`.
+**Pre-flight** ✅ shipped in v0.8.10 (any agent, <30 min each, style-only):
+- ✅ Type hints on helper `backend` params — 17 cli.py helpers now typed `backend: LocalBackend` matching `devices.py`. Two lazy `from mind_meld.storage.local import LocalBackend` sites hoisted to the module-level import in the process.
+- ✅ Standardize optional syntax — all 6 `Optional[X]` uses in cli.py (all `typer.Option` defaults on `pull` / `status` / `diff` / `resolve`) converted to `X | None`; `Optional` dropped from the `typing` import.
+- ✅ Drop placeholderless f-strings + narrow keyring bare-except — 10 AST-verified placeholderless f-strings in cli.py stripped of their `f` prefix (audit was group-aware: no adjacent-concat group lost interpolation). `crypto.py::get_passphrase` and `crypto.py::store_passphrase_in_keyring` narrowed from `except Exception` to `(keyring.errors.KeyringError, ImportError)` via try/except/else split; 7 regression pins landed in `test_crypto.py::TestGetPassphraseExceptNarrow` + `TestStorePassphraseInKeyringExceptNarrow`.
 
-### Track 3A: Test improvements
+### Track 3A: Test improvements ✅ shipped in v0.8.10
 _3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [tests/]_
-_touches: tests/test_integration.py, tests/test_conflict_copy.py_
+_touches: tests/test_integration.py, tests/test_conflict_copy.py, tests/test_crypto.py_
 
-- **Migrate `TestPushPullRoundTrip` to CLI invocation** — `tests/test_integration.py:53-163`: bypasses the CLI entirely; uses `build_manifest`/`encrypt`/`storage.put` by hand. Does not exercise `_pull_core` or `_apply_incoming_file`. Replace with `runner.invoke(app, ["push"|"pull"])` like `TestMultiSourceSync`. Once migrated, the `build_manifest` import drops too. Add a CLI-driven end-to-end test covering push→pull→conflict→tombstone propagation together. _tests/test_integration.py, ~100 lines._ (M)
-- **Rename misleading test** — `tests/test_integration.py:103-163`: `test_deletion_propagation` is named after pre-additive behavior but the body asserts the opposite. Rename to `test_deletion_not_propagated_in_additive_model`. _tests/test_integration.py, ~5 lines._ (S)
-- **Hoist lazy imports** — `tests/test_conflict_copy.py` (~11 sites) and `tests/test_integration.py` (~7 sites): in-function imports of `mind_meld.cli` helpers and `pathlib.Path`/`shutil` redeclared despite module-level blocks. Hoist to the top. _tests/test_conflict_copy.py, tests/test_integration.py, ~30 lines._ (S)
+- ✅ **Migrate `TestPushPullRoundTrip` to CLI invocation** — two existing tests rewritten on top of `CliRunner.invoke(app, ["push"|"pull"])` using the same separate-A/B-claude-dir pattern as `TestMultiSourceSync` (local config points at each device's own path; pull writes to the local-config base_path, not the remote manifest's). `build_manifest_v2` / `encrypt` / `storage.put` / `decrypt` no longer hand-rolled. Added the combined `test_push_pull_conflict_tombstone_combined` E2E walking push → pull → divergent-edit conflict-copy (with backdated mtime so remote wins) → delete + tombstone propagation in a single run. _tests/test_integration.py._ (M) _Shipped in v0.8.10._
+- ✅ **Rename misleading test** — `test_deletion_propagation` → `test_deletion_not_propagated_in_additive_model`. Body already asserted the additive behavior; name was a pre-additive holdover. _tests/test_integration.py._ (S) _Shipped in v0.8.10._
+- ✅ **Hoist lazy imports** — 52 nested imports in `tests/test_integration.py` and 34 in `tests/test_conflict_copy.py` removed via AST-driven sweep. Module-level imports added for `pathlib.Path`, `shutil`, `subprocess`, `sys`, `textwrap`, `tomllib`, `hashlib`, `json`, `typer` + `typer.testing.CliRunner`, and `mind_meld` sub-modules (cli as `cli_module`, config as `config_module`, crypto as `crypto_module`, fsutil, synclog, write_sync_log, hash_file, load_manifest, walk_claude_source, LOCK_PATH, `_gc_old_conflict_files`, `_resolve_interactive_loop`, `app`, `CONFLICT_AGE_DAYS`, `save_config`). Legacy aliases `_json` / `_crypto` renamed to `json` / `crypto_module` in-place. Zero remaining nested imports in either file. _tests/test_conflict_copy.py, tests/test_integration.py._ (S) _Shipped in v0.8.10._
 
 ---
 
@@ -148,12 +148,12 @@ Group 1: Decomposition + DRY
   └── Track 1C ........... ~0.5d .. 3 tasks .. post-1A cli.py follow-ups [✅ v0.8.6]
 
 Group 2: Init flow + sync_log generalization + config polish
-  ├── Track 2A ........... ~1.5d .. 5 tasks .. init + sync_log
-  └── Track 2B ........... ~0.5d .. 2 tasks .. config polish (eng-review follow-ups)
+  ├── Track 2A ........... ~1.5d .. 5 tasks .. init + sync_log [✅ v0.8.7]
+  └── Track 2B ........... ~0.5d .. 2 tasks .. config polish (eng-review follow-ups) [✅ v0.8.8]
 
 Group 3: Test hygiene + style polish
-  Pre-flight .............. 3 items (type hints, optional syntax, f-strings)
-  └── Track 3A ........... ~0.5d .. 3 tasks .. tests (CLI-driven, rename, hoist)
+  Pre-flight .............. 3 items (type hints, optional syntax, f-strings) [✅ v0.8.10]
+  └── Track 3A ........... ~0.5d .. 3 tasks .. tests (CLI-driven, rename, hoist) [✅ v0.8.10]
 
 Group 4: Release infrastructure
   └── Track 4A ........... ~1-2 hr .. 1 task .. GitHub Actions CI

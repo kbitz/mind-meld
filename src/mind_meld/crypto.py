@@ -478,14 +478,26 @@ def get_passphrase(non_interactive: bool = False) -> str:
     Hook-path callers (autopull/autopush) MUST pass non_interactive=True;
     `getpass.getpass()` blocks on stdin and would hang the hook.
     """
+    # Narrow catch: KeyringError covers the published backend-failure family
+    # (NoKeyringError, InitError, PasswordSetError, ...), ImportError handles
+    # a stripped Python install where the `keyring` package itself is missing.
+    # Anything else (OSError, RuntimeError, DBus surprises on Linux)
+    # propagates so the visible-failure contract from v0.8.1 keeps holding —
+    # autopull/autopush's outer `except Exception` records a non-success
+    # breadcrumb instead of silently falling through to env-var lookup under
+    # a bogus "keyring said no" premise.
     try:
         import keyring as kr
-
-        stored = kr.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
-        if stored is not None:
-            return stored
-    except Exception:
+        from keyring.errors import KeyringError
+    except ImportError:
         pass
+    else:
+        try:
+            stored = kr.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+            if stored is not None:
+                return stored
+        except KeyringError:
+            pass
 
     env_passphrase = os.environ.get(ENV_VAR)
     if env_passphrase:
@@ -509,11 +521,20 @@ def get_passphrase(non_interactive: bool = False) -> str:
 
 
 def store_passphrase_in_keyring(passphrase: str) -> bool:
-    """Store the passphrase in the OS keyring. Returns False if unavailable."""
+    """Store the passphrase in the OS keyring. Returns False if unavailable.
+
+    Narrow catch (see `get_passphrase` for the rationale): only
+    `keyring.errors.KeyringError` and `ImportError` are converted to a
+    False return. Other exception kinds propagate.
+    """
     try:
         import keyring as kr
+        from keyring.errors import KeyringError
+    except ImportError:
+        return False
 
+    try:
         kr.set_password(KEYRING_SERVICE, KEYRING_USERNAME, passphrase)
         return True
-    except Exception:
+    except KeyringError:
         return False
