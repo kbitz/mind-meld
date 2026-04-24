@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        exclude:
+          # macOS is ~5x slower than Linux; cover min/max Python versions only.
+          # Ubuntu covers all three versions (3.11, 3.12, 3.13).
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -e .[dev]
+
+      - name: Verify keyring backend (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          python -c "
+          import keyring
+          backend = str(keyring.get_keyring())
+          assert 'macOS' in backend or 'Keychain' in backend, f'unexpected backend: {backend}'
+          print(backend)
+          "
+
+      - name: Run tests
+        run: pytest tests/
+
+      - name: Build and install wheel (macOS + Python 3.13 only)
+        if: runner.os == 'macOS' && matrix.python-version == '3.13'
+        run: |
+          python -m pip install build
+          python -m build
+          python -m pip install --force-reinstall dist/*.whl
+          mm --version
+
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -e .[dev]
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
