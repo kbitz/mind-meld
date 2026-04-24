@@ -43,8 +43,8 @@ v2 manifests include BOTH `files` and `sources` for seamless backward compat:
   "timestamp": "2026-04-08T12:00:00Z",
   "files": { "...claude files only for v1 compat..." },
   "sources": {
-    "claude": { "base_path": "/Users/kb/.claude", "files": { "..." } },
-    "gstack": { "base_path": "/Users/kb/.gstack", "files": { "..." } }
+    "claude": { "base_path": "/Users/alice/.claude", "files": { "..." } },
+    "gstack": { "base_path": "/Users/alice/.gstack", "files": { "..." } }
   }
 }
 ```

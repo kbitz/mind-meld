@@ -171,9 +171,9 @@ The manifest is a **truth-based snapshot** of the local filesystem state. It alw
   "timestamp": "2026-04-08T12:00:00Z",
   "sources": {
     "claude": {
-      "base_path": "/Users/kb/.claude",
+      "base_path": "/Users/alice/.claude",
       "files": {
-        "projects/-Users-kb-myapp/memory/user_role.md": {
+        "projects/-Users-alice-myapp/memory/user_role.md": {
           "sha256": "e3b0c44298fc...",
           "size": 4096,
           "mtime": "2026-04-08T11:30:00Z"
@@ -181,7 +181,7 @@ The manifest is a **truth-based snapshot** of the local filesystem state. It alw
       }
     },
     "gstack": {
-      "base_path": "/Users/kb/.gstack",
+      "base_path": "/Users/alice/.gstack",
       "files": {
         "projects/myapp/review-log.jsonl": {
           "sha256": "ab12cd34ef56...",
