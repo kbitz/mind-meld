@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.8.3] - 2026-04-23
+## [0.8.4] - 2026-04-23
 
 Group 2 pre-flight + Track 2A: storage-key helpers and CLI decomposition.
 Extracts every storage-key string construction behind a typed helper module,
@@ -75,6 +75,26 @@ fixed before merge (see Fixed).
   from `blob_key(source_device_id, info["sha256"])` is caught and mapped
   to the `"failed"` outcome, preserving per-file isolation (matches the
   v0.8.1 empty-device_id handling in `_apply_conflict`).
+
+## [0.8.3] - 2026-04-23
+
+Prep pass for public release: adds the MIT `LICENSE` file that `pyproject.toml`
+already declares, and scrubs the placeholder user path `/Users/kb/` out of the
+spec, design doc, and one test fixture so examples don't leak a real username.
+No runtime behavior change.
+
+### Added
+- `LICENSE` (MIT) at the repo root. The wheel has declared `license = "MIT"`
+  since 0.8.x but shipped without the actual license text; this closes the gap
+  and satisfies GitHub's license detector.
+
+### Changed
+- `SPEC.md`, `docs/designs/sync-gstack-context.md`, `tests/test_integration.py`:
+  replace `/Users/kb/` with `/Users/alice/` in JSON manifest examples and the v1
+  backward-compat fixture. Pure string swap; the fixture's input and assertion
+  change together, so semantics are unchanged.
+
+## [0.8.2] - 2026-04-23
 
 Track 1B (Group 1): manifest dead-code cleanup + v1-holdover removal. Drops
 vestigial back-compat aliases and the redundant top-level `files` key from

@@ -969,7 +969,7 @@ class TestMultiSourceSync:
             "device_id": "old-device",
             "device_name": "Old Mac",
             "timestamp": "2026-01-01T00:00:00Z",
-            "base_path": "/Users/kb/.claude",
+            "base_path": "/Users/alice/.claude",
             "files": {
                 "projects/-myapp/memory/role.md": {
                     "sha256": "abc123",
@@ -994,7 +994,7 @@ class TestMultiSourceSync:
         assert "sources" in loaded
         assert "claude" in loaded["sources"]
         claude_src = loaded["sources"]["claude"]
-        assert claude_src["base_path"] == "/Users/kb/.claude"
+        assert claude_src["base_path"] == "/Users/alice/.claude"
         assert len(claude_src["files"]) == 2
         assert claude_src["files"]["projects/-myapp/memory/role.md"]["sha256"] == "abc123"
 

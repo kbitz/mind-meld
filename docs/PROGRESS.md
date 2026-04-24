@@ -4,7 +4,8 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
-| 0.8.3   | 2026-04-23 | Group 2 pre-flight + Track 2A: storage-key helpers (`storage/keys.py` with path-traversal validation) + cli.py decomposition (`_pull_core` → 6 helpers + single print-owner, `_apply_incoming_file` → 3 per-outcome helpers). Internal refactor, zero user-visible behavior change; two codex-found regressions (`had_changes` exclusion of `unchanged`, per-file `blob_key` validation) caught and fixed pre-merge. |
+| 0.8.4   | 2026-04-23 | Group 2 pre-flight + Track 2A: storage-key helpers (`storage/keys.py` with path-traversal validation) + cli.py decomposition (`_pull_core` → 6 helpers + single print-owner, `_apply_incoming_file` → 3 per-outcome helpers). Internal refactor, zero user-visible behavior change; two codex-found regressions (`had_changes` exclusion of `unchanged`, per-file `blob_key` validation) caught and fixed pre-merge. |
+| 0.8.3   | 2026-04-23 | Public-release prep: adds MIT `LICENSE` file (closes the gap where `pyproject.toml` declared `license = "MIT"` but the text wasn't shipped) and scrubs the placeholder `/Users/kb/` username out of SPEC.md, sync-gstack-context design doc, and one test fixture. No runtime behavior change. |
 | 0.8.2   | 2026-04-23 | Track 1B (Group 1): manifest dead-code cleanup + v1-holdover removal (delete `walk_directory`/`build_manifest`, drop top-level `"files"` mirror, `diff_manifests` → `diff_files`, `DiffResult` → `@dataclass`) |
 | 0.8.1   | 2026-04-23 | Track 1A (Group 1): cli.py surgical hardening (resolve exit-code propagation, conflict_filename ValueError on empty device_id, GC malformed-blob visibility, quiet-path audit for autopull/autopush recovery + no-sources + fsync failures, total_failed surfacing) |
 | 0.8.0   | 2026-04-23 | Group 2 pre-flight + Track 2A: error-surface hardening (`_merge_manifests` tiebreak, `mm diag`, `mm init` two-tier guard, `mm recover --abandon-manifest`, `_error()` stderr routing, `list_devices` shape validation) |
@@ -53,7 +54,7 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   `walk_directory`/`build_manifest` backward-compat aliases, dropped top-level
   `"files"` mirror in v2 manifests, converted `DiffResult` to `@dataclass`,
   renamed `diff_manifests` → `diff_files`.
-- **Storage-key helpers + cli.py decomposition:** ✅ shipped in v0.8.3.
+- **Storage-key helpers + cli.py decomposition:** ✅ shipped in v0.8.4.
   `storage/keys.py` (manifest_key/blob_key/device_key/parse_blob_key) with
   path-traversal validation at construction; `_pull_core` decomposed into
   `_select_devices`/`_prefetch_manifests`/`_preflight_conflicts`/
@@ -67,7 +68,9 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   already solved by crypto v2. Style nits collapsed into pre-flight. Three
   follow-up items from TODOS.md slotted into new Track 1C. Now 4 groups / 7
   tracks / 19 tasks (down from 8 groups / 12 tracks / 38 tasks).
-- **Group 1 (Decomposition + DRY):** Track 1A ✅ shipped in v0.8.3
+- **Public-release prep:** ✅ shipped in v0.8.3. MIT `LICENSE` file added
+  + `/Users/kb/` placeholder scrubbed from SPEC / design doc / test fixture.
+- **Group 1 (Decomposition + DRY):** Track 1A ✅ shipped in v0.8.4
   (decomposition + storage-key portion of pre-flight). Remaining: pre-flight
   `constants.py` extraction (CONFLICT_INFIX, CONFLICT_AGE_DAYS,
   TOMBSTONE_TTL_DAYS, FORMAT_VERSION) and the cli.py literal-site migration;
