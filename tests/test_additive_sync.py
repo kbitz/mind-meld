@@ -18,10 +18,9 @@ import pytest
 from mind_meld.crypto import decrypt, encrypt
 from mind_meld.manifest import (
     TOMBSTONE_TTL_DAYS,
-    build_manifest,
     collect_tombstones,
     deserialize_manifest,
-    diff_manifests,
+    diff_files,
     generate_tombstones,
     is_tombstoned,
     normalize_manifest,
@@ -332,6 +331,43 @@ class TestMergeManifestsAfterLoadRefactor:
             == "2026-04-22T10:00:00+00:00"
         )
 
+    def test_merge_output_has_no_top_level_files_key(self):
+        """REGRESSION (Track 1B): v2 writers do not emit a redundant top-level
+        `files` mirror, and `normalize_manifest` strips it on v2 passthrough.
+        `_merge_manifests` inherits the winning manifest via a shallow dict
+        copy (cli.py:553) — if a future commit re-introduces the mirror in
+        either writer, that mirror would carry through the copy and resurrect
+        a silently-stale view of the claude source. Lock it out.
+        """
+        from mind_meld.cli import _merge_manifests
+        from mind_meld.manifest import load_manifest
+
+        # Simulate a pre-Track-1B manifest that still carries the mirror.
+        # After load_manifest (which normalizes), the mirror is scrubbed —
+        # but if someone regresses normalize_manifest, this test catches it.
+        blob = serialize_manifest({
+            "device_id": "peer1",
+            "device_name": "old",
+            "timestamp": "2026-04-20T10:00:00+00:00",
+            "files": {"a.md": {"sha256": "stale", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}},
+            "sources": {
+                "claude": {
+                    "base_path": "",
+                    "files": {"a.md": {"sha256": "fresh", "size": 1, "mtime": "2026-04-20T10:00:00+00:00"}},
+                },
+            },
+            "tombstones": {},
+        })
+        loaded = load_manifest(blob)
+        # Read-path invariant: scrubbed on v2 passthrough.
+        assert "files" not in loaded
+
+        merged = _merge_manifests([loaded])
+        # Merge output inherits the scrubbed shape.
+        assert "files" not in merged
+        # Source-scoped files survived unchanged.
+        assert merged["sources"]["claude"]["files"]["a.md"]["sha256"] == "fresh"
+
     def test_content_hash_tiebreak_is_deterministic(self):
         """REGRESSION (Group 2 pre-flight 1): two conflict copies with
         identical ISO-second timestamps but different contents must merge
@@ -432,7 +468,9 @@ class TestConflictManifestMerge:
         # Should still return the canonical manifest (status == "ok")
         result = _fetch_remote_manifest(backend, "abc", PASSPHRASE, MEMORY_KB)
         assert result.is_ok
-        assert "a.md" in result.manifest.get("files", {})
+        # Post-Track-1B: v1 input is promoted to v2 and the top-level "files"
+        # mirror is scrubbed. The payload lives under sources.claude.files.
+        assert "a.md" in result.manifest["sources"]["claude"]["files"]
 
     def test_all_copies_corrupt_returns_corrupt_status(self, tmp_path):
         """If all manifest copies are corrupt, return status='corrupt'."""
@@ -501,10 +539,10 @@ class TestAdditivePull:
             # b.md is local-only
         }
 
-        diff = diff_manifests(
-            {"files": remote_files},  # remote is "local" arg (source of truth for what to download)
-            {"files": local_files},   # local is "remote" arg (what we compare against)
-        )
+        # Arg-swap: pull path passes (remote, local) so diff.new/modified are
+        # files to download; diff.deleted is local-only (ignored under
+        # additive pull). See diff_files docstring.
+        diff = diff_files(remote_files, local_files)
 
         # diff.deleted contains local-only files, but additive pull ignores them
         assert len(diff.deleted) == 1

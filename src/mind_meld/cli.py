@@ -47,7 +47,7 @@ from mind_meld.manifest import (
     build_manifest_v2,
     collect_tombstones,
     deserialize_manifest,
-    diff_manifests,
+    diff_files,
     generate_tombstones,
     hash_file,
     is_conflict_filename,
@@ -566,9 +566,10 @@ def _merge_manifests(manifests: list[dict]) -> dict:
             merged_sources[src_name]["files"].update(src_data.get("files", {}))
 
     merged["sources"] = merged_sources
-    # v1 compat: update top-level "files" from claude source
-    if "claude" in merged_sources:
-        merged["files"] = merged_sources["claude"].get("files", {})
+    # Track 1B: the redundant top-level "files" mirror is not written by
+    # this code (and `normalize_manifest` strips it on v2 passthrough), so
+    # `merged` inherits whatever came via `dict(sorted_manifests[-1])`
+    # above — which is always files-free post-normalize.
 
     # Merge tombstones additively too
     merged_tombstones: dict[str, dict] = {}
@@ -1453,10 +1454,7 @@ def _push_core(
 
     for src_name, src_data in local_manifest["sources"].items():
         remote_src = remote_sources.get(src_name, {"files": {}})
-        diff = diff_manifests(
-            {"files": src_data["files"]},
-            {"files": remote_src.get("files", {})},
-        )
+        diff = diff_files(src_data["files"], remote_src.get("files", {}))
 
         if not diff.has_changes:
             continue
@@ -1862,10 +1860,10 @@ def _pull_core(
                     except (PermissionError, OSError):
                         pass
 
-            diff = diff_manifests(
-                {"files": remote_files},
-                {"files": local_files},
-            )
+            # Arg-swap: this is the additive pull path. See diff_files
+            # docstring — `new`/`modified` are files to download; `deleted`
+            # is ignored (additive pull never deletes local files).
+            diff = diff_files(remote_files, local_files)
 
             if dry_run:
                 if not quiet:
@@ -2106,10 +2104,7 @@ def status(
         remote_src = remote_sources.get(src_name, {"files": {}})
         remote_files = remote_src.get("files", {})
 
-        diff = diff_manifests(
-            {"files": local_files},
-            {"files": remote_files},
-        )
+        diff = diff_files(local_files, remote_files)
 
         local_count = len(local_files)
         remote_count = len(remote_files)
@@ -2467,10 +2462,7 @@ def diff_cmd(
 
         remote_src = remote_sources.get(src_name, {"files": {}})
         remote_files = remote_src.get("files", {})
-        diff = diff_manifests(
-            {"files": src_data["files"]},
-            {"files": remote_files},
-        )
+        diff = diff_files(src_data["files"], remote_files)
 
         if not diff.has_changes:
             continue
