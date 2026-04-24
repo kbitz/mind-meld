@@ -472,6 +472,115 @@ class TestFingerprint:
 
 class TestGetPassphrase:
     def test_env_var_fallback(self, monkeypatch):
+        # Simulate a keyring backend that has no entry for us. With the
+        # narrowed except (Group 3 pre-flight #3), we need a real
+        # KeyringError-family raise to trigger fallthrough — not a
+        # synthetic AttributeError.
+        import keyring
+        from keyring.errors import NoKeyringError
+
+        def no_backend(*_a, **_kw):
+            raise NoKeyringError("no backend configured")
+
+        monkeypatch.setattr(keyring, "get_password", no_backend)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", "from-env")
-        monkeypatch.delattr("keyring.get_password", raising=False)
         assert get_passphrase() == "from-env"
+
+
+# ── keyring except-narrowing regression pins (Group 3 pre-flight #3) ─
+#
+# Narrowed from `except Exception` to `(KeyringError, ImportError)` so
+# unknown failure kinds (OSError, RuntimeError from a broken backend,
+# native trace from a misconfigured DBus on Linux) propagate out to the
+# autopull/autopush hook's outer `except Exception` where they produce a
+# non-success breadcrumb. See `crypto.get_passphrase` and
+# `crypto.store_passphrase_in_keyring` docstrings for full rationale.
+
+
+class TestGetPassphraseExceptNarrow:
+    """Pin the catch set for get_passphrase's keyring read path."""
+
+    def test_keyring_error_is_caught_and_falls_through_to_env(self, monkeypatch):
+        """KeyringError (backend unavailable etc.) → env-var fallback used."""
+        import keyring
+        from keyring.errors import NoKeyringError
+
+        def boom(*_a, **_kw):
+            raise NoKeyringError("no backend")
+
+        monkeypatch.setattr(keyring, "get_password", boom)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "env-wins")
+        assert get_passphrase() == "env-wins"
+
+    def test_import_error_is_caught_and_falls_through_to_env(self, monkeypatch):
+        """`import keyring` failing (stripped Python) → env-var fallback used."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "keyring":
+                raise ImportError("keyring missing")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "env-wins")
+        assert get_passphrase() == "env-wins"
+
+    def test_os_error_propagates(self, monkeypatch):
+        """Non-keyring exceptions (OSError etc.) must escape — no silent swallow."""
+        import keyring
+
+        def boom(*_a, **_kw):
+            raise OSError("locked keychain gave us something unexpected")
+
+        monkeypatch.setattr(keyring, "get_password", boom)
+        monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+        with pytest.raises(OSError, match="locked keychain"):
+            get_passphrase(non_interactive=True)
+
+    def test_runtime_error_propagates(self, monkeypatch):
+        """A broken backend that raises a plain RuntimeError must not be swallowed."""
+        import keyring
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("dbus session bus went away")
+
+        monkeypatch.setattr(keyring, "get_password", boom)
+        monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+        with pytest.raises(RuntimeError, match="dbus session bus"):
+            get_passphrase(non_interactive=True)
+
+    def test_happy_path_returns_stored(self, monkeypatch):
+        """Sanity: when keyring returns a value, we return it (no fallback)."""
+        import keyring
+
+        monkeypatch.setattr(keyring, "get_password", lambda *_a, **_kw: "stored-pw")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "should-be-ignored")
+        assert get_passphrase() == "stored-pw"
+
+
+class TestStorePassphraseInKeyringExceptNarrow:
+    """Pin the catch set for store_passphrase_in_keyring's write path."""
+
+    def test_keyring_error_returns_false(self, monkeypatch):
+        """KeyringError → graceful False (init prints a warning, keeps going)."""
+        import keyring
+        from keyring.errors import PasswordSetError
+
+        def boom(*_a, **_kw):
+            raise PasswordSetError("backend refused write")
+
+        monkeypatch.setattr(keyring, "set_password", boom)
+        assert crypto.store_passphrase_in_keyring("pw") is False
+
+    def test_runtime_error_propagates(self, monkeypatch):
+        """Non-keyring exceptions escape — don't pretend the write failed gracefully."""
+        import keyring
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("something structurally wrong")
+
+        monkeypatch.setattr(keyring, "set_password", boom)
+        with pytest.raises(RuntimeError, match="something structurally wrong"):
+            crypto.store_passphrase_in_keyring("pw")
