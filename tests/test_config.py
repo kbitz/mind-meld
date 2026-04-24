@@ -13,6 +13,7 @@ from mind_meld.config import (
     get_sources,
     load_config,
     save_config,
+    patch_config_on_disk,
 )
 from mind_meld.errors import ConfigError
 
@@ -538,3 +539,239 @@ class TestLoadConfigNormalizesUnexpectedErrors:
 
         with pytest.raises(ConfigError, match="failed to load"):
             load_config(config_path)
+
+
+class TestConfigErrorPrefixes:
+    """load_config's non-init prefixes must say 'config:' not 'init:' because
+    they fire on every command that calls _get_config (push, pull, status,
+    diag, recover...). 'init: config not found' stays — that branch genuinely
+    points the user at running `mm init`."""
+
+    def test_parse_error_prefix_is_config_not_init(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage\n'  # unclosed table header — parse error
+        )
+        with pytest.raises(ConfigError, match=r"^config: failed to parse"):
+            load_config(config_path)
+
+    def test_generic_load_error_prefix_is_config_not_init(
+        self, tmp_path, monkeypatch
+    ):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "storage"}"\n'
+        )
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("simulated post-parse failure")
+
+        from mind_meld import config as config_module
+        monkeypatch.setattr(config_module, "_apply_defaults", boom)
+
+        with pytest.raises(ConfigError, match=r"^config: failed to load"):
+            load_config(config_path)
+
+    def test_missing_file_error_prefix_still_init(self, tmp_path):
+        """Pin: the missing-file branch still points at `mm init`."""
+        with pytest.raises(ConfigError, match=r"^init: config not found"):
+            load_config(tmp_path / "nonexistent.toml")
+
+
+class TestUpdateConfigOnDisk:
+    """patch_config_on_disk re-reads the raw TOML, merges a patch at section
+    granularity, and persists. Critical invariant: untouched fields and
+    untouched sections are byte-identical to what the user wrote.
+
+    This is the backfill-save contract — first-run-after-upgrade persists
+    crypto fingerprints WITHOUT silently rewriting `~/.claude` →
+    `/Users/alice/.claude` or dereferencing symlinked storage paths."""
+
+    def _write_minimal_config(self, config_path, storage_path_value):
+        """Write a minimal valid config with the given storage.path value verbatim."""
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{storage_path_value}"\n'
+            '[sync]\n'
+            'claude_dir = "~/.claude"\n'
+            'max_file_size = 52428800\n'
+        )
+
+    def test_merges_into_existing_section(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "s"}"\n'
+            '[crypto]\n'
+            'argon2_memory_kb = 1024\n'
+        )
+        patch_config_on_disk(
+            {"crypto": {"root_salt_fp": "deadbeef"}},
+            path=config_path,
+        )
+        loaded = load_config(config_path)
+        assert loaded["crypto"]["root_salt_fp"] == "deadbeef"
+        # Pre-existing field preserved
+        assert loaded["crypto"]["argon2_memory_kb"] == 1024
+
+    def test_creates_section_if_absent(self, tmp_path):
+        """When the patched section doesn't exist on disk, helper creates it."""
+        config_path = tmp_path / "config.toml"
+        self._write_minimal_config(config_path, str(tmp_path / "s"))
+        # No [crypto] section exists yet
+        patch_config_on_disk(
+            {"crypto": {"root_salt_fp": "x", "argon2_memory_kb": 65536}},
+            path=config_path,
+        )
+        loaded = load_config(config_path)
+        assert loaded["crypto"]["root_salt_fp"] == "x"
+        assert loaded["crypto"]["argon2_memory_kb"] == 65536
+
+    def test_preserves_tilde_storage_path(self, tmp_path):
+        """CRITICAL REGRESSION: helper does NOT resolve '~/' in storage.path
+        when persisting a patch to an unrelated section."""
+        config_path = tmp_path / "config.toml"
+        self._write_minimal_config(config_path, "~/Library/Mobile Documents/CloudDocs/mm")
+        patch_config_on_disk(
+            {"crypto": {"root_salt_fp": "x"}},
+            path=config_path,
+        )
+        # Re-read raw TOML (not through load_config, which would mutate in memory)
+        import tomllib
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        assert raw["storage"]["path"] == "~/Library/Mobile Documents/CloudDocs/mm"
+
+    def test_preserves_symlinked_storage_path(self, tmp_path):
+        """CRITICAL REGRESSION: helper does NOT dereference symlinks in
+        storage.path when persisting a patch to an unrelated section."""
+        real_dir = tmp_path / "real_storage"
+        real_dir.mkdir()
+        symlink = tmp_path / "link_storage"
+        os.symlink(real_dir, symlink)
+
+        config_path = tmp_path / "config.toml"
+        self._write_minimal_config(config_path, str(symlink))
+        patch_config_on_disk(
+            {"crypto": {"root_salt_fp": "x"}},
+            path=config_path,
+        )
+        import tomllib
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        assert raw["storage"]["path"] == str(symlink)
+
+    def test_preserves_tilde_claude_dir(self, tmp_path):
+        """CRITICAL REGRESSION: legacy sync.claude_dir survives backfill."""
+        config_path = tmp_path / "config.toml"
+        self._write_minimal_config(config_path, str(tmp_path / "s"))
+        patch_config_on_disk(
+            {"crypto": {"root_salt_fp": "x"}},
+            path=config_path,
+        )
+        import tomllib
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        assert raw["sync"]["claude_dir"] == "~/.claude"
+
+    def test_preserves_sync_sources_array_verbatim(self, tmp_path):
+        """Modern multi-source config: sources array stays byte-identical."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "s"}"\n'
+            '[sync]\n'
+            'max_file_size = 52428800\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            'path = "~/.claude"\n'
+            'type = "claude"\n'
+            '[[sync.sources]]\n'
+            'name = "gstack"\n'
+            'path = "~/.gstack"\n'
+            'type = "generic"\n'
+            'include_dirs = ["projects", "analytics"]\n'
+            'include_files = ["config.yaml"]\n'
+        )
+        patch_config_on_disk(
+            {"crypto": {"root_salt_fp": "x"}},
+            path=config_path,
+        )
+        import tomllib
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        assert raw["sync"]["sources"][0]["path"] == "~/.claude"
+        assert raw["sync"]["sources"][1]["path"] == "~/.gstack"
+        assert raw["sync"]["sources"][1]["include_dirs"] == ["projects", "analytics"]
+
+    def test_raises_config_error_on_missing_file(self, tmp_path):
+        with pytest.raises(ConfigError, match="cannot update"):
+            patch_config_on_disk(
+                {"crypto": {"x": "y"}},
+                path=tmp_path / "nonexistent.toml",
+            )
+
+    def test_patches_multiple_sections_independently(self, tmp_path):
+        """Pin the dict-of-dicts contract: patches to multiple sections in a
+        single call all land, each on its own section."""
+        config_path = tmp_path / "config.toml"
+        self._write_minimal_config(config_path, str(tmp_path / "s"))
+        patch_config_on_disk(
+            {
+                "crypto": {"root_salt_fp": "abc"},
+                "notify": {"email": "x@y.z"},
+            },
+            path=config_path,
+        )
+        loaded = load_config(config_path)
+        assert loaded["crypto"]["root_salt_fp"] == "abc"
+        assert loaded["notify"]["email"] == "x@y.z"
+
+    def test_overwrites_existing_field_in_section(self, tmp_path):
+        """A field update overwrites the on-disk value (same section, same
+        key) without disturbing sibling fields. This is the backfill contract
+        for argon2_memory_kb."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            '[storage]\n'
+            f'path = "{tmp_path / "s"}"\n'
+            '[crypto]\n'
+            'root_salt_fp = "OLD"\n'
+            'argon2_memory_kb = 1024\n'
+        )
+        patch_config_on_disk(
+            {"crypto": {"root_salt_fp": "NEW"}},
+            path=config_path,
+        )
+        loaded = load_config(config_path)
+        assert loaded["crypto"]["root_salt_fp"] == "NEW"
+        # Sibling field in the same section is untouched
+        assert loaded["crypto"]["argon2_memory_kb"] == 1024
+
+    def test_raises_config_error_on_malformed_toml(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("[unclosed\n")
+        with pytest.raises(ConfigError, match="failed to parse"):
+            patch_config_on_disk(
+                {"crypto": {"x": "y"}},
+                path=config_path,
+            )

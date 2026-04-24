@@ -74,7 +74,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
         with open(config_path, "rb") as f:
             config = tomllib.load(f)
     except Exception as e:
-        raise ConfigError(f"init: failed to parse {config_path} — {e}") from e
+        raise ConfigError(f"config: failed to parse {config_path} — {e}") from e
 
     # Normalize any non-ConfigError exceptions from validate/apply_defaults
     # (e.g. .resolve() RuntimeError on cyclic symlinks) into ConfigError so
@@ -86,7 +86,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     except ConfigError:
         raise
     except Exception as e:
-        raise ConfigError(f"init: failed to load {config_path} — {e}") from e
+        raise ConfigError(f"config: failed to load {config_path} — {e}") from e
     return config
 
 
@@ -264,6 +264,59 @@ def save_config(config: dict[str, Any], path: Path | None = None) -> None:
     # internal state, not user-shared content.
     data = "\n".join(lines).encode("utf-8")
     fsutil.atomic_write_bytes(config_path, data, fsync=True, mode=0o600)
+
+
+def patch_config_on_disk(
+    updates: dict[str, dict[str, Any]], path: Path | None = None
+) -> None:
+    """Re-read TOML from disk, shallow-merge `updates` per field within each
+    section, save.
+
+    Used by backfill flows that need to persist a small patch (e.g. crypto
+    session fingerprints after first-run-after-upgrade) WITHOUT writing
+    `_apply_defaults`' in-memory path canonicalization back over the user's
+    hand-edited TOML. `~/.claude` stays `~/.claude`; symlinks stay symlinks.
+
+    Narrow contract — only for partial patches. This bypasses `_validate` /
+    `_apply_defaults` by design, because the whole point is to preserve the
+    raw user-authored text for fields outside the patch. For a full config
+    write (fresh init, manual rewrite) use `save_config` directly.
+
+    `updates` is shallow-keyed by section and shallow-valued by field:
+    e.g. `{"crypto": {"root_salt_fp": "...", "argon2_memory_kb": 65536}}`.
+    Sections not mentioned are untouched; fields not mentioned within a
+    section are untouched. Sections absent from disk are created.
+
+    The merge is section-level shallow: passing `{"sync": {"sources": [...]}}`
+    REPLACES the existing sources array wholesale, not per-item. Array-of-tables
+    sections (`[[sync.sources]]`) and nested tables cannot be partially
+    patched through this helper — only flat key/value sections.
+
+    Raises `ConfigError` on missing / malformed TOML or on a malformed
+    on-disk section (e.g. `crypto = "bad"` where a table was expected).
+    Callers in non-fatal backfill paths must swallow with their own try/except.
+    """
+    config_path = path or CONFIG_PATH
+    try:
+        with open(config_path, "rb") as f:
+            on_disk = tomllib.load(f)
+    except FileNotFoundError as e:
+        raise ConfigError(
+            f"config: cannot update — {config_path} does not exist."
+        ) from e
+    except Exception as e:
+        raise ConfigError(f"config: failed to parse {config_path} — {e}") from e
+
+    for section, field_updates in updates.items():
+        section_dict = on_disk.setdefault(section, {})
+        if not isinstance(section_dict, dict):
+            raise ConfigError(
+                f"config: cannot patch — section [{section}] in "
+                f"{config_path} is not a table."
+            )
+        section_dict.update(field_updates)
+
+    save_config(on_disk, config_path)
 
 
 def _toml_value(val: Any) -> str:

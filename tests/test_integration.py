@@ -1431,3 +1431,244 @@ class TestInitTwoTierGuard:
         # BRICK did NOT fire (no typed token consumed from stdin).
         assert result.exit_code == 0, result.output
         assert "DANGER" not in (result.stderr or "") + result.output
+
+
+class TestBackfillPreservesRawPaths:
+    """Headline regression for Track 2B: first-run-after-upgrade backfill
+    (crypto.root_salt_fp / argon2_memory_kb) must NOT silently rewrite the
+    user's hand-written TOML paths. `~/.claude` stays `~/.claude`;
+    symlinked storage roots stay symlinks. See ROADMAP.md Track 2B."""
+
+    def _setup_config_and_storage(
+        self, tmp_path, storage_path_value, storage_real_path
+    ):
+        """Write a config pointing at a real storage dir, using storage_path_value
+        as the raw storage.path field (which may be a symlink or tilde)."""
+        from pathlib import Path
+
+        claude_dir = tmp_path / "claude"
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "dev-a"\n'
+            'name = "Mac A"\n'
+            '[storage]\n'
+            f'path = "{storage_path_value}"\n'
+            '[sync]\n'
+            f'claude_dir = "{claude_dir}"\n'
+            'max_file_size = 52428800\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            f'path = "{claude_dir}"\n'
+            'type = "claude"\n'
+            '[crypto]\n'
+            f'argon2_memory_kb = {MEMORY_KB}\n'
+            # NOTE: no root_salt_fp — backfill must fire
+        )
+
+        backend = LocalBackend(Path(storage_real_path))
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "Mac A")
+        return config_path
+
+    def _run_autopush_with_config(self, config_path, monkeypatch):
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0, (
+            f"autopush must succeed; got exit={result.exit_code} "
+            f"output={result.output!r}"
+        )
+        return result
+
+    def test_symlinked_storage_path_preserved_through_backfill(
+        self, tmp_path, monkeypatch
+    ):
+        """CRITICAL REGRESSION: symlinked storage.path is NOT dereferenced
+        by the crypto-init backfill save."""
+        import tomllib
+
+        real_storage = tmp_path / "real_storage"
+        real_storage.mkdir()
+        symlink_storage = tmp_path / "link_storage"
+        os.symlink(real_storage, symlink_storage)
+
+        config_path = self._setup_config_and_storage(
+            tmp_path,
+            storage_path_value=str(symlink_storage),
+            storage_real_path=str(real_storage),
+        )
+        self._run_autopush_with_config(config_path, monkeypatch)
+
+        # Re-read raw TOML; the storage.path must still be the symlink
+        # form the user wrote, NOT the resolved target.
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        assert raw["storage"]["path"] == str(symlink_storage)
+        assert raw["storage"]["path"] != str(real_storage.resolve())
+        # Backfill DID fire — crypto fields added.
+        assert "root_salt_fp" in raw["crypto"]
+        assert raw["crypto"]["argon2_memory_kb"] == MEMORY_KB
+
+    def test_sync_sources_array_preserved_through_backfill(
+        self, tmp_path, monkeypatch
+    ):
+        """Modern multi-source config: every sources[*].path string survives
+        backfill byte-identical."""
+        import tomllib
+
+        real_storage = tmp_path / "real_storage"
+        real_storage.mkdir()
+        symlink_storage = tmp_path / "link_storage"
+        os.symlink(real_storage, symlink_storage)
+
+        config_path = self._setup_config_and_storage(
+            tmp_path,
+            storage_path_value=str(symlink_storage),
+            storage_real_path=str(real_storage),
+        )
+        self._run_autopush_with_config(config_path, monkeypatch)
+
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        # The claude source path was written verbatim; still exactly that.
+        sources = raw["sync"]["sources"]
+        assert len(sources) == 1
+        assert sources[0]["name"] == "claude"
+        assert sources[0]["type"] == "claude"
+        # Path is a real absolute path in this test (can't use ~ safely in
+        # integration tests because it points at the real home), but the
+        # invariant we want is that it's unchanged from what the user wrote.
+        original_claude_path = str(tmp_path / "claude")
+        assert sources[0]["path"] == original_claude_path
+
+    def test_tilde_storage_path_preserved_through_backfill(
+        self, tmp_path, monkeypatch
+    ):
+        """CRITICAL REGRESSION (end-to-end): a config with tilde-form paths
+        survives the full `mm autopush` backfill flow. Monkeypatches HOME so
+        `~/...` resolves inside the test sandbox."""
+        import tomllib
+        from pathlib import Path
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Seed tilde-addressable locations: ~/real_storage and ~/claude
+        real_storage = tmp_path / "real_storage"
+        real_storage.mkdir()
+        claude_dir = tmp_path / "claude"
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "role.md").write_text("Data scientist")
+
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            '[device]\n'
+            'id = "dev-a"\n'
+            'name = "Mac A"\n'
+            '[storage]\n'
+            'path = "~/real_storage"\n'
+            '[sync]\n'
+            'claude_dir = "~/claude"\n'
+            'max_file_size = 52428800\n'
+            '[[sync.sources]]\n'
+            'name = "claude"\n'
+            'path = "~/claude"\n'
+            'type = "claude"\n'
+            '[crypto]\n'
+            f'argon2_memory_kb = {MEMORY_KB}\n'
+            # NOTE: no root_salt_fp — backfill must fire
+        )
+
+        backend = LocalBackend(Path(real_storage))
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "Mac A")
+
+        self._run_autopush_with_config(config_path, monkeypatch)
+
+        # Re-read raw TOML: the tilde form must survive verbatim.
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+        assert raw["storage"]["path"] == "~/real_storage"
+        assert raw["sync"]["claude_dir"] == "~/claude"
+        assert raw["sync"]["sources"][0]["path"] == "~/claude"
+        # Backfill DID fire — crypto fields added.
+        assert "root_salt_fp" in raw["crypto"]
+
+    def test_second_push_does_not_rewrite_config(self, tmp_path, monkeypatch):
+        """Idempotency: after backfill, subsequent pushes must NOT touch the
+        config file (no root_salt_fp drift, no mtime churn)."""
+        import tomllib
+
+        real_storage = tmp_path / "real_storage"
+        real_storage.mkdir()
+        symlink_storage = tmp_path / "link_storage"
+        os.symlink(real_storage, symlink_storage)
+
+        config_path = self._setup_config_and_storage(
+            tmp_path,
+            storage_path_value=str(symlink_storage),
+            storage_real_path=str(real_storage),
+        )
+        # First push: backfill fires and writes crypto fields.
+        self._run_autopush_with_config(config_path, monkeypatch)
+        with open(config_path, "rb") as f:
+            raw_after_first = tomllib.load(f)
+
+        # Second push: backfill MUST NOT fire (root_salt_fp already set).
+        first_push_mtime = config_path.stat().st_mtime_ns
+        self._run_autopush_with_config(config_path, monkeypatch)
+        with open(config_path, "rb") as f:
+            raw_after_second = tomllib.load(f)
+
+        # Config content must be identical across second push.
+        assert raw_after_first == raw_after_second
+        # mtime stability is a strong signal — no write happened.
+        assert config_path.stat().st_mtime_ns == first_push_mtime
+
+    def test_backfill_survives_if_config_file_moved(
+        self, tmp_path, monkeypatch
+    ):
+        """Non-fatal: if the config file is missing when the backfill helper
+        runs (user deleted it, or some concurrent process clobbered it after
+        load_config read it into memory), the ConfigError swallow keeps
+        autopush functional. In-memory root_salt_fp still serves this process;
+        drift check won't fire on the next run."""
+        real_storage = tmp_path / "real_storage"
+        real_storage.mkdir()
+
+        config_path = self._setup_config_and_storage(
+            tmp_path,
+            storage_path_value=str(real_storage),
+            storage_real_path=str(real_storage),
+        )
+        # Simulate the config file being missing at helper-entry time by
+        # wrapping patch_config_on_disk with a delete-then-call shim. The
+        # real helper then hits the FileNotFoundError branch and raises
+        # ConfigError, which autopush swallows.
+        from mind_meld import config as config_module
+        real_helper = config_module.patch_config_on_disk
+
+        def delete_then_call(updates, path=None):
+            (path or config_path).unlink()
+            real_helper(updates, path=path)
+
+        monkeypatch.setattr("mind_meld.cli.patch_config_on_disk", delete_then_call)
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0, (
+            f"autopush must swallow backfill failure; got exit={result.exit_code} "
+            f"output={result.output!r}"
+        )
+        # No traceback: the visible-failure contract covers known error modes;
+        # backfill failure specifically is known-swallowable.
+        assert "Traceback" not in result.output
+        assert "Traceback" not in (result.stderr or "")
