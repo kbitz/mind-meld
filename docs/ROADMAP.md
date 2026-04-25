@@ -12,15 +12,16 @@ Every item targets the v1.0 release.
 
 **Correctness foundation, error discipline, decomposition + DRY (Tracks
 1A/1B/1C), init flow + sync_log generalization (Group 2), test hygiene +
-style polish (Group 3), and CI infrastructure (Group 4) all shipped through
-v0.8.11.** See `docs/PROGRESS.md` for the full version history. Group 1 is
-fully shipped — its remaining `constants.py` preflight was dropped after a
-`/plan-eng-review` cohesion check (2 of 4 constants are single-module,
-extraction would split the cohesive `FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1`
-pair). Group 5 picks up the conflict-UX backlog from kb-mbp's first-pull,
-sequenced P0-first within the Group: Track 5A ships the autopull silent-mode
-regression + scope bugs, Track 5B relabels the resolve/conflicts UX, Track
-5C inverts the conflict default and adds real merge.
+style polish (Group 3), CI infrastructure (Group 4), and Track 5A's
+auto-command + scope bug bundle (with Group 5's gstack `include_files`
+preflight) all shipped through v0.8.15.** See `docs/PROGRESS.md` for the
+full version history. Group 1 is fully shipped — its remaining
+`constants.py` preflight was dropped after a `/plan-eng-review` cohesion
+check (2 of 4 constants are single-module, extraction would split the
+cohesive `FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair). Group 5 still
+in flight: Track 5D adds two adversarial-review follow-ups that harden the
+v0.8.15 Track 5A ship (next up); Track 5B relabels the resolve/conflicts UX;
+Track 5C inverts the conflict default and adds real merge.
 
 ---
 
@@ -87,34 +88,32 @@ Surfaced 2026-04-24 from kb-mbp's first-pull session: 286-file pull on a
 fresh Mac landed 6 conflict copies with confusing labels, no inline
 filenames, an over-truncated `mm conflicts` table, silence during the
 ~4-minute download, and a P0 contract regression on `mm autopull` /
-`autopush`. All ten tasks (+ pre-flight) share the same theme and
-ride the same release window. Tracks 5A/5B/5C are sequenced serially
-because they all touch `cli.py`, but in different functions — same
-intra-Group serial pattern that Tracks 1A/1C and 2A/2B used in this
-project. Audit's `COLLISIONS` finding on `cli.py` overlap is acknowledged
-and tolerated (file-level granularity is too coarse for monolithic
-`cli.py`; functions are disjoint in practice).
+`autopush`. Tracks 5B/5C/5D are sequenced serially because they all touch
+`cli.py` in different functions — same intra-Group serial pattern that
+Tracks 1A/1C and 2A/2B used in this project. Track 5D ships next (smallest,
+hardens 5A's just-shipped fixes), then 5B (UX surfaces), then 5C (conflict
+inversion + real merge).
 
-**Pre-flight** (shared-infra; serial, one-at-a-time):
-- Add `retro-context.md` + `greptile-history.md` to gstack default `include_files` — `src/mind_meld/config.py:DEFAULT_SOURCES` gstack entry. Low-risk additive. Existing configs with explicit `sync.sources` need to add manually; one-line CHANGELOG note. _src/mind_meld/config.py, ~4 lines._ (XS) [manual]
+_Track 5A (Auto-command silent-mode + scope bugs + Group 5 preflight) — ✓ Complete (v0.8.15). 3 tasks shipped + gstack `include_files` default add._
 
-### Track 5A: Auto-command silent-mode + scope bugs (P0 first)
-_3 tasks · ~0.5 day (human) / ~25 min (CC) · low-medium risk · [cli.py auto + scope]_
-_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, src/mind_meld/manifest.py, SPEC.md, tests/_
+### Track 5D: Track 5A adversarial-review follow-ups
+_2 tasks · ~0.5 day (human) / ~30 min (CC) · low-medium risk · [cli.py + devices.py hardening]_
+_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, tests/_
+_Sequencing: 5A shipped in v0.8.15; 5D hardens that surface and ships next, before 5B/5C._
 
-Smallest batch, highest urgency — ships first so the autopull silent-mode
-contract stops emitting stderr noise on every fresh Mac running the Claude
-Code integration. Three discrete cli.py bugs that don't touch each other's
-call sites.
+Two adversarial-pass findings from the v0.8.15 `/review` cycle. Both target
+exactly the code paths Track 5A just touched: `_find_conflict_files`
+(extended in v0.8.15 with the depth-0 sibling-glob for `include_files`) and
+`_save_and_register` (gained the rollback try/except in v0.8.15). Small
+batch, ships before 5B/5C so the v0.8.15 fixes harden cleanly.
 
-- **P0 — `mm autopull` / `mm autopush` no longer exit silently on a fresh (un-initialized) machine** — `tests/test_integration.py::TestAutoCommands::test_autopull_no_config_exits_silently` and the autopush twin both fail. Tests assert `result.output == ""` when `CONFIG_PATH` points at non-existent file; observed `mm: push failed - init: config not found at <path> — run 'mm init' first.\n` on stderr. Pre-existing — not introduced by current branch. Likely cause: v0.8.1 visible-failure contract widening — `ConfigError` is now uniformly loud-on-stderr, but the "not initialized at all" case (literal `init: config not found` in `config.py:71`) is supposed to remain silent per CLAUDE.md's auto-command contract. Real-world impact: fresh Mac (or pre-`mm init`) sees stderr noise on every Claude Code session start if `mm autopull`/`autopush` is wired into hooks — exactly the kb-mbp first-pull scenario. Fix: (a) preflight `CONFIG_PATH.exists()` in autopull/autopush BEFORE `load_config` and short-circuit silently — keeps `ConfigError` loud for malformed-config. Add regression test exercising both quiet-on-no-config AND loud-on-malformed-config (existing test only covers no-config). _src/mind_meld/cli.py auto-command entrypoints + tests/test_integration.py::TestAutoCommands. ~15-30 lines._ (S) [BUG] **Priority: P0 — silent-mode contract regression, surfaces on every fresh Mac with the Claude Code integration.**
-- **`_synced_scan_dirs` misses `include_files` sidecars on generic sources** — `cli.py:3231-3237` generic branch returns only resolved `include_dirs`. Trailing comment promises `+ base for single-file includes` but it's never implemented. Result: any conflict file produced for a top-level `include_files` entry (gstack default = `config.yaml`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`, all under `~/.gstack`) is invisible to `mm conflicts` / `mm resolve` / `mm gc --conflicts`. Reproduced 2026-04-24: kb-mbp first pull reported 6 conflicts; `mm conflicts` listed 5; missing was `~/.gstack/config.sync-conflict-20260424-233316-889e42c0.yaml`. Fix: in `_synced_scan_dirs`, after `include_dirs` loop, walk unique parents of `include_files` entries at **depth 0 only** (recursing would scan unsynced subtrees). Two viable shapes: (a) return `list[tuple[Path, bool]]` with recursive flag; (b) separate `_include_files_conflict_paths` helper computing per-entry candidate glob — more surgical. Test coverage: generic source with both include_dirs and include_files, conflicts in each, all three commands seeing the right count. Adjacent: verify `mm push` doesn't have parallel scope mismatch. _src/mind_meld/cli.py `_synced_scan_dirs` + `_find_conflict_files` + tests. ~30-50 lines._ (S) [BUG]
-- **`_save_and_register` needs register-failure rollback** — `cli.py:_save_and_register` persists config → registers device → stores passphrase. If `register_device` raises (iCloud hiccup, transient `StorageError`) after `save_config` succeeded, local config now claims a `device_id` that `devices/` on storage doesn't contain. Peers scanning `devices/` via `_select_devices` never discover this device — push writes manifests under an ID no one is listening for. Pre-existing (Track 2A; codex adversarial during /review). Fix options: (a) swap order to register BEFORE save_config — config-without-device is its own ugly state; (b) on register failure, delete the saved config; (c) lazy self-repair in push that calls `register_device` if the device file is missing. Option (c) most robust. _src/mind_meld/cli.py, src/mind_meld/devices.py, ~40 lines._ (S) [review]
+- **`_find_conflict_files` double-counts when an `include_files` entry sits inside an `include_dirs` directory** — surfaced by the v0.8.15 `/review` adversarial pass. If a user customizes their gstack source with `include_files: ["projects/notes.md"]` AND `include_dirs: ["projects"]` (nested), a conflict file at `projects/notes.sync-conflict-...md` gets visited twice: once via the `include_dirs` rglob (recursive scan from `projects/`) and once via the new depth-0 sibling-glob (parent_dir = `projects`, glob `notes.sync-conflict-*.md`). Result: duplicate rows in `mm conflicts`, `mm gc --conflicts` reaps the same path twice (`unlink` idempotent thanks to `missing_ok=True`, but the count printed to the user is wrong), and `mm resolve` would silently no-op on the second visit. The default config doesn't trigger this (all `include_files` entries are bare top-level dotfiles), so the practical risk is low — but adding a `seen: set[Path]` dedup pass at the top of `_find_conflict_files` is ~5 lines and removes the footgun. _src/mind_meld/cli.py + tests/test_conflict_copy.py, ~10-15 lines._ (XS) [review]
+- **`_save_and_register` not crash-safe between `save_config` and `register_device`** — surfaced by the v0.8.15 `/review` adversarial pass. The new rollback try/except handles `(StorageError, OSError, MindMeldError)` from `register_device`, but only catches Python exceptions. A SIGKILL, OOM, or power loss in the window between `save_config()` returning and `register_device()` either succeeding or raising leaves the user with a local config claiming a `device_id` that storage's `devices/<id>.json` doesn't contain — exactly the orphan state the v0.8.15 rollback was supposed to prevent. Init's existing overwrite prompt (cli.py:1474) is the only safety net; a user who answers "no" stays orphaned silently. Two viable fixes: (a) swap order — `register_device` first (storage write), then `save_config` (local write); orphan storage entries are harmless and cleanable, but orphan local config silently breaks pushes. (b) Add a `device_registered: bool` sentinel committed only after register succeeds; init detects sentinel-missing and re-runs register on next start. (a) is simpler; (b) is more robust against future failure modes. _src/mind_meld/cli.py + possibly src/mind_meld/devices.py + tests, ~30-50 lines._ (S-M) [review]
 
 ### Track 5B: Pull / resolve / conflicts UX surfaces
 _4 tasks · ~0.5 day (human) / ~25 min (CC) · low risk · [cli.py UX]_
 _touches: src/mind_meld/cli.py_
-_Depends on: Track 5A landing first to clear the cli.py merge surface — disjoint functions but git-coordination cost is real._
+_Depends on: Track 5D landing first (continues the cli.py serial chain after 5A's v0.8.15 ship) — disjoint functions but git-coordination cost is real._
 
 - **Relabel `mm resolve` interactive prompt to user terms** — `cli.py:3629-3633`: today's `(c)anonical / (f)orce conflict → canonical / (b)oth / (a)bort` reads as internal jargon. User can't tell that "canonical" holds *remote* bytes and "conflict" holds *local* bytes, so picking (c) silently throws away local edits. Relabel to `(l)ocal / (r)emote / (b)oth [default] / (a)bort` with a one-line preface naming which side is which. Also fix the parallel `(p)romote / (d)elete / (s)kip` jargon at `cli.py:3568-3576`. Pair with the inversion task (Track 5C) so labels match file-on-disk reality post-flip. Lower-risk to ship independently first. _src/mind_meld/cli.py `_resolve_interactive_loop`, ~20 lines._ (XS) [manual]
 - **Pull summary lists conflicted (and failed) files inline** — `_print_pull_summary` cli.py:2197-2250: per-source counts already accumulate paths in `r.outcomes["conflicted"]` / `["failed"]` but never display them. User has to run `mm conflicts` just to learn *which* 6 files conflicted. Fix: when `src_conflicted > 0` (and not quiet), list each path under the per-source line; same for failed. Cap at 20 with `... and N more` overflow. Print path relative to source's base — source name in header already disambiguates. _src/mind_meld/cli.py `_print_pull_summary`, ~10-15 lines._ (XS) [manual]
@@ -140,21 +139,21 @@ Adjacency list (who depends on whom):
 - Group 2 ← {1}    ✓ Complete (v0.8.7 + v0.8.8)
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
-- Group 5 ← {}     (in-flight — Tracks 5A → 5B → 5C, serialized in cli.py)
+- Group 5 ← {}     (in-flight — Track 5A ✓ v0.8.15; 5D → 5B → 5C remain, serialized in cli.py)
 ```
 
 In-flight detail:
 
 ```
 Group 5: Conflict UX & first-pull polish
-  Pre-flight .............. ~5 min ... gstack include_files default add (bundled with Track 5A)
-  ├── Track 5A ........... ~0.5d ..... 3 tasks .. autopull silent-mode (P0) + scope + register-rollback   [ships first, with preflight]
-  ├── Track 5B ........... ~0.5d ..... 4 tasks .. relabel + summary + table + progress                    [ships second]
-  └── Track 5C ........... ~3-5d ..... 2 tasks .. invert default + real-merge backends                    [ships last]
+  Track 5A ............... ✓ Complete (v0.8.15) ...... 3 tasks + preflight shipped
+  ├── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [ships next]
+  ├── Track 5B ........... ~0.5d ..... 4 tasks .. relabel + summary + table + progress                          [ships after 5D]
+  └── Track 5C ........... ~3-5d ..... 2 tasks .. invert default + real-merge backends                          [ships last]
 ```
 
-**Active total: 1 in-flight Group . 3 tracks . 9 tasks (+ 1 pre-flight item bundled with 5A)**
-**Shipped: Groups 1, 2, 3, 4 — see PROGRESS.md.**
+**Active total: 1 in-flight Group . 3 tracks remaining . 8 tasks**
+**Shipped: Groups 1, 2, 3, 4, and Group 5 Track 5A (+ Group 5 preflight) — see PROGRESS.md.**
 
 ---
 
