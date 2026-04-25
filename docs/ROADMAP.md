@@ -10,22 +10,15 @@ accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x, /plan-eng-review on
 2026-04-23, and the 2026-04-24 first-pull conflict-UX session on kb-mbp.
 Every item targets the v1.0 release.
 
-**Correctness foundation, error discipline, decomposition + DRY (Tracks
-1A/1B/1C), init flow + sync_log generalization (Group 2), test hygiene +
-style polish (Group 3), CI infrastructure (Group 4), Track 5A's
-auto-command + scope bug bundle (with Group 5's gstack `include_files`
-preflight), and Track 5B's resolve/conflicts UX vocabulary unification
-(with v0.9.0 BREAKING input-letter change) all shipped through v0.9.0.**
-See `docs/PROGRESS.md` for the full version history. Group 1 is fully
-shipped — its remaining `constants.py` preflight was dropped after a
-`/plan-eng-review` cohesion check (2 of 4 constants are single-module,
-extraction would split the cohesive
+**Groups 1-4 fully shipped. Group 5 nearly done: Tracks 5A / 5B / 5C / 5E
+all shipped through v0.9.2, plus a v0.9.3 hotfix patch that added
+`config.yaml` to the gstack source's default `exclude_patterns`.** See
+`docs/PROGRESS.md` for the full version history. Group 1's `constants.py`
+preflight was dropped after a `/plan-eng-review` cohesion check (2 of 4
+constants are single-module, extraction would split the cohesive
 `FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair). Group 5 still in
-flight: Track 5D adds two adversarial-review follow-ups that harden the
-v0.8.15 Track 5A ship; Track 5C inverts the conflict default and adds
-real merge backends (inherits a load-bearing subtask from Track 5B's CEO
-review: handle pre-inversion `.sync-conflict-*` files via timestamp-based
-mode detection or one-time migration).
+flight: only Track 5D remains — two adversarial-review follow-ups that
+harden the v0.8.15 Track 5A ship.
 
 ---
 
@@ -92,36 +85,32 @@ Surfaced 2026-04-24 from kb-mbp's first-pull session: 286-file pull on a
 fresh Mac landed 6 conflict copies with confusing labels, no inline
 filenames, an over-truncated `mm conflicts` table, silence during the
 ~4-minute download, and a P0 contract regression on `mm autopull` /
-`autopush`. Tracks 5B/5C/5D are sequenced serially because they all touch
-`cli.py` in different functions — same intra-Group serial pattern that
-Tracks 1A/1C and 2A/2B used in this project. Track 5D ships next (smallest,
-hardens 5A's just-shipped fixes), then 5B (UX surfaces), then 5C (conflict
-inversion + real merge).
+`autopush`. Tracks 5A / 5B / 5C / 5E all shipped through v0.9.2 (plus a
+v0.9.3 hotfix patch adding `config.yaml` to the gstack source's default
+`exclude_patterns`). Only Track 5D remains.
 
-_Track 5A (Auto-command silent-mode + scope bugs + Group 5 preflight) — ✓ Complete (v0.8.15). 3 tasks shipped + gstack `include_files` default add._
+_Track 5A (Auto-command silent-mode + scope bugs + Group 5 preflight — P0 autopull/autopush silent-mode contract regression, `_synced_scan_dirs` undercount on generic-type sources, `_save_and_register` rollback, gstack `include_files` default add) — ✓ Complete (v0.8.15). 3 tasks shipped + 1 preflight._
+
+_Track 5B (Pull / resolve / conflicts UX surfaces — vocabulary unification `(c)`/`(f)` → `(l)/(r)/(b)/(a)`, inline conflicted filenames in pull summary, `mm conflicts` table column rename + per-column wrap, Rich Progress widget for TTY, quiet-mode contract fix routing per-source conflicts to stderr) — ✓ Complete (v0.9.0). 4 tasks + scope expansions shipped. **BREAKING**: legacy `c`/`f` letters rejected loudly. 14 new tests (700 pass). Track 5E inherited the pre-inversion `.sync-conflict-*` migration subtask (D9 handoff)._
+
+_Track 5C (`exclude_patterns` + log + migration UX — per-source glob list, consumer-boundary filter at `_pull_core` + `_push_core`, tombstone-suppression invariant, `mm log` JSONL writer/reader, `mm migrate-config` command, autopull/autopush missing-excludes breadcrumb, `mm sources` excluded-count column, `mm status` warning) — ✓ Complete (v0.9.1). Pivoted via /plan-ceo-review from "conflict inversion + real-merge backends" after kb-mbp first-pull data showed 24/25 divergent files were per-machine artifacts that excludes prevent. Real-merge backend deferred to Future. Inversion split to Track 5E. 38 tests + 5 IRON RULE pins._
+
+_Track 5E (Conflict default inversion — inverted `_apply_conflict` (canonical = local; remote → sidecar), strict pull-start fleet-version refusal, pre-inversion `v0-` filename migration, dual-mode resolve dispatch by filename prefix, `mm conflicts` Mode column, `mm devices` Version column, `update_last_seen` writes `last_seen_version`) — ✓ Complete (v0.9.2). **BREAKING**: pre-v0.9.2 peers refused at pull start. Added `packaging>=21.0`. 11 tests in `TestInversion5E`. 768 pass._
+
+_v0.9.3 hotfix patch (post-Track-5C): added `config.yaml` to the gstack source's default `exclude_patterns` (gstack's version-check tracking, machine-local). Existing installs need `mm migrate-config` to pick it up._
 
 ### Track 5D: Track 5A adversarial-review follow-ups
 _2 tasks · ~0.5 day (human) / ~30 min (CC) · low-medium risk · [cli.py + devices.py hardening]_
 _touches: src/mind_meld/cli.py, src/mind_meld/devices.py, tests/_
-_Sequencing: 5A shipped in v0.8.15; 5D hardens that surface and ships next, before 5B/5C._
+_Sequencing: last remaining Track in Group 5; hardens v0.8.15's Track 5A ship._
 
 Two adversarial-pass findings from the v0.8.15 `/review` cycle. Both target
 exactly the code paths Track 5A just touched: `_find_conflict_files`
 (extended in v0.8.15 with the depth-0 sibling-glob for `include_files`) and
-`_save_and_register` (gained the rollback try/except in v0.8.15). Small
-batch, ships before 5B/5C so the v0.8.15 fixes harden cleanly.
+`_save_and_register` (gained the rollback try/except in v0.8.15).
 
 - **`_find_conflict_files` double-counts when an `include_files` entry sits inside an `include_dirs` directory** — surfaced by the v0.8.15 `/review` adversarial pass. If a user customizes their gstack source with `include_files: ["projects/notes.md"]` AND `include_dirs: ["projects"]` (nested), a conflict file at `projects/notes.sync-conflict-...md` gets visited twice: once via the `include_dirs` rglob (recursive scan from `projects/`) and once via the new depth-0 sibling-glob (parent_dir = `projects`, glob `notes.sync-conflict-*.md`). Result: duplicate rows in `mm conflicts`, `mm gc --conflicts` reaps the same path twice (`unlink` idempotent thanks to `missing_ok=True`, but the count printed to the user is wrong), and `mm resolve` would silently no-op on the second visit. The default config doesn't trigger this (all `include_files` entries are bare top-level dotfiles), so the practical risk is low — but adding a `seen: set[Path]` dedup pass at the top of `_find_conflict_files` is ~5 lines and removes the footgun. _src/mind_meld/cli.py + tests/test_conflict_copy.py, ~10-15 lines._ (XS) [review]
 - **`_save_and_register` not crash-safe between `save_config` and `register_device`** — surfaced by the v0.8.15 `/review` adversarial pass. The new rollback try/except handles `(StorageError, OSError, MindMeldError)` from `register_device`, but only catches Python exceptions. A SIGKILL, OOM, or power loss in the window between `save_config()` returning and `register_device()` either succeeding or raising leaves the user with a local config claiming a `device_id` that storage's `devices/<id>.json` doesn't contain — exactly the orphan state the v0.8.15 rollback was supposed to prevent. Init's existing overwrite prompt (cli.py:1474) is the only safety net; a user who answers "no" stays orphaned silently. Two viable fixes: (a) swap order — `register_device` first (storage write), then `save_config` (local write); orphan storage entries are harmless and cleanable, but orphan local config silently breaks pushes. (b) Add a `device_registered: bool` sentinel committed only after register succeeds; init detects sentinel-missing and re-runs register on next start. (a) is simpler; (b) is more robust against future failure modes. _src/mind_meld/cli.py + possibly src/mind_meld/devices.py + tests, ~30-50 lines._ (S-M) [review]
-
-### Track 5B: Pull / resolve / conflicts UX surfaces
-_✓ Complete (v0.9.0). 4 tasks shipped + scope expansions per /plan-ceo-review (D3 vocabulary unification across resolve flow, D4 loud rejection of legacy `c`/`f`, D5 verbose unlocks inline-paths cap, D7 preface for parallel `(p)/(d)/(s)`, D9 dual-semantics handed to 5C, D10 indent hierarchy for multi-device disambig, D11 quiet-mode contract fix routes per-source conflicts/failures to stderr) and /plan-eng-review (5B-5C-REMAP-BOUNDARY markers in cli.py + test class so 5C’s inversion surfaces every assertion that needs to flip). 14 new tests (700 pass). **BREAKING**: input letters `c`/`f` for `mm resolve` now rejected loudly to stderr per visible-failure contract — pre-existing scripts must migrate to `l`/`r`. Track 5C inherits one explicit subtask (D9 handoff): handle pre-inversion `.sync-conflict-*` files via timestamp-based mode detection or one-time migration; without it, persisted conflict files at 5C ship would have mislabeled (l)/(r) labels and risk silent data loss._
-
-### Track 5C: exclude_patterns + log + migration UX
-_✓ Complete (v0.9.1). Per-source `exclude_patterns` glob list, consumer-boundary filter (`_pull_core` + `_push_core`), tombstone-suppression invariant, `mm log` JSONL writer + reader, `mm migrate-config` command, mm pull/push migration prompt + autopull/autopush breadcrumb (visible-failure contract), `mm sources` excluded-count column, `mm status` missing-excludes warning. 38 new tests including 5 IRON RULE regression pins (kb-mbp two-device case, tombstone-on-exclude-transition, tombstone-on-unexclude-transition, sidecar bypass guard, mm gc safety). Originally scoped to "conflict default inversion + real-merge backends"; pivoted via /plan-ceo-review on 2026-04-25 after analysing the kb-mbp 2026-04-24 first-pull data (25 divergent files, 24 of them per-machine artifacts that exclude_patterns prevents from ever conflicting). Real-merge backend deferred to Phase 2. Conflict inversion split out as Track 5E._
-
-### Track 5E: Conflict default inversion (BREAKING)
-_✓ Complete (v0.9.2). Inverted `_apply_conflict` (canonical = local; remote → sidecar) + strict pull-start fleet-version refusal (`mm pull` exits non-zero before any I/O if any peer's `last_seen_version < 0.9.2` or device.json is corrupt) + pre-inversion conflict-file migration to `v0-` prefix (lock-protected, mm pull / mm resolve only) + dual-mode resolve dispatch by filename prefix (`v0-` = pre-inversion ops; no prefix = post-inversion ops) + `mm conflicts` Mode column + `mm devices` Version column + `update_last_seen` writes `last_seen_version`. Added `packaging>=21.0` for `Version` parsing. 11 new tests in `TestInversion5E` pinning the IRON RULE regressions. 768 pass._
 
 ---
 
@@ -134,22 +123,18 @@ Adjacency list (who depends on whom):
 - Group 2 ← {1}    ✓ Complete (v0.8.7 + v0.8.8)
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
-- Group 5 ← {}     (in-flight — Tracks 5A ✓ v0.8.15, 5B ✓ v0.9.0; 5D → 5C remain)
+- Group 5 ← {}     (in-flight — 5A/5B/5C/5E shipped through v0.9.2 + v0.9.3 hotfix; only 5D remains)
 ```
 
 In-flight detail:
 
 ```
 Group 5: Conflict UX & first-pull polish
-  Track 5A ............... ✓ Complete (v0.8.15) ...... 3 tasks + preflight shipped
-  Track 5B ............... ✓ Complete (v0.9.0) ....... 4 tasks + scope expansions shipped (BREAKING)
-  Track 5C ............... ✓ Complete (v0.9.1) ....... 38 tests + 5 IRON RULE pins (exclude_patterns + log + migrate UX)
-  Track 5E ............... ✓ Complete (v0.9.2) ....... 11 tests + IRON RULE pins (conflict inversion + fleet refusal, BREAKING)
   └── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [last]
 ```
 
 **Active total: 1 in-flight Group . 1 track remaining . 2 tasks**
-**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B + 5C + 5E (+ Group 5 preflight) — see PROGRESS.md.**
+**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B + 5C + 5E (+ Group 5 preflight + v0.9.3 hotfix) — see PROGRESS.md.**
 
 ---
 
