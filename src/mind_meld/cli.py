@@ -95,6 +95,7 @@ from mind_meld.storage.keys import (
     DEVICES_PREFIX,
     MANIFESTS_PREFIX,
     blob_key,
+    device_key,
     manifest_key,
     parse_blob_key,
 )
@@ -1567,56 +1568,73 @@ def _bootstrap_or_verify_crypto(
     return root_salt, argon2_memory_kb, keycheck_blob
 
 
-def _save_and_register(
+def _register_and_save(
     config: dict,
     backend: LocalBackend,
     device_id: str,
     device_name: str,
     passphrase: str,
 ) -> None:
-    """Persist config, register the device, and store the passphrase.
+    """Register the device, persist config, and store the passphrase.
 
-    Order matters: config write → device register → keyring store. A
-    typo'd passphrase on the second-device path is caught in crypto
-    validation BEFORE this function runs, so keyring never holds an
-    invalid secret.
+    Order matters: device register (storage write) → config write (local
+    pointer) → keyring store. The "remote first, local pointer last"
+    pattern is the canonical filesystem/DB transaction discipline — a
+    crash before the local pointer is committed leaves the remote with
+    an inert breadcrumb (recoverable on retry), never the inverse half-
+    state where local claims a device storage doesn't recognize. A typo'd
+    passphrase on the second-device path is caught in crypto validation
+    BEFORE this function runs, so keyring never holds an invalid secret.
 
-    Rollback contract: if `register_device` fails (transient `StorageError`,
-    iCloud placeholder hiccup, etc.) after `save_config` succeeded, the
-    saved config file is deleted before the original exception propagates.
-    Without this, init leaves a local config claiming a `device_id` that
-    storage's `devices/` doesn't contain — peers never discover this device,
-    and every subsequent push writes manifests under an ID no one is
-    listening for. User retries `mm init` and either succeeds clean or
-    sees the underlying error, never a half-state. If the rollback unlink
-    itself fails (rare), it surfaces a warning and lets the original
-    register error win — masking the real cause is worse than a confusing
-    secondary message.
+    Crash safety (Track 5D, v0.9.4):
+      * register fails → re-raise; nothing local was written, retry init
+        runs the first-device path naturally.
+      * save_config fails → best-effort `backend.delete(devices/<id>.json)`
+        before re-raising. Normal save failures (disk full, permissions)
+        self-clean so retry init doesn't trip `_init_storage_guard`'s
+        orphan-case warning. If the cleanup itself fails, the original
+        save error propagates — masking the real cause behind a confusing
+        secondary error is worse than the cosmetic orphan that remains.
+      * SIGKILL between register and save_config → cosmetic orphan device
+        entry in storage. `_init_storage_guard` warns + prompts on retry
+        init; user confirms and a fresh device_id is minted alongside.
+        The orphan is inert (no `last_seen`, never used).
+      * Pre-existing victims of the v0.8.15..v0.9.3 inverse half-state
+        (config has device_id, storage lacks devices/<id>.json) self-heal
+        on first push via `_ensure_device_registered` at `_push_core`
+        entry — see Track 5D Task 2b.
     """
-    save_config(config)
+    # Precompute the storage key so the cleanup-warning f-string below
+    # cannot itself raise from `device_key(...)` validation and mask the
+    # original save_config error (codex adversarial 2026-04-25).
+    dev_key = device_key(device_id)
+    register_device(backend, device_id, device_name)
     try:
-        register_device(backend, device_id, device_name)
-    except (StorageError, OSError, MindMeldError):
-        # Narrow to the failure modes the rollback is designed for. A bare
-        # `except Exception` would catch programming errors (AssertionError,
-        # AttributeError, TypeError from a future logic bug) and silently
-        # nuke the user's saved config every retry — same class of silent
-        # data destruction the rollback exists to prevent. Programming
-        # errors propagate uncaught so the user sees a real traceback and
-        # the saved config is preserved for diagnosis.
+        save_config(config)
+    except Exception:
+        # Best-effort cleanup: keep the device entry from accumulating in
+        # storage when save_config raises normally (disk full, permissions,
+        # bad config path). Without this, repeated init failures mint a new
+        # orphan storage entry per attempt and trip `_init_storage_guard`'s
+        # orphan-case warning on retry. SIGKILL still leaves the cosmetic
+        # orphan — that's the rare event we accept structurally via the
+        # order swap.
         try:
-            _config_module.CONFIG_PATH.unlink(missing_ok=True)
-        except OSError as unlink_exc:
+            backend.delete(dev_key)
+        except Exception as cleanup_exc:
             # Per CLAUDE.md visible-failure contract: load-bearing warnings
             # signal data-at-risk degradation and must reach stderr even in
-            # quiet mode. Original register error wins via bare `raise` below.
+            # quiet mode. Original save error wins via bare `raise` below —
+            # surfacing the cleanup failure but not letting it mask the
+            # real cause.
             stderr_console.print(
-                f"mm: warning: rollback of {_config_module.CONFIG_PATH} failed "
-                f"({type(unlink_exc).__name__}): {unlink_exc}"
+                f"mm: warning: cleanup of {dev_key} after "
+                f"save_config failure failed ({type(cleanup_exc).__name__}): "
+                f"{cleanup_exc}"
             )
         raise
-    console.print(f"  Config written to {_config_module.CONFIG_PATH}")
     console.print(f"  Device registered: {device_name} ({device_id})")
+    console.print(f"  Config written to {_config_module.CONFIG_PATH}")
 
     # store_passphrase_in_keyring narrowed its own catch to
     # (KeyringError, ImportError) in v0.8.9. Init has already committed
@@ -1649,12 +1667,12 @@ def init() -> None:
 
     First-device path (mm-crypto-init missing):
         Double-prompt passphrase, generate root_salt + keycheck, atomic write,
-        then save config + register device + store passphrase.
+        then register device + save config + store passphrase (Track 5D order).
 
     Second-device path (mm-crypto-init ok):
         Single-prompt passphrase, derive master_key from the stored root_salt,
-        verify keycheck. On success, save config + register + store passphrase.
-        On failure, nothing local is written.
+        verify keycheck. On success, register device + save config + store
+        passphrase. On failure, nothing local is written.
 
     Two-tier re-init guard (Group 2 pre-flight 3):
         * Orphan case — mm-crypto-init ok + other occupancy: warn that
@@ -1745,7 +1763,7 @@ def init() -> None:
         },
     }
 
-    _save_and_register(config, backend, device_id, device_name, passphrase)
+    _register_and_save(config, backend, device_id, device_name, passphrase)
 
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
 
@@ -1799,6 +1817,55 @@ def push(
         release_lock()
 
 
+def _ensure_device_registered(
+    backend: LocalBackend,
+    device_id: str,
+    device_name: str,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Self-heal a missing device entry before push runs (Track 5D Task 2b).
+
+    If the device's storage entry is absent, recreate it. Two scenarios
+    converge here:
+      * SIGKILL/OOM crash between `register_device` and `save_config` in
+        a v0.9.4+ init — the order swap (Task 2) accepts this as a rare
+        cosmetic event for the *next* init, but a user who got past init
+        with a half-state lands here.
+      * Pre-v0.9.4 init crash in the v0.8.15..v0.9.3 inverted window:
+        local config has a `device_id` that storage's `devices/` doesn't
+        contain. Without this hook those users push manifests under an
+        ID no peer recognizes, silently. Self-heal makes the fix retro-
+        active: first push after upgrade re-registers the device.
+
+    `dry_run=True` is a no-op (codex review 2026-04-25): self-heal does
+    a backend.put via register_device, which would violate `mm push
+    --dry-run`'s "preview only" contract. The real `mm push` afterwards
+    does the heal.
+
+    register_device is idempotent on the storage write and the entry
+    carries no `last_seen` until the first successful push completes,
+    so a brief race against a concurrent init is benign.
+
+    On register failure (transient iCloud StorageError), emit a stderr
+    breadcrumb before re-raising. The breadcrumb is load-bearing for
+    autopush, whose generic `except Exception` would otherwise swallow
+    the failure and silently no-op every push — `mm: warning:` matches
+    the visible-failure contract for degraded-state signals.
+    """
+    if dry_run:
+        return
+    if backend.exists(device_key(device_id)):
+        return
+    try:
+        register_device(backend, device_id, device_name)
+    except Exception as e:
+        stderr_console.print(
+            f"mm: warning: device entry self-heal failed ({type(e).__name__}): {e}"
+        )
+        raise
+
+
 def _push_core(
     config: dict,
     passphrase: str,
@@ -1818,6 +1885,7 @@ def _push_core(
     max_file_size = config["sync"]["max_file_size"]
 
     backend = get_backend(config)
+    _ensure_device_registered(backend, device_id, device_name, dry_run=dry_run)
 
     # Build local manifest (v2 with sources)
     sources = get_sources(config)
@@ -4167,13 +4235,30 @@ def _find_conflict_files(
     Pass False from `mm conflicts` (read-only; lockless — would race
     autopull) and from `_gc_old_conflict_files` (mtime-based reaping
     doesn't need the prefix discrimination, codex-2 #5).
+
+    Dedup: scan strategies (1) and (2) overlap when an `include_files`
+    entry sits inside an `include_dirs` directory (e.g. user customizes
+    `include_files: ["projects/notes.md"]` AND `include_dirs:
+    ["projects"]`). Without dedup, `mm conflicts` shows duplicate rows
+    and `mm gc --conflicts` double-counts reaped files. Key is
+    `(src_name, conflict_path)` not bare `Path`: two configured sources
+    could legitimately reference overlapping subtrees, and dedup must
+    preserve source attribution.
     """
     hits: list[tuple[str, Path, Path | None]] = []
+    seen: set[tuple[str, Path]] = set()
 
     def _maybe_migrate(p: Path) -> Path:
         if migrate_pre_inversion:
             return _migrate_pre_inversion_conflict(p)
         return p
+
+    def _try_add(src_name: str, conflict_path: Path, canonical: Path | None) -> None:
+        key = (src_name, conflict_path)
+        if key in seen:
+            return
+        seen.add(key)
+        hits.append((src_name, conflict_path, canonical))
 
     for src_cfg in get_sources(config):
         base_path = Path(src_cfg["path"]).expanduser().resolve()
@@ -4191,12 +4276,10 @@ def _find_conflict_files(
                     continue
                 conflict_path = _maybe_migrate(conflict_path)
                 canonical = _canonical_for_conflict(conflict_path)
-                hits.append(
-                    (
-                        src_cfg["name"],
-                        conflict_path,
-                        canonical if canonical.exists() else None,
-                    )
+                _try_add(
+                    src_cfg["name"],
+                    conflict_path,
+                    canonical if canonical.exists() else None,
                 )
 
         # (2) Depth-0 sibling-glob for include_files entries. Gate on data
@@ -4220,12 +4303,10 @@ def _find_conflict_files(
                     if not is_conflict_filename(conflict_path.name):
                         continue
                     conflict_path = _maybe_migrate(conflict_path)
-                    hits.append(
-                        (
-                            src_cfg["name"],
-                            conflict_path,
-                            canonical if canonical.exists() else None,
-                        )
+                    _try_add(
+                        src_cfg["name"],
+                        conflict_path,
+                        canonical if canonical.exists() else None,
                     )
     return hits
 
