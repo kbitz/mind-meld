@@ -1,8 +1,9 @@
 """Pull/push history JSONL log for `mm log` query and audit trail.
 
 Append-only at ~/.config/mind-meld/pull-history.jsonl, mode 0600. One JSON
-object per line. Schema (line):
+object per line. Two row classes share the file:
 
+  Pull/push row (per-file outcome — `append`):
     {
       "ts": "<ISO-8601 UTC>",
       "verb": "pull" | "push",
@@ -15,6 +16,20 @@ object per line. Schema (line):
       "remote_sha": "<optional sha256 hex>",
       "sidecar": "<optional sidecar filename if action=conflicted>"
     }
+
+  Self-upgrade row (one per detected version transition — `append_self_upgrade`):
+    {
+      "ts": "<ISO-8601 UTC>",
+      "verb": "self-upgrade",
+      "device": "<this device's id>",
+      "old_version": "<prior __version__>",
+      "new_version": "<current __version__>"
+    }
+
+  Self-upgrade rows have NO source/rel_path/action — `mm log` table renderer
+  detects verb=="self-upgrade" and renders an "extra" column ("OLD → NEW")
+  instead of the source/path columns. Machine consumers of `--format jsonl`
+  must tolerate the missing fields.
 
 Concurrency: every append acquires `fcntl.flock(LOCK_EX)` on the file fd.
 mm itself serializes push/pull/gc through the mm lockfile, but a user
@@ -49,7 +64,7 @@ ROTATED_SUFFIX = ".1"
 _ROTATE_BYTES = 1_000_000  # 1MB cap; rotate at line boundary on next write
 
 Action = Literal["written", "merged", "skipped", "conflicted", "excluded", "uploaded", "failed"]
-Verb = Literal["pull", "push"]
+Verb = Literal["pull", "push", "self-upgrade"]
 
 
 def history_path() -> Path:
@@ -75,7 +90,7 @@ def append(
     sidecar: str | None = None,
     ts: datetime | None = None,
 ) -> None:
-    """Append one record to pull-history.jsonl. Best-effort.
+    """Append one pull/push record to pull-history.jsonl. Best-effort.
 
     Failures are swallowed: history is a forensic aid, not data integrity.
     A crashed FS / permission flip / disk-full must not break the calling
@@ -96,6 +111,42 @@ def append(
     if sidecar is not None:
         payload["sidecar"] = sidecar
 
+    _append_payload(payload)
+
+
+def append_self_upgrade(
+    *,
+    device: str,
+    old_version: str,
+    new_version: str,
+    ts: datetime | None = None,
+) -> None:
+    """Append one self-upgrade transition record. Best-effort.
+
+    Distinct from `append` because self-upgrade rows have NO
+    source/rel_path/action — they're a different event class. Contract is
+    enforced inline as silent skip (NOT assertion): if old_version or
+    new_version is empty, drop the row rather than raise. Codex outside
+    voice flagged that assertions disable under `python -O` and would
+    crash callers — neither acceptable for a forensic-only log.
+    """
+    if not old_version or not new_version:
+        return  # silent skip on contract violation
+    payload: dict[str, Any] = {
+        "ts": (ts or datetime.now(timezone.utc)).isoformat(),
+        "verb": "self-upgrade",
+        "device": device,
+        "old_version": old_version,
+        "new_version": new_version,
+    }
+    _append_payload(payload)
+
+
+def _append_payload(payload: dict[str, Any]) -> None:
+    """Internal: write one JSONL row under flock, rotate at line boundary if
+    over cap. Shared by `append` (pull/push rows) and `append_self_upgrade`
+    (transition rows) so flock + rotation logic stays single-sourced.
+    """
     line = json.dumps(payload, sort_keys=True) + "\n"
     data = line.encode("utf-8")
 

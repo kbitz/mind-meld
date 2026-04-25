@@ -135,6 +135,14 @@ def _apply_defaults(config: dict[str, Any]) -> None:
     crypto = config.setdefault("crypto", {})
     crypto.setdefault("argon2_memory_kb", DEFAULT_ARGON2_MEMORY_KB)
 
+    # Auto-upgrade nudge (v0.9.4): on by default. Lenient validation —
+    # unknown keys under [upgrade] are silently ignored (so a typo like
+    # `auto_chec = false` never crashes a hook). Only the specific keys
+    # we recognize are read by `mind_meld.upgrade`.
+    upgrade = config.setdefault("upgrade", {})
+    if "auto_check" not in upgrade or not isinstance(upgrade.get("auto_check"), bool):
+        upgrade["auto_check"] = True
+
     # Canonicalize paths: expanduser + resolve matches the walker / storage pattern.
     # claude_dir is only present in legacy configs; guard the expansion accordingly.
     config["storage"]["path"] = str(Path(config["storage"]["path"]).expanduser().resolve())
