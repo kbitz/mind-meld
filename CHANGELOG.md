@@ -2,6 +2,285 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.2] - 2026-04-25 — BREAKING
+
+**Track 5E (Conflict default inversion) + 4 ship-fix bug fixes caught by
+the /ship pre-landing review.** Headline change: `_apply_conflict` now
+keeps LOCAL bytes at canonical and writes REMOTE bytes to the
+`.sync-conflict-*` sidecar — the opposite of every prior version.
+
+### Pre-landing review fixes (ship-fix bundle)
+
+The /ship workflow's pre-landing review found 1 CRITICAL + 3 HIGH bugs
+in the Track 5E implementation. All four are fixed in the same release:
+
+- **F1 CRITICAL — silent data loss in resolve.** The pre-inversion
+  conflict-file migration sweep at `_pull_core` and `mm resolve` couldn't
+  distinguish pre-v0.9.2 conflict files (no `v0-` prefix) from fresh
+  post-inversion conflict files produced by THIS version's
+  `_apply_conflict` (which also has no prefix). On consecutive pulls,
+  every fresh post-inversion sidecar got false-tagged `v0-` and
+  `_resolve_interactive_loop` then dispatched it under inverted
+  semantics — picking `(l)ocal` would silently overwrite local edits
+  with remote bytes. Fix: one-shot install marker file at
+  `~/.config/mind-meld/inversion-installed-at`. The migration sweep
+  now skips files whose mtime is at-or-after the marker (i.e.
+  produced by this version's writer). Fail-safe: if the marker is
+  unreadable/unwriteable, refuse to migrate rather than risk
+  mass re-tagging.
+- **F2 HIGH — `migrate-config` could brick `config.toml`.**
+  `_toml_value` did no escaping on string literals; a user-customized
+  `exclude_patterns` glob containing `"`, `\`, or a newline would
+  round-trip through `mm migrate-config --yes` as malformed TOML and
+  wedge the next `mm` invocation on parse error. Fix: escape `\`, `"`,
+  `\n`, `\r` per the TOML basic-string spec.
+- **F3 HIGH — autopull spammed `autopull.log` on mixed-version fleet.**
+  `_check_fleet_version_or_refuse` raises via `_error()` →
+  `typer.Exit(1)`, which is a `RuntimeError` subclass, not a
+  `MindMeldError`. autopull's `except MindMeldError` branch missed it
+  and the generic `except Exception` treated the typed refusal as an
+  unexpected error — writing the full multi-line refusal text to
+  `autopull.log` and a "failed" breadcrumb on every Claude Code
+  session start. Fix: explicit `except typer.Exit` branch in
+  autopull/autopush BEFORE the generic catch; outcome is now
+  `fleet-refused` (autopull) / `refused` (autopush).
+- **F4 HIGH — pullhistory self-DOS from autopull excluded logging.**
+  `_pull_core`'s exclude-filter loop wrote one `pullhistory.append(action="excluded")`
+  record per peer × source × excluded-rel_path tuple. At ~100
+  projects × hourly autopull hooks, the 1MB `pull-history.jsonl` cap
+  rotated within hours and evicted real `written / merged / conflicted /
+  failed` records to `.1`. The audit-log feature became useless. Fix:
+  skip excluded-path logging when `quiet=True` (autopull/autopush);
+  interactive `mm pull` still logs the full set so users can audit
+  their excludes via `mm log --action excluded`.
+
+11 new IRON RULE regression tests pin all four fixes (post-inversion
+file consecutive-pull safety, mtime-gate migration when older than
+marker, marker-failure fail-safe degrades to no-migration, autopull
+no-excluded-logging in quiet, interactive pull DOES log excluded,
+TOML escape round-trip for `"`/`\`/newline, autopull fleet-refusal
+breadcrumb is `fleet-refused` not `failed`).
+
+### Track 5E (original scope)
+
+Two reasons for the inversion: (1)
+asymmetric blast radius — local is the known-working version on this
+machine, remote is the unknown-from-elsewhere version; (2) the visible
+sidecar should hold the *surprising* bytes, not the working ones.
+Mtime-skip already handles "local newer," so the conflict path only
+fires when remote is newer or mtimes are equal — but "remote newer" never
+meant "remote correct for this machine."
+
+**Strict pull-start fleet-version refusal (load-bearing).** `mm pull`
+now exits non-zero BEFORE any download/write if any peer device's
+`last_seen_version < 0.9.2`, OR if any peer's `device.json` is corrupt
+(can't read its version → can't trust its conflict files). Per-peer
+classification: safe / inactive (registered, never pushed → ALLOW) /
+pre-v0.9.2 (REFUSE) / dropped (REFUSE by storage key). The refusal
+message names every offending peer and points at `mm devices` for the
+version table. Recovery: upgrade peers and have each push once before
+re-pulling. Last-resort: hand-edit `device.json` to add
+`"last_seen_version": "0.9.2"` (only after verifying peer is actually
+upgraded).
+
+**Pre-inversion conflict-file migration.** Existing `.sync-conflict-*`
+files produced by pre-v0.9.2 code carry no marker. The first
+lock-protected discovery in `mm pull` or `mm resolve` migrates them by
+renaming to `.sync-conflict-v0-<ts>-<dev>.<ext>`. Idempotent (`v0-`
+prefix is its own no-op signal); collision-safe (target exists → leave
+both, don't overwrite); per-file rename failure logs and continues.
+`mm conflicts` does NOT migrate — it's lockless and would race autopull
+(codex-2 #5).
+
+**Dual-mode resolve dispatch by filename prefix (NOT timestamp).** `v0-`
+files dispatch under PRE-inversion semantics (sidecar = local bytes;
+canonical = remote): `(l)ocal` renames sidecar over canonical, `(r)emote`
+unlinks sidecar. Files without the prefix dispatch under POST-inversion
+semantics (canonical = local; sidecar = remote): `(l)ocal` unlinks
+sidecar, `(r)emote` renames sidecar over canonical. Per-file diff labels
+flip per row; the prompt copy clarifies which file currently holds which
+side.
+
+**`mm conflicts` table** gains a "Mode" column (`pre-v0.9.2` /
+`v0.9.2+`). Per-row "local" / "remote" column meanings derive from the
+prefix. Footer hint when pre-inversion files are present nudges users to
+`mm resolve` for migration.
+
+**`mm devices` table** gains a "Version" column showing each peer's
+`last_seen_version`. `update_last_seen` writes `last_seen_version:
+__version__` alongside `last_seen` on every push (forward-compatible —
+older mm tolerates unknown keys).
+
+**`packaging>=21.0`** added to `dependencies` for `Version` parsing in
+the fleet-version comparator.
+
+**11 new tests** in `tests/test_integration.py::TestInversion5E` pinning
+the IRON RULE regressions: inversion correctness (canonical = local,
+sidecar = remote, no `v0-` prefix on fresh files), mixed-version refusal
+correctness (4 sub-cases: pre-v0.9.2 explicit, missing field, inactive
+peer permitted, corrupt device.json refuses by key), self-exclusion
+from scan (no peers → no self-refusal), pre-inversion file resolves
+under v0- dispatch (both `(l)` and `(r)` ops), `mm conflicts` is
+read-only (no rename), `mm resolve` migrates pre-inversion files. 768
+pass.
+
+### Breaking
+- Conflict-direction inversion: pre-existing `.sync-conflict-*` files
+  produced by pre-v0.9.2 code now require the migration step before
+  resolve dispatches them correctly. `mm pull` and `mm resolve` perform
+  the migration automatically; manual migration via `mv` is also safe
+  (rename `<x>.sync-conflict-<ts>-<dev>.<ext>` →
+  `<x>.sync-conflict-v0-<ts>-<dev>.<ext>`).
+- `mm pull` REFUSES when any peer reports a pre-v0.9.2
+  `last_seen_version` (or none, if last_seen is present). Upgrade peers
+  to v0.9.2 and have each push at least once before pulling here.
+- `_apply_conflict` no longer renames the local file. Callers that
+  assumed the rename + rollback dance must be updated; the in-tree
+  `_resolve_interactive_loop` and the test suite were both updated.
+
+### Added
+- `INVERSION_MIN_VERSION = "0.9.2"` constant in `cli.py`.
+- `is_pre_inversion_conflict_filename(name) -> bool` in `manifest.py`;
+  `CONFLICT_PATTERN_V0` / `CONFLICT_V0_PREFIX` constants.
+- `list_devices_with_drops(backend)` in `devices.py` — variant of
+  `list_devices` returning `(valid, dropped)` so the fleet refusal
+  gate can name the offending storage key (codex-2 #3).
+- `_check_fleet_version_or_refuse(backend, my_device_id)` in `cli.py`,
+  invoked at the top of `_pull_core` before any I/O.
+- `_migrate_pre_inversion_conflict(path)` helper in `cli.py`;
+  `_find_conflict_files(config, *, migrate_pre_inversion=False)` opt-in
+  flag wired into `mm pull` / `mm resolve` (lock-protected callers only).
+- `mm conflicts` "Mode" column; `mm devices` "Version" column.
+- 11 new tests in `TestInversion5E`.
+
+### Changed
+- `_apply_conflict` body: writes remote to sidecar (no rename, no
+  rollback); local stays at canonical.
+- `_resolve_interactive_loop`: dual-mode dispatch by filename prefix.
+  Diff labels flip per row.
+- `_predict_pull_outcome` user-facing string updated to "would write
+  remote to .sync-conflict-*".
+- `_apply_incoming_file` decision-tree comment updated to reflect
+  inversion + per-row label note.
+- Track 5B's `5B-5C-REMAP-BOUNDARY` markers throughout `cli.py` and
+  `tests/test_conflict_copy.py` removed; the inversion is now in place.
+- `update_last_seen` writes `last_seen_version` on every push.
+- `pyproject.toml`: `packaging>=21.0` added to dependencies.
+
+### Recovery from a stuck "Mixed-version fleet detected" refusal
+1. Check `mm devices` — the offending peer(s) show `—` or a pre-v0.9.2
+   value in the Version column.
+2. Upgrade each peer (`pip install --upgrade mind-meld`) and run
+   `mm push` from each one.
+3. Re-run `mm pull` here. The fleet check should now pass.
+
+If a peer is permanently offline / decommissioned, hand-edit its
+`devices/<id>.json` in the storage root to add
+`"last_seen_version": "0.9.2"` — but only do this if you're certain the
+peer will never push again (or has been verified-upgraded out-of-band).
+The check exists to prevent dual-semantics conflict-file production
+that this puller would silently mis-resolve.
+
+## [0.9.1] - 2026-04-25
+
+**Track 5C (exclude_patterns + log + migration UX) — additive.** Per-source
+`exclude_patterns` glob list lets gstack and other sources opt out of syncing
+per-machine artifacts (gstack `repo-mode.json` 7-day TTL caches and
+`land-deploy-confirmed` deploy markers, both recomputed locally on every
+machine). Default gstack source ships with the recommended globs. Existing
+configs need to opt in via the new `mm migrate-config` command (idempotent,
+acquires the mm lockfile, preserves user-customized excludes by appending).
+
+**Consumer-boundary filter wiring (codex-2 #1 + #2 fix).** New
+`_filter_excluded_paths(manifest, exclude_map)` helper applies at TWO call
+sites: `_pull_core` (peer manifests, before `collect_tombstones` and per-
+source download) and `_push_core` (the manifest returned from
+`_recover_prior_manifest`, before `generate_tombstones`). Critically NOT at
+`_fetch_remote_manifest` — `mm gc` reads raw manifests via that path to
+compute referenced blobs, and a filtered manifest there would mark live peer
+blobs as orphans (the gc-bypass hazard pinned by `test_mm_gc_does_not_orphan_
+excluded_path_blobs`).
+
+**Tombstone-suppression invariant.** Adding a path to `exclude_patterns`
+must NOT generate a deletion tombstone on the next push (kb-mbp 2026-04-24
+regression: without consumer-boundary filtering, every newly-excluded path
+ships a tombstone that propagates to peers). Removing a glob brings the
+path back as new (no spurious tombstone). Sidecar recovery is filtered too
+so a corrupt-manifest recovery on a freshly-migrated config doesn't re-
+introduce pre-exclude paths via the sidecar.
+
+**`mm log` subcommand.** Append-only JSONL log at
+`~/.config/mind-meld/pull-history.jsonl` records every per-file pull/push
+action ("written" / "merged" / "skipped" / "conflicted" / "excluded" /
+"uploaded" / "failed"). 1MB cap with line-boundary rotation to `.1` (no
+byte-tail truncate; reader tolerates a torn first line in `.1` as the
+crash-mid-rotate fingerprint). Filters: `--source`, `--since`, `--action`,
+`--verb`, `--limit`, `--format {jsonl|table}`. Useful for "what conflicted
+on date X" audits even after the conflict files are resolved, and for
+"what is my exclude_patterns actually filtering" via `mm log --action
+excluded`. fcntl.flock on every append; mode 0600.
+
+**`mm migrate-config` command.** Diffs current `[[sync.sources]]` against
+`DEFAULT_SOURCES` and proposes adding any missing recommended
+`exclude_patterns` globs. Idempotent. `--yes` skips the inner confirm prompt
+for scripted invocation; `--dry-run` shows the diff without writing. Wholesale
+replaces the `[[sync.sources]]` array (per `patch_config_on_disk`'s contract);
+other `[sync]` keys (`max_file_size`) survive via per-field merge.
+
+**Migration UX (visible-failure contract).** Interactive `mm pull` / `mm push`
+prompt-once if recommended excludes are missing. autopull/autopush NEVER
+auto-mutate config — they record the missing-excludes signal to
+`~/.config/mind-meld/migration-state.json` and let `mm status` surface it
+on the next interactive run. Without this, a wedged config would silently
+keep producing conflict copies forever with no signal that
+`mm migrate-config` would fix it.
+
+**`mm sources` extension.** Adds an "Excluded" column counting how many files
+each source's `exclude_patterns` actually matched on this scan. Diagnostic
+only — sanity-check an over-broad glob (e.g. `**/*.json` skipping
+everything) before pulling on every machine.
+
+**`mm status` extension.** Surfaces "Config missing recommended excludes for
+source(s) X — run `mm migrate-config` to add" so users notice their config
+drift even when only autopull/autopush is running.
+
+38 new tests (5 IRON RULE regression pins: kb-mbp two-device case,
+tombstone-on-exclude-transition, tombstone-on-unexclude-transition, sidecar
+bypass guard, mm gc safety). 758 pass.
+
+### Added
+- `exclude_patterns: list[str]` field on `[[sync.sources]]` entries.
+  `_validate_exclude_patterns` rejects non-list and non-string-element
+  shapes at config load time (not mid-sync).
+- `gstack` `DEFAULT_SOURCES` entry now includes
+  `["projects/*/repo-mode.json", "projects/*/land-deploy-confirmed"]`.
+- `_filter_excluded_paths(manifest, exclude_map) -> dict` consumer-boundary
+  helper; `_build_exclude_map(config)` companion that walks `get_sources`.
+- `src/mind_meld/pullhistory.py` — append-only JSONL writer + reader
+  with fcntl flock, 0600 perms, line-boundary rotation at 1MB.
+- `mm log` subcommand with `--source`, `--since`, `--action`, `--verb`,
+  `--limit`, `--format` flags.
+- `mm migrate-config` command with `--yes` and `--dry-run` flags.
+- Interactive `mm pull` / `mm push` migration prompt + auto-command
+  breadcrumb at `~/.config/mind-meld/migration-state.json`.
+- `mm sources` "Excluded" column.
+- `mm status` "missing recommended excludes" warning.
+
+### Changed
+- `manifest._is_excluded(rel_path, exclude_patterns=None)` — extended to
+  accept per-source globs; backward-compatible default.
+- `manifest._record_file` and `walk_claude_source` now accept
+  `exclude_patterns`; `walk_source` threads it for `claude` types and
+  `walk_generic_source` reads it from the source dict.
+- `_upload_changed_blobs` accepts `src_name` for `pullhistory.append`
+  bookkeeping; legacy callers without source context still work
+  (None → no log entry).
+
+### Codex review notes (out of scope; tracked separately)
+- Codex-1 #14 left two `mm conflicts` count-diff tests in test_conflict_copy.py
+  asserting "6 vs 9" depending on platform fnmatch. Out of 5C scope; the
+  count diff is documented in the resolve-mode flow but not regression-pinned.
+
 ## [0.9.0] - 2026-04-25
 
 **Track 5B (Pull / resolve / conflicts UX surfaces) — BREAKING.** Vocabulary

@@ -42,23 +42,48 @@ from mind_meld.errors import ManifestError
 # `notes.sync-conflict-log.md` or `notes.sync-conflict-2024-summary.md`
 # are NEVER false-positive-excluded. fnmatch char classes match exactly
 # one character, so the digit count is enforced precisely.
+#
+# Track 5E (v0.9.2 BREAKING) introduces an optional `v0-` prefix in the
+# metadata position to mark pre-inversion conflict files. Files without the
+# prefix were created by post-inversion code; files WITH the prefix were
+# either created by pre-inversion code AND migrated by `_find_conflict_files`,
+# or pre-inversion code that mm rewrote during migration. The dual-pattern
+# match keeps `mm gc --conflicts` and walker exclusion working uniformly
+# across both eras.
 CONFLICT_INFIX = ".sync-conflict-"
+CONFLICT_V0_PREFIX = "v0-"
 _DIGITS_8 = "[0-9]" * 8
 _DIGITS_6 = "[0-9]" * 6
 CONFLICT_PATTERN = f"*{CONFLICT_INFIX}{_DIGITS_8}-{_DIGITS_6}-*"
+CONFLICT_PATTERN_V0 = f"*{CONFLICT_INFIX}{CONFLICT_V0_PREFIX}{_DIGITS_8}-{_DIGITS_6}-*"
 
 
 def is_conflict_filename(name: str) -> bool:
     """Return True iff `name` is an mm/Syncthing-style conflict copy.
 
     Strict matcher: the suffix after `.sync-conflict-` must start with a
-    digit (timestamp). Used by the walker to keep conflict files local-only
-    and by `mm conflicts`/`mm gc --conflicts` to avoid false-positives on
-    user files that happen to contain `.sync-conflict-` in their name.
+    timestamp (or `v0-<timestamp>` for pre-inversion files migrated by
+    Track 5E). Used by the walker to keep conflict files local-only and by
+    `mm conflicts`/`mm gc --conflicts` to avoid false-positives on user
+    files that happen to contain `.sync-conflict-` in their name.
     """
     if not name:
         return False
-    return fnmatch.fnmatch(name, CONFLICT_PATTERN)
+    return fnmatch.fnmatch(name, CONFLICT_PATTERN) or fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
+
+
+def is_pre_inversion_conflict_filename(name: str) -> bool:
+    """Return True iff `name` is a `v0-`-prefixed conflict copy.
+
+    Used by `_resolve_interactive_loop`'s dual-mode dispatch: `v0-` files
+    were produced under pre-inversion semantics (canonical = remote, sidecar
+    = local), so `(l)ocal` means `rename sidecar -> canonical`. Files without
+    the prefix are post-inversion and `(l)ocal` means `unlink sidecar`
+    (canonical IS local already).
+    """
+    if not name:
+        return False
+    return fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
 
 
 EXCLUDED = [
@@ -103,8 +128,17 @@ def mtime_from_path(path: Path) -> datetime:
     return datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
 
-def _is_excluded(rel_path: str) -> bool:
-    """Check if a relative path matches any exclude pattern."""
+def _is_excluded(rel_path: str, exclude_patterns: list[str] | None = None) -> bool:
+    """Check if a relative path matches any exclude pattern.
+
+    The hardcoded EXCLUDED list covers universal junk (.git, *.tmp, etc.).
+    Per-source globs in `exclude_patterns` extend the filter for source-
+    specific artifacts (e.g. gstack's per-machine repo-mode.json caches).
+    Per-source globs are matched against the FULL relative path (so users
+    can scope to subtrees like `projects/*/repo-mode.json`), unlike the
+    EXCLUDED list which mixes basename (`*.pyc`) and dir-segment (`.git/`)
+    semantics for backward compatibility.
+    """
     parts = rel_path.split("/")
     filename = parts[-1]
     # Conflict copies stay local-only — uploading them would defeat the
@@ -121,6 +155,10 @@ def _is_excluded(rel_path: str) -> bool:
         # File patterns
         else:
             if fnmatch.fnmatch(filename, pattern):
+                return True
+    if exclude_patterns:
+        for pattern in exclude_patterns:
+            if fnmatch.fnmatch(rel_path, pattern):
                 return True
     return False
 
@@ -172,6 +210,7 @@ def _record_file(
     base: Path,
     max_file_size: int,
     on_skip: Any = None,
+    exclude_patterns: list[str] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Apply the per-file walker pipeline to `path` under `base`.
 
@@ -181,10 +220,15 @@ def _record_file(
     f"exceeds max_file_size ({size_mb:.1f}MB)") are load-bearing because
     cli.py surfaces them in verbose walker output. Do not reshape them
     without updating callers and tests.
+
+    `exclude_patterns` extends the global EXCLUDED list with per-source
+    fnmatch globs evaluated against the relative path. Excluded paths
+    return None silently (no on_skip) — exclusion is intentional, not
+    a degradation signal.
     """
     rel = str(path.relative_to(base))
 
-    if _is_excluded(rel):
+    if _is_excluded(rel, exclude_patterns):
         return None
 
     try:
@@ -218,6 +262,7 @@ def walk_claude_source(
     base_dir: str | Path,
     max_file_size: int = 52_428_800,
     on_skip: Any = None,
+    exclude_patterns: list[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Claude ~/.claude directory and build the files dict.
 
@@ -227,6 +272,8 @@ def walk_claude_source(
         base_dir: Root directory to walk (e.g., ~/.claude)
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files.
+        exclude_patterns: Optional per-source fnmatch globs that extend the
+            hardcoded EXCLUDED list. Matched against the relative path.
 
     Returns:
         Dict mapping relative paths to {sha256, size, mtime}.
@@ -253,7 +300,7 @@ def walk_claude_source(
         for path in scan_dir.rglob("*"):
             if not path.is_file():
                 continue
-            if result := _record_file(path, base, max_file_size, on_skip):
+            if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
                 rel, info = result
                 files[rel] = info
 
@@ -272,6 +319,8 @@ def walk_generic_source(
             path: Base directory path (supports ~)
             include_dirs: List of directory names to walk recursively
             include_files: List of filenames to check at root level
+            exclude_patterns: Optional fnmatch globs evaluated against the
+                relative path; matches are silently skipped.
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files.
 
@@ -284,6 +333,7 @@ def walk_generic_source(
 
     include_dirs: list[str] = source_config.get("include_dirs", [])
     include_files: list[str] = source_config.get("include_files", [])
+    exclude_patterns: list[str] = source_config.get("exclude_patterns", [])
 
     files: dict[str, dict[str, Any]] = {}
     collected_paths: list[Path] = []
@@ -304,7 +354,7 @@ def walk_generic_source(
             collected_paths.append(path)
 
     for path in collected_paths:
-        if result := _record_file(path, base, max_file_size, on_skip):
+        if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
             rel, info = result
             files[rel] = info
 
@@ -332,7 +382,12 @@ def walk_source(
     base_path = str(Path(source_config["path"]).expanduser().resolve())
 
     if source_type == "claude":
-        files = walk_claude_source(source_config["path"], max_file_size, on_skip)
+        files = walk_claude_source(
+            source_config["path"],
+            max_file_size,
+            on_skip,
+            exclude_patterns=source_config.get("exclude_patterns"),
+        )
     elif source_type == "generic":
         files = walk_generic_source(source_config, max_file_size, on_skip)
     else:

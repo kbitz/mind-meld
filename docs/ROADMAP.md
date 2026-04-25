@@ -117,13 +117,11 @@ batch, ships before 5B/5C so the v0.8.15 fixes harden cleanly.
 ### Track 5B: Pull / resolve / conflicts UX surfaces
 _✓ Complete (v0.9.0). 4 tasks shipped + scope expansions per /plan-ceo-review (D3 vocabulary unification across resolve flow, D4 loud rejection of legacy `c`/`f`, D5 verbose unlocks inline-paths cap, D7 preface for parallel `(p)/(d)/(s)`, D9 dual-semantics handed to 5C, D10 indent hierarchy for multi-device disambig, D11 quiet-mode contract fix routes per-source conflicts/failures to stderr) and /plan-eng-review (5B-5C-REMAP-BOUNDARY markers in cli.py + test class so 5C’s inversion surfaces every assertion that needs to flip). 14 new tests (700 pass). **BREAKING**: input letters `c`/`f` for `mm resolve` now rejected loudly to stderr per visible-failure contract — pre-existing scripts must migrate to `l`/`r`. Track 5C inherits one explicit subtask (D9 handoff): handle pre-inversion `.sync-conflict-*` files via timestamp-based mode detection or one-time migration; without it, persisted conflict files at 5C ship would have mislabeled (l)/(r) labels and risk silent data loss._
 
-### Track 5C: Conflict default inversion + real-merge backends
-_2 tasks · ~3-5 days (human) / ~1.5 hr (CC) · medium-high risk · [merge.py + conflict semantics]_
-_touches: src/mind_meld/merge.py, src/mind_meld/cli.py, SPEC.md, CHANGELOG.md, tests/_
-_Depends on: Track 5B landing first so the inversion can ride the relabeled prompt copy without a label-mismatch interim state. Highest-risk task in the Group; ships last._
+### Track 5C: exclude_patterns + log + migration UX
+_✓ Complete (v0.9.1). Per-source `exclude_patterns` glob list, consumer-boundary filter (`_pull_core` + `_push_core`), tombstone-suppression invariant, `mm log` JSONL writer + reader, `mm migrate-config` command, mm pull/push migration prompt + autopull/autopush breadcrumb (visible-failure contract), `mm sources` excluded-count column, `mm status` missing-excludes warning. 38 new tests including 5 IRON RULE regression pins (kb-mbp two-device case, tombstone-on-exclude-transition, tombstone-on-unexclude-transition, sidecar bypass guard, mm gc safety). Originally scoped to "conflict default inversion + real-merge backends"; pivoted via /plan-ceo-review on 2026-04-25 after analysing the kb-mbp 2026-04-24 first-pull data (25 divergent files, 24 of them per-machine artifacts that exclude_patterns prevents from ever conflicting). Real-merge backend deferred to Phase 2. Conflict inversion split out as Track 5E._
 
-- **Invert conflict-resolution default: keep local at canonical, route remote to `.sync-conflict-*`** — `_apply_conflict` (cli.py:921-964) on `--conflict-mode keep-both` (default) currently renames local → sidecar and writes remote bytes to canonical. Wrong default for two reasons: (1) asymmetric blast radius — local is known-working on this machine, remote is unknown-from-elsewhere; (2) the visible `.sync-conflict-*` file should hold the *surprising* version, not the working one. mtime-skip already handles "local newer," so conflict path only fires when remote is newer or mtimes equal — but "remote newer" ≠ "remote correct for this machine." Surface area: `_apply_conflict` body cli.py:932-963; preflight message cli.py:736; `--conflict-mode keep-both` docstring cli.py:1777; `_prompt_conflict_choice` labels cli.py:1024-1042; tests; SPEC.md if it documents direction; CLAUDE.md "Syncthing convention" mention (the change moves *toward* Syncthing's actual convention). Open question: hard flip (BREAKING) or `--conflict-prefer {local,remote}` flag with default `local`? Strong opinion the flip is correct; weaker on exposing the knob. _src/mind_meld/cli.py + tests + SPEC.md + CHANGELOG; ~80-150 lines including tests._ (M) [manual]
-- **`mm resolve`: add real merge so output looks like one machine did all the work** — Today only picks a winner. Auto-merge at pull time (`should_merge`, merge.py:41-44) covers only `.jsonl` (set-union by `ts`) and `MEMORY.md` (line-union); every other text file becomes a sidecar with no merge path. Pragmatic hybrid: per-filetype dispatch in `merge.py` extending `should_merge` — code/JSON/text via `git merge-file` (universally available on macOS, two-way using one side as base since mm doesn't currently store ancestor); prose (`.md` non-MEMORY, `.txt`) via Claude API merge behind explicit `--ai-merge` opt-in flag (project context: this *is* mind-meld syncing memory + notes, prose-heavy); binaries fall back to pick-a-winner. `mm resolve` gains (m)erge option. Surface: merge.py dispatch + git-merge-file wrapper + optional Anthropic backend; `_apply_conflict` tries merge before conflict-rename; `_resolve_interactive_loop` (m) action; config + opt-in; tests per backend; SPEC.md + CHANGELOG. Open: track ancestor (3-way) or stay 2-way? Integrate AI merge or separate `mm merge --ai`? Hard prereq: inversion lands first so "local side" semantics are clear. _src/mind_meld/merge.py + cli.py + optional new module + config + tests + SPEC.md. ~300-500 lines depending on whether AI merge ships v1._ (L) [manual]
+### Track 5E: Conflict default inversion (BREAKING)
+_✓ Complete (v0.9.2). Inverted `_apply_conflict` (canonical = local; remote → sidecar) + strict pull-start fleet-version refusal (`mm pull` exits non-zero before any I/O if any peer's `last_seen_version < 0.9.2` or device.json is corrupt) + pre-inversion conflict-file migration to `v0-` prefix (lock-protected, mm pull / mm resolve only) + dual-mode resolve dispatch by filename prefix (`v0-` = pre-inversion ops; no prefix = post-inversion ops) + `mm conflicts` Mode column + `mm devices` Version column + `update_last_seen` writes `last_seen_version`. Added `packaging>=21.0` for `Version` parsing. 11 new tests in `TestInversion5E` pinning the IRON RULE regressions. 768 pass._
 
 ---
 
@@ -145,12 +143,13 @@ In-flight detail:
 Group 5: Conflict UX & first-pull polish
   Track 5A ............... ✓ Complete (v0.8.15) ...... 3 tasks + preflight shipped
   Track 5B ............... ✓ Complete (v0.9.0) ....... 4 tasks + scope expansions shipped (BREAKING)
-  ├── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [ships next]
-  └── Track 5C ........... ~3-5d ..... 2 tasks + 1 inherited subtask (D9 pre-inversion handler) ............... [ships last]
+  Track 5C ............... ✓ Complete (v0.9.1) ....... 38 tests + 5 IRON RULE pins (exclude_patterns + log + migrate UX)
+  Track 5E ............... ✓ Complete (v0.9.2) ....... 11 tests + IRON RULE pins (conflict inversion + fleet refusal, BREAKING)
+  └── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [last]
 ```
 
-**Active total: 1 in-flight Group . 2 tracks remaining . 4 tasks (incl. 1 inherited subtask)**
-**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B (+ Group 5 preflight) — see PROGRESS.md.**
+**Active total: 1 in-flight Group . 1 track remaining . 2 tasks**
+**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B + 5C + 5E (+ Group 5 preflight) — see PROGRESS.md.**
 
 ---
 

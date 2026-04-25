@@ -349,3 +349,66 @@ def test_gc_does_not_reap_non_hex_sha_blob(tmp_path, monkeypatch):
     )
     # Verbose output should surface it as malformed.
     assert "malformed" in r.stdout
+
+
+# ─── 5E ship-fix (F3): autopull/autopush handle fleet-refusal cleanly ─────
+
+
+class TestAutopullFleetRefusalBreadcrumb:
+    """5E ship-fix (F3): a `typer.Exit(1)` raised by
+    `_check_fleet_version_or_refuse` MUST be caught by autopull's
+    `except typer.Exit` branch — NOT by the generic `except Exception`
+    that logs the full refusal traceback to autopull.log on every
+    Claude Code session start. The breadcrumb outcome must be
+    `fleet-refused`, not `failed`."""
+
+    def test_autopull_fleet_refusal_writes_clean_breadcrumb(self, tmp_path, monkeypatch):
+        """Mixed-version fleet → autopull exits 0 (silent contract),
+        writes outcome=fleet-refused, does NOT write to autopull.log."""
+        from mind_meld.devices import register_device as _register
+        from mind_meld.storage.keys import device_key
+
+        # Standard two-device setup with one peer recorded as pre-v0.9.2.
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        _populate_claude(claude_dir)
+        config_path, _ = _make_config(tmp_path, storage_dir, claude_dir, "dev-self", "Self")
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        _register(backend, "dev-self", "Self")
+        _register(backend, "dev-old", "OldPeer")
+        # Manually plant a stale peer with pre-v0.9.2 version.
+        old_data = {
+            "device_id": "dev-old",
+            "device_name": "OldPeer",
+            "registered": "2026-01-01T00:00:00+00:00",
+            "last_seen": "2026-04-01T00:00:00+00:00",
+            "last_seen_version": "0.9.1",
+        }
+        backend.put(device_key("dev-old"), json.dumps(old_data).encode())
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        _redirect_lock(monkeypatch, tmp_path)
+        iso = _redirect_sidecar(monkeypatch, tmp_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        r = runner.invoke(app, ["autopull"])
+        # Silent contract: autopull NEVER non-zero exits on a "loud" refusal —
+        # _error()'s typer.Exit(1) is caught and routed to the breadcrumb.
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+
+        # Breadcrumb outcome must be `fleet-refused`, NOT `failed`.
+        crumb = json.loads((iso / "last-autorun.json").read_text())
+        assert crumb["outcome"] == "fleet-refused", (
+            f"Expected fleet-refused; got {crumb['outcome']}. "
+            f"This means typer.Exit was caught by `except Exception` "
+            f"(F3 regression) and the user's autopull.log is now spammed "
+            f"with refusal tracebacks on every hook fire."
+        )
+
+        # And NO autopull.log entry — _log_unexpected must not have run.
+        log_path = iso / "autopull.log"
+        assert not log_path.exists() or log_path.stat().st_size == 0, (
+            "autopull.log should be empty for a fleet-refusal — "
+            "_log_unexpected was called by mistake."
+        )

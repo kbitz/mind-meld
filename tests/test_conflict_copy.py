@@ -179,9 +179,11 @@ class TestApplyIncomingFile:
         conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
         assert conflicts == []
 
-    def test_conflict_flips_local_to_sibling(self, tmp_path: Path) -> None:
-        """[C] Local older than remote -> local renamed to .sync-conflict-*,
-        remote written to canonical path."""
+    def test_conflict_writes_remote_to_sidecar_keeps_local_at_canonical(
+        self, tmp_path: Path
+    ) -> None:
+        """[C] Track 5E inversion: local older than remote -> remote bytes
+        land in .sync-conflict-* sidecar; local stays at canonical."""
         rel = "memory/user_role.md"
         local = tmp_path / rel
         local.parent.mkdir(parents=True)
@@ -200,13 +202,16 @@ class TestApplyIncomingFile:
         )
 
         assert outcome == "conflicted"
-        # Canonical now has remote
-        assert local.read_bytes() == b"remote content"
-        # Conflict file has original local
+        # Canonical UNTOUCHED — still local bytes (post-inversion).
+        assert local.read_bytes() == b"local content"
+        # Sidecar holds the REMOTE bytes (post-inversion).
         conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
         assert len(conflicts) == 1
-        assert conflicts[0].read_bytes() == b"local content"
+        assert conflicts[0].read_bytes() == b"remote content"
         assert conflicts[0].name.endswith(".md")
+        # Sidecar filename has NO `v0-` prefix — that prefix is reserved
+        # for pre-inversion files migrated by Track 5E's helper.
+        assert "sync-conflict-v0-" not in conflicts[0].name
 
     def test_empty_remote_device_id_returns_failed_not_raises(self, tmp_path: Path) -> None:
         """REGRESSION: a corrupted peer manifest with empty device_id used to
@@ -239,16 +244,26 @@ class TestApplyIncomingFile:
         assert list(local.parent.glob(f"*{CONFLICT_INFIX}*")) == []
 
     def test_pull_is_idempotent_after_conflict(self, tmp_path: Path) -> None:
-        """Second apply of the same remote data should be unchanged, not a
-        second conflict. This is the critical convergence property."""
+        """Second apply of the same remote data: local still differs from
+        remote (canonical = local bytes post-inversion), so we'd build
+        ANOTHER sidecar — but `conflict_filename` collision-detects and
+        the existing sidecar still has the same remote bytes.
+
+        Pre-inversion, the second apply matched on hash because canonical
+        held remote bytes. Post-inversion the convergence story is
+        different: every re-pull writes another timestamped sidecar (the
+        collision-suffix branch fires). For idempotence, callers should
+        still gate via diff_files upstream — which is what production
+        does. This test pins the per-file behavior: distinct outcome
+        ('conflicted' both times), and the sidecar count grows by one
+        per call.
+        """
         rel = "memory/user_role.md"
         local = tmp_path / rel
         local.parent.mkdir(parents=True)
         local.write_bytes(b"local content")
         _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
 
-        # Simulated remote info that _apply_incoming_file reaches via diff.
-        # Apply #1 creates a conflict.
         remote_sha = hashlib.sha256(b"remote content").hexdigest()
         info = _remote_info(remote_sha, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
 
@@ -260,10 +275,13 @@ class TestApplyIncomingFile:
             remote_device_id="devA1234",
         )
         assert first == "conflicted"
+        # Canonical is still local bytes — `local_hash` on the second call
+        # does NOT match remote_sha, so we re-enter the conflict branch.
+        # This is divergent from pre-inversion idempotence; production
+        # callers (`_pull_one_source`) gate via diff_files BEFORE
+        # `_apply_incoming_file` runs, so the second pull simply doesn't
+        # reach this code path.
 
-        # Apply #2: local now matches remote (we just wrote remote). diff_files
-        # upstream would have filtered this out as unchanged, but if it somehow
-        # still reaches _apply_incoming_file, the re-read hash branch catches it.
         second = _apply_incoming_file(
             local_path=local,
             rel_path=rel,
@@ -271,11 +289,10 @@ class TestApplyIncomingFile:
             remote_info=info,
             remote_device_id="devA1234",
         )
-        assert second == "unchanged"
-
-        # Critically: only ONE conflict file, not two.
+        assert second == "conflicted"  # Re-conflict because canonical = local stayed
+        # Collision-suffix branch yields two distinct sidecars.
         conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
-        assert len(conflicts) == 1
+        assert len(conflicts) == 2
 
 
 class TestConflictFilename:
@@ -707,42 +724,35 @@ class TestWalkerExcludesConflictRegression:
 
 
 class TestResolveInteractiveLoop:
-    """Tests for _resolve_interactive_loop — the interactive picker invoked by
-    `mm resolve`. Uses monkeypatch on typer.prompt to simulate user input.
+    """Tests for _resolve_interactive_loop — the interactive picker invoked
+    by `mm resolve`. Uses monkeypatch on typer.prompt to simulate user input.
 
-    # 5B-5C-REMAP-BOUNDARY
-    Tests below pin (l)/(r) → underlying-op mapping under TODAY's
-    _apply_conflict semantics: canonical holds remote bytes, .sync-conflict-*
-    holds local bytes. When Track 5C inverts _apply_conflict (canonical =
-    local, .sync-conflict-* = remote), every assertion under this marker
-    must be deliberately re-mapped:
-      - (l)ocal: today maps to cpath.rename(canonical); post-5C maps to
-        cpath.unlink() (canonical IS local already)
-      - (r)emote: today maps to cpath.unlink(); post-5C maps to
-        cpath.rename(canonical) (overwrite canonical's local with remote)
-    Re-mapping is mechanical but MUST NOT happen silently. Grep for
-    '5B-5C-REMAP-BOUNDARY' before flipping.
+    Track 5E (v0.9.2 BREAKING) inverted _apply_conflict: canonical now
+    holds LOCAL bytes; .sync-conflict-* holds REMOTE bytes. The dispatch
+    in _resolve_interactive_loop is dual-mode by FILENAME PREFIX — files
+    with no `v0-` prefix are post-inversion (and (l) unlinks, (r) renames);
+    files with `v0-` prefix are pre-inversion-migrated (and (l) renames,
+    (r) unlinks). Tests below use no-prefix filenames so they cover the
+    post-inversion path; pre-inversion behavior is covered by
+    TestResolveInteractiveLoopPreInversion below.
     """
 
     @staticmethod
     def _make_conflict_pair(tmp_path: Path) -> tuple[Path, Path]:
-        """Create a canonical + conflict sibling with distinct content.
+        """Create a canonical + conflict sidecar pair under post-inversion
+        semantics: canonical = local bytes, sidecar = remote bytes.
 
-        Returns (canonical, conflict). Today (5B-5C-REMAP-BOUNDARY):
-        canonical holds remote bytes; conflict holds local bytes.
+        Returns (canonical, conflict).
         """
         canonical = tmp_path / "user.md"
-        canonical.write_bytes(b"remote content")
+        canonical.write_bytes(b"local content")  # post-inversion: canonical = local
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
-        conflict.write_bytes(b"local content")
+        conflict.write_bytes(b"remote content")  # post-inversion: sidecar = remote
         return canonical, conflict
 
-    def test_keep_remote_deletes_conflict(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'r' — conflict file (local-bytes today) is deleted,
-        canonical (remote-bytes today) preserved.
-
-        # 5B-5C-REMAP-BOUNDARY: post-5C, the underlying op flips to rename.
-        """
+    def test_keep_remote_promotes_conflict_to_canonical(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'r' under post-inversion: sidecar (REMOTE bytes) is
+        renamed over canonical, overwriting local."""
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
@@ -750,15 +760,14 @@ class TestResolveInteractiveLoop:
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
         assert canonical.exists()
-        assert canonical.read_bytes() == b"remote content"
-        assert not conflict.exists(), "conflict should be deleted"
+        assert canonical.read_bytes() == b"remote content", (
+            "canonical now holds remote bytes (sidecar promoted over)"
+        )
+        assert not conflict.exists(), "sidecar should be gone (renamed)"
 
-    def test_keep_local_promotes_conflict_to_canonical(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'l' — conflict (local-bytes today) renamed onto
-        canonical, overwriting remote bytes.
-
-        # 5B-5C-REMAP-BOUNDARY: post-5C, the underlying op flips to unlink.
-        """
+    def test_keep_local_unlinks_remote_sidecar(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'l' under post-inversion: canonical IS local
+        already, so we just drop the remote sidecar."""
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
@@ -766,10 +775,8 @@ class TestResolveInteractiveLoop:
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
         assert canonical.exists()
-        assert canonical.read_bytes() == b"local content", (
-            "canonical should now have local-side bytes"
-        )
-        assert not conflict.exists(), "conflict path should be gone (renamed)"
+        assert canonical.read_bytes() == b"local content", "canonical untouched — already local"
+        assert not conflict.exists(), "remote sidecar should be unlinked"
 
     def test_keep_both_is_noop(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'b' (default) — both files remain unchanged."""
@@ -779,8 +786,8 @@ class TestResolveInteractiveLoop:
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
-        assert canonical.read_bytes() == b"remote content"
-        assert conflict.read_bytes() == b"local content"
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
 
     def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
@@ -792,12 +799,7 @@ class TestResolveInteractiveLoop:
             _resolve_interactive_loop([("s1", conflict, canonical)])
 
     def test_old_letter_c_rejected_loudly(self, tmp_path: Path, monkeypatch, capsys) -> None:
-        """User pipes legacy 'c' — error to stderr, typer.Exit(1), no mutation.
-
-        Backward-compat per visible-failure contract. Old (c)anonical / (f)orce
-        letters were removed in v0.9.0; piping them must NOT silently fall
-        through to the default ("kept both").
-        """
+        """User pipes legacy 'c' — error to stderr, typer.Exit(1), no mutation."""
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
@@ -806,11 +808,9 @@ class TestResolveInteractiveLoop:
             _resolve_interactive_loop([("s1", conflict, canonical)])
         assert exc.value.exit_code == 1
 
-        # No mutation — both files preserved
-        assert canonical.read_bytes() == b"remote content"
-        assert conflict.read_bytes() == b"local content"
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
 
-        # Loud stderr breadcrumb pointing at new letters
         captured = capsys.readouterr()
         assert "no longer accepted" in captured.err
         assert "(l)ocal" in captured.err
@@ -826,75 +826,52 @@ class TestResolveInteractiveLoop:
             _resolve_interactive_loop([("s1", conflict, canonical)])
         assert exc.value.exit_code == 1
 
-        # No mutation
-        assert canonical.read_bytes() == b"remote content"
-        assert conflict.read_bytes() == b"local content"
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
 
         captured = capsys.readouterr()
         assert "no longer accepted" in captured.err
 
     def test_full_word_local_does_not_match_lookup(self, tmp_path: Path, monkeypatch) -> None:
         """REGRESSION: dispatch must use exact match, not startswith.
-
-        Pre-fix, typing 'lookup' or 'leave' would silently match (l)ocal
-        and rename the conflict file, overwriting canonical. codex /review
-        v0.9.0 caught the footgun. This test pins the fix.
-
-        # 5B-5C-REMAP-BOUNDARY: post-5C, (l) maps to unlink instead.
-        """
+        Pre-fix, typing 'lookup' would silently match (l)ocal."""
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "lookup")
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
-        # Both files preserved (fell through to default "kept both")
-        assert canonical.read_bytes() == b"remote content"
-        assert conflict.read_bytes() == b"local content"
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
 
     def test_full_word_remote_does_not_match_retry(self, tmp_path: Path, monkeypatch) -> None:
-        """REGRESSION: dispatch must use exact match, not startswith.
-
-        Pre-fix, typing 'retry' or 'remove' would silently match (r)emote
-        and unlink the conflict file. codex /review v0.9.0.
-
-        # 5B-5C-REMAP-BOUNDARY: post-5C, (r) maps to rename instead.
-        """
+        """REGRESSION: dispatch must use exact match, not startswith."""
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "retry")
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
-        # Both files preserved (fell through to default "kept both")
-        assert canonical.read_bytes() == b"remote content"
-        assert conflict.read_bytes() == b"local content"
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
 
     def test_cancel_does_not_trigger_legacy_rejection(self, tmp_path: Path, monkeypatch) -> None:
-        """REGRESSION: legacy 'c'/'f' rejection must use exact match.
-
-        Pre-fix, typing 'cancel' or 'continue' would trigger 'input letters
-        c and f are no longer accepted' and abort the entire walk with
-        exit 1. codex /review v0.9.0 caught the false-positive footgun.
-        """
+        """REGRESSION: legacy 'c'/'f' rejection uses exact match —
+        'cancel' must not be misclassified as legacy 'c'."""
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "cancel")
 
-        # Should NOT raise typer.Exit (no legacy rejection on full word)
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
-        # Both files preserved (fell through to default "kept both")
-        assert canonical.read_bytes() == b"remote content"
-        assert conflict.read_bytes() == b"local content"
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
 
     def test_full_word_local_alias_works(self, tmp_path: Path, monkeypatch) -> None:
-        """User typing 'local' (the full word) should keep local — same
-        as typing 'l'. Exact-match dispatch accepts both forms.
-        """
+        """User typing 'local' (the full word) keeps local — same as 'l'."""
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "local")
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
-        # Local kept (conflict promoted to canonical)
+        # Local kept; remote sidecar dropped.
         assert canonical.read_bytes() == b"local content"
         assert not conflict.exists()
 
@@ -931,30 +908,30 @@ class TestResolveInteractiveLoop:
     def test_walks_multiple_conflicts(self, tmp_path: Path, monkeypatch) -> None:
         """Given multiple hits, each is prompted sequentially.
 
-        # 5B-5C-REMAP-BOUNDARY: pinned op for (r) and (l) under today's
-        semantics — post-5C must re-pin both branches.
+        Post-inversion: canonical = local bytes, sidecar = remote bytes.
         """
 
         c1 = tmp_path / "a.md"
-        c1.write_bytes(b"a-remote")
+        c1.write_bytes(b"a-local")  # canonical = local (post-inversion)
         conflict1 = tmp_path / "a.sync-conflict-20260421-143055-devA1234.md"
-        conflict1.write_bytes(b"a-local")
+        conflict1.write_bytes(b"a-remote")  # sidecar = remote
 
         c2 = tmp_path / "b.md"
-        c2.write_bytes(b"b-remote")
+        c2.write_bytes(b"b-local")
         conflict2 = tmp_path / "b.sync-conflict-20260421-143055-devA1234.md"
-        conflict2.write_bytes(b"b-local")
+        conflict2.write_bytes(b"b-remote")
 
-        # Return different choices per call: first 'r' (keep remote), then 'l' (keep local)
+        # First 'r' (keep remote — promotes sidecar over canonical),
+        # then 'l' (keep local — drops sidecar).
         choices = iter(["r", "l"])
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(choices))
 
         _resolve_interactive_loop([("s1", conflict1, c1), ("s1", conflict2, c2)])
 
-        # First pair: remote kept (canonical preserved), conflict deleted
+        # First pair: 'r' under post-inversion = sidecar promoted over canonical.
         assert c1.read_bytes() == b"a-remote"
         assert not conflict1.exists()
-        # Second pair: local kept (conflict promoted to canonical)
+        # Second pair: 'l' under post-inversion = canonical IS local; drop sidecar.
         assert c2.read_bytes() == b"b-local"
         assert not conflict2.exists()
 
@@ -997,17 +974,16 @@ class TestResolveExitCode:
         resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
         assert (resolved, failed) == (0, 1)
 
-    def test_loop_counts_unlink_failure(self, tmp_path: Path, monkeypatch) -> None:
-        """Keep-remote choice + unlink raises OSError -> failed += 1.
-
-        # 5B-5C-REMAP-BOUNDARY: today (r)emote unlinks cpath; post-5C it renames.
+    def test_loop_counts_keep_local_unlink_failure(self, tmp_path: Path, monkeypatch) -> None:
+        """Post-inversion: 'l' (keep-local) unlinks the remote sidecar.
+        Failure -> failed += 1, walk continues.
         """
 
         canonical = tmp_path / "f.md"
-        canonical.write_bytes(b"canon")
+        canonical.write_bytes(b"local content")
         conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
-        conflict.write_bytes(b"conflict")
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
+        conflict.write_bytes(b"remote content")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
 
         def boom(self):
             raise OSError("simulated unlink failure")
@@ -1039,14 +1015,14 @@ class TestResolveExitCode:
         items = []
         for n in ("a", "b", "c"):
             canonical = tmp_path / f"{n}.md"
-            canonical.write_bytes(b"canon")
+            canonical.write_bytes(b"local content")
             conflict = tmp_path / f"{n}.sync-conflict-20260421-143055-devA1234.md"
-            conflict.write_bytes(b"conflict")
+            conflict.write_bytes(b"remote content")
             items.append(("s1", conflict, canonical))
 
-        # Three 'r' choices (keep remote). Middle unlink fails.
-        # 5B-5C-REMAP-BOUNDARY: post-5C, "keep remote" renames not unlinks.
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
+        # Three 'l' choices (keep local — drops sidecar under post-inversion).
+        # Middle unlink fails.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
         real_unlink = Path.unlink
         call_idx = {"n": 0}
 
@@ -1092,9 +1068,9 @@ class TestResolveExitCode:
         monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
         monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
 
-        # Force 'l' (keep local — renames conflict onto canonical today).
-        # 5B-5C-REMAP-BOUNDARY: post-5C, (l) unlinks instead of renames.
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        # Post-inversion: 'r' (keep remote) renames sidecar over canonical.
+        # Force the rename to fail so resolve exits 1.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
 
         def boom(*a, **kw):
             raise OSError("simulated rename failure")

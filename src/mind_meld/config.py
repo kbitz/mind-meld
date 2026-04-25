@@ -49,6 +49,16 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             ".welcome-seen",
             ".codex-desc-healed",
         ],
+        # Per-machine artifacts that gstack recomputes on each device. Syncing
+        # them produces a churning conflict file every pull (kb-mbp 2026-04-24).
+        # repo-mode.json: 7-day TTL solo-vs-collaborative cache, recomputed
+        # locally. land-deploy-confirmed: deploy-config-hash markers, computed
+        # per-machine. Excluding at the per-source glob level keeps the global
+        # EXCLUDED list focused on universal junk (.git, *.tmp, etc.).
+        "exclude_patterns": [
+            "projects/*/repo-mode.json",
+            "projects/*/land-deploy-confirmed",
+        ],
     },
 ]
 
@@ -149,6 +159,29 @@ def _validate_sources(sources: Any) -> None:
         if name in seen_names:
             raise ConfigError(f"config: duplicate source name '{name}'.")
         seen_names.add(name)
+        if "exclude_patterns" in src:
+            _validate_exclude_patterns(src["exclude_patterns"], name)
+
+
+def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
+    """Check exclude_patterns is a list[str] of compilable fnmatch globs.
+
+    fnmatch accepts any string as a pattern (no syntax errors), so we only
+    enforce the structural shape (list of strings). This guards the malformed-
+    schema branch (e.g. user wrote a single string instead of a list) at load
+    time so push/pull don't crash mid-walk with a TypeError on iteration.
+    """
+    if not isinstance(patterns, list):
+        raise ConfigError(
+            f"config: source '{source_name}' exclude_patterns must be a list, "
+            f"got {type(patterns).__name__}."
+        )
+    for j, pat in enumerate(patterns):
+        if not isinstance(pat, str):
+            raise ConfigError(
+                f"config: source '{source_name}' exclude_patterns[{j}] must be "
+                f"a string, got {type(pat).__name__}."
+            )
 
 
 def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -309,9 +342,21 @@ def patch_config_on_disk(updates: dict[str, dict[str, Any]], path: Path | None =
 
 
 def _toml_value(val: Any) -> str:
-    """Format a Python value as a TOML literal."""
+    """Format a Python value as a TOML literal.
+
+    Strings are emitted as TOML basic strings (`"..."`) with `\\` and
+    `"` escaped, plus literal CR/LF mapped to `\\r`/`\\n`. Without
+    escaping, a user-supplied `exclude_patterns` value containing a
+    quote (e.g. `foo"bar*`) would round-trip through `migrate-config`
+    as a malformed TOML literal that wedges the next `mm` invocation
+    on parse error (5E ship-fix; caught by /ship pre-landing review's
+    adversarial pass).
+    """
     if isinstance(val, str):
-        return f'"{val}"'
+        escaped = (
+            val.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        )
+        return f'"{escaped}"'
     if isinstance(val, bool):
         return "true" if val else "false"
     if isinstance(val, int):
@@ -320,7 +365,7 @@ def _toml_value(val: Any) -> str:
         return str(val)
     if isinstance(val, list):
         if all(isinstance(v, str) for v in val):
-            items = ", ".join(f'"{v}"' for v in val)
+            items = ", ".join(_toml_value(v) for v in val)
             return f"[{items}]"
         return str(val)  # fallback for non-string lists
-    return f'"{val}"'
+    return _toml_value(str(val))
