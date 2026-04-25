@@ -33,14 +33,13 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "path": "~/.gstack",
         "type": "generic",
         "include_dirs": ["projects", "analytics", "retros"],
-        # Curated to three categories: gstack config (config.yaml), cross-machine
-        # memory content (retro-context.md, greptile-history.md), and onboarding
-        # markers (the dotfiles). Bare top-level files only — directories go in
+        # Curated to two categories: cross-machine memory content
+        # (retro-context.md, greptile-history.md) and onboarding markers
+        # (the dotfiles). Bare top-level files only — directories go in
         # include_dirs above. Adding here widens the default sync surface for
         # all new mm installs; existing configs with explicit [[sync.sources]]
         # need to opt in manually.
         "include_files": [
-            "config.yaml",
             "retro-context.md",
             "greptile-history.md",
             ".completeness-intro-seen",
@@ -53,9 +52,13 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         # them produces a churning conflict file every pull (kb-mbp 2026-04-24).
         # repo-mode.json: 7-day TTL solo-vs-collaborative cache, recomputed
         # locally. land-deploy-confirmed: deploy-config-hash markers, computed
-        # per-machine. Excluding at the per-source glob level keeps the global
-        # EXCLUDED list focused on universal junk (.git, *.tmp, etc.).
+        # per-machine. config.yaml: holds gstack version-check tracking
+        # (last successful version per machine); syncing it actively breaks
+        # the version mechanism on whichever machine pulls last (v0.9.3).
+        # Excluding at the per-source glob level keeps the global EXCLUDED
+        # list focused on universal junk (.git, *.tmp, etc.).
         "exclude_patterns": [
+            "config.yaml",
             "projects/*/repo-mode.json",
             "projects/*/land-deploy-confirmed",
         ],

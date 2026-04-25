@@ -159,18 +159,24 @@ class TestDefaultSources:
         ):
             assert marker in gstack["include_files"], f"missing onboarding marker {marker}"
 
-    def test_gstack_include_files_contains_config(self):
+    def test_gstack_include_files_no_longer_contains_config(self):
+        """v0.9.3: config.yaml moved from include_files to exclude_patterns.
+        It holds gstack version-check tracking (last successful version per
+        machine), so syncing it actively breaks the version mechanism on
+        whichever machine pulls last."""
         gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
-        assert "config.yaml" in gstack["include_files"]
+        assert "config.yaml" not in gstack["include_files"]
 
     def test_gstack_exclude_patterns_present(self):
         """5C: per-machine artifacts (repo-mode.json, land-deploy-confirmed)
         must be in the default exclude_patterns. Losing this regression-pins
-        the kb-mbp 2026-04-24 first-pull conflict bug."""
+        the kb-mbp 2026-04-24 first-pull conflict bug. v0.9.3 added
+        config.yaml for the gstack version-check reason (see test above)."""
         gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
         patterns = gstack.get("exclude_patterns") or []
         assert "projects/*/repo-mode.json" in patterns
         assert "projects/*/land-deploy-confirmed" in patterns
+        assert "config.yaml" in patterns
 
 
 class TestExcludePatternsValidation:

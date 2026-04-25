@@ -705,6 +705,7 @@ class TestMigrateConfigCommand:
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
         assert "projects/*/repo-mode.json" in gstack["exclude_patterns"]
         assert "projects/*/land-deploy-confirmed" in gstack["exclude_patterns"]
+        assert "config.yaml" in gstack["exclude_patterns"]  # v0.9.3
 
     def test_dry_run_does_not_write(self, tmp_path, monkeypatch):
         config_path = self._write_explicit_config(tmp_path, exclude_patterns=None)
@@ -733,6 +734,7 @@ class TestMigrateConfigCommand:
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
         assert "my-custom-pattern.txt" in gstack["exclude_patterns"]
         assert "projects/*/repo-mode.json" in gstack["exclude_patterns"]
+        assert "config.yaml" in gstack["exclude_patterns"]  # v0.9.3
 
 
 class TestMmStatusMissingExcludesWarning:
@@ -2511,7 +2513,10 @@ class TestInitFlow:
         # DEFAULT_SOURCES fields survive the indirection (Issue 1C regression pin).
         gstack = cfg["sync"]["sources"][0]
         assert "projects" in gstack["include_dirs"]
-        assert "config.yaml" in gstack["include_files"]
+        assert "retro-context.md" in gstack["include_files"]
+        # v0.9.3: exclude_patterns is also load-bearing now — pin that it
+        # survives indirection AND contains the new config.yaml exclude.
+        assert "config.yaml" in gstack["exclude_patterns"]
 
     def test_first_device_both_sources_init(self, tmp_path, monkeypatch):
         """Accept both → sources list has claude AND gstack."""
