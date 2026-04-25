@@ -10,15 +10,15 @@ accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x, /plan-eng-review on
 2026-04-23, and the 2026-04-24 first-pull conflict-UX session on kb-mbp.
 Every item targets the v1.0 release.
 
-**Groups 1-4 fully shipped. Group 5 nearly done: Tracks 5A / 5B / 5C / 5E
-all shipped through v0.9.2, plus a v0.9.3 hotfix patch that added
-`config.yaml` to the gstack source's default `exclude_patterns`.** See
-`docs/PROGRESS.md` for the full version history. Group 1's `constants.py`
+**Groups 1-5 fully shipped.** Tracks 5A / 5B / 5C / 5E shipped through
+v0.9.2, the v0.9.3 hotfix patch added `config.yaml` to the gstack source's
+default `exclude_patterns`, and Track 5D shipped as v0.9.4 (adversarial-
+review follow-ups hardening the v0.8.15 Track 5A ship: `_find_conflict_files`
+tuple-key dedup + `_register_and_save` order swap + push-time self-heal).
+See `docs/PROGRESS.md` for the full version history. Group 1's `constants.py`
 preflight was dropped after a `/plan-eng-review` cohesion check (2 of 4
 constants are single-module, extraction would split the cohesive
-`FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair). Group 5 still in
-flight: only Track 5D remains — two adversarial-review follow-ups that
-harden the v0.8.15 Track 5A ship.
+`FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair).
 
 ---
 
@@ -78,16 +78,16 @@ _Track 4A (GitHub Actions CI workflow + ruff pin + README badge + 113-violation 
 
 ---
 
-## Group 5: Conflict UX & first-pull polish
+## Group 5: Conflict UX & first-pull polish ✓ Complete
 _Depends on: none_
 
 Surfaced 2026-04-24 from kb-mbp's first-pull session: 286-file pull on a
 fresh Mac landed 6 conflict copies with confusing labels, no inline
 filenames, an over-truncated `mm conflicts` table, silence during the
 ~4-minute download, and a P0 contract regression on `mm autopull` /
-`autopush`. Tracks 5A / 5B / 5C / 5E all shipped through v0.9.2 (plus a
+`autopush`. Tracks 5A / 5B / 5C / 5E shipped through v0.9.2 (plus a
 v0.9.3 hotfix patch adding `config.yaml` to the gstack source's default
-`exclude_patterns`). Only Track 5D remains.
+`exclude_patterns`). Track 5D shipped as v0.9.4 — closes Group 5.
 
 _Track 5A (Auto-command silent-mode + scope bugs + Group 5 preflight — P0 autopull/autopush silent-mode contract regression, `_synced_scan_dirs` undercount on generic-type sources, `_save_and_register` rollback, gstack `include_files` default add) — ✓ Complete (v0.8.15). 3 tasks shipped + 1 preflight._
 
@@ -99,18 +99,7 @@ _Track 5E (Conflict default inversion — inverted `_apply_conflict` (canonical 
 
 _v0.9.3 hotfix patch (post-Track-5C): added `config.yaml` to the gstack source's default `exclude_patterns` (gstack's version-check tracking, machine-local). Existing installs need `mm migrate-config` to pick it up._
 
-### Track 5D: Track 5A adversarial-review follow-ups
-_2 tasks · ~0.5 day (human) / ~30 min (CC) · low-medium risk · [cli.py + devices.py hardening]_
-_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, tests/_
-_Sequencing: last remaining Track in Group 5; hardens v0.8.15's Track 5A ship._
-
-Two adversarial-pass findings from the v0.8.15 `/review` cycle. Both target
-exactly the code paths Track 5A just touched: `_find_conflict_files`
-(extended in v0.8.15 with the depth-0 sibling-glob for `include_files`) and
-`_save_and_register` (gained the rollback try/except in v0.8.15).
-
-- **`_find_conflict_files` double-counts when an `include_files` entry sits inside an `include_dirs` directory** — surfaced by the v0.8.15 `/review` adversarial pass. If a user customizes their gstack source with `include_files: ["projects/notes.md"]` AND `include_dirs: ["projects"]` (nested), a conflict file at `projects/notes.sync-conflict-...md` gets visited twice: once via the `include_dirs` rglob (recursive scan from `projects/`) and once via the new depth-0 sibling-glob (parent_dir = `projects`, glob `notes.sync-conflict-*.md`). Result: duplicate rows in `mm conflicts`, `mm gc --conflicts` reaps the same path twice (`unlink` idempotent thanks to `missing_ok=True`, but the count printed to the user is wrong), and `mm resolve` would silently no-op on the second visit. The default config doesn't trigger this (all `include_files` entries are bare top-level dotfiles), so the practical risk is low — but adding a `seen: set[Path]` dedup pass at the top of `_find_conflict_files` is ~5 lines and removes the footgun. _src/mind_meld/cli.py + tests/test_conflict_copy.py, ~10-15 lines._ (XS) [review]
-- **`_save_and_register` not crash-safe between `save_config` and `register_device`** — surfaced by the v0.8.15 `/review` adversarial pass. The new rollback try/except handles `(StorageError, OSError, MindMeldError)` from `register_device`, but only catches Python exceptions. A SIGKILL, OOM, or power loss in the window between `save_config()` returning and `register_device()` either succeeding or raising leaves the user with a local config claiming a `device_id` that storage's `devices/<id>.json` doesn't contain — exactly the orphan state the v0.8.15 rollback was supposed to prevent. Init's existing overwrite prompt (cli.py:1474) is the only safety net; a user who answers "no" stays orphaned silently. Two viable fixes: (a) swap order — `register_device` first (storage write), then `save_config` (local write); orphan storage entries are harmless and cleanable, but orphan local config silently breaks pushes. (b) Add a `device_registered: bool` sentinel committed only after register succeeds; init detects sentinel-missing and re-runs register on next start. (a) is simpler; (b) is more robust against future failure modes. _src/mind_meld/cli.py + possibly src/mind_meld/devices.py + tests, ~30-50 lines._ (S-M) [review]
+_Track 5D (Track 5A adversarial-review follow-ups — `_find_conflict_files` tuple-key dedup over the `include_dirs` rglob × `include_files` sibling-glob overlap, `_save_and_register` → `_register_and_save` order swap with best-effort cleanup so a SIGKILL/OOM/power-loss window between writes leaves an inert orphan instead of an inverse half-state, and a new `_ensure_device_registered` push-time self-heal that retroactively fixes any pre-v0.9.4 victims of the v0.8.15..v0.9.3 half-state) — ✓ Complete (v0.9.4). 2 tasks + 1 codex-follow-through self-heal hook. 15 new tests (5 dedup, 7 register/save, 3 self-heal); 789 pass._
 
 ---
 
@@ -123,18 +112,11 @@ Adjacency list (who depends on whom):
 - Group 2 ← {1}    ✓ Complete (v0.8.7 + v0.8.8)
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
-- Group 5 ← {}     (in-flight — 5A/5B/5C/5E shipped through v0.9.2 + v0.9.3 hotfix; only 5D remains)
+- Group 5 ← {}     ✓ Complete (5A/5B/5C/5E shipped through v0.9.2 + v0.9.3 hotfix + 5D shipped v0.9.4)
 ```
 
-In-flight detail:
-
-```
-Group 5: Conflict UX & first-pull polish
-  └── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [last]
-```
-
-**Active total: 1 in-flight Group . 1 track remaining . 2 tasks**
-**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B + 5C + 5E (+ Group 5 preflight + v0.9.3 hotfix) — see PROGRESS.md.**
+**Active total: 0 in-flight Groups. Phase 1 complete — see Future for Phase 2+ items.**
+**Shipped: Groups 1, 2, 3, 4, 5 (Tracks 5A + 5B + 5C + 5D + 5E + Group 5 preflight + v0.9.3 hotfix) — see PROGRESS.md.**
 
 ---
 
