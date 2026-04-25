@@ -6,124 +6,122 @@ Group 1 before starting Group 2. Tracks within a group run in parallel
 pick up.
 
 Items originate from the 2026-04-22 `/full-review` audit, review follow-ups
-accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x, and /plan-eng-review on
-2026-04-23. Every item targets the v1.0 release.
+accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x, /plan-eng-review on
+2026-04-23, and the 2026-04-24 first-pull conflict-UX session on kb-mbp.
+Every item targets the v1.0 release.
 
-**Correctness foundation + Error discipline + Post-v0.5.1 follow-ups + cli.py
-hardening + manifest dead code all shipped through v0.8.2.** Tri-state
-`ManifestFetch` recovery chain (v0.5.1), crypto v2 master_key + HKDF (v0.6.0),
-storage layer hardening (v0.6.1), walker conflict-file exclusion + read-path
-boundary (v0.6.2), silent-failure cleanup + `--conflict-mode` unification
-(v0.7.0), config eager validation (v0.7.1), error-surface hardening + `mm diag`
-+ `mm recover --abandon-manifest` (v0.8.0), cli.py surgical hardening (v0.8.1),
-manifest dead code + v1 holdovers (v0.8.2). See `docs/PROGRESS.md` for the
-full version history.
+**Correctness foundation, error discipline, decomposition + DRY (Tracks
+1A/1B/1C), init flow + sync_log generalization (Group 2), test hygiene +
+style polish (Group 3), and CI infrastructure (Group 4) all shipped through
+v0.8.11.** See `docs/PROGRESS.md` for the full version history. Group 1
+remains in-flight on its preflight `constants.py` extraction. Group 5
+picks up the conflict-UX backlog from kb-mbp's first-pull, sequenced
+P0-first within the Group: Track 5A ships the autopull silent-mode
+regression + scope bugs, Track 5B relabels the resolve/conflicts UX, Track
+5C inverts the conflict default and adds real merge.
 
 ---
 
 ## Group 1: Decomposition + DRY
 
-Break up overgrown functions and extract duplicated logic. Parallel-safe
-across cli.py (Track 1A) and manifest.py + merge.py (Track 1B). Track 1C is
-serial after 1A (cli.py follow-ups).
-
-**Track 1A ✅ shipped in v0.8.4** (decomposition + storage-key portion of
-pre-flight). Pre-flight's `constants.py` extraction + the cli.py literal-site
-migration is still open.
+Tracks 1A/1B/1C all shipped (v0.8.4 / v0.8.5 / v0.8.6). Only the preflight
+`constants.py` extraction remains.
 
 **Pre-flight** (shared-infra; serial, one-at-a-time):
-- Create `src/mind_meld/constants.py` and move `CONFLICT_INFIX`, `CONFLICT_AGE_DAYS`, `TOMBSTONE_TTL_DAYS`, `FORMAT_VERSION`. Add `_manifest_key(device_id)` / `_blob_key(device_id, sha)` (and a parser) in the storage package. Migrate the 6 string-literal construction sites in cli.py (lines 136, 222, 322, 591, 878, 1486) and the parse site. ~100 LOC across cli.py, manifest.py, storage/local.py, new constants.py. _Storage-key helpers + all construction/parse sites ✅ shipped in v0.8.4 (`src/mind_meld/storage/keys.py` with path-traversal validation). Remaining: `constants.py` for CONFLICT_INFIX / CONFLICT_AGE_DAYS / TOMBSTONE_TTL_DAYS / FORMAT_VERSION._
+- Create `src/mind_meld/constants.py` and move `CONFLICT_INFIX`, `CONFLICT_AGE_DAYS`, `TOMBSTONE_TTL_DAYS`, `FORMAT_VERSION`. ~30 LOC across cli.py, manifest.py, storage/local.py, new constants.py. _Storage-key helpers + all construction/parse sites already shipped in v0.8.4 (`src/mind_meld/storage/keys.py` with path-traversal validation)._
 
-### Track 1A: Decompose overgrown cli.py functions ✅ shipped in v0.8.4
-_2 tasks · ~1.5 days (human) / ~20 min (CC) · medium risk · [cli.py]_
-_touches: src/mind_meld/cli.py, tests/test_integration.py_
+_Track 1A (Decompose `_pull_core` + `_apply_incoming_file`) — ✓ Complete (v0.8.4). 2 tasks shipped._
 
-- ✅ **Decompose `_pull_core` (247 lines)** — `cli.py:961-1208`: split into `_select_devices`, `_prefetch_manifests`, `_pull_one_source`, `_print_pull_summary` so the top-level reads as five orchestration calls. Also fix the double `list_devices` call (cli.py:994, 1008) while you're in there, and align `_predict_pull_outcome` return vocabulary with `ApplyOutcome` (cli.py:241-270). _src/mind_meld/cli.py, ~250 lines._ (L) _Shipped in v0.8.4 as 6 helpers (`_select_devices`, `_prefetch_manifests`, `_preflight_conflicts`, `_pull_one_source`, `_fsync_touched_parents`, `_print_pull_summary`); double `list_devices` fixed. Codex adversarial review flagged the planned `_predict_pull_outcome` vocabulary rename as a worse abstraction — reversed, vocabulary unchanged._
-- ✅ **Decompose `_apply_incoming_file` (114 lines)** — `cli.py:447-561`: extract `_apply_write`, `_apply_merge`, `_apply_conflict` helpers; `_apply_incoming_file` dispatches via outcome classification. _src/mind_meld/cli.py, ~150 lines._ (M) _Shipped in v0.8.4; dispatcher shrank 125 → ~50 LOC._
+_Track 1B (Walker + manifest + merge DRY) — ✓ Complete (v0.8.5). 3 tasks + 1 contract-change cleanup shipped._
 
-### Track 1B: Walker + manifest + merge DRY ✅ shipped in v0.8.5
-_3 tasks + 1 contract-change cleanup · ~0.5 day (human) / ~12 min (CC) · low risk · [manifest.py, merge.py]_
-_touches: src/mind_meld/manifest.py, src/mind_meld/merge.py, tests/test_manifest.py_
-
-- ✅ **Extract `_record_file` helper** — per-file "exclude → stat → size-check → hash → record" block duplicated verbatim between `walk_claude_source` and `walk_generic_source`. Shipped in v0.8.5 as a maximalist helper that also owns `relative_to(base)` (codex adversarial review caught the original signature, which would have left rel-path computation duplicated across call sites). _src/mind_meld/manifest.py_. (S) _Shipped in v0.8.5._
-- ✅ **Extract `_is_active_tombstone(info, cutoff) -> bool` helper** — `generate_tombstones` (carry-forward) and `collect_tombstones` (fleet aggregation) both duplicated the fromisoformat + tzinfo-UTC guard + cutoff compare + `(ValueError, TypeError)` handling. Shipped as the full predicate (codex adversarial review correctly flagged the originally-planned parse-only `_parse_tombstone_ts` as beneath the abstraction threshold — extracting just the parse would have left the cutoff-comparison and try/except duplicated). _src/mind_meld/manifest.py_. (S) _Shipped in v0.8.5._
-- ✅ **`merge.py` dispatch + join helpers** — `should_merge`/`merge_file` duplicated strategy classification; `merge_jsonl`/`merge_lines` shared an identical join-lines tail. Shipped as `_merge_strategy(rel_path) -> Callable | None` (direct callable, no registry — codex review correctly flagged the original `_STRATEGIES` dict as YAGNI machinery for two predicates) + `_join_lines(lines)` helper. _src/mind_meld/merge.py_. (S) _Shipped in v0.8.5._
-- ✅ **Drop redundant `normalize_manifest(remote_manifest)` call at manifest.py:607 + enforce caller contract at runtime** — added during /plan-eng-review 2026-04-24 after auditing all three caller paths (`_fetch_remote_manifest` → `load_manifest`; `sidecar.read` → explicit normalize; peer-fallback synthetic dict) and finding the call was positionally wrong (ran AFTER the carry-forward loop had already consumed tombstone keys). /review cross-model adversarial (Claude + Codex, 2026-04-24) independently found that the dropped call was also doing load-bearing v1→v2 `files`→`sources` promotion right before new-tombstone detection — so a hand-built v1-shaped dict would silently produce zero new tombstones (delete-propagation loss) instead of the original `claude:<path>` entries. Fixed by enforcing the contract at runtime: `generate_tombstones` now raises `ManifestError` on a v1-shaped `remote_manifest` instead of failing silently. Tests `TestGenerateTombstonesContract::test_raises_on_v1_shaped_input` and `test_none_remote_still_allowed` pin the contract. _src/mind_meld/manifest.py, tests/test_manifest.py_. (S) _Shipped in v0.8.5._
-
-### Track 1C: Post-1A cli.py follow-ups ✅ shipped in v0.8.6
-_3 tasks · ~0.5 day (human) / ~15 min (CC) · low risk · [cli.py]_
-_touches: src/mind_meld/cli.py, src/mind_meld/storage/keys.py, tests/test_preflight.py, tests/test_track_1c.py (new)_
-
-- **diff-call-site DRY pass** — `cli.py:1454-1459, 1843-1868, 2101-2112, 2464-2473`: the four `diff_files` call sites share a per-source iteration pattern but diverge on filtering (push filters by `has_changes`, status/diff filter by `--source` arg, pull builds local_files by hashing). Track 1A's `_pull_core` decomposition resolves one of the four; the other three (push, status, diff) still carry the boilerplate. Candidate primitive: a helper that takes local + remote source dicts and yields `(src_name, src_data, remote_src, diff)` tuples, callers filter. [plan-eng-review 2026-04-23] _src/mind_meld/cli.py, ~40 lines._ (S)
-- **GC: validate blob shape, not just depth** — `_do_gc` (cli.py:2660-2698) now flags wrong-depth `data/` entries (v0.8.1 fix), but a 3-segment path with bogus middle/leaf still gets reaped as an "orphan" if not in `referenced_hashes`. Examples: `data//foo.enc` (empty device_id), `data/dev/not-a-sha.enc` (non-hex leaf). Add a stricter validator: device_id segment matches `[0-9a-f]{8,}`, leaf matches `[0-9a-f]{64}`. [codex-adversarial 2026-04-23] _src/mind_meld/cli.py, ~20 lines._ (S)
-- **Autopull breadcrumb: `degraded` outcome on durability fsync failure** — `_pull_core` (cli.py:1978-1990) warns to stderr when `fsutil.fsync_dir` fails during the deferred-durability commit (v0.8.1 fix), but the result still has no `durability_degraded` field, so `autopull` writes `outcome: "success"` to the breadcrumb. A user reading `mm status` only sees "success" while recently-pulled renames may not survive crash/power loss. Mirrors the autopush "no-sources" breadcrumb fix: thread `durability_degraded` through `PullResult`, surface as `outcome: "degraded"` in autopull. [codex-adversarial 2026-04-23] _src/mind_meld/cli.py, ~25 lines._ (S)
+_Track 1C (Post-1A cli.py follow-ups — diff-call-site DRY, GC blob-shape validation, autopull degraded breadcrumb) — ✓ Complete (v0.8.6). 3 tasks shipped._
 
 ---
 
-## Group 2: Init flow + sync_log generalization + config polish
+## Group 2: Init flow + sync_log generalization + config polish ✓ Complete
 
-Multi-source assumption lag — `init` still hardcodes `~/.claude` and
-`write_sync_log` is claude-specific. Resolving this makes mm genuinely
-multi-source in day-to-day usage. Track 2B picks up the two config-polish
-follow-ups from /plan-eng-review on 2026-04-23.
+Shipped across v0.8.7 + v0.8.8. Multi-source assumption lag resolved — `init` no
+longer hardcodes `~/.claude` and `write_sync_log` is type-keyed instead of
+name-keyed. Config polish from /plan-eng-review followed in v0.8.8.
 
-### Track 2A: Init decomposition + DEFAULT_SOURCES reuse + sync_log generalization ✅ shipped in v0.8.7
-_5 tasks + refinements · ~1.5 days (human) / ~25 min (CC) · medium risk · [cli.py, config.py, synclog.py]_
-_touches: src/mind_meld/cli.py, src/mind_meld/config.py, src/mind_meld/synclog.py, tests/test_integration.py, tests/test_track_2a.py, tests/test_synclog.py (new)_
+_Track 2A (Init decomposition + DEFAULT_SOURCES reuse + sync_log generalization) — ✓ Complete (v0.8.7). 5 tasks + refinements shipped._
 
-- ✅ **Decompose `init` (213 lines)** — `cli.py:1191-1403`: shipped as **4 helpers** (not the originally-planned 3 — `/plan-eng-review 2026-04-24` extended the list after auditing): `_load_prior_device_metadata()`, `_prompt_passphrase(is_first_device)`, `_bootstrap_or_verify_crypto(...)`, `_save_and_register(...)`. The fifth "_maybe_add_gstack_source" helper from the original plan was subsumed into `_prompt_sources()` (see next task). `init()` body shrank from ~213 lines to ~60-line orchestration. _src/mind_meld/cli.py._ (M) _Shipped in v0.8.7._
-- ✅ **Reuse `DEFAULT_SOURCES` in init** — `cli.py:1293, 1352, 1367-1384`: `init()` hardcoded `"~/.claude"`, `52_428_800`, `65_536`, and re-inlined the full gstack source dict. Now imports `DEFAULT_MAX_FILE_SIZE` / `DEFAULT_ARGON2_MEMORY_KB` / `DEFAULT_SOURCES` and picks entries via a new `config.get_default_source(name)` helper that deep-copies (Issue 1C guard against `DEFAULT_SOURCES` aliasing pollution from caller mutation). Also reshaped `DEFAULT_CLAUDE_DIR` from the expanded `str(Path.home() / ".claude")` to the literal `"~/.claude"` to match the TOML-round-trip convention that Track 2B depends on. _src/mind_meld/cli.py, src/mind_meld/config.py._ (S) _Shipped in v0.8.7._
-- ✅ **Init prompts per-source and refuses to finish without any enabled source** — `cli.py:_prompt_sources()`: current flow wrote `sync.claude_dir = "~/.claude"` unconditionally; a pure-gstack user ended with `get_sources() == []` and push said "No sync sources found". New flow loops over `DEFAULT_SOURCES`, Y/n-prompts each with default=Y iff path exists, and refuses (exit non-zero) if zero sources enabled. Reframe per /plan-eng-review Issue 1D: the refusal is "no sources enabled," not "path doesn't exist" — path-existence remains `get_sources()`'s job (it filters missing paths). _src/mind_meld/cli.py, tests/test_integration.py._ (M) _Shipped in v0.8.7._
-- ✅ **`write_sync_log` keyed off source type** — `cli.py:1969, 2345-2347`: called only when `src_name == "claude"`; a user renaming their claude source broke sync-log entirely. Now gated on `src_type == "claude"` inside `_pull_one_source`. **Required widening `local_sources_map` from `dict[str, Path]` to `dict[str, dict]` carrying both `path` and `type`** (Issue 1A critical finding: `_pull_one_source` had no `src_cfg` handle before — blindly keying on type in the existing signature would have NameError'd at runtime). `_pull_one_source` now takes `src_type` explicitly. Regression pins: `test_renamed_claude_source_still_logs` (renamed-name + type-claude) and `test_claude_named_generic_does_not_log` (claude-name + type-generic). _src/mind_meld/cli.py, tests/test_track_2a.py._ (S) _Shipped in v0.8.7._
-- ✅ **`synclog.py` param rename `claude_dir` → `claude_base`** — `synclog.py:17`: NOT `base_path` as originally planned (Issue 1E: `base_path` would lie about scope since the function hardcodes `projects/` subdir lookup, a claude-wire-format detail). `claude_base` tells the truth: "the on-disk root of a claude-type source". Docstring explicitly documents the claude-only semantic and that the caller owns the type-gate. Added dedicated `tests/test_synclog.py` (15 unit tests) covering path handling, per-project grouping, all 5 change categories, metadata emission, and a regression pin that the old `claude_dir=` kwarg raises TypeError (so stale callers fail loudly, not silently to the wrong location). _src/mind_meld/synclog.py, tests/test_synclog.py (new), tests/test_integration.py._ (S) _Shipped in v0.8.7._
-
-### Track 2B: Config polish — eng-review follow-ups ✅ shipped in v0.8.8
-_2 tasks · ~30 min (human) / ~15 min (CC) · low risk · [config.py, cli.py]_
-_touches: src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_integration.py_
-_Depends on: Track 2A landing first so the `cli.py:1076` config-read pattern is consolidated. Otherwise the refactor fights with in-flight init work._
-
-_Scope revised 2026-04-24 after /plan-eng-review + Codex outside-voice challenge: the
-original "stop mutating config in `_apply_defaults`" fix was a broad runtime-semantics
-change for a single-writer bug. Narrowed to the actual leak site._
-
-- ✅ **Stop persisting canonicalized paths during the crypto-init backfill save** — `_init_crypto_session` (cli.py:281-287) currently calls `save_config(config)` on first-run-after-upgrade to persist `crypto.root_salt_fp` + `crypto.argon2_memory_kb`. Because `_apply_defaults` canonicalized paths in memory, that backfill silently rewrites the user's TOML (`~/.claude` → `/Users/alice/.claude`; symlinked paths dereferenced). The fresh-init save at cli.py:1386 is safe (writes what the user just typed). Fix: add a `config.patch_config_on_disk(updates, path=None)` helper that re-reads the raw TOML, shallow-merges only the provided `updates`, and calls `save_config`. Backfill uses the helper for the two crypto fields; all other fields stay byte-identical on disk. Keep in-memory canonicalization (`_apply_defaults`) unchanged — it's consumed correctly by 6 downstream readers and preserves the load-time cyclic-symlink → ConfigError invariant from CLAUDE.md. Codex flagged the underlying UX footgun during /plan-eng-review 2026-04-23 (v0.7.1's `.resolve()` addition extended it to symlink dereference). _src/mind_meld/config.py, src/mind_meld/cli.py, ~25 lines._ (S) _Shipped in v0.8.8._
-- ✅ **Rename ConfigError prefix on non-init load paths** — config.py:61 and config.py:73 both prefix errors with `init:` (e.g. `init: failed to parse`, `init: failed to load`). These fire on any command that calls `_get_config` (push, pull, status, diag, recover...), not just `init`. Rename both to `config:`. Line 55's `init: config not found` stays — that branch genuinely points the user at running `mm init`. _src/mind_meld/config.py, tests/test_config.py, ~8 lines._ (S) _Shipped in v0.8.8._
+_Track 2B (Config polish — eng-review follow-ups: backfill path preservation + ConfigError prefix rename) — ✓ Complete (v0.8.8). 2 tasks shipped._
 
 ---
 
-## Group 3: Test hygiene + style polish ✅ shipped in v0.8.10
+## Group 3: Test hygiene + style polish ✓ Complete
 
-CLI-driven end-to-end coverage + lint polish. Style nits collapse into
-pre-flight; the CLI E2E migration is the one load-bearing piece.
+Shipped as v0.8.10. Pre-flight style polish (type hints, optional syntax,
+placeholderless f-strings, keyring except-narrowing) + Track 3A test
+improvements (CliRunner migration, combined E2E, lazy-import hoist) all
+landed together. Codex `/review` caught a P0 keyring-propagation gap during
+review and the fix shipped with 3 regression pins.
 
-**Pre-flight** ✅ shipped in v0.8.10 (any agent, <30 min each, style-only):
-- ✅ Type hints on helper `backend` params — 17 cli.py helpers now typed `backend: LocalBackend` matching `devices.py`. Two lazy `from mind_meld.storage.local import LocalBackend` sites hoisted to the module-level import in the process.
-- ✅ Standardize optional syntax — all 6 `Optional[X]` uses in cli.py (all `typer.Option` defaults on `pull` / `status` / `diff` / `resolve`) converted to `X | None`; `Optional` dropped from the `typing` import.
-- ✅ Drop placeholderless f-strings + narrow keyring bare-except — 10 AST-verified placeholderless f-strings in cli.py stripped of their `f` prefix (audit was group-aware: no adjacent-concat group lost interpolation). `crypto.py::get_passphrase` and `crypto.py::store_passphrase_in_keyring` narrowed from `except Exception` to `(keyring.errors.KeyringError, ImportError)` via try/except/else split; 7 regression pins landed in `test_crypto.py::TestGetPassphraseExceptNarrow` + `TestStorePassphraseInKeyringExceptNarrow`.
-
-### Track 3A: Test improvements ✅ shipped in v0.8.10
-_3 tasks · ~0.5 day (human) / ~10 min (CC) · low risk · [tests/]_
-_touches: tests/test_integration.py, tests/test_conflict_copy.py, tests/test_crypto.py_
-
-- ✅ **Migrate `TestPushPullRoundTrip` to CLI invocation** — two existing tests rewritten on top of `CliRunner.invoke(app, ["push"|"pull"])` using the same separate-A/B-claude-dir pattern as `TestMultiSourceSync` (local config points at each device's own path; pull writes to the local-config base_path, not the remote manifest's). `build_manifest_v2` / `encrypt` / `storage.put` / `decrypt` no longer hand-rolled. Added the combined `test_push_pull_conflict_tombstone_combined` E2E walking push → pull → divergent-edit conflict-copy (with backdated mtime so remote wins) → delete + tombstone propagation in a single run. _tests/test_integration.py._ (M) _Shipped in v0.8.10._
-- ✅ **Rename misleading test** — `test_deletion_propagation` → `test_deletion_not_propagated_in_additive_model`. Body already asserted the additive behavior; name was a pre-additive holdover. _tests/test_integration.py._ (S) _Shipped in v0.8.10._
-- ✅ **Hoist lazy imports** — 52 nested imports in `tests/test_integration.py` and 34 in `tests/test_conflict_copy.py` removed via AST-driven sweep. Module-level imports added for `pathlib.Path`, `shutil`, `subprocess`, `sys`, `textwrap`, `tomllib`, `hashlib`, `json`, `typer` + `typer.testing.CliRunner`, and `mind_meld` sub-modules (cli as `cli_module`, config as `config_module`, crypto as `crypto_module`, fsutil, synclog, write_sync_log, hash_file, load_manifest, walk_claude_source, LOCK_PATH, `_gc_old_conflict_files`, `_resolve_interactive_loop`, `app`, `CONFLICT_AGE_DAYS`, `save_config`). Legacy aliases `_json` / `_crypto` renamed to `json` / `crypto_module` in-place. Zero remaining nested imports in either file. _tests/test_conflict_copy.py, tests/test_integration.py._ (S) _Shipped in v0.8.10._
+_Track 3A (CliRunner migration + combined push/pull/conflict E2E + 86 lazy-import hoists) — ✓ Complete (v0.8.10). 3 tasks shipped + 3 codex-follow-through pins._
 
 ---
 
-## Group 4: Release infrastructure
+## Group 4: Release infrastructure ✓ Complete
 
-CI plumbing that's been ad-hoc to date. The project currently has no CI on
-main — every push trusts the human (or Claude session) to have run `pytest`
-locally. For a tool whose whole job is "never silently eat user deletions
-across machines," the absence of CI on main is a real risk surface.
-Parallel-safe with every other group.
+Shipped as v0.8.11. Single `macos-latest` + Python 3.13 GitHub Actions
+workflow runs `ruff check`, `ruff format --check`, `pytest tests/`, wheel
+build + install + `mm --version` smoke, and asserts the real Keychain
+backend loads. Ruff pinned at 0.15.12 with `E/F/W/I` ruleset (isort
+enforcement locks Group 3's import hoisting).
 
-### Track 4A: GitHub Actions CI workflow
-_1 task · ~1-2 hours (human) / ~30 min (CC) · low risk · [.github/workflows/, pyproject.toml, README.md]_
-_touches: .github/workflows/ci.yml (new), pyproject.toml, README.md, one ruff-drift commit_
+_Track 4A (GitHub Actions CI workflow + ruff pin + README badge + 113-violation drift sweep) — ✓ Complete (v0.8.11). 1 task shipped._
 
-- **Add `.github/workflows/ci.yml`** — single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool; multi-OS + multi-Python is theater). Runs `ruff check`, `ruff format --check`, `pytest tests/`, and a wheel build + install + `mm --version` smoke on every push to main and every PR. Also asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). Adds ruff to dev-deps (exact-pinned), `[tool.ruff]` config in pyproject.toml, README CI badge, pip cache, concurrency-cancel-in-progress, `permissions: contents: read`, `timeout-minutes: 20`. No path filter (avoids the branch-protection pending-forever footgun for path-skipped required checks). _.github/workflows/ci.yml (~50 lines), pyproject.toml, README.md, one ruff-drift commit._ (S)
+---
+
+## Group 5: Conflict UX & first-pull polish
+_Depends on: none_
+
+Surfaced 2026-04-24 from kb-mbp's first-pull session: 286-file pull on a
+fresh Mac landed 6 conflict copies with confusing labels, no inline
+filenames, an over-truncated `mm conflicts` table, silence during the
+~4-minute download, and a P0 contract regression on `mm autopull` /
+`autopush`. All ten tasks (+ pre-flight) share the same theme and
+ride the same release window. Tracks 5A/5B/5C are sequenced serially
+because they all touch `cli.py`, but in different functions — same
+intra-Group serial pattern that Tracks 1A/1C and 2A/2B used in this
+project. Audit's `COLLISIONS` finding on `cli.py` overlap is acknowledged
+and tolerated (file-level granularity is too coarse for monolithic
+`cli.py`; functions are disjoint in practice).
+
+**Pre-flight** (shared-infra; serial, one-at-a-time):
+- Add `retro-context.md` + `greptile-history.md` to gstack default `include_files` — `src/mind_meld/config.py:DEFAULT_SOURCES` gstack entry. Low-risk additive. Existing configs with explicit `sync.sources` need to add manually; one-line CHANGELOG note. _src/mind_meld/config.py, ~4 lines._ (XS) [manual]
+
+### Track 5A: Auto-command silent-mode + scope bugs (P0 first)
+_3 tasks · ~0.5 day (human) / ~25 min (CC) · low-medium risk · [cli.py auto + scope]_
+_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, src/mind_meld/manifest.py, SPEC.md, tests/_
+
+Smallest batch, highest urgency — ships first so the autopull silent-mode
+contract stops emitting stderr noise on every fresh Mac running the Claude
+Code integration. Three discrete cli.py bugs that don't touch each other's
+call sites.
+
+- **P0 — `mm autopull` / `mm autopush` no longer exit silently on a fresh (un-initialized) machine** — `tests/test_integration.py::TestAutoCommands::test_autopull_no_config_exits_silently` and the autopush twin both fail. Tests assert `result.output == ""` when `CONFIG_PATH` points at non-existent file; observed `mm: push failed - init: config not found at <path> — run 'mm init' first.\n` on stderr. Pre-existing — not introduced by current branch. Likely cause: v0.8.1 visible-failure contract widening — `ConfigError` is now uniformly loud-on-stderr, but the "not initialized at all" case (literal `init: config not found` in `config.py:71`) is supposed to remain silent per CLAUDE.md's auto-command contract. Real-world impact: fresh Mac (or pre-`mm init`) sees stderr noise on every Claude Code session start if `mm autopull`/`autopush` is wired into hooks — exactly the kb-mbp first-pull scenario. Fix: (a) preflight `CONFIG_PATH.exists()` in autopull/autopush BEFORE `load_config` and short-circuit silently — keeps `ConfigError` loud for malformed-config. Add regression test exercising both quiet-on-no-config AND loud-on-malformed-config (existing test only covers no-config). _src/mind_meld/cli.py auto-command entrypoints + tests/test_integration.py::TestAutoCommands. ~15-30 lines._ (S) [BUG] **Priority: P0 — silent-mode contract regression, surfaces on every fresh Mac with the Claude Code integration.**
+- **`_synced_scan_dirs` misses `include_files` sidecars on generic sources** — `cli.py:3231-3237` generic branch returns only resolved `include_dirs`. Trailing comment promises `+ base for single-file includes` but it's never implemented. Result: any conflict file produced for a top-level `include_files` entry (gstack default = `config.yaml`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`, all under `~/.gstack`) is invisible to `mm conflicts` / `mm resolve` / `mm gc --conflicts`. Reproduced 2026-04-24: kb-mbp first pull reported 6 conflicts; `mm conflicts` listed 5; missing was `~/.gstack/config.sync-conflict-20260424-233316-889e42c0.yaml`. Fix: in `_synced_scan_dirs`, after `include_dirs` loop, walk unique parents of `include_files` entries at **depth 0 only** (recursing would scan unsynced subtrees). Two viable shapes: (a) return `list[tuple[Path, bool]]` with recursive flag; (b) separate `_include_files_conflict_paths` helper computing per-entry candidate glob — more surgical. Test coverage: generic source with both include_dirs and include_files, conflicts in each, all three commands seeing the right count. Adjacent: verify `mm push` doesn't have parallel scope mismatch. _src/mind_meld/cli.py `_synced_scan_dirs` + `_find_conflict_files` + tests. ~30-50 lines._ (S) [BUG]
+- **`_save_and_register` needs register-failure rollback** — `cli.py:_save_and_register` persists config → registers device → stores passphrase. If `register_device` raises (iCloud hiccup, transient `StorageError`) after `save_config` succeeded, local config now claims a `device_id` that `devices/` on storage doesn't contain. Peers scanning `devices/` via `_select_devices` never discover this device — push writes manifests under an ID no one is listening for. Pre-existing (Track 2A; codex adversarial during /review). Fix options: (a) swap order to register BEFORE save_config — config-without-device is its own ugly state; (b) on register failure, delete the saved config; (c) lazy self-repair in push that calls `register_device` if the device file is missing. Option (c) most robust. _src/mind_meld/cli.py, src/mind_meld/devices.py, ~40 lines._ (S) [review]
+
+### Track 5B: Pull / resolve / conflicts UX surfaces
+_4 tasks · ~0.5 day (human) / ~25 min (CC) · low risk · [cli.py UX]_
+_touches: src/mind_meld/cli.py_
+_Depends on: Track 5A landing first to clear the cli.py merge surface — disjoint functions but git-coordination cost is real._
+
+- **Relabel `mm resolve` interactive prompt to user terms** — `cli.py:3629-3633`: today's `(c)anonical / (f)orce conflict → canonical / (b)oth / (a)bort` reads as internal jargon. User can't tell that "canonical" holds *remote* bytes and "conflict" holds *local* bytes, so picking (c) silently throws away local edits. Relabel to `(l)ocal / (r)emote / (b)oth [default] / (a)bort` with a one-line preface naming which side is which. Also fix the parallel `(p)romote / (d)elete / (s)kip` jargon at `cli.py:3568-3576`. Pair with the inversion task (Track 5C) so labels match file-on-disk reality post-flip. Lower-risk to ship independently first. _src/mind_meld/cli.py `_resolve_interactive_loop`, ~20 lines._ (XS) [manual]
+- **Pull summary lists conflicted (and failed) files inline** — `_print_pull_summary` cli.py:2197-2250: per-source counts already accumulate paths in `r.outcomes["conflicted"]` / `["failed"]` but never display them. User has to run `mm conflicts` just to learn *which* 6 files conflicted. Fix: when `src_conflicted > 0` (and not quiet), list each path under the per-source line; same for failed. Cap at 20 with `... and N more` overflow. Print path relative to source's base — source name in header already disambiguates. _src/mind_meld/cli.py `_print_pull_summary`, ~10-15 lines._ (XS) [manual]
+- **`mm conflicts` table: stop truncating + drop jargon labels** — Screenshot 2026-04-24 shows `kbitz-cl…` / `kbitz-fi…` at typical terminal width; both columns repeat the same `~/.gstack/projects/...` parent. Fix surface (cli.py:3289-3317): (c) rename "Conflict"/"Canonical" labels to "local"/"remote" (matches user's mental model + pairs with inversion); (d) Rich `Table(no_wrap=False, overflow="fold")` so paths wrap rather than truncate. Lowest-risk standalone change is just (c)+(d). Layout rework — collapse `~`, drop one column with separate suffix column — can follow when convenient. _src/mind_meld/cli.py `conflicts()`, ~20-40 lines._ (S) [manual]
+- **`mm pull` progress output during download loop** — `cli.py:1074-1112`'s `_download_and_apply` runs silently between the per-device header (cli.py:2390) and the final summary. On first-pull-on-a-new-Mac, `backend.get(bkey)` blocks on iCloud placeholder materialization; kb-mbp 2026-04-24 saw 286 files / 263s wall, no output, visually identical to a hung process. `--verbose` doesn't help — verbose paths fire AFTER each file's blocking read. Fix: Rich `Progress` for TTY (`from rich.progress import Progress`), plain "downloading N/total" counter every K files for non-TTY, no output for `quiet=True` (autopull). Display bytes-transferred — already tracked. _src/mind_meld/cli.py `_download_and_apply` and `_pull_one_source`, ~30 lines._ (S) [manual]
+
+### Track 5C: Conflict default inversion + real-merge backends
+_2 tasks · ~3-5 days (human) / ~1.5 hr (CC) · medium-high risk · [merge.py + conflict semantics]_
+_touches: src/mind_meld/merge.py, src/mind_meld/cli.py, SPEC.md, CHANGELOG.md, tests/_
+_Depends on: Track 5B landing first so the inversion can ride the relabeled prompt copy without a label-mismatch interim state. Highest-risk task in the Group; ships last._
+
+- **Invert conflict-resolution default: keep local at canonical, route remote to `.sync-conflict-*`** — `_apply_conflict` (cli.py:921-964) on `--conflict-mode keep-both` (default) currently renames local → sidecar and writes remote bytes to canonical. Wrong default for two reasons: (1) asymmetric blast radius — local is known-working on this machine, remote is unknown-from-elsewhere; (2) the visible `.sync-conflict-*` file should hold the *surprising* version, not the working one. mtime-skip already handles "local newer," so conflict path only fires when remote is newer or mtimes equal — but "remote newer" ≠ "remote correct for this machine." Surface area: `_apply_conflict` body cli.py:932-963; preflight message cli.py:736; `--conflict-mode keep-both` docstring cli.py:1777; `_prompt_conflict_choice` labels cli.py:1024-1042; tests; SPEC.md if it documents direction; CLAUDE.md "Syncthing convention" mention (the change moves *toward* Syncthing's actual convention). Open question: hard flip (BREAKING) or `--conflict-prefer {local,remote}` flag with default `local`? Strong opinion the flip is correct; weaker on exposing the knob. _src/mind_meld/cli.py + tests + SPEC.md + CHANGELOG; ~80-150 lines including tests._ (M) [manual]
+- **`mm resolve`: add real merge so output looks like one machine did all the work** — Today only picks a winner. Auto-merge at pull time (`should_merge`, merge.py:41-44) covers only `.jsonl` (set-union by `ts`) and `MEMORY.md` (line-union); every other text file becomes a sidecar with no merge path. Pragmatic hybrid: per-filetype dispatch in `merge.py` extending `should_merge` — code/JSON/text via `git merge-file` (universally available on macOS, two-way using one side as base since mm doesn't currently store ancestor); prose (`.md` non-MEMORY, `.txt`) via Claude API merge behind explicit `--ai-merge` opt-in flag (project context: this *is* mind-meld syncing memory + notes, prose-heavy); binaries fall back to pick-a-winner. `mm resolve` gains (m)erge option. Surface: merge.py dispatch + git-merge-file wrapper + optional Anthropic backend; `_apply_conflict` tries merge before conflict-rename; `_resolve_interactive_loop` (m) action; config + opt-in; tests per backend; SPEC.md + CHANGELOG. Open: track ancestor (3-way) or stay 2-way? Integrate AI merge or separate `mm merge --ai`? Hard prereq: inversion lands first so "local side" semantics are clear. _src/mind_meld/merge.py + cli.py + optional new module + config + tests + SPEC.md. ~300-500 lines depending on whether AI merge ships v1._ (L) [manual]
 
 ---
 
@@ -132,34 +130,29 @@ _touches: .github/workflows/ci.yml (new), pyproject.toml, README.md, one ruff-dr
 Adjacency list (who depends on whom):
 
 ```
-- Group 1 ← {}
-- Group 2 ← {1}
-- Group 3 ← {2}
-- Group 4 ← {}    (parallel to all — release infra)
+- Group 1 ← {}     (constants.py preflight, parallel with Group 5)
+- Group 2 ← {1}    ✓ Complete (v0.8.7 + v0.8.8)
+- Group 3 ← {2}    ✓ Complete (v0.8.10)
+- Group 4 ← {}     ✓ Complete (v0.8.11)
+- Group 5 ← {}     (in-flight — Tracks 5A → 5B → 5C, serialized in cli.py)
 ```
 
-Track detail per group:
+In-flight detail:
 
 ```
 Group 1: Decomposition + DRY
-  Pre-flight .............. ~2 hr (constants + storage key helpers) [storage keys ✅ v0.8.4]
-  ├── Track 1A ........... ~1.5d .. 2 tasks .. decompose _pull_core + _apply_incoming_file [✅ v0.8.4]
-  ├── Track 1B ........... ~0.5d .. 3 tasks .. walker + manifest + merge DRY [✅ v0.8.5]
-  └── Track 1C ........... ~0.5d .. 3 tasks .. post-1A cli.py follow-ups [✅ v0.8.6]
+  Pre-flight .............. ~30 min .. constants.py extraction
+  └── (Tracks 1A/1B/1C all ✓ Complete)
 
-Group 2: Init flow + sync_log generalization + config polish
-  ├── Track 2A ........... ~1.5d .. 5 tasks .. init + sync_log [✅ v0.8.7]
-  └── Track 2B ........... ~0.5d .. 2 tasks .. config polish (eng-review follow-ups) [✅ v0.8.8]
-
-Group 3: Test hygiene + style polish
-  Pre-flight .............. 3 items (type hints, optional syntax, f-strings) [✅ v0.8.10]
-  └── Track 3A ........... ~0.5d .. 3 tasks .. tests (CLI-driven, rename, hoist) [✅ v0.8.10]
-
-Group 4: Release infrastructure
-  └── Track 4A ........... ~1-2 hr .. 1 task .. GitHub Actions CI (single macos+py3.13 job, ruff + pytest + wheel smoke)
+Group 5: Conflict UX & first-pull polish
+  Pre-flight .............. ~5 min ... gstack include_files default add
+  ├── Track 5A ........... ~0.5d ..... 3 tasks .. autopull silent-mode (P0) + scope + register-rollback   [ships first]
+  ├── Track 5B ........... ~0.5d ..... 4 tasks .. relabel + summary + table + progress                    [ships second]
+  └── Track 5C ........... ~3-5d ..... 2 tasks .. invert default + real-merge backends                    [ships last]
 ```
 
-**Total: 4 groups · 7 tracks · 19 tasks (+ 4 pre-flight items)**
+**Active total: 2 in-flight Groups . 3 tracks . 9 tasks (+ 2 pre-flight items)**
+**Shipped: Groups 1 (Tracks A/B/C), 2, 3, 4 — see PROGRESS.md.**
 
 ---
 
@@ -169,13 +162,15 @@ Group 4: Release infrastructure
 
 - **Mtime hash cache** — push-side perf: skip re-hashing files whose mtime hasn't changed since the last push. Per-device local cache at `~/.config/mind_meld/local-manifest.json` keyed by (mtime, size, sha). _src/mind_meld/cache.py (new), src/mind_meld/manifest.py, src/mind_meld/cli.py, ~210 lines._ (M) _Deferred because: motivating 4-minute-push problem on 1000 files was already solved by crypto v2 (process-scoped master key + HKDF). Revisit only if push latency becomes user-visible again._
 
-- **Three-way merge base (stored last-synced hash)** — pull-side correctness upgrade: per-source, per-file last-synced hash at `~/.config/mind_meld/sync-state.json`. Distinguishes "remote changed, I didn't" from "we both changed" — fast-forward when only one side changed; conflict-copy only when both diverged from base. _src/mind_meld/sync_state.py (new), src/mind_meld/cli.py, ~310 lines._ (M-L) _Deferred because: correctness upgrade, not a fix — current Syncthing conflict-copy pattern works; no divergence-misclassification reports. Revisit if users report "it conflict-copied a file I didn't even touch."_
+- **Three-way merge base (stored last-synced hash)** — pull-side correctness upgrade: per-source, per-file last-synced hash at `~/.config/mind_meld/sync-state.json`. Distinguishes "remote changed, I didn't" from "we both changed" — fast-forward when only one side changed; conflict-copy only when both diverged from base. _src/mind_meld/sync_state.py (new), src/mind_meld/cli.py, ~310 lines._ (M-L) _Deferred because: correctness upgrade, not a fix — current Syncthing conflict-copy pattern works; no divergence-misclassification reports. Revisit if users report "it conflict-copied a file I didn't even touch." Becomes a hard prereq for upgrading Track 5B's `git merge-file` to a 3-way merge._
 
-- **`mm rekey` passphrase rotation** — Format v2 makes `master_key` the rotation boundary but v2 blobs don't carry a `key_scheme` byte (dropped per /plan-ceo-review simplification). Rotation requires format v3: either re-wrap `master_key` under the new passphrase, or re-encrypt every blob under a freshly-derived `master_key`. Completes the crypto story but requires a format bump and migration path. _src/mind_meld/crypto.py, src/mind_meld/cli.py, SPEC.md, ~200-400 lines._ (M-L) _Deferred because: post-1.0 P3 — requires format v3 and a migration dance; no users blocked pre-1.0._
+- **`mm rekey` passphrase rotation** — Format v2 makes `master_key` the rotation boundary but v2 blobs don't carry a `key_scheme` byte. Rotation requires format v3: either re-wrap `master_key` under the new passphrase, or re-encrypt every blob under a freshly-derived `master_key`. Completes the crypto story but requires a format bump and migration path. _src/mind_meld/crypto.py, src/mind_meld/cli.py, SPEC.md, ~200-400 lines._ (M-L) _Deferred because: post-1.0 P3 — requires format v3 and a migration dance; no users blocked pre-1.0._
 
-- **Blob-directory as secondary peer-discovery in corrupt-manifest recovery** — in `_collect_peer_tombstones` (or a sibling helper), when a peer's `devices/<id>.json` is corrupt or missing but `data/<id>/` has blobs and `manifests/<id>/*.enc` decrypts, promote the blob-dir-derived `device_id` to the peer list. Recovers tombstones from the otherwise-dropped peer. Widens the trust surface — blob-presence becomes load-bearing evidence of a peer's existence, not just a device-registry entry. _src/mind_meld/cli.py, ~30 lines._ (S) _Deferred because: observation-bar — land when the first real support case appears where corrupt `devices.json` masks a recoverable manifest. v0.8.0's `list_devices` shape-validation + warning is enough until then._
+- **Blob-directory as secondary peer-discovery in corrupt-manifest recovery** — in `_collect_peer_tombstones` (or sibling helper), when a peer's `devices/<id>.json` is corrupt or missing but `data/<id>/` has blobs and `manifests/<id>/*.enc` decrypts, promote the blob-dir-derived `device_id` to the peer list. Recovers tombstones from the otherwise-dropped peer. Widens the trust surface — blob-presence becomes load-bearing evidence of a peer's existence, not just a device-registry entry. _src/mind_meld/cli.py, ~30 lines._ (S) _Deferred because: observation-bar — land when the first real support case appears where corrupt `devices.json` masks a recoverable manifest. v0.8.0's `list_devices` shape-validation + warning is enough until then._
 
-- **PyPI publish workflow** — `.github/workflows/release.yml` that builds + publishes to PyPI on git tag push (e.g. `v0.8.0` → trigger). Uses `hatchling` build backend (already configured in `pyproject.toml`). Currently users install via `pip install -e .` from a local clone; PyPI distribution would let someone `pip install mind-meld` cleanly. Commits to a public package namespace (name squatting, can't easily rename); need to decide on trusted-publisher vs API token auth. Depends on Group 4 (CI) landing first (tests green before publishing anything). _.github/workflows/release.yml, ~50 lines._ (S) _Deferred because: observation-bar — land when "how do I install this" becomes friction. No user demand signal today._
+- **PyPI publish workflow** — `.github/workflows/release.yml` that builds + publishes to PyPI on git tag push. Uses `hatchling` build backend (already configured). Currently users install via `pip install -e .` from a local clone; PyPI distribution would let someone `pip install mind-meld` cleanly. Commits to a public package namespace (name squatting, can't easily rename); need to decide on trusted-publisher vs API token auth. Tests-green prereq satisfied by Group 4 (CI shipped v0.8.11). _.github/workflows/release.yml, ~50 lines._ (S) _Deferred because: observation-bar — land when "how do I install this" becomes friction. No user demand signal today._
+
+- **Cross-device source rename drift partitions sync** — Track 2A's type-keyed sync-log fix addressed *same-device* renames. Cross-device, manifests are still keyed by `src_name` (`manifest.py`, `_pull_core`'s `local_sources_map[src_name]` lookup), so if device A renames "claude" → "work-claude" but B keeps "claude", B's pull skips A's manifest via the unknown-source warning path. Codex adversarial 2026-04-24. Fix: cross-device source identity needs to key off `(type, signature)` or similar, not raw name. Bigger design change — likely a follow-up track or a SPEC.md-documented known limitation for v1.0. _src/mind_meld/cli.py, src/mind_meld/manifest.py, SPEC.md, ~100 lines._ (M-L) _Deferred because: no fleet-rename incident yet; documenting as a known limitation is enough for v1.0. Reopen on first support case where two devices use mismatched source names._
 
 ---
 

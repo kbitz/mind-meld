@@ -4,6 +4,10 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.8.14  | 2026-04-24 | Roadmap tidy. Freshness scan marks Groups 2/3/4 ✓ Complete in place (shipped through v0.8.7/v0.8.8/v0.8.10/v0.8.11); Tracks 1A/1B/1C collapsed to one-liners (only Group 1's preflight `constants.py` extraction remains). Triages 11 unprocessed items: 10 kept in current phase as new Group 5 (Conflict UX & first-pull polish) with three serialized Tracks — 5A (auto-command + scope bugs incl. P0 autopull silent-mode regression, ships first), 5B (resolve/conflicts/pull UX relabel), 5C (conflict default inversion + real-merge backends, ships last). One item (cross-device source rename drift) deferred to Future as documented known limitation. PROGRESS.md "Where we are" refreshed to match. |
+| 0.8.13  | 2026-04-24 | Docs: log 8 conflict-UX TODOs from kb-mbp's first-pull session — `mm resolve` prompt label jargon, pull summary missing inline conflicted filenames, `mm conflicts` table truncation, P0 `mm autopull`/`autopush` silent-mode contract regression on un-initialized machines, `_synced_scan_dirs` missing `include_files` sidecars on generic sources, "real merge" via `git merge-file` + opt-in Claude API for prose, and the load-bearing "invert conflict default" (local stays canonical, remote routes to `.sync-conflict-*`). All triaged into new Group 5 (Conflict UX & first-pull polish) — see ROADMAP.md. |
+| 0.8.12  | 2026-04-24 | Docs: README install command corrected to `pip install -e .` from a local clone (project is not on PyPI; PyPI publish is a Future item). |
+| 0.8.11  | 2026-04-24 | Group 4 / Track 4A — GitHub Actions CI workflow. Single `macos-latest` + Python 3.13 job runs `ruff check`, `ruff format --check`, `pytest tests/`, wheel build + install + `mm --version` smoke, and asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). Ruff pinned at 0.15.12 in dev deps with `[tool.ruff]` config + `E/F/W/I` rule set (isort enforcement locks Group 3's import hoisting). One-time fix-drift commit swept 113 violations clean. README CI badge added. No path filter (avoids the branch-protection pending-forever footgun for path-skipped required checks). |
 | 0.8.10  | 2026-04-24 | Group 3 — Test hygiene + style polish. Pre-flight (17 `backend: LocalBackend` hints in cli.py; 6 `Optional[X]` → `X \| None` + `Optional` dropped from typing import; 10 placeholderless f-strings stripped via AST audit; `crypto.py` keyring `except Exception` narrowed to `(KeyringError, ImportError)` + 7 regression pins in `test_crypto.py`). Track 3A (TestPushPullRoundTrip migrated from direct-API to `CliRunner.invoke`; new combined push→pull→conflict→tombstone E2E in test_integration.py; `test_deletion_propagation` renamed to `test_deletion_not_propagated_in_additive_model`; 86 lazy in-function imports hoisted across test_integration.py + test_conflict_copy.py). Codex adversarial during `/review` caught a P0 gap: `_auto_command_setup` + `_get_passphrase_or_exit` caught only `CryptoError`, so non-KeyringError propagation would have crashed uncaught — fixed in-line with 3 more regression pins before merge. 669 tests passing (+11 from baseline 658), zero behavior regressions. |
 | 0.8.9   | 2026-04-24 | Docs: multi-machine usage guide (PR #27) — README explains that `mm` reads config from `~/.config/mind-meld/config.toml`, adds "Setting up a second (or third) Mac" bootstrap recipe, and documents three-way convergence (line-union merge for .jsonl/MEMORY.md, mtime-skip with `.sync-conflict-*` for other divergent files, tombstone-propagated deletions). Expanded "Syncing gstack" with default `include_dirs`/`include_files` lists, set-union merge behavior for `analytics/*.jsonl`, machine-local file enumeration (sessions/, builder-profile.jsonl), and the `sync.sources` wholesale-replacement caveat. No code or behavior changes. |
 | 0.8.5   | 2026-04-24 | Track 1B (Group 1) — Walker + manifest + merge DRY: `_record_file` helper (collapses walk_claude_source + walk_generic_source per-file blocks), `_is_active_tombstone` helper (collapses generate_tombstones carry-forward + collect_tombstones aggregation), `_merge_strategy` + `_join_lines` helpers. Also drops redundant `normalize_manifest` call at manifest.py:607 — the call was positionally wrong (ran after the carry-forward loop had already consumed tombstone keys) and all three caller paths already satisfy the load-path invariant. `generate_tombstones` now enforces the caller contract at runtime: a v1-shaped dict (no `"sources"` key) raises `ManifestError` rather than silently producing zero tombstones. Two review passes landed corrections pre-merge: /plan-eng-review codex outside-voice (5 design corrections — `_record_file` signature taking `(path, base)`; direct `_merge_strategy -> Callable` instead of a registry; full-predicate `_is_active_tombstone` instead of parse-only helper; exact on_skip reason strings pinned in tests; Task 4 contract change owned with a test); /review cross-model adversarial (Claude + Codex independently confirmed a silent-delete-propagation regression on raw v1 input — fixed by promoting the documented contract to a runtime `ManifestError` guard). 10 new tests, 571 pass, zero regression against any v2-normalized caller. |
@@ -73,18 +77,39 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   tracks / 19 tasks (down from 8 groups / 12 tracks / 38 tasks).
 - **Public-release prep:** ✅ shipped in v0.8.3. MIT `LICENSE` file added
   + `/Users/kb/` placeholder scrubbed from SPEC / design doc / test fixture.
-- **Group 1 (Decomposition + DRY):** Track 1A ✅ shipped in v0.8.4
-  (decomposition + storage-key portion of pre-flight). Track 1B ✅ shipped
-  in v0.8.5 (`_record_file`, `_is_active_tombstone`, `_merge_strategy` +
-  `_join_lines`, plus dropped redundant `normalize_manifest` at
-  manifest.py:607 with the contract change owned by a dedicated test).
-  Remaining: pre-flight `constants.py` extraction (CONFLICT_INFIX,
-  CONFLICT_AGE_DAYS, TOMBSTONE_TTL_DAYS, FORMAT_VERSION) and the cli.py
-  literal-site migration; Track 1C (post-1A cli.py follow-ups) queued.
-- **Group 2 (Init flow + sync_log generalization + config polish):** queued.
-- **Group 3 (Test hygiene + style polish):** queued.
-- **Group 4 (Release infrastructure, GitHub Actions CI):** queued —
-  parallel-safe with everything; can land anytime.
+- **Group 1 (Decomposition + DRY):** Tracks 1A ✅ v0.8.4, 1B ✅ v0.8.5, 1C
+  ✅ v0.8.6 all shipped. Remaining: only the pre-flight `constants.py`
+  extraction (CONFLICT_INFIX, CONFLICT_AGE_DAYS, TOMBSTONE_TTL_DAYS,
+  FORMAT_VERSION) — storage-key helpers already shipped in v0.8.4.
+- **Group 2 (Init flow + sync_log generalization + config polish):** ✓ Complete
+  — Track 2A ✅ v0.8.7 (init decomposed into 4 helpers, `DEFAULT_SOURCES`
+  reused, `write_sync_log` keyed off source type), Track 2B ✅ v0.8.8
+  (backfill path preservation via `patch_config_on_disk`, ConfigError
+  prefix rename `init:` → `config:` on non-init paths).
+- **Group 3 (Test hygiene + style polish):** ✓ Complete — pre-flight + Track
+  3A ✅ v0.8.10 (CliRunner migration, combined push/pull/conflict E2E, 86
+  lazy-import hoists, type hints, `Optional[X]` → `X | None`,
+  placeholderless f-string strip, keyring `except Exception` narrowed to
+  `(KeyringError, ImportError)`). Codex `/review` caught a P0 keyring-
+  propagation gap pre-merge; fix shipped with 3 regression pins.
+- **Group 4 (Release infrastructure, GitHub Actions CI):** ✓ Complete —
+  Track 4A ✅ v0.8.11 (single macos+py3.13 job: ruff check + format-check
+  + pytest + wheel smoke + Keychain-backend load assert; ruff pinned
+  0.15.12; 113-violation drift sweep; README badge).
+- **Group 5 (Conflict UX & first-pull polish):** queued — surfaced
+  2026-04-24. 9 tasks across 3 serialized tracks (all touch `cli.py` in
+  different functions; intra-Group `Depends on:` annotations express the
+  ordering, same pattern as prior Tracks 1A/1C and 2A/2B). **Track 5A
+  (Auto-command + scope bugs, ships first):** P0 autopull silent-mode
+  contract regression + `_synced_scan_dirs` missing `include_files`
+  sidecars + `_save_and_register` rollback. **Track 5B (UX surfaces,
+  ships second):** relabel `mm resolve` prompt to user terms + inline
+  conflicted filenames in pull summary + `mm conflicts` table fixes +
+  download progress. **Track 5C (Conflict semantics, ships last):**
+  invert default so local stays canonical and remote routes to
+  `.sync-conflict-*` + real merge backends (`git merge-file` + opt-in
+  Claude API for prose). + 1 pre-flight (gstack `include_files` default
+  add). See ROADMAP.md.
 
 ### Version source of truth
 
