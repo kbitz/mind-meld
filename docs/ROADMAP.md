@@ -121,11 +121,7 @@ _✓ Complete (v0.9.0). 4 tasks shipped + scope expansions per /plan-ceo-review 
 _✓ Complete (v0.9.1). Per-source `exclude_patterns` glob list, consumer-boundary filter (`_pull_core` + `_push_core`), tombstone-suppression invariant, `mm log` JSONL writer + reader, `mm migrate-config` command, mm pull/push migration prompt + autopull/autopush breadcrumb (visible-failure contract), `mm sources` excluded-count column, `mm status` missing-excludes warning. 38 new tests including 5 IRON RULE regression pins (kb-mbp two-device case, tombstone-on-exclude-transition, tombstone-on-unexclude-transition, sidecar bypass guard, mm gc safety). Originally scoped to "conflict default inversion + real-merge backends"; pivoted via /plan-ceo-review on 2026-04-25 after analysing the kb-mbp 2026-04-24 first-pull data (25 divergent files, 24 of them per-machine artifacts that exclude_patterns prevents from ever conflicting). Real-merge backend deferred to Phase 2. Conflict inversion split out as Track 5E._
 
 ### Track 5E: Conflict default inversion (BREAKING)
-_~250-300 LOC + 18 tests · medium risk · [conflict semantics + fleet-version refusal]_
-_touches: src/mind_meld/cli.py, src/mind_meld/devices.py, src/mind_meld/manifest.py, SPEC.md, CHANGELOG.md, tests/_
-_Depends on: Track 5C landing first so 5E ships on top of the consumer-boundary-filter foundation._
-
-- **Invert `_apply_conflict`** (cli.py:928-981): canonical = local on conflict, remote → sidecar. Wrong default today for two reasons: (1) asymmetric blast radius — local is known-working on this machine, remote is unknown-from-elsewhere; (2) the visible `.sync-conflict-*` file should hold the *surprising* version, not the working one. Strict pull-start fleet-version refusal (`mm pull` exits non-zero before any I/O if any peer's `last_seen_version < 0.9.x`) so a mid-fleet upgrade can't produce dual-semantics conflict files. `is_conflict_filename` regex extended for `v0-` prefix; `_find_conflict_files` migrates pre-inversion files to the `v0-` prefix on first lock-protected discovery (mm pull / mm resolve only; mm conflicts is read-only). `_resolve_interactive_loop` dual-mode dispatch by filename prefix. _src/mind_meld/cli.py + devices.py + manifest.py + tests + SPEC.md + CHANGELOG; ~250-300 lines._ (M) [manual]
+_✓ Complete (v0.9.2). Inverted `_apply_conflict` (canonical = local; remote → sidecar) + strict pull-start fleet-version refusal (`mm pull` exits non-zero before any I/O if any peer's `last_seen_version < 0.9.2` or device.json is corrupt) + pre-inversion conflict-file migration to `v0-` prefix (lock-protected, mm pull / mm resolve only) + dual-mode resolve dispatch by filename prefix (`v0-` = pre-inversion ops; no prefix = post-inversion ops) + `mm conflicts` Mode column + `mm devices` Version column + `update_last_seen` writes `last_seen_version`. Added `packaging>=21.0` for `Version` parsing. 11 new tests in `TestInversion5E` pinning the IRON RULE regressions. 768 pass._
 
 ---
 
@@ -148,12 +144,12 @@ Group 5: Conflict UX & first-pull polish
   Track 5A ............... ✓ Complete (v0.8.15) ...... 3 tasks + preflight shipped
   Track 5B ............... ✓ Complete (v0.9.0) ....... 4 tasks + scope expansions shipped (BREAKING)
   Track 5C ............... ✓ Complete (v0.9.1) ....... 38 tests + 5 IRON RULE pins (exclude_patterns + log + migrate UX)
-  ├── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [pending]
-  └── Track 5E ........... ~250-300 LOC ... conflict-direction inversion + fleet-version refusal (BREAKING)  [ships next]
+  Track 5E ............... ✓ Complete (v0.9.2) ....... 11 tests + IRON RULE pins (conflict inversion + fleet refusal, BREAKING)
+  └── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [last]
 ```
 
-**Active total: 1 in-flight Group . 2 tracks remaining . 3 tasks**
-**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B + 5C (+ Group 5 preflight) — see PROGRESS.md.**
+**Active total: 1 in-flight Group . 1 track remaining . 2 tasks**
+**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B + 5C + 5E (+ Group 5 preflight) — see PROGRESS.md.**
 
 ---
 

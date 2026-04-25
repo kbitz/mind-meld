@@ -474,21 +474,27 @@ If the local file has been edited independently of the remote version (local has
 1. **Skip (S):** local mtime is newer than remote mtime — leave local as-is. Convergence happens on the next push.
 2. **Merge (M):** file has a mergeable type (`.jsonl` union-merge, `MEMORY.md` line-merge).
 3. **Write (W):** no local divergence — write the remote version to the canonical path.
-4. **Conflict-copy (C):** local has diverged AND isn't mergeable AND isn't newer — rename local to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.<ext>` (Syncthing convention, collision suffix on clash), then write remote to the canonical path. Local edits are preserved alongside.
+4. **Conflict-copy (C, INVERTED in v0.9.2):** local has diverged AND isn't mergeable AND isn't newer — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside.
 5. **Update-base (U):** remote hash matches local hash — no I/O, just refresh the last-synced state.
 
 Pull re-reads local hash and mtime at apply time so the decision reflects the actual state when writing, race-safe against editors running during a long pull.
 
+**Inversion (v0.9.2 BREAKING).** Pre-v0.9.2 did the opposite for [C]: local was renamed out to the sidecar and remote bytes were written to canonical. The inversion makes the visible `.sync-conflict-*` file hold the *surprising* version (remote, from elsewhere) rather than the working version (local, on this machine). Sidecar-write failure is per-file isolated and does NOT need a rollback dance — local is never overwritten in the conflict path.
+
+**Pre-inversion file migration.** Files produced by pre-v0.9.2 code carry no marker. The first lock-protected discovery in `mm pull` or `mm resolve` migrates them by renaming to `<stem>.sync-conflict-v0-<ts>-<dev>.<ext>` — the `v0-` prefix is reserved for migrated files; post-v0.9.2 code never produces it directly. The dual-mode resolve dispatch is keyed by the prefix, NOT by timestamp (sound — post-inversion code is the only producer of un-prefixed files). `mm conflicts` is intentionally read-only and does NOT migrate (it's lockless and would race autopull, codex-2 #5).
+
+**Strict pull-start fleet-version refusal (load-bearing).** `mm pull` exits non-zero before any I/O if any peer's `last_seen_version < 0.9.2`, OR if any peer's `device.json` is corrupt (can't read its version). Per-peer classification: safe / inactive (registered, never pushed → ALLOW) / pre-v0.9.2 (REFUSE) / dropped (REFUSE by storage key, codex-2 #3). The refusal cites every offending peer; recovery is to upgrade peers and have each push once. Last-resort: hand-edit `device.json` to add `"last_seen_version": "0.9.2"` only after verifying the peer is actually upgraded. Without this gate, a pre-v0.9.2 peer pushing now would produce conflict files under the OLD direction (canonical = remote, sidecar = local), and a v0.9.2 puller would silently mis-resolve them under the NEW dual-mode dispatch.
+
 **Conflict mode.** `mm pull --conflict-mode` takes one of three values:
-- `keep-both` (default): auto-rename local to `.sync-conflict-*`, remote wins canonical.
-- `prompt`: per-file prompt (unified diff + pick: canonical / force conflict to canonical / keep both / abort).
+- `keep-both` (default): auto-keep-both via the inverted [C] path — local stays at canonical, remote lands in `.sync-conflict-*`.
+- `prompt`: per-file prompt (unified diff + pick: local / remote / both / abort).
 - `fail`: preflight every file via `_predict_pull_outcome`. If any file would conflict, print the list and exit **3** with **no writes**. For CI use. Best-effort — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
 
 **Post-hoc resolution commands:**
 
-- `mm conflicts` — list every `.sync-conflict-*` file across synced sources with age and canonical sibling.
-- `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows a unified diff, prompts for a winner, acquires the mm lockfile so autopull can't race the rename/unlink. Deletions and renames propagate via the existing additive-sync tombstone machinery.
-- `mm gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days).
+- `mm conflicts` — list every `.sync-conflict-*` file across synced sources with age, canonical sibling, and per-row Mode column (`pre-v0.9.2` for `v0-`-prefixed files, `v0.9.2+` otherwise). Read-only; does NOT migrate pre-inversion files.
+- `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows a unified diff, prompts for a winner. Dual-mode dispatch by filename prefix: `v0-` → pre-inversion ops ((l) renames sidecar over canonical, (r) unlinks sidecar); no prefix → post-inversion ops ((l) unlinks sidecar, (r) renames sidecar over canonical). Acquires the mm lockfile so autopull can't race the rename/unlink. Migrates pre-inversion files to `v0-` prefix on first discovery.
+- `mm gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days). Matches both prefixed and un-prefixed forms via `is_conflict_filename`.
 
 **Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.mind-meld-log.md`, and `mm diff` annotations all reflect the split so cross-machine work is visible.
 

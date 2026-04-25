@@ -56,7 +56,12 @@ from mind_meld.crypto import (
     store_passphrase_in_keyring,
     verify_passphrase,
 )
-from mind_meld.devices import _list_devices_impl, register_device, update_last_seen
+from mind_meld.devices import (
+    _list_devices_impl,
+    list_devices_with_drops,
+    register_device,
+    update_last_seen,
+)
 from mind_meld.errors import (
     ConfigError,
     CryptoError,
@@ -99,6 +104,15 @@ from mind_meld.synclog import write_sync_log
 ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
 FetchStatus = Literal["ok", "missing", "corrupt"]
 CONFLICT_AGE_DAYS = 30
+
+# Track 5E (v0.9.2 BREAKING): minimum peer version required for safe pull.
+# v0.9.2 inverted the conflict-direction semantics — a peer running an
+# older mm would produce conflict files under the OLD direction (canonical
+# = remote, sidecar = local), but a v0.9.2 puller dispatches by filename
+# prefix (`v0-` = pre-inversion, no prefix = post-inversion) and would
+# silently mis-resolve the peer's just-produced files. Refuse the pull
+# until every peer reports last_seen_version >= this constant.
+INVERSION_MIN_VERSION = "0.9.2"
 
 
 @dataclass
@@ -814,7 +828,7 @@ def _print_pull_prediction(diff: DiffResult, base_path: Path, src_name: str) -> 
         console.print(f"    [dim]= skip[/dim]     {path} (local newer)")
     for path in sorted(buckets["conflict"]):
         console.print(
-            f"    [yellow]! conflict[/yellow] {path} (would rename local to .sync-conflict-*)"
+            f"    [yellow]! conflict[/yellow] {path} (would write remote to .sync-conflict-*)"
         )
     for path in sorted(buckets["unchanged"]):
         console.print(f"    [dim]  unchanged[/dim] {path}")
@@ -969,12 +983,18 @@ def _prompt_conflict_choice(
 #   local hash == remote hash               -> UNCHANGED
 #   should_merge(rel_path)                  -> MERGED    (jsonl / MEMORY.md)
 #   local mtime > remote mtime              -> SKIPPED   (local newer)
-#   local mtime <= remote mtime             -> CONFLICTED
-#        rename canonical -> .sync-conflict-<ts>-<device>.<ext>
-#        write  remote    -> canonical
+#   local mtime <= remote mtime             -> CONFLICTED  (v0.9.2 INVERTED)
+#        keep canonical at LOCAL bytes (no rename, no rollback)
+#        write REMOTE bytes -> .sync-conflict-<ts>-<device>.<ext>
 #
-#   Failures (rename / write) are isolated per-file: the local file is never
-#   left destroyed without a recoverable trail. Returns "failed" on error.
+#   Pre-v0.9.2 did the opposite (canonical = remote, sidecar = local). The
+#   inversion makes the visible `.sync-conflict-*` file hold the surprising
+#   bytes, not the working bytes. Pre-inversion files migrated by Track 5E
+#   carry a `v0-` prefix in the metadata position so resolve's dual-mode
+#   dispatch can pick the right semantics per file.
+#
+#   Failures (sidecar write) are isolated per-file: local is untouched at
+#   canonical because we never overwrite it. Returns "failed" on error.
 
 
 def _apply_write(
@@ -1022,19 +1042,26 @@ def _apply_conflict(
     remote_device_id: str,
     verbose: bool = False,
 ) -> ApplyOutcome:
-    """[C] conflict path: rename local to .sync-conflict-*, write remote to canonical.
+    """[C] conflict path (v0.9.2 INVERTED): keep local at canonical,
+    route remote bytes to .sync-conflict-*.
 
-    Rollback on write failure so canonical still points at something.
+    Pre-v0.9.2 (Tracks 5A/5B and earlier) did the opposite: rename local
+    out to the sidecar, write remote to canonical. Track 5E inverted the
+    default for two reasons: (1) asymmetric blast radius \u2014 local is the
+    known-working version on this machine, remote is the unknown-from-
+    elsewhere version; (2) the visible `.sync-conflict-*` should hold the
+    *surprising* version, not the working one. Mtime-skip already
+    handles "local newer," so the conflict path only fires when remote
+    is newer or mtimes are equal \u2014 but "remote newer" never meant "remote
+    correct for this machine."
 
-    # 5B-5C-REMAP-BOUNDARY: this is the PRODUCER. Today this function
-    # writes remote bytes to canonical and renames local out to
-    # .sync-conflict-*. Track 5C will INVERT this: keep local bytes at
-    # canonical, write remote to .sync-conflict-*. Every consumer marker
-    # in `_resolve_interactive_loop`, the conflicts table, and tests is
-    # mapped to today's semantics here. Flipping this function without
-    # also re-mapping every 5B-5C-REMAP-BOUNDARY in cli.py + tests will
-    # silently invert the resolve dispatch and cause data loss. Grep for
-    # `5B-5C-REMAP-BOUNDARY` before any change here.
+    Failure modes (per-file isolation; never destroys local without a
+    recoverable trail):
+      * sidecar path-build (empty/None remote_device_id from corrupt peer
+        manifest): warn, fail this file, keep walking.
+      * sidecar write fail: warn, fail this file. Local is untouched at
+        canonical because we never wrote it out \u2014 the inversion makes
+        rollback unnecessary.
     """
     try:
         conflict_path = conflict_filename(local_path, remote_device_id)
@@ -1047,27 +1074,23 @@ def _apply_conflict(
             f"  [red]conflict path build failed (local preserved):[/red] {rel_path} \u2014 {e}"
         )
         return "failed"
-    try:
-        local_path.rename(conflict_path)
-    except OSError as e:
-        console.print(
-            f"  [red]conflict rename failed (local preserved):[/red] {rel_path} \u2014 {e}"
-        )
-        return "failed"
 
+    # Inverted semantics: write remote bytes to the .sync-conflict-* sidecar.
+    # Canonical (local) is untouched \u2014 no rename + rollback dance needed
+    # because we never overwrite local in the conflict path. The sidecar
+    # filename has no `v0-` prefix \u2014 that prefix is reserved for
+    # pre-inversion files migrated by `_migrate_pre_inversion_conflict`,
+    # NOT new files produced post-inversion.
     try:
-        fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
+        fsutil.atomic_write_bytes(conflict_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
-        # Best-effort rollback so canonical still points at something.
-        try:
-            conflict_path.rename(local_path)
-        except OSError:
-            pass  # local now lives at conflict_path only \u2014 not lost, just moved
-        console.print(f"  [red]canonical write failed after rename:[/red] {rel_path} \u2014 {e}")
+        console.print(f"  [red]sidecar write failed (local preserved):[/red] {rel_path} \u2014 {e}")
         return "failed"
 
     if verbose:
-        console.print(f"  [yellow]conflict:[/yellow] {rel_path} -> {conflict_path.name}")
+        console.print(
+            f"  [yellow]conflict:[/yellow] {rel_path} (remote saved as {conflict_path.name})"
+        )
     return "conflicted"
 
 
@@ -1130,8 +1153,11 @@ def _apply_incoming_file(
     if interactive_resolve:
         choice = _prompt_conflict_choice(rel_path, local_path, plain_data)
         if choice == "keep-canonical":
+            # Post-inversion: canonical IS local, so "keep-canonical" =
+            # "keep-local" — both work as user-facing labels. The internal
+            # outcome stays "skipped" for back-compat with PullResult.
             if verbose:
-                console.print(f"  [dim]= {rel_path} (kept canonical by user)[/dim]")
+                console.print(f"  [dim]= {rel_path} (kept local by user)[/dim]")
             return "skipped"
         if choice == "keep-remote":
             # User overrode default keep-both by picking remote \u2014 overwrite
@@ -2124,6 +2150,95 @@ class _PerSourceResult:
         return any(self.outcomes[k] for k in self.outcomes if k != "unchanged")
 
 
+def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> None:
+    """Refuse pull if any peer's last_seen_version is pre-v0.9.2 OR the
+    peer's device.json is corrupt/shape-invalid.
+
+    Track 5E (v0.9.2 BREAKING): the conflict-direction inversion ships
+    incompatibly. A pre-v0.9.2 peer pushing now would produce conflict
+    files under the OLD direction (canonical = remote, sidecar = local),
+    but we dispatch by filename prefix (`v0-` = pre-inversion, no prefix
+    = post-inversion) and a peer's just-produced (un-prefixed) old-
+    direction file would be silently mis-resolved as post-inversion.
+
+    Per-peer classification:
+      * safe — last_seen_version is parseable and >= INVERSION_MIN_VERSION.
+      * inactive — last_seen ALSO missing (registered, never pushed). ALLOW
+        because the peer has no conflict files for us to misinterpret.
+      * pre-v0.9.2 — last_seen present but last_seen_version missing OR
+        parses to a version < INVERSION_MIN_VERSION. REFUSE.
+      * dropped — device.json corrupt/shape-invalid. REFUSE by storage
+        key — we can't read its version, so we can't trust its conflict
+        files (codex-2 #3).
+
+    Refusal exits non-zero via `_error` BEFORE any pull I/O. Implementation
+    uses the silent `list_devices_with_drops`; the loud-on-stderr
+    `_list_devices_warn` runs later in `_select_devices` only if the
+    fleet check passes.
+    """
+    from packaging.version import InvalidVersion, Version
+
+    valid, dropped = list_devices_with_drops(backend)
+    refusals: list[str] = []
+
+    for key, reason in dropped:
+        refusals.append(
+            f"  storage key {key} — corrupt device.json ({reason}); can't read last_seen_version"
+        )
+
+    try:
+        threshold = Version(INVERSION_MIN_VERSION)
+    except InvalidVersion:
+        # Defensive — INVERSION_MIN_VERSION is hardcoded.
+        return
+
+    for d in valid:
+        did = d.get("device_id")
+        if did == my_device_id:
+            continue
+        if not d.get("last_seen"):
+            # Inactive peer (registered, never pushed). No conflict files
+            # exist on storage from this peer — safe to ignore.
+            continue
+        version_str = d.get("last_seen_version")
+        if not isinstance(version_str, str) or not version_str:
+            refusals.append(
+                f"  device {d.get('device_name', '?')} ({did}) — "
+                f"last_seen_version missing (last push was on a pre-"
+                f"v{INVERSION_MIN_VERSION} mm)"
+            )
+            continue
+        try:
+            peer_version = Version(version_str)
+        except InvalidVersion:
+            refusals.append(
+                f"  device {d.get('device_name', '?')} ({did}) — "
+                f"last_seen_version={version_str!r} is malformed"
+            )
+            continue
+        if peer_version < threshold:
+            refusals.append(
+                f"  device {d.get('device_name', '?')} ({did}) — "
+                f"last_seen_version={version_str} < {INVERSION_MIN_VERSION}"
+            )
+
+    if refusals:
+        _error(
+            f"Mixed-version fleet detected. v{INVERSION_MIN_VERSION} "
+            f"inverted the conflict-file direction (canonical = local, "
+            f"sidecar = remote); a pre-v{INVERSION_MIN_VERSION} peer "
+            f"pushing now would produce conflict files under the OLD "
+            f"semantics that this puller can't safely dispatch.\n\n"
+            f"Update the following peer(s) to v{INVERSION_MIN_VERSION} "
+            f"and have them push at least once before pulling here:\n"
+            + "\n".join(refusals)
+            + "\n\nRun `mm devices` for the version table. "
+            "Last-resort recovery: hand-edit device.json to add "
+            f'"last_seen_version": "{INVERSION_MIN_VERSION}"' + " — only after "
+            "verifying the peer is actually upgraded."
+        )
+
+
 def _select_devices(
     backend: LocalBackend, my_device_id: str, from_device: str | None
 ) -> tuple[list[dict], list[dict]]:
@@ -2620,6 +2735,22 @@ def _pull_core(
     start = time.time()
     my_device_id = config["device"]["id"]
     backend = get_backend(config)
+
+    # Track 5E gate: refuse pull if any peer is pre-v0.9.2 OR has a
+    # corrupt device.json (we can't read its version). Runs BEFORE the
+    # pre-inversion migration sweep so we don't accidentally migrate
+    # files in a refusal scenario where the user is about to upgrade
+    # their peers and re-pull. Exits via _error → typer.Exit(1).
+    _check_fleet_version_or_refuse(backend, my_device_id)
+
+    # Pre-inversion conflict-file migration. Runs once per pull under the
+    # already-held mm lockfile — safe against autopull racing with another
+    # discovery walk. mm pull is about to potentially produce NEW (post-
+    # inversion) conflict files via `_apply_conflict`; without this sweep,
+    # the user's tree would end up with a mix of pre-inversion and post-
+    # inversion files indistinguishable except by mtime — and resolve's
+    # dual-mode dispatch needs the prefix, not the timestamp.
+    _find_conflict_files(config, migrate_pre_inversion=True)
 
     # Widened to carry path + type per source. Type is load-bearing for
     # the sync-log gate in _pull_one_source — keying on type (not name)
@@ -3235,6 +3366,7 @@ def devices() -> None:
     table.add_column("Name")
     table.add_column("ID")
     table.add_column("Last Push")
+    table.add_column("Version")
     table.add_column("")
 
     for d in device_list:
@@ -3242,10 +3374,16 @@ def devices() -> None:
         # `last_seen` is seeded only on push (not at register time), so a
         # registered-but-never-pushed device renders as an em-dash rather
         # than misleadingly showing its registration time.
+        # `last_seen_version` (v0.9.2+) records the mm version on the
+        # peer's last push. Missing value => peer hasn't pushed since
+        # upgrading to v0.9.2 \u2014 surface as em-dash so users can spot
+        # pre-v0.9.2 peers that are blocking pull via the fleet-version
+        # refusal gate.
         table.add_row(
             d.get("device_name", "?"),
             d["device_id"],
             d.get("last_seen", "\u2014"),
+            d.get("last_seen_version", "\u2014"),
             marker,
         )
 
@@ -3872,7 +4010,55 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     return dirs
 
 
-def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
+def _migrate_pre_inversion_conflict(path: Path) -> Path:
+    """Rename a pre-inversion conflict file to carry the `v0-` prefix.
+
+    Idempotent: a path already prefixed with `v0-` returns unchanged.
+    Failure (rename error, target collision) logs a warning to stderr
+    and returns the original path so the caller can keep walking —
+    losing one migration attempt is preferable to aborting the whole
+    conflict-discovery sweep.
+
+    MUST only be called from a lock-protected context (mm pull, mm
+    resolve). `mm conflicts` is intentionally read-only and lockless;
+    renaming there would race with autopull's own discovery walk
+    (codex-2 #5).
+    """
+    from mind_meld.manifest import (
+        CONFLICT_V0_PREFIX,
+        is_pre_inversion_conflict_filename,
+    )
+
+    name = path.name
+    if is_pre_inversion_conflict_filename(name):
+        return path
+    if not is_conflict_filename(name):
+        return path
+
+    idx = name.find(CONFLICT_INFIX)
+    if idx == -1:
+        return path  # defensive — is_conflict_filename guarantees presence
+    before = name[: idx + len(CONFLICT_INFIX)]
+    after = name[idx + len(CONFLICT_INFIX) :]
+    new_name = f"{before}{CONFLICT_V0_PREFIX}{after}"
+    new_path = path.with_name(new_name)
+    if new_path.exists():
+        return path  # collision — leave both copies in place for resolve
+    try:
+        path.rename(new_path)
+    except OSError as e:
+        stderr_console.print(
+            f"[yellow]warning:[/yellow] failed to migrate pre-inversion conflict file {path} — {e}"
+        )
+        return path
+    return new_path
+
+
+def _find_conflict_files(
+    config: dict,
+    *,
+    migrate_pre_inversion: bool = False,
+) -> list[tuple[str, Path, Path | None]]:
     """Walk all sync sources looking for .sync-conflict-* files.
 
     Scoped to the same paths mm push walks — won't surface conflict files
@@ -3888,8 +4074,21 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
          files for top-level entries like ~/.gstack/config.yaml are invisible
          to `mm conflicts` / `mm resolve` / `mm gc --conflicts` (the kb-mbp
          2026-04-24 first-pull bug — listed 5 of 6 conflicts).
+
+    `migrate_pre_inversion` (default False): if True, rename any
+    pre-inversion conflict files to carry the `v0-` prefix before
+    returning. Lock-protected callers ONLY (mm pull, mm resolve).
+    Pass False from `mm conflicts` (read-only; lockless — would race
+    autopull) and from `_gc_old_conflict_files` (mtime-based reaping
+    doesn't need the prefix discrimination, codex-2 #5).
     """
     hits: list[tuple[str, Path, Path | None]] = []
+
+    def _maybe_migrate(p: Path) -> Path:
+        if migrate_pre_inversion:
+            return _migrate_pre_inversion_conflict(p)
+        return p
+
     for src_cfg in get_sources(config):
         base_path = Path(src_cfg["path"]).expanduser().resolve()
         if not base_path.exists():
@@ -3904,9 +4103,14 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
                     continue
                 if not is_conflict_filename(conflict_path.name):
                     continue
+                conflict_path = _maybe_migrate(conflict_path)
                 canonical = _canonical_for_conflict(conflict_path)
                 hits.append(
-                    (src_cfg["name"], conflict_path, canonical if canonical.exists() else None)
+                    (
+                        src_cfg["name"],
+                        conflict_path,
+                        canonical if canonical.exists() else None,
+                    )
                 )
 
         # (2) Depth-0 sibling-glob for include_files entries. Gate on data
@@ -3929,6 +4133,7 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
                         continue
                     if not is_conflict_filename(conflict_path.name):
                         continue
+                    conflict_path = _maybe_migrate(conflict_path)
                     hits.append(
                         (
                             src_cfg["name"],
@@ -3962,25 +4167,34 @@ def _canonical_for_conflict(conflict_path: Path) -> Path:
 
 @app.command()
 def conflicts() -> None:
-    """List .sync-conflict-* files across all synced sources."""
+    """List .sync-conflict-* files across all synced sources.
+
+    Per-row column meaning depends on the filename prefix:
+      * `v0-` (pre-inversion, pre-v0.9.2 conflict file) — sidecar holds
+        LOCAL bytes; canonical holds REMOTE.
+      * no prefix (post-inversion, v0.9.2+) — canonical holds LOCAL;
+        sidecar holds REMOTE.
+
+    Read-only: never mutates conflict file names. Migration to the `v0-`
+    prefix happens lock-protected in `mm pull` and `mm resolve` only —
+    `mm conflicts` is lockless and any rename here would race autopull.
+    """
     config = _get_config()
     hits = _find_conflict_files(config)
     if not hits:
         console.print("[green]No conflict files.[/green]")
         return
 
-    # 5B-5C-REMAP-BOUNDARY: today, the .sync-conflict-* file holds local
-    # bytes (because _apply_conflict renames local out, writes remote to
-    # canonical). Track 5C inverts this. The "local"/"remote" column
-    # headers match today's mapping; 5C must update them when it inverts
-    # _apply_conflict, or switch to per-row labeling via filename
-    # timestamp (see ROADMAP Track 5C subtask filed by /plan-ceo-review D9).
+    from mind_meld.manifest import is_pre_inversion_conflict_filename
+
     table = Table(title=f"Conflict files ({len(hits)})")
     table.add_column("Source")
+    table.add_column("Mode")
     table.add_column("local", no_wrap=False, overflow="fold")
     table.add_column("remote", no_wrap=False, overflow="fold")
     table.add_column("Age")
     now = datetime.now(timezone.utc)
+    pre_inversion_seen = False
     for src_name, cpath, canonical in sorted(hits, key=lambda h: str(h[1])):
         try:
             mtime = datetime.fromtimestamp(cpath.stat().st_mtime, tz=timezone.utc)
@@ -3988,13 +4202,30 @@ def conflicts() -> None:
             age_str = f"{age.days}d" if age.days else f"{age.seconds // 3600}h"
         except OSError:
             age_str = "?"
-        canonical_display = str(canonical) if canonical else "[dim](gone)[/dim]"
-        table.add_row(src_name, str(cpath), canonical_display, age_str)
+        is_pre = is_pre_inversion_conflict_filename(cpath.name)
+        if is_pre:
+            pre_inversion_seen = True
+            mode = "[yellow]pre-v0.9.2[/yellow]"
+            # Pre-inversion: sidecar = local, canonical = remote.
+            local_display = str(cpath)
+            remote_display = str(canonical) if canonical else "[dim](gone)[/dim]"
+        else:
+            mode = "v0.9.2+"
+            # Post-inversion: canonical = local, sidecar = remote.
+            local_display = str(canonical) if canonical else "[dim](gone)[/dim]"
+            remote_display = str(cpath)
+        table.add_row(src_name, mode, local_display, remote_display, age_str)
     console.print(table)
     console.print(
         "\nRun [bold]mm resolve[/bold] to keep local, remote, or both "
         "interactively, or delete files manually with [bold]rm[/bold]."
     )
+    if pre_inversion_seen:
+        console.print(
+            "\n[dim]Pre-v0.9.2 conflict files are listed in the table — "
+            "run [bold]mm resolve[/bold] to migrate them to the new "
+            "filename convention before resolving.[/dim]"
+        )
 
 
 # ── recover ───────────────────────────────────────────────────────────
@@ -4208,7 +4439,10 @@ def resolve(
 
     failed = 0
     try:
-        hits = _find_conflict_files(config)
+        # Lock-protected discovery: opt into pre-inversion migration so any
+        # legacy `.sync-conflict-<ts>-<dev>.<ext>` files get renamed to the
+        # `v0-` prefix before resolve dispatches on the prefix below.
+        hits = _find_conflict_files(config, migrate_pre_inversion=True)
 
         if path:
             target = Path(path).expanduser().resolve()
@@ -4249,15 +4483,23 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
         console.print(f"\n[bold yellow]Conflict in {src_name}:[/bold yellow] {cpath}")
 
         if canonical is None:
-            # 5B-5C-REMAP-BOUNDARY: today, .sync-conflict-* holds local
-            # bytes (because _apply_conflict renames local out, writes
-            # remote to canonical). Track 5C inverts this. The preface
-            # below describes today's mapping; 5C must update the wording
-            # OR detect pre-inversion files via filename timestamp.
-            console.print(
-                "  [dim]No canonical file exists. The conflict file holds "
-                "your local edits from before the conflict was created.[/dim]"
-            )
+            # Dual-mode preface by filename prefix. Pre-inversion (`v0-`)
+            # files were produced when sidecar = local bytes; post-inversion
+            # files have sidecar = remote bytes. The promote/delete ops are
+            # the same; only the preface wording flips.
+            from mind_meld.manifest import is_pre_inversion_conflict_filename
+
+            if is_pre_inversion_conflict_filename(cpath.name):
+                console.print(
+                    "  [dim]No canonical file exists. This pre-v0.9.2 "
+                    "conflict file holds your LOCAL edits from before "
+                    "the conflict was created.[/dim]"
+                )
+            else:
+                console.print(
+                    "  [dim]No canonical file exists. This conflict file "
+                    "holds REMOTE bytes from another machine.[/dim]"
+                )
             console.print(
                 "  [dim]Promote it to make it the canonical file, "
                 "delete it to discard, or skip to leave it for later.[/dim]"
@@ -4295,26 +4537,43 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
             # else: skip (default)
             continue
 
-        # 5B-5C-REMAP-BOUNDARY: today, canonical holds remote bytes and
-        # cpath holds local bytes (set up by _apply_conflict). At Track 5C
-        # ship, this mapping inverts — canonical will hold local, cpath
-        # will hold remote. When 5C lands: swap the two .read_text calls
-        # below, swap the fromfile/tofile labels, and swap the underlying
-        # ops in the (l)/(r) dispatch further down.
+        # Dual-mode dispatch by filename prefix. `v0-` = pre-inversion
+        # (sidecar HOLDS local bytes; canonical holds remote). No prefix =
+        # post-inversion (canonical IS local; sidecar holds remote bytes).
+        # Picking by prefix (not timestamp) is sound: post-inversion files
+        # are produced by code that NEVER stamps the v0- prefix, and
+        # pre-inversion files are migrated to the prefix at discovery time
+        # by `_migrate_pre_inversion_conflict`. Mixed prefixes in one walk
+        # are expected during migration.
+        from mind_meld.manifest import is_pre_inversion_conflict_filename
+
+        is_pre_inversion = is_pre_inversion_conflict_filename(cpath.name)
+
         try:
-            remote_text = canonical.read_text(errors="replace").splitlines()
-            local_text = cpath.read_text(errors="replace").splitlines()
+            canonical_text = canonical.read_text(errors="replace").splitlines()
+            cpath_text = cpath.read_text(errors="replace").splitlines()
         except OSError as e:
             console.print(f"  [red]read failed:[/red] {e}")
             failed += 1
             continue
 
+        if is_pre_inversion:
+            # Pre-inversion: canonical = remote, cpath = local.
+            from_text, to_text = canonical_text, cpath_text
+            from_label = f"remote ({canonical.name})"
+            to_label = f"local  ({cpath.name})"
+        else:
+            # Post-inversion: canonical = local, cpath = remote.
+            from_text, to_text = canonical_text, cpath_text
+            from_label = f"local  ({canonical.name})"
+            to_label = f"remote ({cpath.name})"
+
         diff = list(
             difflib.unified_diff(
-                remote_text,
-                local_text,
-                fromfile=f"remote ({canonical.name})",
-                tofile=f"local  ({cpath.name})",
+                from_text,
+                to_text,
+                fromfile=from_label,
+                tofile=to_label,
                 lineterm="",
                 n=3,
             )
@@ -4332,11 +4591,22 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
         else:
             console.print("  [dim](files differ but text diff is empty — likely binary)[/dim]")
 
-        console.print(
-            "  [bold]Which side do you want to keep?[/bold] "
-            "local = your edits on this machine; "
-            "remote = bytes from the other machine."
-        )
+        if is_pre_inversion:
+            console.print(
+                "  [bold]Which side do you want to keep?[/bold] "
+                "local = your pre-conflict edits on this machine "
+                "(currently in the [italic]sidecar[/italic] file); "
+                "remote = bytes from the other machine "
+                "(currently at [italic]canonical[/italic])."
+            )
+        else:
+            console.print(
+                "  [bold]Which side do you want to keep?[/bold] "
+                "local = your edits on this machine "
+                "(currently at [italic]canonical[/italic]); "
+                "remote = bytes from the other machine "
+                "(currently in the [italic]sidecar[/italic] file)."
+            )
         console.print("  (l)ocal / (r)emote / (b)oth [default] / (a)bort")
         choice = typer.prompt("  Choice", default="b", show_default=False).strip().lower()
 
@@ -4361,32 +4631,47 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
         # delete the conflict file. (codex /review v0.9.0 — caught a real
         # silent-data-loss footgun the eng review missed.)
         if choice in ("l", "local"):
-            # 5B-5C-REMAP-BOUNDARY: today, "keep local" renames cpath
-            # (which holds local bytes) onto canonical. At Track 5C ship,
-            # canonical IS local already; "keep local" becomes
-            # `cpath.unlink()` (delete the remote-bytes sidecar).
-            try:
-                cpath.rename(canonical)
-                console.print(
-                    f"  [green]kept local; promoted[/green] {cpath.name} -> {canonical.name}"
-                )
-                resolved += 1
-            except OSError as e:
-                console.print(f"  [red]rename failed:[/red] {e}")
-                failed += 1
+            if is_pre_inversion:
+                # Pre-inversion: sidecar HOLDS local bytes — promote.
+                try:
+                    cpath.rename(canonical)
+                    console.print(
+                        f"  [green]kept local; promoted[/green] {cpath.name} -> {canonical.name}"
+                    )
+                    resolved += 1
+                except OSError as e:
+                    console.print(f"  [red]rename failed:[/red] {e}")
+                    failed += 1
+            else:
+                # Post-inversion: canonical IS local — drop the remote sidecar.
+                try:
+                    cpath.unlink()
+                    console.print(f"  [green]kept local; discarded remote[/green] {cpath.name}")
+                    resolved += 1
+                except OSError as e:
+                    console.print(f"  [red]delete failed:[/red] {e}")
+                    failed += 1
         elif choice in ("r", "remote"):
-            # 5B-5C-REMAP-BOUNDARY: today, "keep remote" unlinks cpath
-            # because canonical already holds remote bytes (written by
-            # _apply_conflict). At Track 5C ship, cpath IS remote;
-            # "keep remote" becomes `cpath.rename(canonical)` (overwrite
-            # canonical's local bytes with remote).
-            try:
-                cpath.unlink()
-                console.print(f"  [green]kept remote; deleted[/green] {cpath.name}")
-                resolved += 1
-            except OSError as e:
-                console.print(f"  [red]delete failed:[/red] {e}")
-                failed += 1
+            if is_pre_inversion:
+                # Pre-inversion: canonical IS remote — drop the local sidecar.
+                try:
+                    cpath.unlink()
+                    console.print(f"  [green]kept remote; discarded local[/green] {cpath.name}")
+                    resolved += 1
+                except OSError as e:
+                    console.print(f"  [red]delete failed:[/red] {e}")
+                    failed += 1
+            else:
+                # Post-inversion: sidecar HOLDS remote bytes — promote over local.
+                try:
+                    cpath.rename(canonical)
+                    console.print(
+                        f"  [green]kept remote; promoted[/green] {cpath.name} -> {canonical.name}"
+                    )
+                    resolved += 1
+                except OSError as e:
+                    console.print(f"  [red]rename failed:[/red] {e}")
+                    failed += 1
         elif choice in ("a", "abort"):
             raise typer.Abort()
         else:

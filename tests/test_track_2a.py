@@ -109,26 +109,36 @@ class TestApplyMerge:
 
 
 class TestApplyConflict:
-    def test_happy_path_renames_and_writes(self, tmp_path: Path) -> None:
+    def test_happy_path_keeps_local_writes_remote_to_sidecar(self, tmp_path: Path) -> None:
+        """Track 5E inversion: canonical stays at LOCAL bytes, REMOTE bytes
+        land in the .sync-conflict-* sidecar. Sidecar filename has NO
+        `v0-` prefix — that prefix is reserved for pre-inversion files
+        migrated by `_migrate_pre_inversion_conflict`."""
         local = tmp_path / "doc.md"
         local.write_bytes(b"local content")
         outcome = _apply_conflict(local, "doc.md", b"remote content", "devAAAA1234")
         assert outcome == "conflicted"
-        assert local.read_bytes() == b"remote content"
-        # Exactly one conflict sibling, holding local's original bytes.
+        # Local untouched at canonical.
+        assert local.read_bytes() == b"local content"
+        # Exactly one sidecar, holding the REMOTE bytes (post-inversion).
         siblings = [p for p in tmp_path.iterdir() if p.name.startswith("doc.sync-conflict-")]
         assert len(siblings) == 1
-        assert siblings[0].read_bytes() == b"local content"
+        assert siblings[0].read_bytes() == b"remote content"
+        # No `v0-` prefix on a freshly-produced post-inversion file.
+        assert "sync-conflict-v0-" not in siblings[0].name
 
     def test_empty_device_id_returns_failed(self, tmp_path: Path) -> None:
         local = tmp_path / "doc.md"
         local.write_bytes(b"local")
         outcome = _apply_conflict(local, "doc.md", b"remote", "")
         assert outcome == "failed"
-        # Local preserved at canonical (not renamed away).
+        # Local preserved at canonical (no rename happens post-inversion either).
         assert local.read_bytes() == b"local"
 
-    def test_write_failure_rolls_back(self, tmp_path: Path, monkeypatch) -> None:
+    def test_sidecar_write_failure_preserves_local(self, tmp_path: Path, monkeypatch) -> None:
+        """Post-inversion: sidecar write failure leaves local untouched
+        at canonical because we never overwrite it. No rollback needed —
+        the inversion eliminates the rename + rollback dance."""
         from mind_meld import cli as cli_module
 
         local = tmp_path / "doc.md"
@@ -140,9 +150,10 @@ class TestApplyConflict:
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
         outcome = _apply_conflict(local, "doc.md", b"remote", "devAAAA1234")
         assert outcome == "failed"
-        # Rollback: canonical exists (rolled back from conflict_path).
         assert local.exists()
         assert local.read_bytes() == b"local"
+        # No sidecar was written.
+        assert not any(p.name.startswith("doc.sync-conflict-") for p in tmp_path.iterdir())
 
 
 # ── _empty_outcomes ──────────────────────────────────────────────────
@@ -1381,6 +1392,10 @@ class TestWarningsSurvivePartialPull:
         monkeypatch.setattr(cli_module, "_download_and_apply", fake_download_and_apply)
         monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", raising_cleanup)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
+        # Track 5E: bypass the fleet-version check + migration sweep so
+        # the test stays scoped to corrupt-peer warning routing.
+        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(
             cli_module,
             "collect_tombstones",
@@ -1477,6 +1492,12 @@ class TestWriteSyncLogBestEffort:
         monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", lambda *a, **kw: 0)
         monkeypatch.setattr(cli_module, "write_sync_log", boom_write_sync_log)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
+        # Track 5E: _pull_core's fleet-version check fires before any
+        # other I/O. This unit test stubs get_backend → None to isolate
+        # sync-log behavior, so the fleet check has no real backend to
+        # query — bypass it.
+        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(
             cli_module,
             "collect_tombstones",

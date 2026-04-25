@@ -42,23 +42,48 @@ from mind_meld.errors import ManifestError
 # `notes.sync-conflict-log.md` or `notes.sync-conflict-2024-summary.md`
 # are NEVER false-positive-excluded. fnmatch char classes match exactly
 # one character, so the digit count is enforced precisely.
+#
+# Track 5E (v0.9.2 BREAKING) introduces an optional `v0-` prefix in the
+# metadata position to mark pre-inversion conflict files. Files without the
+# prefix were created by post-inversion code; files WITH the prefix were
+# either created by pre-inversion code AND migrated by `_find_conflict_files`,
+# or pre-inversion code that mm rewrote during migration. The dual-pattern
+# match keeps `mm gc --conflicts` and walker exclusion working uniformly
+# across both eras.
 CONFLICT_INFIX = ".sync-conflict-"
+CONFLICT_V0_PREFIX = "v0-"
 _DIGITS_8 = "[0-9]" * 8
 _DIGITS_6 = "[0-9]" * 6
 CONFLICT_PATTERN = f"*{CONFLICT_INFIX}{_DIGITS_8}-{_DIGITS_6}-*"
+CONFLICT_PATTERN_V0 = f"*{CONFLICT_INFIX}{CONFLICT_V0_PREFIX}{_DIGITS_8}-{_DIGITS_6}-*"
 
 
 def is_conflict_filename(name: str) -> bool:
     """Return True iff `name` is an mm/Syncthing-style conflict copy.
 
     Strict matcher: the suffix after `.sync-conflict-` must start with a
-    digit (timestamp). Used by the walker to keep conflict files local-only
-    and by `mm conflicts`/`mm gc --conflicts` to avoid false-positives on
-    user files that happen to contain `.sync-conflict-` in their name.
+    timestamp (or `v0-<timestamp>` for pre-inversion files migrated by
+    Track 5E). Used by the walker to keep conflict files local-only and by
+    `mm conflicts`/`mm gc --conflicts` to avoid false-positives on user
+    files that happen to contain `.sync-conflict-` in their name.
     """
     if not name:
         return False
-    return fnmatch.fnmatch(name, CONFLICT_PATTERN)
+    return fnmatch.fnmatch(name, CONFLICT_PATTERN) or fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
+
+
+def is_pre_inversion_conflict_filename(name: str) -> bool:
+    """Return True iff `name` is a `v0-`-prefixed conflict copy.
+
+    Used by `_resolve_interactive_loop`'s dual-mode dispatch: `v0-` files
+    were produced under pre-inversion semantics (canonical = remote, sidecar
+    = local), so `(l)ocal` means `rename sidecar -> canonical`. Files without
+    the prefix are post-inversion and `(l)ocal` means `unlink sidecar`
+    (canonical IS local already).
+    """
+    if not name:
+        return False
+    return fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
 
 
 EXCLUDED = [

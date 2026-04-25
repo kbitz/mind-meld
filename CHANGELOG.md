@@ -2,6 +2,128 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.2] - 2026-04-25 — BREAKING
+
+**Track 5E (Conflict default inversion).** `_apply_conflict` now keeps
+LOCAL bytes at canonical and writes REMOTE bytes to the `.sync-conflict-*`
+sidecar — the opposite of every prior version. Two reasons: (1)
+asymmetric blast radius — local is the known-working version on this
+machine, remote is the unknown-from-elsewhere version; (2) the visible
+sidecar should hold the *surprising* bytes, not the working ones.
+Mtime-skip already handles "local newer," so the conflict path only
+fires when remote is newer or mtimes are equal — but "remote newer" never
+meant "remote correct for this machine."
+
+**Strict pull-start fleet-version refusal (load-bearing).** `mm pull`
+now exits non-zero BEFORE any download/write if any peer device's
+`last_seen_version < 0.9.2`, OR if any peer's `device.json` is corrupt
+(can't read its version → can't trust its conflict files). Per-peer
+classification: safe / inactive (registered, never pushed → ALLOW) /
+pre-v0.9.2 (REFUSE) / dropped (REFUSE by storage key). The refusal
+message names every offending peer and points at `mm devices` for the
+version table. Recovery: upgrade peers and have each push once before
+re-pulling. Last-resort: hand-edit `device.json` to add
+`"last_seen_version": "0.9.2"` (only after verifying peer is actually
+upgraded).
+
+**Pre-inversion conflict-file migration.** Existing `.sync-conflict-*`
+files produced by pre-v0.9.2 code carry no marker. The first
+lock-protected discovery in `mm pull` or `mm resolve` migrates them by
+renaming to `.sync-conflict-v0-<ts>-<dev>.<ext>`. Idempotent (`v0-`
+prefix is its own no-op signal); collision-safe (target exists → leave
+both, don't overwrite); per-file rename failure logs and continues.
+`mm conflicts` does NOT migrate — it's lockless and would race autopull
+(codex-2 #5).
+
+**Dual-mode resolve dispatch by filename prefix (NOT timestamp).** `v0-`
+files dispatch under PRE-inversion semantics (sidecar = local bytes;
+canonical = remote): `(l)ocal` renames sidecar over canonical, `(r)emote`
+unlinks sidecar. Files without the prefix dispatch under POST-inversion
+semantics (canonical = local; sidecar = remote): `(l)ocal` unlinks
+sidecar, `(r)emote` renames sidecar over canonical. Per-file diff labels
+flip per row; the prompt copy clarifies which file currently holds which
+side.
+
+**`mm conflicts` table** gains a "Mode" column (`pre-v0.9.2` /
+`v0.9.2+`). Per-row "local" / "remote" column meanings derive from the
+prefix. Footer hint when pre-inversion files are present nudges users to
+`mm resolve` for migration.
+
+**`mm devices` table** gains a "Version" column showing each peer's
+`last_seen_version`. `update_last_seen` writes `last_seen_version:
+__version__` alongside `last_seen` on every push (forward-compatible —
+older mm tolerates unknown keys).
+
+**`packaging>=21.0`** added to `dependencies` for `Version` parsing in
+the fleet-version comparator.
+
+**11 new tests** in `tests/test_integration.py::TestInversion5E` pinning
+the IRON RULE regressions: inversion correctness (canonical = local,
+sidecar = remote, no `v0-` prefix on fresh files), mixed-version refusal
+correctness (4 sub-cases: pre-v0.9.2 explicit, missing field, inactive
+peer permitted, corrupt device.json refuses by key), self-exclusion
+from scan (no peers → no self-refusal), pre-inversion file resolves
+under v0- dispatch (both `(l)` and `(r)` ops), `mm conflicts` is
+read-only (no rename), `mm resolve` migrates pre-inversion files. 768
+pass.
+
+### Breaking
+- Conflict-direction inversion: pre-existing `.sync-conflict-*` files
+  produced by pre-v0.9.2 code now require the migration step before
+  resolve dispatches them correctly. `mm pull` and `mm resolve` perform
+  the migration automatically; manual migration via `mv` is also safe
+  (rename `<x>.sync-conflict-<ts>-<dev>.<ext>` →
+  `<x>.sync-conflict-v0-<ts>-<dev>.<ext>`).
+- `mm pull` REFUSES when any peer reports a pre-v0.9.2
+  `last_seen_version` (or none, if last_seen is present). Upgrade peers
+  to v0.9.2 and have each push at least once before pulling here.
+- `_apply_conflict` no longer renames the local file. Callers that
+  assumed the rename + rollback dance must be updated; the in-tree
+  `_resolve_interactive_loop` and the test suite were both updated.
+
+### Added
+- `INVERSION_MIN_VERSION = "0.9.2"` constant in `cli.py`.
+- `is_pre_inversion_conflict_filename(name) -> bool` in `manifest.py`;
+  `CONFLICT_PATTERN_V0` / `CONFLICT_V0_PREFIX` constants.
+- `list_devices_with_drops(backend)` in `devices.py` — variant of
+  `list_devices` returning `(valid, dropped)` so the fleet refusal
+  gate can name the offending storage key (codex-2 #3).
+- `_check_fleet_version_or_refuse(backend, my_device_id)` in `cli.py`,
+  invoked at the top of `_pull_core` before any I/O.
+- `_migrate_pre_inversion_conflict(path)` helper in `cli.py`;
+  `_find_conflict_files(config, *, migrate_pre_inversion=False)` opt-in
+  flag wired into `mm pull` / `mm resolve` (lock-protected callers only).
+- `mm conflicts` "Mode" column; `mm devices` "Version" column.
+- 11 new tests in `TestInversion5E`.
+
+### Changed
+- `_apply_conflict` body: writes remote to sidecar (no rename, no
+  rollback); local stays at canonical.
+- `_resolve_interactive_loop`: dual-mode dispatch by filename prefix.
+  Diff labels flip per row.
+- `_predict_pull_outcome` user-facing string updated to "would write
+  remote to .sync-conflict-*".
+- `_apply_incoming_file` decision-tree comment updated to reflect
+  inversion + per-row label note.
+- Track 5B's `5B-5C-REMAP-BOUNDARY` markers throughout `cli.py` and
+  `tests/test_conflict_copy.py` removed; the inversion is now in place.
+- `update_last_seen` writes `last_seen_version` on every push.
+- `pyproject.toml`: `packaging>=21.0` added to dependencies.
+
+### Recovery from a stuck "Mixed-version fleet detected" refusal
+1. Check `mm devices` — the offending peer(s) show `—` or a pre-v0.9.2
+   value in the Version column.
+2. Upgrade each peer (`pip install --upgrade mind-meld`) and run
+   `mm push` from each one.
+3. Re-run `mm pull` here. The fleet check should now pass.
+
+If a peer is permanently offline / decommissioned, hand-edit its
+`devices/<id>.json` in the storage root to add
+`"last_seen_version": "0.9.2"` — but only do this if you're certain the
+peer will never push again (or has been verified-upgraded out-of-band).
+The check exists to prevent dual-semantics conflict-file production
+that this puller would silently mis-resolve.
+
 ## [0.9.1] - 2026-04-25
 
 **Track 5C (exclude_patterns + log + migration UX) — additive.** Per-source

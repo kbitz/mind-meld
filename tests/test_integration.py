@@ -11,6 +11,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
@@ -218,13 +219,14 @@ class TestPushPullRoundTrip:
 
         assert runner.invoke(app, ["pull", "--conflict-mode", "keep-both"]).exit_code == 0
 
-        # Canonical path carries A's new content.
-        assert role_b.read_text() == "---\nname: role\n---\nPrincipal engineer"
-        # B's local edit survived as a .sync-conflict-* sibling.
+        # Track 5E inversion: canonical now stays at LOCAL bytes (B's
+        # edit), and REMOTE bytes (A's push) land in the .sync-conflict-*
+        # sidecar. Pre-v0.9.2 was the opposite.
+        assert role_b.read_text() == "---\nname: role\n---\nSomething else entirely"
         memory_b = role_b.parent
         conflict_siblings = list(memory_b.glob("user_role.sync-conflict-*.md"))
         assert len(conflict_siblings) == 1, f"Expected one conflict copy, got {conflict_siblings}"
-        assert conflict_siblings[0].read_text() == "---\nname: role\n---\nSomething else entirely"
+        assert conflict_siblings[0].read_text() == "---\nname: role\n---\nPrincipal engineer"
 
         # Phase 3: A deletes feedback.md and pushes. Tombstone is recorded in
         # A's manifest. B pulls; B's local feedback.md is preserved (additive),
@@ -248,7 +250,7 @@ class TestPushPullRoundTrip:
             f"Expected feedback.md tombstone in A's manifest, got keys: {list(tombstones)}"
         )
 
-        # Sanity: original role content pre-modification is not the current canonical.
+        # Sanity: B's modified content is what's now at canonical (post-inversion).
         assert original_role != role_b.read_text()
 
 
@@ -868,6 +870,320 @@ class TestMmLogCommand:
         for line in lines:
             rec = json.loads(line)
             assert rec["action"] == "excluded"
+
+
+class TestInversion5E:
+    """Track 5E IRON RULE regression pins.
+
+    Pins the conflict-direction inversion (canonical = local, sidecar =
+    remote), the strict pull-start fleet-version refusal, the dual-mode
+    resolve dispatch by filename prefix, and the pre-inversion file
+    migration. Failing these tests blocks ship.
+    """
+
+    def _make_claude_config(self, tmp_path, storage_dir, claude_dir, device_id, device_name):
+        config_path = tmp_path / f"config_{device_id}.toml"
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        return config_path
+
+    def _bootstrap(self, storage_dir):
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        return backend
+
+    def _activate(self, monkeypatch, config_path):
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+    def test_inversion_canonical_stays_local_remote_in_sidecar(self, tmp_path, monkeypatch):
+        """Round-trip: A pushes, B locally diverges, B pulls. Post-inversion,
+        canonical stays at B's LOCAL edit, A's REMOTE bytes land in the
+        sidecar. Plus: rollback path is irrelevant (no rename happens),
+        so canonical is preserved on sidecar-write failure too."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        memory_a = claude_a / "projects" / "-Users-kb-myapp" / "memory"
+        memory_a.mkdir(parents=True)
+        (memory_a / "role.md").write_text("A initial")
+        memory_b = claude_b / "projects" / "-Users-kb-myapp" / "memory"
+        memory_b.mkdir(parents=True)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = self._make_claude_config(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        config_b = self._make_claude_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # Round-trip phase 1: A pushes, B pulls clean.
+        self._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        self._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        role_b = memory_b / "role.md"
+        assert role_b.exists()
+
+        # Phase 2: divergent edits. A pushes new content; B edits locally.
+        self._activate(monkeypatch, config_a)
+        (memory_a / "role.md").write_text("A second push")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        self._activate(monkeypatch, config_b)
+        role_b.write_text("B local edit")
+        old = time.time() - 3600
+        os.utime(role_b, (old, old))  # Backdate so pull sees remote-newer.
+
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+
+        # Inversion: canonical = local; sidecar = remote.
+        assert role_b.read_text() == "B local edit"
+        siblings = list(memory_b.glob("role.sync-conflict-*.md"))
+        assert len(siblings) == 1
+        assert siblings[0].read_text() == "A second push"
+        # No `v0-` prefix on a freshly-produced post-inversion file.
+        assert "sync-conflict-v0-" not in siblings[0].name
+
+    def test_pull_refuses_when_peer_pre_inversion(self, tmp_path, monkeypatch):
+        """Mixed-version refusal: peer's last_seen_version < INVERSION_MIN_VERSION
+        => mm pull exits non-zero before any I/O with peer name in message."""
+        from mind_meld.cli import INVERSION_MIN_VERSION
+        from mind_meld.devices import register_device as _register
+        from mind_meld.storage.keys import device_key
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        backend = self._bootstrap(storage_dir)
+        _register(backend, "dev-self", "Self")
+        _register(backend, "dev-old", "OldPeer")
+        # Manually write a stale device.json for the old peer with a
+        # pre-inversion last_seen_version. The fleet check must refuse.
+        old_data = {
+            "device_id": "dev-old",
+            "device_name": "OldPeer",
+            "registered": "2026-01-01T00:00:00+00:00",
+            "last_seen": "2026-04-01T00:00:00+00:00",
+            "last_seen_version": "0.9.1",  # pre-INVERSION_MIN_VERSION
+        }
+        backend.put(device_key("dev-old"), json.dumps(old_data).encode())
+
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 1, result.output
+        # Refusal cites the offending peer (via stderr — _error routes there).
+        combined = (result.output or "") + (result.stderr or "")
+        assert "OldPeer" in combined
+        assert "Mixed-version" in combined or "0.9.1" in combined
+        # Threshold appears in the message.
+        assert INVERSION_MIN_VERSION in combined
+
+    def test_pull_refuses_when_peer_last_seen_version_missing(self, tmp_path, monkeypatch):
+        """Peer last_seen present (active), last_seen_version missing — REFUSE."""
+        from mind_meld.devices import register_device as _register
+        from mind_meld.storage.keys import device_key
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        backend = self._bootstrap(storage_dir)
+        _register(backend, "dev-self", "Self")
+        _register(backend, "dev-stale", "StalePeer")
+        # Active peer (last_seen present) but no last_seen_version.
+        stale_data = {
+            "device_id": "dev-stale",
+            "device_name": "StalePeer",
+            "registered": "2026-01-01T00:00:00+00:00",
+            "last_seen": "2026-04-01T00:00:00+00:00",
+        }
+        backend.put(device_key("dev-stale"), json.dumps(stale_data).encode())
+
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 1, result.output
+        combined = (result.output or "") + (result.stderr or "")
+        assert "StalePeer" in combined
+
+    def test_pull_proceeds_when_peer_inactive(self, tmp_path, monkeypatch):
+        """Inactive peer (registered, never pushed): no last_seen → ALLOW."""
+        from mind_meld.devices import register_device as _register
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        backend = self._bootstrap(storage_dir)
+        _register(backend, "dev-self", "Self")
+        _register(backend, "dev-newpeer", "NewPeer")  # registered, no last_seen
+
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # Pull proceeds (no manifests to download, but doesn't refuse).
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+
+    def test_pull_proceeds_with_no_peers(self, tmp_path, monkeypatch):
+        """Self-only fleet: pull does NOT self-refuse on its own version."""
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-self", "Self")
+
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+
+    def test_pull_refuses_when_peer_device_json_corrupt(self, tmp_path, monkeypatch):
+        """Dropped peer (corrupt device.json): refuse and cite the storage key."""
+        from mind_meld.devices import register_device as _register
+        from mind_meld.storage.keys import DEVICES_PREFIX
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        backend = self._bootstrap(storage_dir)
+        _register(backend, "dev-self", "Self")
+        # Write a malformed device.json directly.
+        bad_key = f"{DEVICES_PREFIX}dev-bad.json"
+        backend.put(bad_key, b"{not valid json}")
+
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 1, result.output
+        combined = (result.output or "") + (result.stderr or "")
+        assert bad_key in combined or "dev-bad" in combined
+
+    def test_pre_inversion_file_resolves_under_v0_dispatch(self, tmp_path, monkeypatch):
+        """A `v0-`-prefixed file (sidecar = local, canonical = remote) routes
+        through the pre-inversion arm of the dual dispatch: (l)ocal renames
+        sidecar over canonical, recovering local edits."""
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "doc.md"
+        canonical.write_bytes(b"remote content")  # pre-inversion: canonical = remote
+        # `v0-`-prefixed sidecar — pre-inversion semantics.
+        sidecar = tmp_path / "doc.sync-conflict-v0-20260420-120000-devA1234.md"
+        sidecar.write_bytes(b"local content")
+
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        _resolve_interactive_loop([("s1", sidecar, canonical)])
+
+        # (l) under v0- prefix = sidecar.rename(canonical). Local recovered.
+        assert canonical.read_bytes() == b"local content"
+        assert not sidecar.exists()
+
+    def test_pre_inversion_file_keep_remote_unlinks_local_sidecar(self, tmp_path, monkeypatch):
+        """A `v0-`-prefixed file with (r)emote choice: canonical IS remote,
+        so we drop the local sidecar."""
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "doc.md"
+        canonical.write_bytes(b"remote content")
+        sidecar = tmp_path / "doc.sync-conflict-v0-20260420-120000-devA1234.md"
+        sidecar.write_bytes(b"local content")
+
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
+        _resolve_interactive_loop([("s1", sidecar, canonical)])
+
+        assert canonical.read_bytes() == b"remote content"
+        assert not sidecar.exists()
+
+    def test_mm_conflicts_is_read_only(self, tmp_path, monkeypatch):
+        """mm conflicts must NOT migrate pre-inversion files — codex-2 #5
+        race against autopull. The sidecar's filename stays unchanged."""
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        memory = claude_dir / "projects" / "-Users-kb-app" / "memory"
+        memory.mkdir(parents=True)
+        canonical = memory / "role.md"
+        canonical.write_bytes(b"remote content")
+        # Pre-inversion-style sidecar WITHOUT the v0- prefix.
+        legacy = memory / "role.sync-conflict-20260420-120000-devA1234.md"
+        legacy.write_bytes(b"local content")
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-self", "Self")
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["conflicts"])
+        assert result.exit_code == 0, result.output
+        # Filename UNCHANGED — no migration happened.
+        assert legacy.exists()
+        assert not (memory / "role.sync-conflict-v0-20260420-120000-devA1234.md").exists()
+
+    def test_mm_resolve_migrates_pre_inversion_files(self, tmp_path, monkeypatch):
+        """mm resolve runs under the lockfile and DOES migrate pre-inversion
+        files to the v0- prefix on first discovery."""
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        memory = claude_dir / "projects" / "-Users-kb-app" / "memory"
+        memory.mkdir(parents=True)
+        canonical = memory / "role.md"
+        canonical.write_bytes(b"remote content")
+        legacy = memory / "role.sync-conflict-20260420-120000-devA1234.md"
+        legacy.write_bytes(b"local content")
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-self", "Self")
+        config_path = self._make_claude_config(
+            tmp_path, storage_dir, claude_dir, "dev-self", "Self"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        # User picks 'b' (kept both — no further mutation).
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "b")
+
+        result = runner.invoke(app, ["resolve"])
+        assert result.exit_code == 0, result.output
+        # Migration happened — old name is gone, v0- name exists.
+        assert not legacy.exists()
+        migrated = memory / "role.sync-conflict-v0-20260420-120000-devA1234.md"
+        assert migrated.exists()
+        assert migrated.read_bytes() == b"local content"
 
 
 class TestSyncLog:
