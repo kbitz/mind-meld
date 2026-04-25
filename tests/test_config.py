@@ -807,7 +807,13 @@ class TestGetSourcesDisabledFilter:
         claude_dir.mkdir()
         gstack_dir = tmp_path / ".gstack"
         gstack_dir.mkdir()
+        # Both Path.home() AND $HOME need redirecting: get_sources uses
+        # expanduser() which reads $HOME (not Path.home()), and the
+        # auto-detect branch uses Path.home(). Patching only Path.home
+        # passes locally if real ~/.claude exists, but fails in CI where
+        # $HOME points at a clean /Users/runner with no ~/.claude.
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         config = {
             "device": {"id": "abc", "name": "Mac"},
@@ -824,6 +830,7 @@ class TestGetSourcesDisabledFilter:
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         config = {
             "device": {"id": "abc", "name": "Mac"},
@@ -840,6 +847,7 @@ class TestGetSourcesDisabledFilter:
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         config = {
             "device": {"id": "abc", "name": "Mac"},
