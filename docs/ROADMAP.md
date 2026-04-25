@@ -12,16 +12,20 @@ Every item targets the v1.0 release.
 
 **Correctness foundation, error discipline, decomposition + DRY (Tracks
 1A/1B/1C), init flow + sync_log generalization (Group 2), test hygiene +
-style polish (Group 3), CI infrastructure (Group 4), and Track 5A's
+style polish (Group 3), CI infrastructure (Group 4), Track 5A's
 auto-command + scope bug bundle (with Group 5's gstack `include_files`
-preflight) all shipped through v0.8.15.** See `docs/PROGRESS.md` for the
-full version history. Group 1 is fully shipped — its remaining
-`constants.py` preflight was dropped after a `/plan-eng-review` cohesion
-check (2 of 4 constants are single-module, extraction would split the
-cohesive `FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair). Group 5 still
-in flight: Track 5D adds two adversarial-review follow-ups that harden the
-v0.8.15 Track 5A ship (next up); Track 5B relabels the resolve/conflicts UX;
-Track 5C inverts the conflict default and adds real merge.
+preflight), and Track 5B's resolve/conflicts UX vocabulary unification
+(with v0.9.0 BREAKING input-letter change) all shipped through v0.9.0.**
+See `docs/PROGRESS.md` for the full version history. Group 1 is fully
+shipped — its remaining `constants.py` preflight was dropped after a
+`/plan-eng-review` cohesion check (2 of 4 constants are single-module,
+extraction would split the cohesive
+`FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair). Group 5 still in
+flight: Track 5D adds two adversarial-review follow-ups that harden the
+v0.8.15 Track 5A ship; Track 5C inverts the conflict default and adds
+real merge backends (inherits a load-bearing subtask from Track 5B's CEO
+review: handle pre-inversion `.sync-conflict-*` files via timestamp-based
+mode detection or one-time migration).
 
 ---
 
@@ -111,14 +115,7 @@ batch, ships before 5B/5C so the v0.8.15 fixes harden cleanly.
 - **`_save_and_register` not crash-safe between `save_config` and `register_device`** — surfaced by the v0.8.15 `/review` adversarial pass. The new rollback try/except handles `(StorageError, OSError, MindMeldError)` from `register_device`, but only catches Python exceptions. A SIGKILL, OOM, or power loss in the window between `save_config()` returning and `register_device()` either succeeding or raising leaves the user with a local config claiming a `device_id` that storage's `devices/<id>.json` doesn't contain — exactly the orphan state the v0.8.15 rollback was supposed to prevent. Init's existing overwrite prompt (cli.py:1474) is the only safety net; a user who answers "no" stays orphaned silently. Two viable fixes: (a) swap order — `register_device` first (storage write), then `save_config` (local write); orphan storage entries are harmless and cleanable, but orphan local config silently breaks pushes. (b) Add a `device_registered: bool` sentinel committed only after register succeeds; init detects sentinel-missing and re-runs register on next start. (a) is simpler; (b) is more robust against future failure modes. _src/mind_meld/cli.py + possibly src/mind_meld/devices.py + tests, ~30-50 lines._ (S-M) [review]
 
 ### Track 5B: Pull / resolve / conflicts UX surfaces
-_4 tasks · ~0.5 day (human) / ~25 min (CC) · low risk · [cli.py UX]_
-_touches: src/mind_meld/cli.py_
-_Depends on: Track 5D landing first (continues the cli.py serial chain after 5A's v0.8.15 ship) — disjoint functions but git-coordination cost is real._
-
-- **Relabel `mm resolve` interactive prompt to user terms** — `cli.py:3629-3633`: today's `(c)anonical / (f)orce conflict → canonical / (b)oth / (a)bort` reads as internal jargon. User can't tell that "canonical" holds *remote* bytes and "conflict" holds *local* bytes, so picking (c) silently throws away local edits. Relabel to `(l)ocal / (r)emote / (b)oth [default] / (a)bort` with a one-line preface naming which side is which. Also fix the parallel `(p)romote / (d)elete / (s)kip` jargon at `cli.py:3568-3576`. Pair with the inversion task (Track 5C) so labels match file-on-disk reality post-flip. Lower-risk to ship independently first. _src/mind_meld/cli.py `_resolve_interactive_loop`, ~20 lines._ (XS) [manual]
-- **Pull summary lists conflicted (and failed) files inline** — `_print_pull_summary` cli.py:2197-2250: per-source counts already accumulate paths in `r.outcomes["conflicted"]` / `["failed"]` but never display them. User has to run `mm conflicts` just to learn *which* 6 files conflicted. Fix: when `src_conflicted > 0` (and not quiet), list each path under the per-source line; same for failed. Cap at 20 with `... and N more` overflow. Print path relative to source's base — source name in header already disambiguates. _src/mind_meld/cli.py `_print_pull_summary`, ~10-15 lines._ (XS) [manual]
-- **`mm conflicts` table: stop truncating + drop jargon labels** — Screenshot 2026-04-24 shows `kbitz-cl…` / `kbitz-fi…` at typical terminal width; both columns repeat the same `~/.gstack/projects/...` parent. Fix surface (cli.py:3289-3317): (c) rename "Conflict"/"Canonical" labels to "local"/"remote" (matches user's mental model + pairs with inversion); (d) Rich `Table(no_wrap=False, overflow="fold")` so paths wrap rather than truncate. Lowest-risk standalone change is just (c)+(d). Layout rework — collapse `~`, drop one column with separate suffix column — can follow when convenient. _src/mind_meld/cli.py `conflicts()`, ~20-40 lines._ (S) [manual]
-- **`mm pull` progress output during download loop** — `cli.py:1074-1112`'s `_download_and_apply` runs silently between the per-device header (cli.py:2390) and the final summary. On first-pull-on-a-new-Mac, `backend.get(bkey)` blocks on iCloud placeholder materialization; kb-mbp 2026-04-24 saw 286 files / 263s wall, no output, visually identical to a hung process. `--verbose` doesn't help — verbose paths fire AFTER each file's blocking read. Fix: Rich `Progress` for TTY (`from rich.progress import Progress`), plain "downloading N/total" counter every K files for non-TTY, no output for `quiet=True` (autopull). Display bytes-transferred — already tracked. _src/mind_meld/cli.py `_download_and_apply` and `_pull_one_source`, ~30 lines._ (S) [manual]
+_✓ Complete (v0.9.0). 4 tasks shipped + scope expansions per /plan-ceo-review (D3 vocabulary unification across resolve flow, D4 loud rejection of legacy `c`/`f`, D5 verbose unlocks inline-paths cap, D7 preface for parallel `(p)/(d)/(s)`, D9 dual-semantics handed to 5C, D10 indent hierarchy for multi-device disambig, D11 quiet-mode contract fix routes per-source conflicts/failures to stderr) and /plan-eng-review (5B-5C-REMAP-BOUNDARY markers in cli.py + test class so 5C’s inversion surfaces every assertion that needs to flip). 14 new tests (700 pass). **BREAKING**: input letters `c`/`f` for `mm resolve` now rejected loudly to stderr per visible-failure contract — pre-existing scripts must migrate to `l`/`r`. Track 5C inherits one explicit subtask (D9 handoff): handle pre-inversion `.sync-conflict-*` files via timestamp-based mode detection or one-time migration; without it, persisted conflict files at 5C ship would have mislabeled (l)/(r) labels and risk silent data loss._
 
 ### Track 5C: Conflict default inversion + real-merge backends
 _2 tasks · ~3-5 days (human) / ~1.5 hr (CC) · medium-high risk · [merge.py + conflict semantics]_
@@ -139,7 +136,7 @@ Adjacency list (who depends on whom):
 - Group 2 ← {1}    ✓ Complete (v0.8.7 + v0.8.8)
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
-- Group 5 ← {}     (in-flight — Track 5A ✓ v0.8.15; 5D → 5B → 5C remain, serialized in cli.py)
+- Group 5 ← {}     (in-flight — Tracks 5A ✓ v0.8.15, 5B ✓ v0.9.0; 5D → 5C remain)
 ```
 
 In-flight detail:
@@ -147,13 +144,13 @@ In-flight detail:
 ```
 Group 5: Conflict UX & first-pull polish
   Track 5A ............... ✓ Complete (v0.8.15) ...... 3 tasks + preflight shipped
+  Track 5B ............... ✓ Complete (v0.9.0) ....... 4 tasks + scope expansions shipped (BREAKING)
   ├── Track 5D ........... ~0.5d ..... 2 tasks .. _find_conflict_files dedup + _save_and_register crash-safety  [ships next]
-  ├── Track 5B ........... ~0.5d ..... 4 tasks .. relabel + summary + table + progress                          [ships after 5D]
-  └── Track 5C ........... ~3-5d ..... 2 tasks .. invert default + real-merge backends                          [ships last]
+  └── Track 5C ........... ~3-5d ..... 2 tasks + 1 inherited subtask (D9 pre-inversion handler) ............... [ships last]
 ```
 
-**Active total: 1 in-flight Group . 3 tracks remaining . 8 tasks**
-**Shipped: Groups 1, 2, 3, 4, and Group 5 Track 5A (+ Group 5 preflight) — see PROGRESS.md.**
+**Active total: 1 in-flight Group . 2 tracks remaining . 4 tasks (incl. 1 inherited subtask)**
+**Shipped: Groups 1, 2, 3, 4, and Group 5 Tracks 5A + 5B (+ Group 5 preflight) — see PROGRESS.md.**
 
 ---
 

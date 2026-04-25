@@ -2,6 +2,47 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.0] - 2026-04-25
+
+**Track 5B (Pull / resolve / conflicts UX surfaces) — BREAKING.** Vocabulary
+unified across `mm resolve`, `mm conflicts`, and pull summary: `(c)anonical /
+(f)orce conflict` becomes `(l)ocal / (r)emote / (b)oth / (a)bort`. Old letters
+`c` and `f` are rejected loudly to stderr (visible-failure contract; piping
+legacy scripts now errors instead of silently falling through to the default
+"kept both"). Diff display labels (fromfile/tofile), helper text in
+`mm conflicts`, the `mm resolve` docstring, and the parallel `(p)/(d)/(s)`
+preface all flipped to the new vocabulary in one PR (per `/plan-ceo-review`
+D3 scope expansion).
+
+`mm conflicts` table renames "Conflict" / "Canonical" columns to "local" /
+"remote" plus per-column wrap (`add_column(no_wrap=False, overflow="fold")`)
+so long paths no longer truncate at terminal width. `_print_pull_summary`
+now lists conflicted/failed paths inline under each per-source line (cap 20
+with overflow marker; `--verbose` unlocks the cap per `/plan-ceo-review` D5).
+
+Pre-existing docstring/code mismatch fixed (D11): per-source conflicts and
+failures now reach stderr in quiet mode (autopull), with `<device>/<source>`
+prefix because the per-device header is suppressed in quiet — matches
+CLAUDE.md "Load-bearing warnings" contract.
+
+`mm pull` Rich Progress widget for TTY (`console.is_terminal` gate), plain
+"downloading N file(s)" banner for non-TTY, silent in autopull (`quiet`
+threaded through `_pull_one_source` → `_download_and_apply` so progress
+can't leak in autopull). Empty-`to_download` gate prevents Rich Progress
+with `total=0`.
+
+Variable names in `_resolve_interactive_loop` (`local_text`/`remote_text`)
+reflect today's `_apply_conflict` semantics with `5B-5C-REMAP-BOUNDARY`
+markers throughout cli.py + the test class so Track 5C's inversion will
+surface every assertion that needs to flip. Pre-inversion `.sync-conflict-*`
+files persisted on disk are 5C's problem to handle (timestamp-based
+detection or one-time migration; filed in the 5C handoff per
+`/plan-ceo-review` D9).
+
+14 new tests pinning today's mapping, the quiet contract, the cap/verbose
+behavior, multi-device disambiguation, and Task 4 quiet plumbing.
+700 pass.
+
 ## [0.8.15.1] - 2026-04-25
 
 Roadmap refresh. Freshness scan marks Track 5A ✓ Complete in place (shipped
