@@ -2,6 +2,26 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.13] - 2026-04-24
+
+Backlog grooming. Captures eight follow-ups discovered during a real-world
+first-pull session on a new Mac: a confirmed `[BUG]` in `_synced_scan_dirs`
+where `mm conflicts` / `mm resolve` / `mm gc --conflicts` undercount on
+`generic`-type sources because the function never scans top-level
+`include_files` paths (reproduced via `~/.gstack/config.yaml` orphan
+sidecar); a P0 `[BUG]` for the autopull/autopush silent-mode contract
+regressing on un-initialized machines (test_integration failures); and
+six UX TODOs around conflict resolution — invert the default so canonical
+keeps local bytes, add real merge to `mm resolve` instead of pick-a-winner,
+add progress output during the silent download loop, fix the `mm conflicts`
+table truncation + jargon labels, relabel the resolve prompt from "(f)orce
+conflict → canonical" to plain `(l)ocal / (r)emote`, and list conflicted
+paths inline in the pull summary instead of forcing a second command.
+
+### Added
+- `docs/TODOS.md` — eight new entries in the Unprocessed inbox covering the
+  conflict UX coherence theme, captured for a future implementing session.
+
 ## [0.8.12] - 2026-04-24
 
 Docs fix. The README and SPEC both told users to `pipx install mind-meld`,
