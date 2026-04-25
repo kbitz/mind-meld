@@ -19,7 +19,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade}.py
+src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources}.py
 src/mind_meld/storage/{local,keys}.py
 
 Storage keys are constructed via helpers in `storage/keys.py`
@@ -39,7 +39,7 @@ Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). Run `ru
 GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool — multi-OS + multi-Python matrix is theater for this project). Runs ruff check + ruff format --check + pytest + wheel build + `mm --version` smoke. Asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). pip cache keyed on `pyproject.toml`. No `paths:` filter — every PR runs CI (avoids the branch-protection pending-forever footgun for path-skipped required checks).
 
 ## Commands
-mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush
+mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources
 
 Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 2 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--conflicts` (also reap `.sync-conflict-*` files older than 30 days).
@@ -54,6 +54,57 @@ Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns` must NOT generate a deletion tombstone on the next push (2026-04-24 first-pull regression). Removing a glob brings the path back as new. Sidecar recovery is filtered too so a corrupt-manifest recovery on a freshly-migrated config doesn't re-introduce pre-exclude paths via the sidecar (codex-2 #2). All four scenarios (two-device first-pull, tombstone-on-exclude, tombstone-on-unexclude, sidecar-bypass-guard) are pinned in `tests/test_integration.py::TestExcludePatterns5C`.
 
 **Visible-failure contract for migration UX (v0.9.1).** Existing configs need to opt in by running `mm migrate-config`. autopull / autopush NEVER auto-mutate config — they record the missing-excludes signal to `~/.config/mind-meld/migration-state.json` and let `mm status` surface it. Interactive `mm pull` / `mm push` prompt-once. Silent config mutation in a hook would be exactly the class of "wedged sync I never noticed" failure the visible-failure contract exists to prevent. Add the new "config missing recommended excludes" warning to the existing curated stderr signal set (corrupt-manifest recovery, fsync failures, no-sources misconfig, etc.).
+
+## disabled_sources + consumer-boundary filter (load-bearing, v0.10.0)
+Per-machine source toggle. `[sync].disabled_sources: list[str]` lists source
+names to skip on this device only (config.toml is per-machine, never synced).
+`get_sources()` filters by name after resolution and before the path-existence
+filter. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
+`mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
+pattern). Strict by default; `--force` accepts unknown names for forward-compat
+(pre-disable codex before it ships).
+
+`_filter_disabled_sources(manifest, disabled)` applies at TWO consumer-boundary
+call sites — same shape as `_filter_excluded_paths` (the kb-mbp 2026-04-24 fix
+template): (1) `_push_core` filters prior_manifest BEFORE `generate_tombstones`,
+covering ok-fetch / sidecar / peer-fallback uniformly; (2) `_pull_core` filters
+peer manifests in `manifest_cache` BEFORE `collect_tombstones`. Disable-then-
+exclude order in both sites: dropping the whole source first avoids walking
+soon-to-be-dropped exclude_patterns. The filter MUST NOT apply at
+`_fetch_remote_manifest` itself — `mm gc` reads raw manifests via that path
+and a filtered manifest there orphans live peer blobs (codex-2 #1 hazard,
+mirrored from exclude_patterns).
+
+**Tombstone-suppression invariant.** Disabling a source on machine A and
+pushing must NOT generate deletion tombstones for that source's files (would
+propagate fleet-wide deletion). Re-enabling brings the source's files back as
+fresh entries (not tombstones). Sidecar recovery filters too so a corrupt-
+manifest recovery on a freshly-disabled config doesn't re-introduce
+disabled-source paths via the sidecar. All five scenarios (push, re-enable,
+pull, sidecar recovery, gc) pinned in
+`tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`.
+
+`seen_sources.py` (new module, mirrors pullhistory.py shape) tracks per-machine
+acknowledgment of source names at `~/.config/mind-meld/seen-sources.json`
+(0600). `read(initial)` lazy-initializes under `fcntl.flock` on first call,
+seeded with the names of currently-resolved sources. **Migration invariant**:
+without the lazy-init seed, every existing user's first post-v0.10.0 `mm
+status` would surface spurious "New source: claude!" / "New source: gstack!"
+hints for sources they're already syncing. Pinned by
+`test_seen_sources_initialized_to_existing_on_upgrade`.
+
+`mm status` surfaces two breadcrumbs: "Disabled sources (this device): X, Y"
+when the disabled list is non-empty, and "New source available: X" (one-shot
+via `seen_sources.compute_new_sources`) when DEFAULT_SOURCES grows on upgrade
+and the user hasn't yet enabled or disabled the new name. `mm sources` shows
+all configured sources (not just resolved) with an Enabled column; disabled
+rows render dimmed.
+
+The `_prompt_source_toggle(source, *, current_state)` helper (extracted from
+`_prompt_sources` in v0.10.0) is the single source of truth for the per-source
+Y/N prompt copy + default rule. `_prompt_sources` (init) and
+`reconfigure_sources` both call it; `mm init`'s default-Y-on-path-exists
+behavior is preserved.
 
 ## Conflict-direction inversion + fleet-version refusal (load-bearing, v0.9.2 BREAKING)
 `_apply_conflict` keeps LOCAL bytes at canonical; REMOTE bytes go to `.sync-conflict-*` sidecar. No rename + rollback dance — local is never overwritten in the conflict path. Pre-v0.9.2 produced the opposite mapping; pre-existing files migrate to a `v0-` prefix on first lock-protected discovery in `mm pull` / `mm resolve` (NEVER from `mm conflicts` — lockless, would race autopull, codex-2 #5).

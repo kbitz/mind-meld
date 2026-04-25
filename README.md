@@ -138,8 +138,29 @@ Supplying `sync.sources` replaces the defaults wholesale — copy the full list,
 
 **Useful flags:**
 
-- `mm sources` — show the resolved source list after config + auto-detection.
+- `mm sources` — show the configured source list with their `Enabled` state and file counts.
 - `mm pull --source gstack` — pull only the gstack source (skip Claude).
+
+## Disabling sources per machine
+
+`config.toml` lives at `~/.config/mind-meld/` and is never synced — making it the natural home for per-device preferences. To turn off a source on one machine without affecting the others:
+
+```bash
+mm disable-source gstack       # this Mac only; iCloud peers untouched
+mm enable-source gstack        # turn it back on
+```
+
+The on/off state lives in `[sync].disabled_sources = ["gstack"]`. Disabling does NOT delete your `[[sync.sources]]` entry — re-enabling preserves any customizations like `include_dirs` or `exclude_patterns`.
+
+`mm sources` shows the toggle state as an `Enabled` column. `mm status` calls out disabled sources in a one-line breadcrumb so future-you doesn't forget gstack is off and re-debug "why isn't this syncing".
+
+**Forward-compat for not-yet-shipped sources.** When `mm` adds a new source to its defaults (e.g. codex in a future release), upgraders don't get auto-enrolled — `mm status` surfaces a one-shot `New source available: codex. Run mm enable-source codex to sync.` hint. To pre-disable a name before it ships:
+
+```bash
+mm disable-source codex --force   # accepts unknown names for forward-compat
+```
+
+`mm reconfigure-sources` re-runs the picker against your current config + new defaults, in case you want to revisit every choice at once.
 
 ## Handling conflicts
 
