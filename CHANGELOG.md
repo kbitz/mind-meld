@@ -2,6 +2,28 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.14] - 2026-04-24
+
+Roadmap tidy. Freshness scan marks Groups 2/3/4 ✓ Complete in place
+(shipped through v0.8.7/v0.8.8/v0.8.10/v0.8.11) and collapses Track
+1A/1B/1C detail to one-liners — only Group 1's preflight `constants.py`
+extraction remains. Triages the eight conflict-UX TODOs from v0.8.13 (plus
+two `[review]` items and one `[manual]`) into new Group 5 with three
+serialized Tracks: 5A (auto-command + scope bugs incl. P0 autopull
+silent-mode regression, ships first), 5B (resolve/conflicts/pull UX
+relabel), 5C (conflict default inversion + real-merge backends, ships
+last). One item — cross-device source rename drift — deferred to Future
+as a documented known limitation. PROGRESS.md "Where we are" refreshed to
+match.
+
+### Changed
+- `docs/ROADMAP.md` — Groups 2/3/4 marked ✓ Complete; new Group 5 with
+  Tracks 5A/5B/5C + pre-flight; updated Execution Map.
+- `docs/PROGRESS.md` — added v0.8.11/v0.8.12/v0.8.13/v0.8.14 rows;
+  refreshed "Where we are" to reflect what shipped through v0.8.13.
+- `docs/TODOS.md` — Unprocessed inbox drained; ten items routed to
+  ROADMAP.md, one to Future.
+
 ## [0.8.13] - 2026-04-24
 
 Backlog grooming. Captures eight follow-ups discovered during a real-world
