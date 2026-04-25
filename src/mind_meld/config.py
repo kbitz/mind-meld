@@ -123,8 +123,11 @@ def _validate(config: dict[str, Any]) -> None:
     # instead of mid-sync. Runs before _apply_defaults, so we only check
     # structure — path expansion happens in get_sources.
     sync = config.get("sync")
-    if isinstance(sync, dict) and "sources" in sync:
-        _validate_sources(sync["sources"])
+    if isinstance(sync, dict):
+        if "sources" in sync:
+            _validate_sources(sync["sources"])
+        if "disabled_sources" in sync:
+            _validate_disabled_sources(sync["disabled_sources"])
 
 
 def _apply_defaults(config: dict[str, Any]) -> None:
@@ -172,6 +175,26 @@ def _validate_sources(sources: Any) -> None:
         seen_names.add(name)
         if "exclude_patterns" in src:
             _validate_exclude_patterns(src["exclude_patterns"], name)
+
+
+def _validate_disabled_sources(names: Any) -> None:
+    """Check sync.disabled_sources is a list[str].
+
+    Per-machine off-switch field (v0.10.0). Names need not match any
+    currently-configured source — `--force` disable accepts unknown
+    names for forward-compat (pre-disabling a not-yet-shipped source).
+    Validation here is purely structural: shape errors at load time
+    instead of crashing mid-sync on iteration.
+    """
+    if not isinstance(names, list):
+        raise ConfigError(
+            f"config: sync.disabled_sources must be a list, got {type(names).__name__}."
+        )
+    for j, name in enumerate(names):
+        if not isinstance(name, str):
+            raise ConfigError(
+                f"config: sync.disabled_sources[{j}] must be a string, got {type(name).__name__}."
+            )
 
 
 def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
@@ -250,6 +273,20 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
             )
 
     _validate_sources(sources)
+
+    # Per-machine disabled toggle (v0.10.0): drop sources whose name is
+    # in [sync].disabled_sources. The list is per-device — config.toml is
+    # never synced — so this is naturally a per-machine preference.
+    # See docs/designs/source-toggle.md.
+    #
+    # IMPORTANT: this is the source-resolution filter, NOT the consumer-
+    # boundary filter. _push_core and _pull_core MUST also drop disabled
+    # entries from prior_manifest / peer manifests respectively, before
+    # tombstone computation, to prevent fleet-wide data loss on first
+    # post-disable push. See cli.py and TestDisabledSourcesTombstoneSuppression.
+    disabled = sync.get("disabled_sources", []) or []
+    if disabled:
+        sources = [s for s in sources if s["name"] not in disabled]
 
     # Filter to sources whose path exists on disk
     return [s for s in sources if Path(s["path"]).exists()]
