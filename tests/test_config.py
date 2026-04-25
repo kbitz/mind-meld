@@ -239,6 +239,77 @@ class TestExcludePatternsValidation:
             load_config(config_path)
 
 
+class TestTomlValueEscaping:
+    """5E ship-fix (F2): _toml_value MUST escape special characters in
+    strings so user-customized exclude_patterns containing `"`, `\\`, or
+    a newline survive `mm migrate-config --yes` without corrupting
+    config.toml. Without escaping, the next `mm` invocation fails to
+    parse and the install is bricked until the user manually edits."""
+
+    def _parse_toml_value(self, val: str) -> object:
+        """Parse a single TOML value via tomllib by wrapping in `k = <val>`."""
+        import tomllib
+
+        return tomllib.loads(f"k = {val}")["k"]
+
+    def test_quote_in_string_round_trips_via_tomllib(self):
+        from mind_meld.config import _toml_value
+
+        result = _toml_value('foo"bar*')
+        assert self._parse_toml_value(result) == 'foo"bar*'
+
+    def test_backslash_in_string_round_trips_via_tomllib(self):
+        from mind_meld.config import _toml_value
+
+        result = _toml_value("with\\backslash")
+        assert self._parse_toml_value(result) == "with\\backslash"
+
+    def test_newline_in_string_round_trips_via_tomllib(self):
+        from mind_meld.config import _toml_value
+
+        result = _toml_value("line1\nline2")
+        assert self._parse_toml_value(result) == "line1\nline2"
+
+    def test_string_list_uses_per_element_escape(self):
+        from mind_meld.config import _toml_value
+
+        result = _toml_value(['foo"bar', "ok"])
+        # Both strings are quoted; the embedded quote is escaped.
+        assert '\\"' in result
+        assert result.startswith("[")
+        assert result.endswith("]")
+
+    def test_round_trip_with_quote_in_exclude_pattern_does_not_corrupt(self, tmp_path):
+        """Headline: save_config + load_config + patch_config_on_disk
+        round-trip a glob containing a quote. F2 caught a real failure
+        path: migrate-config wrote the value back with no escape, the
+        next load raised ConfigError on parse."""
+        config_path = tmp_path / "config.toml"
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(tmp_path / ".gstack"),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        # User wrote a custom exclude_pattern containing a quote.
+                        "exclude_patterns": ['evil"name.txt', "back\\slash"],
+                    }
+                ],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        save_config(config, config_path)
+        # Round-trip through tomllib should succeed.
+        loaded = load_config(config_path)
+        src = loaded["sync"]["sources"][0]
+        assert src["exclude_patterns"] == ['evil"name.txt', "back\\slash"]
+
+
 class TestExcludePatternsRoundTrip:
     """exclude_patterns survives save → load → save."""
 

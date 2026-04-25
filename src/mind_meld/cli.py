@@ -2793,18 +2793,28 @@ def _pull_core(
             filtered = _filter_excluded_paths(m, exclude_map)
             # Log "excluded" per peer-path so `mm log --action excluded`
             # shows what the user is NOT pulling because of their config.
-            for src_name, src_data in m.get("sources", {}).items():
-                kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
-                for rel_path, info in src_data.get("files", {}).items():
-                    if rel_path not in kept:
-                        pullhistory.append(
-                            verb="pull",
-                            device=did,
-                            source=src_name,
-                            rel_path=rel_path,
-                            action="excluded",
-                            remote_sha=info.get("sha256"),
-                        )
+            #
+            # 5E ship-fix: skip logging in quiet (autopull/autopush) mode.
+            # Without this gate, autopull writes one record per peer ×
+            # source × excluded-path tuple on every hook fire — at
+            # ~100 projects × hourly pulls, the 1MB pullhistory cap
+            # rotates within hours and evicts real `written / merged /
+            # conflicted / failed` records to `.1`. The forensic-aid
+            # contract becomes useless. Interactive `mm pull` still
+            # logs the full set so users can audit their excludes.
+            if not quiet:
+                for src_name, src_data in m.get("sources", {}).items():
+                    kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
+                    for rel_path, info in src_data.get("files", {}).items():
+                        if rel_path not in kept:
+                            pullhistory.append(
+                                verb="pull",
+                                device=did,
+                                source=src_name,
+                                rel_path=rel_path,
+                                action="excluded",
+                                remote_sha=info.get("sha256"),
+                            )
             filtered_cache[did] = filtered
         manifest_cache = filtered_cache
 
@@ -4010,14 +4020,69 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     return dirs
 
 
+def _inversion_marker_path() -> Path:
+    """Canonical path for the one-shot inversion-install timestamp file."""
+    return sidecar.SIDECAR_DIR / "inversion-installed-at"
+
+
+def _ensure_inversion_marker() -> float | None:
+    """Get-or-create the inversion-install timestamp (epoch seconds).
+
+    Returns the timestamp as a float, or None on any read/parse/write
+    failure (fail-safe: the caller treats None as "skip migration").
+
+    Critical safety property: distinguishes pre-inversion conflict files
+    (mtime predates the marker — produced by pre-v0.9.2 code on this
+    machine) from post-inversion conflict files (mtime is at-or-after
+    the marker — produced by THIS version's `_apply_conflict`, which
+    emits unprefixed filenames). Without this gate, the migration sweep
+    re-tags every fresh post-inversion sidecar as `v0-` on the next
+    pull and resolve silently dispatches them backwards, causing data
+    loss (the CRITICAL bug caught by /ship pre-landing review and
+    independently confirmed by both adversarial and reviewer subagents).
+
+    First-call semantics: writes the marker at "now" so any pre-existing
+    `.sync-conflict-*` files already on disk (mtime < now) get migrated
+    on this pull, and every NEW conflict file produced from here on
+    (mtime > now) is correctly skipped.
+
+    Best-effort: directory creation and file write may fail (perms,
+    disk full). Failure returns None — the caller MUST treat None as
+    "do not migrate" rather than "migrate everything", so a broken
+    marker degrades to safe-default-no-migration instead of mass
+    re-tagging.
+    """
+    path = _inversion_marker_path()
+    try:
+        if path.exists():
+            return float(path.read_text().strip())
+        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+        marker_ts = time.time()
+        # Atomic write so a crash mid-create doesn't leave a partial
+        # number that fails to float-parse on the next read.
+        fsutil.atomic_write_bytes(
+            path,
+            f"{marker_ts}\n".encode(),
+            fsync=True,
+            mode=0o600,
+        )
+        return marker_ts
+    except (OSError, ValueError, StorageError):
+        return None
+
+
 def _migrate_pre_inversion_conflict(path: Path) -> Path:
     """Rename a pre-inversion conflict file to carry the `v0-` prefix.
 
     Idempotent: a path already prefixed with `v0-` returns unchanged.
-    Failure (rename error, target collision) logs a warning to stderr
-    and returns the original path so the caller can keep walking —
-    losing one migration attempt is preferable to aborting the whole
-    conflict-discovery sweep.
+    Skips files whose mtime is at-or-after the inversion-install marker
+    (those are post-inversion files produced by THIS version's
+    `_apply_conflict`, which emits unprefixed filenames — re-tagging
+    them as `v0-` would silently invert resolve's dispatch and cause
+    data loss). Failure (rename error, target collision, missing marker)
+    logs a warning to stderr and returns the original path so the
+    caller can keep walking — losing one migration attempt is preferable
+    to aborting the whole conflict-discovery sweep.
 
     MUST only be called from a lock-protected context (mm pull, mm
     resolve). `mm conflicts` is intentionally read-only and lockless;
@@ -4033,6 +4098,27 @@ def _migrate_pre_inversion_conflict(path: Path) -> Path:
     if is_pre_inversion_conflict_filename(name):
         return path
     if not is_conflict_filename(name):
+        return path
+
+    # Mtime gate (5E ship-fix): only migrate files whose mtime predates
+    # the inversion-install marker. Without this, fresh post-inversion
+    # sidecars produced by `_apply_conflict` (which has the same
+    # unprefixed shape as legacy pre-inversion files) get false-tagged
+    # `v0-` on the very next pull, then `_resolve_interactive_loop`
+    # dispatches them backwards (silent data loss).
+    marker_ts = _ensure_inversion_marker()
+    if marker_ts is None:
+        # Fail-safe: marker unreadable / unwriteable. Refuse to migrate
+        # rather than risk mis-tagging.
+        return path
+    try:
+        file_mtime = path.stat().st_mtime
+    except OSError:
+        return path
+    if file_mtime >= marker_ts:
+        # Post-inversion file — produced after this version was installed.
+        # Leave its filename unprefixed (the resolve dual-mode dispatch
+        # treats no-prefix as post-inversion semantics).
         return path
 
     idx = name.find(CONFLICT_INFIX)
@@ -5132,6 +5218,16 @@ def autopull() -> None:
             _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
         else:
             _write_autorun_breadcrumb("pull", "success")
+    except typer.Exit:
+        # 5E ship-fix: `_check_fleet_version_or_refuse` exits via
+        # `_error()` → `typer.Exit(1)` on a mixed-version fleet refusal.
+        # Without this branch, the typed exit lands in `except Exception`
+        # below — autopull would log the full refusal traceback to
+        # `autopull.log` and write a "failed" breadcrumb on every
+        # Claude Code session start, masking the real signal. `_error`
+        # already wrote the user-facing stderr line; just mark the
+        # breadcrumb and exit.
+        _write_autorun_breadcrumb("pull", "fleet-refused")
     except MindMeldError as e:
         print(f"mm: pull failed - {e}", file=sys.stderr)
         if _should_log_cause(e):
@@ -5201,6 +5297,12 @@ def autopush() -> None:
             print(f"mm: pushed {total} files ({', '.join(parts)})")
 
         _write_autorun_breadcrumb("push", "success")
+    except typer.Exit:
+        # 5E ship-fix: same as autopull — typed `typer.Exit` from
+        # `_error()` (e.g. corrupt-manifest recovery refusal) must NOT
+        # be logged as an unexpected error. `_error` already wrote the
+        # user-facing stderr line; just mark the breadcrumb.
+        _write_autorun_breadcrumb("push", "refused")
     except MindMeldError as e:
         print(f"mm: push failed - {e}", file=sys.stderr)
         if _should_log_cause(e):

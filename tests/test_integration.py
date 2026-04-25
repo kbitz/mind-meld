@@ -1155,7 +1155,9 @@ class TestInversion5E:
 
     def test_mm_resolve_migrates_pre_inversion_files(self, tmp_path, monkeypatch):
         """mm resolve runs under the lockfile and DOES migrate pre-inversion
-        files to the v0- prefix on first discovery."""
+        files to the v0- prefix on first discovery — but only when the
+        file's mtime predates the inversion-install marker (5E ship-fix
+        gate; see _ensure_inversion_marker)."""
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / ".claude"
         memory = claude_dir / "projects" / "-Users-kb-app" / "memory"
@@ -1164,6 +1166,14 @@ class TestInversion5E:
         canonical.write_bytes(b"remote content")
         legacy = memory / "role.sync-conflict-20260420-120000-devA1234.md"
         legacy.write_bytes(b"local content")
+        # Backdate the legacy file to simulate a real pre-v0.9.2 conflict
+        # produced before the install marker was created.
+        old = time.time() - 86400  # 1 day ago
+        os.utime(legacy, (old, old))
+
+        # Redirect SIDECAR_DIR so the inversion marker lands in tmp_path.
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
 
         backend = self._bootstrap(storage_dir)
         register_device(backend, "dev-self", "Self")
@@ -1184,6 +1194,265 @@ class TestInversion5E:
         migrated = memory / "role.sync-conflict-v0-20260420-120000-devA1234.md"
         assert migrated.exists()
         assert migrated.read_bytes() == b"local content"
+
+
+class TestShipFixes5E:
+    """Pre-landing review fixes (5E ship-fix). Pinned per IRON RULE.
+
+    F1: post-inversion files must NOT be migrated to v0- on consecutive
+        pulls (silent data loss caught by /ship adversarial review).
+    F4: autopull (quiet=True) must NOT log "excluded" records — the
+        1MB pullhistory cap rotates within hours under hourly hooks.
+    """
+
+    def _make_gstack_config(self, tmp_path, storage_dir, gstack_dir, device_id, device_name):
+        config_path = tmp_path / f"config_{device_id}.toml"
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(gstack_dir),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "exclude_patterns": ["projects/*/repo-mode.json"],
+                    }
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        return config_path
+
+    def test_post_inversion_file_not_migrated_on_consecutive_runs(self, tmp_path, monkeypatch):
+        """F1 ship-blocker: a fresh post-inversion conflict file (mtime
+        AFTER the install marker) MUST NOT be renamed to v0- by the
+        next pull's migration sweep. Without the mtime gate,
+        `_resolve_interactive_loop`'s prefix-based dispatch would
+        silently flip the (l)/(r) ops and destroy local edits."""
+        from mind_meld.cli import (
+            _ensure_inversion_marker,
+            _migrate_pre_inversion_conflict,
+            conflict_filename,
+        )
+        from mind_meld.manifest import is_pre_inversion_conflict_filename
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+
+        # Stamp the install marker first (simulates a v0.9.2 install
+        # that has run at least one pull/resolve before).
+        marker_ts = _ensure_inversion_marker()
+        assert marker_ts is not None
+
+        # Now produce a fresh post-inversion sidecar via _apply_conflict's
+        # path-builder. Mtime will be NOW (i.e. >= marker_ts).
+        canonical = tmp_path / "doc.md"
+        canonical.write_bytes(b"local content")
+        sidecar_path = conflict_filename(canonical, "devAAAA1234")
+        sidecar_path.write_bytes(b"remote bytes from peer")
+        # Migration sweep must NOT rename this file.
+        result = _migrate_pre_inversion_conflict(sidecar_path)
+        assert result == sidecar_path
+        assert sidecar_path.exists()
+        assert not is_pre_inversion_conflict_filename(sidecar_path.name)
+        # And the v0- variant must NOT have been created.
+        v0_variant = sidecar_path.with_name(
+            sidecar_path.name.replace(".sync-conflict-", ".sync-conflict-v0-")
+        )
+        assert not v0_variant.exists()
+        # Sanity: sidecar_dir / "inversion-installed-at" exists with 0600.
+        marker_path = sidecar_dir / "inversion-installed-at"
+        assert marker_path.exists()
+        import stat as _stat
+
+        assert _stat.S_IMODE(marker_path.stat().st_mode) == 0o600
+
+    def test_pre_inversion_file_still_migrated_when_older_than_marker(self, tmp_path, monkeypatch):
+        """F1 fix complement: pre-existing legacy files (mtime < marker)
+        must still be migrated. The fix is a SAFETY gate, not a
+        disable-migration switch."""
+        from mind_meld.cli import (
+            _ensure_inversion_marker,
+            _migrate_pre_inversion_conflict,
+        )
+        from mind_meld.manifest import is_pre_inversion_conflict_filename
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+
+        # Create a legacy file BEFORE the marker exists, then backdate
+        # it to simulate a real pre-v0.9.2 file from the past.
+        legacy = tmp_path / "doc.sync-conflict-20260420-120000-devA1234.md"
+        legacy.write_bytes(b"local bytes from pre-v0.9.2")
+        old = time.time() - 86400
+        os.utime(legacy, (old, old))
+
+        # Now stamp the marker (mtime < marker).
+        marker_ts = _ensure_inversion_marker()
+        assert marker_ts is not None
+        assert old < marker_ts
+
+        # Migration sweep must rename it.
+        result = _migrate_pre_inversion_conflict(legacy)
+        assert result != legacy
+        assert is_pre_inversion_conflict_filename(result.name)
+        assert not legacy.exists()
+        assert result.read_bytes() == b"local bytes from pre-v0.9.2"
+
+    def test_marker_failure_degrades_to_no_migration(self, tmp_path, monkeypatch):
+        """F1 fail-safe: if `_ensure_inversion_marker` returns None (perms,
+        disk full, parse error), `_migrate_pre_inversion_conflict` must
+        return the original path unchanged. Mass re-tagging on a broken
+        marker would be the original CRITICAL bug all over again."""
+        from mind_meld.cli import _migrate_pre_inversion_conflict
+
+        legacy = tmp_path / "doc.sync-conflict-20260420-120000-devA1234.md"
+        legacy.write_bytes(b"local bytes")
+        old = time.time() - 86400
+        os.utime(legacy, (old, old))
+
+        # Force the marker helper to return None.
+        monkeypatch.setattr("mind_meld.cli._ensure_inversion_marker", lambda: None)
+        result = _migrate_pre_inversion_conflict(legacy)
+        assert result == legacy
+        assert legacy.exists()
+
+    def test_autopull_does_not_log_excluded_paths(self, tmp_path, monkeypatch):
+        """F4 ship-fix: autopull (quiet=True) skips the per-excluded-path
+        pullhistory.append calls so the 1MB cap doesn't rotate within
+        hours under repeated hook fires."""
+        from mind_meld import pullhistory
+
+        # Isolate pullhistory dir.
+        history_dir = tmp_path / "mm_state"
+        monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", history_dir)
+
+        storage_dir = tmp_path / "storage"
+        gstack_a = tmp_path / "machine_a" / ".gstack"
+        gstack_b = tmp_path / "machine_b" / ".gstack"
+        # Populate A with a file that B's exclude_patterns would filter out.
+        proj_a = gstack_a / "projects" / "myapp"
+        proj_a.mkdir(parents=True)
+        (proj_a / "repo-mode.json").write_text("A's per-machine cache")
+        (proj_a / "role.md").write_text("real content")
+        gstack_b.mkdir(parents=True)
+
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = tmp_path / "config_dev-a.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "gstack",
+                            "path": str(gstack_a),
+                            "type": "generic",
+                            "include_dirs": ["projects"],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_a,
+        )
+        config_b = self._make_gstack_config(tmp_path, storage_dir, gstack_b, "dev-b", "B")
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        # A pushes (records its v0.9.2 last_seen_version so B's fleet check passes).
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        # Redirect lockfile + sidecar so B's autopull is hermetic.
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", tmp_path / "sidecar_b")
+
+        # B's autopull runs in quiet mode.
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0, result.output
+
+        # Verify: NO "excluded" records were written by the quiet pull.
+        records = list(pullhistory.read_records())
+        excluded = [r for r in records if r.get("action") == "excluded"]
+        assert excluded == [], (
+            f"autopull (quiet=True) must NOT log excluded paths "
+            f"(found {len(excluded)}). Interactive mm pull is the place "
+            f"to surface them via the audit log."
+        )
+
+    def test_interactive_pull_still_logs_excluded(self, tmp_path, monkeypatch):
+        """F4 fix complement: interactive `mm pull` (not quiet) DOES
+        write the excluded records — the audit-log feature still works
+        for users who explicitly ran the command."""
+        from mind_meld import pullhistory
+
+        history_dir = tmp_path / "mm_state"
+        monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", history_dir)
+
+        storage_dir = tmp_path / "storage"
+        gstack_a = tmp_path / "machine_a" / ".gstack"
+        gstack_b = tmp_path / "machine_b" / ".gstack"
+        proj_a = gstack_a / "projects" / "myapp"
+        proj_a.mkdir(parents=True)
+        (proj_a / "repo-mode.json").write_text("A cache")
+        (proj_a / "role.md").write_text("real")
+        gstack_b.mkdir(parents=True)
+
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = tmp_path / "config_dev-a.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "gstack",
+                            "path": str(gstack_a),
+                            "type": "generic",
+                            "include_dirs": ["projects"],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_a,
+        )
+        config_b = self._make_gstack_config(tmp_path, storage_dir, gstack_b, "dev-b", "B")
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", tmp_path / "sidecar_b")
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+
+        records = list(pullhistory.read_records())
+        excluded = [r for r in records if r.get("action") == "excluded"]
+        # repo-mode.json should appear (excluded by B's pattern)
+        assert any(r.get("rel_path") == "projects/myapp/repo-mode.json" for r in excluded)
 
 
 class TestSyncLog:

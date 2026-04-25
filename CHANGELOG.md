@@ -4,9 +4,66 @@ All notable changes to Mind Meld will be documented in this file.
 
 ## [0.9.2] - 2026-04-25 — BREAKING
 
-**Track 5E (Conflict default inversion).** `_apply_conflict` now keeps
-LOCAL bytes at canonical and writes REMOTE bytes to the `.sync-conflict-*`
-sidecar — the opposite of every prior version. Two reasons: (1)
+**Track 5E (Conflict default inversion) + 4 ship-fix bug fixes caught by
+the /ship pre-landing review.** Headline change: `_apply_conflict` now
+keeps LOCAL bytes at canonical and writes REMOTE bytes to the
+`.sync-conflict-*` sidecar — the opposite of every prior version.
+
+### Pre-landing review fixes (ship-fix bundle)
+
+The /ship workflow's pre-landing review found 1 CRITICAL + 3 HIGH bugs
+in the Track 5E implementation. All four are fixed in the same release:
+
+- **F1 CRITICAL — silent data loss in resolve.** The pre-inversion
+  conflict-file migration sweep at `_pull_core` and `mm resolve` couldn't
+  distinguish pre-v0.9.2 conflict files (no `v0-` prefix) from fresh
+  post-inversion conflict files produced by THIS version's
+  `_apply_conflict` (which also has no prefix). On consecutive pulls,
+  every fresh post-inversion sidecar got false-tagged `v0-` and
+  `_resolve_interactive_loop` then dispatched it under inverted
+  semantics — picking `(l)ocal` would silently overwrite local edits
+  with remote bytes. Fix: one-shot install marker file at
+  `~/.config/mind-meld/inversion-installed-at`. The migration sweep
+  now skips files whose mtime is at-or-after the marker (i.e.
+  produced by this version's writer). Fail-safe: if the marker is
+  unreadable/unwriteable, refuse to migrate rather than risk
+  mass re-tagging.
+- **F2 HIGH — `migrate-config` could brick `config.toml`.**
+  `_toml_value` did no escaping on string literals; a user-customized
+  `exclude_patterns` glob containing `"`, `\`, or a newline would
+  round-trip through `mm migrate-config --yes` as malformed TOML and
+  wedge the next `mm` invocation on parse error. Fix: escape `\`, `"`,
+  `\n`, `\r` per the TOML basic-string spec.
+- **F3 HIGH — autopull spammed `autopull.log` on mixed-version fleet.**
+  `_check_fleet_version_or_refuse` raises via `_error()` →
+  `typer.Exit(1)`, which is a `RuntimeError` subclass, not a
+  `MindMeldError`. autopull's `except MindMeldError` branch missed it
+  and the generic `except Exception` treated the typed refusal as an
+  unexpected error — writing the full multi-line refusal text to
+  `autopull.log` and a "failed" breadcrumb on every Claude Code
+  session start. Fix: explicit `except typer.Exit` branch in
+  autopull/autopush BEFORE the generic catch; outcome is now
+  `fleet-refused` (autopull) / `refused` (autopush).
+- **F4 HIGH — pullhistory self-DOS from autopull excluded logging.**
+  `_pull_core`'s exclude-filter loop wrote one `pullhistory.append(action="excluded")`
+  record per peer × source × excluded-rel_path tuple. At ~100
+  projects × hourly autopull hooks, the 1MB `pull-history.jsonl` cap
+  rotated within hours and evicted real `written / merged / conflicted /
+  failed` records to `.1`. The audit-log feature became useless. Fix:
+  skip excluded-path logging when `quiet=True` (autopull/autopush);
+  interactive `mm pull` still logs the full set so users can audit
+  their excludes via `mm log --action excluded`.
+
+11 new IRON RULE regression tests pin all four fixes (post-inversion
+file consecutive-pull safety, mtime-gate migration when older than
+marker, marker-failure fail-safe degrades to no-migration, autopull
+no-excluded-logging in quiet, interactive pull DOES log excluded,
+TOML escape round-trip for `"`/`\`/newline, autopull fleet-refusal
+breadcrumb is `fleet-refused` not `failed`).
+
+### Track 5E (original scope)
+
+Two reasons for the inversion: (1)
 asymmetric blast radius — local is the known-working version on this
 machine, remote is the unknown-from-elsewhere version; (2) the visible
 sidecar should hold the *surprising* bytes, not the working ones.

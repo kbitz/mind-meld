@@ -342,9 +342,21 @@ def patch_config_on_disk(updates: dict[str, dict[str, Any]], path: Path | None =
 
 
 def _toml_value(val: Any) -> str:
-    """Format a Python value as a TOML literal."""
+    """Format a Python value as a TOML literal.
+
+    Strings are emitted as TOML basic strings (`"..."`) with `\\` and
+    `"` escaped, plus literal CR/LF mapped to `\\r`/`\\n`. Without
+    escaping, a user-supplied `exclude_patterns` value containing a
+    quote (e.g. `foo"bar*`) would round-trip through `migrate-config`
+    as a malformed TOML literal that wedges the next `mm` invocation
+    on parse error (5E ship-fix; caught by /ship pre-landing review's
+    adversarial pass).
+    """
     if isinstance(val, str):
-        return f'"{val}"'
+        escaped = (
+            val.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        )
+        return f'"{escaped}"'
     if isinstance(val, bool):
         return "true" if val else "false"
     if isinstance(val, int):
@@ -353,7 +365,7 @@ def _toml_value(val: Any) -> str:
         return str(val)
     if isinstance(val, list):
         if all(isinstance(v, str) for v in val):
-            items = ", ".join(f'"{v}"' for v in val)
+            items = ", ".join(_toml_value(v) for v in val)
             return f"[{items}]"
         return str(val)  # fallback for non-string lists
-    return f'"{val}"'
+    return _toml_value(str(val))
