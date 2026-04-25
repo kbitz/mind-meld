@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.15.1] - 2026-04-25
+
+Roadmap refresh. Freshness scan marks Track 5A ✓ Complete in place (shipped
+v0.8.15 — 3 tasks + Group 5 preflight). Triage drains 2 `[review]` items
+from TODOS.md (adversarial follow-ups to v0.8.15's Track 5A ship) into a new
+**Track 5D**: `_find_conflict_files` double-count dedup when an `include_files`
+entry sits inside an `include_dirs` directory (XS) + `_save_and_register`
+crash-safety beyond Python exceptions to close the SIGKILL/OOM/power-loss
+window left by v0.8.15's rollback (S-M). 5D ships next, before 5B/5C, so
+v0.8.15's just-shipped surface hardens cleanly. PROGRESS.md "Where we are"
+refreshed; `docs/designs/crypto-v2.md` archived to `docs/archive/` (referenced
+v0.6.0, long-shipped). No code changes.
+
 ## [0.8.15] - 2026-04-24
 
 Group 5 preflight + all of Track 5A bundled per `/plan-eng-review` D2.
