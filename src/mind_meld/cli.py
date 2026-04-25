@@ -29,7 +29,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from mind_meld import __version__, fsutil, pullhistory, sidecar
+from mind_meld import __version__, fsutil, pullhistory, sidecar, upgrade
 from mind_meld import config as _config_module
 from mind_meld.config import (
     DEFAULT_ARGON2_MEMORY_KB,
@@ -222,8 +222,20 @@ def _main(
         is_eager=True,
         help="Show version and exit.",
     ),
+    no_check_version: bool = typer.Option(
+        False,
+        "--no-check-version",
+        help=(
+            "Skip the auto-upgrade nudge for this invocation. "
+            "Force-skips regardless of \\[upgrade] auto_check in config."
+        ),
+    ),
 ) -> None:
-    pass
+    # Wire the per-invocation override into the upgrade module before any
+    # command body runs. Force-skips both `check_for_upgrade` and
+    # `detect_self_version_transition` for this process.
+    if no_check_version:
+        upgrade.set_invocation_skip(True)
 
 
 def _error(msg: str) -> None:
@@ -258,10 +270,17 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
 
 def _get_config() -> dict:
     try:
-        return load_config()
+        config = load_config()
     except MindMeldError as e:
         _error(str(e))
         raise  # unreachable, but keeps type checker happy
+    # Seam 1 — transition detection. Idempotent within a process; safe to
+    # call after every successful load_config. Codex outside voice (D6)
+    # rejected refactoring _auto_command_setup / init_cmd through this
+    # function (would break their distinct error policies); both call
+    # `upgrade.run_transition_hook` directly instead.
+    upgrade.run_transition_hook(config)
+    return config
 
 
 def _get_passphrase_or_exit() -> str:
@@ -1765,6 +1784,13 @@ def init() -> None:
 
     _register_and_save(config, backend, device_id, device_name, passphrase)
 
+    # Seam 1 — transition detection (init path). Seeds the
+    # last_seen_self_version cache so any subsequent upgrade transition is
+    # logged correctly. Routed here directly rather than through
+    # _get_config / _auto_command_setup because init has its own first-run
+    # path with no prior config to load (D6 reasoning).
+    upgrade.run_transition_hook(config)
+
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
 
 
@@ -1815,6 +1841,9 @@ def push(
                 )
     finally:
         release_lock()
+
+    # Seam 2 — interactive push tail nudge.
+    upgrade.emit_nudge_if_due(config)
 
 
 def _ensure_device_registered(
@@ -2142,6 +2171,10 @@ def pull(
         )
     finally:
         release_lock()
+
+    # Seam 2 — interactive pull tail nudge. Runs AFTER the lock is released
+    # so the cold-cache HTTP fetch never blocks pull progress.
+    upgrade.emit_nudge_if_due(config)
 
 
 @dataclass
@@ -3154,6 +3187,18 @@ def status(
             f"{', '.join(missing_excludes)} — run [bold]mm migrate-config[/bold] to add."
         )
 
+    # Seam 3 — auto-upgrade nudge surfacing in status. Reads cache only,
+    # no network call. Distinct from autopull/autopush emission (which gates
+    # on last_nudged_at) — `mm status` is an explicit user check and shows
+    # the cached result every time, regardless of the 24h re-emit gate.
+    upgrade_result = upgrade.check_for_upgrade(config)
+    if upgrade_result.state == "upgrade-available" and upgrade_result.latest:
+        console.print(
+            f"  [yellow]Upgrade available:[/yellow] "
+            f"{upgrade_result.local} → {upgrade_result.latest} "
+            f"(run [bold]{upgrade_result.install_cmd}[/bold])"
+        )
+
     # Per-source breakdown
     total_local = 0
     total_remote = 0
@@ -3939,7 +3984,7 @@ def migrate_config(
 
 
 _LogAction = Literal["written", "merged", "skipped", "conflicted", "excluded", "uploaded", "failed"]
-_LogVerb = Literal["pull", "push"]
+_LogVerb = Literal["pull", "push", "self-upgrade"]
 
 
 @app.command(name="log")
@@ -4039,14 +4084,32 @@ def log_cmd(
     table.add_column("action")
     table.add_column("source")
     table.add_column("path", overflow="fold")
+    # `extra` column carries self-upgrade row details ("0.9.3 → 0.9.4")
+    # without overloading the source/path columns. Empty for pull/push
+    # rows. D8 locked this shape per Codex outside voice.
+    table.add_column("extra", overflow="fold")
     for r in rows:
-        table.add_row(
-            r.get("ts", "?"),
-            r.get("verb", "?"),
-            r.get("action", "?"),
-            r.get("source", "?"),
-            r.get("rel_path", "?"),
-        )
+        verb = r.get("verb", "?")
+        if verb == "self-upgrade":
+            old = r.get("old_version", "?")
+            new = r.get("new_version", "?")
+            table.add_row(
+                r.get("ts", "?"),
+                verb,
+                "—",
+                "—",
+                "—",
+                f"{old} → {new}",
+            )
+        else:
+            table.add_row(
+                r.get("ts", "?"),
+                verb,
+                r.get("action", "?"),
+                r.get("source", "?"),
+                r.get("rel_path", "?"),
+                "",
+            )
     console.print(table)
 
 
@@ -5148,6 +5211,12 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
         _write_autorun_breadcrumb(verb, "config-error", type(e).__name__)
         return None
 
+    # Seam 1 — transition detection on the silent autopull/autopush path.
+    # Same hook as `_get_config`, but routed here directly to preserve this
+    # function's silent-on-error contract (we MUST NOT shout on Claude Code
+    # session start when config is broken or missing).
+    upgrade.run_transition_hook(config)
+
     try:
         passphrase = get_passphrase(non_interactive=True)
     except CryptoError as e:
@@ -5299,6 +5368,12 @@ def autopull() -> None:
             _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
         else:
             _write_autorun_breadcrumb("pull", "success")
+
+        # Seam 2 — auto-upgrade nudge emission at the TAIL. Runs AFTER the
+        # main work + breadcrumb so the cold-cache HTTP fetch latency
+        # (~500ms 1x/24h) doesn't stack on sync latency. Silent unless an
+        # upgrade is genuinely available AND the 24h re-nudge gate permits.
+        upgrade.emit_nudge_if_due(setup.config)
     except typer.Exit:
         # 5E ship-fix: `_check_fleet_version_or_refuse` exits via
         # `_error()` → `typer.Exit(1)` on a mixed-version fleet refusal.
@@ -5378,6 +5453,9 @@ def autopush() -> None:
             print(f"mm: pushed {total} files ({', '.join(parts)})")
 
         _write_autorun_breadcrumb("push", "success")
+
+        # Seam 2 — auto-upgrade nudge emission at the TAIL (mirrors autopull).
+        upgrade.emit_nudge_if_due(setup.config)
     except typer.Exit:
         # 5E ship-fix: same as autopull — typed `typer.Exit` from
         # `_error()` (e.g. corrupt-manifest recovery refusal) must NOT

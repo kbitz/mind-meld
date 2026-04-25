@@ -2,6 +2,84 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.5] - 2026-04-25
+
+Auto-upgrade nudge. mm now checks `/repos/kbitz/mind-meld/tags` once per 24h
+and prints a `mm: notice:` line on stderr when a newer tag is available.
+The user runs the printed `pipx install --force git+...@vX.Y.Z` themselves
+— mm never invokes pipx itself (deferred for managed-pipx / rollback / UX
+reasons; see CEO plan for analysis).
+
+This is a leading-edge complement to the v0.9.2 fleet-version refusal:
+refusal fires only AFTER a newer peer pushes data, so a user only learned
+they were stale by losing a sync round. The nudge fires BEFORE that, ideally
+making the refusal a backstop nobody hits.
+
+### What's new
+
+- New module `src/mind_meld/upgrade.py` with `check_for_upgrade`,
+  `detect_self_version_transition`, `format_upgrade_message`,
+  `emit_nudge_if_due`, and `run_transition_hook`.
+- New CLI flag: `mm --no-check-version` skips the check + transition
+  detection for one invocation. Force-skips regardless of config.
+- New config key: `[upgrade] auto_check = true` (default). Set to `false`
+  to disable the check persistently. Lenient validation — unknown keys
+  under `[upgrade]` are silently ignored so a typo never crashes a hook.
+- `mm: notice:` is a NEW stderr prefix, distinct from `mm: warning:`.
+  `warning:` is reserved for data-at-risk signals (corrupt-manifest
+  recovery, fsync failure, etc.); `notice:` is for FYI signals. Keeping
+  the distinction preserves reader trust in `warning:`.
+- `mm log` gains a new row class: `verb: "self-upgrade"` rows with
+  `old_version` / `new_version` (no source/rel_path/action). `mm log`
+  table renderer adds an `extra` column showing `OLD → NEW` for these
+  rows; pull/push rows leave it empty. `mm log --verb self-upgrade`
+  filters to transition rows.
+- `mm status` surfaces the cached upgrade signal (no network call).
+
+### Bootstrap (one-time)
+
+The fleet won't see the nudge until each machine upgrades to v0.9.5 first
+(older versions don't have the check). Run on each machine once:
+
+```bash
+pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.9.5
+```
+
+After that, every fleet machine self-nudges on the next 0.9.6 / 0.9.7 / etc.
+
+### Architecture notes
+
+- Single cache file at `~/.config/mind-meld/upgrade-state.json`, fcntl-flocked
+  on every read+modify+write. Codex outside voice flagged that an earlier
+  two-file split design had a read-modify-write race on transition detection;
+  the single-file design is race-correct under concurrent mm processes
+  (pinned by `tests/test_upgrade.py::TestRacePin` using subprocess.Popen).
+- Pre-release tags (`-rc`, `-alpha`, `-beta`, `-dev`) AND local-version tags
+  (`+local`) are filtered via `Version.is_prerelease` and `Version.local`.
+  The latter matters because packaging sorts `0.9.4+local > 0.9.4`.
+- 3 hook seams in `cli.py`: transition detection in `_get_config` /
+  `_auto_command_setup` / `init_cmd` (shared helper preserves each caller's
+  distinct error policy); nudge emission at the TAIL of `_pull_core` /
+  `_push_core` (interactive AND quiet); status surfacing in `mm status`.
+  Codex outside voice rejected an earlier "refactor through `_get_config`"
+  approach because it would have broken `_auto_command_setup`'s
+  silent-on-missing-config contract.
+- Lock-order invariants: NEVER acquire mm lockfile while holding
+  upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to
+  pullhistory. Documented in `upgrade.py` module docstring.
+
+### Release discipline (CLAUDE.md)
+
+This release establishes `tag = release. merge alone is not.` /ship is
+responsible for tagging on release; mid-feature WIP merges to main land
+without a tag (fleet stays on the prior tagged version). See
+CLAUDE.md "Release discipline" section.
+
+### Tests
+
+47 new tests in `tests/test_upgrade.py`. Full suite: 873 passing
+(826 from auto-upgrade work + 47 new + ~ already-counted Track 5D).
+
 ## [0.9.4] - 2026-04-25
 
 **Track 5D — adversarial-review follow-ups for the v0.8.15 Track 5A ship.**
