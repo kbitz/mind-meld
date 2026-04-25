@@ -15,10 +15,14 @@ v0.9.2, the v0.9.3 hotfix patch added `config.yaml` to the gstack source's
 default `exclude_patterns`, and Track 5D shipped as v0.9.4 (adversarial-
 review follow-ups hardening the v0.8.15 Track 5A ship: `_find_conflict_files`
 tuple-key dedup + `_register_and_save` order swap + push-time self-heal).
-See `docs/PROGRESS.md` for the full version history. Group 1's `constants.py`
-preflight was dropped after a `/plan-eng-review` cohesion check (2 of 4
-constants are single-module, extraction would split the cohesive
-`FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair).
+**v0.9.5 ships the auto-upgrade nudge** (out-of-scope for the v1.0 cleanup
+sweep, but included here as a reference point — see CHANGELOG.md for the
+full feature description and CLAUDE.md "Auto-upgrade nudge" + "Release
+discipline" sections for architecture). See `docs/PROGRESS.md` for the
+full version history. Group 1's `constants.py` preflight was dropped after
+a `/plan-eng-review` cohesion check (2 of 4 constants are single-module,
+extraction would split the cohesive `FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1`
+pair).
 
 ---
 
