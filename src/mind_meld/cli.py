@@ -22,6 +22,7 @@ from rich.console import Console
 from rich.table import Table
 
 from mind_meld import __version__, fsutil, sidecar
+from mind_meld import config as _config_module
 from mind_meld.config import (
     CONFIG_PATH,
     DEFAULT_ARGON2_MEMORY_KB,
@@ -1383,11 +1384,32 @@ def _save_and_register(
     typo'd passphrase on the second-device path is caught in crypto
     validation BEFORE this function runs, so keyring never holds an
     invalid secret.
+
+    Rollback contract: if `register_device` fails (transient `StorageError`,
+    iCloud placeholder hiccup, etc.) after `save_config` succeeded, the
+    saved config file is deleted before the original exception propagates.
+    Without this, init leaves a local config claiming a `device_id` that
+    storage's `devices/` doesn't contain — peers never discover this device,
+    and every subsequent push writes manifests under an ID no one is
+    listening for. User retries `mm init` and either succeeds clean or
+    sees the underlying error, never a half-state. If the rollback unlink
+    itself fails (rare), it surfaces a warning and lets the original
+    register error win — masking the real cause is worse than a confusing
+    secondary message.
     """
     save_config(config)
+    try:
+        register_device(backend, device_id, device_name)
+    except Exception:
+        try:
+            _config_module.CONFIG_PATH.unlink(missing_ok=True)
+        except OSError as unlink_exc:
+            console.print(
+                f"  [yellow]Warning: rollback of {_config_module.CONFIG_PATH} failed "
+                f"({type(unlink_exc).__name__}): {unlink_exc}[/yellow]"
+            )
+        raise
     console.print(f"  Config written to {CONFIG_PATH}")
-
-    register_device(backend, device_id, device_name)
     console.print(f"  Device registered: {device_name} ({device_id})")
 
     # store_passphrase_in_keyring narrowed its own catch to
@@ -3244,12 +3266,23 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
     from unsynced areas of the source tree. Returns (source_name,
     conflict_path, canonical_path_if_exists). Canonical is None if the user
     has already deleted it.
+
+    Two scan strategies, since `mm push` walks two surfaces per source:
+      1. Recursive scan inside include_dirs (and claude SYNCED_SUBDIRS).
+      2. Depth-0 sibling-glob for generic include_files entries — top-level
+         single-file syncs whose conflict siblings live next to them, not
+         inside `_synced_scan_dirs`' recursive surface. Without (2), conflict
+         files for top-level entries like ~/.gstack/config.yaml are invisible
+         to `mm conflicts` / `mm resolve` / `mm gc --conflicts` (the kb-mbp
+         2026-04-24 first-pull bug — listed 5 of 6 conflicts).
     """
     hits: list[tuple[str, Path, Path | None]] = []
     for src_cfg in get_sources(config):
         base_path = Path(src_cfg["path"]).expanduser().resolve()
         if not base_path.exists():
             continue
+
+        # (1) Recursive scan in include_dirs / SYNCED_SUBDIRS.
         for scan_dir in _synced_scan_dirs(src_cfg, base_path):
             # rglob is loose (substring); filter strictly via is_conflict_filename
             # so user files like notes.sync-conflict-log.md are not listed/reaped.
@@ -3262,6 +3295,30 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
                 hits.append(
                     (src_cfg["name"], conflict_path, canonical if canonical.exists() else None)
                 )
+
+        # (2) Depth-0 sibling-glob for generic include_files entries.
+        if src_cfg.get("type") == "generic":
+            for filename in src_cfg.get("include_files", []):
+                canonical = base_path / filename
+                # parent_dir handles both top-level entries (parent == base_path)
+                # and nested entries like "subdir/file.txt" (parent == base/subdir).
+                # .glob() is depth-0 — never recurses into unsynced subtrees.
+                parent_dir = canonical.parent
+                if not parent_dir.exists():
+                    continue
+                pattern = f"{canonical.stem}{CONFLICT_INFIX}*{canonical.suffix}"
+                for conflict_path in parent_dir.glob(pattern):
+                    if not conflict_path.is_file():
+                        continue
+                    if not is_conflict_filename(conflict_path.name):
+                        continue
+                    hits.append(
+                        (
+                            src_cfg["name"],
+                            conflict_path,
+                            canonical if canonical.exists() else None,
+                        )
+                    )
     return hits
 
 
@@ -3850,7 +3907,13 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
     Writes a breadcrumb (`last-autorun.json`) on every early-exit path so
     `mm status` can surface silent-skip history.
     """
-    if not CONFIG_PATH.exists():
+    # Module-attribute access (not the local `CONFIG_PATH` import binding) so
+    # `monkeypatch.setattr("mind_meld.config.CONFIG_PATH", ...)` propagates.
+    # `load_config()` below already resolves the path through the module
+    # attribute; using the local cli.py binding here would let the two
+    # diverge under test and the silent-mode contract would regress to a
+    # `mm: pull failed - init: config not found` stderr line.
+    if not _config_module.CONFIG_PATH.exists():
         _write_autorun_breadcrumb(verb, "config-missing")
         return None
 

@@ -425,18 +425,42 @@ class TestGCSafety:
 
 class TestAutoCommands:
     def test_autopull_no_config_exits_silently(self, tmp_path, monkeypatch):
-        """autopull should exit silently when mm is not initialized."""
+        """autopull should exit silently when mm is not initialized.
+
+        Pins the silent-mode contract: a fresh Mac with no config must produce
+        zero stderr noise on every Claude Code session start. Patches only the
+        source module's CONFIG_PATH — the silent-mode preflight in
+        `_auto_command_setup` MUST go through module-attribute access for this
+        single-patch to take effect, otherwise the broken cli.py local-binding
+        regresses and `load_config` raises ConfigError("init: config not
+        found ...") which surfaces as `mm: pull failed - ...` on stderr.
+        """
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
+        # Breadcrumb lives under sidecar.SIDECAR_DIR — redirect for isolation.
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
         assert result.output == ""
+        # Breadcrumb confirms the silent-exit went through the config-missing
+        # branch, not the broader exception-fallback path.
+        breadcrumb_path = sidecar_dir / "last-autorun.json"
+        assert breadcrumb_path.exists()
+        breadcrumb = json.loads(breadcrumb_path.read_text())
+        assert breadcrumb["outcome"] == "config-missing"
 
     def test_autopush_no_config_exits_silently(self, tmp_path, monkeypatch):
-        """autopush should exit silently when mm is not initialized."""
+        """autopush silent-mode twin of test_autopull_no_config_exits_silently."""
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", tmp_path / "nonexistent.toml")
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
         assert result.output == ""
+        breadcrumb_path = sidecar_dir / "last-autorun.json"
+        assert breadcrumb_path.exists()
+        breadcrumb = json.loads(breadcrumb_path.read_text())
+        assert breadcrumb["outcome"] == "config-missing"
 
     def test_autopull_bad_config_prints_stderr_and_exits_zero(self, tmp_path, monkeypatch):
         """Regression for eager validation: a config file that exists but has
