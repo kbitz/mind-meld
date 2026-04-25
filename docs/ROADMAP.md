@@ -13,22 +13,28 @@ Every item targets the v1.0 release.
 **Correctness foundation, error discipline, decomposition + DRY (Tracks
 1A/1B/1C), init flow + sync_log generalization (Group 2), test hygiene +
 style polish (Group 3), and CI infrastructure (Group 4) all shipped through
-v0.8.11.** See `docs/PROGRESS.md` for the full version history. Group 1
-remains in-flight on its preflight `constants.py` extraction. Group 5
-picks up the conflict-UX backlog from kb-mbp's first-pull, sequenced
-P0-first within the Group: Track 5A ships the autopull silent-mode
+v0.8.11.** See `docs/PROGRESS.md` for the full version history. Group 1 is
+fully shipped — its remaining `constants.py` preflight was dropped after a
+`/plan-eng-review` cohesion check (2 of 4 constants are single-module,
+extraction would split the cohesive `FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1`
+pair). Group 5 picks up the conflict-UX backlog from kb-mbp's first-pull,
+sequenced P0-first within the Group: Track 5A ships the autopull silent-mode
 regression + scope bugs, Track 5B relabels the resolve/conflicts UX, Track
 5C inverts the conflict default and adds real merge.
 
 ---
 
-## Group 1: Decomposition + DRY
+## Group 1: Decomposition + DRY ✓ Complete
 
-Tracks 1A/1B/1C all shipped (v0.8.4 / v0.8.5 / v0.8.6). Only the preflight
-`constants.py` extraction remains.
-
-**Pre-flight** (shared-infra; serial, one-at-a-time):
-- Create `src/mind_meld/constants.py` and move `CONFLICT_INFIX`, `CONFLICT_AGE_DAYS`, `TOMBSTONE_TTL_DAYS`, `FORMAT_VERSION`. ~30 LOC across cli.py, manifest.py, storage/local.py, new constants.py. _Storage-key helpers + all construction/parse sites already shipped in v0.8.4 (`src/mind_meld/storage/keys.py` with path-traversal validation)._
+Tracks 1A/1B/1C all shipped (v0.8.4 / v0.8.5 / v0.8.6). The proposed
+`constants.py` extraction preflight was dropped on 2026-04-24 after a
+`/plan-eng-review` cohesion check: only `FORMAT_VERSION` and `CONFLICT_INFIX`
+are genuinely cross-module of the four candidates, and even those pair
+tightly with `FORMAT_VERSION_LEGACY_V1` (legacy-blob detection, crypto.py)
+and `CONFLICT_PATTERN` (manifest.py) — siblings the original task missed.
+`CONFLICT_AGE_DAYS` and `TOMBSTONE_TTL_DAYS` are single-module.
+Centralization would have been net-new structure without a real cohesion
+problem to solve.
 
 _Track 1A (Decompose `_pull_core` + `_apply_incoming_file`) — ✓ Complete (v0.8.4). 2 tasks shipped._
 
@@ -130,7 +136,7 @@ _Depends on: Track 5B landing first so the inversion can ride the relabeled prom
 Adjacency list (who depends on whom):
 
 ```
-- Group 1 ← {}     (constants.py preflight, parallel with Group 5)
+- Group 1 ← {}     ✓ Complete (Tracks A/B/C shipped; constants.py preflight dropped 2026-04-24)
 - Group 2 ← {1}    ✓ Complete (v0.8.7 + v0.8.8)
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
@@ -140,19 +146,15 @@ Adjacency list (who depends on whom):
 In-flight detail:
 
 ```
-Group 1: Decomposition + DRY
-  Pre-flight .............. ~30 min .. constants.py extraction
-  └── (Tracks 1A/1B/1C all ✓ Complete)
-
 Group 5: Conflict UX & first-pull polish
-  Pre-flight .............. ~5 min ... gstack include_files default add
-  ├── Track 5A ........... ~0.5d ..... 3 tasks .. autopull silent-mode (P0) + scope + register-rollback   [ships first]
+  Pre-flight .............. ~5 min ... gstack include_files default add (bundled with Track 5A)
+  ├── Track 5A ........... ~0.5d ..... 3 tasks .. autopull silent-mode (P0) + scope + register-rollback   [ships first, with preflight]
   ├── Track 5B ........... ~0.5d ..... 4 tasks .. relabel + summary + table + progress                    [ships second]
   └── Track 5C ........... ~3-5d ..... 2 tasks .. invert default + real-merge backends                    [ships last]
 ```
 
-**Active total: 2 in-flight Groups . 3 tracks . 9 tasks (+ 2 pre-flight items)**
-**Shipped: Groups 1 (Tracks A/B/C), 2, 3, 4 — see PROGRESS.md.**
+**Active total: 1 in-flight Group . 3 tracks . 9 tasks (+ 1 pre-flight item bundled with 5A)**
+**Shipped: Groups 1, 2, 3, 4 — see PROGRESS.md.**
 
 ---
 
