@@ -30,7 +30,7 @@ from mind_meld.cli import (
     _prompt_passphrase,
     _prompt_sources,
     _pull_one_source,
-    _save_and_register,
+    _register_and_save,
     _select_devices,
     _UnknownSourceWarning,
 )
@@ -1649,12 +1649,20 @@ class TestPromptSources:
         assert "config.yaml" in gstack["exclude_patterns"]
 
 
-class TestSaveAndRegister:
-    """_save_and_register — config write → device register → keyring store."""
+class TestRegisterAndSave:
+    """_register_and_save — device register → config write → keyring store.
+
+    Track 5D (v0.9.4) inverted the original Track 5A ordering. The
+    canonical 'remote first, local pointer last' pattern means a SIGKILL
+    or normal save_config failure leaves at most an inert orphan device
+    entry in storage (recoverable on retry init) instead of the inverse
+    half-state where local config claims a device storage doesn't know.
+    """
 
     def test_ordering(self, tmp_path: Path, monkeypatch) -> None:
-        """Order matters: if config write fails we must NOT have registered
-        the device or stored the passphrase. Pin the sequence."""
+        """Track 5D order: register MUST run before save_config so a
+        save failure at most leaves an orphan storage breadcrumb, never
+        an orphan local config that silently breaks pushes."""
         from mind_meld import cli as cli_module
 
         cfg = tmp_path / "config.toml"
@@ -1683,8 +1691,10 @@ class TestSaveAndRegister:
             "device": {"id": "d1", "name": "Mac"},
             "storage": {"path": str(tmp_path)},
         }
-        _save_and_register(config, backend=None, device_id="d1", device_name="Mac", passphrase="pw")
-        assert call_order == ["save", "register", "keyring"]
+        _register_and_save(
+            config, backend=MagicMock(), device_id="d1", device_name="Mac", passphrase="pw"
+        )
+        assert call_order == ["register", "save", "keyring"]
 
     def test_no_keyring_still_succeeds(self, tmp_path: Path, monkeypatch) -> None:
         """Keyring unavailable (lambda _pw: False) → function completes
@@ -1702,21 +1712,26 @@ class TestSaveAndRegister:
             "storage": {"path": str(tmp_path)},
         }
         # Must not raise.
-        _save_and_register(config, backend=None, device_id="d1", device_name="Mac", passphrase="pw")
+        _register_and_save(
+            config, backend=MagicMock(), device_id="d1", device_name="Mac", passphrase="pw"
+        )
 
-    def test_register_failure_rolls_back_saved_config(self, tmp_path: Path, monkeypatch) -> None:
-        """Track 5A Task 3 regression: if register_device raises after
-        save_config succeeded, the saved config file MUST be deleted before
-        the exception propagates. Without rollback, init leaves a local
-        config claiming a device_id that storage doesn't know about — peers
-        never discover this device, and every push writes manifests under an
-        ID no one is listening for. User retries `mm init` and either
-        succeeds clean or sees the underlying error, never a half-state.
-        """
+    def test_register_failure_does_not_save_config(self, tmp_path: Path, monkeypatch) -> None:
+        """Track 5D Task 2 (replaces test_register_failure_rolls_back_saved_config):
+        register_device raises before save_config runs, so there is no
+        local config to roll back — the saved-config file must simply
+        not exist. Storage has nothing because register failed atomically."""
         from mind_meld import cli as cli_module
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+
+        save_called = []
+
+        def tracking_save(c, path=None):
+            save_called.append(True)
+
+        monkeypatch.setattr(cli_module, "save_config", tracking_save)
 
         def boom(*_a, **_kw):
             raise StorageError("transient iCloud put failure")
@@ -1728,54 +1743,87 @@ class TestSaveAndRegister:
             "storage": {"path": str(tmp_path)},
         }
         with pytest.raises(StorageError, match="transient iCloud put failure"):
-            _save_and_register(
-                config, backend=None, device_id="d1", device_name="Mac", passphrase="pw"
+            _register_and_save(
+                config, backend=MagicMock(), device_id="d1", device_name="Mac", passphrase="pw"
             )
-        assert not cfg.exists(), "config file must be rolled back when register fails"
+        assert save_called == [], "save_config must not run when register fails"
+        assert not cfg.exists()
 
-    def test_register_failure_rollback_unlink_failure_does_not_mask_original(
+    def test_save_config_failure_after_register_triggers_cleanup(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """Defense: if the rollback unlink itself fails (rare — file vanished,
-        permissions changed, fs-level oddness), the user MUST still see the
-        original register error. Masking the real cause behind a confusing
-        unlink error would hide what actually went wrong."""
+        """Track 5D CMT-2: when save_config raises after register
+        succeeded, _register_and_save best-effort-deletes the just-
+        registered devices/<id>.json so retry init doesn't trip
+        _init_storage_guard's orphan-case warning. Original save_config
+        error propagates regardless of cleanup outcome."""
         from mind_meld import cli as cli_module
+        from mind_meld.storage.keys import device_key
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
 
-        def boom_register(*_a, **_kw):
-            raise StorageError("transient iCloud put failure")
+        backend = MagicMock()
+        monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
 
-        monkeypatch.setattr(cli_module, "register_device", boom_register)
+        def boom_save(_c, path=None):
+            raise OSError("disk full")
 
-        # Force the rollback unlink to raise.
-        original_unlink = Path.unlink
-
-        def boom_unlink(self, *args, **kwargs):
-            if self == cfg:
-                raise PermissionError("filesystem locked")
-            return original_unlink(self, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "unlink", boom_unlink)
+        monkeypatch.setattr(cli_module, "save_config", boom_save)
 
         config = {
             "device": {"id": "d1", "name": "Mac"},
             "storage": {"path": str(tmp_path)},
         }
-        # Original register error must propagate, NOT the unlink error.
-        with pytest.raises(StorageError, match="transient iCloud put failure"):
-            _save_and_register(
-                config, backend=None, device_id="d1", device_name="Mac", passphrase="pw"
+        with pytest.raises(OSError, match="disk full"):
+            _register_and_save(
+                config, backend=backend, device_id="d1", device_name="Mac", passphrase="pw"
             )
+        # Cleanup hit the right storage key.
+        backend.delete.assert_called_once_with(device_key("d1"))
+
+    def test_save_config_failure_when_cleanup_also_fails_propagates_save_error(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Defense: if backend.delete itself raises during cleanup, the
+        original save_config error must still be the one the user sees.
+        Masking the real cause behind a confusing cleanup error would
+        hide what actually went wrong (same defense the original
+        rollback-unlink test pinned, now phrased for the new ordering)."""
+        from mind_meld import cli as cli_module
+
+        cfg = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+
+        backend = MagicMock()
+        backend.delete.side_effect = StorageError("storage cleanup also failed")
+        monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
+
+        def boom_save(_c, path=None):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cli_module, "save_config", boom_save)
+
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path)},
+        }
+        # Original save error wins, not the cleanup error.
+        with pytest.raises(OSError, match="disk full"):
+            _register_and_save(
+                config, backend=backend, device_id="d1", device_name="Mac", passphrase="pw"
+            )
+        # Cleanup failure was surfaced via the visible-failure contract.
+        captured = capsys.readouterr()
+        assert "cleanup of" in captured.err
+        assert "storage cleanup also failed" in captured.err
 
     def test_register_failure_does_not_print_committed_messages(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
-        """User-facing message ordering: 'Config written' and 'Device registered'
-        are committed-state confirmations; on register failure neither should
-        appear since the state is rolled back."""
+        """User-facing message ordering: 'Device registered' and 'Config
+        written' are committed-state confirmations; on register failure
+        neither should appear since no durable step succeeded."""
         from mind_meld import cli as cli_module
 
         cfg = tmp_path / "config.toml"
@@ -1791,13 +1839,113 @@ class TestSaveAndRegister:
             "storage": {"path": str(tmp_path)},
         }
         with pytest.raises(StorageError):
-            _save_and_register(
-                config, backend=None, device_id="d1", device_name="Mac", passphrase="pw"
+            _register_and_save(
+                config, backend=MagicMock(), device_id="d1", device_name="Mac", passphrase="pw"
             )
         captured = capsys.readouterr()
         # Neither commit-confirmation line should have been emitted.
         assert "Config written" not in captured.out
         assert "Device registered" not in captured.out
+
+
+class TestEnsureDeviceRegistered:
+    """Track 5D Task 2b — push-time self-heal for missing device entry.
+
+    Two scenarios converge here:
+      * Future v0.9.4+ SIGKILL crash between register_device and
+        save_config in _register_and_save.
+      * Pre-v0.9.4 victims of the v0.8.15..v0.9.3 inverted half-state
+        (config has device_id, storage's devices/<id>.json missing).
+    """
+
+    def test_self_heals_missing_device_entry(self, tmp_path: Path, monkeypatch) -> None:
+        """When devices/<id>.json is absent in storage, push entry calls
+        register_device to recreate it. Pre-existing victims of the
+        inverted half-state self-heal on first push after upgrade."""
+        from mind_meld.cli import _ensure_device_registered
+        from mind_meld.storage.keys import device_key
+
+        backend = MagicMock()
+        backend.exists.return_value = False
+        registered = []
+
+        def fake_register(b, did, dname):
+            registered.append((b, did, dname))
+
+        monkeypatch.setattr("mind_meld.cli.register_device", fake_register)
+
+        _ensure_device_registered(backend, "d1", "Mac")
+
+        backend.exists.assert_called_once_with(device_key("d1"))
+        assert registered == [(backend, "d1", "Mac")]
+
+    def test_no_op_when_device_already_registered(self, tmp_path: Path, monkeypatch) -> None:
+        """When devices/<id>.json already exists, register_device is NOT
+        called. Self-heal must not re-register on every push (would reset
+        `registered` timestamp and look noisy in `mm devices`)."""
+        from mind_meld.cli import _ensure_device_registered
+
+        backend = MagicMock()
+        backend.exists.return_value = True
+        registered = []
+
+        def fake_register(b, did, dname):
+            registered.append((b, did, dname))
+
+        monkeypatch.setattr("mind_meld.cli.register_device", fake_register)
+
+        _ensure_device_registered(backend, "d1", "Mac")
+
+        assert registered == [], "register_device must not run when entry exists"
+
+    def test_self_heal_register_failure_propagates(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """If register_device raises during self-heal (transient iCloud,
+        permissions), the push aborts with that error AND a stderr
+        warning lands first. The warning is load-bearing: autopush's
+        generic `except Exception` would otherwise swallow the failure
+        and silently no-op every push, violating the visible-failure
+        contract for degraded-state signals."""
+        from mind_meld.cli import _ensure_device_registered
+
+        backend = MagicMock()
+        backend.exists.return_value = False
+
+        def boom(*_a, **_kw):
+            raise StorageError("transient iCloud put failure")
+
+        monkeypatch.setattr("mind_meld.cli.register_device", boom)
+
+        with pytest.raises(StorageError, match="transient iCloud put failure"):
+            _ensure_device_registered(backend, "d1", "Mac")
+        captured = capsys.readouterr()
+        # Visible-failure contract: warning reached stderr before re-raise.
+        assert "mm: warning: device entry self-heal failed" in captured.err
+        assert "StorageError" in captured.err
+
+    def test_dry_run_skips_self_heal(self, tmp_path: Path, monkeypatch) -> None:
+        """Track 5D codex review 2026-04-25: `mm push --dry-run` must
+        not mutate storage, even when the device entry is missing. The
+        self-heal does a `backend.put` via register_device, so dry_run
+        gating is required to honor --dry-run's preview-only contract."""
+        from mind_meld.cli import _ensure_device_registered
+
+        backend = MagicMock()
+        backend.exists.return_value = False
+        registered = []
+
+        def fake_register(b, did, dname):
+            registered.append((b, did, dname))
+
+        monkeypatch.setattr("mind_meld.cli.register_device", fake_register)
+
+        _ensure_device_registered(backend, "d1", "Mac", dry_run=True)
+
+        assert backend.exists.call_count == 0, (
+            "dry_run must not even probe storage — short-circuit before any I/O"
+        )
+        assert registered == [], "dry_run must not call register_device"
 
 
 class TestBootstrapOrVerifyCrypto:

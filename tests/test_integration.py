@@ -1787,13 +1787,16 @@ class TestAutoCommands:
         assert "Traceback" not in result.output + (result.stderr or "")
 
     def test_init_tolerates_keyring_write_exception(self, tmp_path, monkeypatch):
-        """Regression: _save_and_register must not abort on a non-KeyringError
-        from store_passphrase_in_keyring after config + device are already
+        """Regression: _register_and_save must not abort on a non-KeyringError
+        from store_passphrase_in_keyring after register + config are already
         committed. Old wide `except Exception` inside the helper swallowed
         everything; v0.8.9's narrowing made non-KeyringError propagate. The
-        follow-through fix wraps the call at the _save_and_register call site
+        follow-through fix wraps the call at the _register_and_save call site
         so init degrades to the env-var-fallback path cleanly instead of
-        leaving the user half-initialized with an uncaught traceback."""
+        leaving the user half-initialized with an uncaught traceback.
+
+        (Function renamed from `_save_and_register` to `_register_and_save`
+        in Track 5D / v0.9.4 when the order swapped to register-first.)"""
         config_path = tmp_path / "config.toml"
         storage = tmp_path / "icloud"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)

@@ -664,6 +664,138 @@ class TestFindConflictFilesIncludeFiles:
         assert not old.exists()
 
 
+class TestFindConflictFilesNestedDedup:
+    """Track 5D Task 1: dedup pass guards against double-counting when an
+    `include_files` entry sits inside an `include_dirs` directory.
+
+    The default config doesn't trigger this (all `include_files` entries
+    are bare top-level dotfiles or `retro-context.md`/`greptile-history.md`).
+    But a user customizing their gstack source with `include_files:
+    ["projects/notes.md"]` AND `include_dirs: ["projects"]` would have
+    `_find_conflict_files` visit a `projects/notes.sync-conflict-...md`
+    twice — once via the rglob and once via the depth-0 sibling-glob —
+    producing duplicate rows in `mm conflicts` and double-counted reaps
+    in `mm gc --conflicts`.
+
+    Dedup key is `(src_name, conflict_path)` not bare `Path`: two
+    legitimately-overlapping sources must keep distinct rows so each
+    source's attribution is preserved.
+    """
+
+    def _nested_config(self, src: Path) -> dict:
+        return {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "include_files": ["projects/notes.md"],
+                    }
+                ]
+            }
+        }
+
+    def test_nested_include_file_inside_include_dir_dedups(self, tmp_path: Path) -> None:
+        """The headline regression pin: a single conflict file at a path
+        the rglob AND the sibling-glob both reach is listed exactly once."""
+        src = tmp_path / "gstack"
+        (src / "projects").mkdir(parents=True)
+        (src / "projects" / "notes.md").write_bytes(b"canonical")
+        conflict = src / "projects" / "notes.sync-conflict-20260425-150000-devA1234.md"
+        conflict.write_bytes(b"divergent")
+
+        hits = _find_conflict_files(self._nested_config(src))
+        hit_paths = [h[1] for h in hits]
+        assert hit_paths.count(conflict) == 1
+        assert len(hits) == 1
+
+    def test_dedup_preserves_canonical_resolution(self, tmp_path: Path) -> None:
+        """The single deduped row must still report the right canonical
+        path. mm resolve relies on this."""
+        src = tmp_path / "gstack"
+        (src / "projects").mkdir(parents=True)
+        (src / "projects" / "notes.md").write_bytes(b"canonical")
+        conflict = src / "projects" / "notes.sync-conflict-20260425-150000-devA1234.md"
+        conflict.write_bytes(b"divergent")
+
+        hits = _find_conflict_files(self._nested_config(src))
+        assert len(hits) == 1
+        _src_name, _cpath, canonical = hits[0]
+        assert canonical == src / "projects" / "notes.md"
+
+    def test_dedup_does_not_collapse_distinct_conflicts(self, tmp_path: Path) -> None:
+        """Two distinct conflict files in the overlap zone must remain as
+        two distinct rows. Dedup is by `(src_name, path)`, not by canonical."""
+        src = tmp_path / "gstack"
+        (src / "projects").mkdir(parents=True)
+        (src / "projects" / "notes.md").write_bytes(b"canonical")
+        c1 = src / "projects" / "notes.sync-conflict-20260425-150000-devA1234.md"
+        c2 = src / "projects" / "notes.sync-conflict-20260425-160000-devB5678.md"
+        c1.write_bytes(b"divergent-1")
+        c2.write_bytes(b"divergent-2")
+
+        hits = _find_conflict_files(self._nested_config(src))
+        hit_paths = {h[1] for h in hits}
+        assert hit_paths == {c1, c2}
+        assert len(hits) == 2
+
+    def test_gc_reaps_nested_include_file_conflict_once(self, tmp_path: Path) -> None:
+        """End-to-end via _gc_old_conflict_files: pre-fix this returned 2
+        (path visited twice, second unlink no-ops via missing_ok=True but
+        reaped count was inflated). After dedup it returns 1."""
+        src = tmp_path / "gstack"
+        (src / "projects").mkdir(parents=True)
+        (src / "projects" / "notes.md").write_bytes(b"canonical")
+        old = src / "projects" / "notes.sync-conflict-20000101-000000-devA1234.md"
+        old.write_bytes(b"old")
+        ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(old, (ancient, ancient))
+
+        reaped = _gc_old_conflict_files(self._nested_config(src), dry_run=False, verbose=False)
+        assert reaped == 1
+        assert not old.exists()
+
+    def test_dedup_in_lock_protected_migration_path(self, tmp_path: Path, monkeypatch) -> None:
+        """`mm pull` and `mm resolve` call the function with
+        migrate_pre_inversion=True, which renames pre-inversion files
+        mid-scan. A nested-overlap pre-inversion conflict must surface
+        exactly once after migration — once renamed by the rglob pass,
+        the sibling-glob does not re-discover it under the old name
+        (file no longer exists at that path) and the dedup guards
+        against any future re-introduction."""
+        from mind_meld.cli import _ensure_inversion_marker
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+
+        src = tmp_path / "gstack"
+        (src / "projects").mkdir(parents=True)
+        (src / "projects" / "notes.md").write_bytes(b"canonical")
+        # Pre-inversion conflict file: backdate mtime so the migration
+        # mtime gate (5E ship-fix) treats it as legacy and renames it.
+        pre_inversion = src / "projects" / "notes.sync-conflict-20260301-100000-devA1234.md"
+        pre_inversion.write_bytes(b"divergent")
+        old_mtime = datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp() - 86400
+        os.utime(pre_inversion, (old_mtime, old_mtime))
+
+        # Stamp the inversion marker AFTER backdating so the gate fires.
+        marker_ts = _ensure_inversion_marker()
+        assert marker_ts is not None
+        assert old_mtime < marker_ts
+
+        hits = _find_conflict_files(self._nested_config(src), migrate_pre_inversion=True)
+        # Migration renames the file to embed the v0- prefix between the
+        # CONFLICT_INFIX and the timestamp segment.
+        migrated = src / "projects" / "notes.sync-conflict-v0-20260301-100000-devA1234.md"
+        assert migrated.exists()
+        assert not pre_inversion.exists()
+        # Exactly one row, pointing at the migrated path.
+        hit_paths = [h[1] for h in hits]
+        assert hit_paths == [migrated]
+
+
 class TestFindConflictFilesFalsePositiveGuard:
     """Latent bug fix: _find_conflict_files used a substring check that
     matched user files like `notes.sync-conflict-log.md`, so the reaper
