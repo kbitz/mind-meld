@@ -49,7 +49,7 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             ".codex-desc-healed",
         ],
         # Per-machine artifacts that gstack recomputes on each device. Syncing
-        # them produces a churning conflict file every pull (kb-mbp 2026-04-24).
+        # them produces a churning conflict file every pull (2026-04-24 first-pull regression).
         # repo-mode.json: 7-day TTL solo-vs-collaborative cache, recomputed
         # locally. land-deploy-confirmed: deploy-config-hash markers, computed
         # per-machine. config.yaml: holds gstack version-check tracking

@@ -7,7 +7,7 @@ pick up.
 
 Items originate from the 2026-04-22 `/full-review` audit, review follow-ups
 accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x, /plan-eng-review on
-2026-04-23, and the 2026-04-24 first-pull conflict-UX session on kb-mbp.
+2026-04-23, and the 2026-04-24 first-pull conflict-UX session.
 Every item targets the v1.0 release.
 
 **Groups 1-5 fully shipped.** Tracks 5A / 5B / 5C / 5E shipped through
@@ -85,7 +85,7 @@ _Track 4A (GitHub Actions CI workflow + ruff pin + README badge + 113-violation 
 ## Group 5: Conflict UX & first-pull polish ✓ Complete
 _Depends on: none_
 
-Surfaced 2026-04-24 from kb-mbp's first-pull session: 286-file pull on a
+Surfaced 2026-04-24 from a fresh-Mac first-pull session: 286-file pull on a
 fresh Mac landed 6 conflict copies with confusing labels, no inline
 filenames, an over-truncated `mm conflicts` table, silence during the
 ~4-minute download, and a P0 contract regression on `mm autopull` /
@@ -97,7 +97,7 @@ _Track 5A (Auto-command silent-mode + scope bugs + Group 5 preflight — P0 auto
 
 _Track 5B (Pull / resolve / conflicts UX surfaces — vocabulary unification `(c)`/`(f)` → `(l)/(r)/(b)/(a)`, inline conflicted filenames in pull summary, `mm conflicts` table column rename + per-column wrap, Rich Progress widget for TTY, quiet-mode contract fix routing per-source conflicts to stderr) — ✓ Complete (v0.9.0). 4 tasks + scope expansions shipped. **BREAKING**: legacy `c`/`f` letters rejected loudly. 14 new tests (700 pass). Track 5E inherited the pre-inversion `.sync-conflict-*` migration subtask (D9 handoff)._
 
-_Track 5C (`exclude_patterns` + log + migration UX — per-source glob list, consumer-boundary filter at `_pull_core` + `_push_core`, tombstone-suppression invariant, `mm log` JSONL writer/reader, `mm migrate-config` command, autopull/autopush missing-excludes breadcrumb, `mm sources` excluded-count column, `mm status` warning) — ✓ Complete (v0.9.1). Pivoted via /plan-ceo-review from "conflict inversion + real-merge backends" after kb-mbp first-pull data showed 24/25 divergent files were per-machine artifacts that excludes prevent. Real-merge backend deferred to Future. Inversion split to Track 5E. 38 tests + 5 IRON RULE pins._
+_Track 5C (`exclude_patterns` + log + migration UX — per-source glob list, consumer-boundary filter at `_pull_core` + `_push_core`, tombstone-suppression invariant, `mm log` JSONL writer/reader, `mm migrate-config` command, autopull/autopush missing-excludes breadcrumb, `mm sources` excluded-count column, `mm status` warning) — ✓ Complete (v0.9.1). Pivoted via /plan-ceo-review from "conflict inversion + real-merge backends" after the 2026-04-24 first-pull data showed 24/25 divergent files were per-machine artifacts that excludes prevent. Real-merge backend deferred to Future. Inversion split to Track 5E. 38 tests + 5 IRON RULE pins._
 
 _Track 5E (Conflict default inversion — inverted `_apply_conflict` (canonical = local; remote → sidecar), strict pull-start fleet-version refusal, pre-inversion `v0-` filename migration, dual-mode resolve dispatch by filename prefix, `mm conflicts` Mode column, `mm devices` Version column, `update_last_seen` writes `last_seen_version`) — ✓ Complete (v0.9.2). **BREAKING**: pre-v0.9.2 peers refused at pull start. Added `packaging>=21.0`. 11 tests in `TestInversion5E`. 768 pass._
 

@@ -817,7 +817,7 @@ class TestPullSummaryInlinePaths:
     def test_conflicted_paths_listed_under_per_source_line(self, capsys) -> None:
         from mind_meld.cli import PullResult, _print_pull_summary
 
-        per_source = _make_per_source("claude", "kb-mbp", conflicted=["a.md", "b.md", "c.md"])
+        per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
         _print_pull_summary(
             PullResult(total_conflicted=3, elapsed=1.0),
             corrupt_peers=[],
@@ -835,7 +835,9 @@ class TestPullSummaryInlinePaths:
     def test_failed_paths_listed_separately(self, capsys) -> None:
         from mind_meld.cli import PullResult, _print_pull_summary
 
-        per_source = _make_per_source("claude", "kb-mbp", failed=["bad-blob.md", "bad-decrypt.md"])
+        per_source = _make_per_source(
+            "claude", "machine-a", failed=["bad-blob.md", "bad-decrypt.md"]
+        )
         _print_pull_summary(
             PullResult(total_failed=2, elapsed=1.0),
             corrupt_peers=[],
@@ -853,7 +855,7 @@ class TestPullSummaryInlinePaths:
         from mind_meld.cli import PullResult, _print_pull_summary
 
         paths = [f"f{i}.md" for i in range(25)]
-        per_source = _make_per_source("claude", "kb-mbp", conflicted=paths)
+        per_source = _make_per_source("claude", "machine-a", conflicted=paths)
         _print_pull_summary(
             PullResult(total_conflicted=25, elapsed=1.0),
             corrupt_peers=[],
@@ -876,7 +878,7 @@ class TestPullSummaryInlinePaths:
         from mind_meld.cli import PullResult, _print_pull_summary
 
         paths = [f"f{i}.md" for i in range(25)]
-        per_source = _make_per_source("claude", "kb-mbp", conflicted=paths)
+        per_source = _make_per_source("claude", "machine-a", conflicted=paths)
         _print_pull_summary(
             PullResult(total_conflicted=25, elapsed=1.0),
             corrupt_peers=[],
@@ -896,7 +898,7 @@ class TestPullSummaryInlinePaths:
         """No conflicted/failed paths => no inline list (no false positives)."""
         from mind_meld.cli import PullResult, _print_pull_summary
 
-        per_source = _make_per_source("claude", "kb-mbp", written=["new.md"])
+        per_source = _make_per_source("claude", "machine-a", written=["new.md"])
         _print_pull_summary(
             PullResult(total_written=1, elapsed=1.0),
             corrupt_peers=[],
@@ -923,7 +925,7 @@ class TestPullSummaryQuietContract:
     def test_quiet_routes_per_source_conflicts_to_stderr(self, capsys) -> None:
         from mind_meld.cli import PullResult, _print_pull_summary
 
-        per_source = _make_per_source("claude", "kb-mbp", conflicted=["a.md", "b.md", "c.md"])
+        per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
         _print_pull_summary(
             PullResult(total_conflicted=3, elapsed=1.0),
             corrupt_peers=[],
@@ -935,7 +937,7 @@ class TestPullSummaryQuietContract:
         )
         captured = capsys.readouterr()
         # Stderr surfaces device/source prefix + file list
-        assert "kb-mbp/claude" in captured.err
+        assert "machine-a/claude" in captured.err
         assert "3 conflicts" in captured.err
         for path in ("a.md", "b.md", "c.md"):
             assert path in captured.err
@@ -945,7 +947,7 @@ class TestPullSummaryQuietContract:
     def test_quiet_routes_per_source_failed_to_stderr(self, capsys) -> None:
         from mind_meld.cli import PullResult, _print_pull_summary
 
-        per_source = _make_per_source("claude", "kb-mbp", failed=["bad.md"])
+        per_source = _make_per_source("claude", "machine-a", failed=["bad.md"])
         _print_pull_summary(
             PullResult(total_failed=1, elapsed=1.0),
             corrupt_peers=[],
@@ -956,7 +958,7 @@ class TestPullSummaryQuietContract:
             verbose=False,
         )
         captured = capsys.readouterr()
-        assert "kb-mbp/claude" in captured.err
+        assert "machine-a/claude" in captured.err
         assert "1 failed" in captured.err
         assert "bad.md" in captured.err
 
@@ -968,8 +970,8 @@ class TestPullSummaryQuietContract:
         """
         from mind_meld.cli import PullResult, _print_pull_summary
 
-        ps_a = _make_per_source("claude", "kb-mbp", conflicted=["x.md"])
-        ps_b = _make_per_source("claude", "kb-mac", conflicted=["y.md"])
+        ps_a = _make_per_source("claude", "machine-a", conflicted=["x.md"])
+        ps_b = _make_per_source("claude", "machine-b", conflicted=["y.md"])
         _print_pull_summary(
             PullResult(total_conflicted=2, elapsed=1.0),
             corrupt_peers=[],
@@ -980,8 +982,8 @@ class TestPullSummaryQuietContract:
             verbose=False,
         )
         err = capsys.readouterr().err
-        assert "kb-mbp/claude" in err
-        assert "kb-mac/claude" in err
+        assert "machine-a/claude" in err
+        assert "machine-b/claude" in err
         assert "x.md" in err
         assert "y.md" in err
 
@@ -989,7 +991,7 @@ class TestPullSummaryQuietContract:
         """No conflicts/failures => no stderr noise (no false positives)."""
         from mind_meld.cli import PullResult, _print_pull_summary
 
-        per_source = _make_per_source("claude", "kb-mbp", written=["new.md"])
+        per_source = _make_per_source("claude", "machine-a", written=["new.md"])
         _print_pull_summary(
             PullResult(total_written=1, elapsed=1.0),
             corrupt_peers=[],
@@ -1007,7 +1009,7 @@ class TestPullSummaryQuietContract:
         from mind_meld.cli import PullResult, _print_pull_summary
 
         paths = [f"f{i}.md" for i in range(25)]
-        per_source = _make_per_source("claude", "kb-mbp", conflicted=paths)
+        per_source = _make_per_source("claude", "machine-a", conflicted=paths)
         _print_pull_summary(
             PullResult(total_conflicted=25, elapsed=1.0),
             corrupt_peers=[],

@@ -1218,7 +1218,7 @@ def _download_and_apply(
     Progress display (Track 5B Task 4):
       - quiet=True: silent. Autopull contract — no stdout/stderr noise.
       - TTY + not quiet: Rich Progress widget renders bar + count + elapsed.
-        First-pull-on-new-Mac case (kb-mbp 2026-04-24): per-file
+        First-pull-on-new-Mac case (the 2026-04-24 first-pull session): per-file
         backend.get(bkey) blocks on iCloud placeholder materialization;
         before this, the entire 286-file / 263s pull was indistinguishable
         from a hung process. Progress only updates BETWEEN files (a single
@@ -1963,8 +1963,8 @@ def _push_core(
     # config now excludes from BOTH the ok-fetch path and the recovery
     # branches (sidecar prior state, peer-tombstone aggregation). Without
     # this, generate_tombstones would emit a deletion tombstone for every
-    # newly-excluded path on the first post-migration push (the kb-mbp
-    # 2026-04-24 regression), and the sidecar/peer-fallback branches
+    # newly-excluded path on the first post-migration push (the
+    # 2026-04-24 first-pull regression), and the sidecar/peer-fallback branches
     # would seed pre-exclude paths back into the next manifest.
     exclude_map = _build_exclude_map(config)
     if remote_manifest is not None:
@@ -2589,7 +2589,7 @@ def _print_preflight_conflicts(predicted: list[_PredictedConflict], quiet: bool)
 
 
 # Inline-path display cap for the non-verbose pull summary. 20 was picked
-# from the kb-mbp 2026-04-24 first-pull session (286-file pull / 6 conflicts):
+# from the 2026-04-24 first-pull session (286-file pull / 6 conflicts):
 # enough to surface a typical conflict batch without spamming, and short
 # enough that --verbose still feels distinct.
 _INLINE_PATH_CAP = 20
@@ -4289,7 +4289,7 @@ def _find_conflict_files(
          single-file syncs whose conflict siblings live next to them, not
          inside `_synced_scan_dirs`' recursive surface. Without (2), conflict
          files for top-level entries like ~/.gstack/retro-context.md are invisible
-         to `mm conflicts` / `mm resolve` / `mm gc --conflicts` (the kb-mbp
+         to `mm conflicts` / `mm resolve` / `mm gc --conflicts` (the
          2026-04-24 first-pull bug — listed 5 of 6 conflicts).
 
     `migrate_pre_inversion` (default False): if True, rename any
