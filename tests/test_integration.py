@@ -313,8 +313,8 @@ class TestExcludePatterns5C:
         for p in paths:
             os.utime(p, (old, old))
 
-    def test_kb_mbp_regression_no_conflicts_for_excluded_paths(self, tmp_path, monkeypatch):
-        """kb-mbp 2026-04-24: A pushes per-machine artifacts WITHOUT the
+    def test_two_device_first_pull_no_conflicts_for_excluded_paths(self, tmp_path, monkeypatch):
+        """2026-04-24 first-pull: A pushes per-machine artifacts WITHOUT the
         recommended excludes; B pulls WITH the excludes installed. Pull
         MUST emit zero `.sync-conflict-*` files for repo-mode.json or
         land-deploy-confirmed (the per-machine churn paths).

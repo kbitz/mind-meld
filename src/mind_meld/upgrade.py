@@ -2,9 +2,8 @@
 24h via stderr; log self-version transitions to pullhistory.
 
 Approach A "nudge-only" — mm NEVER invokes pipx itself. The nudge prints the
-upgrade command; the user runs it. See docs/designs/auto-upgrade.md (or the CEO
-plan archive at ~/.gstack/projects/kbitz-mind-meld/ceo-plans/) for the full
-rationale on why subprocess pipx is deferred.
+upgrade command; the user runs it. See docs/designs/auto-upgrade.md for the
+full rationale on why subprocess pipx is deferred.
 
 Version source: pyproject.toml on main (raw.githubusercontent.com... actually,
 NO — switched to the /tags API in eng review). The repo has tags v0.3.0..vX.Y.Z

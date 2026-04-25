@@ -2,6 +2,36 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.6] - 2026-04-25
+
+Public-readiness scrub before flipping the GitHub repo from private to public.
+Cosmetic-only — zero behavioral changes, all 836 tests still pass.
+
+### Changed
+
+- `pyproject.toml` `authors` field set to `Karl Bitz` (was placeholder
+  `Mind Meld Contributors`).
+- README's "How it works" section now documents the v0.9.5 auto-upgrade nudge
+  (24h check, `mm: notice:` stderr prefix, `--no-check-version` opt-out flag,
+  `[upgrade] auto_check = false` config opt-out, relationship to v0.9.2 fleet
+  refusal). Closes the doc gap where v0.9.5's user-visible behavior was only
+  described in CHANGELOG and CLAUDE.md.
+- Internal commentary across CHANGELOG / CLAUDE / SPEC / ROADMAP / PROGRESS /
+  cli.py / config.py / `tests/test_*.py` rephrased to remove `kb-mbp` /
+  `kb-mac` personal-machine identifiers from case-study descriptions
+  (replaced with `2026-04-24 first-pull` and `machine-a` / `machine-b`).
+  Test fixture strings only — no semantic meaning, all assertions still pass.
+- `src/mind_meld/upgrade.py` module docstring no longer references a
+  personal local-path archive (`~/.gstack/projects/.../ceo-plans/`).
+
+### Preserved
+
+- All `kbitz/mind-meld` references in URL / repo-slug contexts kept
+  (`api.github.com/repos/kbitz/mind-meld/...` auto-upgrade endpoint, `pipx
+  install git+https://github.com/kbitz/mind-meld.git@vX.Y.Z` install
+  commands, README CI badge, CHANGELOG bootstrap recipe). These are
+  load-bearing and would break the auto-upgrade nudge if changed.
+
 ## [0.9.5] - 2026-04-25
 
 Auto-upgrade nudge. mm now checks `/repos/kbitz/mind-meld/tags` once per 24h
@@ -401,8 +431,8 @@ blobs as orphans (the gc-bypass hazard pinned by `test_mm_gc_does_not_orphan_
 excluded_path_blobs`).
 
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns`
-must NOT generate a deletion tombstone on the next push (kb-mbp 2026-04-24
-regression: without consumer-boundary filtering, every newly-excluded path
+must NOT generate a deletion tombstone on the next push (2026-04-24
+first-pull regression: without consumer-boundary filtering, every newly-excluded path
 ships a tombstone that propagates to peers). Removing a glob brings the
 path back as new (no spurious tombstone). Sidecar recovery is filtered too
 so a corrupt-manifest recovery on a freshly-migrated config doesn't re-
@@ -443,7 +473,7 @@ everything) before pulling on every machine.
 source(s) X — run `mm migrate-config` to add" so users notice their config
 drift even when only autopull/autopush is running.
 
-38 new tests (5 IRON RULE regression pins: kb-mbp two-device case,
+38 new tests (5 IRON RULE regression pins: two-device first-pull case,
 tombstone-on-exclude-transition, tombstone-on-unexclude-transition, sidecar
 bypass guard, mm gc safety). 758 pass.
 
@@ -544,7 +574,7 @@ preflight used cli.py's local import while `load_config()` reads the module
 attribute, so monkeypatch divergence let the loud-on-malformed branch fire
 on truly-missing configs); the `_synced_scan_dirs` scope bug where conflict
 files for top-level `include_files` entries were invisible to `mm conflicts` /
-`mm resolve` / `mm gc --conflicts` (kb-mbp 2026-04-24 first-pull saw 5 of 6
+`mm resolve` / `mm gc --conflicts` (the 2026-04-24 first-pull session saw 5 of 6
 conflicts because `~/.gstack/config.sync-conflict-...yaml` lived at depth-0
 outside the recursive scan); and `_save_and_register` now rolls back the
 saved `config.toml` if `register_device` fails so init either fully succeeds

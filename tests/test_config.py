@@ -170,7 +170,7 @@ class TestDefaultSources:
     def test_gstack_exclude_patterns_present(self):
         """5C: per-machine artifacts (repo-mode.json, land-deploy-confirmed)
         must be in the default exclude_patterns. Losing this regression-pins
-        the kb-mbp 2026-04-24 first-pull conflict bug. v0.9.3 added
+        the 2026-04-24 first-pull conflict bug. v0.9.3 added
         config.yaml for the gstack version-check reason (see test above)."""
         gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
         patterns = gstack.get("exclude_patterns") or []

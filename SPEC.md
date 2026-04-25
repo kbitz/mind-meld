@@ -568,7 +568,7 @@ The default `gstack` source ships with
 gstack's per-machine artifacts (7-day TTL solo-vs-collaborative cache
 and deploy-config-hash markers, both recomputed locally per device).
 Without these, every pull conflict-copies them on every device every day
-(kb-mbp 2026-04-24 first-pull regression).
+(2026-04-24 first-pull regression).
 
 **Consumer-boundary filter (load-bearing).** The exclude filter applies at
 TWO call sites — both **after** `_fetch_remote_manifest` returns:

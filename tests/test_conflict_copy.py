@@ -523,7 +523,7 @@ class TestFindConflictFilesClaudeType:
 
 
 class TestFindConflictFilesIncludeFiles:
-    """Regression for kb-mbp 2026-04-24 first-pull: a 286-file pull produced 6
+    """Regression for the 2026-04-24 first-pull: a 286-file pull produced 6
     conflict copies, but `mm conflicts` listed only 5. The missing one was
     `~/.gstack/config.sync-conflict-...yaml` — a sibling of an `include_files`
     entry. `_synced_scan_dirs` only returned `include_dirs` for generic
