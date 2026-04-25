@@ -149,9 +149,11 @@ name = "gstack"
 path = "~/.gstack"
 type = "generic"           # whitelist-based walker
 include_dirs = ["projects", "analytics", "retros"]
-include_files = ["config.yaml", "retro-context.md", "greptile-history.md",
+include_files = ["retro-context.md", "greptile-history.md",
                  ".completeness-intro-seen", ".telemetry-prompted",
                  ".proactive-prompted", ".welcome-seen", ".codex-desc-healed"]
+exclude_patterns = ["config.yaml", "projects/*/repo-mode.json",
+                    "projects/*/land-deploy-confirmed"]
 
 [crypto]
 argon2_memory_kb = 65536   # Argon2id memory parameter in KB (default: 64MB). Lower for constrained environments.

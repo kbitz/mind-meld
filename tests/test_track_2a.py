@@ -1643,7 +1643,10 @@ class TestPromptSources:
         assert [s["name"] for s in result] == ["gstack"]
         gstack = result[0]
         assert "projects" in gstack["include_dirs"]
-        assert "config.yaml" in gstack["include_files"]
+        assert "retro-context.md" in gstack["include_files"]
+        # v0.9.3: exclude_patterns is also load-bearing now — pin that it
+        # survives indirection AND contains the new config.yaml exclude.
+        assert "config.yaml" in gstack["exclude_patterns"]
 
 
 class TestSaveAndRegister:

@@ -101,7 +101,8 @@ If `~/.gstack` is detected during `mm init`, it is automatically added as a sync
 **Defaults out of the box:**
 
 - `include_dirs`: `projects/`, `analytics/`, `retros/`
-- `include_files`: `config.yaml`, `retro-context.md`, `greptile-history.md`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
+- `include_files`: `retro-context.md`, `greptile-history.md`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
+- `exclude_patterns`: `config.yaml`, `projects/*/repo-mode.json`, `projects/*/land-deploy-confirmed` (per-machine artifacts that churn-conflict on every pull — `config.yaml` holds gstack's version-check tracking)
 
 This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped, sorted by `ts`). Append-only telemetry from 3 machines converges cleanly into one timeline.
 
@@ -116,7 +117,6 @@ path = "~/.gstack"
 type = "generic"
 include_dirs = ["projects", "analytics", "retros"]
 include_files = [
-    "config.yaml",
     "retro-context.md",
     "greptile-history.md",
     ".completeness-intro-seen",
@@ -125,6 +125,11 @@ include_files = [
     ".welcome-seen",
     ".codex-desc-healed",
     ".writing-style-prompted",   # added (your custom extra)
+]
+exclude_patterns = [
+    "config.yaml",
+    "projects/*/repo-mode.json",
+    "projects/*/land-deploy-confirmed",
 ]
 ```
 

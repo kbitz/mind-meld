@@ -4157,7 +4157,7 @@ def _find_conflict_files(
       2. Depth-0 sibling-glob for generic include_files entries — top-level
          single-file syncs whose conflict siblings live next to them, not
          inside `_synced_scan_dirs`' recursive surface. Without (2), conflict
-         files for top-level entries like ~/.gstack/config.yaml are invisible
+         files for top-level entries like ~/.gstack/retro-context.md are invisible
          to `mm conflicts` / `mm resolve` / `mm gc --conflicts` (the kb-mbp
          2026-04-24 first-pull bug — listed 5 of 6 conflicts).
 

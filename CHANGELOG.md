@@ -2,6 +2,44 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.3] - 2026-04-25
+
+Small follow-up patch caught immediately after v0.9.2 ship: add
+`config.yaml` to the gstack source's default `exclude_patterns`. Track 5C
+(v0.9.1) covered `projects/*/repo-mode.json` and
+`projects/*/land-deploy-confirmed` but missed `~/.gstack/config.yaml`,
+which holds gstack's version-check tracking (the "last successful gstack
+version" per machine, plus other machine-local IDs). Syncing it actively
+breaks the version mechanism on whichever machine pulls last.
+
+Existing installs need to run `mm migrate-config` to pick up the new
+recommended exclude — autopull/autopush surface the missing-excludes
+signal via `mm status` (the visible-failure contract from v0.9.1).
+Fresh installs get the fixed default automatically.
+
+No fleet-version threshold change — `INVERSION_MIN_VERSION` stays
+at `"0.9.2"`, same as v0.9.2. v0.9.3 is no harder to roll out than
+v0.9.2 was: a v0.9.0/v0.9.1 peer was already a refusal under v0.9.2
+and remains so under v0.9.3.
+
+### One-time cleanup for v0.9.2 → v0.9.3 upgraders
+
+If you ran v0.9.2 long enough to hit a `config.yaml` conflict (and have
+a stranded `~/.gstack/config.sync-conflict-<ts>-<device>.yaml` sidecar
+on disk), v0.9.3 can no longer surface it via `mm conflicts` / `mm
+resolve` / `mm gc --conflicts` — the conflict-file walker iterates
+`include_files`, which no longer contains `config.yaml`. List + clean
+up by hand once:
+
+```bash
+find ~/.gstack -maxdepth 1 -name 'config.sync-conflict-*' -ls
+find ~/.gstack -maxdepth 1 -name 'config.sync-conflict-*' -delete
+```
+
+Adversarial review (Claude + Codex) flagged this on /ship; the proper
+fix (depth-0 scan of source root in `_synced_scan_dirs`) lands in a
+follow-up patch.
+
 ## [0.9.2] - 2026-04-25 — BREAKING
 
 **Track 5E (Conflict default inversion) + 4 ship-fix bug fixes caught by
