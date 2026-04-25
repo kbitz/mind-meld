@@ -709,41 +709,65 @@ class TestWalkerExcludesConflictRegression:
 class TestResolveInteractiveLoop:
     """Tests for _resolve_interactive_loop — the interactive picker invoked by
     `mm resolve`. Uses monkeypatch on typer.prompt to simulate user input.
+
+    # 5B-5C-REMAP-BOUNDARY
+    Tests below pin (l)/(r) → underlying-op mapping under TODAY's
+    _apply_conflict semantics: canonical holds remote bytes, .sync-conflict-*
+    holds local bytes. When Track 5C inverts _apply_conflict (canonical =
+    local, .sync-conflict-* = remote), every assertion under this marker
+    must be deliberately re-mapped:
+      - (l)ocal: today maps to cpath.rename(canonical); post-5C maps to
+        cpath.unlink() (canonical IS local already)
+      - (r)emote: today maps to cpath.unlink(); post-5C maps to
+        cpath.rename(canonical) (overwrite canonical's local with remote)
+    Re-mapping is mechanical but MUST NOT happen silently. Grep for
+    '5B-5C-REMAP-BOUNDARY' before flipping.
     """
 
     @staticmethod
     def _make_conflict_pair(tmp_path: Path) -> tuple[Path, Path]:
         """Create a canonical + conflict sibling with distinct content.
-        Returns (canonical, conflict)."""
+
+        Returns (canonical, conflict). Today (5B-5C-REMAP-BOUNDARY):
+        canonical holds remote bytes; conflict holds local bytes.
+        """
         canonical = tmp_path / "user.md"
-        canonical.write_bytes(b"canonical content")
+        canonical.write_bytes(b"remote content")
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
-        conflict.write_bytes(b"conflict content")
+        conflict.write_bytes(b"local content")
         return canonical, conflict
 
-    def test_keep_canonical_deletes_conflict(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'c' — conflict file is deleted, canonical preserved."""
+    def test_keep_remote_deletes_conflict(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'r' — conflict file (local-bytes today) is deleted,
+        canonical (remote-bytes today) preserved.
+
+        # 5B-5C-REMAP-BOUNDARY: post-5C, the underlying op flips to rename.
+        """
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
         assert canonical.exists()
-        assert canonical.read_bytes() == b"canonical content"
+        assert canonical.read_bytes() == b"remote content"
         assert not conflict.exists(), "conflict should be deleted"
 
-    def test_force_promotes_conflict_over_canonical(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'f' — conflict renamed to canonical (overwriting canonical)."""
+    def test_keep_local_promotes_conflict_to_canonical(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 'l' — conflict (local-bytes today) renamed onto
+        canonical, overwriting remote bytes.
+
+        # 5B-5C-REMAP-BOUNDARY: post-5C, the underlying op flips to unlink.
+        """
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
         assert canonical.exists()
-        assert canonical.read_bytes() == b"conflict content", (
-            "canonical should now have conflict's content"
+        assert canonical.read_bytes() == b"local content", (
+            "canonical should now have local-side bytes"
         )
         assert not conflict.exists(), "conflict path should be gone (renamed)"
 
@@ -755,8 +779,8 @@ class TestResolveInteractiveLoop:
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
-        assert canonical.read_bytes() == b"canonical content"
-        assert conflict.read_bytes() == b"conflict content"
+        assert canonical.read_bytes() == b"remote content"
+        assert conflict.read_bytes() == b"local content"
 
     def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
@@ -767,8 +791,119 @@ class TestResolveInteractiveLoop:
         with pytest.raises(typer.Abort):
             _resolve_interactive_loop([("s1", conflict, canonical)])
 
+    def test_old_letter_c_rejected_loudly(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """User pipes legacy 'c' — error to stderr, typer.Exit(1), no mutation.
+
+        Backward-compat per visible-failure contract. Old (c)anonical / (f)orce
+        letters were removed in v0.9.0; piping them must NOT silently fall
+        through to the default ("kept both").
+        """
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+
+        with pytest.raises(typer.Exit) as exc:
+            _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert exc.value.exit_code == 1
+
+        # No mutation — both files preserved
+        assert canonical.read_bytes() == b"remote content"
+        assert conflict.read_bytes() == b"local content"
+
+        # Loud stderr breadcrumb pointing at new letters
+        captured = capsys.readouterr()
+        assert "no longer accepted" in captured.err
+        assert "(l)ocal" in captured.err
+        assert "(r)emote" in captured.err
+
+    def test_old_letter_f_rejected_loudly(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """User pipes legacy 'f' — error to stderr, typer.Exit(1), no mutation."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
+
+        with pytest.raises(typer.Exit) as exc:
+            _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert exc.value.exit_code == 1
+
+        # No mutation
+        assert canonical.read_bytes() == b"remote content"
+        assert conflict.read_bytes() == b"local content"
+
+        captured = capsys.readouterr()
+        assert "no longer accepted" in captured.err
+
+    def test_full_word_local_does_not_match_lookup(self, tmp_path: Path, monkeypatch) -> None:
+        """REGRESSION: dispatch must use exact match, not startswith.
+
+        Pre-fix, typing 'lookup' or 'leave' would silently match (l)ocal
+        and rename the conflict file, overwriting canonical. codex /review
+        v0.9.0 caught the footgun. This test pins the fix.
+
+        # 5B-5C-REMAP-BOUNDARY: post-5C, (l) maps to unlink instead.
+        """
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "lookup")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        # Both files preserved (fell through to default "kept both")
+        assert canonical.read_bytes() == b"remote content"
+        assert conflict.read_bytes() == b"local content"
+
+    def test_full_word_remote_does_not_match_retry(self, tmp_path: Path, monkeypatch) -> None:
+        """REGRESSION: dispatch must use exact match, not startswith.
+
+        Pre-fix, typing 'retry' or 'remove' would silently match (r)emote
+        and unlink the conflict file. codex /review v0.9.0.
+
+        # 5B-5C-REMAP-BOUNDARY: post-5C, (r) maps to rename instead.
+        """
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "retry")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        # Both files preserved (fell through to default "kept both")
+        assert canonical.read_bytes() == b"remote content"
+        assert conflict.read_bytes() == b"local content"
+
+    def test_cancel_does_not_trigger_legacy_rejection(self, tmp_path: Path, monkeypatch) -> None:
+        """REGRESSION: legacy 'c'/'f' rejection must use exact match.
+
+        Pre-fix, typing 'cancel' or 'continue' would trigger 'input letters
+        c and f are no longer accepted' and abort the entire walk with
+        exit 1. codex /review v0.9.0 caught the false-positive footgun.
+        """
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "cancel")
+
+        # Should NOT raise typer.Exit (no legacy rejection on full word)
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        # Both files preserved (fell through to default "kept both")
+        assert canonical.read_bytes() == b"remote content"
+        assert conflict.read_bytes() == b"local content"
+
+    def test_full_word_local_alias_works(self, tmp_path: Path, monkeypatch) -> None:
+        """User typing 'local' (the full word) should keep local — same
+        as typing 'l'. Exact-match dispatch accepts both forms.
+        """
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "local")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        # Local kept (conflict promoted to canonical)
+        assert canonical.read_bytes() == b"local content"
+        assert not conflict.exists()
+
     def test_canonical_missing_promote(self, tmp_path: Path, monkeypatch) -> None:
-        """Canonical is gone, user picks 'p' — conflict is renamed to recovered canonical path."""
+        """Canonical is gone, user picks 'p' — conflict is renamed to recovered canonical path.
+
+        D7: parallel (p)/(d)/(s) prompt unchanged from prior versions; only
+        the surrounding preface was rewritten.
+        """
 
         conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict content")
@@ -794,29 +929,33 @@ class TestResolveInteractiveLoop:
         assert not conflict.exists()
 
     def test_walks_multiple_conflicts(self, tmp_path: Path, monkeypatch) -> None:
-        """Given multiple hits, each is prompted sequentially."""
+        """Given multiple hits, each is prompted sequentially.
+
+        # 5B-5C-REMAP-BOUNDARY: pinned op for (r) and (l) under today's
+        semantics — post-5C must re-pin both branches.
+        """
 
         c1 = tmp_path / "a.md"
-        c1.write_bytes(b"a-canon")
+        c1.write_bytes(b"a-remote")
         conflict1 = tmp_path / "a.sync-conflict-20260421-143055-devA1234.md"
-        conflict1.write_bytes(b"a-conflict")
+        conflict1.write_bytes(b"a-local")
 
         c2 = tmp_path / "b.md"
-        c2.write_bytes(b"b-canon")
+        c2.write_bytes(b"b-remote")
         conflict2 = tmp_path / "b.sync-conflict-20260421-143055-devA1234.md"
-        conflict2.write_bytes(b"b-conflict")
+        conflict2.write_bytes(b"b-local")
 
-        # Return different choices per call: first 'c' (keep canonical), then 'f' (force)
-        choices = iter(["c", "f"])
+        # Return different choices per call: first 'r' (keep remote), then 'l' (keep local)
+        choices = iter(["r", "l"])
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(choices))
 
         _resolve_interactive_loop([("s1", conflict1, c1), ("s1", conflict2, c2)])
 
-        # First pair: canonical kept, conflict deleted
-        assert c1.read_bytes() == b"a-canon"
+        # First pair: remote kept (canonical preserved), conflict deleted
+        assert c1.read_bytes() == b"a-remote"
         assert not conflict1.exists()
-        # Second pair: conflict promoted over canonical
-        assert c2.read_bytes() == b"b-conflict"
+        # Second pair: local kept (conflict promoted to canonical)
+        assert c2.read_bytes() == b"b-local"
         assert not conflict2.exists()
 
 
@@ -838,7 +977,7 @@ class TestResolveExitCode:
         conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict")
 
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
         resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
         assert (resolved, failed) == (1, 0)
 
@@ -859,13 +998,16 @@ class TestResolveExitCode:
         assert (resolved, failed) == (0, 1)
 
     def test_loop_counts_unlink_failure(self, tmp_path: Path, monkeypatch) -> None:
-        """Keep-canonical choice + unlink raises OSError -> failed += 1."""
+        """Keep-remote choice + unlink raises OSError -> failed += 1.
+
+        # 5B-5C-REMAP-BOUNDARY: today (r)emote unlinks cpath; post-5C it renames.
+        """
 
         canonical = tmp_path / "f.md"
         canonical.write_bytes(b"canon")
         conflict = tmp_path / "f.sync-conflict-20260421-143055-devA1234.md"
         conflict.write_bytes(b"conflict")
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
 
         def boom(self):
             raise OSError("simulated unlink failure")
@@ -902,8 +1044,9 @@ class TestResolveExitCode:
             conflict.write_bytes(b"conflict")
             items.append(("s1", conflict, canonical))
 
-        # Three 'c' choices. Middle unlink fails.
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "c")
+        # Three 'r' choices (keep remote). Middle unlink fails.
+        # 5B-5C-REMAP-BOUNDARY: post-5C, "keep remote" renames not unlinks.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
         real_unlink = Path.unlink
         call_idx = {"n": 0}
 
@@ -949,8 +1092,9 @@ class TestResolveExitCode:
         monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
         monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
 
-        # Force 'f' (force conflict -> canonical) and make rename fail.
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "f")
+        # Force 'l' (keep local — renames conflict onto canonical today).
+        # 5B-5C-REMAP-BOUNDARY: post-5C, (l) unlinks instead of renames.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
 
         def boom(*a, **kw):
             raise OSError("simulated rename failure")

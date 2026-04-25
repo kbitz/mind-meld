@@ -19,6 +19,13 @@ from typing import Any, Literal
 
 import typer
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from mind_meld import __version__, fsutil, sidecar
@@ -928,6 +935,16 @@ def _apply_conflict(
     """[C] conflict path: rename local to .sync-conflict-*, write remote to canonical.
 
     Rollback on write failure so canonical still points at something.
+
+    # 5B-5C-REMAP-BOUNDARY: this is the PRODUCER. Today this function
+    # writes remote bytes to canonical and renames local out to
+    # .sync-conflict-*. Track 5C will INVERT this: keep local bytes at
+    # canonical, write remote to .sync-conflict-*. Every consumer marker
+    # in `_resolve_interactive_loop`, the conflicts table, and tests is
+    # mapped to today's semantics here. Flipping this function without
+    # also re-mapping every 5B-5C-REMAP-BOUNDARY in cli.py + tests will
+    # silently invert the resolve dispatch and cause data loss. Grep for
+    # `5B-5C-REMAP-BOUNDARY` before any change here.
     """
     try:
         conflict_path = conflict_filename(local_path, remote_device_id)
@@ -1054,12 +1071,28 @@ def _download_and_apply(
     memory_kb: int,
     interactive_resolve: bool = False,
     verbose: bool = False,
+    quiet: bool = False,
 ) -> tuple[int, dict[ApplyOutcome, list[str]]]:
     """Download blobs and dispatch each to _apply_incoming_file.
 
     Returns (encrypted_bytes_transferred, outcomes_by_path).
     outcomes_by_path groups rel_paths by outcome so callers can report
     per-outcome totals and write accurate sync logs.
+
+    Progress display (Track 5B Task 4):
+      - quiet=True: silent. Autopull contract — no stdout/stderr noise.
+      - TTY + not quiet: Rich Progress widget renders bar + count + elapsed.
+        First-pull-on-new-Mac case (kb-mbp 2026-04-24): per-file
+        backend.get(bkey) blocks on iCloud placeholder materialization;
+        before this, the entire 286-file / 263s pull was indistinguishable
+        from a hung process. Progress only updates BETWEEN files (a single
+        blocking .get() does not yield), so this surfaces stalls at
+        per-file boundaries — not intra-file.
+      - non-TTY + not quiet: skip the rewriting widget (line-rewriting
+        garbles log capture); a one-time start banner keeps scripted
+        callers informed without spamming.
+      - to_download empty: skip the widget entirely (Rich Progress with
+        total=0 risks empty-bar / div-by-zero rendering).
     """
     bytes_transferred = 0
     outcomes: dict[ApplyOutcome, list[str]] = {
@@ -1071,45 +1104,93 @@ def _download_and_apply(
         "failed": [],
     }
 
-    for rel_path, info in to_download.items():
-        try:
-            bkey = blob_key(source_device_id, info.get("sha256", ""))
-        except ValueError as e:
-            # Malicious or corrupt manifest shipped a sha256 with path
-            # separators / parent-dir refs / null bytes / empty. Per-file
-            # isolation: fail this file, keep walking — matches the
-            # v0.8.1 empty-device_id handling in _apply_conflict.
-            console.print(f"  [red]bad blob key (local preserved):[/red] {rel_path} — {e}")
-            outcomes["failed"].append(rel_path)
-            continue
-        try:
-            enc_data = backend.get(bkey)
-        except MindMeldError:
-            if verbose:
-                console.print(f"  [yellow]blob missing: {bkey}[/yellow]")
-            outcomes["failed"].append(rel_path)
-            continue
+    total = len(to_download)
+    show_progress = bool(to_download) and not quiet
+    use_widget = show_progress and console.is_terminal
 
-        try:
-            plain_data = decrypt(enc_data, passphrase, memory_kb)
-        except CryptoError as e:
-            console.print(f"  [red]decrypt failed:[/red] {rel_path} \u2014 {e}")
-            outcomes["failed"].append(rel_path)
-            continue
-
-        bytes_transferred += len(enc_data)
-        local_path = base_path / rel_path
-
-        outcome = _apply_incoming_file(
-            local_path=local_path,
-            rel_path=rel_path,
-            plain_data=plain_data,
-            remote_info=info,
-            remote_device_id=source_device_id,
-            interactive_resolve=interactive_resolve,
-            verbose=verbose,
+    progress: Progress | None = None
+    task_id: int | None = None
+    if use_widget:
+        progress = Progress(
+            TextColumn("  [bold]downloading[/bold]"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
         )
-        outcomes[outcome].append(rel_path)
+        progress.start()
+        task_id = progress.add_task("download", total=total)
+    elif show_progress:
+        # Non-TTY: emit a single start banner. Per-file lines would spam
+        # logs; the totals line at the end of pull surfaces the result.
+        console.print(f"  downloading {total} file(s)...")
+
+    def _advance() -> None:
+        if progress is not None and task_id is not None:
+            progress.advance(task_id)
+
+    # Quiet-mode contract: per-file decorations skipped in quiet (autopull);
+    # the summary routes per-source totals to stderr in _print_pull_summary
+    # (D11). Without this gate, autopull leaked per-file lines to stdout on
+    # bad-blob/decrypt errors. (codex /review v0.9.0 caught the gap.)
+    try:
+        for rel_path, info in to_download.items():
+            try:
+                bkey = blob_key(source_device_id, info.get("sha256", ""))
+            except ValueError as e:
+                # Malicious or corrupt manifest shipped a sha256 with path
+                # separators / parent-dir refs / null bytes / empty. Per-file
+                # isolation: fail this file, keep walking — matches the
+                # v0.8.1 empty-device_id handling in _apply_conflict.
+                if not quiet:
+                    console.print(
+                        f"  [red]bad blob key (local preserved):[/red] {rel_path} \u2014 {e}"
+                    )
+                outcomes["failed"].append(rel_path)
+                _advance()
+                continue
+            try:
+                enc_data = backend.get(bkey)
+            except MindMeldError:
+                if verbose and not quiet:
+                    console.print(f"  [yellow]blob missing: {bkey}[/yellow]")
+                outcomes["failed"].append(rel_path)
+                _advance()
+                continue
+
+            try:
+                plain_data = decrypt(enc_data, passphrase, memory_kb)
+            except CryptoError as e:
+                if not quiet:
+                    console.print(f"  [red]decrypt failed:[/red] {rel_path} \u2014 {e}")
+                outcomes["failed"].append(rel_path)
+                _advance()
+                continue
+
+            bytes_transferred += len(enc_data)
+            local_path = base_path / rel_path
+
+            outcome = _apply_incoming_file(
+                local_path=local_path,
+                rel_path=rel_path,
+                plain_data=plain_data,
+                remote_info=info,
+                remote_device_id=source_device_id,
+                interactive_resolve=interactive_resolve,
+                verbose=verbose and not quiet,
+            )
+            outcomes[outcome].append(rel_path)
+            _advance()
+    finally:
+        # progress.stop() in its own try/except so a Rich render failure
+        # at teardown does not mask the original exception from the loop.
+        # (codex /review v0.9.0)
+        if progress is not None:
+            try:
+                progress.stop()
+            except Exception:
+                pass
 
     return bytes_transferred, outcomes
 
@@ -2059,6 +2140,7 @@ def _pull_one_source(
     interactive_resolve: bool,
     dry_run: bool,
     verbose_console: bool,
+    quiet: bool = False,
 ) -> _PerSourceResult:
     """Pull one source from one peer. Returns _PerSourceResult.
 
@@ -2069,6 +2151,9 @@ def _pull_one_source(
 
     `verbose_console` is `(verbose and not quiet)` — controls per-file
     console output inside _download_and_apply.
+
+    `quiet` is the autopull flag — gates the Track 5B Task 4 download
+    progress widget (silent in autopull, visible otherwise).
     """
     remote_files = src_data.get("files", {})
     base_result = _PerSourceResult(
@@ -2120,6 +2205,7 @@ def _pull_one_source(
         memory_kb,
         interactive_resolve=interactive_resolve,
         verbose=verbose_console,
+        quiet=quiet,
     )
 
     touched_parents: set[Path] = set()
@@ -2176,6 +2262,39 @@ def _print_preflight_conflicts(predicted: list[_PredictedConflict], quiet: bool)
     )
 
 
+# Inline-path display cap for the non-verbose pull summary. 20 was picked
+# from the kb-mbp 2026-04-24 first-pull session (286-file pull / 6 conflicts):
+# enough to surface a typical conflict batch without spamming, and short
+# enough that --verbose still feels distinct.
+_INLINE_PATH_CAP = 20
+
+
+def _format_inline_paths(paths: list[str], *, verbose: bool, sep: str) -> str:
+    """Format an inline path list for the quiet-mode stderr summary.
+
+    Caps to _INLINE_PATH_CAP unless verbose. Cap overflow renders as
+    "(and N more)" suffix so users know they're seeing a slice.
+    """
+    if verbose or len(paths) <= _INLINE_PATH_CAP:
+        return sep.join(paths)
+    shown = sep.join(paths[:_INLINE_PATH_CAP])
+    return f"{shown} (and {len(paths) - _INLINE_PATH_CAP} more)"
+
+
+def _print_inline_paths(paths: list[str], *, verbose: bool, color: str) -> None:
+    """Render an inline path list under a non-quiet per-source summary line.
+
+    Uses 4-space indent so the device→source→file hierarchy stays visible
+    when multiple devices share a source name. Caps to _INLINE_PATH_CAP
+    unless --verbose; overflow renders as a dim "... and N more" line.
+    """
+    cap = len(paths) if verbose else min(_INLINE_PATH_CAP, len(paths))
+    for p in paths[:cap]:
+        console.print(f"    [{color}]- {p}[/{color}]")
+    if not verbose and len(paths) > cap:
+        console.print(f"    [dim]... and {len(paths) - cap} more[/dim]")
+
+
 def _print_pull_summary(
     result: PullResult,
     corrupt_peers: list[_CorruptPeer],
@@ -2227,7 +2346,29 @@ def _print_pull_summary(
         else:
             console.print(f"  [yellow]warning:[/yellow] {msg}")
 
+    # Load-bearing: per-source conflicts/failures (D11 contract fix).
+    # The docstring's promise that these reach stderr in quiet mode was
+    # never honored before Track 5B — the early `return` below ate them.
+    # Quiet path now emits one stderr line per per-source category, with
+    # `<device>/<source>` prefix because the per-device header (printed
+    # at the call site, not here) is suppressed in quiet mode.
     if quiet:
+        for r in per_source_results:
+            src_conflicted = len(r.outcomes["conflicted"])
+            src_failed = len(r.outcomes["failed"])
+            if src_conflicted:
+                paths = _format_inline_paths(r.outcomes["conflicted"], verbose=verbose, sep=", ")
+                print(
+                    f"mm: warning: {r.device_name}/{r.src_name} — "
+                    f"{src_conflicted} conflicts: {paths}",
+                    file=sys.stderr,
+                )
+            if src_failed:
+                paths = _format_inline_paths(r.outcomes["failed"], verbose=verbose, sep=", ")
+                print(
+                    f"mm: warning: {r.device_name}/{r.src_name} — {src_failed} failed: {paths}",
+                    file=sys.stderr,
+                )
         return
 
     # Per-source lines (conflicts/failures always; verbose otherwise).
@@ -2250,6 +2391,14 @@ def _print_pull_summary(
             if src_failed:
                 line += f" [red]{src_failed} failed[/red]"
             console.print(line)
+            # Task 2: inline conflicted/failed path list under per-source
+            # line. 4-space indent keeps the device→source→file hierarchy
+            # readable when multiple devices share a source name (D10).
+            # --verbose unlocks the cap (D5).
+            if src_conflicted:
+                _print_inline_paths(r.outcomes["conflicted"], verbose=verbose, color="yellow")
+            if src_failed:
+                _print_inline_paths(r.outcomes["failed"], verbose=verbose, color="red")
 
     # Totals.
     console.print("\n[bold green]Pull complete.[/bold green]")
@@ -2461,6 +2610,7 @@ def _pull_core(
                     interactive_resolve=interactive_resolve_flag,
                     dry_run=dry_run,
                     verbose_console=(verbose and not quiet),
+                    quiet=quiet,
                 )
 
                 if dry_run and per_source.dry_run_diff is not None:
@@ -3367,10 +3517,16 @@ def conflicts() -> None:
         console.print("[green]No conflict files.[/green]")
         return
 
+    # 5B-5C-REMAP-BOUNDARY: today, the .sync-conflict-* file holds local
+    # bytes (because _apply_conflict renames local out, writes remote to
+    # canonical). Track 5C inverts this. The "local"/"remote" column
+    # headers match today's mapping; 5C must update them when it inverts
+    # _apply_conflict, or switch to per-row labeling via filename
+    # timestamp (see ROADMAP Track 5C subtask filed by /plan-ceo-review D9).
     table = Table(title=f"Conflict files ({len(hits)})")
     table.add_column("Source")
-    table.add_column("Conflict")
-    table.add_column("Canonical")
+    table.add_column("local", no_wrap=False, overflow="fold")
+    table.add_column("remote", no_wrap=False, overflow="fold")
     table.add_column("Age")
     now = datetime.now(timezone.utc)
     for src_name, cpath, canonical in sorted(hits, key=lambda h: str(h[1])):
@@ -3384,8 +3540,8 @@ def conflicts() -> None:
         table.add_row(src_name, str(cpath), canonical_display, age_str)
     console.print(table)
     console.print(
-        "\nRun [bold]mm resolve[/bold] to pick a winner interactively, or "
-        "delete files manually with [bold]rm[/bold]."
+        "\nRun [bold]mm resolve[/bold] to keep local, remote, or both "
+        "interactively, or delete files manually with [bold]rm[/bold]."
     )
 
 
@@ -3570,18 +3726,26 @@ def resolve(
 ) -> None:
     """Interactively resolve .sync-conflict-* files.
 
-    For each conflict: shows a unified diff of canonical vs conflict, then
-    prompts: keep canonical / keep conflict / keep both (no-op) / abort.
+    For each conflict: shows a unified diff of remote vs local, then
+    prompts: (l)ocal / (r)emote / (b)oth [default] / (a)bort.
 
-    "Keep canonical" deletes the conflict file.
-    "Keep conflict" renames conflict → canonical (overwriting canonical).
-    "Keep both" leaves both files in place.
+    (l)ocal keeps your edits on this machine and discards the bytes from
+    the other machine.
+    (r)emote keeps the bytes from the other machine and discards your
+    local edits on this conflict.
+    (b)oth leaves both files in place (default — no data loss).
+    (a)bort exits the resolve walk; previously-resolved conflicts stay
+    resolved.
 
     Both deletions and renames propagate on the next `mm push` via the
     existing tombstone / additive-sync machinery.
 
     Acquires the mm lockfile so an autopull running in parallel can't
     race with our rename/unlink operations on the synced files.
+
+    Old input letters `c` and `f` from prior versions are rejected loudly
+    to prevent silent fall-through on stale scripts (visible-failure
+    contract; see CLAUDE.md).
     """
     config = _get_config()
 
@@ -3633,9 +3797,18 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
         console.print(f"\n[bold yellow]Conflict in {src_name}:[/bold yellow] {cpath}")
 
         if canonical is None:
+            # 5B-5C-REMAP-BOUNDARY: today, .sync-conflict-* holds local
+            # bytes (because _apply_conflict renames local out, writes
+            # remote to canonical). Track 5C inverts this. The preface
+            # below describes today's mapping; 5C must update the wording
+            # OR detect pre-inversion files via filename timestamp.
             console.print(
-                "  [dim]Canonical version no longer exists. "
-                "Promote conflict to canonical or delete it?[/dim]"
+                "  [dim]No canonical file exists. The conflict file holds "
+                "your local edits from before the conflict was created.[/dim]"
+            )
+            console.print(
+                "  [dim]Promote it to make it the canonical file, "
+                "delete it to discard, or skip to leave it for later.[/dim]"
             )
             choice = (
                 typer.prompt(
@@ -3646,7 +3819,9 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 .strip()
                 .lower()
             )
-            if choice.startswith("p"):
+            # Exact-match dispatch (not startswith): "post"/"plan"/"description"
+            # must not silently promote/delete. (codex /review v0.9.0)
+            if choice in ("p", "promote"):
                 target_canonical = _canonical_for_conflict(cpath)
                 try:
                     cpath.rename(target_canonical)
@@ -3657,7 +3832,7 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 except OSError as e:
                     console.print(f"  [red]promote failed:[/red] {e}")
                     failed += 1
-            elif choice.startswith("d"):
+            elif choice in ("d", "delete"):
                 try:
                     cpath.unlink()
                     console.print(f"  [red]deleted[/red] {cpath.name}")
@@ -3665,11 +3840,18 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 except OSError as e:
                     console.print(f"  [red]delete failed:[/red] {e}")
                     failed += 1
+            # else: skip (default)
             continue
 
+        # 5B-5C-REMAP-BOUNDARY: today, canonical holds remote bytes and
+        # cpath holds local bytes (set up by _apply_conflict). At Track 5C
+        # ship, this mapping inverts — canonical will hold local, cpath
+        # will hold remote. When 5C lands: swap the two .read_text calls
+        # below, swap the fromfile/tofile labels, and swap the underlying
+        # ops in the (l)/(r) dispatch further down.
         try:
-            local_text = canonical.read_text(errors="replace").splitlines()
-            conflict_text = cpath.read_text(errors="replace").splitlines()
+            remote_text = canonical.read_text(errors="replace").splitlines()
+            local_text = cpath.read_text(errors="replace").splitlines()
         except OSError as e:
             console.print(f"  [red]read failed:[/red] {e}")
             failed += 1
@@ -3677,10 +3859,10 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
 
         diff = list(
             difflib.unified_diff(
+                remote_text,
                 local_text,
-                conflict_text,
-                fromfile=f"canonical {canonical.name}",
-                tofile=f"conflict  {cpath.name}",
+                fromfile=f"remote ({canonical.name})",
+                tofile=f"local  ({cpath.name})",
                 lineterm="",
                 n=3,
             )
@@ -3699,27 +3881,61 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
             console.print("  [dim](files differ but text diff is empty — likely binary)[/dim]")
 
         console.print(
-            "  [bold]Keep which?[/bold] "
-            "(c)anonical / (f)orce conflict -> canonical / (b)oth [default] / (a)bort"
+            "  [bold]Which side do you want to keep?[/bold] "
+            "local = your edits on this machine; "
+            "remote = bytes from the other machine."
         )
+        console.print("  (l)ocal / (r)emote / (b)oth [default] / (a)bort")
         choice = typer.prompt("  Choice", default="b", show_default=False).strip().lower()
-        if choice.startswith("c"):
-            try:
-                cpath.unlink()
-                console.print(f"  [green]kept canonical; deleted[/green] {cpath.name}")
-                resolved += 1
-            except OSError as e:
-                console.print(f"  [red]delete failed:[/red] {e}")
-                failed += 1
-        elif choice.startswith("f"):
+
+        # Backward-compat: reject the old letters loudly per the
+        # visible-failure contract (CLAUDE.md). Without this, a stale
+        # script piping "c\n" or "f\n" would silently fall through to
+        # the default ("kept both" no-op) — masking the relabel.
+        # Pre-1.0 BREAKING; CHANGELOG note at v0.9.0.
+        # Exact-match (not startswith): otherwise "cancel" / "continue"
+        # would trigger the legacy rejection. (codex /review v0.9.0)
+        if choice in ("c", "f"):
+            print(
+                "mm: error: input letters 'c' and 'f' are no longer accepted. "
+                "Use (l)ocal to keep your local edits or (r)emote to keep "
+                "the other machine's bytes. (Old labels removed in v0.9.0.)",
+                file=sys.stderr,
+            )
+            raise typer.Exit(1)
+
+        # Exact-match dispatch (not startswith): "leave" / "lookup" must
+        # not silently keep local; "retry" / "remove" must not silently
+        # delete the conflict file. (codex /review v0.9.0 — caught a real
+        # silent-data-loss footgun the eng review missed.)
+        if choice in ("l", "local"):
+            # 5B-5C-REMAP-BOUNDARY: today, "keep local" renames cpath
+            # (which holds local bytes) onto canonical. At Track 5C ship,
+            # canonical IS local already; "keep local" becomes
+            # `cpath.unlink()` (delete the remote-bytes sidecar).
             try:
                 cpath.rename(canonical)
-                console.print(f"  [green]promoted conflict to canonical[/green] {canonical.name}")
+                console.print(
+                    f"  [green]kept local; promoted[/green] {cpath.name} -> {canonical.name}"
+                )
                 resolved += 1
             except OSError as e:
                 console.print(f"  [red]rename failed:[/red] {e}")
                 failed += 1
-        elif choice.startswith("a"):
+        elif choice in ("r", "remote"):
+            # 5B-5C-REMAP-BOUNDARY: today, "keep remote" unlinks cpath
+            # because canonical already holds remote bytes (written by
+            # _apply_conflict). At Track 5C ship, cpath IS remote;
+            # "keep remote" becomes `cpath.rename(canonical)` (overwrite
+            # canonical's local bytes with remote).
+            try:
+                cpath.unlink()
+                console.print(f"  [green]kept remote; deleted[/green] {cpath.name}")
+                resolved += 1
+            except OSError as e:
+                console.print(f"  [red]delete failed:[/red] {e}")
+                failed += 1
+        elif choice in ("a", "abort"):
             raise typer.Abort()
         else:
             console.print("  [dim]kept both; no change[/dim]")

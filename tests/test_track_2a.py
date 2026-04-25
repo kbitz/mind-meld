@@ -766,6 +766,443 @@ class TestPrintPullSummaryStderrRouting:
         assert "Pull complete" in captured.out
 
 
+# ── Track 5B Task 2 + D11 ────────────────────────────────────────────
+
+
+def _make_per_source(
+    src_name: str,
+    device_name: str,
+    *,
+    conflicted: list[str] | None = None,
+    failed: list[str] | None = None,
+    written: list[str] | None = None,
+) -> _PerSourceResult:
+    """Build a _PerSourceResult fixture for summary tests."""
+    return _PerSourceResult(
+        src_name=src_name,
+        device_name=device_name,
+        device_id=device_name + "-id",
+        outcomes={
+            "written": written or [],
+            "merged": [],
+            "skipped": [],
+            "conflicted": conflicted or [],
+            "unchanged": [],
+            "failed": failed or [],
+        },
+        bytes_transferred=0,
+        touched_parents=set(),
+    )
+
+
+class TestPullSummaryInlinePaths:
+    """Track 5B Task 2: per-source line lists conflicted/failed paths inline.
+
+    Cap at 20 (D5: --verbose unlocks). 4-space indent under the per-source
+    line preserves device→source→file hierarchy when multi-device runs
+    share a source name (D10).
+    """
+
+    def test_conflicted_paths_listed_under_per_source_line(self, capsys) -> None:
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        per_source = _make_per_source("claude", "kb-mbp", conflicted=["a.md", "b.md", "c.md"])
+        _print_pull_summary(
+            PullResult(total_conflicted=3, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=False,
+            verbose=False,
+        )
+        out = capsys.readouterr().out
+        assert "claude:" in out
+        for path in ("a.md", "b.md", "c.md"):
+            assert path in out
+
+    def test_failed_paths_listed_separately(self, capsys) -> None:
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        per_source = _make_per_source("claude", "kb-mbp", failed=["bad-blob.md", "bad-decrypt.md"])
+        _print_pull_summary(
+            PullResult(total_failed=2, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=False,
+            verbose=False,
+        )
+        out = capsys.readouterr().out
+        assert "bad-blob.md" in out
+        assert "bad-decrypt.md" in out
+
+    def test_cap_at_20_shows_overflow(self, capsys) -> None:
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        paths = [f"f{i}.md" for i in range(25)]
+        per_source = _make_per_source("claude", "kb-mbp", conflicted=paths)
+        _print_pull_summary(
+            PullResult(total_conflicted=25, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=False,
+            verbose=False,
+        )
+        out = capsys.readouterr().out
+        # First 20 paths listed
+        for i in range(20):
+            assert f"f{i}.md" in out
+        # Overflow line surfaced; remainder NOT listed
+        assert "and 5 more" in out
+        assert "f24.md" not in out
+
+    def test_verbose_unlocks_cap(self, capsys) -> None:
+        """D5: --verbose lifts the 20-path cap on inline path display."""
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        paths = [f"f{i}.md" for i in range(25)]
+        per_source = _make_per_source("claude", "kb-mbp", conflicted=paths)
+        _print_pull_summary(
+            PullResult(total_conflicted=25, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=False,
+            verbose=True,
+        )
+        out = capsys.readouterr().out
+        # All 25 listed; no overflow line
+        for i in range(25):
+            assert f"f{i}.md" in out
+        assert "more" not in out
+
+    def test_zero_conflicts_no_inline_list(self, capsys) -> None:
+        """No conflicted/failed paths => no inline list (no false positives)."""
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        per_source = _make_per_source("claude", "kb-mbp", written=["new.md"])
+        _print_pull_summary(
+            PullResult(total_written=1, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=False,
+            verbose=True,
+        )
+        out = capsys.readouterr().out
+        # No "- " bullet lines indicating an inline path list
+        assert "    - " not in out
+
+
+class TestPullSummaryQuietContract:
+    """Track 5B D11: quiet-mode per-source conflicts/failures must reach
+    stderr. Pre-existing docstring/code mismatch — _print_pull_summary's
+    docstring claimed these were load-bearing-to-stderr, but `if quiet:
+    return` suppressed them. Track 5B closes the gap.
+
+    REGRESSION: D11 quiet conflicts/failures contract.
+    """
+
+    def test_quiet_routes_per_source_conflicts_to_stderr(self, capsys) -> None:
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        per_source = _make_per_source("claude", "kb-mbp", conflicted=["a.md", "b.md", "c.md"])
+        _print_pull_summary(
+            PullResult(total_conflicted=3, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=True,
+            verbose=False,
+        )
+        captured = capsys.readouterr()
+        # Stderr surfaces device/source prefix + file list
+        assert "kb-mbp/claude" in captured.err
+        assert "3 conflicts" in captured.err
+        for path in ("a.md", "b.md", "c.md"):
+            assert path in captured.err
+        # Cosmetic stdout still suppressed
+        assert "Pull complete" not in captured.out
+
+    def test_quiet_routes_per_source_failed_to_stderr(self, capsys) -> None:
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        per_source = _make_per_source("claude", "kb-mbp", failed=["bad.md"])
+        _print_pull_summary(
+            PullResult(total_failed=1, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=True,
+            verbose=False,
+        )
+        captured = capsys.readouterr()
+        assert "kb-mbp/claude" in captured.err
+        assert "1 failed" in captured.err
+        assert "bad.md" in captured.err
+
+    def test_quiet_multi_device_disambiguation(self, capsys) -> None:
+        """Two devices with same-named source must be disambiguated by
+        device prefix in quiet stderr (the per-device console header at
+        cli.py:2422 is suppressed in quiet mode, so the stderr line is
+        the only context the user gets).
+        """
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        ps_a = _make_per_source("claude", "kb-mbp", conflicted=["x.md"])
+        ps_b = _make_per_source("claude", "kb-mac", conflicted=["y.md"])
+        _print_pull_summary(
+            PullResult(total_conflicted=2, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[ps_a, ps_b],
+            quiet=True,
+            verbose=False,
+        )
+        err = capsys.readouterr().err
+        assert "kb-mbp/claude" in err
+        assert "kb-mac/claude" in err
+        assert "x.md" in err
+        assert "y.md" in err
+
+    def test_quiet_zero_conflicts_no_stderr(self, capsys) -> None:
+        """No conflicts/failures => no stderr noise (no false positives)."""
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        per_source = _make_per_source("claude", "kb-mbp", written=["new.md"])
+        _print_pull_summary(
+            PullResult(total_written=1, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=True,
+            verbose=False,
+        )
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_quiet_cap_with_overflow_marker(self, capsys) -> None:
+        """quiet stderr also caps at 20 (with --verbose unlock per D5)."""
+        from mind_meld.cli import PullResult, _print_pull_summary
+
+        paths = [f"f{i}.md" for i in range(25)]
+        per_source = _make_per_source("claude", "kb-mbp", conflicted=paths)
+        _print_pull_summary(
+            PullResult(total_conflicted=25, elapsed=1.0),
+            corrupt_peers=[],
+            unknown_sources=[],
+            fsync_warnings=[],
+            per_source_results=[per_source],
+            quiet=True,
+            verbose=False,
+        )
+        err = capsys.readouterr().err
+        for i in range(20):
+            assert f"f{i}.md" in err
+        assert "and 5 more" in err
+        assert "f24.md" not in err
+
+
+# ── Track 5B Task 4: download progress + quiet plumbing ──────────────
+
+
+class TestDownloadAndApplyQuietAndProgress:
+    """Track 5B Task 4: Rich Progress widget for non-quiet TTY pulls;
+    plain banner for non-quiet non-TTY; silent in quiet (autopull).
+
+    REGRESSION: Task 4 quiet plumbing — without `quiet` threaded through
+    _pull_one_source → _download_and_apply, autopull would leak progress
+    output to stdout/stderr, violating its silent-mode contract.
+    """
+
+    @staticmethod
+    def _force_get_failure(monkeypatch) -> None:
+        """Make every backend.get raise MindMeldError so the loop body
+        exits early without decrypting. We're testing the wrapper's
+        gating logic (quiet, empty, non-TTY), not the per-file body.
+        """
+        from mind_meld.errors import MindMeldError
+
+        def boom(*a, **kw):
+            raise MindMeldError("simulated blob miss")
+
+        # Patched on a fresh MagicMock backend so we don't hit real storage
+        backend = MagicMock()
+        backend.get = MagicMock(side_effect=boom)
+        return backend
+
+    def test_quiet_true_no_progress_output(self, tmp_path, monkeypatch, capsys) -> None:
+        """REGRESSION: D11/Task 4 quiet contract — no widget, no banner,
+        no per-file lines reach stdout/stderr in quiet mode.
+        """
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._force_get_failure(monkeypatch)
+        bt, outcomes = _download_and_apply(
+            backend,
+            tmp_path,
+            {"a.md": _info("abc")},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        captured = capsys.readouterr()
+        assert "downloading" not in captured.out
+        assert "downloading" not in captured.err
+        # Failed outcome still recorded (per-file isolation contract)
+        assert outcomes["failed"] == ["a.md"]
+
+    def test_empty_to_download_no_widget(self, tmp_path, capsys) -> None:
+        """No files to download => no Progress instantiation, no banner.
+
+        Rich Progress with total=0 renders an empty bar; div-by-zero risk
+        on percentage display in some Rich versions. Gate it out entirely.
+        """
+        from mind_meld.cli import _download_and_apply
+
+        backend = MagicMock()
+        bt, outcomes = _download_and_apply(
+            backend,
+            tmp_path,
+            {},
+            "peerA",
+            "pp",
+            1024,
+            quiet=False,
+        )
+        captured = capsys.readouterr()
+        assert "downloading" not in captured.out
+        assert bt == 0
+        assert outcomes == {
+            "written": [],
+            "merged": [],
+            "skipped": [],
+            "conflicted": [],
+            "unchanged": [],
+            "failed": [],
+        }
+
+    @staticmethod
+    def _force_non_tty_console(monkeypatch) -> None:
+        """Replace cli.console with a non-TTY Rich Console for the test."""
+        import io as _io
+
+        from rich.console import Console as _Console
+
+        from mind_meld import cli as cli_module
+
+        non_tty = _Console(file=_io.StringIO(), force_terminal=False)
+        monkeypatch.setattr(cli_module, "console", non_tty)
+        return non_tty
+
+    def test_non_tty_emits_start_banner(self, tmp_path, monkeypatch) -> None:
+        """Non-TTY non-quiet => single start banner; no rewriting widget
+        (widget would garble piped output / log capture).
+        """
+        from mind_meld import cli as cli_module
+
+        backend = self._force_get_failure(monkeypatch)
+        non_tty = self._force_non_tty_console(monkeypatch)
+
+        cli_module._download_and_apply(
+            backend,
+            tmp_path,
+            {"a.md": _info("abc"), "b.md": _info("def")},
+            "peerA",
+            "pp",
+            1024,
+            quiet=False,
+        )
+        # Banner went to the substituted Console's StringIO, not stdout.
+        out = non_tty.file.getvalue()
+        assert "downloading 2 file(s)" in out
+
+    def test_non_tty_quiet_silent(self, tmp_path, monkeypatch) -> None:
+        """Non-TTY + quiet => still silent (quiet wins over banner)."""
+        from mind_meld import cli as cli_module
+
+        backend = self._force_get_failure(monkeypatch)
+        non_tty = self._force_non_tty_console(monkeypatch)
+
+        cli_module._download_and_apply(
+            backend,
+            tmp_path,
+            {"a.md": _info("abc")},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        out = non_tty.file.getvalue()
+        assert "downloading" not in out
+
+    def test_quiet_suppresses_per_file_blob_key_error(self, tmp_path, monkeypatch) -> None:
+        """REGRESSION: codex /review v0.9.0.
+
+        Pre-fix, _download_and_apply printed `bad blob key` per-file via
+        console.print regardless of quiet, leaking to stdout in autopull.
+        D11 contract requires per-source totals reach stderr via
+        _print_pull_summary; per-file decoration must be suppressed in
+        quiet mode.
+        """
+        from mind_meld import cli as cli_module
+
+        non_tty = self._force_non_tty_console(monkeypatch)
+
+        # Mock backend never gets called because blob_key raises ValueError.
+        backend = MagicMock()
+
+        # info has empty sha256 → blob_key raises ValueError → bad blob key path
+        cli_module._download_and_apply(
+            backend,
+            tmp_path,
+            {"a.md": {"sha256": "", "size": 0}},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        out = non_tty.file.getvalue()
+        # Per-file error must NOT leak in quiet mode
+        assert "bad blob key" not in out
+        assert "local preserved" not in out
+
+    def test_quiet_suppresses_per_file_blob_missing(self, tmp_path, monkeypatch) -> None:
+        """REGRESSION: codex /review v0.9.0 — same contract for blob-missing path.
+
+        With verbose AND quiet, the verbose-gated blob-missing line must
+        still suppress (quiet wins).
+        """
+        from mind_meld import cli as cli_module
+
+        non_tty = self._force_non_tty_console(monkeypatch)
+        backend = self._force_get_failure(monkeypatch)
+
+        cli_module._download_and_apply(
+            backend,
+            tmp_path,
+            {"a.md": _info("abc")},
+            "peerA",
+            "pp",
+            1024,
+            verbose=True,
+            quiet=True,
+        )
+        out = non_tty.file.getvalue()
+        assert "blob missing" not in out
+
+
 # ── Codex regression pins ────────────────────────────────────────────
 
 
