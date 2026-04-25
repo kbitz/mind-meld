@@ -1068,14 +1068,12 @@ class TestLoadPriorDeviceMetadata:
     def test_no_config_returns_none_tuple(self, tmp_path: Path, monkeypatch) -> None:
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         assert _load_prior_device_metadata() == (None, None)
 
     def test_readable_config_returns_id_and_name(self, tmp_path: Path, monkeypatch) -> None:
         cfg = tmp_path / "config.toml"
         cfg.write_text('[device]\nid = "abc123"\nname = "OldMac"\n[storage]\npath = "/tmp/x"\n')
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         assert _load_prior_device_metadata() == ("abc123", "OldMac")
 
     def test_malformed_config_returns_none_tuple(self, tmp_path: Path, monkeypatch) -> None:
@@ -1084,7 +1082,6 @@ class TestLoadPriorDeviceMetadata:
         cfg = tmp_path / "config.toml"
         cfg.write_text("this is not: valid [toml at all\n")
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         assert _load_prior_device_metadata() == (None, None)
 
 
@@ -1201,7 +1198,6 @@ class TestSaveAndRegister:
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
 
         call_order: list[str] = []
 
@@ -1236,7 +1232,6 @@ class TestSaveAndRegister:
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
 
         monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
         monkeypatch.setattr(cli_module, "store_passphrase_in_keyring", lambda _pw: False)
@@ -1261,7 +1256,6 @@ class TestSaveAndRegister:
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
 
         def boom(*_a, **_kw):
             raise StorageError("transient iCloud put failure")
@@ -1289,7 +1283,6 @@ class TestSaveAndRegister:
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
 
         def boom_register(*_a, **_kw):
             raise StorageError("transient iCloud put failure")
@@ -1326,7 +1319,6 @@ class TestSaveAndRegister:
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
 
         def boom(*_a, **_kw):
             raise StorageError("nope")

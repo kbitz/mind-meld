@@ -95,7 +95,6 @@ class TestPushPullRoundTrip:
 
     def _activate(self, monkeypatch, config_path):
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
 
     def _bootstrap(self, storage_dir):
         backend = LocalBackend(storage_dir)
@@ -480,7 +479,6 @@ class TestAutoCommands:
             # no path — eager validation catches it
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
 
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
@@ -502,7 +500,6 @@ class TestAutoCommands:
             'type = "claude"\n'
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
 
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
@@ -530,7 +527,6 @@ class TestAutoCommands:
         )
         (tmp_path / ".claude").mkdir()
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         # Breadcrumb lives under sidecar.SIDECAR_DIR — redirect for isolation.
         sidecar_dir = tmp_path / "sidecar"
         monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
@@ -572,7 +568,6 @@ class TestAutoCommands:
         )
         (tmp_path / ".claude").mkdir()
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         import mind_meld.cli as cli_mod
 
         def boom(*_a, **_kw):
@@ -597,7 +592,6 @@ class TestAutoCommands:
         config_path = tmp_path / "config.toml"
         storage = tmp_path / "icloud"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         # Force store_passphrase_in_keyring to leak a non-KeyringError.
         import mind_meld.cli as cli_mod
 
@@ -659,7 +653,6 @@ class TestAutoCommands:
         monkeypatch.setattr("mind_meld.config.LOCK_PATH", test_lock)
         monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", test_lock)
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         # Spawn a child that grabs the lock and holds it until stdin closes.
@@ -740,7 +733,6 @@ class TestAutoCommands:
 
         # Monkeypatch config path and passphrase
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         # Run autopush
@@ -831,7 +823,6 @@ class TestMultiSourceSync:
         register_device(backend, "dev-b", "Mac B")
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         result = runner.invoke(app, ["autopush"])
@@ -850,7 +841,6 @@ class TestMultiSourceSync:
         )
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
 
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
@@ -897,7 +887,6 @@ class TestMultiSourceSync:
         bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         runner.invoke(app, ["autopush"])
 
@@ -912,7 +901,6 @@ class TestMultiSourceSync:
             tmp_path, storage_dir, claude_dir, "dev-b", "Mac B", gstack_dir
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
 
         # Spy: capture every fsync_dir call Pull triggers.
         calls: list[Path] = []
@@ -976,7 +964,6 @@ class TestMultiSourceSync:
         register_device(backend, "dev-b", "Mac B")
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
@@ -992,7 +979,6 @@ class TestMultiSourceSync:
         config_b_path, _ = self._make_config(tmp_path, storage_dir, claude_dir, "dev-b", "Mac B")
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
 
@@ -1034,7 +1020,6 @@ class TestMultiSourceSync:
         register_device(backend, "dev-b", "Mac B")
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
@@ -1051,7 +1036,6 @@ class TestMultiSourceSync:
         )
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
         result = runner.invoke(app, ["pull", "--source", "gstack"])
         assert result.exit_code == 0
 
@@ -1091,7 +1075,6 @@ class TestMultiSourceSync:
         register_device(backend, "dev-b", "Mac B")
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
@@ -1106,7 +1089,6 @@ class TestMultiSourceSync:
         )
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b_path)
         result = runner.invoke(app, ["pull", "--source", "gstack"])
         assert result.exit_code == 0
 
@@ -1143,7 +1125,6 @@ class TestMultiSourceSync:
 
         # Push (creates v2 manifest with both sources)
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
@@ -1221,7 +1202,6 @@ class TestInitFlow:
 
         cfg_path = tmp_path / "config_test.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
         # Make keyring a no-op so tests don't pollute the real Keychain.
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         # get_passphrase falls back to env; tests set MINDMELD_PASSPHRASE as needed.
@@ -1470,7 +1450,6 @@ class TestInitTwoTierGuard:
     def _setup(self, tmp_path, monkeypatch):
         cfg = tmp_path / "config_test.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         return cfg
 
@@ -1647,7 +1626,6 @@ class TestBackfillPreservesRawPaths:
 
     def _run_autopush_with_config(self, config_path, monkeypatch):
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0, (
@@ -1815,7 +1793,6 @@ class TestBackfillPreservesRawPaths:
         monkeypatch.setattr("mind_meld.cli.patch_config_on_disk", delete_then_call)
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
         result = runner.invoke(app, ["autopush"])

@@ -51,7 +51,6 @@ runner = CliRunner()
 def test_autopull_silent_exit_when_config_missing(tmp_path, monkeypatch):
     """REGRESSION: only FileNotFoundError-equivalent silences autopull."""
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", tmp_path / "nope.toml")
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", tmp_path / "nope.toml")
     result = runner.invoke(app, ["autopull"])
     assert result.exit_code == 0
     assert result.stdout == ""
@@ -69,7 +68,6 @@ def test_autopull_surfaces_corrupt_config(tmp_path, monkeypatch):
     bad = tmp_path / "config.toml"
     bad.write_text("@@not-valid-toml@@")
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", bad)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", bad)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
 
     result = runner.invoke(app, ["autopull"])
@@ -87,7 +85,6 @@ def test_autopush_surfaces_corrupt_config(tmp_path, monkeypatch):
     bad = tmp_path / "config.toml"
     bad.write_text("!! definitely not toml !!")
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", bad)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", bad)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
 
     result = runner.invoke(app, ["autopush"])
@@ -105,7 +102,6 @@ def test_autopull_typed_error_without_cause_does_not_log(tmp_path, monkeypatch):
     bad = tmp_path / "config.toml"
     bad.write_text("# missing all required sections\n")
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", bad)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", bad)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
 
     result = runner.invoke(app, ["autopull"])
@@ -127,7 +123,6 @@ def test_autopull_logs_traceback_on_unexpected_config_error(tmp_path, monkeypatc
     _populate_claude(claude_dir)
     config_path, _ = _make_config(tmp_path, storage_dir, claude_dir)
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
 
     def boom(*a, **kw):
@@ -321,7 +316,6 @@ def test_pull_warns_on_unknown_source(tmp_path, monkeypatch):
     register_device(backend, "dev-b", "Mac B")
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a)
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
@@ -347,7 +341,6 @@ def test_pull_warns_on_unknown_source(tmp_path, monkeypatch):
         config_b,
     )
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b)
 
     r = runner.invoke(app, ["pull"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -390,7 +383,6 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
     register_device(backend, "dev-b", "Mac B")
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a)
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
@@ -399,7 +391,6 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
 
     # Switch to device B.
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b)
 
     role = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "role.md"
     snapshot_before = role.read_text()
@@ -718,17 +709,14 @@ def test_pull_conflict_mode_fail_catches_cross_peer_conflict(tmp_path, monkeypat
         register_device(backend, did, name)
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a)
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     assert runner.invoke(app, ["push"]).exit_code == 0
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b)
     assert runner.invoke(app, ["push"]).exit_code == 0
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_l)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_l)
 
     r = runner.invoke(app, ["pull", "--conflict-mode", "fail"])
     assert r.exit_code == 3, (r.stdout, r.stderr)
@@ -808,7 +796,6 @@ def test_error_writes_to_stderr_not_stdout(tmp_path, monkeypatch):
     bad = tmp_path / "bad.toml"
     bad.write_text("this is not = valid toml [[[")
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", bad)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", bad)
 
     r = runner.invoke(app, ["push"])
 
@@ -954,7 +941,6 @@ def test_autopush_breadcrumb_no_sources_distinguishes_from_success(tmp_path, mon
     register_device(backend, "dev-empty", "Empty")
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
     _redirect_lock(monkeypatch, tmp_path)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
@@ -988,7 +974,6 @@ def test_autopush_surfaces_no_sources_warning_in_quiet_mode(tmp_path, monkeypatc
     register_device(backend, "dev-empty", "Empty")
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
@@ -1021,14 +1006,12 @@ def test_autopull_surfaces_fsync_failure_in_quiet_mode(tmp_path, monkeypatch):
     register_device(backend, "dev-b", "Mac B")
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a)
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     assert runner.invoke(app, ["push"]).exit_code == 0
 
     # Switch to device B and force fsync to fail during the upcoming autopull.
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b)
 
     # Path-aware mock: only raise on the deferred-durability fsync (which
     # targets the claude tree where pulled files landed). _init_crypto_session

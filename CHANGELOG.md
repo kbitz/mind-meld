@@ -55,6 +55,25 @@ check (only 2 of 4 candidates are cross-module, would have split the
 - `docs/ROADMAP.md` — Group 1 marked ✓ Complete (constants.py preflight
   dropped with cohesion-check rationale); Group 5 preflight bundled with
   Track 5A; Execution Map updated.
+- `_find_conflict_files` sibling-glob gates on `include_files` presence
+  rather than `type == "generic"` so a future schema that adds
+  `include_files` to other source types doesn't silently lose conflict
+  visibility (defensive against the same scope-mismatch class of bug).
+- `_save_and_register` rollback narrows `except Exception` to
+  `(StorageError, OSError, MindMeldError)` so programming errors
+  (AssertionError, AttributeError) propagate instead of silently
+  destroying the user's saved config on every retry.
+- All `cli.py` `CONFIG_PATH` access goes through `_config_module.CONFIG_PATH`
+  uniformly. The local `from mind_meld.config import CONFIG_PATH` binding
+  was removed; ~50 dead `monkeypatch.setattr("mind_meld.cli.CONFIG_PATH",
+  ...)` lines across 9 test files dropped (they were the symptom of the
+  dual-binding footgun, now retired).
+- Rollback unlink-failure warning now goes to `stderr_console` per the
+  CLAUDE.md visible-failure contract (load-bearing degradation signals
+  reach stderr even in quiet mode).
+- README.md, SPEC.md, and `docs/designs/sync-gstack-context.md` updated
+  to list the two new gstack `include_files` defaults
+  (`retro-context.md`, `greptile-history.md`).
 
 ## [0.8.14] - 2026-04-24
 

@@ -946,7 +946,6 @@ class TestResolveExitCode:
             cfg_path,
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
         monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
 

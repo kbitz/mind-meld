@@ -24,7 +24,6 @@ from rich.table import Table
 from mind_meld import __version__, fsutil, sidecar
 from mind_meld import config as _config_module
 from mind_meld.config import (
-    CONFIG_PATH,
     DEFAULT_ARGON2_MEMORY_KB,
     DEFAULT_MAX_FILE_SIZE,
     DEFAULT_SOURCES,
@@ -1265,7 +1264,7 @@ def _load_prior_device_metadata() -> tuple[str | None, str | None]:
     or missing config returns (None, None) — the orphan warning just
     loses the descriptive name.
     """
-    if not CONFIG_PATH.exists():
+    if not _config_module.CONFIG_PATH.exists():
         return None, None
     try:
         prior = load_config()
@@ -1400,16 +1399,26 @@ def _save_and_register(
     save_config(config)
     try:
         register_device(backend, device_id, device_name)
-    except Exception:
+    except (StorageError, OSError, MindMeldError):
+        # Narrow to the failure modes the rollback is designed for. A bare
+        # `except Exception` would catch programming errors (AssertionError,
+        # AttributeError, TypeError from a future logic bug) and silently
+        # nuke the user's saved config every retry — same class of silent
+        # data destruction the rollback exists to prevent. Programming
+        # errors propagate uncaught so the user sees a real traceback and
+        # the saved config is preserved for diagnosis.
         try:
             _config_module.CONFIG_PATH.unlink(missing_ok=True)
         except OSError as unlink_exc:
-            console.print(
-                f"  [yellow]Warning: rollback of {_config_module.CONFIG_PATH} failed "
-                f"({type(unlink_exc).__name__}): {unlink_exc}[/yellow]"
+            # Per CLAUDE.md visible-failure contract: load-bearing warnings
+            # signal data-at-risk degradation and must reach stderr even in
+            # quiet mode. Original register error wins via bare `raise` below.
+            stderr_console.print(
+                f"mm: warning: rollback of {_config_module.CONFIG_PATH} failed "
+                f"({type(unlink_exc).__name__}): {unlink_exc}"
             )
         raise
-    console.print(f"  Config written to {CONFIG_PATH}")
+    console.print(f"  Config written to {_config_module.CONFIG_PATH}")
     console.print(f"  Device registered: {device_name} ({device_id})")
 
     # store_passphrase_in_keyring narrowed its own catch to
@@ -1461,8 +1470,10 @@ def init() -> None:
     # Capture prior device metadata BEFORE any prompt so the orphan-case
     # warning can name the device about to be left behind.
     existing_device_id, existing_device_name = _load_prior_device_metadata()
-    if CONFIG_PATH.exists():
-        overwrite = typer.confirm(f"Config already exists at {CONFIG_PATH}. Overwrite?")
+    if _config_module.CONFIG_PATH.exists():
+        overwrite = typer.confirm(
+            f"Config already exists at {_config_module.CONFIG_PATH}. Overwrite?"
+        )
         if not overwrite:
             raise typer.Exit()
 
@@ -3296,8 +3307,12 @@ def _find_conflict_files(config: dict) -> list[tuple[str, Path, Path | None]]:
                     (src_cfg["name"], conflict_path, canonical if canonical.exists() else None)
                 )
 
-        # (2) Depth-0 sibling-glob for generic include_files entries.
-        if src_cfg.get("type") == "generic":
+        # (2) Depth-0 sibling-glob for include_files entries. Gate on data
+        # presence (not source type) so a future schema that adds
+        # include_files to other source types doesn't silently lose
+        # conflict visibility — the same scope-mismatch class of bug as
+        # the original Track 5A Task 2.
+        if src_cfg.get("include_files"):
             for filename in src_cfg.get("include_files", []):
                 canonical = base_path / filename
                 # parent_dir handles both top-level entries (parent == base_path)
@@ -3907,12 +3922,12 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
     Writes a breadcrumb (`last-autorun.json`) on every early-exit path so
     `mm status` can surface silent-skip history.
     """
-    # Module-attribute access (not the local `CONFIG_PATH` import binding) so
+    # All CONFIG_PATH access goes through `_config_module.CONFIG_PATH` so
     # `monkeypatch.setattr("mind_meld.config.CONFIG_PATH", ...)` propagates.
-    # `load_config()` below already resolves the path through the module
-    # attribute; using the local cli.py binding here would let the two
-    # diverge under test and the silent-mode contract would regress to a
-    # `mm: pull failed - init: config not found` stderr line.
+    # `load_config()` already resolves through the module attribute; a
+    # local `from mind_meld.config import CONFIG_PATH` binding would let
+    # the two diverge under test (the silent-mode contract regression
+    # that surfaced in v0.8.15).
     if not _config_module.CONFIG_PATH.exists():
         _write_autorun_breadcrumb(verb, "config-missing")
         return None

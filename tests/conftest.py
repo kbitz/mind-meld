@@ -134,7 +134,6 @@ def _setup_real_config(tmp_path, monkeypatch):
     register_device(backend, "dev-a", "Mac A")
 
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_path)
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     return claude_dir
