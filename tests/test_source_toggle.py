@@ -1,0 +1,374 @@
+"""Tests for v0.10.0 per-machine source toggle CLI commands + display.
+
+Covers:
+- `mm enable-source` / `mm disable-source` / `mm reconfigure-sources` happy paths
+- `--force` escape hatch + closest-match hint on unknown names
+- Idempotent no-op messages
+- `mm sources` Enabled column + dim disabled rows + shows-disabled-too
+- `mm status` disabled-sources breadcrumb + new-source hint (one-shot)
+
+Consumer-boundary tombstone-suppression invariants (P0) live in
+`tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+import typer
+from typer.testing import CliRunner
+
+from mind_meld import seen_sources
+from mind_meld.cli import (
+    _filter_disabled_sources,
+    _known_source_names,
+    _prompt_source_toggle,
+    _validate_source_name,
+    app,
+)
+from mind_meld.config import save_config
+from mind_meld.errors import ConfigError
+
+runner = CliRunner()
+
+
+@pytest.fixture
+def isolated_seen_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr("mind_meld.seen_sources.SEEN_DIR", tmp_path / "mm_state")
+
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
+    """Minimal config with claude + gstack explicit sources, ready to mutate."""
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    gstack = tmp_path / ".gstack"
+    gstack.mkdir()
+    config_path = tmp_path / "config.toml"
+    config = {
+        "device": {"id": "abc123", "name": "MacBook"},
+        "storage": {"path": str(storage)},
+        "sync": {
+            "max_file_size": 52_428_800,
+            "sources": [
+                {"name": "claude", "path": str(claude), "type": "claude"},
+                {"name": "gstack", "path": str(gstack), "type": "generic"},
+            ],
+        },
+        "crypto": {"argon2_memory_kb": 1024},
+    }
+    save_config(config, config_path)
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    return config_path
+
+
+# ── _validate_source_name + _known_source_names ──────────────────────
+
+
+class TestValidateSourceName:
+    def test_known_name_passes(self):
+        cfg = {"sync": {"sources": [{"name": "claude", "path": "/", "type": "claude"}]}}
+        _validate_source_name("claude", cfg, force=False)
+        _validate_source_name("gstack", cfg, force=False)  # in DEFAULT_SOURCES
+
+    def test_unknown_name_strict_raises(self):
+        cfg = {"sync": {"sources": []}}
+        with pytest.raises(ConfigError, match="unknown source 'codex'"):
+            _validate_source_name("codex", cfg, force=False)
+
+    def test_unknown_name_force_warns_and_passes(self, capsys):
+        cfg = {"sync": {"sources": []}}
+        _validate_source_name("codex", cfg, force=True)
+        captured = capsys.readouterr()
+        assert "codex" in captured.err
+        assert "--force" in captured.err
+
+    def test_closest_match_hint_in_error(self):
+        cfg = {"sync": {"sources": []}}
+        with pytest.raises(ConfigError, match="Did you mean 'gstack'"):
+            _validate_source_name("gstck", cfg, force=False)
+
+    def test_known_source_names_returns_sorted_union(self):
+        cfg = {"sync": {"sources": [{"name": "custom", "path": "/", "type": "claude"}]}}
+        names = _known_source_names(cfg)
+        assert "custom" in names
+        assert "claude" in names
+        assert "gstack" in names
+        assert names == sorted(names)
+
+
+# ── _prompt_source_toggle ────────────────────────────────────────────
+
+
+class TestPromptSourceToggle:
+    def test_default_reflects_current_state_true(self, monkeypatch, tmp_path):
+        """Empty stdin = accept default. current_state=True → returns True."""
+        captured: dict = {}
+
+        def fake_confirm(prompt, default):
+            captured["prompt"] = prompt
+            captured["default"] = default
+            return default
+
+        monkeypatch.setattr(typer, "confirm", fake_confirm)
+        result = _prompt_source_toggle(
+            {"name": "claude", "path": str(tmp_path)}, current_state=True
+        )
+        assert result is True
+        assert captured["default"] is True
+        assert "claude" in captured["prompt"]
+
+    def test_default_reflects_current_state_false(self, monkeypatch, tmp_path):
+        def fake_confirm(prompt, default):
+            return default
+
+        monkeypatch.setattr(typer, "confirm", fake_confirm)
+        result = _prompt_source_toggle(
+            {"name": "gstack", "path": str(tmp_path)}, current_state=False
+        )
+        assert result is False
+
+
+# ── disable-source ────────────────────────────────────────────────────
+
+
+class TestDisableSource:
+    def test_disables_known_source(self, cfg, isolated_seen_sources):
+        result = runner.invoke(app, ["disable-source", "gstack"])
+        assert result.exit_code == 0, result.output
+        assert "Disabled source 'gstack'" in result.output
+
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert on_disk["sync"]["disabled_sources"] == ["gstack"]
+
+    def test_idempotent_no_op_on_already_disabled(self, cfg, isolated_seen_sources):
+        runner.invoke(app, ["disable-source", "gstack"])
+        result = runner.invoke(app, ["disable-source", "gstack"])
+        assert result.exit_code == 0
+        assert "already disabled" in result.output
+
+    def test_unknown_name_strict_errors(self, cfg, isolated_seen_sources):
+        result = runner.invoke(app, ["disable-source", "definitely-unknown"])
+        assert result.exit_code != 0
+        assert "unknown source" in result.output
+
+    def test_closest_match_hint(self, cfg, isolated_seen_sources):
+        result = runner.invoke(app, ["disable-source", "gstck"])
+        assert result.exit_code != 0
+        assert "Did you mean 'gstack'" in result.output
+
+    def test_unknown_name_force_accepted(self, cfg, isolated_seen_sources):
+        """Forward-compat: pre-disable codex before it ships."""
+        result = runner.invoke(app, ["disable-source", "codex", "--force"])
+        assert result.exit_code == 0
+        assert "Disabled" in result.output
+        # stderr breadcrumb in CliRunner: combined output has the warning.
+        # We assert the field landed.
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "codex" in on_disk["sync"]["disabled_sources"]
+
+    def test_records_seen(self, cfg, isolated_seen_sources):
+        runner.invoke(app, ["disable-source", "gstack"])
+        assert seen_sources.seen_path().exists()
+        seen = json.loads(seen_sources.seen_path().read_text())
+        assert "gstack" in seen
+
+
+# ── enable-source ─────────────────────────────────────────────────────
+
+
+class TestEnableSource:
+    def test_enables_disabled_source(self, cfg, isolated_seen_sources):
+        runner.invoke(app, ["disable-source", "gstack"])
+        result = runner.invoke(app, ["enable-source", "gstack"])
+        assert result.exit_code == 0, result.output
+        assert "Enabled source 'gstack'" in result.output
+
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert on_disk["sync"]["disabled_sources"] == []
+
+    def test_already_enabled_no_op(self, cfg, isolated_seen_sources):
+        # gstack is in explicit sources, not disabled.
+        result = runner.invoke(app, ["enable-source", "gstack"])
+        assert result.exit_code == 0
+        assert "already enabled" in result.output
+
+    def test_unknown_name_strict_errors(self, cfg, isolated_seen_sources):
+        result = runner.invoke(app, ["enable-source", "definitely-unknown"])
+        assert result.exit_code != 0
+        assert "unknown source" in result.output
+
+    def test_unknown_name_force_accepted(self, cfg, isolated_seen_sources):
+        # First pre-disable codex via --force.
+        runner.invoke(app, ["disable-source", "codex", "--force"])
+        # Now re-enable via --force (codex still not in DEFAULT_SOURCES on this
+        # mm version, so --force needed for both directions).
+        result = runner.invoke(app, ["enable-source", "codex", "--force"])
+        assert result.exit_code == 0
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "codex" not in (on_disk["sync"].get("disabled_sources") or [])
+
+    def test_appends_default_for_known_default_not_in_explicit(
+        self, tmp_path, monkeypatch, isolated_seen_sources
+    ):
+        """If user has explicit [[sync.sources]] without gstack, but gstack is
+        in DEFAULT_SOURCES, `mm enable-source gstack` appends gstack's default
+        config so the source actually starts syncing."""
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        claude = tmp_path / ".claude"
+        claude.mkdir()
+        config_path = tmp_path / "config.toml"
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(storage)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude), "type": "claude"},
+                ],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        save_config(config, config_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+        result = runner.invoke(app, ["enable-source", "gstack"])
+        assert result.exit_code == 0, result.output
+        import tomllib
+
+        with open(config_path, "rb") as f:
+            on_disk = tomllib.load(f)
+        names = [s["name"] for s in on_disk["sync"]["sources"]]
+        assert "gstack" in names
+
+
+# ── mm sources display ────────────────────────────────────────────────
+
+
+class TestSourcesTable:
+    def test_shows_enabled_column(self, cfg, isolated_seen_sources):
+        result = runner.invoke(app, ["sources"])
+        assert result.exit_code == 0, result.output
+        assert "Enabled" in result.output
+
+    def test_shows_disabled_row_too(self, cfg, isolated_seen_sources):
+        runner.invoke(app, ["disable-source", "gstack"])
+        result = runner.invoke(app, ["sources"])
+        assert result.exit_code == 0
+        # Both sources visible in the table even with one disabled.
+        assert "claude" in result.output
+        assert "gstack" in result.output
+
+
+# ── mm status display ─────────────────────────────────────────────────
+
+
+class TestStatusBreadcrumbs:
+    def test_disabled_breadcrumb_when_nonempty(self, cfg, isolated_seen_sources, monkeypatch):
+        """`mm status` shows disabled-sources line when list is non-empty."""
+        from mind_meld import crypto
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "test-passphrase")
+
+        # Bootstrap crypto-init in storage so status can run.
+        import tomllib
+
+        from mind_meld.crypto import bootstrap_crypto_init
+        from mind_meld.devices import register_device
+        from mind_meld.storage.local import LocalBackend
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        backend = LocalBackend(on_disk["storage"]["path"])
+        bootstrap_crypto_init(backend, "test-passphrase", argon2_memory_kb=1024)
+        register_device(backend, "abc123", "MacBook")
+        crypto.clear_crypto_session()
+
+        runner.invoke(app, ["disable-source", "gstack"])
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Disabled sources" in result.output
+        assert "gstack" in result.output
+
+    def test_no_breadcrumb_when_empty(self, cfg, isolated_seen_sources, monkeypatch):
+        from mind_meld import crypto
+        from mind_meld.crypto import bootstrap_crypto_init
+        from mind_meld.devices import register_device
+        from mind_meld.storage.local import LocalBackend
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "test-passphrase")
+
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        backend = LocalBackend(on_disk["storage"]["path"])
+        bootstrap_crypto_init(backend, "test-passphrase", argon2_memory_kb=1024)
+        register_device(backend, "abc123", "MacBook")
+        crypto.clear_crypto_session()
+
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0
+        assert "Disabled sources" not in result.output
+
+
+# ── _filter_disabled_sources ─────────────────────────────────────────
+
+
+class TestFilterDisabledSources:
+    """Pure-function tests for the manifest filter (consumer-boundary
+    invariant). End-to-end tombstone-suppression behavior pinned in
+    test_integration.py::TestDisabledSourcesTombstoneSuppression."""
+
+    def test_empty_disabled_returns_unchanged(self):
+        manifest = {
+            "sources": {"claude": {"files": {"a.md": {"sha256": "x"}}}},
+            "tombstones": {"claude:b.md": {"deleted_by": "x"}},
+        }
+        assert _filter_disabled_sources(manifest, []) is manifest
+
+    def test_drops_disabled_source_entries(self):
+        manifest = {
+            "sources": {
+                "claude": {"files": {"a.md": {"sha256": "x"}}},
+                "gstack": {"files": {"b.md": {"sha256": "y"}}},
+            },
+            "tombstones": {},
+        }
+        out = _filter_disabled_sources(manifest, ["gstack"])
+        assert "claude" in out["sources"]
+        assert "gstack" not in out["sources"]
+
+    def test_preserves_tombstones_for_disabled_source(self):
+        """Asymmetric filter: tombstones survive across the disable filter
+        even for the disabled source. Pinning the codex 2026-04-25 finding:
+        if A deleted gstack:x and pushed a tombstone, then disables gstack,
+        the prior tombstone MUST flow through to A's next manifest so a
+        long-offline peer pulling only A's view doesn't lose the deletion."""
+        manifest = {
+            "sources": {},
+            "tombstones": {
+                "claude:a.md": {"deleted_by": "x"},
+                "gstack:b.md": {"deleted_by": "x"},
+            },
+        }
+        out = _filter_disabled_sources(manifest, ["gstack"])
+        # BOTH tombstones flow through — disable does not undo prior consensus.
+        assert "claude:a.md" in out["tombstones"]
+        assert "gstack:b.md" in out["tombstones"]

@@ -745,6 +745,189 @@ class TestValidateSourcesShapeGuards:
             _validate_sources([{"name": "claude", "path": 42, "type": "claude"}])
 
 
+class TestDisabledSourcesField:
+    """Per-machine source toggle (v0.10.0): [sync].disabled_sources filter
+    in get_sources() + schema validation in _validate. The field is the
+    source-resolution filter; the consumer-boundary tombstone-suppression
+    invariant lives in cli.py (TestDisabledSourcesTombstoneSuppression)."""
+
+    def _base_config(self, tmp_path) -> dict:
+        return {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+        }
+
+    def test_validate_passes_with_valid_disabled_sources(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {"disabled_sources": ["gstack"]}
+        _validate(config)  # should not raise
+
+    def test_validate_passes_with_empty_disabled_sources(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {"disabled_sources": []}
+        _validate(config)
+
+    def test_validate_passes_when_disabled_sources_absent(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {}
+        _validate(config)
+
+    def test_validate_raises_on_non_list(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {"disabled_sources": "gstack"}
+        with pytest.raises(ConfigError, match="disabled_sources must be a list"):
+            _validate(config)
+
+    def test_validate_raises_on_non_string_entry(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {"disabled_sources": [42]}
+        with pytest.raises(ConfigError, match="disabled_sources\\[0\\] must be a string"):
+            _validate(config)
+
+    def test_load_config_raises_on_bad_disabled_sources_in_toml(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        config_path.write_text(
+            f'[device]\nid = "abc"\nname = "Mac"\n'
+            f'[storage]\npath = "{storage}"\n'
+            f"[sync]\ndisabled_sources = 42\n"
+        )
+        with pytest.raises(ConfigError):
+            load_config(config_path)
+
+
+class TestGetSourcesDisabledFilter:
+    """get_sources() filters by [sync].disabled_sources. Filter applies AFTER
+    resolution (DEFAULT_SOURCES + auto-detect + explicit) and BEFORE the
+    path-existence filter."""
+
+    def test_disabled_sources_drops_named_source(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        gstack_dir = tmp_path / ".gstack"
+        gstack_dir.mkdir()
+        # Both Path.home() AND $HOME need redirecting: get_sources uses
+        # expanduser() which reads $HOME (not Path.home()), and the
+        # auto-detect branch uses Path.home(). Patching only Path.home
+        # passes locally if real ~/.claude exists, but fails in CI where
+        # $HOME points at a clean /Users/runner with no ~/.claude.
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"disabled_sources": ["gstack"]},
+        }
+        sources = get_sources(config)
+        names = [s["name"] for s in sources]
+        assert "gstack" not in names
+        assert "claude" in names
+
+    def test_empty_disabled_sources_is_no_op(self, tmp_path, monkeypatch):
+        """Regression: an empty disabled_sources list must not change behavior."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"disabled_sources": []},
+        }
+        sources = get_sources(config)
+        assert any(s["name"] == "claude" for s in sources)
+
+    def test_unknown_name_in_disabled_sources_silently_ignored(self, tmp_path, monkeypatch):
+        """Unknown names at this layer are silent — strict validation lives
+        in the CLI (`mm disable-source <unknown>`). Validation here would
+        force the CLI's --force escape hatch to live in a wrong layer."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"disabled_sources": ["definitely-not-a-source"]},
+        }
+        sources = get_sources(config)
+        assert any(s["name"] == "claude" for s in sources)
+
+    def test_disabled_filter_applies_to_explicit_sources(self, tmp_path):
+        """User has explicit [[sync.sources]] for claude + gstack; disable
+        gstack: gstack is filtered out of resolution."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        gstack_dir = tmp_path / ".gstack"
+        gstack_dir.mkdir()
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                    {"name": "gstack", "path": str(gstack_dir), "type": "generic"},
+                ],
+                "disabled_sources": ["gstack"],
+            },
+        }
+        sources = get_sources(config)
+        assert [s["name"] for s in sources] == ["claude"]
+
+
+class TestDisabledSourcesRoundTrip:
+    """save_config + load_config round-trips disabled_sources cleanly.
+    Patch via patch_config_on_disk preserves [[sync.sources]] (array of
+    tables) untouched."""
+
+    def test_round_trip_disabled_sources(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(storage)},
+            "sync": {"disabled_sources": ["gstack"]},
+        }
+        save_config(config, config_path)
+        loaded = load_config(config_path)
+        assert loaded["sync"]["disabled_sources"] == ["gstack"]
+
+    def test_patch_disabled_sources_preserves_explicit_sources(self, tmp_path):
+        """Patching [sync].disabled_sources via patch_config_on_disk must NOT
+        clobber the [[sync.sources]] array of tables."""
+        config_path = tmp_path / "config.toml"
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        claude_dir = tmp_path / "claude"
+        claude_dir.mkdir()
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(storage)},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                ],
+            },
+        }
+        save_config(config, config_path)
+
+        patch_config_on_disk(
+            {"sync": {"disabled_sources": ["gstack"]}},
+            config_path,
+        )
+
+        loaded = load_config(config_path)
+        assert loaded["sync"]["disabled_sources"] == ["gstack"]
+        assert len(loaded["sync"]["sources"]) == 1
+        assert loaded["sync"]["sources"][0]["name"] == "claude"
+
+
 class TestLoadConfigNormalizesUnexpectedErrors:
     """load_config must normalize any non-ConfigError exception from validate or
     apply_defaults (e.g. .resolve() RuntimeError on cyclic symlinks) into

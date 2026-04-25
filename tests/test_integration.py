@@ -649,6 +649,339 @@ class TestFilterExcludedPathsHelper:
         assert "projects/myapp/repo-mode.json" not in out["sources"]["gstack"]["files"]
 
 
+class TestDisabledSourcesTombstoneSuppression:
+    """v0.10.0 IRON RULE regression pins for [sync].disabled_sources.
+
+    Mirror of TestExcludePatterns5C — same shape, different filter target.
+    The exclude_patterns invariant stripped per-path entries; this strips
+    whole sources. Both apply at the consumer boundary (`_push_core`,
+    `_pull_core`) and MUST NOT apply at `_fetch_remote_manifest` (mm gc
+    reads raw manifests there).
+
+    Failing these tests blocks ship: a regression here means disabling a
+    source on one machine propagates fleet-wide deletion of that source's
+    content on the next push.
+    """
+
+    def _make_two_source_config(
+        self,
+        tmp_path,
+        storage_dir,
+        claude_dir,
+        gstack_dir,
+        device_id,
+        device_name,
+        *,
+        disabled_sources=None,
+    ):
+        config_path = tmp_path / f"config_{device_id}.toml"
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                    {
+                        "name": "gstack",
+                        "path": str(gstack_dir),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        if disabled_sources is not None:
+            config["sync"]["disabled_sources"] = disabled_sources
+        save_config(config, config_path)
+        return config_path
+
+    def _populate_claude(self, claude_dir):
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "user_role.md").write_text("---\nname: role\n---\nData scientist")
+
+    def _populate_gstack(self, gstack_dir):
+        proj = gstack_dir / "projects" / "myapp"
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "role.md").write_text("data scientist")
+        (proj / "feedback.md").write_text("no mocks")
+
+    def _activate(self, monkeypatch, config_path):
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+    def _bootstrap(self, storage_dir):
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        return backend
+
+    def test_disable_source_does_not_generate_tombstones_on_next_push(self, tmp_path, monkeypatch):
+        """P0 fleet-wide-data-loss prevention: disable gstack on machine A
+        and push. The new manifest must NOT contain deletion tombstones
+        for any gstack file. Without the consumer-boundary filter on the
+        prior_manifest, generate_tombstones would emit a tombstone per
+        gstack file (because the local-walked manifest no longer has
+        gstack via get_sources()'s filter), peers would pull the
+        tombstones, and gstack content would vanish fleet-wide.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+        self._populate_claude(claude_dir)
+        self._populate_gstack(gstack_dir)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+
+        # Phase 1: push without disable — both sources land in remote manifest.
+        config_path = self._make_two_source_config(
+            tmp_path, storage_dir, claude_dir, gstack_dir, "dev-a", "A"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        assert "projects/myapp/role.md" in remote["sources"]["gstack"]["files"]
+
+        # Phase 2: disable gstack. Push.
+        self._make_two_source_config(
+            tmp_path,
+            storage_dir,
+            claude_dir,
+            gstack_dir,
+            "dev-a",
+            "A",
+            disabled_sources=["gstack"],
+        )
+        # Touch claude file so push has a diff to upload.
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "Data scientist v2"
+        )
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        gstack_tombstones = [k for k in remote.get("tombstones", {}) if k.startswith("gstack:")]
+        assert gstack_tombstones == [], (
+            f"Disabling a source must NOT generate tombstones for that source's "
+            f"files (would propagate fleet-wide deletion); got {gstack_tombstones}"
+        )
+
+    def test_enable_previously_disabled_source_brings_files_back_as_new(
+        self, tmp_path, monkeypatch
+    ):
+        """Re-enable round-trip: disable gstack, push, enable gstack, push.
+        Files reappear as fresh entries in the manifest, NOT as tombstones."""
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+        self._populate_claude(claude_dir)
+        self._populate_gstack(gstack_dir)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+
+        # Phase 1: disable gstack, push.
+        config_path = self._make_two_source_config(
+            tmp_path,
+            storage_dir,
+            claude_dir,
+            gstack_dir,
+            "dev-a",
+            "A",
+            disabled_sources=["gstack"],
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        # Phase 2: re-enable gstack, push.
+        self._make_two_source_config(tmp_path, storage_dir, claude_dir, gstack_dir, "dev-a", "A")
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "Data scientist v3"
+        )
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        # gstack content reappears as fresh entries.
+        assert "projects/myapp/role.md" in remote["sources"]["gstack"]["files"]
+        # And no tombstones for the previously-disabled source.
+        gstack_tombstones = [k for k in remote.get("tombstones", {}) if k.startswith("gstack:")]
+        assert gstack_tombstones == []
+
+    def test_pull_skips_disabled_source_peer_manifest_entries(self, tmp_path, monkeypatch):
+        """A pushes both sources. B has gstack disabled. B's pull must
+        NOT land any gstack files locally. Without the consumer-boundary
+        filter on peer manifests in `_pull_core`, B would pull A's gstack
+        content despite the local disable."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "a" / ".claude"
+        gstack_a = tmp_path / "a" / ".gstack"
+        claude_b = tmp_path / "b" / ".claude"
+        gstack_b = tmp_path / "b" / ".gstack"
+        self._populate_claude(claude_a)
+        self._populate_gstack(gstack_a)
+        claude_b.mkdir(parents=True)
+        gstack_b.mkdir(parents=True)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = self._make_two_source_config(
+            tmp_path, storage_dir, claude_a, gstack_a, "dev-a", "A"
+        )
+        config_b = self._make_two_source_config(
+            tmp_path,
+            storage_dir,
+            claude_b,
+            gstack_b,
+            "dev-b",
+            "B",
+            disabled_sources=["gstack"],
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        self._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        self._activate(monkeypatch, config_b)
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+
+        # B's gstack dir stays empty — A's content didn't land.
+        landed = (
+            list((gstack_b / "projects").glob("*/role.md"))
+            if (gstack_b / "projects").exists()
+            else []
+        )
+        assert landed == [], f"Disabled source must not pull peer content; got {landed}"
+        # Claude content DID land (not disabled).
+        claude_landed = list(claude_b.rglob("user_role.md"))
+        assert claude_landed, "Non-disabled claude content should still pull"
+
+    def test_sidecar_recovery_filters_disabled_sources(self, tmp_path, monkeypatch):
+        """Corrupt own manifest → recovery via sidecar (which contains the
+        pre-disable gstack entries) → consumer-boundary filter applies
+        before generate_tombstones → NO spurious tombstones for disabled-
+        source paths.
+
+        Same shape as test_sidecar_bypass_guard for exclude_patterns.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        gstack_dir = tmp_path / ".gstack"
+        self._populate_claude(claude_dir)
+        self._populate_gstack(gstack_dir)
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+
+        # Phase 1: push with both sources; sidecar captures gstack.
+        config_path = self._make_two_source_config(
+            tmp_path, storage_dir, claude_dir, gstack_dir, "dev-a", "A"
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        sidecar_path = sidecar_dir / "last-push.json"
+        assert sidecar_path.exists()
+        sidecar_content = json.loads(sidecar_path.read_text())
+        assert "gstack" in sidecar_content["sources"]
+
+        # Corrupt the storage manifest so push falls through to sidecar.
+        manifest_storage_path = storage_dir / "manifests" / "dev-a" / "manifest.json.enc"
+        manifest_storage_path.write_bytes(b"\x00\x01\x02 not a manifest")
+
+        # Phase 2: disable gstack, push (recovery via sidecar fires).
+        self._make_two_source_config(
+            tmp_path,
+            storage_dir,
+            claude_dir,
+            gstack_dir,
+            "dev-a",
+            "A",
+            disabled_sources=["gstack"],
+        )
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "Data scientist v2"
+        )
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        gstack_tombstones = [k for k in remote.get("tombstones", {}) if k.startswith("gstack:")]
+        assert gstack_tombstones == [], (
+            f"Sidecar recovery bypassed the disabled-source filter: "
+            f"spurious tombstone(s) {gstack_tombstones}"
+        )
+
+    def test_mm_gc_does_not_orphan_disabled_source_blobs(self, tmp_path, monkeypatch):
+        """A peer manifest references gstack blobs. Local has gstack disabled.
+        `mm gc` reads RAW peer manifests via _fetch_remote_manifest (no filter
+        applied at fetch boundary), so the gstack blobs remain referenced and
+        are NOT deleted. Without this invariant, gc would orphan and silently
+        delete blobs that peers still reference, breaking sync for peers who
+        still have gstack enabled.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "a" / ".claude"
+        gstack_a = tmp_path / "a" / ".gstack"
+        claude_b = tmp_path / "b" / ".claude"
+        gstack_b = tmp_path / "b" / ".gstack"
+        self._populate_claude(claude_a)
+        self._populate_gstack(gstack_a)
+        claude_b.mkdir(parents=True)
+        gstack_b.mkdir(parents=True)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = self._make_two_source_config(
+            tmp_path, storage_dir, claude_a, gstack_a, "dev-a", "A"
+        )
+        config_b = self._make_two_source_config(
+            tmp_path,
+            storage_dir,
+            claude_b,
+            gstack_b,
+            "dev-b",
+            "B",
+            disabled_sources=["gstack"],
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        self._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        # Locate a gstack blob A pushed.
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        role_sha = remote["sources"]["gstack"]["files"]["projects/myapp/role.md"]["sha256"]
+        blob_path = storage_dir / "data" / "dev-a" / f"{role_sha}.enc"
+        assert blob_path.exists(), "Setup: gstack blob must exist before gc"
+
+        # B (with gstack disabled) runs gc.
+        self._activate(monkeypatch, config_b)
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 0, result.output
+
+        assert blob_path.exists(), (
+            "mm gc deleted a gstack blob that's still referenced by peer A's "
+            "manifest. The disabled-source filter must NOT apply at the fetch "
+            "boundary used by gc — the consumer-boundary contract."
+        )
+
+
 class TestMigrateConfigCommand:
     """Track 5C: mm migrate-config adds missing recommended excludes,
     is idempotent, and preserves user-customized fields."""

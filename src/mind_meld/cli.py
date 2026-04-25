@@ -29,7 +29,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from mind_meld import __version__, fsutil, pullhistory, sidecar, upgrade
+from mind_meld import __version__, fsutil, pullhistory, seen_sources, sidecar, upgrade
 from mind_meld import config as _config_module
 from mind_meld.config import (
     DEFAULT_ARGON2_MEMORY_KB,
@@ -560,6 +560,52 @@ def _filter_excluded_paths(manifest: dict, exclude_map: dict[str, list[str]]) ->
             continue
         new_tombstones[key] = info
     out["tombstones"] = new_tombstones
+
+    return out
+
+
+def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
+    """Return a shallow copy of `manifest` with disabled-source entries stripped.
+
+    Drops `sources.<name>` entries whose source name is in `disabled`.
+    Empty `disabled` returns `manifest` unchanged (load-bearing for hot paths).
+
+    Apply at the CONSUMER boundary (`_pull_core`, `_push_core`), NOT inside
+    `_fetch_remote_manifest`. Same hazard as `_filter_excluded_paths`:
+    `mm gc` reads raw manifests via that path to compute referenced blobs,
+    and a filtered manifest there would mark live peer blobs as orphans.
+    Mirror of the exclude_patterns invariant (CLAUDE.md, 2026-04-24
+    first-pull regression).
+
+    Without this filter at `_push_core`: disabling a source on machine A
+    and pushing would generate a deletion tombstone for every file in that
+    source (because `generate_tombstones` compares prior_manifest with
+    new_manifest, and the new manifest no longer has the disabled source
+    via get_sources's filter). Peers pull tombstones, delete content
+    fleet-wide. P0 footgun.
+
+    **Asymmetric filter — sources stripped, tombstones preserved.** Codex
+    adversarial review 2026-04-25 caught this: if A deletes `gstack:x`,
+    pushes a real tombstone, then disables gstack and pushes again, dropping
+    the prior tombstone purges A's legitimate deletion. A long-offline peer
+    that comes back and pulls only A's manifest would lose the deletion and
+    `x` would resurrect. Tombstones encode prior consensus that disabling
+    must not undo. Generate_tombstones still won't ADD spurious tombstones
+    because both prior and new manifest lack the disabled source's `sources`
+    section — empty diff = no new tombstones. Existing
+    `tombstones[<disabled>:*]` keys flow through unchanged.
+    """
+    if not disabled:
+        return manifest
+
+    disabled_set = set(disabled)
+    out = dict(manifest)
+
+    out["sources"] = {
+        name: data for name, data in manifest.get("sources", {}).items() if name not in disabled_set
+    }
+    # Tombstones intentionally preserved across the disable filter — see
+    # the asymmetric-filter rationale in the docstring above.
 
     return out
 
@@ -1449,14 +1495,33 @@ def _init_storage_guard(
     # is ok and nothing else exists.
 
 
+def _prompt_source_toggle(source: dict[str, Any], *, current_state: bool) -> bool:
+    """One Y/n confirm for a single source.
+
+    Single source of truth for the prompt copy + default-Y/N rule. Used
+    by `_prompt_sources` (init flow) and `reconfigure_sources` (eng-review
+    D5). `current_state` is the default answer:
+      - init: whether the path exists on disk (kept-as-is per eng-review D1)
+      - reconfigure: whether the source is currently active in config
+    """
+    name = source["name"]
+    path_str = str(source.get("path", ""))
+    if path_str:
+        detected = "detected" if Path(path_str).expanduser().exists() else "not detected"
+        prompt = f"Sync '{name}' source at {path_str}? ({detected})"
+    else:
+        prompt = f"Sync '{name}' source?"
+    return typer.confirm(prompt, default=current_state)
+
+
 def _prompt_sources() -> list[dict[str, Any]]:
     """Prompt for each known source type; return the enabled entries.
 
-    Each DEFAULT_SOURCES entry becomes a Y/n prompt. Default is Y when
-    the path exists on disk, N otherwise — this nudges users toward
-    only-enabling-what-they-have without making it impossible to enable
-    a source whose directory doesn't exist yet (e.g. new machine, same
-    project about to be cloned).
+    Each DEFAULT_SOURCES entry becomes a Y/n prompt via `_prompt_source_toggle`.
+    Default is Y when the path exists on disk, N otherwise — nudges users
+    toward only-enabling-what-they-have without making it impossible to
+    enable a source whose directory doesn't exist yet (e.g. new machine,
+    same project about to be cloned).
 
     Source paths stay in tilde-form in the returned dicts so they round-
     trip through TOML readably. `get_sources()` expands at use time.
@@ -1465,9 +1530,7 @@ def _prompt_sources() -> list[dict[str, Any]]:
     for default in DEFAULT_SOURCES:
         path_str = str(default["path"])
         exists = Path(path_str).expanduser().exists()
-        detected = "detected" if exists else "not detected"
-        prompt = f"Sync '{default['name']}' source at {path_str}? ({detected})"
-        if typer.confirm(prompt, default=exists):
+        if _prompt_source_toggle(default, current_state=exists):
             src = get_default_source(default["name"])
             if src is not None:
                 enabled.append(src)
@@ -1959,15 +2022,28 @@ def _push_core(
         fetch, backend, device_id, passphrase, memory_kb, quiet=quiet
     )
 
-    # Consumer-boundary exclude_patterns filter. Strips paths the local
-    # config now excludes from BOTH the ok-fetch path and the recovery
-    # branches (sidecar prior state, peer-tombstone aggregation). Without
-    # this, generate_tombstones would emit a deletion tombstone for every
-    # newly-excluded path on the first post-migration push (the
-    # 2026-04-24 first-pull regression), and the sidecar/peer-fallback branches
-    # would seed pre-exclude paths back into the next manifest.
+    # Consumer-boundary filters. Strip from prior_manifest BOTH (1) paths
+    # the local config now excludes via per-source `exclude_patterns` and
+    # (2) entire sources the user has marked in [sync].disabled_sources.
+    # Both filters apply to the ok-fetch path AND the recovery branches
+    # (sidecar prior state, peer-tombstone aggregation).
+    #
+    # Without (1): generate_tombstones emits a deletion tombstone for
+    # every newly-excluded path on first post-migration push (the
+    # 2026-04-24 first-pull regression).
+    #
+    # Without (2): generate_tombstones emits a deletion tombstone for
+    # every file in a newly-disabled source on first post-disable push,
+    # propagating fleet-wide data loss. v0.10.0 source-toggle invariant;
+    # mirror of (1)'s pattern. See docs/designs/source-toggle.md.
+    #
+    # Order matters: disable first, then exclude. Disabling drops the
+    # whole source; excluding-then-filtering would walk a soon-to-be-
+    # dropped source's exclude_patterns for nothing.
     exclude_map = _build_exclude_map(config)
+    disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
     if remote_manifest is not None:
+        remote_manifest = _filter_disabled_sources(remote_manifest, disabled_sources)
         remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map)
 
     # Generate tombstones for files that disappeared since last push
@@ -2884,7 +2960,17 @@ def _pull_core(
     # `_fetch_remote_manifest` — `mm gc` reads raw manifests via that path
     # to compute referenced blobs, and a filtered manifest there would
     # mark live peer blobs as orphans (codex-2 #1).
+    # Same disable-then-exclude order as _push_core. The disabled-sources
+    # filter strips entire `sources.<name>` entries so the per-peer
+    # download loop never tries to land a disabled source's files locally.
+    # P0 invariant — see _filter_disabled_sources docstring.
     exclude_map = _build_exclude_map(config)
+    disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
+    if disabled_sources:
+        manifest_cache = {
+            did: (None if m is None else _filter_disabled_sources(m, disabled_sources))
+            for did, m in manifest_cache.items()
+        }
     if exclude_map:
         filtered_cache: dict[str, dict | None] = {}
         for did, m in manifest_cache.items():
@@ -3197,6 +3283,39 @@ def status(
             f"  [yellow]Upgrade available:[/yellow] "
             f"{upgrade_result.local} → {upgrade_result.latest} "
             f"(run [bold]{upgrade_result.install_cmd}[/bold])"
+        )
+
+    # Per-machine source-toggle visibility (v0.10.0). Two breadcrumbs:
+    #   1. Disabled list: surfaces intentional state so future-you doesn't
+    #      forget gstack is off and re-debug "why isn't this syncing".
+    #   2. New-source hint: when DEFAULT_SOURCES grows (codex et al.) the
+    #      user sees a one-shot suggestion to opt in. seen_sources tracks
+    #      acknowledgments via enable/disable/reconfigure; the lazy-init
+    #      invariant in seen_sources.read() ensures upgraders don't see
+    #      spurious hints for already-shipped claude/gstack.
+    disabled_list = list(config.get("sync", {}).get("disabled_sources", []) or [])
+    if disabled_list:
+        console.print(
+            f"  [yellow]Disabled sources (this device):[/yellow] "
+            f"{', '.join(sorted(disabled_list))} — "
+            "run [bold]mm enable-source <name>[/bold] to re-enable."
+        )
+
+    explicit_names = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
+    currently_resolved = [s["name"] for s in sources_configs]
+    seen = seen_sources.read(initial=currently_resolved)
+    default_names = [s["name"] for s in DEFAULT_SOURCES]
+    new_sources = seen_sources.compute_new_sources(
+        seen=seen,
+        default_names=default_names,
+        disabled=disabled_list,
+        explicit_names=explicit_names,
+    )
+    for name in new_sources:
+        console.print(
+            f"  [cyan]New source available:[/cyan] {name} — "
+            f"run [bold]mm enable-source {name}[/bold] to sync, "
+            f"or [bold]mm disable-source {name}[/bold] to dismiss."
         )
 
     # Per-source breakdown
@@ -3793,28 +3912,44 @@ def _do_gc(
 # ── sources ───────────────────────────────────────────────────────────
 
 
+def _resolve_all_configured_sources(config: dict) -> list[dict[str, Any]]:
+    """Return the resolution-time view of configured sources, BYPASSING the
+    [sync].disabled_sources filter (path-existence filter still applies).
+
+    Used by `mm sources` so the table can show disabled rows alongside
+    active ones with an Enabled column. Mutating-via-copy preserves
+    `get_sources()` as the only authoritative resolver.
+    """
+    sync = dict(config.get("sync", {}) or {})
+    sync["disabled_sources"] = []
+    config_no_disable = {**config, "sync": sync}
+    return get_sources(config_no_disable)
+
+
 @app.command()
 def sources() -> None:
     """List configured sync sources.
 
-    The "Excluded" column reports how many files the source's
-    `exclude_patterns` actually matched on this scan. Diagnostic only —
-    use it to sanity-check an over-broad glob (e.g. `**/*.json` skipping
-    everything) BEFORE pulling on every machine. Not a safety net; the
-    walker silently drops excluded paths regardless.
+    Shows ALL configured sources (active + disabled). The "Enabled" column
+    reflects [sync].disabled_sources — disable a source on this device with
+    `mm disable-source <name>`. The "Excluded" column reports how many files
+    the source's `exclude_patterns` actually matched on this scan; diagnostic
+    only, used to sanity-check an over-broad glob.
     """
     config = _get_config()
 
     from mind_meld.manifest import _is_excluded as _manifest_is_excluded
     from mind_meld.manifest import walk_source
 
-    src_list = get_sources(config)
+    src_list = _resolve_all_configured_sources(config)
+    disabled_set = set(config.get("sync", {}).get("disabled_sources", []) or [])
     max_file_size = config["sync"]["max_file_size"]
 
     table = Table(title="Configured Sources")
     table.add_column("Name")
     table.add_column("Path")
     table.add_column("Type")
+    table.add_column("Enabled")
     table.add_column("Files")
     table.add_column("Excluded")
 
@@ -3836,15 +3971,266 @@ def sources() -> None:
         else:
             kept = len(all_files)
             excluded_display = "—"
+        is_disabled = src["name"] in disabled_set
+        enabled_display = "[red]N[/red]" if is_disabled else "[green]Y[/green]"
+        # Dim the row's data columns when disabled to make the state
+        # obvious at a glance.
+        wrap = (lambda s: f"[dim]{s}[/dim]") if is_disabled else (lambda s: s)
         table.add_row(
-            src["name"],
-            src["path"],
-            src["type"],
-            str(kept),
-            excluded_display,
+            wrap(src["name"]),
+            wrap(src["path"]),
+            wrap(src["type"]),
+            enabled_display,
+            wrap(str(kept)),
+            wrap(excluded_display),
         )
 
     console.print(table)
+
+
+# ── enable-source / disable-source / reconfigure-sources ──────────────
+
+
+def _known_source_names(config: dict) -> list[str]:
+    """Sorted union of explicit-config names and DEFAULT_SOURCES names.
+
+    The validation surface for `mm enable-source` / `mm disable-source`.
+    A name is "known" if either the user has it in [[sync.sources]] or
+    mm ships a default for it. Strict by default; --force accepts unknown.
+    """
+    explicit = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
+    defaults = [s["name"] for s in DEFAULT_SOURCES]
+    return sorted(set(explicit) | set(defaults))
+
+
+def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
+    """Raise ConfigError on unknown name unless --force.
+
+    Closest-match hint via difflib so a typo like `gstck` suggests `gstack`.
+    --force surfaces a stderr breadcrumb but accepts (forward-compat:
+    pre-disabling a not-yet-shipped source like codex).
+    """
+    valid = _known_source_names(config)
+    if name in valid:
+        return
+    if force:
+        print(
+            f"mm: warning: '{name}' is not a known source "
+            f"(valid: {', '.join(valid)}); accepting via --force.",
+            file=sys.stderr,
+        )
+        return
+    import difflib
+
+    matches = difflib.get_close_matches(name, valid, n=1, cutoff=0.6)
+    suggestion = f" Did you mean '{matches[0]}'?" if matches else ""
+    raise ConfigError(
+        f"unknown source '{name}' — valid: {', '.join(valid)}.{suggestion} "
+        "Use --force to accept a name not yet known to mm "
+        "(forward-compat for not-yet-shipped sources)."
+    )
+
+
+def _record_seen(names: list[str]) -> None:
+    """Mark `names` as acknowledged in the seen_sources tracker.
+
+    Atomic under flock via `seen_sources.acknowledge` (codex 2026-04-25:
+    the previous read+update+write split lost concurrent acknowledgments).
+    Best-effort: a write failure surfaces a stderr breadcrumb but does not
+    crash the calling command. The seen tracker drives the `mm status`
+    new-source hint; losing it just means a hint repeats.
+    """
+    config = _get_config()
+    currently_resolved = [s["name"] for s in get_sources(config)]
+    seen_sources.acknowledge(names, initial=currently_resolved)
+
+
+@app.command(name="disable-source")
+def disable_source(
+    name: str = typer.Argument(..., help="Source name to disable on this device"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Accept a source name not yet known to mm (forward-compat).",
+    ),
+) -> None:
+    """Disable a sync source on THIS DEVICE only.
+
+    config.toml is per-machine (never synced), so `disabled_sources` is a
+    natural per-device preference. Disabling does NOT delete the source's
+    [[sync.sources]] entry — re-enabling preserves user customizations
+    (include_dirs, exclude_patterns).
+
+    Strict by default: unknown name errors with a closest-match hint.
+    `--force` accepts unknown names so you can pre-disable a source that
+    hasn't shipped yet (e.g. `mm disable-source codex --force`).
+    """
+    config = _get_config()
+    try:
+        _validate_source_name(name, config, force=force)
+    except ConfigError as e:
+        _error(str(e))
+
+    sync = dict(config.get("sync", {}) or {})
+    disabled = list(sync.get("disabled_sources", []) or [])
+    if name in disabled:
+        console.print(f"[dim]Source '{name}' is already disabled.[/dim]")
+        return
+
+    disabled.append(name)
+    patch_config_on_disk({"sync": {"disabled_sources": sorted(disabled)}})
+    _record_seen([name])
+
+    console.print(f"[green]Disabled source '{name}' on this device.[/green]")
+    console.print(f"[dim]Run 'mm enable-source {name}' to re-enable.[/dim]")
+
+
+@app.command(name="enable-source")
+def enable_source(
+    name: str = typer.Argument(..., help="Source name to enable on this device"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Accept a source name not yet known to mm (forward-compat).",
+    ),
+) -> None:
+    """Enable a sync source on this device.
+
+    Removes the name from [sync].disabled_sources. If the name is in
+    DEFAULT_SOURCES but absent from the user's [[sync.sources]] (e.g.
+    a freshly-shipped codex source that didn't auto-enable), append the
+    default config so the source actually starts syncing.
+    """
+    config = _get_config()
+    try:
+        _validate_source_name(name, config, force=force)
+    except ConfigError as e:
+        _error(str(e))
+
+    sync = dict(config.get("sync", {}) or {})
+    disabled = list(sync.get("disabled_sources", []) or [])
+    explicit_sources = list(sync.get("sources", []) or [])
+    explicit_names = [s["name"] for s in explicit_sources]
+    default_names = [s["name"] for s in DEFAULT_SOURCES]
+
+    updates: dict[str, Any] = {}
+
+    if name in disabled:
+        disabled.remove(name)
+        updates["disabled_sources"] = sorted(disabled)
+
+    # If the user has explicit sources and this name isn't among them,
+    # but it IS in DEFAULT_SOURCES, append the default so enable actually
+    # has effect (auto-detect doesn't fire when explicit sources are set).
+    needs_explicit_append = (
+        explicit_sources and name not in explicit_names and name in default_names
+    )
+    if needs_explicit_append:
+        default = get_default_source(name)
+        if default is not None:
+            explicit_sources.append(default)
+            updates["sources"] = explicit_sources
+
+    if not updates:
+        # Already enabled and configured — no-op message.
+        if name in explicit_names or (not explicit_sources and name in default_names):
+            console.print(f"[dim]Source '{name}' is already enabled.[/dim]")
+            return
+
+    if updates:
+        patch_config_on_disk({"sync": updates})
+
+    _record_seen([name])
+    console.print(f"[green]Enabled source '{name}' on this device.[/green]")
+
+
+@app.command(name="reconfigure-sources")
+def reconfigure_sources() -> None:
+    """Re-run the source picker against the current config + new defaults.
+
+    Use this after `mm` ships a new source (e.g. codex in v0.11+) to walk
+    through enable/disable for every known source. Preserves user
+    customizations on existing [[sync.sources]] entries (include_dirs,
+    exclude_patterns).
+
+    Atomicity: Ctrl-C mid-prompt aborts without writing. The whole
+    reconfigured state is committed in a single patch_config_on_disk call.
+    """
+    config = _get_config()
+    sync = dict(config.get("sync", {}) or {})
+    explicit_sources = list(sync.get("sources", []) or [])
+    explicit_names = [s["name"] for s in explicit_sources]
+    disabled = list(sync.get("disabled_sources", []) or [])
+    default_names = [s["name"] for s in DEFAULT_SOURCES]
+
+    # Unified ordered list: DEFAULT_SOURCES first (canonical surfacing
+    # order), then any user-customized names not in defaults. Prefer the
+    # user's existing entry for each name so customizations show in the
+    # picker context.
+    seen_names: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+    for d in DEFAULT_SOURCES:
+        seen_names.add(d["name"])
+        existing = next((s for s in explicit_sources if s["name"] == d["name"]), None)
+        ordered.append(existing if existing is not None else d)
+    for s in explicit_sources:
+        if s["name"] not in seen_names:
+            seen_names.add(s["name"])
+            ordered.append(s)
+
+    if not ordered:
+        console.print("[dim]No sources configured to reconfigure.[/dim]")
+        return
+
+    console.print("[bold]Reconfigure sources for this device.[/bold]")
+    console.print(
+        "[dim]Disabling marks the source in disabled_sources (per-machine, "
+        "not synced). Disabling does NOT delete the [[sync.sources]] entry — "
+        "re-enabling preserves customizations.[/dim]\n"
+    )
+
+    new_explicit_sources: list[dict[str, Any]] = []
+    new_disabled: list[str] = []
+
+    try:
+        for item in ordered:
+            iname = item["name"]
+            currently_active = (
+                iname in explicit_names or (not explicit_sources and iname in default_names)
+            ) and iname not in disabled
+            answered = _prompt_source_toggle(item, current_state=currently_active)
+            existing = next((s for s in explicit_sources if s["name"] == iname), None)
+            if answered:
+                # Source on: ensure in [[sync.sources]] (use existing for
+                # customizations, else default).
+                if existing is not None:
+                    new_explicit_sources.append(existing)
+                else:
+                    default = get_default_source(iname)
+                    if default is not None:
+                        new_explicit_sources.append(default)
+            else:
+                # Source off: keep [[sync.sources]] entry intact for re-enable
+                # to preserve customizations, plus mark disabled.
+                if existing is not None:
+                    new_explicit_sources.append(existing)
+                new_disabled.append(iname)
+    except (KeyboardInterrupt, typer.Abort):
+        console.print("\n[yellow]Reconfigure aborted; no changes written.[/yellow]")
+        raise typer.Exit(1) from None
+
+    updates: dict[str, Any] = {"disabled_sources": sorted(new_disabled)}
+    if new_explicit_sources:
+        updates["sources"] = new_explicit_sources
+
+    patch_config_on_disk({"sync": updates})
+
+    # Mark every name as seen — reconfigure is the explicit acknowledgment
+    # surface, so even sources the user re-confirmed should not surface as
+    # "new" hints next run.
+    _record_seen([item["name"] for item in ordered])
+
+    console.print("\n[green]Source configuration updated.[/green]")
 
 
 # ── migrate-config ────────────────────────────────────────────────────

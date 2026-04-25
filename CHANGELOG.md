@@ -2,6 +2,101 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.10.0] - 2026-04-25
+
+**Per-machine source toggle.** New `[sync].disabled_sources` field plus
+three CLI commands (`mm enable-source`, `mm disable-source`,
+`mm reconfigure-sources`) for opting individual sync sources in or out on
+a per-device basis. `config.toml` is per-machine (never synced), so the
+toggle naturally lives there. Forward-looking groundwork for codex (and
+future) sources to ship as opt-in additions to `DEFAULT_SOURCES` without
+auto-enrolling existing users.
+
+Purely additive; no breaking changes. Upgraders keep their existing
+behavior — auto-detection of `~/.gstack` still fires, no retroactive
+prompts.
+
+### Added
+
+- **`mm disable-source <name> [--force]`** — adds the name to
+  `[sync].disabled_sources`, removing the source from `get_sources()`'s
+  resolution. Strict by default: unknown names error with a closest-match
+  hint (`gstck` → suggests `gstack`). `--force` accepts unknown names so
+  you can pre-disable a source that hasn't shipped yet (`mm disable-source
+  codex --force`). Per-machine: only this device is affected.
+
+- **`mm enable-source <name> [--force]`** — removes the name from
+  `disabled_sources`. If the name is in `DEFAULT_SOURCES` but absent from
+  the user's `[[sync.sources]]` (e.g. a freshly-shipped codex), appends
+  the default config so the source actually starts syncing.
+
+- **`mm reconfigure-sources`** — re-runs the picker against the current
+  config + new defaults. Use after `mm` ships a new source to walk
+  through enable/disable for every known one. Preserves user
+  customizations on existing `[[sync.sources]]` entries (`include_dirs`,
+  `exclude_patterns`). Atomic: Ctrl-C aborts without writing.
+
+- **`mm sources`** now lists ALL configured sources (not just resolved)
+  with a new `Enabled` column. Disabled rows are dimmed so the toggle
+  state is obvious at a glance.
+
+- **`mm status`** surfaces two new breadcrumbs:
+  - `Disabled sources (this device): X, Y` when the list is non-empty,
+    so future-you doesn't forget gstack is off and re-debug "why isn't
+    this syncing".
+  - `New source available: X. Run mm enable-source X to sync.` when
+    `DEFAULT_SOURCES` grows post-upgrade. One-shot via `seen-sources.json`
+    — once the user enables / disables / reconfigures, the hint stops.
+
+- **`src/mind_meld/seen_sources.py`** — new module tracking per-machine
+  acknowledgment of source names. `read(initial)` lazy-initializes under
+  `fcntl.flock` on first call, seeded with the names of currently-resolved
+  sources. Without this seed, every upgrader would see spurious "New
+  source: claude!" / "New source: gstack!" hints for sources they're
+  already syncing — the migration invariant pinned by
+  `test_seen_sources_initialized_to_existing_on_upgrade`.
+
+### Load-bearing — consumer-boundary tombstone-suppression invariant
+
+Disabling a source MUST NOT generate deletion tombstones for that source's
+files on the next push, or the disable-on-one-machine action propagates
+fleet-wide deletion. Same shape as the kb-mbp 2026-04-24
+`exclude_patterns` regression fix; same fix pattern.
+
+`disabled_sources` applies at TWO consumer boundaries (`_push_core`
+before `generate_tombstones`; `_pull_core` before `collect_tombstones`)
+and MUST NOT apply at `_fetch_remote_manifest` — `mm gc` reads raw peer
+manifests via that path to compute referenced blobs, and a filtered
+manifest there would orphan live peer blobs. Pinned by 5 tests in
+`tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`:
+
+- `test_disable_source_does_not_generate_tombstones_on_next_push`
+- `test_enable_previously_disabled_source_brings_files_back_as_new`
+- `test_pull_skips_disabled_source_peer_manifest_entries`
+- `test_sidecar_recovery_filters_disabled_sources`
+- `test_mm_gc_does_not_orphan_disabled_source_blobs`
+
+### Changed
+
+- **`_prompt_sources()` extracted `_prompt_source_toggle(source, *,
+  current_state)` helper.** Single source of truth for the per-source
+  Y/N prompt copy + default rule; reused by `_prompt_sources` (init flow)
+  and `reconfigure_sources`. `mm init`'s default-Y-on-path-exists
+  behavior is unchanged.
+
+- **`get_sources()`** now applies the `disabled_sources` filter after
+  resolution and before the path-existence filter.
+
+### Tests
+
+848 pass (789 baseline + 59 new). New test files:
+`tests/test_seen_sources.py` (16 tests) and
+`tests/test_source_toggle.py` (26 tests). Plus 13 new schema /
+get_sources tests in `test_config.py` and 5 P0 integration pins in
+`test_integration.py`.
+
+See `docs/designs/source-toggle.md` for the full design rationale.
+
 ## [0.9.6] - 2026-04-25
 
 Public-readiness scrub before flipping the GitHub repo from private to public.
