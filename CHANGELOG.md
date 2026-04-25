@@ -2,6 +2,89 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.4] - 2026-04-25
+
+**Track 5D — adversarial-review follow-ups for the v0.8.15 Track 5A ship.**
+Two surgical hardening fixes plus a self-heal hook for any user already
+in a half-initialized state from earlier versions.
+
+### Fixed
+
+- **`mm conflicts` no longer double-counts when an `include_files` entry
+  sits inside an `include_dirs` directory.** Surfaced by the v0.8.15
+  `/review` adversarial pass: a user customizing their gstack source
+  with `include_files: ["projects/notes.md"]` AND `include_dirs:
+  ["projects"]` (nested) would see duplicate rows in `mm conflicts`,
+  inflated counts in `mm gc --conflicts`, and `mm resolve` silently
+  no-opping on the second visit. `_find_conflict_files` now dedups via
+  a `seen: set[tuple[str, Path]]` accumulator. Tuple key (not bare
+  `Path`) preserves source attribution when two configured sources
+  legitimately reference overlapping subtrees. Default config doesn't
+  trigger this — all `include_files` entries are bare top-level
+  dotfiles — but the dedup is a footgun-removal for anyone customizing.
+
+- **`mm init` is now crash-safe between `register_device` and
+  `save_config`.** Surfaced by the same v0.8.15 adversarial pass: the
+  Track 5A rollback try/except handled Python exceptions only. A
+  SIGKILL/OOM/power loss in the window between `save_config()` returning
+  and `register_device()` either succeeding or raising left the user
+  with a local config claiming a `device_id` that storage's
+  `devices/<id>.json` didn't contain — peers never discovered the
+  device, and every subsequent push wrote manifests under an ID no
+  one was listening for.
+
+  v0.9.4 swaps the order: `register_device` runs FIRST (storage write),
+  then `save_config` (local pointer). The "remote first, local pointer
+  last" pattern is canonical filesystem/DB transaction discipline. A
+  crash after register but before save now leaves an inert orphan
+  storage entry, recoverable on retry init via `_init_storage_guard`'s
+  orphan-case prompt. The original local-side rollback try/except is
+  removed; a new best-effort `backend.delete(devices/<id>.json)` wraps
+  `save_config` so normal save failures (disk full, permissions) don't
+  trip the orphan-case warning on retry init. The original `save_config`
+  exception always wins — cleanup failures land as a `mm: warning:`
+  stderr breadcrumb without masking the real cause.
+
+  Function renamed `_save_and_register` → `_register_and_save` to
+  match the new ordering. Init's docstring updated.
+
+### Added
+
+- **Push-time self-heal for missing device entries.** New
+  `_ensure_device_registered` hook at `_push_core` entry: if
+  `devices/<my_id>.json` is absent, recreate it via `register_device`
+  before any push work runs. Two scenarios converge here:
+    - Future v0.9.4+ SIGKILL crash mid-init (cosmetic, accepted by the
+      order swap above).
+    - Pre-v0.9.4 victims of the v0.8.15..v0.9.3 inverted half-state
+      (config has `device_id`, storage's `devices/` doesn't). Without
+      this hook those users push manifests under an ID no peer
+      recognizes, silently. The fix is retroactive: first push after
+      upgrade self-heals.
+
+  Gated on `not dry_run` (codex review caught: `mm push --dry-run`
+  must not mutate storage). Register failures land a stderr `mm:
+  warning:` breadcrumb before re-raising — load-bearing for autopush,
+  whose generic `except Exception` would otherwise swallow the failure
+  and silently no-op every push.
+
+### Tests
+
+15 new tests pin the regressions:
+- 5 in `tests/test_conflict_copy.py::TestFindConflictFilesNestedDedup`
+  (overlap dedup, canonical preserved, distinct-not-collapsed, gc E2E,
+  pre-inversion migration path).
+- 7 in `tests/test_track_2a.py::TestRegisterAndSave` (new ordering,
+  no-keyring, register-failure-no-save, save-failure-cleanup,
+  cleanup-failure-doesnt-mask-save-error, dry_run skip, no-committed-messages).
+- 3 in `tests/test_track_2a.py::TestEnsureDeviceRegistered` (self-heal
+  on missing, no-op when present, register-failure stderr+propagate +
+  dry-run skip).
+
+789 tests pass. No fleet-version threshold change —
+`INVERSION_MIN_VERSION` stays at `"0.9.2"`, v0.9.4 is no harder to
+roll out than v0.9.3 was.
+
 ## [0.9.3] - 2026-04-25
 
 Small follow-up patch caught immediately after v0.9.2 ship: add
