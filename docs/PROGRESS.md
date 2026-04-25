@@ -97,20 +97,22 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   Track 4A ✅ v0.8.11 (single macos+py3.13 job: ruff check + format-check
   + pytest + wheel smoke + Keychain-backend load assert; ruff pinned
   0.15.12; 113-violation drift sweep; README badge).
-- **Group 5 (Conflict UX & first-pull polish):** queued — surfaced
-  2026-04-24. 9 tasks across 3 serialized tracks (all touch `cli.py` in
-  different functions; intra-Group `Depends on:` annotations express the
-  ordering, same pattern as prior Tracks 1A/1C and 2A/2B). **Track 5A
-  (Auto-command + scope bugs, ships first):** P0 autopull silent-mode
-  contract regression + `_synced_scan_dirs` missing `include_files`
-  sidecars + `_save_and_register` rollback. **Track 5B (UX surfaces,
-  ships second):** relabel `mm resolve` prompt to user terms + inline
-  conflicted filenames in pull summary + `mm conflicts` table fixes +
-  download progress. **Track 5C (Conflict semantics, ships last):**
-  invert default so local stays canonical and remote routes to
-  `.sync-conflict-*` + real merge backends (`git merge-file` + opt-in
-  Claude API for prose). + 1 pre-flight (gstack `include_files` default
-  add). See ROADMAP.md.
+- **Group 5 (Conflict UX & first-pull polish):** in flight. **Track 5A
+  ✅ shipped v0.8.15** (P0 autopull silent-mode contract regression +
+  `_synced_scan_dirs` missing `include_files` sidecars + `_save_and_register`
+  register-failure rollback) + Group 5 preflight (gstack `include_files`
+  default add). 8 tasks across 3 serialized tracks remain (all touch
+  `cli.py` in different functions; intra-Group `Depends on:` annotations
+  express the ordering, same pattern as prior Tracks 1A/1C and 2A/2B).
+  **Track 5D (5A adversarial-review follow-ups, ships next):**
+  `_find_conflict_files` double-count dedup + `_save_and_register`
+  crash-safety beyond Python exceptions (SIGKILL/OOM/power-loss window).
+  **Track 5B (UX surfaces, ships after 5D):** relabel `mm resolve` prompt
+  to user terms + inline conflicted filenames in pull summary + `mm
+  conflicts` table fixes + download progress. **Track 5C (Conflict
+  semantics, ships last):** invert default so local stays canonical and
+  remote routes to `.sync-conflict-*` + real merge backends (`git
+  merge-file` + opt-in Claude API for prose). See ROADMAP.md.
 
 ### Version source of truth
 
