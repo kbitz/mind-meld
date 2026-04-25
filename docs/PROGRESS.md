@@ -95,21 +95,20 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   Track 4A ✅ v0.8.11 (single macos+py3.13 job: ruff check + format-check
   + pytest + wheel smoke + Keychain-backend load assert; ruff pinned
   0.15.12; 113-violation drift sweep; README badge).
-- **Groups 5/6/7 (Conflict UX from kb-mbp first-pull):** queued — surfaced
-  2026-04-24. Sequenced P0-first because all three touch `cli.py` and
-  cross-Group serialization is cleaner than intra-Group same-file
-  collisions. **Group 5 (Auto-command + scope bugs):** 3 tasks incl. P0
-  autopull silent-mode contract regression, `_synced_scan_dirs` missing
-  `include_files` sidecars, `_save_and_register` rollback gap, + 1
-  pre-flight (gstack `include_files` default add). Ships first.
-  **Group 6 (Pull/resolve/conflicts UX surfaces):** 4 tasks — relabel
-  `mm resolve` prompt to user terms, inline conflicted filenames in
-  pull summary, fix `mm conflicts` table truncation + jargon, add
-  download progress. **Group 7 (Conflict semantics — inversion + real
-  merge):** 2 tasks — invert default so local stays canonical and remote
-  routes to `.sync-conflict-*`; add real merge backends (`git
-  merge-file` + opt-in Claude API for prose) so `mm resolve` produces a
-  unified file. See ROADMAP.md.
+- **Group 5 (Conflict UX & first-pull polish):** queued — surfaced
+  2026-04-24. 9 tasks across 3 serialized tracks (all touch `cli.py` in
+  different functions; intra-Group `Depends on:` annotations express the
+  ordering, same pattern as prior Tracks 1A/1C and 2A/2B). **Track 5A
+  (Auto-command + scope bugs, ships first):** P0 autopull silent-mode
+  contract regression + `_synced_scan_dirs` missing `include_files`
+  sidecars + `_save_and_register` rollback. **Track 5B (UX surfaces,
+  ships second):** relabel `mm resolve` prompt to user terms + inline
+  conflicted filenames in pull summary + `mm conflicts` table fixes +
+  download progress. **Track 5C (Conflict semantics, ships last):**
+  invert default so local stays canonical and remote routes to
+  `.sync-conflict-*` + real merge backends (`git merge-file` + opt-in
+  Claude API for prose). + 1 pre-flight (gstack `include_files` default
+  add). See ROADMAP.md.
 
 ### Version source of truth
 

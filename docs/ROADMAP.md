@@ -14,11 +14,11 @@ Every item targets the v1.0 release.
 1A/1B/1C), init flow + sync_log generalization (Group 2), test hygiene +
 style polish (Group 3), and CI infrastructure (Group 4) all shipped through
 v0.8.11.** See `docs/PROGRESS.md` for the full version history. Group 1
-remains in-flight on its preflight `constants.py` extraction. Groups 5, 6,
-and 7 pick up the conflict-UX backlog from kb-mbp's first-pull, sequenced
-P0-first: Group 5 ships the autopull silent-mode regression + scope bugs,
-Group 6 relabels the resolve/conflicts UX, Group 7 inverts the conflict
-default and adds real merge.
+remains in-flight on its preflight `constants.py` extraction. Group 5
+picks up the conflict-UX backlog from kb-mbp's first-pull, sequenced
+P0-first within the Group: Track 5A ships the autopull silent-mode
+regression + scope bugs, Track 5B relabels the resolve/conflicts UX, Track
+5C inverts the conflict default and adds real merge.
 
 ---
 
@@ -74,71 +74,51 @@ _Track 4A (GitHub Actions CI workflow + ruff pin + README badge + 113-violation 
 
 ---
 
-## Group 5: Auto-command + scope bugs (incl. P0)
+## Group 5: Conflict UX & first-pull polish
 _Depends on: none_
 
 Surfaced 2026-04-24 from kb-mbp's first-pull session: 286-file pull on a
-fresh Mac landed 6 conflict copies plus a P0 contract regression. Smallest
-batch, highest urgency — ships first so the autopull silent-mode contract
-stops emitting stderr noise on every fresh Mac running the Claude Code
-integration. Three discrete cli.py bugs that don't touch each other's call
-sites; bundled because they're all small and ride the same release window.
-Parallel-safe with Group 1's preflight (Group 1 touches new
-`constants.py`, this Group touches existing cli.py functions).
+fresh Mac landed 6 conflict copies with confusing labels, no inline
+filenames, an over-truncated `mm conflicts` table, silence during the
+~4-minute download, and a P0 contract regression on `mm autopull` /
+`autopush`. All ten tasks (+ pre-flight) share the same theme and
+ride the same release window. Tracks 5A/5B/5C are sequenced serially
+because they all touch `cli.py`, but in different functions — same
+intra-Group serial pattern that Tracks 1A/1C and 2A/2B used in this
+project. Audit's `COLLISIONS` finding on `cli.py` overlap is acknowledged
+and tolerated (file-level granularity is too coarse for monolithic
+`cli.py`; functions are disjoint in practice).
 
 **Pre-flight** (shared-infra; serial, one-at-a-time):
 - Add `retro-context.md` + `greptile-history.md` to gstack default `include_files` — `src/mind_meld/config.py:DEFAULT_SOURCES` gstack entry. Low-risk additive. Existing configs with explicit `sync.sources` need to add manually; one-line CHANGELOG note. _src/mind_meld/config.py, ~4 lines._ (XS) [manual]
 
-### Track 5A: Auto-command silent-mode + scope bugs
+### Track 5A: Auto-command silent-mode + scope bugs (P0 first)
 _3 tasks · ~0.5 day (human) / ~25 min (CC) · low-medium risk · [cli.py auto + scope]_
 _touches: src/mind_meld/cli.py, src/mind_meld/devices.py, src/mind_meld/manifest.py, SPEC.md, tests/_
+
+Smallest batch, highest urgency — ships first so the autopull silent-mode
+contract stops emitting stderr noise on every fresh Mac running the Claude
+Code integration. Three discrete cli.py bugs that don't touch each other's
+call sites.
 
 - **P0 — `mm autopull` / `mm autopush` no longer exit silently on a fresh (un-initialized) machine** — `tests/test_integration.py::TestAutoCommands::test_autopull_no_config_exits_silently` and the autopush twin both fail. Tests assert `result.output == ""` when `CONFIG_PATH` points at non-existent file; observed `mm: push failed - init: config not found at <path> — run 'mm init' first.\n` on stderr. Pre-existing — not introduced by current branch. Likely cause: v0.8.1 visible-failure contract widening — `ConfigError` is now uniformly loud-on-stderr, but the "not initialized at all" case (literal `init: config not found` in `config.py:71`) is supposed to remain silent per CLAUDE.md's auto-command contract. Real-world impact: fresh Mac (or pre-`mm init`) sees stderr noise on every Claude Code session start if `mm autopull`/`autopush` is wired into hooks — exactly the kb-mbp first-pull scenario. Fix: (a) preflight `CONFIG_PATH.exists()` in autopull/autopush BEFORE `load_config` and short-circuit silently — keeps `ConfigError` loud for malformed-config. Add regression test exercising both quiet-on-no-config AND loud-on-malformed-config (existing test only covers no-config). _src/mind_meld/cli.py auto-command entrypoints + tests/test_integration.py::TestAutoCommands. ~15-30 lines._ (S) [BUG] **Priority: P0 — silent-mode contract regression, surfaces on every fresh Mac with the Claude Code integration.**
 - **`_synced_scan_dirs` misses `include_files` sidecars on generic sources** — `cli.py:3231-3237` generic branch returns only resolved `include_dirs`. Trailing comment promises `+ base for single-file includes` but it's never implemented. Result: any conflict file produced for a top-level `include_files` entry (gstack default = `config.yaml`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`, all under `~/.gstack`) is invisible to `mm conflicts` / `mm resolve` / `mm gc --conflicts`. Reproduced 2026-04-24: kb-mbp first pull reported 6 conflicts; `mm conflicts` listed 5; missing was `~/.gstack/config.sync-conflict-20260424-233316-889e42c0.yaml`. Fix: in `_synced_scan_dirs`, after `include_dirs` loop, walk unique parents of `include_files` entries at **depth 0 only** (recursing would scan unsynced subtrees). Two viable shapes: (a) return `list[tuple[Path, bool]]` with recursive flag; (b) separate `_include_files_conflict_paths` helper computing per-entry candidate glob — more surgical. Test coverage: generic source with both include_dirs and include_files, conflicts in each, all three commands seeing the right count. Adjacent: verify `mm push` doesn't have parallel scope mismatch. _src/mind_meld/cli.py `_synced_scan_dirs` + `_find_conflict_files` + tests. ~30-50 lines._ (S) [BUG]
 - **`_save_and_register` needs register-failure rollback** — `cli.py:_save_and_register` persists config → registers device → stores passphrase. If `register_device` raises (iCloud hiccup, transient `StorageError`) after `save_config` succeeded, local config now claims a `device_id` that `devices/` on storage doesn't contain. Peers scanning `devices/` via `_select_devices` never discover this device — push writes manifests under an ID no one is listening for. Pre-existing (Track 2A; codex adversarial during /review). Fix options: (a) swap order to register BEFORE save_config — config-without-device is its own ugly state; (b) on register failure, delete the saved config; (c) lazy self-repair in push that calls `register_device` if the device file is missing. Option (c) most robust. _src/mind_meld/cli.py, src/mind_meld/devices.py, ~40 lines._ (S) [review]
 
----
-
-## Group 6: Pull / resolve / conflicts UX surfaces
-
-Depends on Group 5 landing first to clear the cli.py merge surface — Group
-6 touches the same file in different functions but coordination cost is
-real.
-
-Four UX polish surfaces in `cli.py`: relabel the `mm resolve` interactive
-prompt to user-facing terms (drop "canonical/conflict" jargon), inline the
-conflicted filenames in the pull summary, fix the truncated `mm conflicts`
-table, and add download progress so `mm pull` stops looking hung during
-iCloud-placeholder materialization. All four are independent edits to
-distinct cli.py functions and ride the same release window.
-
-### Track 6A: Resolve / conflicts / pull UX surfaces
+### Track 5B: Pull / resolve / conflicts UX surfaces
 _4 tasks · ~0.5 day (human) / ~25 min (CC) · low risk · [cli.py UX]_
 _touches: src/mind_meld/cli.py_
+_Depends on: Track 5A landing first to clear the cli.py merge surface — disjoint functions but git-coordination cost is real._
 
-- **Relabel `mm resolve` interactive prompt to user terms** — `cli.py:3629-3633`: today's `(c)anonical / (f)orce conflict → canonical / (b)oth / (a)bort` reads as internal jargon. User can't tell that "canonical" holds *remote* bytes and "conflict" holds *local* bytes, so picking (c) silently throws away local edits. Relabel to `(l)ocal / (r)emote / (b)oth [default] / (a)bort` with a one-line preface naming which side is which. Also fix the parallel `(p)romote / (d)elete / (s)kip` jargon at `cli.py:3568-3576`. Pair with the inversion task (Group 7) so labels match file-on-disk reality post-flip. Lower-risk to ship independently first. _src/mind_meld/cli.py `_resolve_interactive_loop`, ~20 lines._ (XS) [manual]
+- **Relabel `mm resolve` interactive prompt to user terms** — `cli.py:3629-3633`: today's `(c)anonical / (f)orce conflict → canonical / (b)oth / (a)bort` reads as internal jargon. User can't tell that "canonical" holds *remote* bytes and "conflict" holds *local* bytes, so picking (c) silently throws away local edits. Relabel to `(l)ocal / (r)emote / (b)oth [default] / (a)bort` with a one-line preface naming which side is which. Also fix the parallel `(p)romote / (d)elete / (s)kip` jargon at `cli.py:3568-3576`. Pair with the inversion task (Track 5C) so labels match file-on-disk reality post-flip. Lower-risk to ship independently first. _src/mind_meld/cli.py `_resolve_interactive_loop`, ~20 lines._ (XS) [manual]
 - **Pull summary lists conflicted (and failed) files inline** — `_print_pull_summary` cli.py:2197-2250: per-source counts already accumulate paths in `r.outcomes["conflicted"]` / `["failed"]` but never display them. User has to run `mm conflicts` just to learn *which* 6 files conflicted. Fix: when `src_conflicted > 0` (and not quiet), list each path under the per-source line; same for failed. Cap at 20 with `... and N more` overflow. Print path relative to source's base — source name in header already disambiguates. _src/mind_meld/cli.py `_print_pull_summary`, ~10-15 lines._ (XS) [manual]
 - **`mm conflicts` table: stop truncating + drop jargon labels** — Screenshot 2026-04-24 shows `kbitz-cl…` / `kbitz-fi…` at typical terminal width; both columns repeat the same `~/.gstack/projects/...` parent. Fix surface (cli.py:3289-3317): (c) rename "Conflict"/"Canonical" labels to "local"/"remote" (matches user's mental model + pairs with inversion); (d) Rich `Table(no_wrap=False, overflow="fold")` so paths wrap rather than truncate. Lowest-risk standalone change is just (c)+(d). Layout rework — collapse `~`, drop one column with separate suffix column — can follow when convenient. _src/mind_meld/cli.py `conflicts()`, ~20-40 lines._ (S) [manual]
 - **`mm pull` progress output during download loop** — `cli.py:1074-1112`'s `_download_and_apply` runs silently between the per-device header (cli.py:2390) and the final summary. On first-pull-on-a-new-Mac, `backend.get(bkey)` blocks on iCloud placeholder materialization; kb-mbp 2026-04-24 saw 286 files / 263s wall, no output, visually identical to a hung process. `--verbose` doesn't help — verbose paths fire AFTER each file's blocking read. Fix: Rich `Progress` for TTY (`from rich.progress import Progress`), plain "downloading N/total" counter every K files for non-TTY, no output for `quiet=True` (autopull). Display bytes-transferred — already tracked. _src/mind_meld/cli.py `_download_and_apply` and `_pull_one_source`, ~30 lines._ (S) [manual]
 
----
-
-## Group 7: Conflict semantics — inversion + real merge
-
-Depends on Group 6 landing first so the inversion can ride the relabeled
-prompt copy without a label-mismatch interim state.
-
-Load-bearing semantic change to conflict resolution: invert the default so
-the user's local file stays at the canonical path and the remote bytes get
-routed to `.sync-conflict-*`, then add real merge backends (`git
-merge-file` for code/JSON/text, opt-in Claude API for prose) so `mm
-resolve` can produce a unified file rather than just picking a winner.
-Highest-risk batch (touches conflict semantics + adds new dependencies);
-ships last because the prerequisite UX work needs to be in place first.
-
-### Track 7A: Conflict default inversion + real-merge backends
+### Track 5C: Conflict default inversion + real-merge backends
 _2 tasks · ~3-5 days (human) / ~1.5 hr (CC) · medium-high risk · [merge.py + conflict semantics]_
 _touches: src/mind_meld/merge.py, src/mind_meld/cli.py, SPEC.md, CHANGELOG.md, tests/_
+_Depends on: Track 5B landing first so the inversion can ride the relabeled prompt copy without a label-mismatch interim state. Highest-risk task in the Group; ships last._
 
 - **Invert conflict-resolution default: keep local at canonical, route remote to `.sync-conflict-*`** — `_apply_conflict` (cli.py:921-964) on `--conflict-mode keep-both` (default) currently renames local → sidecar and writes remote bytes to canonical. Wrong default for two reasons: (1) asymmetric blast radius — local is known-working on this machine, remote is unknown-from-elsewhere; (2) the visible `.sync-conflict-*` file should hold the *surprising* version, not the working one. mtime-skip already handles "local newer," so conflict path only fires when remote is newer or mtimes equal — but "remote newer" ≠ "remote correct for this machine." Surface area: `_apply_conflict` body cli.py:932-963; preflight message cli.py:736; `--conflict-mode keep-both` docstring cli.py:1777; `_prompt_conflict_choice` labels cli.py:1024-1042; tests; SPEC.md if it documents direction; CLAUDE.md "Syncthing convention" mention (the change moves *toward* Syncthing's actual convention). Open question: hard flip (BREAKING) or `--conflict-prefer {local,remote}` flag with default `local`? Strong opinion the flip is correct; weaker on exposing the knob. _src/mind_meld/cli.py + tests + SPEC.md + CHANGELOG; ~80-150 lines including tests._ (M) [manual]
 - **`mm resolve`: add real merge so output looks like one machine did all the work** — Today only picks a winner. Auto-merge at pull time (`should_merge`, merge.py:41-44) covers only `.jsonl` (set-union by `ts`) and `MEMORY.md` (line-union); every other text file becomes a sidecar with no merge path. Pragmatic hybrid: per-filetype dispatch in `merge.py` extending `should_merge` — code/JSON/text via `git merge-file` (universally available on macOS, two-way using one side as base since mm doesn't currently store ancestor); prose (`.md` non-MEMORY, `.txt`) via Claude API merge behind explicit `--ai-merge` opt-in flag (project context: this *is* mind-meld syncing memory + notes, prose-heavy); binaries fall back to pick-a-winner. `mm resolve` gains (m)erge option. Surface: merge.py dispatch + git-merge-file wrapper + optional Anthropic backend; `_apply_conflict` tries merge before conflict-rename; `_resolve_interactive_loop` (m) action; config + opt-in; tests per backend; SPEC.md + CHANGELOG. Open: track ancestor (3-way) or stay 2-way? Integrate AI merge or separate `mm merge --ai`? Hard prereq: inversion lands first so "local side" semantics are clear. _src/mind_meld/merge.py + cli.py + optional new module + config + tests + SPEC.md. ~300-500 lines depending on whether AI merge ships v1._ (L) [manual]
@@ -154,9 +134,7 @@ Adjacency list (who depends on whom):
 - Group 2 ← {1}    ✓ Complete (v0.8.7 + v0.8.8)
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
-- Group 5 ← {}     (in-flight — auto-cmd + scope bugs incl. P0; ships first)
-- Group 6 ← {5}    (UX surfaces; needs Group 5's cli.py landing first)
-- Group 7 ← {6}    (conflict semantics; needs Group 6's relabel before flip)
+- Group 5 ← {}     (in-flight — Tracks 5A → 5B → 5C, serialized in cli.py)
 ```
 
 In-flight detail:
@@ -166,18 +144,14 @@ Group 1: Decomposition + DRY
   Pre-flight .............. ~30 min .. constants.py extraction
   └── (Tracks 1A/1B/1C all ✓ Complete)
 
-Group 5: Auto-command + scope bugs (incl. P0)  [ships first]
+Group 5: Conflict UX & first-pull polish
   Pre-flight .............. ~5 min ... gstack include_files default add
-  └── Track 5A ........... ~0.5d ..... 3 tasks .. autopull silent-mode (P0) + scope + register-rollback
-
-Group 6: Pull / resolve / conflicts UX surfaces  [ships second]
-  └── Track 6A ........... ~0.5d ..... 4 tasks .. relabel + summary + table + progress
-
-Group 7: Conflict semantics — inversion + real merge  [ships last]
-  └── Track 7A ........... ~3-5d ..... 2 tasks .. invert default + real-merge backends
+  ├── Track 5A ........... ~0.5d ..... 3 tasks .. autopull silent-mode (P0) + scope + register-rollback   [ships first]
+  ├── Track 5B ........... ~0.5d ..... 4 tasks .. relabel + summary + table + progress                    [ships second]
+  └── Track 5C ........... ~3-5d ..... 2 tasks .. invert default + real-merge backends                    [ships last]
 ```
 
-**Active total: 4 in-flight Groups . 4 tracks . 10 tasks (+ 2 pre-flight items)**
+**Active total: 2 in-flight Groups . 3 tracks . 9 tasks (+ 2 pre-flight items)**
 **Shipped: Groups 1 (Tracks A/B/C), 2, 3, 4 — see PROGRESS.md.**
 
 ---
