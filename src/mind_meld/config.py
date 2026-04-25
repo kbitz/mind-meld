@@ -33,8 +33,16 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "path": "~/.gstack",
         "type": "generic",
         "include_dirs": ["projects", "analytics", "retros"],
+        # Curated to three categories: gstack config (config.yaml), cross-machine
+        # memory content (retro-context.md, greptile-history.md), and onboarding
+        # markers (the dotfiles). Bare top-level files only — directories go in
+        # include_dirs above. Adding here widens the default sync surface for
+        # all new mm installs; existing configs with explicit [[sync.sources]]
+        # need to opt in manually.
         "include_files": [
             "config.yaml",
+            "retro-context.md",
+            "greptile-history.md",
             ".completeness-intro-seen",
             ".telemetry-prompted",
             ".proactive-prompted",

@@ -188,14 +188,12 @@ class TestAutopullDegradedBreadcrumb:
         register_device(backend, "dev-b", "Mac B")
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_a)
         _redirect_lock(monkeypatch, tmp_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         assert runner.invoke(app, ["push"]).exit_code == 0
 
         # Switch to B for the upcoming autopull.
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", config_b)
         return backend, claude_a, claude_b
 
     def test_degraded_on_fsync_failure(self, tmp_path, monkeypatch):

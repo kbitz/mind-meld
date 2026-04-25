@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from mind_meld.config import (
+    DEFAULT_SOURCES,
     _apply_defaults,
     _validate,
     _validate_sources,
@@ -116,6 +117,50 @@ class TestSaveLoad:
         save_config(config, config_path)
         assert len(calls) == 1
         assert calls[0]["fsync"] is True
+
+
+class TestDefaultSources:
+    """Pin DEFAULT_SOURCES contents so accidental list trims become test failures.
+
+    Specifically guards the gstack source's include_files curation (gstack
+    config + cross-machine memory + onboarding markers). Adding here widens
+    the default sync surface for all new mm installs, so the contents are
+    deliberately enumerated.
+    """
+
+    def test_claude_source_present(self):
+        assert any(s["name"] == "claude" and s["type"] == "claude" for s in DEFAULT_SOURCES)
+
+    def test_gstack_source_present(self):
+        assert any(s["name"] == "gstack" and s["type"] == "generic" for s in DEFAULT_SOURCES)
+
+    def test_gstack_include_dirs_unchanged(self):
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        assert gstack["include_dirs"] == ["projects", "analytics", "retros"]
+
+    def test_gstack_include_files_contains_memory_content(self):
+        """Memory content (retro-context.md, greptile-history.md) must be in the
+        default include_files. Added 2026-04-24 for cross-machine memory continuity."""
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        assert "retro-context.md" in gstack["include_files"]
+        assert "greptile-history.md" in gstack["include_files"]
+
+    def test_gstack_include_files_contains_onboarding_markers(self):
+        """Onboarding markers determine which gstack first-run prompts have already
+        been seen. Losing them silently re-prompts users on every machine."""
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        for marker in (
+            ".completeness-intro-seen",
+            ".telemetry-prompted",
+            ".proactive-prompted",
+            ".welcome-seen",
+            ".codex-desc-healed",
+        ):
+            assert marker in gstack["include_files"], f"missing onboarding marker {marker}"
+
+    def test_gstack_include_files_contains_config(self):
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        assert "config.yaml" in gstack["include_files"]
 
 
 class TestGetSources:

@@ -58,7 +58,6 @@ def _mk(tmp_path, monkeypatch):
         cfg_path,
     )
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
     # Isolate sidecar.

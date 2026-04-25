@@ -1068,14 +1068,12 @@ class TestLoadPriorDeviceMetadata:
     def test_no_config_returns_none_tuple(self, tmp_path: Path, monkeypatch) -> None:
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         assert _load_prior_device_metadata() == (None, None)
 
     def test_readable_config_returns_id_and_name(self, tmp_path: Path, monkeypatch) -> None:
         cfg = tmp_path / "config.toml"
         cfg.write_text('[device]\nid = "abc123"\nname = "OldMac"\n[storage]\npath = "/tmp/x"\n')
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         assert _load_prior_device_metadata() == ("abc123", "OldMac")
 
     def test_malformed_config_returns_none_tuple(self, tmp_path: Path, monkeypatch) -> None:
@@ -1084,7 +1082,6 @@ class TestLoadPriorDeviceMetadata:
         cfg = tmp_path / "config.toml"
         cfg.write_text("this is not: valid [toml at all\n")
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
         assert _load_prior_device_metadata() == (None, None)
 
 
@@ -1201,7 +1198,6 @@ class TestSaveAndRegister:
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
 
         call_order: list[str] = []
 
@@ -1236,7 +1232,6 @@ class TestSaveAndRegister:
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg)
 
         monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
         monkeypatch.setattr(cli_module, "store_passphrase_in_keyring", lambda _pw: False)
@@ -1247,6 +1242,101 @@ class TestSaveAndRegister:
         }
         # Must not raise.
         _save_and_register(config, backend=None, device_id="d1", device_name="Mac", passphrase="pw")
+
+    def test_register_failure_rolls_back_saved_config(self, tmp_path: Path, monkeypatch) -> None:
+        """Track 5A Task 3 regression: if register_device raises after
+        save_config succeeded, the saved config file MUST be deleted before
+        the exception propagates. Without rollback, init leaves a local
+        config claiming a device_id that storage doesn't know about — peers
+        never discover this device, and every push writes manifests under an
+        ID no one is listening for. User retries `mm init` and either
+        succeeds clean or sees the underlying error, never a half-state.
+        """
+        from mind_meld import cli as cli_module
+
+        cfg = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+
+        def boom(*_a, **_kw):
+            raise StorageError("transient iCloud put failure")
+
+        monkeypatch.setattr(cli_module, "register_device", boom)
+
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path)},
+        }
+        with pytest.raises(StorageError, match="transient iCloud put failure"):
+            _save_and_register(
+                config, backend=None, device_id="d1", device_name="Mac", passphrase="pw"
+            )
+        assert not cfg.exists(), "config file must be rolled back when register fails"
+
+    def test_register_failure_rollback_unlink_failure_does_not_mask_original(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Defense: if the rollback unlink itself fails (rare — file vanished,
+        permissions changed, fs-level oddness), the user MUST still see the
+        original register error. Masking the real cause behind a confusing
+        unlink error would hide what actually went wrong."""
+        from mind_meld import cli as cli_module
+
+        cfg = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+
+        def boom_register(*_a, **_kw):
+            raise StorageError("transient iCloud put failure")
+
+        monkeypatch.setattr(cli_module, "register_device", boom_register)
+
+        # Force the rollback unlink to raise.
+        original_unlink = Path.unlink
+
+        def boom_unlink(self, *args, **kwargs):
+            if self == cfg:
+                raise PermissionError("filesystem locked")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", boom_unlink)
+
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path)},
+        }
+        # Original register error must propagate, NOT the unlink error.
+        with pytest.raises(StorageError, match="transient iCloud put failure"):
+            _save_and_register(
+                config, backend=None, device_id="d1", device_name="Mac", passphrase="pw"
+            )
+
+    def test_register_failure_does_not_print_committed_messages(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """User-facing message ordering: 'Config written' and 'Device registered'
+        are committed-state confirmations; on register failure neither should
+        appear since the state is rolled back."""
+        from mind_meld import cli as cli_module
+
+        cfg = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
+
+        def boom(*_a, **_kw):
+            raise StorageError("nope")
+
+        monkeypatch.setattr(cli_module, "register_device", boom)
+
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path)},
+        }
+        with pytest.raises(StorageError):
+            _save_and_register(
+                config, backend=None, device_id="d1", device_name="Mac", passphrase="pw"
+            )
+        captured = capsys.readouterr()
+        # Neither commit-confirmation line should have been emitted.
+        assert "Config written" not in captured.out
+        assert "Device registered" not in captured.out
 
 
 class TestBootstrapOrVerifyCrypto:

@@ -58,7 +58,6 @@ def _setup(tmp_path, monkeypatch, *, with_config=True, with_crypto_init=True):
             cfg_path,
         )
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
-    monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
 
     # Isolate sidecar/breadcrumb to tmp_path.
     sc_dir = tmp_path / "sidecar"

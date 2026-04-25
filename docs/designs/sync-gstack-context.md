@@ -66,7 +66,8 @@ name = "gstack"
 path = "~/.gstack"
 type = "generic"
 include_dirs = ["projects", "analytics", "retros"]
-include_files = ["config.yaml", ".completeness-intro-seen", ".telemetry-prompted",
+include_files = ["config.yaml", "retro-context.md", "greptile-history.md",
+                 ".completeness-intro-seen", ".telemetry-prompted",
                  ".proactive-prompted", ".welcome-seen", ".codex-desc-healed"]
 ```
 

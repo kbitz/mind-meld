@@ -2,6 +2,79 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.8.15] - 2026-04-24
+
+Group 5 preflight + all of Track 5A bundled per `/plan-eng-review` D2.
+Three Track 5A bug fixes ship together: the P0 `mm autopull` / `mm autopush`
+silent-mode contract regression on un-initialized machines (root cause was
+a binding-vs-attribute mismatch — `_auto_command_setup`'s `CONFIG_PATH.exists()`
+preflight used cli.py's local import while `load_config()` reads the module
+attribute, so monkeypatch divergence let the loud-on-malformed branch fire
+on truly-missing configs); the `_synced_scan_dirs` scope bug where conflict
+files for top-level `include_files` entries were invisible to `mm conflicts` /
+`mm resolve` / `mm gc --conflicts` (kb-mbp 2026-04-24 first-pull saw 5 of 6
+conflicts because `~/.gstack/config.sync-conflict-...yaml` lived at depth-0
+outside the recursive scan); and `_save_and_register` now rolls back the
+saved `config.toml` if `register_device` fails so init either fully succeeds
+or leaves no local state — peers no longer see orphan `device_id`s with no
+matching `devices/<id>.json` on storage. Group 5 preflight bundled in the
+same release: gstack `DEFAULT_SOURCES.include_files` adds `retro-context.md`
+and `greptile-history.md` for cross-machine memory continuity. Group 1's
+unfinished `constants.py` extraction preflight was dropped after a cohesion
+check (only 2 of 4 candidates are cross-module, would have split the
+`FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1` pair) — Group 1 marked ✓ Complete.
+20 new tests (4 regressions pinned), 685 pass.
+
+### Fixed
+- `mm autopull` / `mm autopush` now exit silently on un-initialized machines
+  again, restoring the documented quiet-on-no-config / loud-on-malformed
+  contract. `_auto_command_setup` preflights `CONFIG_PATH.exists()` via
+  module-attribute access (`mind_meld.config.CONFIG_PATH`) so monkeypatching
+  the source module propagates and the test/production preflight stay in sync.
+- `mm conflicts` / `mm resolve` / `mm gc --conflicts` now surface conflict
+  copies on top-level `include_files` entries (e.g.
+  `~/.gstack/config.sync-conflict-*.yaml`). `_find_conflict_files` adds a
+  depth-0 sibling-glob path for generic sources, gated by `is_conflict_filename`'s
+  strict pattern so user files like `notes.sync-conflict-log.md` stay filtered.
+- `mm init` rolls back the saved `config.toml` if `register_device` fails
+  so peers never see a device claimed in local config but missing from
+  `devices/`. Original error propagates even if the rollback unlink itself
+  fails (no masking).
+
+### Added
+- `retro-context.md` and `greptile-history.md` to gstack
+  `DEFAULT_SOURCES.include_files` for cross-machine memory continuity.
+- Curation comment on `include_files` documenting the three categories
+  (gstack config, memory content, onboarding markers).
+- 20 new tests across `test_config.py` (`TestDefaultSources`),
+  `test_conflict_copy.py` (`TestFindConflictFilesIncludeFiles`),
+  `test_integration.py` (breadcrumb assertions on silent-mode), and
+  `test_track_2a.py` (`TestSaveAndRegister` rollback paths).
+
+### Changed
+- `docs/ROADMAP.md` — Group 1 marked ✓ Complete (constants.py preflight
+  dropped with cohesion-check rationale); Group 5 preflight bundled with
+  Track 5A; Execution Map updated.
+- `_find_conflict_files` sibling-glob gates on `include_files` presence
+  rather than `type == "generic"` so a future schema that adds
+  `include_files` to other source types doesn't silently lose conflict
+  visibility (defensive against the same scope-mismatch class of bug).
+- `_save_and_register` rollback narrows `except Exception` to
+  `(StorageError, OSError, MindMeldError)` so programming errors
+  (AssertionError, AttributeError) propagate instead of silently
+  destroying the user's saved config on every retry.
+- All `cli.py` `CONFIG_PATH` access goes through `_config_module.CONFIG_PATH`
+  uniformly. The local `from mind_meld.config import CONFIG_PATH` binding
+  was removed; ~50 dead `monkeypatch.setattr("mind_meld.cli.CONFIG_PATH",
+  ...)` lines across 9 test files dropped (they were the symptom of the
+  dual-binding footgun, now retired).
+- Rollback unlink-failure warning now goes to `stderr_console` per the
+  CLAUDE.md visible-failure contract (load-bearing degradation signals
+  reach stderr even in quiet mode).
+- README.md, SPEC.md, and `docs/designs/sync-gstack-context.md` updated
+  to list the two new gstack `include_files` defaults
+  (`retro-context.md`, `greptile-history.md`).
+
 ## [0.8.14] - 2026-04-24
 
 Roadmap tidy. Freshness scan marks Groups 2/3/4 ✓ Complete in place

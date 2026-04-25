@@ -646,7 +646,6 @@ class TestRecoverAbandonManifestDestructive:
             cfg_path,
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 

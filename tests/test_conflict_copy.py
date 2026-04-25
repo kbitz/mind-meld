@@ -505,6 +505,148 @@ class TestFindConflictFilesClaudeType:
         assert out_of_scope not in hit_paths, "scope should exclude sessions/"
 
 
+class TestFindConflictFilesIncludeFiles:
+    """Regression for kb-mbp 2026-04-24 first-pull: a 286-file pull produced 6
+    conflict copies, but `mm conflicts` listed only 5. The missing one was
+    `~/.gstack/config.sync-conflict-...yaml` — a sibling of an `include_files`
+    entry. `_synced_scan_dirs` only returned `include_dirs` for generic
+    sources, so depth-0 conflict siblings of `include_files` entries were
+    invisible to mm conflicts / mm resolve / mm gc --conflicts.
+
+    Track 5A Task 2: _find_conflict_files now adds a depth-0 sibling-glob
+    path for each generic include_files entry. is_conflict_filename's strict
+    pattern still keeps user files like notes.sync-conflict-log.md filtered.
+    """
+
+    def _config(self, src: Path, include_files: list[str]) -> dict:
+        return {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "include_files": include_files,
+                    }
+                ]
+            }
+        }
+
+    def test_top_level_include_file_conflict_is_listed(self, tmp_path: Path) -> None:
+        """Conflict on a top-level include_files entry (e.g. config.yaml) appears
+        in the hits list. Pre-fix this was the 6-of-6 vs 5-of-6 regression."""
+        src = tmp_path / "gstack"
+        src.mkdir()
+        (src / "config.yaml").write_bytes(b"canonical")
+        conflict = src / "config.sync-conflict-20260424-233316-889e42c0.yaml"
+        conflict.write_bytes(b"divergent")
+
+        hits = _find_conflict_files(self._config(src, ["config.yaml"]))
+        hit_paths = [h[1] for h in hits]
+        assert conflict in hit_paths
+
+    def test_dotfile_include_file_conflict_is_listed(self, tmp_path: Path) -> None:
+        """Conflict on a leading-dot top-level include_files entry (e.g.
+        `.completeness-intro-seen` — no extension). Path.stem treats the full
+        name as the stem and the suffix is empty, so the glob pattern is
+        `.completeness-intro-seen.sync-conflict-*`. Verifies the empty-suffix
+        edge case."""
+        src = tmp_path / "gstack"
+        src.mkdir()
+        (src / ".completeness-intro-seen").write_bytes(b"")
+        conflict = src / ".completeness-intro-seen.sync-conflict-20260424-233316-889e42c0"
+        conflict.write_bytes(b"divergent")
+
+        hits = _find_conflict_files(self._config(src, [".completeness-intro-seen"]))
+        hit_paths = [h[1] for h in hits]
+        assert conflict in hit_paths
+
+    def test_canonical_resolution_for_include_file_conflict(self, tmp_path: Path) -> None:
+        """Each hit must report the canonical path correctly. mm resolve relies
+        on this to write the chosen bytes to the right destination."""
+        src = tmp_path / "gstack"
+        src.mkdir()
+        (src / "config.yaml").write_bytes(b"canonical")
+        conflict = src / "config.sync-conflict-20260424-233316-889e42c0.yaml"
+        conflict.write_bytes(b"divergent")
+
+        hits = _find_conflict_files(self._config(src, ["config.yaml"]))
+        # Find the hit corresponding to the include_files conflict.
+        match = [h for h in hits if h[1] == conflict]
+        assert len(match) == 1
+        _src_name, _cpath, canonical = match[0]
+        assert canonical == src / "config.yaml"
+
+    def test_user_file_with_infix_at_base_not_listed(self, tmp_path: Path) -> None:
+        """is_conflict_filename strictness must apply to the new sibling-glob
+        path too: a user file like `notes.sync-conflict-log.md` at the source
+        base (matching neither stem nor strict pattern) must not be listed."""
+        src = tmp_path / "gstack"
+        src.mkdir()
+        (src / "config.yaml").write_bytes(b"canonical")
+        # User-created file at base with .sync-conflict- substring but no timestamp.
+        user_file = src / "notes.sync-conflict-log.md"
+        user_file.write_bytes(b"legitimate user file")
+
+        hits = _find_conflict_files(self._config(src, ["config.yaml"]))
+        hit_paths = [h[1] for h in hits]
+        assert user_file not in hit_paths
+
+    def test_unrelated_include_file_stem_does_not_collide(self, tmp_path: Path) -> None:
+        """Glob is stem-anchored: a conflict for `other.yaml` is not picked up
+        when looking for `config.yaml` siblings."""
+        src = tmp_path / "gstack"
+        src.mkdir()
+        (src / "config.yaml").write_bytes(b"a")
+        (src / "other.yaml").write_bytes(b"b")
+        # Only register config.yaml as include_files; conflict belongs to other.yaml.
+        other_conflict = src / "other.sync-conflict-20260424-233316-889e42c0.yaml"
+        other_conflict.write_bytes(b"divergent")
+
+        hits = _find_conflict_files(self._config(src, ["config.yaml"]))
+        hit_paths = [h[1] for h in hits]
+        assert other_conflict not in hit_paths
+
+    def test_include_files_and_include_dirs_both_scanned(self, tmp_path: Path) -> None:
+        """End-to-end: a generic source with conflicts in BOTH include_dirs
+        (recursive) and include_files (sibling-glob) surfaces both. Pre-fix
+        only the include_dirs ones appeared."""
+        src = tmp_path / "gstack"
+        (src / "projects").mkdir(parents=True)
+        # Conflict inside include_dir (recursive scan path).
+        (src / "projects" / "proj.md").write_bytes(b"a")
+        dir_conflict = src / "projects" / "proj.sync-conflict-20260424-100000-devA1234.md"
+        dir_conflict.write_bytes(b"divergent")
+        # Conflict at base for include_files entry (sibling-glob path).
+        (src / "config.yaml").write_bytes(b"b")
+        file_conflict = src / "config.sync-conflict-20260424-200000-devB5678.yaml"
+        file_conflict.write_bytes(b"divergent")
+
+        hits = _find_conflict_files(self._config(src, ["config.yaml"]))
+        hit_paths = [h[1] for h in hits]
+        assert dir_conflict in hit_paths
+        assert file_conflict in hit_paths
+        assert len(hits) == 2
+
+    def test_gc_reaps_stale_include_files_conflict(self, tmp_path: Path) -> None:
+        """End-to-end downstream: `mm gc --conflicts` consumes _find_conflict_files,
+        so the scope fix transitively unblocks reaping stale include_files conflicts."""
+        src = tmp_path / "gstack"
+        src.mkdir()
+        (src / "config.yaml").write_bytes(b"canonical")
+        old = src / "config.sync-conflict-20000101-000000-devA1234.yaml"
+        old.write_bytes(b"old")
+        ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(old, (ancient, ancient))
+
+        reaped = _gc_old_conflict_files(
+            self._config(src, ["config.yaml"]), dry_run=False, verbose=False
+        )
+        assert reaped == 1
+        assert not old.exists()
+
+
 class TestFindConflictFilesFalsePositiveGuard:
     """Latent bug fix: _find_conflict_files used a substring check that
     matched user files like `notes.sync-conflict-log.md`, so the reaper
@@ -804,7 +946,6 @@ class TestResolveExitCode:
             cfg_path,
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
-        monkeypatch.setattr("mind_meld.cli.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
         monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
 
