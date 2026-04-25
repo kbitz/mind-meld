@@ -71,6 +71,143 @@ class TestIsExcluded:
         assert not _is_excluded("projects/-foo/memory/notes.sync-conflict-log.md")
 
 
+class TestIsExcludedWithPerSourcePatterns:
+    """5C: per-source `exclude_patterns` extend the global EXCLUDED list.
+
+    Matched against the FULL relative path (not just basename), so users
+    can scope to subtrees like `projects/*/repo-mode.json`.
+    """
+
+    def test_per_source_glob_drops_path(self):
+        assert _is_excluded(
+            "projects/myapp/repo-mode.json",
+            exclude_patterns=["projects/*/repo-mode.json"],
+        )
+
+    def test_per_source_glob_does_not_drop_non_match(self):
+        assert not _is_excluded(
+            "projects/myapp/role.md",
+            exclude_patterns=["projects/*/repo-mode.json"],
+        )
+
+    def test_per_source_glob_path_scoped_not_basename(self):
+        """A glob like `cache.json` matches basename only because fnmatch
+        evaluates against the full relative path here. To scope to a
+        subtree you spell it out: `**/cache.json` matches at any depth."""
+        assert not _is_excluded(
+            "projects/myapp/cache.json",
+            exclude_patterns=["cache.json"],  # no path glob → only matches root
+        )
+        assert _is_excluded(
+            "projects/myapp/cache.json",
+            exclude_patterns=["**/cache.json"],
+        )
+
+    def test_global_excluded_still_applies_when_per_source_set(self):
+        """exclude_patterns extends — does not replace — the EXCLUDED list."""
+        assert _is_excluded(
+            "projects/myapp/.env",
+            exclude_patterns=["projects/*/repo-mode.json"],
+        )
+
+    def test_empty_exclude_patterns_is_no_op(self):
+        assert not _is_excluded("projects/myapp/role.md", exclude_patterns=[])
+
+    def test_none_exclude_patterns_is_no_op(self):
+        assert not _is_excluded("projects/myapp/role.md", exclude_patterns=None)
+
+
+class TestWalkerExcludePatterns:
+    """5C: walker honors per-source exclude_patterns end-to-end.
+
+    Generic walker + claude walker both route through `_record_file`,
+    which threads exclude_patterns into `_is_excluded`.
+    """
+
+    def test_walk_generic_source_drops_excluded_paths(self, tmp_path):
+        base = tmp_path / "gstack"
+        projects = base / "projects" / "myapp"
+        projects.mkdir(parents=True)
+        (projects / "repo-mode.json").write_text("{}")
+        (projects / "role.md").write_text("kept")
+
+        files = walk_generic_source(
+            {
+                "name": "gstack",
+                "path": str(base),
+                "type": "generic",
+                "include_dirs": ["projects"],
+                "exclude_patterns": ["projects/*/repo-mode.json"],
+            }
+        )
+        rels = set(files.keys())
+        assert "projects/myapp/role.md" in rels
+        assert "projects/myapp/repo-mode.json" not in rels
+
+    def test_walk_generic_source_no_excludes_keeps_all(self, tmp_path):
+        base = tmp_path / "gstack"
+        projects = base / "projects" / "myapp"
+        projects.mkdir(parents=True)
+        (projects / "repo-mode.json").write_text("{}")
+        (projects / "role.md").write_text("kept")
+
+        files = walk_generic_source(
+            {
+                "name": "gstack",
+                "path": str(base),
+                "type": "generic",
+                "include_dirs": ["projects"],
+            }
+        )
+        rels = set(files.keys())
+        assert "projects/myapp/repo-mode.json" in rels
+        assert "projects/myapp/role.md" in rels
+
+    def test_walk_source_threads_exclude_patterns_for_claude_type(self, tmp_path):
+        """The claude walker also accepts exclude_patterns via walk_source."""
+        base = tmp_path / "claude"
+        memory = base / "projects" / "myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "private-notes.md").write_text("kept-locally")
+        (memory / "role.md").write_text("synced")
+
+        _, files = walk_source(
+            {
+                "name": "claude",
+                "path": str(base),
+                "type": "claude",
+                "exclude_patterns": ["projects/*/memory/private-*.md"],
+            }
+        )
+        rels = set(files.keys())
+        assert "projects/myapp/memory/role.md" in rels
+        assert "projects/myapp/memory/private-notes.md" not in rels
+
+    def test_build_manifest_v2_carries_exclude_patterns_via_source_dict(self, tmp_path):
+        base = tmp_path / "gstack"
+        projects = base / "projects" / "myapp"
+        projects.mkdir(parents=True)
+        (projects / "repo-mode.json").write_text("{}")
+        (projects / "role.md").write_text("kept")
+
+        manifest = build_manifest_v2(
+            "dev-a",
+            "Mac A",
+            [
+                {
+                    "name": "gstack",
+                    "path": str(base),
+                    "type": "generic",
+                    "include_dirs": ["projects"],
+                    "exclude_patterns": ["projects/*/repo-mode.json"],
+                }
+            ],
+        )
+        files = manifest["sources"]["gstack"]["files"]
+        assert "projects/myapp/role.md" in files
+        assert "projects/myapp/repo-mode.json" not in files
+
+
 class TestHashFile:
     def test_hash_known_content(self, tmp_path):
         f = tmp_path / "test.txt"

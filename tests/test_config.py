@@ -9,6 +9,7 @@ from mind_meld.config import (
     DEFAULT_SOURCES,
     _apply_defaults,
     _validate,
+    _validate_exclude_patterns,
     _validate_sources,
     get_sources,
     load_config,
@@ -161,6 +162,115 @@ class TestDefaultSources:
     def test_gstack_include_files_contains_config(self):
         gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
         assert "config.yaml" in gstack["include_files"]
+
+    def test_gstack_exclude_patterns_present(self):
+        """5C: per-machine artifacts (repo-mode.json, land-deploy-confirmed)
+        must be in the default exclude_patterns. Losing this regression-pins
+        the kb-mbp 2026-04-24 first-pull conflict bug."""
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        patterns = gstack.get("exclude_patterns") or []
+        assert "projects/*/repo-mode.json" in patterns
+        assert "projects/*/land-deploy-confirmed" in patterns
+
+
+class TestExcludePatternsValidation:
+    """5C: _validate_sources accepts and validates the new
+    exclude_patterns field at load time."""
+
+    def test_valid_exclude_patterns_passes(self):
+        sources = [
+            {
+                "name": "gstack",
+                "path": "~/.gstack",
+                "type": "generic",
+                "exclude_patterns": ["projects/*/cache.json", "**/*.tmp"],
+            }
+        ]
+        _validate_sources(sources)  # must not raise
+
+    def test_no_exclude_patterns_field_passes(self):
+        """A source without exclude_patterns is valid (the field is optional)."""
+        sources = [{"name": "claude", "path": "~/.claude", "type": "claude"}]
+        _validate_sources(sources)
+
+    def test_empty_exclude_patterns_list_passes(self):
+        sources = [
+            {"name": "gstack", "path": "~/.gstack", "type": "generic", "exclude_patterns": []}
+        ]
+        _validate_sources(sources)
+
+    def test_non_list_exclude_patterns_raises(self):
+        with pytest.raises(ConfigError, match="exclude_patterns must be a list"):
+            _validate_exclude_patterns("not-a-list", "gstack")
+
+    def test_non_string_pattern_raises(self):
+        with pytest.raises(ConfigError, match=r"exclude_patterns\[0\] must be a string"):
+            _validate_exclude_patterns([42, "ok"], "gstack")
+
+    def test_validate_sources_propagates_pattern_error(self):
+        sources = [
+            {
+                "name": "gstack",
+                "path": "~/.gstack",
+                "type": "generic",
+                "exclude_patterns": [42],
+            }
+        ]
+        with pytest.raises(ConfigError, match="exclude_patterns"):
+            _validate_sources(sources)
+
+    def test_load_config_raises_on_bad_exclude_patterns_in_toml(self, tmp_path):
+        """Headline: malformed exclude_patterns in TOML raises at load
+        boundary, not mid-push."""
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            "[device]\n"
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            "[storage]\n"
+            f'path = "{tmp_path / "storage"}"\n'
+            "[[sync.sources]]\n"
+            'name = "gstack"\n'
+            'path = "~/.gstack"\n'
+            'type = "generic"\n'
+            'exclude_patterns = "should-be-a-list"\n'
+        )
+        with pytest.raises(ConfigError, match="exclude_patterns must be a list"):
+            load_config(config_path)
+
+
+class TestExcludePatternsRoundTrip:
+    """exclude_patterns survives save → load → save."""
+
+    def test_round_trip_preserves_exclude_patterns(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(tmp_path / ".gstack"),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "exclude_patterns": [
+                            "projects/*/repo-mode.json",
+                            "projects/*/land-deploy-confirmed",
+                        ],
+                    }
+                ],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        save_config(config, config_path)
+        loaded = load_config(config_path)
+        src = loaded["sync"]["sources"][0]
+        assert src["exclude_patterns"] == [
+            "projects/*/repo-mode.json",
+            "projects/*/land-deploy-confirmed",
+        ]
 
 
 class TestGetSources:

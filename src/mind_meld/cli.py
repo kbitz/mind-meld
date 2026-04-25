@@ -6,6 +6,7 @@ Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import secrets
 import sys
@@ -28,7 +29,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from mind_meld import __version__, fsutil, sidecar
+from mind_meld import __version__, fsutil, pullhistory, sidecar
 from mind_meld import config as _config_module
 from mind_meld.config import (
     DEFAULT_ARGON2_MEMORY_KB,
@@ -456,6 +457,79 @@ def _fetch_remote_manifest(
     return ManifestFetch(status="ok", manifest=_merge_manifests(manifests))
 
 
+def _build_exclude_map(config: dict) -> dict[str, list[str]]:
+    """Map source name -> exclude_patterns list from local config.
+
+    Empty entries are pruned so callers can use truthiness as the no-op gate.
+    Sources without `exclude_patterns` are absent (not present-with-[]) so
+    `_filter_excluded_paths` short-circuits via the `not exclude_map` check.
+    """
+    out: dict[str, list[str]] = {}
+    for src in get_sources(config):
+        patterns = src.get("exclude_patterns")
+        if patterns:
+            out[src["name"]] = list(patterns)
+    return out
+
+
+def _filter_excluded_paths(manifest: dict, exclude_map: dict[str, list[str]]) -> dict:
+    """Return a shallow copy of `manifest` with excluded source-paths stripped.
+
+    Drops entries from `sources.<name>.files` and `tombstones` whose relative
+    path matches any glob in `exclude_map[name]`. Empty `exclude_map` returns
+    `manifest` unchanged (load-bearing for hot paths: avoid copying large
+    manifests when no source declares excludes).
+
+    Apply at the CONSUMER boundary (_pull_core, _push_core), NOT inside
+    `_fetch_remote_manifest`. `mm gc` walks raw manifests via
+    `_fetch_remote_manifest` to compute referenced blobs — a filtered manifest
+    there would mark live peer blobs as orphans and silently delete them
+    (codex-2 #1, the gc-bypass hazard). The filter is a CONSUMER-side fix
+    for the tombstone-on-exclude-transition bug, not a fetch-side scrub.
+
+    Tombstone keys are `<source>:<rel_path>` post-Track-1B. Bare-path keys
+    (legacy v1 manifests) default to the `claude` source per the same
+    promotion rule `normalize_manifest` applies.
+    """
+    if not exclude_map:
+        return manifest
+
+    def _excluded(src_name: str, rel_path: str) -> bool:
+        patterns = exclude_map.get(src_name)
+        if not patterns:
+            return False
+        return any(fnmatch.fnmatch(rel_path, p) for p in patterns)
+
+    out = dict(manifest)
+
+    new_sources: dict[str, dict] = {}
+    for src_name, src_data in manifest.get("sources", {}).items():
+        patterns = exclude_map.get(src_name)
+        if not patterns:
+            new_sources[src_name] = src_data
+            continue
+        new_files = {
+            rel: info
+            for rel, info in src_data.get("files", {}).items()
+            if not _excluded(src_name, rel)
+        }
+        new_sources[src_name] = {**src_data, "files": new_files}
+    out["sources"] = new_sources
+
+    new_tombstones: dict[str, dict] = {}
+    for key, info in manifest.get("tombstones", {}).items():
+        if isinstance(key, str) and ":" in key:
+            src_name, rel = key.split(":", 1)
+        else:
+            src_name, rel = "claude", key  # legacy bare-path tombstones
+        if _excluded(src_name, rel):
+            continue
+        new_tombstones[key] = info
+    out["tombstones"] = new_tombstones
+
+    return out
+
+
 def _recover_prior_manifest(
     fetch: ManifestFetch,
     backend: LocalBackend,
@@ -757,11 +831,17 @@ def _upload_changed_blobs(
     passphrase: str,
     memory_kb: int,
     verbose: bool = False,
+    src_name: str | None = None,
 ) -> int:
     """Upload changed blobs to storage.
 
     Reads and hashes each file atomically with read_and_hash to avoid
     TOCTOU races. Returns total encrypted bytes transferred.
+
+    `src_name` (when provided) drives `pullhistory.append` so the history
+    log records one "uploaded" entry per file. Optional so legacy/test
+    callers without source context still work; production push paths
+    always pass it.
     """
     bytes_transferred = 0
     for rel_path, info in to_upload.items():
@@ -776,6 +856,16 @@ def _upload_changed_blobs(
         bkey = blob_key(device_id, info["sha256"])
         backend.put(bkey, enc_data)
         bytes_transferred += len(enc_data)
+
+        if src_name is not None:
+            pullhistory.append(
+                verb="push",
+                device=device_id,
+                source=src_name,
+                rel_path=rel_path,
+                action="uploaded",
+                local_sha=info.get("sha256"),
+            )
 
         if verbose:
             console.print(f"  [green]\u2191[/green] {rel_path}")
@@ -1644,6 +1734,10 @@ def push(
 ) -> None:
     """Push local session data to storage."""
     config = _get_config()
+    _maybe_prompt_migration(config)
+    # Re-load in case the migration prompt mutated config on disk so the
+    # current command sees the new exclude_patterns.
+    config = _get_config()
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -1742,6 +1836,17 @@ def _push_core(
         fetch, backend, device_id, passphrase, memory_kb, quiet=quiet
     )
 
+    # Consumer-boundary exclude_patterns filter. Strips paths the local
+    # config now excludes from BOTH the ok-fetch path and the recovery
+    # branches (sidecar prior state, peer-tombstone aggregation). Without
+    # this, generate_tombstones would emit a deletion tombstone for every
+    # newly-excluded path on the first post-migration push (the kb-mbp
+    # 2026-04-24 regression), and the sidecar/peer-fallback branches
+    # would seed pre-exclude paths back into the next manifest.
+    exclude_map = _build_exclude_map(config)
+    if remote_manifest is not None:
+        remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map)
+
     # Generate tombstones for files that disappeared since last push
     tombstones = generate_tombstones(local_manifest, remote_manifest, device_id)
     local_manifest["tombstones"] = tombstones
@@ -1780,6 +1885,7 @@ def _push_core(
             passphrase,
             memory_kb,
             verbose=(verbose and not quiet),
+            src_name=src_name,
         )
         total_new += len(diff.new)
         total_modified += len(diff.modified)
@@ -1912,6 +2018,10 @@ def pull(
     the removal of --no-prompt / --resolve-interactive would otherwise cause
     stale scripts to hit usage-error exit 2 and be misclassified as conflicts.
     """
+    config = _get_config()
+    _maybe_prompt_migration(config)
+    # Re-load in case the migration prompt mutated config on disk so this
+    # pull sees the new exclude_patterns.
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
 
@@ -2533,6 +2643,40 @@ def _pull_core(
 
     manifest_cache, corrupt_peers = _prefetch_manifests(backend, all_devices, passphrase, memory_kb)
 
+    # Consumer-boundary exclude_patterns filter for pull. Drops excluded
+    # paths from each peer manifest before tombstone collection AND before
+    # the per-source download loop. Without this, a peer who hasn't yet
+    # adopted the local exclude_patterns ships an excluded file in their
+    # manifest, and pull would either download it (defeating the exclude)
+    # or surface it as a conflict. Filter HERE, not in
+    # `_fetch_remote_manifest` — `mm gc` reads raw manifests via that path
+    # to compute referenced blobs, and a filtered manifest there would
+    # mark live peer blobs as orphans (codex-2 #1).
+    exclude_map = _build_exclude_map(config)
+    if exclude_map:
+        filtered_cache: dict[str, dict | None] = {}
+        for did, m in manifest_cache.items():
+            if m is None:
+                filtered_cache[did] = None
+                continue
+            filtered = _filter_excluded_paths(m, exclude_map)
+            # Log "excluded" per peer-path so `mm log --action excluded`
+            # shows what the user is NOT pulling because of their config.
+            for src_name, src_data in m.get("sources", {}).items():
+                kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
+                for rel_path, info in src_data.get("files", {}).items():
+                    if rel_path not in kept:
+                        pullhistory.append(
+                            verb="pull",
+                            device=did,
+                            source=src_name,
+                            rel_path=rel_path,
+                            action="excluded",
+                            remote_sha=info.get("sha256"),
+                        )
+            filtered_cache[did] = filtered
+        manifest_cache = filtered_cache
+
     all_tombstones = collect_tombstones(
         list(manifest_cache.keys()),
         lambda did: manifest_cache.get(did),
@@ -2633,6 +2777,23 @@ def _pull_core(
                 total_conflicted += len(per_source.outcomes["conflicted"])
                 total_failed += len(per_source.outcomes["failed"])
                 device_had_changes = True
+
+                # Log per-file outcomes for `mm log` audit trail. "unchanged"
+                # is intentionally omitted — it represents apply-time
+                # convergence (no I/O), and logging it would dwarf the
+                # forensic signal in the file. All other outcomes ARE
+                # I/O events worth recording.
+                for action_key in ("written", "merged", "skipped", "conflicted", "failed"):
+                    for rel_path in per_source.outcomes.get(action_key, []):
+                        remote_info = src_data.get("files", {}).get(rel_path, {})
+                        pullhistory.append(
+                            verb="pull",
+                            device=did,
+                            source=src_name,
+                            rel_path=rel_path,
+                            action=action_key,
+                            remote_sha=remote_info.get("sha256"),
+                        )
 
                 # Claude sync log is best-effort: log file is cosmetic
                 # signal for Claude Code, losing it on error is harmless.
@@ -2770,6 +2931,18 @@ def status(
         console.print(
             "  [yellow]Remote manifest: CORRUPT[/yellow] — next 'mm push' "
             "will attempt recovery from sidecar or peers."
+        )
+
+    # Visible-failure contract: surface the auto-command migration
+    # breadcrumb so users notice their config is missing recommended
+    # excludes (otherwise autopull/autopush silently keep producing
+    # conflict copies for repo-mode.json / land-deploy-confirmed every
+    # pull, with no signal that `mm migrate-config` would fix it).
+    missing_excludes = _config_missing_recommended_excludes(config)
+    if missing_excludes:
+        console.print(
+            f"  [yellow]Config missing recommended excludes for source(s):[/yellow] "
+            f"{', '.join(missing_excludes)} — run [bold]mm migrate-config[/bold] to add."
         )
 
     # Per-source breakdown
@@ -3361,9 +3534,17 @@ def _do_gc(
 
 @app.command()
 def sources() -> None:
-    """List configured sync sources."""
+    """List configured sync sources.
+
+    The "Excluded" column reports how many files the source's
+    `exclude_patterns` actually matched on this scan. Diagnostic only —
+    use it to sanity-check an over-broad glob (e.g. `**/*.json` skipping
+    everything) BEFORE pulling on every machine. Not a safety net; the
+    walker silently drops excluded paths regardless.
+    """
     config = _get_config()
 
+    from mind_meld.manifest import _is_excluded as _manifest_is_excluded
     from mind_meld.manifest import walk_source
 
     src_list = get_sources(config)
@@ -3374,11 +3555,282 @@ def sources() -> None:
     table.add_column("Path")
     table.add_column("Type")
     table.add_column("Files")
+    table.add_column("Excluded")
 
     for src in src_list:
-        base_path, files = walk_source(src, max_file_size)
-        table.add_row(src["name"], src["path"], src["type"], str(len(files)))
+        # Walk WITHOUT exclude_patterns so we count what the per-source
+        # globs would have stripped. `all_files` is already post-EXCLUDED
+        # (the global junk list runs inside `_record_file`), so any match
+        # against `patterns` here is attributable to per-source globs only.
+        # Two passes is the cheapest accurate diagnostic — instrumenting
+        # the walker with a counter would leak diagnostic state into the
+        # hot path.
+        src_no_excludes = {k: v for k, v in src.items() if k != "exclude_patterns"}
+        _, all_files = walk_source(src_no_excludes, max_file_size)
+        patterns = src.get("exclude_patterns") or []
+        if patterns:
+            excluded_count = sum(1 for rel in all_files if _manifest_is_excluded(rel, patterns))
+            kept = len(all_files) - excluded_count
+            excluded_display = str(excluded_count)
+        else:
+            kept = len(all_files)
+            excluded_display = "—"
+        table.add_row(
+            src["name"],
+            src["path"],
+            src["type"],
+            str(kept),
+            excluded_display,
+        )
 
+    console.print(table)
+
+
+# ── migrate-config ────────────────────────────────────────────────────
+
+
+def _compute_recommended_excludes_diff(
+    sources: list[dict],
+) -> list[tuple[str, list[str], list[str]]]:
+    """For each user-configured source, compute the missing recommended globs.
+
+    Returns [(source_name, missing_globs, current_globs)] only for sources
+    that (a) match a DEFAULT_SOURCES entry by name AND (b) the default
+    declares `exclude_patterns` AND (c) at least one default glob is absent
+    from the user's current list. Idempotent: a source already containing
+    every recommended glob is omitted.
+    """
+    diffs: list[tuple[str, list[str], list[str]]] = []
+    for src in sources:
+        default = get_default_source(src.get("name", ""))
+        if default is None:
+            continue
+        recommended = default.get("exclude_patterns") or []
+        if not recommended:
+            continue
+        current: list[str] = list(src.get("exclude_patterns") or [])
+        missing = [p for p in recommended if p not in current]
+        if missing:
+            diffs.append((src["name"], missing, current))
+    return diffs
+
+
+def _config_missing_recommended_excludes(config: dict) -> list[str]:
+    """Names of explicit `[[sync.sources]]` entries missing recommended excludes.
+
+    Returns [] when there's no explicit `sync.sources` array (legacy
+    claude_dir-only configs and bare configs use DEFAULT_SOURCES verbatim,
+    which already includes the recommended excludes — nothing to migrate).
+    """
+    sources = config.get("sync", {}).get("sources")
+    if not sources:
+        return []
+    return [name for name, _missing, _current in _compute_recommended_excludes_diff(sources)]
+
+
+def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
+    """Body of `mm migrate-config`. Extracted so the interactive
+    `_maybe_prompt_migration` can call it directly without going through
+    typer's option-parsing machinery.
+    """
+    config = _get_config()
+
+    sources = config.get("sync", {}).get("sources")
+    if not sources:
+        console.print(
+            "[dim]Config has no explicit [[sync.sources]] entries — "
+            "nothing to migrate. DEFAULT_SOURCES already include the "
+            "recommended excludes.[/dim]"
+        )
+        return
+
+    diffs = _compute_recommended_excludes_diff(sources)
+    if not diffs:
+        console.print("[green]Config is already up to date.[/green]")
+        return
+
+    console.print("\n[bold]Recommended exclude_patterns updates:[/bold]")
+    for name, missing, current in diffs:
+        console.print(f"\n  [bold]{name}[/bold]  (current: {current!r})")
+        for p in missing:
+            console.print(f"    [green]+ {p}[/green]")
+
+    if dry_run:
+        console.print("\n[dim]Dry run — no changes written.[/dim]")
+        return
+
+    if not yes and not typer.confirm("\nApply these updates?", default=True):
+        console.print("[yellow]Cancelled.[/yellow]")
+        return
+
+    try:
+        acquire_lock()
+    except LockError as e:
+        _error(str(e))
+
+    try:
+        diff_map = {name: missing for name, missing, _current in diffs}
+        new_sources: list[dict] = []
+        for src in sources:
+            if src.get("name") in diff_map:
+                merged = dict(src)
+                current = list(src.get("exclude_patterns") or [])
+                merged["exclude_patterns"] = current + diff_map[src["name"]]
+                new_sources.append(merged)
+            else:
+                new_sources.append(src)
+
+        # patch_config_on_disk replaces the sources array wholesale (per its
+        # contract). max_file_size and other [sync] scalars survive because
+        # the section-level merge is per-field.
+        patch_config_on_disk({"sync": {"sources": new_sources}})
+        # Clear any prior migration breadcrumb — config now matches.
+        breadcrumb = _migration_state_path()
+        try:
+            breadcrumb.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        console.print(
+            f"[green]Updated {len(diffs)} source(s).[/green] "
+            f"Config written to {_config_module.CONFIG_PATH}."
+        )
+    finally:
+        release_lock()
+
+
+@app.command(name="migrate-config")
+def migrate_config(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show the diff without writing config.toml."
+    ),
+) -> None:
+    """Add recommended `exclude_patterns` to existing `[[sync.sources]]`.
+
+    Compares each user-configured source against the matching DEFAULT_SOURCES
+    entry and proposes adding any missing recommended globs. Idempotent —
+    re-running on a fully-migrated config exits with "already up to date".
+
+    Acquires the mm lockfile so a concurrent push/pull can't read a half-
+    written config.
+    """
+    _migrate_config_core(yes=yes, dry_run=dry_run)
+
+
+# ── log ───────────────────────────────────────────────────────────────
+
+
+_LogAction = Literal["written", "merged", "skipped", "conflicted", "excluded", "uploaded", "failed"]
+_LogVerb = Literal["pull", "push"]
+
+
+@app.command(name="log")
+def log_cmd(
+    source: str | None = typer.Option(
+        None, "--source", help="Filter by source name (e.g. 'claude', 'gstack')."
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Only entries at/after this ISO-8601 timestamp."
+    ),
+    action: _LogAction | None = typer.Option(
+        None,
+        "--action",
+        help="Filter by per-file action.",
+        case_sensitive=False,
+    ),
+    verb: _LogVerb | None = typer.Option(
+        None,
+        "--verb",
+        help="Filter by pull or push.",
+        case_sensitive=False,
+    ),
+    limit: int = typer.Option(
+        50, "--limit", "-n", help="Show at most N records (most recent first)."
+    ),
+    fmt: str = typer.Option(
+        "table",
+        "--format",
+        help="Output format: 'table' (human) or 'jsonl' (machine).",
+        case_sensitive=False,
+    ),
+) -> None:
+    """Query the pull/push history log.
+
+    Records every per-file pull and push action to
+    ~/.config/mind-meld/pull-history.jsonl. Useful for "what conflicted on
+    date X" audits even after the .sync-conflict-* files are resolved
+    or reaped, and for "what is my exclude_patterns actually filtering"
+    via `mm log --action excluded`.
+    """
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            _error(f"--since: not a valid ISO-8601 timestamp: {since!r}")
+            return  # unreachable
+    else:
+        since_dt = None
+
+    fmt_lower = fmt.lower()
+    if fmt_lower not in ("table", "jsonl"):
+        _error(f"--format must be 'table' or 'jsonl', got {fmt!r}")
+        return  # unreachable
+
+    rows: list[dict] = []
+    for rec in pullhistory.read_records():
+        if source and rec.get("source") != source:
+            continue
+        if action and rec.get("action") != action:
+            continue
+        if verb and rec.get("verb") != verb:
+            continue
+        if since_dt is not None:
+            try:
+                rec_ts = datetime.fromisoformat(rec.get("ts", ""))
+            except (TypeError, ValueError):
+                continue
+            if rec_ts.tzinfo is None:
+                rec_ts = rec_ts.replace(tzinfo=timezone.utc)
+            if rec_ts < since_dt:
+                continue
+        rows.append(rec)
+
+    # Most-recent-first; cap to limit.
+    rows.sort(key=lambda r: r.get("ts", ""), reverse=True)
+    if limit > 0:
+        rows = rows[:limit]
+
+    if not rows:
+        if fmt_lower == "jsonl":
+            return
+        console.print("[dim]No log entries.[/dim]")
+        return
+
+    if fmt_lower == "jsonl":
+        import json as _json
+
+        for r in rows:
+            typer.echo(_json.dumps(r, sort_keys=True))
+        return
+
+    table = Table(title=f"mm log ({len(rows)} entries)")
+    table.add_column("ts", overflow="fold")
+    table.add_column("verb")
+    table.add_column("action")
+    table.add_column("source")
+    table.add_column("path", overflow="fold")
+    for r in rows:
+        table.add_row(
+            r.get("ts", "?"),
+            r.get("verb", "?"),
+            r.get("action", "?"),
+            r.get("source", "?"),
+            r.get("rel_path", "?"),
+        )
     console.print(table)
 
 
@@ -3991,6 +4443,85 @@ def _autorun_breadcrumb_path() -> Path:
     return sidecar.SIDECAR_DIR / "last-autorun.json"
 
 
+def _migration_state_path() -> Path:
+    """`migration-state.json` next to the recovery sidecar.
+
+    Records that an auto-command observed missing recommended excludes but
+    refused to mutate config (visible-failure contract — auto-commands MUST
+    NEVER silently change user config). `mm status` and the interactive
+    prompts read this so the signal stays visible until the user runs
+    `mm migrate-config`.
+    """
+    return sidecar.SIDECAR_DIR / "migration-state.json"
+
+
+def _write_migration_breadcrumb(missing: list[str]) -> None:
+    """Best-effort write of the missing-excludes signal. Never raises.
+
+    Skipped when no sources are missing (delete the file so stale
+    breadcrumbs don't outlive their cause). Called from autopull/autopush
+    on every run; cost is one stat + (rarely) one write.
+    """
+    path = _migration_state_path()
+    if not missing:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError:
+            return
+        return
+    try:
+        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+        import json as _json
+
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "missing_sources": sorted(set(missing)),
+        }
+        path.write_text(_json.dumps(payload, indent=2))
+    except Exception:
+        # Forensic aid only; never block the calling auto-command.
+        pass
+
+
+def _maybe_prompt_migration(config: dict) -> None:
+    """Once-per-invocation interactive prompt for missing recommended excludes.
+
+    Called from the top of `mm push` / `mm pull` ONLY (interactive verbs).
+    Auto-commands (autopull/autopush) NEVER prompt and NEVER mutate config —
+    they write a `migration-state.json` breadcrumb instead and let `mm status`
+    surface the signal. Visible-failure contract: silent config mutation
+    in a hook would be exactly the class of "wedged sync I never noticed"
+    failure the contract exists to prevent.
+    """
+    missing = _config_missing_recommended_excludes(config)
+    if not missing:
+        return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        # Non-TTY interactive verb (CI, piped invocation): warn to stderr
+        # but don't block on a prompt nobody can answer.
+        stderr_console.print(
+            f"[yellow]warning:[/yellow] config missing recommended excludes "
+            f"for source(s) {', '.join(missing)}. Run "
+            f"[bold]mm migrate-config[/bold] to add them."
+        )
+        return
+    console.print(
+        f"\n[yellow]Config is missing recommended exclude_patterns for "
+        f"source(s):[/yellow] {', '.join(missing)}"
+    )
+    console.print(
+        "  These per-machine artifacts (e.g. gstack repo-mode caches) "
+        "produce churn on every pull when synced."
+    )
+    if typer.confirm("Run 'mm migrate-config' now?", default=True):
+        # Call the core directly so typer's option machinery isn't in the
+        # way; the inner "Apply these updates?" prompt still confirms
+        # before writing.
+        _migrate_config_core(yes=False, dry_run=False)
+
+
 def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None:
     """Record the last autopull/autopush attempt for forensic observability.
 
@@ -4233,6 +4764,12 @@ def autopull() -> None:
     if setup is None:
         return
 
+    # Visible-failure contract: NEVER auto-mutate config. Record the
+    # missing-excludes signal so `mm status` can surface it for the next
+    # interactive run. This breadcrumb is intentionally orthogonal to the
+    # autorun outcome — pull can succeed AND have a pending migration.
+    _write_migration_breadcrumb(_config_missing_recommended_excludes(setup.config))
+
     try:
         acquire_lock()
     except LockError:
@@ -4339,6 +4876,11 @@ def autopush() -> None:
     setup = _auto_command_setup("push")
     if setup is None:
         return
+
+    # Visible-failure contract: NEVER auto-mutate config from a hook.
+    # Surface the missing-excludes signal via a breadcrumb so `mm status`
+    # nudges the user on their next interactive run.
+    _write_migration_breadcrumb(_config_missing_recommended_excludes(setup.config))
 
     try:
         acquire_lock()

@@ -252,6 +252,624 @@ class TestPushPullRoundTrip:
         assert original_role != role_b.read_text()
 
 
+class TestExcludePatterns5C:
+    """Track 5C IRON RULE regression pins.
+
+    Reasoning is in `_filter_excluded_paths` and the consumer-boundary
+    filter wiring (cli.py: `_pull_core`, `_push_core`). Failing these
+    tests blocks ship.
+    """
+
+    def _make_gstack_config(
+        self,
+        tmp_path,
+        storage_dir,
+        gstack_dir,
+        device_id,
+        device_name,
+        *,
+        exclude_patterns=None,
+    ):
+        config_path = tmp_path / f"config_{device_id}.toml"
+        gstack_src: dict = {
+            "name": "gstack",
+            "path": str(gstack_dir),
+            "type": "generic",
+            "include_dirs": ["projects"],
+        }
+        if exclude_patterns is not None:
+            gstack_src["exclude_patterns"] = exclude_patterns
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [gstack_src],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        return config_path
+
+    def _populate_gstack(self, gstack_dir, project="myapp", repo_mode="solo"):
+        proj = gstack_dir / "projects" / project
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "repo-mode.json").write_text(f'{{"mode": "{repo_mode}"}}')
+        (proj / "land-deploy-confirmed").write_text("OK")
+        (proj / "role.md").write_text("data scientist")
+
+    def _activate(self, monkeypatch, config_path):
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+    def _bootstrap(self, storage_dir):
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        return backend
+
+    def _backdate(self, *paths, seconds=3600):
+        old = time.time() - seconds
+        for p in paths:
+            os.utime(p, (old, old))
+
+    def test_kb_mbp_regression_no_conflicts_for_excluded_paths(self, tmp_path, monkeypatch):
+        """kb-mbp 2026-04-24: A pushes per-machine artifacts WITHOUT the
+        recommended excludes; B pulls WITH the excludes installed. Pull
+        MUST emit zero `.sync-conflict-*` files for repo-mode.json or
+        land-deploy-confirmed (the per-machine churn paths).
+
+        Test deliberately backdates B's local files so the
+        without-filter scenario WOULD have produced a conflict — the
+        assertion proves the filter is what prevents it.
+        """
+        storage_dir = tmp_path / "storage"
+        gstack_a = tmp_path / "machine_a" / ".gstack"
+        gstack_b = tmp_path / "machine_b" / ".gstack"
+        self._populate_gstack(gstack_a, repo_mode="solo-A")
+        self._populate_gstack(gstack_b, repo_mode="collaborative-B")
+
+        # Make B's local strictly older than A's about-to-be-pushed manifest.
+        # Without this, mtime-skip might mask the conflict scenario and
+        # the test would falsely pass without the exclude filter.
+        proj_b = gstack_b / "projects" / "myapp"
+        self._backdate(
+            proj_b / "repo-mode.json",
+            proj_b / "land-deploy-confirmed",
+        )
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = self._make_gstack_config(
+            tmp_path, storage_dir, gstack_a, "dev-a", "A", exclude_patterns=None
+        )
+        config_b = self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            gstack_b,
+            "dev-b",
+            "B",
+            exclude_patterns=[
+                "projects/*/repo-mode.json",
+                "projects/*/land-deploy-confirmed",
+            ],
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        self._activate(monkeypatch, config_a)
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+
+        self._activate(monkeypatch, config_b)
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+
+        repo_mode_conflicts = list(proj_b.glob("repo-mode.sync-conflict-*.json"))
+        ldc_conflicts = list(proj_b.glob("land-deploy-confirmed.sync-conflict-*"))
+        assert repo_mode_conflicts == [], (
+            f"Excluded repo-mode.json must NOT produce a conflict copy; got {repo_mode_conflicts}"
+        )
+        assert ldc_conflicts == [], (
+            f"Excluded land-deploy-confirmed must NOT produce a conflict copy; got {ldc_conflicts}"
+        )
+        # Untouched local content survives.
+        assert (proj_b / "repo-mode.json").read_text() == '{"mode": "collaborative-B"}'
+        assert (proj_b / "land-deploy-confirmed").read_text() == "OK"
+        # role.md (not in exclude_patterns) does sync.
+        assert (proj_b / "role.md").exists()
+
+    def test_tombstone_not_emitted_on_exclude_transition(self, tmp_path, monkeypatch):
+        """File previously synced; user adds the glob; next push must NOT
+        emit a deletion tombstone for the now-excluded path."""
+        storage_dir = tmp_path / "storage"
+        gstack = tmp_path / ".gstack"
+        self._populate_gstack(gstack)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+
+        # Phase 1: push without excludes — repo-mode.json lands in remote manifest.
+        config_path = self._make_gstack_config(
+            tmp_path, storage_dir, gstack, "dev-a", "A", exclude_patterns=None
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        assert "projects/myapp/repo-mode.json" in remote["sources"]["gstack"]["files"]
+
+        # Phase 2: install the exclude, push again. File still exists on
+        # disk locally (would normally walk into the manifest if not excluded).
+        self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            gstack,
+            "dev-a",
+            "A",
+            exclude_patterns=["projects/*/repo-mode.json"],
+        )
+        # Touch role.md so push has at least one diff to upload (otherwise
+        # _push_core may early-exit on "nothing to push" before manifest write).
+        (gstack / "projects" / "myapp" / "role.md").write_text("data scientist v2")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        offending = [k for k in remote.get("tombstones", {}) if "repo-mode.json" in k]
+        assert offending == [], f"Excluded path must NOT generate a tombstone; got {offending}"
+        # And the file is dropped from sources.gstack.files (walker filtered it).
+        assert "projects/myapp/repo-mode.json" not in remote["sources"]["gstack"]["files"]
+
+    def test_no_spurious_tombstone_on_unexclude_transition(self, tmp_path, monkeypatch):
+        """Removing a glob brings the path back into sync as new — push
+        must record it as a fresh entry, NOT as a tombstone."""
+        storage_dir = tmp_path / "storage"
+        gstack = tmp_path / ".gstack"
+        self._populate_gstack(gstack)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+
+        config_path = self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            gstack,
+            "dev-a",
+            "A",
+            exclude_patterns=["projects/*/repo-mode.json"],
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        # Phase 2: remove the exclude, push.
+        self._make_gstack_config(tmp_path, storage_dir, gstack, "dev-a", "A", exclude_patterns=None)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        offending = [k for k in remote.get("tombstones", {}) if "repo-mode.json" in k]
+        assert offending == [], f"Removing an exclude must not surface a tombstone; got {offending}"
+        assert "projects/myapp/repo-mode.json" in remote["sources"]["gstack"]["files"]
+
+    def test_sidecar_bypass_guard(self, tmp_path, monkeypatch):
+        """Corrupt own manifest → recovery via sidecar (which contains the
+        pre-exclude path) → consumer-boundary filter applies before
+        generate_tombstones → NO spurious tombstones for excluded paths.
+
+        Pins codex-2 #2: without the consumer-boundary filter on the
+        sidecar prior state, push silently re-tombstones every newly-
+        excluded path on the first post-corruption recovery.
+        """
+        storage_dir = tmp_path / "storage"
+        gstack = tmp_path / ".gstack"
+        self._populate_gstack(gstack)
+
+        # Redirect sidecar so the test is hermetic.
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+
+        # Phase 1: push without excludes; sidecar captures the file.
+        config_path = self._make_gstack_config(
+            tmp_path, storage_dir, gstack, "dev-a", "A", exclude_patterns=None
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        sidecar_path = sidecar_dir / "last-push.json"
+        assert sidecar_path.exists()
+        sidecar_content = json.loads(sidecar_path.read_text())
+        assert "projects/myapp/repo-mode.json" in sidecar_content["sources"]["gstack"]["files"]
+
+        # Corrupt the storage manifest so push recovery falls through to sidecar.
+        manifest_storage_path = storage_dir / "manifests" / "dev-a" / "manifest.json.enc"
+        manifest_storage_path.write_bytes(b"\x00\x01\x02 not a manifest")
+
+        # Phase 2: install excludes, push (recovery via sidecar fires).
+        self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            gstack,
+            "dev-a",
+            "A",
+            exclude_patterns=["projects/*/repo-mode.json"],
+        )
+        # Touch role.md so push has work to do beyond manifest rewrite.
+        (gstack / "projects" / "myapp" / "role.md").write_text("v2")
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        offending = [k for k in remote.get("tombstones", {}) if "repo-mode.json" in k]
+        assert offending == [], (
+            f"Sidecar recovery bypassed the exclude filter: spurious tombstone(s) {offending}"
+        )
+
+    def test_mm_gc_does_not_orphan_excluded_path_blobs(self, tmp_path, monkeypatch):
+        """Peer manifest contains an excluded-path blob. mm gc reads RAW
+        manifests via `_fetch_remote_manifest` (no filter applied at fetch
+        boundary), so the blob remains referenced and is NOT deleted.
+
+        Pins codex-2 #1: without the no-filter-at-fetch invariant, gc
+        treats an excluded-path blob as orphan and silently deletes it,
+        breaking peers that haven't yet adopted the exclude.
+        """
+        storage_dir = tmp_path / "storage"
+        gstack_a = tmp_path / "a" / ".gstack"
+        gstack_b = tmp_path / "b" / ".gstack"
+        self._populate_gstack(gstack_a, repo_mode="A")
+        gstack_b.mkdir(parents=True)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_a = self._make_gstack_config(
+            tmp_path, storage_dir, gstack_a, "dev-a", "A", exclude_patterns=None
+        )
+        config_b = self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            gstack_b,
+            "dev-b",
+            "B",
+            exclude_patterns=["projects/*/repo-mode.json"],
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        self._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        repo_mode_sha = remote["sources"]["gstack"]["files"]["projects/myapp/repo-mode.json"][
+            "sha256"
+        ]
+        blob_path = storage_dir / "data" / "dev-a" / f"{repo_mode_sha}.enc"
+        assert blob_path.exists(), "Setup: blob must exist before gc"
+
+        # B (with excludes) runs gc.
+        self._activate(monkeypatch, config_b)
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 0, result.output
+
+        assert blob_path.exists(), (
+            "mm gc deleted a blob that's still referenced by a peer "
+            "manifest. The exclude filter must NOT apply at the fetch "
+            "boundary used by gc — the consumer-boundary contract."
+        )
+
+
+class TestFilterExcludedPathsHelper:
+    """Track 5C: direct unit coverage of _filter_excluded_paths so the
+    consumer-boundary contract is provable without a full push/pull
+    round-trip."""
+
+    def test_no_op_when_exclude_map_empty(self):
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {"gstack": {"files": {"projects/x/repo-mode.json": {"sha256": "a"}}}},
+            "tombstones": {},
+        }
+        assert _filter_excluded_paths(m, {}) is m
+
+    def test_strips_excluded_files_from_sources(self):
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {
+                "gstack": {
+                    "base_path": "/x",
+                    "files": {
+                        "projects/myapp/repo-mode.json": {"sha256": "a"},
+                        "projects/myapp/role.md": {"sha256": "b"},
+                    },
+                }
+            },
+            "tombstones": {},
+        }
+        out = _filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
+        kept = out["sources"]["gstack"]["files"]
+        assert "projects/myapp/role.md" in kept
+        assert "projects/myapp/repo-mode.json" not in kept
+        # Original is untouched (returned a copy).
+        assert "projects/myapp/repo-mode.json" in m["sources"]["gstack"]["files"]
+
+    def test_strips_tombstones_for_excluded_paths(self):
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {"gstack": {"files": {}}},
+            "tombstones": {
+                "gstack:projects/myapp/repo-mode.json": {"deleted_at": "2026-04-25T00:00:00+00:00"},
+                "gstack:projects/myapp/role.md": {"deleted_at": "2026-04-25T00:00:00+00:00"},
+            },
+        }
+        out = _filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
+        keys = list(out["tombstones"])
+        assert "gstack:projects/myapp/role.md" in keys
+        assert "gstack:projects/myapp/repo-mode.json" not in keys
+
+    def test_legacy_bare_path_tombstones_default_to_claude_source(self):
+        """Pre-v0.4 manifests had bare-path tombstone keys. Filter
+        treats them as `claude` source per `normalize_manifest`'s rule."""
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {"claude": {"files": {}}},
+            "tombstones": {
+                "projects/-foo/memory/role.md": {"deleted_at": "2026-04-25T00:00:00+00:00"},
+            },
+        }
+        out = _filter_excluded_paths(m, {"claude": ["projects/*/memory/role.md"]})
+        assert out["tombstones"] == {}
+
+    def test_unaffected_sources_pass_through_unchanged(self):
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {
+                "gstack": {"files": {"projects/myapp/repo-mode.json": {"sha256": "a"}}},
+                "claude": {"files": {"projects/-foo/memory/role.md": {"sha256": "b"}}},
+            },
+            "tombstones": {},
+        }
+        out = _filter_excluded_paths(m, {"gstack": ["projects/*/repo-mode.json"]})
+        # claude source untouched.
+        assert out["sources"]["claude"]["files"]["projects/-foo/memory/role.md"]["sha256"] == "b"
+        # gstack source filtered.
+        assert "projects/myapp/repo-mode.json" not in out["sources"]["gstack"]["files"]
+
+
+class TestMigrateConfigCommand:
+    """Track 5C: mm migrate-config adds missing recommended excludes,
+    is idempotent, and preserves user-customized fields."""
+
+    def _write_explicit_config(self, tmp_path, *, exclude_patterns=None):
+        config_path = tmp_path / "config.toml"
+        gstack_src: dict = {
+            "name": "gstack",
+            "path": str(tmp_path / ".gstack"),
+            "type": "generic",
+            "include_dirs": ["projects"],
+        }
+        if exclude_patterns is not None:
+            gstack_src["exclude_patterns"] = exclude_patterns
+        config = {
+            "device": {"id": "dev-a", "name": "A"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"max_file_size": 52_428_800, "sources": [gstack_src]},
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        save_config(config, config_path)
+        return config_path
+
+    def _redirect_lock(self, monkeypatch, tmp_path):
+        lp = tmp_path / "test.lock"
+        monkeypatch.setattr("mind_meld.config.LOCK_PATH", lp)
+        monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", lp)
+
+    def test_idempotent_on_already_migrated_config(self, tmp_path, monkeypatch):
+        """Running migrate-config twice is a no-op the second time."""
+        from mind_meld.config import DEFAULT_SOURCES
+
+        gstack_default = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        config_path = self._write_explicit_config(
+            tmp_path, exclude_patterns=list(gstack_default["exclude_patterns"])
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        result = runner.invoke(app, ["migrate-config", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "already up to date" in result.output
+
+    def test_adds_missing_recommended_excludes(self, tmp_path, monkeypatch):
+        """A source without exclude_patterns gets the recommended set."""
+        config_path = self._write_explicit_config(tmp_path, exclude_patterns=None)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+        # Auto-confirm the inner "Apply these updates?" prompt.
+        result = runner.invoke(app, ["migrate-config", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        loaded = config_module.load_config(config_path)
+        gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
+        assert "projects/*/repo-mode.json" in gstack["exclude_patterns"]
+        assert "projects/*/land-deploy-confirmed" in gstack["exclude_patterns"]
+
+    def test_dry_run_does_not_write(self, tmp_path, monkeypatch):
+        config_path = self._write_explicit_config(tmp_path, exclude_patterns=None)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        result = runner.invoke(app, ["migrate-config", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        loaded = config_module.load_config(config_path)
+        gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
+        # exclude_patterns NOT added.
+        assert "exclude_patterns" not in gstack or not gstack["exclude_patterns"]
+
+    def test_preserves_user_added_excludes(self, tmp_path, monkeypatch):
+        """Migration appends missing recommended globs to whatever the
+        user already had — does not wipe their custom entries."""
+        config_path = self._write_explicit_config(
+            tmp_path, exclude_patterns=["my-custom-pattern.txt"]
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        result = runner.invoke(app, ["migrate-config", "--yes"])
+        assert result.exit_code == 0, result.output
+        loaded = config_module.load_config(config_path)
+        gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
+        assert "my-custom-pattern.txt" in gstack["exclude_patterns"]
+        assert "projects/*/repo-mode.json" in gstack["exclude_patterns"]
+
+
+class TestMmStatusMissingExcludesWarning:
+    """5C-9: mm status surfaces the missing-excludes signal."""
+
+    def test_status_warns_when_excludes_missing(self, tmp_path, monkeypatch):
+        # Minimal config with an explicit gstack source missing excludes.
+        config_path = tmp_path / "config.toml"
+        gstack_dir = tmp_path / ".gstack"
+        (gstack_dir / "projects" / "myapp").mkdir(parents=True)
+        config = {
+            "device": {"id": "dev-a", "name": "A"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(gstack_dir),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                    }
+                ],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        save_config(config, config_path)
+        backend = LocalBackend(tmp_path / "storage")
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "missing recommended excludes" in result.output
+        assert "gstack" in result.output
+
+
+class TestMmSourcesShowsExcludeCounts:
+    """5C-8: mm sources prints per-source exclude_patterns match counts."""
+
+    def test_sources_table_includes_excluded_column(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.toml"
+        gstack_dir = tmp_path / ".gstack"
+        proj = gstack_dir / "projects" / "myapp"
+        proj.mkdir(parents=True)
+        (proj / "repo-mode.json").write_text("{}")
+        (proj / "role.md").write_text("kept")
+        config = {
+            "device": {"id": "dev-a", "name": "A"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(gstack_dir),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "exclude_patterns": ["projects/*/repo-mode.json"],
+                    }
+                ],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        save_config(config, config_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+        result = runner.invoke(app, ["sources"])
+        assert result.exit_code == 0, result.output
+        assert "Excluded" in result.output
+
+
+class TestMmLogCommand:
+    """5C-5: `mm log` queries pull-history.jsonl with filters and formats."""
+
+    def test_log_empty_when_no_history(self, tmp_path, monkeypatch):
+        # Isolate the history dir.
+        monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", tmp_path / "mm_state")
+        # Need a valid config to construct the typer context cleanly.
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(tmp_path / "storage")},
+                "sync": {"max_file_size": 52_428_800, "claude_dir": str(tmp_path / ".claude")},
+                "crypto": {"argon2_memory_kb": 1024},
+            },
+            config_path,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+        result = runner.invoke(app, ["log"])
+        assert result.exit_code == 0, result.output
+        assert "No log entries" in result.output
+
+    def test_log_filters_by_action(self, tmp_path, monkeypatch):
+        from mind_meld import pullhistory
+
+        monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", tmp_path / "mm_state")
+        for i in range(3):
+            pullhistory.append(
+                verb="pull",
+                device="dev-a",
+                source="gstack",
+                rel_path=f"f-{i}.md",
+                action="written",
+            )
+        for i in range(2):
+            pullhistory.append(
+                verb="pull",
+                device="dev-a",
+                source="gstack",
+                rel_path=f"e-{i}.json",
+                action="excluded",
+            )
+
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(tmp_path / "storage")},
+                "sync": {"max_file_size": 52_428_800, "claude_dir": str(tmp_path / ".claude")},
+                "crypto": {"argon2_memory_kb": 1024},
+            },
+            config_path,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+        result = runner.invoke(app, ["log", "--action", "excluded", "--format", "jsonl"])
+        assert result.exit_code == 0, result.output
+        lines = [line for line in result.output.strip().split("\n") if line.startswith("{")]
+        assert len(lines) == 2
+        for line in lines:
+            rec = json.loads(line)
+            assert rec["action"] == "excluded"
+
+
 class TestSyncLog:
     def test_writes_log_per_project(self, tmp_path):
         """Sync log should be written to each affected project dir."""

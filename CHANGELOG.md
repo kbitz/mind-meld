@@ -2,6 +2,106 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.9.1] - 2026-04-25
+
+**Track 5C (exclude_patterns + log + migration UX) — additive.** Per-source
+`exclude_patterns` glob list lets gstack and other sources opt out of syncing
+per-machine artifacts (gstack `repo-mode.json` 7-day TTL caches and
+`land-deploy-confirmed` deploy markers, both recomputed locally on every
+machine). Default gstack source ships with the recommended globs. Existing
+configs need to opt in via the new `mm migrate-config` command (idempotent,
+acquires the mm lockfile, preserves user-customized excludes by appending).
+
+**Consumer-boundary filter wiring (codex-2 #1 + #2 fix).** New
+`_filter_excluded_paths(manifest, exclude_map)` helper applies at TWO call
+sites: `_pull_core` (peer manifests, before `collect_tombstones` and per-
+source download) and `_push_core` (the manifest returned from
+`_recover_prior_manifest`, before `generate_tombstones`). Critically NOT at
+`_fetch_remote_manifest` — `mm gc` reads raw manifests via that path to
+compute referenced blobs, and a filtered manifest there would mark live peer
+blobs as orphans (the gc-bypass hazard pinned by `test_mm_gc_does_not_orphan_
+excluded_path_blobs`).
+
+**Tombstone-suppression invariant.** Adding a path to `exclude_patterns`
+must NOT generate a deletion tombstone on the next push (kb-mbp 2026-04-24
+regression: without consumer-boundary filtering, every newly-excluded path
+ships a tombstone that propagates to peers). Removing a glob brings the
+path back as new (no spurious tombstone). Sidecar recovery is filtered too
+so a corrupt-manifest recovery on a freshly-migrated config doesn't re-
+introduce pre-exclude paths via the sidecar.
+
+**`mm log` subcommand.** Append-only JSONL log at
+`~/.config/mind-meld/pull-history.jsonl` records every per-file pull/push
+action ("written" / "merged" / "skipped" / "conflicted" / "excluded" /
+"uploaded" / "failed"). 1MB cap with line-boundary rotation to `.1` (no
+byte-tail truncate; reader tolerates a torn first line in `.1` as the
+crash-mid-rotate fingerprint). Filters: `--source`, `--since`, `--action`,
+`--verb`, `--limit`, `--format {jsonl|table}`. Useful for "what conflicted
+on date X" audits even after the conflict files are resolved, and for
+"what is my exclude_patterns actually filtering" via `mm log --action
+excluded`. fcntl.flock on every append; mode 0600.
+
+**`mm migrate-config` command.** Diffs current `[[sync.sources]]` against
+`DEFAULT_SOURCES` and proposes adding any missing recommended
+`exclude_patterns` globs. Idempotent. `--yes` skips the inner confirm prompt
+for scripted invocation; `--dry-run` shows the diff without writing. Wholesale
+replaces the `[[sync.sources]]` array (per `patch_config_on_disk`'s contract);
+other `[sync]` keys (`max_file_size`) survive via per-field merge.
+
+**Migration UX (visible-failure contract).** Interactive `mm pull` / `mm push`
+prompt-once if recommended excludes are missing. autopull/autopush NEVER
+auto-mutate config — they record the missing-excludes signal to
+`~/.config/mind-meld/migration-state.json` and let `mm status` surface it
+on the next interactive run. Without this, a wedged config would silently
+keep producing conflict copies forever with no signal that
+`mm migrate-config` would fix it.
+
+**`mm sources` extension.** Adds an "Excluded" column counting how many files
+each source's `exclude_patterns` actually matched on this scan. Diagnostic
+only — sanity-check an over-broad glob (e.g. `**/*.json` skipping
+everything) before pulling on every machine.
+
+**`mm status` extension.** Surfaces "Config missing recommended excludes for
+source(s) X — run `mm migrate-config` to add" so users notice their config
+drift even when only autopull/autopush is running.
+
+38 new tests (5 IRON RULE regression pins: kb-mbp two-device case,
+tombstone-on-exclude-transition, tombstone-on-unexclude-transition, sidecar
+bypass guard, mm gc safety). 758 pass.
+
+### Added
+- `exclude_patterns: list[str]` field on `[[sync.sources]]` entries.
+  `_validate_exclude_patterns` rejects non-list and non-string-element
+  shapes at config load time (not mid-sync).
+- `gstack` `DEFAULT_SOURCES` entry now includes
+  `["projects/*/repo-mode.json", "projects/*/land-deploy-confirmed"]`.
+- `_filter_excluded_paths(manifest, exclude_map) -> dict` consumer-boundary
+  helper; `_build_exclude_map(config)` companion that walks `get_sources`.
+- `src/mind_meld/pullhistory.py` — append-only JSONL writer + reader
+  with fcntl flock, 0600 perms, line-boundary rotation at 1MB.
+- `mm log` subcommand with `--source`, `--since`, `--action`, `--verb`,
+  `--limit`, `--format` flags.
+- `mm migrate-config` command with `--yes` and `--dry-run` flags.
+- Interactive `mm pull` / `mm push` migration prompt + auto-command
+  breadcrumb at `~/.config/mind-meld/migration-state.json`.
+- `mm sources` "Excluded" column.
+- `mm status` "missing recommended excludes" warning.
+
+### Changed
+- `manifest._is_excluded(rel_path, exclude_patterns=None)` — extended to
+  accept per-source globs; backward-compatible default.
+- `manifest._record_file` and `walk_claude_source` now accept
+  `exclude_patterns`; `walk_source` threads it for `claude` types and
+  `walk_generic_source` reads it from the source dict.
+- `_upload_changed_blobs` accepts `src_name` for `pullhistory.append`
+  bookkeeping; legacy callers without source context still work
+  (None → no log entry).
+
+### Codex review notes (out of scope; tracked separately)
+- Codex-1 #14 left two `mm conflicts` count-diff tests in test_conflict_copy.py
+  asserting "6 vs 9" depending on platform fnmatch. Out of 5C scope; the
+  count diff is documented in the resolve-mode flow but not regression-pinned.
+
 ## [0.9.0] - 2026-04-25
 
 **Track 5B (Pull / resolve / conflicts UX surfaces) — BREAKING.** Vocabulary

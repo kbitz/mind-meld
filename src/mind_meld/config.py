@@ -49,6 +49,16 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             ".welcome-seen",
             ".codex-desc-healed",
         ],
+        # Per-machine artifacts that gstack recomputes on each device. Syncing
+        # them produces a churning conflict file every pull (kb-mbp 2026-04-24).
+        # repo-mode.json: 7-day TTL solo-vs-collaborative cache, recomputed
+        # locally. land-deploy-confirmed: deploy-config-hash markers, computed
+        # per-machine. Excluding at the per-source glob level keeps the global
+        # EXCLUDED list focused on universal junk (.git, *.tmp, etc.).
+        "exclude_patterns": [
+            "projects/*/repo-mode.json",
+            "projects/*/land-deploy-confirmed",
+        ],
     },
 ]
 
@@ -149,6 +159,29 @@ def _validate_sources(sources: Any) -> None:
         if name in seen_names:
             raise ConfigError(f"config: duplicate source name '{name}'.")
         seen_names.add(name)
+        if "exclude_patterns" in src:
+            _validate_exclude_patterns(src["exclude_patterns"], name)
+
+
+def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
+    """Check exclude_patterns is a list[str] of compilable fnmatch globs.
+
+    fnmatch accepts any string as a pattern (no syntax errors), so we only
+    enforce the structural shape (list of strings). This guards the malformed-
+    schema branch (e.g. user wrote a single string instead of a list) at load
+    time so push/pull don't crash mid-walk with a TypeError on iteration.
+    """
+    if not isinstance(patterns, list):
+        raise ConfigError(
+            f"config: source '{source_name}' exclude_patterns must be a list, "
+            f"got {type(patterns).__name__}."
+        )
+    for j, pat in enumerate(patterns):
+        if not isinstance(pat, str):
+            raise ConfigError(
+                f"config: source '{source_name}' exclude_patterns[{j}] must be "
+                f"a string, got {type(pat).__name__}."
+            )
 
 
 def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
