@@ -1,28 +1,22 @@
-# Roadmap — Phase 1 (v0.x → v1.0 cleanup sweep)
+# Roadmap — Phase 1 (v0.x → v1.0)
 
-Organized as **Groups > Tracks > Tasks**. Groups are sequential — complete
-Group 1 before starting Group 2. Tracks within a group run in parallel
-(file-ownership-disjoint). Pre-flight items are trivial fixes any agent can
-pick up.
+Organized as **Groups > Tracks > Tasks**. A Group is a wave of PRs that land
+together — parallel-safe within, dependency-ordered between. Tracks within a
+group must be set-disjoint on `_touches:_` footprints. Pre-flight items are
+trivial fixes any agent can pick up.
 
 Items originate from the 2026-04-22 `/full-review` audit, review follow-ups
-accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x, /plan-eng-review on
-2026-04-23, and the 2026-04-24 first-pull conflict-UX session.
-Every item targets the v1.0 release.
+accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x/v0.9.x/v0.10.0, /plan-eng-review
+on 2026-04-23, the 2026-04-24 first-pull conflict-UX session, the v0.9.4 Track 5D
+adversarial review, the 2026-04-25 v0.9.5 auto-upgrade /plan-ceo-review, and
+`docs/designs/fleet-retro.md` (2026-04-27 design doc for v0.11.0).
 
-**Groups 1-5 fully shipped.** Tracks 5A / 5B / 5C / 5E shipped through
-v0.9.2, the v0.9.3 hotfix patch added `config.yaml` to the gstack source's
-default `exclude_patterns`, and Track 5D shipped as v0.9.4 (adversarial-
-review follow-ups hardening the v0.8.15 Track 5A ship: `_find_conflict_files`
-tuple-key dedup + `_register_and_save` order swap + push-time self-heal).
-**v0.9.5 ships the auto-upgrade nudge** (out-of-scope for the v1.0 cleanup
-sweep, but included here as a reference point — see CHANGELOG.md for the
-full feature description and CLAUDE.md "Auto-upgrade nudge" + "Release
-discipline" sections for architecture). See `docs/PROGRESS.md` for the
-full version history. Group 1's `constants.py` preflight was dropped after
-a `/plan-eng-review` cohesion check (2 of 4 constants are single-module,
-extraction would split the cohesive `FORMAT_VERSION`/`FORMAT_VERSION_LEGACY_V1`
-pair).
+**Cleanup-sweep set (Groups 1–5) shipped through v0.9.4.** v0.9.5
+(auto-upgrade nudge), v0.9.6 (public-readiness scrub), and v0.10.0
+(per-machine source toggle) shipped outside the original cleanup-sweep
+plan — see PROGRESS.md and CHANGELOG.md. Three new Groups now planned:
+**Group 6** (release infrastructure polish), **Group 7** (mm-events
+foundation), and **Group 8** (retro-fleet skill — depends on Group 7).
 
 ---
 
@@ -107,6 +101,85 @@ _Track 5D (Track 5A adversarial-review follow-ups — `_find_conflict_files` tup
 
 ---
 
+## Group 6: Release infrastructure polish
+_Depends on: none_
+
+Single-track Group bundling release-discipline polish that pairs with the
+v0.9.5 auto-upgrade nudge. Independent of the auto-upgrade code path
+(nudge reads `/repos/.../tags`, not `/releases/latest`); ships independently
+and doesn't block Group 7 or Group 8.
+
+### Track 6A: GitHub Releases backfill
+_1 task . ~30 min (CC) . low risk . no source code changes_
+_touches:_
+
+- **Backfill GitHub Releases for ~30 existing tags** -- create a release entry per tag using `gh release create vX.Y.Z --notes-from-tag` (or pulling notes from `CHANGELOG.md`). Unlocks RSS feed, downloadable-asset UX, and release-notes surfacing for users browsing the repo. Does not alter the auto-upgrade code path. _GitHub CLI invocation, 0 source LOC._ (S) [plan-ceo-review]
+
+---
+
+## Group 7: mm-events foundation (event capture)
+_Depends on: none_
+
+Implements the foundation for the fleet-aware retro per
+`docs/designs/fleet-retro.md`: per-device JSONL event log written on every
+push, capturing `mm-push`, `git-snapshot`, and `sessions-snapshot` events.
+New `mm-events` source surfaces the events on synced storage; `_push_core`
+tail-position write inside a hard time budget; `mm gc` reaps after 90 days
+via existing tombstone plumbing. No external API dependency.
+
+**Pre-flight** (shared-infra; serial, one-at-a-time):
+- ANSI-escape sanitization on peer-supplied paths -- wrap `rel_path` print sites in `cli.py:917,962,1082,1096` (and Track 5B's pull-summary additions) with `rich.markup.escape()`. A compromised peer could plant escape chars in synced filenames; current rendering passes them through. _src/mind_meld/cli.py, ~6 sites × 1 LOC._ (XS) [plan-ceo-review]
+- `walk_generic_source` double-hash dedup -- when an `include_files` entry sits inside an `include_dirs` directory, the file gets hashed twice (last-write-wins on identical bytes; wasted CPU/IO grows with file size and overlap count). Dedup `collected_paths` via `seen: set[Path]` before the hashing loop, mirroring the Track 5D pattern. _src/mind_meld/manifest.py:310, ~5 lines + 1 test._ (XS) [ship adversarial 2026-04-25]
+- `_find_conflict_files` case-insensitive dedup -- normalize via `os.path.normcase(str(conflict_path))` on macOS for the dedup key (preserve original `conflict_path` in the emitted hit). Very low likelihood — requires user config with mismatched case AND nested `include_files`. _src/mind_meld/cli.py, ~3 lines._ (XS) [ship adversarial 2026-04-25]
+- `register_device` `registered:` timestamp preservation -- fetch-then-write so the iCloud `.icloud` placeholder TOCTOU self-heal path doesn't overwrite first-registration time. The `registered` field semantically means "first registration"; current code regresses to "last registration." _src/mind_meld/devices.py:30, ~5 lines + 1 test._ (XS) [ship adversarial 2026-04-25]
+- pyproject.toml hatchling `force-include` for `src/mind_meld/skills` -- ships skill files inside the wheel via package data. Required by Group 8's symlink installer to find files via `importlib.resources`. _pyproject.toml, ~3 lines._ (XS)
+- DEFAULT_SOURCES `mm-events` entry -- adds the new mm-owned synced source pointing at `~/.local/share/mind-meld/events/`. Path-existence bootstrap creates the dir (mode 0700, parents=True) before first event write. _src/mind_meld/config.py, ~10 lines._ (XS)
+
+### Track 7A: events.py module
+_4 tasks . ~1 day (human) / ~30 min (CC) . medium risk . src/mind_meld/events.py (new)_
+_touches: src/mind_meld/events.py, tests/test_events.py_
+
+Pure-logic foundation. Fully isolated from cli.py wiring.
+
+- **`canonicalize_remote_url` table-tested function** -- normalize git remote URLs to `<host>/<org>/<repo>` form: strip scheme, user/auth segment, port, trailing `.git`; lowercase host, preserve path case. Required for `(remote, sha)` dedup across machines. Multi-remote repos: only `origin` captured (v1 limitation); cherry-picked commits counted separately (v1 limitation). _src/mind_meld/events.py, ~30 lines + 5-row table test._ (S)
+- **`walk_git_projects` with budget + concurrency** -- discovers `.git/` dirs under configured roots; `ThreadPoolExecutor(max_workers=8)`; per-repo subprocess timeout `max(500, total_budget_remaining // repos_remaining)` capped at 2000ms. Single git command per repo: `git -C <path> log --since=<iso> --numstat -M -C --format='%x1e%H%x09%aI%x09%ae%x09%s'`. Parser handles binary rows (`-\t-\tpath`), rename rows (`old => new` → preserve `new`), empty/merge commits with no numstat rows. Per-repo failures: silent skip + emit one `git_snapshot_skip` line for forensic trail. _src/mind_meld/events.py, ~120 lines + parser tests._ (M)
+- **`walk_session_metadata` with Conductor-workspace detection** -- `os.scandir`-based 2-level walk of `~/.claude/projects/*/`. Sets `ephemeral: True` if decoded project path matches `*/conductor/workspaces/*` (matched on the *decoded path string*, NOT path existence — Conductor workspaces are routinely destroyed). Perf target: <500ms for 10k files. _src/mind_meld/events.py, ~60 lines + path-pattern test._ (S)
+- **Cursor read/write + write_push_event with mandatory flock** -- `~/.config/mind-meld/event-cursor.json` (mode 0600, fcntl.flock) and per-device daily JSONL (mode 0600, O_APPEND under flock). Lock-order invariant: cursor flock is INNERMOST; release before any other lock acquisition. First-run cursor returns `now - 30d`. _src/mind_meld/events.py, ~50 lines + concurrent-writer test._ (S)
+
+### Track 7B: _push_core wiring + gc retention
+_3 tasks . ~0.5 day (human) / ~20 min (CC) . medium risk . src/mind_meld/cli.py_
+_touches: src/mind_meld/cli.py, tests/test_integration.py_
+
+Integrates events.py into the push hot path with a hard time budget.
+
+- **`_push_core` tail-position event write** -- after `upgrade.emit_nudge_if_due()`, call `events.write_push_event(...)`. Captures 1× `mm-push` event + N× `git-snapshot` (per-repo) + M× `sessions-snapshot` (per-project). Preserves the v0.9.5 nudge tail-position invariant (events are after the nudge — local file IO doesn't stack with cold-cache HTTP latency). Gated on `not dry_run`. _src/mind_meld/cli.py, ~25 lines._ (S)
+- **Time budget: 500ms interactive / 250ms autopush, with silent-skip-on-exceed** -- partial events already written are kept; remaining capture aborts silently. Cursor advanced to `now` regardless (some commits in abort window may be missed; retro is forensic-only — perfect commit accounting requires retry/resume infrastructure that's overkill for v1). Skill output includes "budget abort on <date>" breadcrumb when applicable. Failure handling uses `mm: notice:` (NOT `mm: warning:`) per CLAUDE.md curated taxonomy. _src/mind_meld/cli.py + src/mind_meld/events.py, ~20 lines + budget-exceed test._ (S)
+- **`mm gc` 90-day events retention via tombstone reuse** -- gc deletes JSONL files older than 90 days locally; the next push generates deletion tombstones via the existing tombstone-on-absent-file plumbing (which propagates to peers as normal). No new GC layer; consistent with truth-based-manifests invariant. _src/mind_meld/cli.py, ~10 lines + reaping test._ (XS)
+
+---
+
+## Group 8: retro-fleet skill (consumer)
+
+The user-facing surface of the fleet-aware retro (depends on Group 7's
+event log existing): a skill shipped in the mm
+wheel and symlinked into `~/.claude/skills/` at `mm init`. Reads the synced
+event log across all devices, dedups by `(canonical_remote_url, sha)`, and
+renders gstack `/retro`-shaped markdown. Skill is acknowledged as an
+mm-internal API consumer; schema versioning lives in `events.py` and the
+skill's reader. Locked output format owned by mm (not coupled to gstack
+evolution).
+
+### Track 8A: SKILL.md + symlink installer + CI smoke test
+_4 tasks . ~1.5 days (human) / ~45 min (CC) . high risk . src/mind_meld/skills/retro-fleet/SKILL.md, src/mind_meld/cli.py_
+_touches: src/mind_meld/skills/retro-fleet/SKILL.md, src/mind_meld/cli.py, tests/test_skill_link.py_
+
+- **`retro-fleet/SKILL.md` content with locked output format** -- skill file that runs Python (or jq) directly to read mm-owned files. Reads `~/.local/share/mind-meld/events/*-*.jsonl` (mm-owned, schema-versioned) + `~/.gstack/analytics/skill-usage.jsonl` + `~/.gstack/analytics/eureka.jsonl` + `~/.gstack/retros/*.json` (read-only, **schema dependency is load-bearing — reader must tolerate missing fields and never crash if gstack ships a breaking change**). Aggregation: git dedup by `(canonical_remote_url, sha)`; sessions sum across `claude_dir` with ephemeral split; skills counts marked "this machine only". Author filter via `git config --global user.email` + optional `[retro].author_emails` config (NO derived-email persistence — avoids cross-machine "which Mac wins" footgun). Locked output format per design doc. _src/mind_meld/skills/retro-fleet/SKILL.md, ~150 lines._ (M)
+- **`_ensure_retro_skill_link` symlink installer** -- two-state op via `importlib.resources.files("mind_meld") / "skills" / "retro-fleet"`. Skip if `~/.claude/skills/` doesn't exist (no Claude Code installed); reuse existing symlink if target matches; emit `mm: notice:` and skip if a non-symlink exists at the target. Hatchling default = unzipped wheels, so `files()` returns a real Path. _src/mind_meld/cli.py, ~30 lines._ (S)
+- **Wire installer into `mm init` (always) + `_push_core` head (24h-TTL gated)** -- `~/.config/mind-meld/.skill-link-checked` touch-mtime gate keeps autopush hot path negligible (one `os.stat` on the marker, skip if recent). NOT called from the v0.9.5 transition hook (lock-order rules: NEVER acquire mm lockfile while holding upgrade-state's flock). `pipx reinstall` self-heal via the 24h check on the next push. _src/mind_meld/cli.py, ~15 lines._ (XS)
+- **CI smoke test pinning wheel ships skill files + release-checklist manual smoke** -- `assert (importlib.resources.files("mind_meld") / "skills" / "retro-fleet" / "SKILL.md").is_file()` in `tests/test_wheel.py` + one-line addition to release checklist requiring manual verification that Claude Code follows the symlink and loads `retro-fleet`. Catches a future build-backend change to zipped wheels before users do. _tests/test_wheel.py + release checklist, ~15 lines._ (XS)
+
+---
+
 ## Execution Map
 
 Adjacency list (who depends on whom):
@@ -117,14 +190,34 @@ Adjacency list (who depends on whom):
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
 - Group 5 ← {}     ✓ Complete (5A/5B/5C/5E shipped through v0.9.2 + v0.9.3 hotfix + 5D shipped v0.9.4)
+- Group 6 ← {}     active (release infrastructure polish; ships independently)
+- Group 7 ← {}     active (mm-events foundation — fleet-retro v0.11.0)
+- Group 8 ← {7}    blocked on 7 (retro-fleet skill consumer)
 ```
 
-**Active total: 0 in-flight Groups. Phase 1 complete — see Future for Phase 2+ items.**
+Track detail per active group:
+
+```
+Group 6: Release infrastructure polish
+  +-- Track 6A ........... ~30 min (CC) .. 1 task
+
+Group 7: mm-events foundation
+  Pre-flight .............. ~30 min (6 items)
+  +-- Track 7A ........... ~30 min (CC) .. 4 tasks .. events.py module
+  +-- Track 7B ........... ~20 min (CC) .. 3 tasks .. _push_core wiring + gc
+
+Group 8: retro-fleet skill
+  +-- Track 8A ........... ~45 min (CC) .. 4 tasks .. skill + symlink + CI
+```
+
+**Active total: 3 in-flight Groups (6, 7, 8). 4 Tracks. 12 tasks + 6 pre-flight items.**
 **Shipped: Groups 1, 2, 3, 4, 5 (Tracks 5A + 5B + 5C + 5D + 5E + Group 5 preflight + v0.9.3 hotfix) — see PROGRESS.md.**
 
 ---
 
 ## Future (Phase 2+)
+
+Items triaged but deferred. Not organized into Groups/Tracks.
 
 - **Selective sync (`sync.include` / `sync.exclude`)** — per-project filtering so users with dozens of Claude projects can sync just the 2-3 they actively use across machines. Config schema + glob validation + walker integration + CLI flag surface. _src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/cli.py, ~180 lines._ (M) _Deferred because: no user demand signal yet; revisit on first support case from someone with dozens of projects who wants to sync just 2-3._
 
@@ -139,6 +232,14 @@ Adjacency list (who depends on whom):
 - **PyPI publish workflow** — `.github/workflows/release.yml` that builds + publishes to PyPI on git tag push. Uses `hatchling` build backend (already configured). Currently users install via `pip install -e .` from a local clone; PyPI distribution would let someone `pip install mind-meld` cleanly. Commits to a public package namespace (name squatting, can't easily rename); need to decide on trusted-publisher vs API token auth. Tests-green prereq satisfied by Group 4 (CI shipped v0.8.11). _.github/workflows/release.yml, ~50 lines._ (S) _Deferred because: observation-bar — land when "how do I install this" becomes friction. No user demand signal today._
 
 - **Cross-device source rename drift partitions sync** — Track 2A's type-keyed sync-log fix addressed *same-device* renames. Cross-device, manifests are still keyed by `src_name` (`manifest.py`, `_pull_core`'s `local_sources_map[src_name]` lookup), so if device A renames "claude" → "work-claude" but B keeps "claude", B's pull skips A's manifest via the unknown-source warning path. Codex adversarial 2026-04-24. Fix: cross-device source identity needs to key off `(type, signature)` or similar, not raw name. Bigger design change — likely a follow-up track or a SPEC.md-documented known limitation for v1.0. _src/mind_meld/cli.py, src/mind_meld/manifest.py, SPEC.md, ~100 lines._ (M-L) _Deferred because: no fleet-rename incident yet; documenting as a known limitation is enough for v1.0. Reopen on first support case where two devices use mismatched source names._
+
+- **`mm upgrade-info` (or `mm version --check`) explicit-check command** — Today the auto-upgrade nudge fires once per 24h on autopull/autopush/interactive-pull/interactive-push and `mm status` surfaces cached state. There's no "check NOW" command. If users want one, the cleanest shape is likely `mm status --refresh` (a flag on the existing command) rather than a new top-level command. _Effort: S._ (S) [plan-ceo-review] _Deferred because: original write-up explicitly says "Watch for real demand before designing — ship the baseline, see if `mm status` is enough."_
+
+- **Approach B: subprocess pipx upgrade execution** — v0.9.5 ships nudge-only ("Approach A"). Approach B would add `mm upgrade` running pipx as a subprocess so the user doesn't type the install command themselves. Real complexity: managed-pipx detection (Homebrew / asdf), rollback ambiguity if the install fails partway, TTY detection for interactive Y/n prompts. Process replacement itself is fine (`execvp("pipx", ...)` works); the deferred work is UX + edge cases. _Effort: M._ (M) [plan-ceo-review] _Deferred because: original write-up says "Revisit only after Approach A has been in production for ≥1 release cycle and the printed-command UX feels insufficient."_
+
+- **`MM_NO_VERSION_CHECK=1` env var as alternate CI override** — Redundant with the `--no-check-version` flag. Add only if env-var ergonomics surface as real demand (e.g., a CI hook that wants to set the override once for all mm invocations). _Effort: XS._ (XS) [plan-ceo-review] _Deferred because: original write-up says "Add only if env-var ergonomics surface as real demand."_
+
+- **Pagination beyond 100 tags for `/repos/kbitz/mind-meld/tags`** — `upgrade.py` fetches with `?per_page=100` (max). At current release velocity (30 tags / 6 months) this gives ~3 years of headroom. Past 100 tags, latest detection may miss the highest semver if GitHub's tag sort places older tags on page 1. Revisit when tag count crosses ~80; either add Link-header pagination or trust GitHub's creation-desc default. _Effort: S._ (S) [plan-eng-review] _Deferred because: ~3 years of headroom before the cap matters._
 
 ---
 
