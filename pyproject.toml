@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mind-meld"
-version = "0.10.0"
+version = "0.10.1"
 description = "Sync Claude Code sessions and AI developer context across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"
@@ -42,6 +42,11 @@ mm = "mind_meld.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mind_meld"]
+# src/mind_meld/skills/ is a real subpackage (__init__.py present) so it
+# ships automatically via packages=. Group 8's retro-fleet/SKILL.md files
+# land inside that subpackage and are findable via
+# importlib.resources.files("mind_meld") / "skills". No force-include
+# needed; force-include + packages= would double-ship the same files.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
