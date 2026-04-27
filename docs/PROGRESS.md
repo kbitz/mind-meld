@@ -34,12 +34,16 @@
 | 0.2.0   | (pre-v0.3) | Multi-source sync with gstack support |
 | 0.1.x   | (pre-v0.2) | iCloud-only backend, autopull/autopush for Claude Code; scoped sync to memory/todos |
 
-## Current phase: pre-1.0 cleanup sweep (v0.x → v1.0)
+## Current phase: v0.x → v1.0
 
-All work is driving toward a single v1.0 release that cleans up correctness
-bugs, decomposition debt, and multi-source assumption lag from the early PRs,
-then layers on three pre-1.0 features (selective sync, mtime hash cache,
-three-way merge base).
+The original cleanup-sweep set (Groups 1–5) shipped through v0.9.4. Three
+post-cleanup releases shipped outside the original plan: v0.9.5
+(auto-upgrade nudge), v0.9.6 (public-readiness scrub), and v0.10.0
+(per-machine source toggle). Three new Groups now planned to land before
+v1.0: Group 6 (release infrastructure polish — GitHub Releases backfill),
+Group 7 (mm-events foundation — fleet-aware retro per
+`docs/designs/fleet-retro.md`), and Group 8 (retro-fleet skill consumer,
+depends on Group 7).
 
 See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
 
@@ -131,6 +135,44 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   an inert orphan instead of an inverse half-state; new
   `_ensure_device_registered` push-time self-heal that retroactively
   fixes any pre-v0.9.4 victims of the v0.8.15..v0.9.3 half-state).
+- **Auto-upgrade nudge:** ✅ shipped in v0.9.5. `mind_meld.upgrade` runs a
+  leading-edge tag-based version check and emits a `mm: notice:` line
+  nudging the fleet to upgrade. Approach A (nudge-only — user runs the
+  printed pipx command); subprocess execution (Approach B) deferred per
+  /plan-ceo-review. Three hook seams in cli.py: transition detection
+  after each `load_config`, nudge emission at `_pull_core` / `_push_core`
+  tail, status surfacing in `mm status`. Lock-order invariants pinned in
+  CLAUDE.md. New `pullhistory` row class (`verb: "self-upgrade"` with
+  `old_version`/`new_version`).
+- **Public-readiness scrub:** ✅ shipped in v0.9.6. Final pass before
+  flipping the repo to public.
+- **Per-machine source toggle:** ✅ shipped in v0.10.0.
+  `[sync].disabled_sources: list[str]` lists source names to skip on this
+  device only (config.toml is per-machine, never synced). New CLI surface:
+  `mm enable-source` / `mm disable-source` / `mm reconfigure-sources`.
+  `_filter_disabled_sources` applies at TWO consumer-boundary call sites
+  (mirrors `_filter_excluded_paths` shape from Track 5C). Tombstone-
+  suppression invariant: disabling a source does NOT propagate fleet-wide
+  deletion. New `seen_sources.py` module (mirrors `pullhistory.py`)
+  tracks per-machine source acknowledgment with lazy-init seed (migration
+  invariant: existing users don't see spurious "new source" hints on
+  upgrade). `_prompt_source_toggle` extracted as the single source of
+  truth for the per-source Y/N prompt copy + default rule.
+- **Group 6 (Release infrastructure polish):** planned. GitHub Releases
+  backfill for ~30 existing tags via `gh release create`. Pairs with v0.9.5
+  release-discipline convention; ships independently.
+- **Group 7 (mm-events foundation, fleet-retro v0.11.0):** planned per
+  `docs/designs/fleet-retro.md`. Per-device JSONL event log (`mm-push` +
+  `git-snapshot` + `sessions-snapshot` events) written at `_push_core`
+  tail position inside a hard time budget. New `mm-events` source on
+  synced storage; `mm gc` reaps after 90 days via existing tombstone
+  plumbing. Pre-flight bundles 4 Track 5D adversarial follow-ups + ANSI-
+  escape sanitization on peer-supplied paths.
+- **Group 8 (retro-fleet skill consumer):** planned. Skill shipped in mm
+  wheel, symlinked into `~/.claude/skills/` at `mm init` (24h-TTL self-heal
+  via push-head hook). Reads synced event log across all devices, dedups
+  by `(canonical_remote_url, sha)`, renders gstack `/retro`-shaped markdown
+  with locked output format owned by mm.
 
 ### Version source of truth
 
