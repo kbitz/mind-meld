@@ -353,7 +353,37 @@ def walk_generic_source(
         if path.exists() and path.is_file():
             collected_paths.append(path)
 
+    # Dedup by filesystem identity (Group 7 preflight #2 + D6). When an
+    # include_files entry sits inside an include_dirs directory (e.g. user
+    # writes include_files: ["projects/notes.md"] AND include_dirs:
+    # ["projects"]), the same on-disk file lands in collected_paths twice.
+    # Without dedup, _record_file hashes it twice — wasted CPU AND, on
+    # case-insensitive volumes (APFS default) with case-mismatched config,
+    # produces two distinct rel keys for one inode. (st_dev, st_ino) is
+    # true filesystem identity — works on macOS (case-insensitive), Linux
+    # (case-sensitive), symlinks, hard links — and never normalizes the
+    # manifest key shape, so cross-platform peer compatibility is
+    # preserved (codex outside-voice finding #5).
+    #
+    # Sort by relative-to-base path before dedup so the rel-key kept on
+    # hardlink/symlink overlap is deterministic across runs and across
+    # machines (rglob iteration order is FS-dependent on macOS APFS).
+    # Without this sort, two peers walking the same tree could pick
+    # different rel keys for the same inode, generating phantom
+    # add/delete churn in the manifest diff.
+    collected_paths.sort(
+        key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
+    )
+    seen: set[tuple[int, int]] = set()
     for path in collected_paths:
+        try:
+            st = path.stat()
+        except OSError:
+            continue  # consistent with _record_file's tolerance for races
+        identity = (st.st_dev, st.st_ino)
+        if identity in seen:
+            continue
+        seen.add(identity)
         if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
             rel, info = result
             files[rel] = info

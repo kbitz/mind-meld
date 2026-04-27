@@ -1600,11 +1600,15 @@ class TestPromptPassphrase:
 class TestPromptSources:
     """_prompt_sources — per-source Y/n prompt; returns enabled entries."""
 
-    def test_all_declined_returns_empty(self, monkeypatch) -> None:
+    def test_all_declined_returns_only_internal_sources(self, monkeypatch) -> None:
+        """User declines every prompt — mm-internal sources (mm-events)
+        still auto-include. The init guard treats this as 'no user-facing
+        sources' and refuses; here we just pin the prompt-level shape."""
         from mind_meld import cli as cli_module
 
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: False)
-        assert _prompt_sources() == []
+        result = _prompt_sources()
+        assert [s["name"] for s in result] == ["mm-events"]
 
     def test_all_accepted_returns_every_default(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
@@ -1627,23 +1631,27 @@ class TestPromptSources:
         assert DEFAULT_SOURCES[0]["path"] == "~/.claude"
 
     def test_claude_only(self, monkeypatch) -> None:
+        """User answers Y for claude and n for gstack. mm-events is
+        mm-internal infrastructure and auto-includes without prompting,
+        so it appears in the result list alongside claude."""
         from mind_meld import cli as cli_module
 
         responses = iter([True, False])  # Y claude, n gstack
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
-        assert [s["name"] for s in result] == ["claude"]
+        assert [s["name"] for s in result] == ["claude", "mm-events"]
 
     def test_gstack_only_preserves_include_fields(self, monkeypatch) -> None:
         """The gstack default carries include_dirs / include_files — they
-        must survive the indirection through get_default_source."""
+        must survive the indirection through get_default_source. mm-events
+        auto-includes without prompting (mm-internal infrastructure)."""
         from mind_meld import cli as cli_module
 
         responses = iter([False, True])  # n claude, Y gstack
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
-        assert [s["name"] for s in result] == ["gstack"]
-        gstack = result[0]
+        assert [s["name"] for s in result] == ["mm-events", "gstack"]
+        gstack = next(s for s in result if s["name"] == "gstack")
         assert "projects" in gstack["include_dirs"]
         assert "retro-context.md" in gstack["include_files"]
         # v0.9.3: exclude_patterns is also load-bearing now — pin that it

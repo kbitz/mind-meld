@@ -545,6 +545,102 @@ class TestWalkGenericSource:
         assert "projects/a/b/c/deep.txt" in files
 
 
+class TestWalkGenericSourceDedup:
+    """Group 7 preflight #2 + D6: dedup collected_paths by (st_dev, st_ino).
+
+    When an `include_files` entry sits inside an `include_dirs` directory,
+    the same on-disk file lands in `collected_paths` twice. Pre-fix, that
+    double-hashed the file (wasted CPU). On case-insensitive volumes
+    (APFS default) with case-mismatched config, it produced two distinct
+    rel keys for one inode (a real correctness bug — manifest invariant
+    violation). Filesystem identity dedup closes both.
+    """
+
+    def test_overlap_via_include_files_inside_include_dirs(self, tmp_path):
+        base = tmp_path / "src"
+        base.mkdir()
+        projects = base / "projects"
+        projects.mkdir()
+        (projects / "notes.md").write_text("hello")
+
+        config = {
+            "path": str(base),
+            "include_dirs": ["projects"],
+            "include_files": ["projects/notes.md"],
+        }
+        files = walk_generic_source(config)
+        assert list(files.keys()) == ["projects/notes.md"]
+
+    def test_overlap_records_file_only_once(self, tmp_path):
+        """Confirm dedup happens at the inode level via on_skip side-effect."""
+        base = tmp_path / "src"
+        base.mkdir()
+        projects = base / "projects"
+        projects.mkdir()
+        (projects / "notes.md").write_text("hello")
+
+        skip_calls: list[tuple[str, str]] = []
+        config = {
+            "path": str(base),
+            "include_dirs": ["projects"],
+            "include_files": ["projects/notes.md"],
+        }
+        files = walk_generic_source(config, on_skip=lambda p, r: skip_calls.append((p, r)))
+        # Dedup short-circuits BEFORE _record_file is called twice.
+        # No skip should fire (file is below default max_file_size).
+        assert files == {
+            "projects/notes.md": files["projects/notes.md"],
+        }
+        assert skip_calls == []
+
+    def test_no_overlap_no_change(self, tmp_path):
+        """Dedup is a no-op when there's no overlap."""
+        base = tmp_path / "src"
+        base.mkdir()
+        projects = base / "projects"
+        projects.mkdir()
+        (projects / "a.md").write_text("a")
+        (base / "config.yaml").write_text("x")
+
+        config = {
+            "path": str(base),
+            "include_dirs": ["projects"],
+            "include_files": ["config.yaml"],
+        }
+        files = walk_generic_source(config)
+        assert "projects/a.md" in files
+        assert "config.yaml" in files
+
+    def test_symlink_to_already_walked_file_dedupes(self, tmp_path):
+        """A symlink within include_dirs pointing at a real file already
+        walked elsewhere produces one entry, not two — same inode.
+
+        Determinism: the rel-key kept is the lexicographically-first
+        relative path. Without the sort in walk_generic_source, rglob
+        iteration order is FS-dependent and two peers could pick
+        different rel keys for the same inode, generating phantom
+        add/delete churn in fleet sync.
+        """
+        base = tmp_path / "src"
+        base.mkdir()
+        projects = base / "projects"
+        projects.mkdir()
+        (projects / "real.md").write_text("hello")
+        # Symlink in same dir pointing at the file.
+        (projects / "alias.md").symlink_to(projects / "real.md")
+
+        config = {
+            "path": str(base),
+            "include_dirs": ["projects"],
+            "include_files": [],
+        }
+        files = walk_generic_source(config)
+        rels = [k for k in files if k.endswith((".md",))]
+        assert len(rels) == 1
+        # Lex-first: 'projects/alias.md' < 'projects/real.md'.
+        assert rels[0] == "projects/alias.md"
+
+
 class TestWalkSource:
     def test_claude_type_dispatches_to_walk_claude_source(self, tmp_path):
         claude = tmp_path / ".claude"

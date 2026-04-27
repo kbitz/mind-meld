@@ -2,6 +2,99 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.10.1] - 2026-04-27
+
+**Group 7 preflight: hygiene + security hardening before fleet-retro
+foundation.** Eight cleanup items spanning peer-controlled trust boundary,
+filesystem-identity dedup, device-write concurrency safety, and the
+mm-events default source needed by the upcoming retro-fleet skill
+(v0.11.0). All additive; no behavior changes for users who don't run the
+new code paths.
+
+### Security
+
+- **Peer-controlled string sanitization at every render site.** A peer can
+  put Rich markup or terminal escape sequences (CSI clear-screen, OSC 52
+  base64 clipboard write, OSC title spoof, DCS, C1) in any synced filename
+  OR file body. Without sanitization those bytes reached your terminal
+  during `mm pull`/`mm conflicts`/`mm resolve`/`mm devices`/`mm status`
+  and silently changed your clipboard, cleared your screen, or hid output.
+  New `safe_str()` (escape strip + Rich markup escape) wraps every
+  peer-controlled interpolation; new `safe_text()` strips escapes from
+  diff content lines before wrapping in Rich `Text()`. Sweep covers ~30
+  print sites including the `mm devices` table, `mm status` peer listings,
+  conflict-prediction messages, and pull/merge feedback.
+
+- **Pull-time case-collision detection on case-insensitive filesystems.**
+  When a Linux peer legitimately has `Projects/x.md` AND `projects/x.md`,
+  a macOS APFS puller can only represent one. The other would silently
+  overwrite the first via inode aliasing. New non-invasive case-detection
+  (swapcase + samefile probe, no writes) buckets peer-manifest paths by
+  casefold; collision clusters emit `mm: warning:` per cluster, drop
+  all-but-lex-first from each peer manifest. Manifest keys are NOT
+  case-normalized — only consumer-side WRITE skipping. Cross-platform
+  peers retain their distinct casing in the manifest.
+
+### Fixed
+
+- **`register_device` is now create-only.** Pre-fix, an iCloud `.icloud`
+  placeholder TOCTOU could trick `_ensure_device_registered`'s
+  `backend.exists()` check into running `register_device` against an
+  entry that already existed, silently bumping the `registered:` first-
+  registration timestamp on every self-heal. Now uses
+  `LocalBackend.put_exclusive` (atomic `os.link` with `EEXIST` detection)
+  so the create-only invariant holds at the filesystem layer regardless
+  of placeholder state. Original `registered:` timestamps are preserved
+  across re-registration.
+
+- **`update_last_seen` serializes via `fcntl.flock`.** Concurrent autopush
+  + interactive push could race on the read-modify-write of
+  `devices/<id>.json`. Today's deterministic fields don't lose data, but
+  any future non-deterministic field would. New `_devices_write_lock()`
+  context manager (LOCK_EX | LOCK_NB with brief retry budget, degrade
+  with `mm: warning:` stderr breadcrumb on contention) wraps the RMW.
+  Lock file at `~/.config/mind-meld/devices-write.lock`.
+
+- **`walk_generic_source` filesystem-identity dedup.** When custom config
+  put an `include_files` entry inside an `include_dirs` directory (e.g.
+  `include_files: ["projects/notes.md"]` AND `include_dirs: ["projects"]`),
+  the same on-disk file got hashed twice. On case-insensitive volumes
+  with case-mismatched config (`["projects"]` + `["Projects/notes.md"]`)
+  it produced two distinct manifest entries for one inode — a real
+  correctness bug. New dedup keys on `(st_dev, st_ino)`. Also sorts
+  `collected_paths` lex before dedup so hardlink/symlink overlap picks
+  the same rel-key on every machine (no phantom add/delete fleet churn).
+
+- **`_find_conflict_files` filesystem-identity dedup.** Same shape change
+  as `walk_generic_source` — extends the existing tuple-key dedup
+  (Track 5D) to `(src_name, st_dev, st_ino)` so case-mismatched config
+  on APFS produces single conflict-table rows.
+
+### Added
+
+- **`mm-events` default source + bootstrap.** New mm-internal source at
+  `~/.local/share/mind-meld/events/` (mode 0o700) for the per-device
+  daily event log Group 8's `retro-fleet` skill will read. Auto-included
+  at `mm init` (mm-internal, no prompt — disable per-machine via
+  `mm disable-source mm-events` if not wanted). `get_sources()`
+  bootstraps the directory on first call so the source isn't inert
+  between Group 7 and Group 8 ship. mkdir failures emit `mm: warning:`
+  to stderr per the visible-failure contract.
+
+- **`src/mind_meld/skills/` placeholder subpackage.** Empty package
+  (`__init__.py` + `.gitkeep`) that ships in the wheel via existing
+  `packages = ["src/mind_meld"]` so Group 8's `retro-fleet/SKILL.md`
+  symlink installer can find the resources via
+  `importlib.resources.files("mind_meld") / "skills"`.
+
+### Changed
+
+- **`mm init` no longer prompts for mm-internal sources.** New
+  `MM_INTERNAL_SOURCE_NAMES` frozenset short-circuits prompts for
+  mm-owned infrastructure (today: `mm-events`). Init guard refuses on
+  zero user-facing sources (mm-events doesn't count). Per-machine
+  opt-out remains via `mm disable-source`.
+
 ## [0.10.0] - 2026-04-25
 
 **Per-machine source toggle.** New `[sync].disabled_sources` field plus

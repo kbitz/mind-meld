@@ -6,8 +6,10 @@ Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import os
+import re
 import secrets
 import sys
 import time
@@ -20,6 +22,7 @@ from typing import Any, Literal
 
 import typer
 from rich.console import Console
+from rich.markup import escape as rich_markup_escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -28,6 +31,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
+from rich.text import Text
 
 from mind_meld import __version__, fsutil, pullhistory, seen_sources, sidecar, upgrade
 from mind_meld import config as _config_module
@@ -36,6 +40,7 @@ from mind_meld.config import (
     DEFAULT_MAX_FILE_SIZE,
     DEFAULT_SOURCES,
     DEFAULT_STORAGE_PATH,
+    MM_INTERNAL_SOURCE_NAMES,
     get_default_source,
     get_sources,
     load_config,
@@ -205,6 +210,71 @@ console = Console()
 # level instance rather than constructing ad-hoc keeps color-capability
 # detection and terminal-width behavior consistent across call sites.
 stderr_console = Console(stderr=True)
+
+
+# Group 7 preflight #1 + D2 + D7: peer-controlled string sanitization.
+# Filenames AND file contents come from sync peers. Without sanitization,
+# a peer can plant Rich markup ([/red]…[red]) or terminal escape sequences
+# (CSI \x1b[2J clear screen, OSC 52 \x1b]52;c;<b64>\x07 clipboard write,
+# OSC 0/2 title spoof, DCS, C1 8-bit) in any synced filename or file body
+# and have them rendered as control output during pull/conflict/merge
+# feedback. The OSC 52 vector is particularly nasty — many terminals
+# (xterm, iTerm2, kitty, alacritty) honor base64-encoded clipboard writes
+# from remote-controlled escape sequences, silently changing the user's
+# clipboard contents.
+#
+# strip_terminal_escapes removes the full set of common escape grammars.
+# safe_str composes that with Rich markup escaping so peer-controlled
+# strings render as literal text in markup contexts.
+#
+# Diff CONTENT (where {line} is bytes from a remote file) goes through
+# safe_text() instead, which strips escapes BEFORE wrapping in Rich's
+# Text() — Text() alone defangs markup but passes raw ANSI through,
+# which would re-open the very channel safe_str closes for filenames.
+_ANSI_ESCAPE_RE = re.compile(
+    # CSI: ESC [ params final-byte (40-126) — matches \x1b[2J, \x1b[31m, etc.
+    r"\x1b\[[\d;?]*[\x40-\x7e]"
+    # OSC: ESC ] params terminator (BEL or ESC \) — matches \x1b]52;c;...\x07
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    # DCS / SOS / PM / APC: ESC P/X/^/_ params terminator (ESC \)
+    r"|\x1b[PX^_][^\x1b]*\x1b\\"
+    # 8-bit C1 introducer (rarely-used 0x9b CSI variant)
+    r"|\x9b[\d;?]*[\x40-\x7e]"
+    # Single-byte escapes: SS2, SS3, RIS, etc. (ESC + single 0x40-0x5F char)
+    r"|\x1b[\x40-\x5f]"
+)
+
+
+def strip_terminal_escapes(s: str) -> str:
+    """Strip CSI / OSC / DCS / C1 / single-byte terminal escape sequences.
+
+    The peer-controlled trust boundary spans more than just CSI color
+    codes. Apply BEFORE rendering any peer-controlled string to a
+    real terminal — Rich's Text() does not strip these.
+    """
+    return _ANSI_ESCAPE_RE.sub("", s)
+
+
+def safe_str(s: object) -> str:
+    """Return a Rich-safe, escape-stripped representation of `s`.
+
+    Use at every print site interpolating a peer-controlled string
+    (filenames, paths, source names, device names, error message tails).
+    Returns a plain str so f-string composition with Rich markup tags
+    continues to work — `f"[red]write failed:[/red] {safe_str(rel_path)}"`.
+    """
+    return rich_markup_escape(strip_terminal_escapes(str(s)))
+
+
+def safe_text(s: str, **kwargs: object) -> Text:
+    """Return a Rich Text wrapping a terminal-escape-stripped str.
+
+    Use for diff CONTENT lines (peer-controlled file bytes printed via
+    console.print). Text() alone defangs Rich markup but passes raw
+    ANSI/OSC/DCS through to the terminal — which is the same trust-
+    boundary leak safe_str closes for filenames. Strip escapes first.
+    """
+    return Text(strip_terminal_escapes(s), **kwargs)
 
 
 def _version_callback(value: bool) -> None:
@@ -610,6 +680,104 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     return out
 
 
+def _detect_case_insensitive_fs(path: Path) -> bool:
+    """Probe whether `path`'s volume is case-insensitive (APFS default, NTFS).
+
+    Non-invasive: no writes. Constructs a swapcase variant of the path's
+    own basename and checks via `samefile()` whether both names resolve
+    to the same inode. Returns False on any failure (safer default — no
+    spurious case-collision warnings on Linux ext4).
+
+    Skips paths whose basename has no alphabetic characters (can't be
+    case-mangled meaningfully). Skips when the swapcase produces the same
+    name (basename was already case-neutral).
+    """
+    if not path.exists():
+        return False
+    name = path.name
+    if not any(c.isalpha() for c in name):
+        return False
+    alt_name = name.swapcase()
+    if alt_name == name:
+        return False
+    alt = path.parent / alt_name
+    try:
+        return alt.exists() and alt.samefile(path)
+    except OSError:
+        return False
+
+
+def _detect_pull_case_collisions(
+    manifest_cache: dict[str, dict | None],
+    local_sources_map: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, list[str]]]:
+    """Detect case-collision clusters in peer manifest paths per source.
+
+    Returns `{src_name: {casefold_key: [colliding_rel_paths_sorted]}}`
+    only for sources whose local base_path is on a case-insensitive FS
+    AND have ≥2 distinct rel_paths casefolding to the same key. Empty
+    dict on case-sensitive volumes — no local collision possible.
+
+    Aggregates across ALL peer manifests so a collision between peer A's
+    "Projects/x.md" and peer B's "projects/x.md" is detected even when
+    neither peer alone exposes both casings.
+    """
+    collisions: dict[str, dict[str, list[str]]] = {}
+    for src_name, src_info in local_sources_map.items():
+        base_path = src_info["path"]
+        if not _detect_case_insensitive_fs(base_path):
+            continue
+        seen_paths_by_key: dict[str, set[str]] = {}
+        for peer_manifest in manifest_cache.values():
+            if peer_manifest is None:
+                continue
+            src_data = peer_manifest.get("sources", {}).get(src_name)
+            if not src_data:
+                continue
+            for rel_path in src_data.get("files", {}):
+                key = rel_path.casefold()
+                seen_paths_by_key.setdefault(key, set()).add(rel_path)
+        clusters = {
+            key: sorted(paths) for key, paths in seen_paths_by_key.items() if len(paths) > 1
+        }
+        if clusters:
+            collisions[src_name] = clusters
+    return collisions
+
+
+def _drop_case_collisions_from_manifests(
+    manifest_cache: dict[str, dict | None],
+    collisions: dict[str, dict[str, list[str]]],
+) -> dict[str, dict | None]:
+    """Drop all-but-lex-first colliding rel_paths from each peer manifest.
+
+    Returns a new cache; input is not mutated. Caller emits one
+    `mm: warning:` per cluster naming the kept and dropped paths
+    (visible-failure contract). Tombstones are not touched — collision
+    is about per-pull WRITES on case-insensitive consumer; tombstones
+    encode prior consensus and stay intact (mirrors the asymmetric
+    `_filter_disabled_sources` invariant).
+    """
+    if not collisions:
+        return manifest_cache
+    new_cache: dict[str, dict | None] = {}
+    for did, manifest in manifest_cache.items():
+        if manifest is None:
+            new_cache[did] = None
+            continue
+        new_manifest = copy.deepcopy(manifest)
+        for src_name, clusters in collisions.items():
+            src_data = new_manifest.get("sources", {}).get(src_name)
+            if not src_data:
+                continue
+            files = src_data.get("files", {})
+            for paths in clusters.values():
+                for drop in paths[1:]:
+                    files.pop(drop, None)
+        new_cache[did] = new_manifest
+    return new_cache
+
+
 def _recover_prior_manifest(
     fetch: ManifestFetch,
     backend: LocalBackend,
@@ -882,22 +1050,23 @@ def _print_pull_prediction(diff: DiffResult, base_path: Path, src_name: str) -> 
     Splits diff.modified into skip/merge/conflict buckets so the user can
     see what pull would actually do, not just a "modified" count.
     """
-    console.print(f"  [dim]source '{src_name}' ({base_path}):[/dim]")
+    console.print(f"  [dim]source '{safe_str(src_name)}' ({safe_str(base_path)}):[/dim]")
     for path, info in sorted(diff.new.items()):
-        console.print(f"    [green]+ write[/green]    {path}")
+        console.print(f"    [green]+ write[/green]    {safe_str(path)}")
     buckets: dict[str, list[str]] = {"merge": [], "skip": [], "conflict": [], "unchanged": []}
     for path, info in diff.modified.items():
         buckets[_predict_pull_outcome(path, info, base_path)].append(path)
     for path in sorted(buckets["merge"]):
-        console.print(f"    [cyan]~ merge[/cyan]    {path}")
+        console.print(f"    [cyan]~ merge[/cyan]    {safe_str(path)}")
     for path in sorted(buckets["skip"]):
-        console.print(f"    [dim]= skip[/dim]     {path} (local newer)")
+        console.print(f"    [dim]= skip[/dim]     {safe_str(path)} (local newer)")
     for path in sorted(buckets["conflict"]):
         console.print(
-            f"    [yellow]! conflict[/yellow] {path} (would write remote to .sync-conflict-*)"
+            f"    [yellow]! conflict[/yellow] {safe_str(path)} "
+            "(would write remote to .sync-conflict-*)"
         )
     for path in sorted(buckets["unchanged"]):
-        console.print(f"    [dim]  unchanged[/dim] {path}")
+        console.print(f"    [dim]  unchanged[/dim] {safe_str(path)}")
 
 
 # ── shared helpers ────────────────────────────────────────────────────
@@ -928,7 +1097,7 @@ def _upload_changed_blobs(
         file_path = base_path / rel_path
         if not file_path.exists():
             if verbose:
-                console.print(f"  [dim]skipped (missing): {rel_path}[/dim]")
+                console.print(f"  [dim]skipped (missing): {safe_str(rel_path)}[/dim]")
             continue
 
         data, _sha = read_and_hash(file_path)
@@ -948,7 +1117,7 @@ def _upload_changed_blobs(
             )
 
         if verbose:
-            console.print(f"  [green]\u2191[/green] {rel_path}")
+            console.print(f"  [green]\u2191[/green] {safe_str(rel_path)}")
 
     return bytes_transferred
 
@@ -1002,26 +1171,31 @@ def _prompt_conflict_choice(
         local_text = ["<unreadable>"]
     remote_text = remote_data.decode("utf-8", errors="replace").splitlines()
 
+    safe_rel = safe_str(rel_path)
     diff = list(
         difflib.unified_diff(
             local_text,
             remote_text,
-            fromfile=f"local {rel_path}",
-            tofile=f"remote {rel_path}",
+            fromfile=f"local {safe_rel}",
+            tofile=f"remote {safe_rel}",
             lineterm="",
             n=3,
         )
     )
 
-    console.print(f"\n[bold yellow]Conflict:[/bold yellow] {rel_path}")
+    console.print(f"\n[bold yellow]Conflict:[/bold yellow] {safe_rel}")
     if diff:
         for line in diff[:60]:
+            # Diff lines carry peer-controlled bytes (file contents).
+            # Use safe_text() so Rich strips terminal escapes (CSI/OSC/DCS)
+            # AND defangs markup \u2014 Text() alone passes raw escapes through.
+            # Group 7 preflight #1 D7 codex finding #2 + adversarial #1.
             if line.startswith("+") and not line.startswith("+++"):
-                console.print(f"  [green]{line}[/green]")
+                console.print(safe_text(line, style="green"))
             elif line.startswith("-") and not line.startswith("---"):
-                console.print(f"  [red]{line}[/red]")
+                console.print(safe_text(line, style="red"))
             else:
-                console.print(f"  {line}")
+                console.print(safe_text(line))
         if len(diff) > 60:
             console.print(f"  [dim]...({len(diff) - 60} more diff lines)[/dim]")
     else:
@@ -1075,10 +1249,10 @@ def _apply_write(
         # fsutil.fsync_dir once per touched parent.
         fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
-        console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
+        console.print(f"  [red]write failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}")
         return "failed"
     if verbose:
-        console.print(f"  [green]\u2193[/green] {rel_path}")
+        console.print(f"  [green]\u2193[/green] {safe_str(rel_path)}")
     return "written"
 
 
@@ -1094,10 +1268,10 @@ def _apply_merge(
         merged = merge_file(rel_path, local_bytes, plain_data)
         fsutil.atomic_write_bytes(local_path, merged, fsync=False)
     except (OSError, StorageError) as e:
-        console.print(f"  [red]merge failed:[/red] {rel_path} \u2014 {e}")
+        console.print(f"  [red]merge failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}")
         return "failed"
     if verbose:
-        console.print(f"  [cyan]merged[/cyan] {rel_path}")
+        console.print(f"  [cyan]merged[/cyan] {safe_str(rel_path)}")
     return "merged"
 
 
@@ -1137,7 +1311,8 @@ def _apply_conflict(
         # The pull summary's `failed` count surfaces the issue without
         # losing progress on N other peer files.
         console.print(
-            f"  [red]conflict path build failed (local preserved):[/red] {rel_path} \u2014 {e}"
+            f"  [red]conflict path build failed (local preserved):[/red] "
+            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
         )
         return "failed"
 
@@ -1150,12 +1325,16 @@ def _apply_conflict(
     try:
         fsutil.atomic_write_bytes(conflict_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
-        console.print(f"  [red]sidecar write failed (local preserved):[/red] {rel_path} \u2014 {e}")
+        console.print(
+            f"  [red]sidecar write failed (local preserved):[/red] "
+            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
+        )
         return "failed"
 
     if verbose:
         console.print(
-            f"  [yellow]conflict:[/yellow] {rel_path} (remote saved as {conflict_path.name})"
+            f"  [yellow]conflict:[/yellow] {safe_str(rel_path)} "
+            f"(remote saved as {safe_str(conflict_path.name)})"
         )
     return "conflicted"
 
@@ -1185,7 +1364,7 @@ def _apply_incoming_file(
     try:
         local_hash = hash_file(local_path)
     except (PermissionError, OSError) as e:
-        console.print(f"  [yellow]read failed:[/yellow] {rel_path} \u2014 {e}")
+        console.print(f"  [yellow]read failed:[/yellow] {safe_str(rel_path)} \u2014 {safe_str(e)}")
         return "failed"
 
     if local_hash == remote_info.get("sha256"):
@@ -1205,14 +1384,15 @@ def _apply_incoming_file(
     except (ValueError, OSError) as e:
         # Malformed mtime or filesystem error: fall through to conflict path.
         console.print(
-            f"  [yellow]mtime parse failed (forcing conflict):[/yellow] {rel_path} \u2014 {e}"
+            f"  [yellow]mtime parse failed (forcing conflict):[/yellow] "
+            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
         )
         local_mtime = None
         remote_mtime = None
 
     if local_mtime is not None and remote_mtime is not None and local_mtime > remote_mtime:
         if verbose:
-            console.print(f"  [dim]= {rel_path} (local newer, kept)[/dim]")
+            console.print(f"  [dim]= {safe_str(rel_path)} (local newer, kept)[/dim]")
         return "skipped"
 
     # [C] conflict path. Optionally prompt the user; default keep-both.
@@ -1223,7 +1403,7 @@ def _apply_incoming_file(
             # "keep-local" — both work as user-facing labels. The internal
             # outcome stays "skipped" for back-compat with PullResult.
             if verbose:
-                console.print(f"  [dim]= {rel_path} (kept local by user)[/dim]")
+                console.print(f"  [dim]= {safe_str(rel_path)} (kept local by user)[/dim]")
             return "skipped"
         if choice == "keep-remote":
             # User overrode default keep-both by picking remote \u2014 overwrite
@@ -1232,10 +1412,14 @@ def _apply_incoming_file(
             try:
                 fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
             except (OSError, StorageError) as e:
-                console.print(f"  [red]write failed:[/red] {rel_path} \u2014 {e}")
+                console.print(
+                    f"  [red]write failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}"
+                )
                 return "failed"
             if verbose:
-                console.print(f"  [yellow]\u2193[/yellow] {rel_path} (remote kept by user)")
+                console.print(
+                    f"  [yellow]\u2193[/yellow] {safe_str(rel_path)} (remote kept by user)"
+                )
             return "written"
         if choice == "abort":
             raise typer.Abort()
@@ -1327,7 +1511,8 @@ def _download_and_apply(
                 # v0.8.1 empty-device_id handling in _apply_conflict.
                 if not quiet:
                     console.print(
-                        f"  [red]bad blob key (local preserved):[/red] {rel_path} \u2014 {e}"
+                        f"  [red]bad blob key (local preserved):[/red] "
+                        f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
                     )
                 outcomes["failed"].append(rel_path)
                 _advance()
@@ -1336,7 +1521,7 @@ def _download_and_apply(
                 enc_data = backend.get(bkey)
             except MindMeldError:
                 if verbose and not quiet:
-                    console.print(f"  [yellow]blob missing: {bkey}[/yellow]")
+                    console.print(f"  [yellow]blob missing: {safe_str(bkey)}[/yellow]")
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -1345,7 +1530,9 @@ def _download_and_apply(
                 plain_data = decrypt(enc_data, passphrase, memory_kb)
             except CryptoError as e:
                 if not quiet:
-                    console.print(f"  [red]decrypt failed:[/red] {rel_path} \u2014 {e}")
+                    console.print(
+                        f"  [red]decrypt failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}"
+                    )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -1517,17 +1704,28 @@ def _prompt_source_toggle(source: dict[str, Any], *, current_state: bool) -> boo
 def _prompt_sources() -> list[dict[str, Any]]:
     """Prompt for each known source type; return the enabled entries.
 
-    Each DEFAULT_SOURCES entry becomes a Y/n prompt via `_prompt_source_toggle`.
-    Default is Y when the path exists on disk, N otherwise — nudges users
-    toward only-enabling-what-they-have without making it impossible to
-    enable a source whose directory doesn't exist yet (e.g. new machine,
-    same project about to be cloned).
+    User-facing sources (claude, gstack) become a Y/n prompt via
+    `_prompt_source_toggle`. Default is Y when the path exists on disk,
+    N otherwise — nudges users toward only-enabling-what-they-have
+    without making it impossible to enable a source whose directory
+    doesn't exist yet (e.g. new machine, same project about to be cloned).
+
+    mm-internal sources (mm-events, Group 7+) auto-include without
+    prompting — they're mm-owned infrastructure for fleet-wide features
+    (retro-fleet) and shouldn't burden the init UX with a question whose
+    only legitimate answer is "yes." Per-machine opt-out is via
+    `mm disable-source mm-events` post-init (v0.10.0).
 
     Source paths stay in tilde-form in the returned dicts so they round-
     trip through TOML readably. `get_sources()` expands at use time.
     """
     enabled: list[dict[str, Any]] = []
     for default in DEFAULT_SOURCES:
+        if default["name"] in MM_INTERNAL_SOURCE_NAMES:
+            src = get_default_source(default["name"])
+            if src is not None:
+                enabled.append(src)
+            continue
         path_str = str(default["path"])
         exists = Path(path_str).expanduser().exists()
         if _prompt_source_toggle(default, current_state=exists):
@@ -1829,7 +2027,13 @@ def init() -> None:
     # cleanly. No data loss, just a storage-side breadcrumb. See
     # TestInitFlow::test_first_device_refuse_all_is_recoverable.
     sources = _prompt_sources()
-    if not sources:
+    # mm-internal sources (mm-events) auto-include and don't count toward
+    # the user-intent guard — a config with only mm-internal sources is
+    # effectively "user wanted nothing synced," same as the pre-Group-7
+    # zero-sources case. Push/pull would silently no-op for the user's
+    # own data; better to refuse and let them re-run.
+    user_facing_sources = [s for s in sources if s["name"] not in MM_INTERNAL_SOURCE_NAMES]
+    if not user_facing_sources:
         _error("init: no sync sources enabled. Re-run 'mm init' and accept at least one source.")
 
     config: dict = {
@@ -1998,7 +2202,7 @@ def _push_core(
     def on_skip(path: str, reason: str) -> None:
         skipped.append((path, reason))
         if verbose and not quiet:
-            console.print(f"  [dim]skipped: {path} ({reason})[/dim]")
+            console.print(f"  [dim]skipped: {safe_str(path)} ({safe_str(reason)})[/dim]")
 
     if not quiet:
         console.print("[bold]Building manifest...[/bold]")
@@ -2378,9 +2582,13 @@ def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> 
             # exist on storage from this peer — safe to ignore.
             continue
         version_str = d.get("last_seen_version")
+        # device_name, did, version_str are peer-controlled — sanitize for
+        # the refusal message that flows through Rich console.print.
+        safe_dname = safe_str(d.get("device_name", "?"))
+        safe_did = safe_str(did)
         if not isinstance(version_str, str) or not version_str:
             refusals.append(
-                f"  device {d.get('device_name', '?')} ({did}) — "
+                f"  device {safe_dname} ({safe_did}) — "
                 f"last_seen_version missing (last push was on a pre-"
                 f"v{INVERSION_MIN_VERSION} mm)"
             )
@@ -2389,14 +2597,14 @@ def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> 
             peer_version = Version(version_str)
         except InvalidVersion:
             refusals.append(
-                f"  device {d.get('device_name', '?')} ({did}) — "
-                f"last_seen_version={version_str!r} is malformed"
+                f"  device {safe_dname} ({safe_did}) — "
+                f"last_seen_version={safe_str(version_str)!r} is malformed"
             )
             continue
         if peer_version < threshold:
             refusals.append(
-                f"  device {d.get('device_name', '?')} ({did}) — "
-                f"last_seen_version={version_str} < {INVERSION_MIN_VERSION}"
+                f"  device {safe_dname} ({safe_did}) — "
+                f"last_seen_version={safe_str(version_str)} < {INVERSION_MIN_VERSION}"
             )
 
     if refusals:
@@ -2647,17 +2855,20 @@ def _print_preflight_conflicts(predicted: list[_PredictedConflict], quiet: bool)
     Quiet (autopull): one-liner per conflict to stderr.
     Non-quiet: rich console with resolution hint.
     """
+    # src_name, rel_path, device_name are all peer-controlled — sanitize.
     if quiet:
         for p in predicted:
             print(
-                f"mm: conflict {p.src_name}/{p.rel_path} (from {p.device_name})",
+                f"mm: conflict {safe_str(p.src_name)}/{safe_str(p.rel_path)} "
+                f"(from {safe_str(p.device_name)})",
                 file=sys.stderr,
             )
         return
     console.print(f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict.")
     for p in predicted:
         console.print(
-            f"  [yellow]! conflict[/yellow] {p.src_name}/{p.rel_path} (from {p.device_name})"
+            f"  [yellow]! conflict[/yellow] {safe_str(p.src_name)}/"
+            f"{safe_str(p.rel_path)} (from {safe_str(p.device_name)})"
         )
     console.print(
         "\nResolve conflicts locally, or re-run with --conflict-mode keep-both to auto-rename."
@@ -2717,10 +2928,12 @@ def _print_pull_summary(
     verbose lines) goes to console only when !quiet.
     """
     # Load-bearing: corrupt peers (silent skip = partial pull masquerading
-    # as successful pull).
+    # as successful pull). device_name and device_id are peer-controlled —
+    # sanitize before render (Group 7 preflight #1 sweep extension).
     for peer in corrupt_peers:
         msg = (
-            f"manifest for device {peer.device_name} ({peer.device_id}) "
+            f"manifest for device {safe_str(peer.device_name)} "
+            f"({safe_str(peer.device_id)}) "
             f"is corrupt - skipping pull from this device."
         )
         if quiet:
@@ -2729,11 +2942,11 @@ def _print_pull_summary(
             console.print(f"[yellow]Warning:[/yellow] {msg}")
 
     # Load-bearing: unknown sources (partition risk — rename drift or
-    # missed config migration).
+    # missed config migration). src_name and device_name are peer-controlled.
     for unk in unknown_sources:
         msg = (
-            f"skipping unknown source '{unk.src_name}' from "
-            f"{unk.device_name} - not configured locally"
+            f"skipping unknown source '{safe_str(unk.src_name)}' from "
+            f"{safe_str(unk.device_name)} - not configured locally"
         )
         if quiet:
             print(f"mm: warning: {msg}", file=sys.stderr)
@@ -2742,7 +2955,7 @@ def _print_pull_summary(
 
     # Load-bearing: fsync failures (pulls non-durable).
     for w in fsync_warnings:
-        msg = f"durability fsync failed on {w.parent_dir} — {w.error}"
+        msg = f"durability fsync failed on {safe_str(w.parent_dir)} — {safe_str(w.error)}"
         if quiet:
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
@@ -3005,6 +3218,34 @@ def _pull_core(
             filtered_cache[did] = filtered
         manifest_cache = filtered_cache
 
+    # Group 7 preflight #6 + D11: pull-time case-collision detection.
+    # On case-insensitive local FS (APFS default, NTFS), two manifest
+    # entries that differ only in casing (peer A "Projects/x.md" + peer B
+    # "projects/x.md") would resolve to the same inode locally — the
+    # second would silently overwrite or alias the first. Detect per
+    # source, emit `mm: warning:` per cluster, drop all-but-lex-first
+    # from each peer manifest. Codex outside-voice T5: a Linux peer can
+    # legitimately have both names; we don't normalize manifest keys
+    # globally — we only skip the duplicate WRITE on case-insensitive
+    # consumers. The raw manifest stays intact for future cross-platform
+    # peers (mm gc reads via _fetch_remote_manifest, unfiltered).
+    case_collisions = _detect_pull_case_collisions(manifest_cache, local_sources_map)
+    if case_collisions:
+        for src_name, clusters in case_collisions.items():
+            for paths in clusters.values():
+                # src_name and paths come from peer manifests — sanitize
+                # before render (Group 7 preflight #1 sweep extension).
+                safe_kept = safe_str(paths[0])
+                safe_dropped = ", ".join(safe_str(p) for p in paths[1:])
+                stderr_console.print(
+                    f"mm: warning: case-collision in source "
+                    f"'{safe_str(src_name)}' on case-insensitive FS — "
+                    f"keeping '{safe_kept}', skipping [{safe_dropped}] "
+                    f"(Linux peer can legitimately push both; this device "
+                    f"can only represent one)"
+                )
+        manifest_cache = _drop_case_collisions_from_manifests(manifest_cache, case_collisions)
+
     all_tombstones = collect_tombstones(
         list(manifest_cache.keys()),
         lambda did: manifest_cache.get(did),
@@ -3041,12 +3282,12 @@ def _pull_core(
             did = device["device_id"]
             dname = device["device_name"]
             if not quiet:
-                console.print(f"\n[bold]Pulling from {dname} ({did})...[/bold]")
+                console.print(f"\n[bold]Pulling from {safe_str(dname)} ({safe_str(did)})...[/bold]")
 
             remote_manifest = manifest_cache.get(did)
             if remote_manifest is None:
                 if not quiet:
-                    console.print(f"  [yellow]No manifest for {dname}[/yellow]")
+                    console.print(f"  [yellow]No manifest for {safe_str(dname)}[/yellow]")
                 continue
 
             device_had_changes = False
@@ -3066,7 +3307,9 @@ def _pull_core(
                 base_path = src_info["path"]
                 src_type = src_info["type"]
                 if verbose and not quiet:
-                    console.print(f"  [bold]Source '{src_name}' ({base_path}):[/bold]")
+                    console.print(
+                        f"  [bold]Source '{safe_str(src_name)}' ({safe_str(base_path)}):[/bold]"
+                    )
 
                 per_source = _pull_one_source(
                     backend,
@@ -3087,13 +3330,16 @@ def _pull_core(
 
                 if dry_run and per_source.dry_run_diff is not None:
                     if not quiet:
-                        console.print(f"  Dry run for {dname}/{src_name}:")
+                        console.print(f"  Dry run for {safe_str(dname)}/{safe_str(src_name)}:")
                         _print_pull_prediction(per_source.dry_run_diff, base_path, src_name)
                     continue
 
                 if not per_source.had_changes:
                     if verbose and not quiet:
-                        console.print(f"  [green]Up to date with {dname}/{src_name}.[/green]")
+                        console.print(
+                            f"  [green]Up to date with "
+                            f"{safe_str(dname)}/{safe_str(src_name)}.[/green]"
+                        )
                     continue
 
                 per_source_results.append(per_source)
@@ -3621,11 +3867,15 @@ def devices() -> None:
         # upgrading to v0.9.2 \u2014 surface as em-dash so users can spot
         # pre-v0.9.2 peers that are blocking pull via the fleet-version
         # refusal gate.
+        # device_name, device_id, last_seen_version are peer-controlled
+        # JSON values. Rich Table cells interpret markup AND pass raw
+        # terminal escapes through (verified). Sanitize before render.
+        # Group 7 preflight #1 sweep extension (adversarial #3).
         table.add_row(
-            d.get("device_name", "?"),
-            d["device_id"],
-            d.get("last_seen", "\u2014"),
-            d.get("last_seen_version", "\u2014"),
+            safe_str(d.get("device_name", "?")),
+            safe_str(d["device_id"]),
+            safe_str(d.get("last_seen", "\u2014")),
+            safe_str(d.get("last_seen_version", "\u2014")),
             marker,
         )
 
@@ -3692,10 +3942,10 @@ def diff_cmd(
         remote_files = remote_src.get("files", {})
 
         any_changes = True
-        console.print(f"\n  [bold]Source '{src_name}':[/bold]")
+        console.print(f"\n  [bold]Source '{safe_str(src_name)}':[/bold]")
         console.print("  [dim](push direction: local → remote)[/dim]")
         for path in sorted(diff.new):
-            console.print(f"    [green]+ push  [/green] {path}")
+            console.print(f"    [green]+ push  [/green] {safe_str(path)}")
         for path in sorted(diff.modified):
             # Predict what pulling the REMOTE version would do to local. The
             # manifests were built from the same state, so local hash matches
@@ -3704,11 +3954,13 @@ def diff_cmd(
             base_path = src_base_paths.get(src_name)
             if base_path is not None and remote_info:
                 outcome = _predict_pull_outcome(path, remote_info, base_path)
-                console.print(f"    [yellow]~ push  [/yellow] {path} (pull would: {outcome})")
+                console.print(
+                    f"    [yellow]~ push  [/yellow] {safe_str(path)} (pull would: {outcome})"
+                )
             else:
-                console.print(f"    [yellow]~ push  [/yellow] {path}")
+                console.print(f"    [yellow]~ push  [/yellow] {safe_str(path)}")
         for path in sorted(diff.deleted):
-            console.print(f"    [red]- only-remote[/red] {path}")
+            console.print(f"    [red]- only-remote[/red] {safe_str(path)}")
 
     if not any_changes:
         console.print("[green]No differences.[/green]")
@@ -4695,15 +4947,31 @@ def _find_conflict_files(
     preserve source attribution.
     """
     hits: list[tuple[str, Path, Path | None]] = []
-    seen: set[tuple[str, Path]] = set()
+    # Group 7 preflight #3 + D6: dedup key uses filesystem identity
+    # (src_name, st_dev, st_ino) when stat succeeds — handles APFS
+    # case-mismatched config (e.g. include_dirs ["projects"] +
+    # include_files ["Projects/notes.md"]) correctly. Falls back to
+    # (src_name, str(path)) when stat fails (race window between glob
+    # and dedup) so we never silently drop a conflict file just because
+    # of a transient stat error. The src_name component preserves source
+    # attribution when two configured sources legitimately reference
+    # overlapping subtrees.
+    seen: set[tuple[str, int, int] | tuple[str, str]] = set()
 
     def _maybe_migrate(p: Path) -> Path:
         if migrate_pre_inversion:
             return _migrate_pre_inversion_conflict(p)
         return p
 
+    def _identity_key(src_name: str, conflict_path: Path) -> tuple[str, int, int] | tuple[str, str]:
+        try:
+            st = conflict_path.stat()
+        except OSError:
+            return (src_name, str(conflict_path))
+        return (src_name, st.st_dev, st.st_ino)
+
     def _try_add(src_name: str, conflict_path: Path, canonical: Path | None) -> None:
-        key = (src_name, conflict_path)
+        key = _identity_key(src_name, conflict_path)
         if key in seen:
             return
         seen.add(key)
@@ -5096,7 +5364,9 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
     resolved = 0
     failed = 0
     for src_name, cpath, canonical in hits:
-        console.print(f"\n[bold yellow]Conflict in {src_name}:[/bold yellow] {cpath}")
+        console.print(
+            f"\n[bold yellow]Conflict in {safe_str(src_name)}:[/bold yellow] {safe_str(cpath)}"
+        )
 
         if canonical is None:
             # Dual-mode preface by filename prefix. Pre-inversion (`v0-`)
@@ -5136,19 +5406,20 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 try:
                     cpath.rename(target_canonical)
                     console.print(
-                        f"  [green]promoted[/green] {cpath.name} -> {target_canonical.name}"
+                        f"  [green]promoted[/green] "
+                        f"{safe_str(cpath.name)} -> {safe_str(target_canonical.name)}"
                     )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]promote failed:[/red] {e}")
+                    console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
                     failed += 1
             elif choice in ("d", "delete"):
                 try:
                     cpath.unlink()
-                    console.print(f"  [red]deleted[/red] {cpath.name}")
+                    console.print(f"  [red]deleted[/red] {safe_str(cpath.name)}")
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {e}")
+                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
                     failed += 1
             # else: skip (default)
             continue
@@ -5169,20 +5440,25 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
             canonical_text = canonical.read_text(errors="replace").splitlines()
             cpath_text = cpath.read_text(errors="replace").splitlines()
         except OSError as e:
-            console.print(f"  [red]read failed:[/red] {e}")
+            console.print(f"  [red]read failed:[/red] {safe_str(e)}")
             failed += 1
             continue
 
+        # Sanitize peer-controlled filenames in the diff labels (Group 7
+        # preflight #1 D7: difflib labels are printed through Rich at line
+        # ~5400, which would otherwise interpret markup in a peer filename).
+        safe_canonical_name = safe_str(canonical.name)
+        safe_cpath_name = safe_str(cpath.name)
         if is_pre_inversion:
             # Pre-inversion: canonical = remote, cpath = local.
             from_text, to_text = canonical_text, cpath_text
-            from_label = f"remote ({canonical.name})"
-            to_label = f"local  ({cpath.name})"
+            from_label = f"remote ({safe_canonical_name})"
+            to_label = f"local  ({safe_cpath_name})"
         else:
             # Post-inversion: canonical = local, cpath = remote.
             from_text, to_text = canonical_text, cpath_text
-            from_label = f"local  ({canonical.name})"
-            to_label = f"remote ({cpath.name})"
+            from_label = f"local  ({safe_canonical_name})"
+            to_label = f"remote ({safe_cpath_name})"
 
         diff = list(
             difflib.unified_diff(
@@ -5195,13 +5471,16 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
             )
         )
         if diff:
+            # Diff CONTENT is peer-controlled bytes — render via safe_text()
+            # so Rich strips terminal escapes (CSI/OSC/DCS) AND defangs
+            # markup. Text() alone passes raw escapes through.
             for line in diff[:80]:
                 if line.startswith("+") and not line.startswith("+++"):
-                    console.print(f"  [green]{line}[/green]")
+                    console.print(safe_text(line, style="green"))
                 elif line.startswith("-") and not line.startswith("---"):
-                    console.print(f"  [red]{line}[/red]")
+                    console.print(safe_text(line, style="red"))
                 else:
-                    console.print(f"  {line}")
+                    console.print(safe_text(line))
             if len(diff) > 80:
                 console.print(f"  [dim]...({len(diff) - 80} more diff lines)[/dim]")
         else:
@@ -5252,41 +5531,47 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 try:
                     cpath.rename(canonical)
                     console.print(
-                        f"  [green]kept local; promoted[/green] {cpath.name} -> {canonical.name}"
+                        f"  [green]kept local; promoted[/green] "
+                        f"{safe_str(cpath.name)} -> {safe_str(canonical.name)}"
                     )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]rename failed:[/red] {e}")
+                    console.print(f"  [red]rename failed:[/red] {safe_str(e)}")
                     failed += 1
             else:
                 # Post-inversion: canonical IS local — drop the remote sidecar.
                 try:
                     cpath.unlink()
-                    console.print(f"  [green]kept local; discarded remote[/green] {cpath.name}")
+                    console.print(
+                        f"  [green]kept local; discarded remote[/green] {safe_str(cpath.name)}"
+                    )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {e}")
+                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
                     failed += 1
         elif choice in ("r", "remote"):
             if is_pre_inversion:
                 # Pre-inversion: canonical IS remote — drop the local sidecar.
                 try:
                     cpath.unlink()
-                    console.print(f"  [green]kept remote; discarded local[/green] {cpath.name}")
+                    console.print(
+                        f"  [green]kept remote; discarded local[/green] {safe_str(cpath.name)}"
+                    )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {e}")
+                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
                     failed += 1
             else:
                 # Post-inversion: sidecar HOLDS remote bytes — promote over local.
                 try:
                     cpath.rename(canonical)
                     console.print(
-                        f"  [green]kept remote; promoted[/green] {cpath.name} -> {canonical.name}"
+                        f"  [green]kept remote; promoted[/green] "
+                        f"{safe_str(cpath.name)} -> {safe_str(canonical.name)}"
                     )
                     resolved += 1
                 except OSError as e:
-                    console.print(f"  [red]rename failed:[/red] {e}")
+                    console.print(f"  [red]rename failed:[/red] {safe_str(e)}")
                     failed += 1
         elif choice in ("a", "abort"):
             raise typer.Abort()
@@ -5314,7 +5599,7 @@ def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
             if verbose or dry_run:
                 age_days = (datetime.now(timezone.utc) - mtime).days
                 prefix = "would delete" if dry_run else "deleted"
-                console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {cpath}")
+                console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {safe_str(cpath)}")
             if not dry_run:
                 try:
                     cpath.unlink()
