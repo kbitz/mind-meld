@@ -21,6 +21,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 ## Source Layout
 src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources}.py
 src/mind_meld/storage/{local,keys}.py
+src/mind_meld/skills/  (placeholder subpackage; ships in wheel via `packages = ["src/mind_meld"]` so Group 8's `retro-fleet/SKILL.md` is findable via `importlib.resources.files("mind_meld") / "skills"`. Do NOT add a hatchling `force-include` for this dir — it would double-ship every file alongside the package walk.)
 
 Storage keys are constructed via helpers in `storage/keys.py`
 (`manifest_key`, `blob_key`, `device_key`, `parse_blob_key`) which validate
@@ -122,8 +123,73 @@ If `save_config` raises (disk full, permissions), a best-effort `backend.delete(
 
 `_ensure_device_registered(backend, device_id, device_name, *, dry_run)` runs at the top of `_push_core` BEFORE any push work. If `devices/<my_id>.json` is absent, it recreates it via `register_device`. Two scenarios converge: future v0.9.4+ SIGKILL crash mid-init (cosmetic) AND retroactive fix for pre-v0.9.4 victims of the v0.8.15..v0.9.3 inverted half-state — those users had been pushing manifests under an ID no peer recognized, silently. First push after upgrading to v0.9.4 self-heals. Gated on `not dry_run` (codex review: `mm push --dry-run` must not mutate storage). Register failures emit a `mm: warning:` stderr breadcrumb before re-raising — load-bearing for autopush, whose generic `except Exception` would otherwise swallow the failure and silently no-op every push.
 
-## `_find_conflict_files` tuple-key dedup (load-bearing, v0.9.4)
-The function runs two scan strategies that overlap when an `include_files` entry sits inside an `include_dirs` directory: (1) `include_dirs` rglob and (2) depth-0 sibling-glob for `include_files`. Without dedup, a conflict file at e.g. `projects/notes.sync-conflict-...md` is visited twice when a user customizes config with `include_files: ["projects/notes.md"]` AND `include_dirs: ["projects"]` (nested) — duplicate rows in `mm conflicts`, inflated counts in `mm gc --conflicts`, `mm resolve` silent no-op on the second visit. Dedup uses `seen: set[tuple[str, Path]]`. The tuple key (NOT bare `Path`) preserves source attribution when two configured sources legitimately reference overlapping subtrees — bare-Path dedup would incorrectly collapse a conflict file shared between sources. Default config doesn't trigger this (all `include_files` are bare top-level dotfiles), but the dedup is footgun-removal for anyone customizing. Pinned in `tests/test_conflict_copy.py::TestFindConflictFilesNestedDedup`.
+## `_find_conflict_files` tuple-key dedup (load-bearing, v0.9.4 + v0.10.1)
+The function runs two scan strategies that overlap when an `include_files` entry sits inside an `include_dirs` directory: (1) `include_dirs` rglob and (2) depth-0 sibling-glob for `include_files`. Without dedup, a conflict file at e.g. `projects/notes.sync-conflict-...md` is visited twice when a user customizes config with `include_files: ["projects/notes.md"]` AND `include_dirs: ["projects"]` (nested) — duplicate rows in `mm conflicts`, inflated counts in `mm gc --conflicts`, `mm resolve` silent no-op on the second visit. Default config doesn't trigger this (all `include_files` are bare top-level dotfiles), but the dedup is footgun-removal for anyone customizing.
+
+v0.9.4 keyed dedup on `set[tuple[str, Path]]`. v0.10.1 strengthened the key to filesystem identity: `(src_name, st_dev, st_ino)` when stat succeeds, `(src_name, str(path))` fallback when stat fails (race window between glob and dedup — never silently drop a conflict file just because of a transient stat error). Filesystem identity handles the case-mismatched-config-on-APFS hazard (`include_dirs: ["projects"]` AND `include_files: ["Projects/notes.md"]` resolve to the same inode but distinct path strings; bare-string keys would let both through). The `src_name` component still preserves source attribution when two configured sources legitimately reference overlapping subtrees. Pinned in `tests/test_conflict_copy.py::TestFindConflictFilesNestedDedup` (v0.9.4) and `TestFindConflictFilesIdentityDedup` (v0.10.1).
+
+## `walk_generic_source` filesystem-identity dedup (load-bearing, v0.10.1)
+Mirror of `_find_conflict_files`'s dedup at the manifest-walk layer. When `include_files` overlaps `include_dirs`, the same on-disk file lands in `collected_paths` twice. Pre-v0.10.1, the second pass got hashed and overwrote the first manifest entry — wasted CPU on identical bytes. On case-insensitive volumes (APFS default) with case-mismatched config, two distinct rel-keys could be created for one inode — a real correctness bug producing phantom add/delete fleet churn.
+
+Dedup uses `set[tuple[int, int]]` keyed on `(st_dev, st_ino)`. Sort `collected_paths` by relative-to-base path BEFORE the dedup pass so the rel-key kept on hardlink/symlink overlap is deterministic across runs and across machines (rglob iteration order is FS-dependent on macOS APFS). Without the sort, two peers walking the same tree could pick different rel keys for the same inode and generate phantom add/delete churn in the manifest diff. Sites: `manifest.py:walk_generic_source` (the pre-hash loop). Stat failures silently skip (consistent with `_record_file`'s race tolerance).
+
+## Pull-time case-collision detection (load-bearing, v0.10.1)
+A Linux peer can legitimately have BOTH `Projects/x.md` AND `projects/x.md` (case-sensitive ext4). A macOS APFS puller can only represent one — the second WRITE would silently alias / overwrite the first via inode collision. Pre-v0.10.1, this was a silent data-loss hazard.
+
+`_detect_case_insensitive_fs(path)` is a non-invasive probe (no writes): construct a swapcase variant of the path's own basename and check via `samefile()` whether both names resolve to the same inode. Returns False on any failure (safer default — no spurious case-collision warnings on Linux ext4). Skips paths whose basename has no alphabetic characters or whose swapcase produces the same name.
+
+`_detect_pull_case_collisions(manifest_cache, local_sources_map)` aggregates across ALL peer manifests so a collision between peer A's `"Projects/x.md"` and peer B's `"projects/x.md"` is detected even when neither peer alone exposes both casings. Returns clusters keyed by source name AND casefold key.
+
+`_drop_case_collisions_from_manifests(manifest_cache, collisions)` returns a NEW cache (input not mutated) with all-but-lex-first paths dropped per cluster. Tombstones are NOT touched — collision is about per-pull WRITES on a case-insensitive consumer; tombstones encode prior consensus and stay intact (mirrors the asymmetric `_filter_disabled_sources` invariant). Manifest keys are NOT case-normalized GLOBALLY — only consumer-side WRITE skipping. Cross-platform peers retain their distinct casing in the synced manifest. The raw manifest stays intact for `mm gc` (which reads via `_fetch_remote_manifest`, unfiltered).
+
+Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download loop, AFTER the disabled-sources / exclude-patterns filter chain. Per-cluster `mm: warning:` to stderr names the kept and dropped paths so the user sees what was skipped (visible-failure contract).
+
+## Peer-controlled string sanitization (load-bearing, v0.10.1, security)
+Every synced filename AND file body crosses an untrusted trust boundary. Without sanitization, a peer can plant Rich markup (`[/red]…[red]`) or terminal escape sequences in any synced filename or file body and have them rendered as control output during `mm pull` / `mm conflicts` / `mm resolve` / `mm devices` / `mm status`. The OSC 52 vector is particularly nasty — many terminals (xterm, iTerm2, kitty, alacritty) honor base64-encoded clipboard writes from remote-controlled escape sequences, silently changing the user's clipboard. CSI `\x1b[2J` clears the screen; OSC 0/2 spoofs the title; DCS / C1 8-bit are also covered.
+
+`strip_terminal_escapes(s)` removes the full common-grammar set: CSI `\x1b[…[\x40-\x7e]`, OSC `\x1b]…(BEL|ST)`, DCS, single-byte `\x1b[\x40-\x5f]`, and the rarely-used 0x9b 8-bit C1 CSI variant. Apply BEFORE rendering any peer-controlled string to a real terminal — Rich's `Text()` does NOT strip these.
+
+`safe_str(s)` composes `strip_terminal_escapes` with `rich.markup.escape` and returns a plain `str`, so f-string composition with Rich markup tags continues to work: `f"[red]write failed:[/red] {safe_str(rel_path)}"`. Use at every print site interpolating a peer-controlled string (filenames, paths, source names, device names, error message tails — including exceptions whose `str(e)` echoes peer-supplied bytes).
+
+`safe_text(s, **kwargs) -> rich.text.Text` is the diff-content variant. Use for diff CONTENT lines (peer-controlled file bytes printed via `console.print`). `Text()` alone defangs Rich markup but passes raw ANSI/OSC/DCS through to the terminal — same trust-boundary leak `safe_str` closes for filenames. Strip escapes first.
+
+Sweep covers ~30 print sites: pull-prediction widget, upload progress, conflict prompts, write/merge/conflict apply paths, all `_apply_*` / `_pull_*` error tails, `mm devices` table cells, `mm diff` per-source headers, fleet-version refusal listing, `_print_pull_summary` warnings, `_resolve_interactive_loop` headers + prompts + diff labels + diff content + outcome lines. `mm devices` Rich Table cells are sanitized too — Table cells interpret markup AND pass raw escapes through (verified). All sites pinned in `tests/test_safe_str.py`.
+
+## `register_device` create-only contract (load-bearing, v0.10.1)
+Pre-v0.10.1, `register_device` always wrote `backend.put(key, ...)`. The push-time `_ensure_device_registered` self-heal (v0.9.4) called `register_device` whenever `backend.exists(key)` returned False. iCloud's `.icloud` placeholder (cloud-only, lazy-materialized) creates a TOCTOU window where `backend.exists()` reports False but the entry actually exists on storage — the self-heal re-registered, silently bumping the `registered:` first-registration timestamp on every push.
+
+v0.10.1 routes `register_device` through `LocalBackend.put_exclusive(key, data)` (atomic `os.link` with `EEXIST` detection) so the create-only invariant holds at the filesystem layer regardless of placeholder state. Existing entries surface as `StorageError`, which the function swallows + returns. Original `registered:` timestamps are preserved across re-registration. Idempotent: self-heal callers can re-register safely.
+
+## Devices write lock (load-bearing, v0.10.1)
+`update_last_seen` does a read-modify-write of `devices/<id>.json` on every push (mutates `last_seen` + `last_seen_version`). Concurrent autopush + interactive push could race on the RMW. Today's deterministic fields (`last_seen`, `last_seen_version`) don't lose data because both writers compute the same effective state, but any FUTURE non-deterministic field (e.g. per-machine notes, error counters, partial-progress markers) would lose interleaved updates.
+
+`_devices_write_lock()` is a `contextlib.contextmanager` wrapping the RMW in `fcntl.LOCK_EX | LOCK_NB` against `~/.config/mind-meld/devices-write.lock` (mode 0o600, parent dir auto-created). Brief retry budget on contention — `_LOCK_RETRY_INTERVALS_S = (0.05, 0.1, 0.2, 0.4)` (~750ms total before degrading). Total acquire wait stays well under 1 second since the critical section is one storage GET + one storage PUT.
+
+On exhausted retries, degrade to executing without the lock and emit one `mm: warning: device write lock contended; skipping last_seen update for this push` line to stderr (visible-failure contract). Today's deterministic fields are safe under degraded operation; the warning lets the user catch a stuck-process scenario before any future non-deterministic field starts losing data.
+
+The lock is LOCAL (per-machine config dir) — `fcntl.flock` is a local-process primitive and never reaches synced storage. All RMW callers MUST hold the flock for the read AND write so an interleaved read can't observe a partial state. Routing field-adders through this lock is forward-defense for concurrency safety.
+
+## `mm-events` default source + bootstrap (load-bearing, v0.10.1)
+`DEFAULT_SOURCES` has a new mm-owned synced source for the per-device daily JSONL event log Group 8's `retro-fleet` skill will read.
+
+```toml
+{ name = "mm-events", path = "~/.local/share/mind-meld",
+  type = "generic", include_dirs = ["events"], exclude_patterns = [] }
+```
+
+Subdir nesting (`include_dirs = ["events"]` rather than `["."]`) plays cleanly with `walk_generic_source` and avoids the `pathlib`-`["."]` quirk. Per-device daily JSONL files land at `events/<device>-<YYYY-MM-DD>.jsonl` under this base path.
+
+`get_sources()` runs a one-shot bootstrap dispatch BEFORE the path-existence filter so mm-internal sources don't fall through as "doesn't exist" on first run. Dispatch table: `{"mm-events": _bootstrap_mm_events_path}`. Adding a new entry to `MM_INTERNAL_SOURCE_NAMES` REQUIRES adding the parallel bootstrap entry here — the dispatch by name keeps the mapping explicit and prevents silent inconsistency between `_prompt_sources` auto-include and bootstrap. Bootstrap is mode 0o700 (events contain device IDs and per-machine activity metadata — not user-secret but per-machine-private). mkdir failures emit `mm: warning:` per the visible-failure contract; the source then drops via the path-existence filter that runs after.
+
+**Known UX rough edge (filed as TODO):** bootstrap fires on every `get_sources()` call, including read-only commands (`mm sources`, `mm status`, `mm conflicts`, `mm diff`, `mm log`, plus `_get_setup`). For users with a chmod-restricted home, autopull would spam `mm: warning:` on every invocation. Correctness is fine; UX hygiene fix is in `docs/TODOS.md` (gate to mutator commands or once-per-process suppression).
+
+## `MM_INTERNAL_SOURCE_NAMES` + init contract (v0.10.1)
+`frozenset({"mm-events"})` in `config.py` enumerates source names that are mm-owned infrastructure, not user-prompted. Two consumer sites:
+
+1. **`_prompt_sources` (init):** mm-internal entries auto-include without a Y/n prompt — they're mm-owned infrastructure for fleet-wide features (retro-fleet) and shouldn't burden the init UX with a question whose only legitimate answer is "yes." Per-machine opt-out remains via `mm disable-source mm-events` post-init (v0.10.0).
+2. **`init_cmd` no-sources guard:** an init that produces only mm-internal sources fails the `user_facing_sources` check (refuses with the same "no sync sources enabled" error as the pre-Group-7 zero-sources case). A config with only mm-events is effectively "user wanted nothing synced" — push/pull would silently no-op for the user's own data; better to refuse and let them re-run.
+
+Adding a new mm-internal source name requires updating the frozenset AND the bootstrap dispatch in `get_sources()` AND (if it has a meaningful per-machine state) wiring `mm disable-source` strict-mode allowance. Keep the set small — every entry sidesteps the init-prompt UX, so only mm-owned synced infrastructure qualifies (today: events).
 
 ## Pull/push history log (v0.9.1)
 `pullhistory.append(verb, device, source, rel_path, action, ...)` writes one JSONL line to `~/.config/mind-meld/pull-history.jsonl` (mode 0600, fcntl.flock-guarded, 1MB cap with line-boundary rotation to `.1`). Wired into `_pull_core` (per-outcome from `_pull_one_source` + `excluded` from the consumer-boundary filter) and `_upload_changed_blobs` (`uploaded`). Failures are swallowed — history is forensic-only, never block sync. `mm log` queries with `--source / --since / --action / --verb / --limit / --format` filters. Reader tolerates a torn first line in `.1` (crash-mid-rotate fingerprint).

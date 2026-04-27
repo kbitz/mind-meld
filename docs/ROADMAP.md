@@ -16,8 +16,11 @@ adversarial review, the 2026-04-25 v0.9.5 auto-upgrade /plan-ceo-review, and
 (per-machine source toggle) shipped outside the original cleanup-sweep
 plan — see PROGRESS.md and CHANGELOG.md. **Group 6** (release
 infrastructure polish — GitHub Releases backfill) shipped 2026-04-27.
-Two new Groups remain: **Group 7** (mm-events foundation) and **Group 8**
-(retro-fleet skill — depends on Group 7).
+**Group 7 preflight** (security hardening + concurrency safety +
+correctness fixes + mm-events default source) shipped as v0.10.1 on
+2026-04-27. Two new Groups remain in flight: **Group 7** Tracks 7A+7B
+(events.py module + `_push_core` wiring) and **Group 8** (retro-fleet
+skill — depends on Group 7).
 
 ---
 
@@ -124,13 +127,16 @@ New `mm-events` source surfaces the events on synced storage; `_push_core`
 tail-position write inside a hard time budget; `mm gc` reaps after 90 days
 via existing tombstone plumbing. No external API dependency.
 
-**Pre-flight** (shared-infra; serial, one-at-a-time):
-- ANSI-escape sanitization on peer-supplied paths -- wrap `rel_path` print sites in `cli.py:917,962,1082,1096` (and Track 5B's pull-summary additions) with `rich.markup.escape()`. A compromised peer could plant escape chars in synced filenames; current rendering passes them through. _src/mind_meld/cli.py, ~6 sites × 1 LOC._ (XS) [plan-ceo-review]
-- `walk_generic_source` double-hash dedup -- when an `include_files` entry sits inside an `include_dirs` directory, the file gets hashed twice (last-write-wins on identical bytes; wasted CPU/IO grows with file size and overlap count). Dedup `collected_paths` via `seen: set[Path]` before the hashing loop, mirroring the Track 5D pattern. _src/mind_meld/manifest.py:310, ~5 lines + 1 test._ (XS) [ship adversarial 2026-04-25]
-- `_find_conflict_files` case-insensitive dedup -- normalize via `os.path.normcase(str(conflict_path))` on macOS for the dedup key (preserve original `conflict_path` in the emitted hit). Very low likelihood — requires user config with mismatched case AND nested `include_files`. _src/mind_meld/cli.py, ~3 lines._ (XS) [ship adversarial 2026-04-25]
-- `register_device` `registered:` timestamp preservation -- fetch-then-write so the iCloud `.icloud` placeholder TOCTOU self-heal path doesn't overwrite first-registration time. The `registered` field semantically means "first registration"; current code regresses to "last registration." _src/mind_meld/devices.py:30, ~5 lines + 1 test._ (XS) [ship adversarial 2026-04-25]
-- pyproject.toml hatchling `force-include` for `src/mind_meld/skills` -- ships skill files inside the wheel via package data. Required by Group 8's symlink installer to find files via `importlib.resources`. _pyproject.toml, ~3 lines._ (XS)
-- DEFAULT_SOURCES `mm-events` entry -- adds the new mm-owned synced source pointing at `~/.local/share/mind-meld/events/`. Path-existence bootstrap creates the dir (mode 0700, parents=True) before first event write. _src/mind_meld/config.py, ~10 lines._ (XS)
+**Pre-flight ✅ Complete (v0.10.1, 2026-04-27).** All 8 preflight items shipped together (the 6 originally listed plus 2 codex-outside-voice expansions: `safe_text` for diff-content lines + `_devices_write_lock` for forward-defense of `update_last_seen`). See PROGRESS.md and CHANGELOG.md for full notes.
+
+- ✓ ANSI-escape sanitization on peer-supplied paths -- expanded from "wrap rel_path print sites with rich.markup.escape()" to a proper `safe_str()` / `safe_text()` helper sweep across ~30 print sites (filenames, source/device names, error tails, diff content, `mm devices` table cells). Strips full CSI / OSC / DCS / C1 grammar (closes the OSC 52 clipboard-write vector that `rich.markup.escape` alone wouldn't). _src/mind_meld/cli.py + tests/test_safe_str.py._
+- ✓ `walk_generic_source` double-hash dedup -- shipped with `set[tuple[st_dev, st_ino]]` filesystem-identity dedup (stronger than the originally-planned `set[Path]`) + deterministic pre-sort (rglob iteration is FS-dependent on APFS; sort-then-dedup avoids phantom add/delete fleet churn). _src/mind_meld/manifest.py + tests/test_manifest.py._
+- ✓ `_find_conflict_files` case-insensitive dedup -- shipped as filesystem-identity dedup (`(src_name, st_dev, st_ino)` tuple, with `(src_name, str)` fallback on stat failure) — same shape as the walker. Stronger than the originally-planned `os.path.normcase` key. _src/mind_meld/cli.py + tests/test_conflict_copy.py._
+- ✓ `register_device` `registered:` timestamp preservation -- shipped as create-only via `LocalBackend.put_exclusive` (atomic `os.link` + EEXIST detection). Holds the create-only invariant at the FS layer regardless of iCloud `.icloud` placeholder state — stronger than the originally-planned fetch-then-write (which still has a TOCTOU window). _src/mind_meld/devices.py + tests/test_devices.py._
+- ✓ pyproject.toml hatchling -- `src/mind_meld/skills/` is a real subpackage (`__init__.py` present) shipping via existing `packages = ["src/mind_meld"]`. No hatchling `force-include` needed (would double-ship). Findable via `importlib.resources.files("mind_meld") / "skills"`. _pyproject.toml + tests/test_wheel.py._
+- ✓ DEFAULT_SOURCES `mm-events` entry -- shipped at `~/.local/share/mind-meld/` with `include_dirs = ["events"]` (subdir nesting plays cleanly with `walk_generic_source`; avoids the `["."]` pathlib quirk). `get_sources()` bootstraps the directory (mode 0o700) on first call so the source isn't inert until first write. New `MM_INTERNAL_SOURCE_NAMES = frozenset({"mm-events"})` short-circuits the init Y/n prompt; init guard refuses on zero user-facing sources. _src/mind_meld/config.py + tests/test_config.py._
+- ✓ (codex-outside-voice expansion) `safe_text()` Rich Text wrapper for diff-content lines -- `Text()` alone defangs Rich markup but passes raw ANSI/OSC/DCS through; same trust-boundary leak `safe_str` closes for filenames. _src/mind_meld/cli.py + tests/test_safe_str.py._
+- ✓ (codex-outside-voice expansion) `_devices_write_lock()` flock around `update_last_seen` RMW -- forward-defense for the moment a non-deterministic `devices/<id>.json` field lands; today's deterministic fields don't lose data, but the lock makes future field-adders safe by default. `fcntl.LOCK_EX | LOCK_NB` with ~750ms retry budget; degrade-with-warning on contention. _src/mind_meld/devices.py + tests/test_devices.py._
 
 ### Track 7A: events.py module
 _4 tasks . ~1 day (human) / ~30 min (CC) . medium risk . src/mind_meld/events.py (new)_
@@ -196,7 +202,7 @@ Track detail per active group:
 
 ```
 Group 7: mm-events foundation
-  Pre-flight .............. ~30 min (6 items)
+  Pre-flight .............. ✓ Complete (v0.10.1, 8 items shipped)
   +-- Track 7A ........... ~30 min (CC) .. 4 tasks .. events.py module
   +-- Track 7B ........... ~20 min (CC) .. 3 tasks .. _push_core wiring + gc
 
@@ -204,8 +210,8 @@ Group 8: retro-fleet skill
   +-- Track 8A ........... ~45 min (CC) .. 4 tasks .. skill + symlink + CI
 ```
 
-**Active total: 2 in-flight Groups (7, 8). 3 Tracks. 11 tasks + 6 pre-flight items.**
-**Shipped: Groups 1, 2, 3, 4, 5 (Tracks 5A + 5B + 5C + 5D + 5E + Group 5 preflight + v0.9.3 hotfix), 6 (Track 6A — GitHub Releases backfill) — see PROGRESS.md.**
+**Active total: 2 in-flight Groups (7, 8). 3 Tracks. 11 tasks remaining (Group 7 preflight ✓ shipped v0.10.1).**
+**Shipped: Groups 1, 2, 3, 4, 5 (Tracks 5A + 5B + 5C + 5D + 5E + Group 5 preflight + v0.9.3 hotfix), 6 (Track 6A — GitHub Releases backfill), 7 preflight (v0.10.1) — see PROGRESS.md.**
 
 ---
 
