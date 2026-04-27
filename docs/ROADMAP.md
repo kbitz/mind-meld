@@ -14,9 +14,10 @@ adversarial review, the 2026-04-25 v0.9.5 auto-upgrade /plan-ceo-review, and
 **Cleanup-sweep set (Groups 1–5) shipped through v0.9.4.** v0.9.5
 (auto-upgrade nudge), v0.9.6 (public-readiness scrub), and v0.10.0
 (per-machine source toggle) shipped outside the original cleanup-sweep
-plan — see PROGRESS.md and CHANGELOG.md. Three new Groups now planned:
-**Group 6** (release infrastructure polish), **Group 7** (mm-events
-foundation), and **Group 8** (retro-fleet skill — depends on Group 7).
+plan — see PROGRESS.md and CHANGELOG.md. **Group 6** (release
+infrastructure polish — GitHub Releases backfill) shipped 2026-04-27.
+Two new Groups remain: **Group 7** (mm-events foundation) and **Group 8**
+(retro-fleet skill — depends on Group 7).
 
 ---
 
@@ -101,7 +102,7 @@ _Track 5D (Track 5A adversarial-review follow-ups — `_find_conflict_files` tup
 
 ---
 
-## Group 6: Release infrastructure polish
+## Group 6: Release infrastructure polish ✓ Complete
 _Depends on: none_
 
 Single-track Group bundling release-discipline polish that pairs with the
@@ -109,11 +110,7 @@ v0.9.5 auto-upgrade nudge. Independent of the auto-upgrade code path
 (nudge reads `/repos/.../tags`, not `/releases/latest`); ships independently
 and doesn't block Group 7 or Group 8.
 
-### Track 6A: GitHub Releases backfill
-_1 task . ~30 min (CC) . low risk . no source code changes_
-_touches:_
-
-- **Backfill GitHub Releases for ~30 existing tags** -- create a release entry per tag using `gh release create vX.Y.Z --notes-from-tag` (or pulling notes from `CHANGELOG.md`). Unlocks RSS feed, downloadable-asset UX, and release-notes surfacing for users browsing the repo. Does not alter the auto-upgrade code path. _GitHub CLI invocation, 0 source LOC._ (S) [plan-ceo-review]
+_Track 6A (GitHub Releases backfill — 36 release entries created via `gh release create`, one per existing tag v0.1.0..v0.10.0; bodies pulled from the matching `## [X.Y.Z]` CHANGELOG section, with v0.9.2 picking up its `— BREAKING` suffix in the title and v0.8.10 falling back to the tagged commit subject since CHANGELOG never carried an entry for it; v0.10.0 marked Latest. Unlocks the RSS feed, release-notes surfacing, and downloadable-asset UX for repo browsers) — ✓ Complete (2026-04-27). 0 source LOC._
 
 ---
 
@@ -190,7 +187,7 @@ Adjacency list (who depends on whom):
 - Group 3 ← {2}    ✓ Complete (v0.8.10)
 - Group 4 ← {}     ✓ Complete (v0.8.11)
 - Group 5 ← {}     ✓ Complete (5A/5B/5C/5E shipped through v0.9.2 + v0.9.3 hotfix + 5D shipped v0.9.4)
-- Group 6 ← {}     active (release infrastructure polish; ships independently)
+- Group 6 ← {}     ✓ Complete (Track 6A — GitHub Releases backfill, 2026-04-27)
 - Group 7 ← {}     active (mm-events foundation — fleet-retro v0.11.0)
 - Group 8 ← {7}    blocked on 7 (retro-fleet skill consumer)
 ```
@@ -198,9 +195,6 @@ Adjacency list (who depends on whom):
 Track detail per active group:
 
 ```
-Group 6: Release infrastructure polish
-  +-- Track 6A ........... ~30 min (CC) .. 1 task
-
 Group 7: mm-events foundation
   Pre-flight .............. ~30 min (6 items)
   +-- Track 7A ........... ~30 min (CC) .. 4 tasks .. events.py module
@@ -210,8 +204,8 @@ Group 8: retro-fleet skill
   +-- Track 8A ........... ~45 min (CC) .. 4 tasks .. skill + symlink + CI
 ```
 
-**Active total: 3 in-flight Groups (6, 7, 8). 4 Tracks. 12 tasks + 6 pre-flight items.**
-**Shipped: Groups 1, 2, 3, 4, 5 (Tracks 5A + 5B + 5C + 5D + 5E + Group 5 preflight + v0.9.3 hotfix) — see PROGRESS.md.**
+**Active total: 2 in-flight Groups (7, 8). 3 Tracks. 11 tasks + 6 pre-flight items.**
+**Shipped: Groups 1, 2, 3, 4, 5 (Tracks 5A + 5B + 5C + 5D + 5E + Group 5 preflight + v0.9.3 hotfix), 6 (Track 6A — GitHub Releases backfill) — see PROGRESS.md.**
 
 ---
 

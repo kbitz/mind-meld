@@ -39,10 +39,10 @@
 The original cleanup-sweep set (Groups 1–5) shipped through v0.9.4. Three
 post-cleanup releases shipped outside the original plan: v0.9.5
 (auto-upgrade nudge), v0.9.6 (public-readiness scrub), and v0.10.0
-(per-machine source toggle). Three new Groups now planned to land before
-v1.0: Group 6 (release infrastructure polish — GitHub Releases backfill),
-Group 7 (mm-events foundation — fleet-aware retro per
-`docs/designs/fleet-retro.md`), and Group 8 (retro-fleet skill consumer,
+(per-machine source toggle). Group 6 (release infrastructure polish —
+GitHub Releases backfill) shipped 2026-04-27. Two new Groups remain
+before v1.0: Group 7 (mm-events foundation — fleet-aware retro per
+`docs/designs/fleet-retro.md`) and Group 8 (retro-fleet skill consumer,
 depends on Group 7).
 
 See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
@@ -158,9 +158,14 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   invariant: existing users don't see spurious "new source" hints on
   upgrade). `_prompt_source_toggle` extracted as the single source of
   truth for the per-source Y/N prompt copy + default rule.
-- **Group 6 (Release infrastructure polish):** planned. GitHub Releases
-  backfill for ~30 existing tags via `gh release create`. Pairs with v0.9.5
-  release-discipline convention; ships independently.
+- **Group 6 (Release infrastructure polish):** ✓ Complete — Track 6A
+  shipped 2026-04-27. 36 GitHub Releases backfilled via `gh release create`,
+  one per tag v0.1.0..v0.10.0. Bodies pulled from each `## [X.Y.Z]`
+  CHANGELOG section; v0.9.2 carries its `— BREAKING` suffix into the
+  release title; v0.8.10 (the one tag without a CHANGELOG entry) falls
+  back to its tagged commit subject. v0.10.0 marked Latest. Unlocks the
+  RSS feed, in-repo release-notes surfacing, and downloadable-asset UX.
+  Zero source-code changes.
 - **Group 7 (mm-events foundation, fleet-retro v0.11.0):** planned per
   `docs/designs/fleet-retro.md`. Per-device JSONL event log (`mm-push` +
   `git-snapshot` + `sessions-snapshot` events) written at `_push_core`
