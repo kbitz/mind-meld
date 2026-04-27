@@ -48,6 +48,25 @@ def _isolate_keyring(monkeypatch) -> None:
     monkeypatch.setattr("keyring.set_password", lambda *a, **kw: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_devices_write_lock(monkeypatch, tmp_path) -> None:
+    """Redirect devices/<id>.json write-lock to a per-test path.
+
+    `update_last_seen` (and any future RMW mutator) routes through
+    `mind_meld.devices._devices_write_lock()`, which flocks
+    `DEVICES_WRITE_LOCK`. Without redirection, every test creates the
+    sentinel in the real `~/.config/mind-meld/`. The flock itself is
+    process-local so cross-test contention isn't a concern, but leaking
+    files into the user's home dir is bad hygiene.
+
+    Import devices explicitly so monkeypatch can resolve the dotted path
+    even in tests (test_version, test_wheel) that don't otherwise touch it.
+    """
+    from mind_meld import devices as _devices
+
+    monkeypatch.setattr(_devices, "DEVICES_WRITE_LOCK", tmp_path / "devices-write.lock")
+
+
 @pytest.fixture
 def test_root_salt() -> bytes:
     """Exported for tests that need the fixture's root_salt explicitly."""

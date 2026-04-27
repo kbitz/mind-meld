@@ -1183,3 +1183,90 @@ class TestUpdateConfigOnDisk:
                 {"crypto": {"x": "y"}},
                 path=config_path,
             )
+
+
+class TestMmEventsSource:
+    """Group 7 preflight #6 + D9: mm-events DEFAULT_SOURCES entry +
+    get_sources() bootstrap. Codex outside-voice finding #9 flagged that
+    without bootstrap, the source ships inert — get_sources() drops it
+    via the path-existence filter at line 292. Bootstrap creates the
+    base path on first call so the source is live from preflight ship.
+    """
+
+    def test_default_sources_includes_mm_events(self):
+        names = [s["name"] for s in DEFAULT_SOURCES]
+        assert "mm-events" in names
+
+    def test_mm_events_default_shape(self):
+        entry = next(s for s in DEFAULT_SOURCES if s["name"] == "mm-events")
+        assert entry["type"] == "generic"
+        assert entry["path"] == "~/.local/share/mind-meld"
+        assert entry["include_dirs"] == ["events"]
+        assert entry["exclude_patterns"] == []
+
+    def test_mm_events_in_internal_source_names(self):
+        from mind_meld.config import MM_INTERNAL_SOURCE_NAMES
+
+        assert "mm-events" in MM_INTERNAL_SOURCE_NAMES
+
+    def test_get_sources_bootstraps_mm_events_path(self, tmp_path, monkeypatch):
+        """First get_sources() call on a fresh machine creates the
+        mm-events base dir at mode 0700. Path-existence filter then
+        keeps the source in the resolved list."""
+        # Redirect ~ to tmp_path so we don't pollute the real home dir.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "icloud")},
+            "sync": {},  # no explicit sources → DEFAULT_SOURCES applies
+        }
+        sources = get_sources(config)
+        names = [s["name"] for s in sources]
+        assert "mm-events" in names
+
+        # Bootstrap created the directory at mode 0700.
+        events_base = tmp_path / ".local" / "share" / "mind-meld"
+        assert events_base.is_dir()
+        # On macOS APFS the mode bits are tracked accurately; mask out the
+        # high bits and check the bottom 9.
+        assert (events_base.stat().st_mode & 0o777) == 0o700
+
+    def test_bootstrap_idempotent(self, tmp_path, monkeypatch):
+        """Re-calling get_sources() doesn't fail when the dir already exists."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config = {
+            "device": {"id": "d1", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "icloud")},
+            "sync": {},
+        }
+        get_sources(config)
+        # Second call must not raise; same source list.
+        sources = get_sources(config)
+        assert "mm-events" in [s["name"] for s in sources]
+
+    def test_bootstrap_failure_emits_warning_and_drops_source(self, tmp_path, monkeypatch, capsys):
+        """Permission denied on mkdir → mm: warning: stderr breadcrumb,
+        source dropped via path-existence filter. Visible-failure contract
+        per CLAUDE.md curated stderr taxonomy."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Make ~/.local/share read-only so mkdir of mind-meld/ fails.
+        share = tmp_path / ".local" / "share"
+        share.mkdir(parents=True)
+        share.chmod(0o500)  # r-x — no write
+        try:
+            config = {
+                "device": {"id": "d1", "name": "Mac"},
+                "storage": {"path": str(tmp_path / "icloud")},
+                "sync": {},
+            }
+            sources = get_sources(config)
+            captured = capsys.readouterr()
+            assert "mm: warning:" in captured.err
+            assert "mm-events" in captured.err
+            # Bootstrap failed → path doesn't exist → source dropped by
+            # path-existence filter.
+            names = [s["name"] for s in sources]
+            assert "mm-events" not in names
+        finally:
+            # Restore so tmp cleanup can rm.
+            share.chmod(0o755)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -756,6 +757,58 @@ class TestFindConflictFilesNestedDedup:
         reaped = _gc_old_conflict_files(self._nested_config(src), dry_run=False, verbose=False)
         assert reaped == 1
         assert not old.exists()
+
+    def test_case_mismatched_config_dedups_on_apfs(self, tmp_path: Path) -> None:
+        """Group 7 preflight #3 + D6: filesystem-identity dedup correctly
+        collapses overlap when user config has case-mismatched paths on a
+        case-insensitive volume (APFS default).
+
+        The codex outside-voice review flagged that os.path.normcase is a
+        no-op on POSIX — the original D4 fix would have done nothing here.
+        (st_dev, st_ino) keying handles the case correctly because both
+        paths resolve to the same inode.
+
+        Skips on case-sensitive volumes (Linux, APFS-CS): the test setup
+        relies on creating one directory and accessing it through a
+        differently-cased path. On case-sensitive FS the alt-cased path
+        simply doesn't exist, the test setup degenerates, and the dedup
+        invariant isn't being exercised.
+        """
+        if sys.platform != "darwin":
+            pytest.skip("case-insensitive FS test requires APFS default")
+
+        src = tmp_path / "gstack"
+        (src / "projects").mkdir(parents=True)
+        (src / "projects" / "notes.md").write_bytes(b"canonical")
+        conflict = src / "projects" / "notes.sync-conflict-20260425-150000-devA1234.md"
+        conflict.write_bytes(b"divergent")
+
+        # Verify the test environment is case-insensitive (APFS default).
+        # Skip if the user's tmp_path happens to be on a case-sensitive volume.
+        alt_case = src / "Projects" / "notes.sync-conflict-20260425-150000-devA1234.md"
+        if not alt_case.exists():
+            pytest.skip("tmp_path is on a case-sensitive volume")
+
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(src),
+                        "type": "generic",
+                        # Case-mismatch between dir and file:
+                        "include_dirs": ["Projects"],
+                        "include_files": ["projects/notes.md"],
+                    }
+                ]
+            }
+        }
+
+        hits = _find_conflict_files(config)
+        # On APFS, "Projects" and "projects" are the same directory; the
+        # rglob walk and the include_files sibling-glob both reach the
+        # same inode; (st_dev, st_ino) dedup collapses to ONE hit.
+        assert len(hits) == 1
 
     def test_dedup_in_lock_protected_migration_path(self, tmp_path: Path, monkeypatch) -> None:
         """`mm pull` and `mm resolve` call the function with

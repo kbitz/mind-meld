@@ -2826,13 +2826,15 @@ class TestInitFlow:
         assert result2.exit_code == 0, result2.output
         assert "Verified passphrase against existing mm-crypto-init" in result2.output
 
-        # Config now written, with claude enabled.
+        # Config now written, with claude enabled. mm-events is mm-internal
+        # infrastructure and auto-includes alongside any user-facing source.
         with open(cfg_path, "rb") as f:
             cfg = tomllib.load(f)
-        assert [s["name"] for s in cfg["sync"]["sources"]] == ["claude"]
+        assert [s["name"] for s in cfg["sync"]["sources"]] == ["claude", "mm-events"]
 
     def test_first_device_gstack_only_init(self, tmp_path, monkeypatch):
-        """Decline claude, accept gstack → sources list has gstack only."""
+        """Decline claude, accept gstack → user-facing sources list has
+        gstack only. mm-events auto-includes (mm-internal infrastructure)."""
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -2845,9 +2847,9 @@ class TestInitFlow:
         with open(cfg_path, "rb") as f:
             cfg = tomllib.load(f)
         names = [s["name"] for s in cfg["sync"]["sources"]]
-        assert names == ["gstack"]
+        assert names == ["mm-events", "gstack"]
         # DEFAULT_SOURCES fields survive the indirection (Issue 1C regression pin).
-        gstack = cfg["sync"]["sources"][0]
+        gstack = next(s for s in cfg["sync"]["sources"] if s["name"] == "gstack")
         assert "projects" in gstack["include_dirs"]
         assert "retro-context.md" in gstack["include_files"]
         # v0.9.3: exclude_patterns is also load-bearing now — pin that it
@@ -2855,7 +2857,7 @@ class TestInitFlow:
         assert "config.yaml" in gstack["exclude_patterns"]
 
     def test_first_device_both_sources_init(self, tmp_path, monkeypatch):
-        """Accept both → sources list has claude AND gstack."""
+        """Accept both user-facing sources → final list has claude, mm-events, gstack."""
 
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -2867,7 +2869,7 @@ class TestInitFlow:
         with open(cfg_path, "rb") as f:
             cfg = tomllib.load(f)
         names = [s["name"] for s in cfg["sync"]["sources"]]
-        assert names == ["claude", "gstack"]
+        assert names == ["claude", "mm-events", "gstack"]
         # Paths round-trip in tilde-form (Issue 1C regression pin: the
         # config must not silently rewrite ~/.claude to an absolute path).
         claude = next(s for s in cfg["sync"]["sources"] if s["name"] == "claude")

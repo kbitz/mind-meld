@@ -161,7 +161,10 @@ class TestDisableSource:
     def test_closest_match_hint(self, cfg, isolated_seen_sources):
         result = runner.invoke(app, ["disable-source", "gstck"])
         assert result.exit_code != 0
-        assert "Did you mean 'gstack'" in result.output
+        # Rich text-wraps the error across lines once the valid-source list
+        # gets long (mm-events addition v0.11.0). Match across the wrap.
+        normalized = " ".join(result.output.split())
+        assert "Did you mean 'gstack'" in normalized
 
     def test_unknown_name_force_accepted(self, cfg, isolated_seen_sources):
         """Forward-compat: pre-disable codex before it ships."""

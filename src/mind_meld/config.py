@@ -6,6 +6,7 @@ Reads and writes ~/.config/mind-meld/config.toml.
 from __future__ import annotations
 
 import copy
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,26 @@ DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
 )
+# Source names that are mm-owned infrastructure (auto-included at init,
+# not user-prompted). Per-machine opt-out remains via `mm disable-source`.
+MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
+
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
+    {
+        # mm-owned synced source for the per-device event log used by Group 8's
+        # retro-fleet skill. Bootstrap creates the path on first get_sources()
+        # call (so the source isn't inert until Track 7A's events.py first
+        # writes — Group 7 preflight #6 + D9, codex outside-voice finding #9).
+        # Per-device daily JSONL files land at events/<device>-<YYYY-MM-DD>.jsonl
+        # under this base path. Subdir nesting plays cleanly with
+        # walk_generic_source (avoids the include_dirs: ["."] pathlib quirk).
+        "name": "mm-events",
+        "path": "~/.local/share/mind-meld",
+        "type": "generic",
+        "include_dirs": ["events"],
+        "exclude_patterns": [],
+    },
     {
         "name": "gstack",
         "path": "~/.gstack",
@@ -288,8 +307,47 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     if disabled:
         sources = [s for s in sources if s["name"] not in disabled]
 
+    # Bootstrap mm-owned source paths BEFORE the path-existence filter so
+    # they don't fall through as "doesn't exist" on first run. The mm-events
+    # source needs its base dir to exist for `walk_generic_source` to
+    # consider it (Group 7 preflight #6 + D9, codex finding #9). Bootstrap
+    # is mode 0700 (events contain device IDs and per-machine activity
+    # metadata — not user-secret but per-machine-private). Failure emits
+    # mm: warning: per the visible-failure contract; the source then drops
+    # via the path-existence filter below.
+    # Bootstrap registry: maps mm-internal source name → its bootstrap fn.
+    # Adding a new entry to MM_INTERNAL_SOURCE_NAMES requires adding the
+    # parallel bootstrap entry here; the dispatch by name keeps the
+    # mapping explicit and prevents silent inconsistency between
+    # _prompt_sources auto-include (cli.py) and bootstrap (here).
+    bootstrap_dispatch: dict[str, Any] = {"mm-events": _bootstrap_mm_events_path}
+    for src in sources:
+        name = src.get("name")
+        if name in MM_INTERNAL_SOURCE_NAMES and name in bootstrap_dispatch:
+            bootstrap_dispatch[name](src["path"])
+
     # Filter to sources whose path exists on disk
     return [s for s in sources if Path(s["path"]).exists()]
+
+
+def _bootstrap_mm_events_path(path: str) -> None:
+    """Best-effort mkdir for the mm-events source base path.
+
+    Idempotent — `exist_ok=True` makes re-call a no-op. Failure (permission
+    denied on a chmod-restricted home, EROFS on a readonly mount) emits a
+    single `mm: warning:` line to stderr and returns; the path-existence
+    filter in get_sources will then drop the source from the resolved list.
+    """
+    p = Path(path).expanduser()
+    if p.exists():
+        return
+    try:
+        p.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as e:
+        sys.stderr.write(
+            f"mm: warning: could not create mm-events source dir {p} ({type(e).__name__}: {e}); "
+            "events will not be synced from this device\n"
+        )
 
 
 def save_config(config: dict[str, Any], path: Path | None = None) -> None:
