@@ -51,12 +51,13 @@ directory was wiped.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal
+
+from mind_meld import fsutil
 
 HISTORY_DIR = Path.home() / ".config" / "mind-meld"
 HISTORY_PATH = HISTORY_DIR / "pull-history.jsonl"
@@ -146,45 +147,27 @@ def _append_payload(payload: dict[str, Any]) -> None:
     """Internal: write one JSONL row under flock, rotate at line boundary if
     over cap. Shared by `append` (pull/push rows) and `append_self_upgrade`
     (transition rows) so flock + rotation logic stays single-sourced.
-    """
-    line = json.dumps(payload, sort_keys=True) + "\n"
-    data = line.encode("utf-8")
 
-    try:
-        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-        path = history_path()
-        # Open append-binary; create with 0600 if missing (umask-respecting
-        # path: open(O_CREAT) honors per-process umask, so we chmod after
-        # to enforce 0600 explicitly — internal state, not user content).
-        fd = os.open(
-            str(path),
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-            0o600,
-        )
+    Routes through `fsutil.flock_append_jsonl` so the flock+chmod+append
+    plumbing is shared with `events.write_push_event`. Rotation lives here
+    as an `on_locked` closure — the helper stays unaware of pullhistory's
+    rotation semantics.
+    """
+    line = json.dumps(payload, sort_keys=True).encode("utf-8")
+    path = history_path()
+
+    def _maybe_rotate(fd: int) -> None:
+        # Rotate AFTER the write so we never truncate mid-line. Re-stat
+        # under the lock so a racing rotate from another process is visible
+        # (we'd just no-op the rename below).
         try:
-            try:
-                os.fchmod(fd, 0o600)
-            except OSError:
-                pass  # fchmod can fail on some filesystems; perms are best-effort
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            try:
-                os.write(fd, data)
-                # Rotate AFTER the write so we never truncate mid-line.
-                # Re-stat under the lock so a racing rotate from another
-                # process is visible (we'd just no-op the rename below).
-                try:
-                    size = os.fstat(fd).st_size
-                except OSError:
-                    size = 0
-                if size > _ROTATE_BYTES:
-                    _rotate_under_lock(path)
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-    except OSError:
-        # Forensic aid only; never block the calling sync.
-        return
+            size = os.fstat(fd).st_size
+        except OSError:
+            size = 0
+        if size > _ROTATE_BYTES:
+            _rotate_under_lock(path)
+
+    fsutil.flock_append_jsonl(path, [line], mode=0o600, on_locked=_maybe_rotate)
 
 
 def _rotate_under_lock(live_path: Path) -> None:
