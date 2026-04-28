@@ -88,6 +88,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 | `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
 | `mm status` | Show local vs remote state |
 | `mm devices` | List registered devices |
+| `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
 | `mm gc` | Delete orphaned blobs |
 | `mm gc --conflicts` | Also delete `.sync-conflict-*` files older than 30 days |
@@ -161,6 +162,30 @@ mm disable-source codex --force   # accepts unknown names for forward-compat
 ```
 
 `mm reconfigure-sources` re-runs the picker against your current config + new defaults, in case you want to revisit every choice at once.
+
+## Fleet retro (`/retro-fleet`)
+
+Mind Meld v0.11.0 ships a Claude Code skill that stitches engineering activity from every Mac in your fleet into one accurate retrospective. Every `mm push` writes a per-device daily JSONL row (commit metadata, sessions count, sync activity) to the synced `mm-events` source, so any machine can read the union and produce a fleet-wide picture.
+
+Inside Claude Code:
+
+```text
+/retro-fleet 7d     # last week, default if you omit the window
+/retro-fleet 30d    # last month
+/retro-fleet 90d    # last quarter (the retention ceiling)
+```
+
+The skill renders a paste-ready markdown retro — drop it into iMessage, Slack, or email. Commits are deduped across machines via `(canonical remote URL, sha)` so the same PR landed once but pushed from two laptops counts as one.
+
+The skill is auto-installed at `~/.claude/skills/retro-fleet` on `mm init`, and self-heals every push (24h-TTL gated, ~1 syscall in steady state) so a `pipx reinstall` rebuild can't leave you with a dangling symlink. If you already have your own file at that path, mm leaves it alone and prints a one-time `mm: notice:` so you know.
+
+**Caveats the output is honest about:**
+
+- Asking for a window longer than 90 days surfaces a tail breadcrumb — `mm gc` reaps event files older than `EVENTS_RETENTION_DAYS` (90), so that's the data ceiling.
+- Peers still on pre-v0.11.0 emit the older v=1 sessions-snapshot schema (delta semantics). The aggregator omits their session counts honestly rather than overcounting; you'll see `Sessions count incomplete: peer X is on pre-v0.11.0` until they upgrade.
+- Devices that haven't pushed during the window are flagged as fleet-incomplete instead of silently dropped.
+
+To filter to your own commits only, the skill consults `git config --global user.email` plus any `[retro].author_emails` aliases in `~/.config/mind-meld/config.toml`. Pass `--no-author-filter` to render every fleet commit. To override the events directory (custom `mm-events` path), set `MM_EVENTS_DIR=/path/to/events` before invoking.
 
 ## Handling conflicts
 

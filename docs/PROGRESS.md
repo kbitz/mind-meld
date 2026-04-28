@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.11.0  | 2026-04-28 | **Group 8 / Track 8A — fleet-aware retro skill.** Claude Code skill that stitches activity from every Mac in the fleet into one paste-ready markdown retro. Reads the synced `mm-events` log (Group 7), dedups commits via `(canonical_remote_url, sha)`, picks the latest sessions snapshot per `(device, claude_dir)`, and renders the gstack `/retro` shape. Three ship surfaces: (1) `src/mind_meld/skills/retro_fleet/{SKILL.md, aggregator.py}` shipped in the wheel; (2) `mm devices --format=json` with stable schema (`device_id`, `device_name`, `last_seen`, `last_seen_version`, `is_self`); (3) `_ensure_retro_skill_link` symlink installer dropped at `mm init` and self-heals every push behind a 24h-TTL marker (5-branch state machine: absent / correct symlink / dangling / wrong target / OSError — pipx-reinstall recovery). `EVENTS_SCHEMA_VERSION` bumped 1 → 2: sessions-snapshot now FULL INVENTORY (every jsonl regardless of mtime) so the aggregator can pick latest-per-tuple and produce honest point-in-time counts. v=1 peers still tolerated — surfaced as "Sessions count incomplete: peer X on pre-v0.11.0" instead of overcounted. Aggregator honors `last_session_at` window (caught in adversarial review — 60d-old session no longer leaks into a 7d retro), survives invalid UTF-8 via `errors="replace"`, counts file-open failures into `skipped_lines`. `mm devices` subprocess invokes via `python -m mind_meld.cli` to sidestep PATH-hijacking. 5 deferred adversarial-review items filed in TODOS.md (concurrent push lock contention, large-fleet aggregator scaling, mm-not-on-PATH guard, more). 1300+ tests pass. |
 | 0.10.1  | 2026-04-27 | **Group 7 preflight — security hardening + concurrency safety + correctness fixes + mm-events foundation.** Eight cleanup items spanning the peer-controlled trust boundary, filesystem-identity dedup, device-write concurrency safety, and the mm-events default source needed by the upcoming retro-fleet skill (v0.11.0). All additive. (1) `safe_str()` / `safe_text()` sanitize peer-controlled strings at every render site (~30 print sites swept) — strips CSI / OSC / DCS / C1 terminal escape sequences AND defangs Rich markup. Closes the OSC 52 clipboard-write vector (xterm/iTerm2/kitty/alacritty honor base64-encoded clipboard writes from remote escapes), CSI screen-clear, OSC title spoof. Pinned in `tests/test_safe_str.py`. (2) Pull-time case-collision detection on case-insensitive filesystems — non-invasive `_detect_case_insensitive_fs` swapcase + samefile probe (no writes), bucket peer-manifest paths by casefold per source, drop all-but-lex-first via `_drop_case_collisions_from_manifests` (manifest keys NEVER case-normalized globally — only consumer-side WRITE skipping; cross-platform peers retain distinct casing). Per-cluster `mm: warning:` to stderr. (3) `register_device` is now create-only via `LocalBackend.put_exclusive` (atomic `os.link` + EEXIST detection) — fixes the iCloud `.icloud` placeholder TOCTOU window where `_ensure_device_registered`'s `backend.exists()` check returned False on a present-but-cloud-only entry, silently bumping the `registered:` first-registration timestamp on every push. (4) `update_last_seen` serializes via `_devices_write_lock()` (`fcntl.LOCK_EX | LOCK_NB`, ~750ms retry budget, degrade-with-warning on contention) — forward-defense for the moment a non-deterministic device.json field lands. (5) `walk_generic_source` filesystem-identity dedup via `set[tuple[st_dev, st_ino]]` with deterministic pre-sort (rglob iteration order is FS-dependent on macOS APFS; sort-then-dedup avoids phantom add/delete fleet churn on hardlink/symlink overlap). (6) `_find_conflict_files` dedup key strengthened from `(src_name, Path)` to `(src_name, st_dev, st_ino)` with `(src_name, str)` fallback on stat failure — same shape as walker. (7) `mm-events` default source at `~/.local/share/mind-meld/events/` (mode 0o700) for Group 8's retro-fleet event log; auto-included at `mm init` (mm-internal, no prompt — disable per-machine via `mm disable-source mm-events`); `get_sources()` bootstraps the directory on first call so the source isn't inert between Group 7 and Group 8 ship. (8) `src/mind_meld/skills/` placeholder subpackage ships in the wheel via existing `packages = ["src/mind_meld"]` so Group 8's `retro-fleet/SKILL.md` symlink installer can find resources via `importlib.resources.files("mind_meld") / "skills"`. New `MM_INTERNAL_SOURCE_NAMES = frozenset({"mm-events"})` short-circuits prompts for mm-owned infrastructure; init guard refuses on zero user-facing sources (mm-events doesn't count). 4 new test modules (`test_safe_str.py`, `test_case_collision.py`, `test_devices.py`, `test_wheel.py`) + extensions to `test_config.py` / `test_conflict_copy.py` / `test_manifest.py`. Two adversarial follow-ups filed in TODOS for v0.10.x patch: read-only-command bootstrap warning spam, conftest devices-import coupling. |
 | 0.9.4   | 2026-04-25 | **Track 5D — adversarial-review follow-ups for the v0.8.15 Track 5A ship.** Two surgical hardening fixes plus a self-heal hook. (1) `_find_conflict_files` now dedups via a `seen: set[tuple[str, Path]]` accumulator — `mm conflicts` no longer double-counts when an `include_files` entry sits inside an `include_dirs` directory (default config doesn't trigger this; footgun-removal for users customizing). Tuple key (not bare `Path`) preserves source attribution when two configured sources legitimately reference overlapping subtrees. (2) `mm init` order swap: `_save_and_register` → `_register_and_save`. Storage-write (`register_device`) runs FIRST, then local pointer (`save_config`) — canonical "remote first, local pointer last" transaction discipline. A SIGKILL/OOM/power-loss in the post-register, pre-save window now leaves an inert orphan storage entry (recoverable on retry init via `_init_storage_guard`'s orphan-case prompt) instead of the inverse half-state where local config claimed a `device_id` storage didn't recognize. The original local-side rollback try/except is gone; a new best-effort `backend.delete(devices/<id>.json)` cleanup wraps `save_config` so normal save failures (disk full, permissions) don't trip the orphan-case warning on retry. (3) Push-time self-heal — new `_ensure_device_registered` hook at `_push_core` entry recreates `devices/<my_id>.json` if it's absent. Two scenarios converge here: future v0.9.4+ SIGKILL crash mid-init (cosmetic) AND retroactive fix for pre-v0.9.4 victims of the v0.8.15..v0.9.3 inverted half-state (config has `device_id`, storage's `devices/` doesn't — without this hook those users push manifests under an ID no peer recognizes, silently). Gated on `not dry_run` (codex review caught `mm push --dry-run` must not mutate storage). 15 new tests pin the regressions (5 conflict-dedup, 7 register-and-save ordering, 3 self-heal). 789 pass. No fleet-version threshold change — `INVERSION_MIN_VERSION` stays at `"0.9.2"`. |
 | 0.9.3   | 2026-04-25 | Hotfix patch (post-Track-5C): added `config.yaml` to the gstack source's default `exclude_patterns`. Track 5C (v0.9.1) covered `projects/*/repo-mode.json` and `projects/*/land-deploy-confirmed` but missed `~/.gstack/config.yaml`, which holds gstack's version-check tracking and other machine-local IDs. Syncing it actively breaks the version mechanism on whichever machine pulls last. Existing installs need `mm migrate-config` (visible-failure contract from v0.9.1 surfaces the missing-excludes signal via `mm status`). Fresh installs get the fixed default automatically. No fleet-version threshold change — `INVERSION_MIN_VERSION` stays at `"0.9.2"`. One-time cleanup note for v0.9.2→v0.9.3 upgraders with a stranded `~/.gstack/config.sync-conflict-*.yaml` sidecar: list + delete via `find ~/.gstack -maxdepth 1 -name 'config.sync-conflict-*'` (the proper depth-0-scan fix lands in a follow-up patch). |
@@ -41,10 +42,12 @@ The original cleanup-sweep set (Groups 1–5) shipped through v0.9.4. Three
 post-cleanup releases shipped outside the original plan: v0.9.5
 (auto-upgrade nudge), v0.9.6 (public-readiness scrub), and v0.10.0
 (per-machine source toggle). Group 6 (release infrastructure polish —
-GitHub Releases backfill) shipped 2026-04-27. Two new Groups remain
-before v1.0: Group 7 (mm-events foundation — fleet-aware retro per
-`docs/designs/fleet-retro.md`) and Group 8 (retro-fleet skill consumer,
-depends on Group 7).
+GitHub Releases backfill) shipped 2026-04-27. Group 7 (mm-events
+foundation — Tracks 7A `events.py` foundation + 7B `_push_core` wiring)
+shipped through v0.10.2 / v0.10.3. **Group 8 (retro-fleet skill
+consumer) shipped as v0.11.0 on 2026-04-28** — closes the fleet-retro
+arc per `docs/designs/fleet-retro.md`. The `Phase 1 → v1.0` plan from
+the 2026-04-22 `/full-review` audit is now complete.
 
 See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
 
@@ -167,12 +170,12 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   back to its tagged commit subject. v0.10.0 marked Latest. Unlocks the
   RSS feed, in-repo release-notes surfacing, and downloadable-asset UX.
   Zero source-code changes.
-- **Group 7 (mm-events foundation, fleet-retro v0.11.0):** planned per
-  `docs/designs/fleet-retro.md`. Per-device JSONL event log (`mm-push` +
-  `git-snapshot` + `sessions-snapshot` events) written at `_push_core`
-  tail position inside a hard time budget. New `mm-events` source on
-  synced storage; `mm gc` reaps after 90 days via existing tombstone
-  plumbing.
+- **Group 7 (mm-events foundation, fleet-retro v0.11.0):** ✓ Complete.
+  Per-device JSONL event log (`mm-push` + `git-snapshot` +
+  `sessions-snapshot` events) written at `_push_core` HEAD position
+  inside a hard time budget. New `mm-events` source on synced storage;
+  `mm gc` reaps event files older than 90 days via tombstone propagation
+  so deletion fans out fleet-wide on the next pull.
   **Pre-flight ✅ shipped in v0.10.1 (2026-04-27).** All 8 preflight items
   landed together: `safe_str()` / `safe_text()` peer-controlled string
   sanitization sweep (~30 print sites — closes the OSC 52 clipboard, CSI
@@ -187,13 +190,40 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
   deterministic pre-sort; `_find_conflict_files` key strengthened to
   `(src_name, st_dev, st_ino)`; `mm-events` default source +
   `MM_INTERNAL_SOURCE_NAMES` frozenset + `get_sources()` bootstrap;
-  `src/mind_meld/skills/` placeholder subpackage. Tracks 7A (events.py
-  module) and 7B (`_push_core` wiring + gc retention) remain.
-- **Group 8 (retro-fleet skill consumer):** planned. Skill shipped in mm
-  wheel, symlinked into `~/.claude/skills/` at `mm init` (24h-TTL self-heal
-  via push-head hook). Reads synced event log across all devices, dedups
-  by `(canonical_remote_url, sha)`, renders gstack `/retro`-shaped markdown
-  with locked output format owned by mm.
+  `src/mind_meld/skills/` placeholder subpackage.
+  **Track 7A ✅ shipped in v0.10.2 (2026-04-28).** `src/mind_meld/events.py`
+  foundation: six functions plus a TypedDict v=1 schema. URL canonicalization
+  strips creds before they reach iCloud-synced JSONL; `discover_git_roots`
+  multi-prober registry handles Conductor worktrees (where `.git` is a
+  file); `walk_git_projects` enforces a hard wall-time budget via
+  `as_completed(timeout=...)`; `walk_session_metadata` 2-level scandir tags
+  Conductor workspaces as ephemeral by path-string match.
+  **Track 7B ✅ shipped in v0.10.3 (2026-04-28).** `_run_events_tail` at the
+  HEAD of `_push_core` (after device self-heal, before `build_manifest_v2`),
+  same-push upload (no one-push lag), `mm-events`-resolved gate (covers
+  fresh / migrated / un-migrated configs uniformly without a migration
+  prompt), wall-clock budget 250ms autopush / 500ms interactive plumbed
+  through to `walk_session_metadata`'s `deadline_monotonic` kwarg, dry-run
+  no-op preserved, forensic-only failure breadcrumb. `_gc_old_event_files`
+  reaps day files older than 90 days by parsing the filename date (NOT
+  mtime — iCloud restores rewrite mtimes back to "now" while filename
+  date is intrinsic). Fleet retention fans out via tombstone propagation.
+- **Group 8 (retro-fleet skill consumer):** ✓ Complete — Track 8A
+  shipped as v0.11.0 on 2026-04-28. Skill ships in the mm wheel under
+  `src/mind_meld/skills/retro_fleet/`, symlinked to
+  `~/.claude/skills/retro-fleet` at `mm init` and self-healed every push
+  behind a 24h-TTL marker (5-branch state machine: target absent /
+  correct symlink / dangling symlink / wrong target / OSError — covers
+  pipx-reinstall recovery). The aggregator reads the synced event log
+  across all devices, dedups commits via `(canonical_remote_url, sha)`,
+  picks the latest sessions-snapshot per `(device, claude_dir)`, and
+  renders gstack `/retro`-shaped markdown with locked output format owned
+  by mm. Two surface companions: `mm devices --format=json` (stable
+  schema for the skill's "M of N known devices" breadcrumb) and the
+  `EVENTS_SCHEMA_VERSION` 1 → 2 bump (sessions-snapshot now FULL
+  INVENTORY so latest-per-tuple is honest). Mixed-fleet handling
+  surfaces `Sessions count incomplete: peer X on pre-v0.11.0` instead
+  of overcounting.
 
 ### Version source of truth
 
