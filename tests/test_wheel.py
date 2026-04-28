@@ -42,3 +42,34 @@ def test_skills_dir_is_real_path():
     skills_dir = Path(str(importlib.resources.files("mind_meld") / "skills"))
     assert skills_dir.exists()
     assert skills_dir.is_dir()
+
+
+def test_retro_fleet_skill_md_ships_in_wheel():
+    """Group 8 / Track 8A: the retro-fleet skill's SKILL.md MUST be present
+    in the installed package. Pre-Group-8 the dir was empty; from Group 8
+    forward, ``mm init``'s symlink installer assumes SKILL.md exists at
+    the wheel-side path.
+    """
+    skill_md = importlib.resources.files("mind_meld") / "skills" / "retro_fleet" / "SKILL.md"
+    assert skill_md.is_file(), (
+        "src/mind_meld/skills/retro_fleet/SKILL.md must ship in the wheel. "
+        "If this fails, check that pyproject.toml's `packages` setting still "
+        "covers nested data files under the skills/ subpackage, and that the "
+        "retro_fleet/ directory has an __init__.py."
+    )
+
+
+def test_retro_fleet_aggregator_ships_in_wheel():
+    """Pin the aggregator's wheel inclusion so SKILL.md's
+    ``python -m mind_meld.skills.retro_fleet.aggregator`` invocation can
+    actually find the module on installed systems."""
+    aggregator = importlib.resources.files("mind_meld") / "skills" / "retro_fleet" / "aggregator.py"
+    assert aggregator.is_file()
+
+
+def test_retro_fleet_module_is_importable():
+    """End-to-end pin: the dotted import path that SKILL.md tells Claude
+    Code to use MUST resolve. Catches missing __init__.py / packaging
+    misconfig before users would."""
+    import mind_meld.skills.retro_fleet  # noqa: F401
+    from mind_meld.skills.retro_fleet import aggregator  # noqa: F401
