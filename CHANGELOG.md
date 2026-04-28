@@ -2,6 +2,49 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.10.2] - 2026-04-28
+
+**Track 7A: events.py foundation for fleet-aware retro.** Internal module
+that captures per-push event metadata (git activity, session metadata, mm
+sync activity) to a per-device daily JSONL file. Nothing user-visible
+until Track 7B wires `_push_core` and Group 8 ships the `retro-fleet`
+skill (both targeting v0.11.0). Foundation lands now to unblock parallel
+work; fleet stays on v0.10.1 behavior until v0.11.0 is tagged.
+
+### Added
+
+- **`src/mind_meld/events.py`** — six functions plus a TypedDict v=1
+  schema for the synced event log. `canonicalize_remote_url` strips
+  credentials, userinfo, query auth, and fragments so tokens never
+  reach iCloud-synced JSONL. `discover_git_roots` runs a multi-prober
+  registry (gstack `repo-mode.json`, claude `cwd` field from session
+  jsonls, manual `[retro].repo_roots`) and filters via
+  `git rev-parse --show-toplevel` so Conductor worktrees (where `.git`
+  is a file) aren't silently excluded. `walk_git_projects` enforces a
+  hard wall-time budget via `as_completed(timeout=...)`, with per-repo
+  timeout `max(200, (budget * 8) // repos)` capped at 2000ms.
+  `walk_session_metadata` does an `os.scandir` 2-level walk and tags
+  Conductor workspaces as ephemeral by path-string match (not existence
+  check). `last_push_ts` derives the cursor from the events log itself
+  by reverse-scanning up to 30 daily files for a `mm-push` row,
+  defaulting to `now - 30d` on first run. `write_push_event` appends
+  N events under one flock window; the contract requires the mm-push
+  event LAST so a partial write doesn't advance the cursor.
+
+### Changed
+
+- **Extracted `fsutil.flock_append_jsonl(path, lines, *, mode, on_locked)`**
+  as the single source of truth for the flock-protected JSONL append
+  pattern. `pullhistory._append_payload` now routes through it with
+  rotation passed in as an `on_locked` closure. Future flock bugs get
+  fixed in one place.
+
+### Tests
+
+- 67 new tests across `tests/test_events.py` (58) and
+  `tests/test_fsutil.py` (9). 38 existing pullhistory tests still pass
+  unchanged after the retrofit. Total: 1024 pass, 0 fail.
+
 ## [0.10.1] - 2026-04-27
 
 **Group 7 preflight: hygiene + security hardening before fleet-retro
