@@ -33,7 +33,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from mind_meld import __version__, fsutil, pullhistory, seen_sources, sidecar, upgrade
+from mind_meld import __version__, events, fsutil, pullhistory, seen_sources, sidecar, upgrade
 from mind_meld import config as _config_module
 from mind_meld.config import (
     DEFAULT_ARGON2_MEMORY_KB,
@@ -110,6 +110,13 @@ from mind_meld.synclog import write_sync_log
 ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
 FetchStatus = Literal["ok", "missing", "corrupt"]
 CONFLICT_AGE_DAYS = 30
+# Track 7B (v0.10.3): per-device daily JSONL events files older than this
+# are reaped at every `mm gc`. The retention is fleet policy, not per-
+# device opt-in: a stale device's old events would otherwise pin storage
+# forever via tombstone propagation. Reap by FILENAME date (Codex C5,
+# C6) — iCloud restores produce misleading mtimes.
+EVENTS_RETENTION_DAYS = 90
+_EVENTS_FILENAME_DATE_RE = re.compile(r"^(?P<device>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$")
 
 # Track 5E (v0.9.2 BREAKING): minimum peer version required for safe pull.
 # v0.9.2 inverted the conflict-direction semantics — a peer running an
@@ -2162,6 +2169,90 @@ def _ensure_device_registered(
         raise
 
 
+def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
+    """Return the base directory of each ``type=claude`` source resolved by
+    ``get_sources()``. Used by ``_run_events_tail`` to feed Track 7B's
+    ``walk_session_metadata`` once per claude dir; aggregated into a single
+    sessions-snapshot row so pull-merge set-union semantics stay stable
+    regardless of how many claude sources are configured."""
+    return [Path(s["path"]).expanduser() for s in sources if s.get("type") == "claude"]
+
+
+def _run_events_tail(
+    config: dict,
+    sources: list[dict],
+    device_id: str,
+    *,
+    dry_run: bool,
+    quiet: bool,
+) -> None:
+    """Capture per-push fleet-retro events at the HEAD of ``_push_core``.
+
+    See CLAUDE.md "Events tail in _push_core (load-bearing, v0.10.3)" for
+    the load-bearing invariants: head-position single-call-site (Codex C4
+    — branch-fragility-free, one-push-lag-free), dry_run no-op (preview
+    contract), mm-events-resolved gate (covers fresh / migrated / un-
+    migrated configs uniformly, Codex C1), and the autopush 250ms /
+    interactive 500ms wall-clock budget.
+
+    Forensic-only invariant: any failure in this block is swallowed and
+    breadcrumbed via ``mm: notice:``. The push proceeds.
+    """
+    if dry_run:
+        return
+    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if mm_events_src is None:
+        return
+    try:
+        budget_ms = (
+            events.WALK_TIME_BUDGET_AUTOPUSH_MS if quiet else events.WALK_TIME_BUDGET_INTERACTIVE_MS
+        )
+        deadline = time.monotonic() + budget_ms / 1000.0
+        events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+
+        roots, errs = events.discover_git_roots(config)
+        since = events.last_push_ts(events_dir, device_id)
+
+        g_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
+        for r in g_rows:
+            r["device"] = device_id
+
+        claude_paths = _enabled_claude_paths(sources)
+        agg_projects: list[dict] = []
+        for claude_dir in claude_paths:
+            for row in events.walk_session_metadata(
+                claude_dir, since=since, deadline_monotonic=deadline
+            ):
+                agg_projects.extend(row.get("projects", []))
+        s_rows: list[dict] = []
+        if claude_paths:
+            s_rows.append(
+                {
+                    "v": events.EVENTS_SCHEMA_VERSION,
+                    "type": "sessions-snapshot",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "device": device_id,
+                    "projects": agg_projects,
+                }
+            )
+
+        source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
+        mm_event = events.make_mm_push_event(
+            device=device_id,
+            mm_version=__version__,
+            sources=source_names,
+            discovery_errors=errs,
+        )
+        # CT-4 invariant: mm-push event LAST so a partial write doesn't
+        # advance the next-push cursor.
+        events.write_push_event(events_dir, device_id, [*g_rows, *s_rows, mm_event])
+
+        if time.monotonic() > deadline:
+            sys.stderr.write("mm: notice: events tail budget exceeded\n")
+    except Exception as e:
+        sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
+
+
 def _push_core(
     config: dict,
     passphrase: str,
@@ -2196,6 +2287,12 @@ def _push_core(
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
         return None
+
+    # Track 7B head-position events tail. MUST run on every push attempt
+    # past this point (events.py:19-22 trust boundary), BEFORE
+    # build_manifest_v2 so this push's events file lands on disk in time
+    # to be uploaded same push. See `_run_events_tail` for invariants.
+    _run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
 
     skipped: list[tuple[str, str]] = []
 
@@ -3995,6 +4092,9 @@ def gc(
         except MindMeldError as e:
             _error(str(e))
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
+        # Track 7B: events retention is always-on (fleet policy, not opt-in).
+        # See `_gc_old_event_files` for the tombstone-propagation framing.
+        _gc_old_event_files(config, dry_run, verbose)
         if prune_conflicts:
             _gc_old_conflict_files(config, dry_run, verbose)
     finally:
@@ -5583,6 +5683,65 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
     else:
         console.print(f"\n[bold]Resolved {resolved} of {len(hits)}.[/bold]")
     return resolved, failed
+
+
+def _gc_old_event_files(config: dict, dry_run: bool, verbose: bool) -> int:
+    """Reap mm-events JSONL files older than ``EVENTS_RETENTION_DAYS``.
+
+    Track 7B fleet retention. The retro skill reads events by walking the
+    synced manifest at retro time, so deletion via tombstone propagation
+    is the fleet-wide retention mechanism: this device drops the file
+    locally → next push generates a tombstone → all peers drop it on
+    pull. An offline peer that comes back online sees the tombstone
+    too, suppressing resurrection of the deleted day file.
+
+    Reap by filename date (``<device>-YYYY-MM-DD.jsonl``), NOT mtime —
+    iCloud restores can rewrite mtimes back to "now" while the filename
+    date is intrinsic to the event-day boundary.
+
+    Path resolution: from ``get_sources(config)`` so user-customized
+    mm-events paths are honored. Returns 0 when no mm-events source is
+    enabled / resolved.
+    """
+    sources = get_sources(config)
+    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if mm_events_src is None:
+        return 0
+    events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+    if not events_dir.is_dir():
+        return 0
+
+    today = datetime.now(timezone.utc).date()
+    reaped = 0
+    for path in events_dir.rglob("*-*.jsonl"):
+        m = _EVENTS_FILENAME_DATE_RE.match(path.name)
+        if m is None:
+            # Non-conforming filename in the events tree — leave alone.
+            continue
+        try:
+            file_date = datetime.strptime(m.group("date"), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        age_days = (today - file_date).days
+        if age_days < EVENTS_RETENTION_DAYS:
+            continue
+        if verbose or dry_run:
+            prefix = "would delete" if dry_run else "deleted"
+            console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {safe_str(path)}")
+        if not dry_run:
+            try:
+                path.unlink()
+                reaped += 1
+            except OSError:
+                pass
+        else:
+            reaped += 1
+    label = "would reap" if dry_run else "reaped"
+    console.print(
+        f"[bold]{label}[/bold] {reaped} stale events files "
+        f"(older than {EVENTS_RETENTION_DAYS} days)"
+    )
+    return reaped
 
 
 def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:

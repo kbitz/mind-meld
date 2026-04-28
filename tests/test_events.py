@@ -458,6 +458,61 @@ class TestWalkSessionMetadata:
         )
         assert out[0]["projects"][0]["ephemeral"] is False
 
+    def test_deadline_monotonic_aborts_per_project_loop(self, tmp_path):
+        """Track 7B / Codex C4: ``deadline_monotonic`` aborts the scandir
+        loop on a per-project boundary so a pathological project (large
+        jsonls, no `cwd` field) can't blow past the wall-clock budget.
+
+        Set up multiple project dirs and pass a deadline that's already
+        expired — the loop must break before scanning any project."""
+        for i in range(20):
+            proj = tmp_path / "projects" / f"-tmp-{i}"
+            proj.mkdir(parents=True)
+            (proj / "session.jsonl").write_text(
+                json.dumps({"cwd": f"/tmp/{i}", "type": "user"}) + "\n"
+            )
+
+        past_deadline = time.monotonic() - 1.0
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            deadline_monotonic=past_deadline,
+        )
+        # Loop broke before the first iteration completed any work.
+        assert out[0]["projects"] == []
+
+    def test_deadline_monotonic_none_scans_all_projects(self, tmp_path):
+        """``deadline_monotonic=None`` is the no-deadline contract — the
+        wall-clock check is bypassed and every project is scanned."""
+        for i in range(5):
+            proj = tmp_path / "projects" / f"-tmp-{i}"
+            proj.mkdir(parents=True)
+            (proj / "session.jsonl").write_text(
+                json.dumps({"cwd": f"/tmp/{i}", "type": "user"}) + "\n"
+            )
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            deadline_monotonic=None,
+        )
+        assert len(out[0]["projects"]) == 5
+
+    def test_pathological_session_walk_no_cwd_anywhere(self, tmp_path):
+        """T2: walks must not crash when no project has a `cwd` field —
+        decoded path falls back to the encoded directory name."""
+        proj = tmp_path / "projects" / "-tmp-no-cwd"
+        proj.mkdir(parents=True)
+        (proj / "session.jsonl").write_text(
+            # Many lines, none with a `cwd` field.
+            "\n".join(json.dumps({"type": "user", "msg": f"x{i}"}) for i in range(500))
+        )
+        out = events.walk_session_metadata(
+            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
+        )
+        assert len(out[0]["projects"]) == 1
+        # No crash, ephemeral derived from the encoded fallback name.
+        assert out[0]["projects"][0]["ephemeral"] is False
+
 
 # ---------------------------------------------------------------------------
 # T1 — last_push_ts (cursor derivation)
@@ -629,6 +684,37 @@ class TestWritePushEvent:
 # ---------------------------------------------------------------------------
 # T2 — budget abort + cursor non-advancement (CT-4 transactional pin)
 # ---------------------------------------------------------------------------
+
+
+class TestMakeMmPushEventInternalFilter:
+    """Track 7B / Codex C7: ``MM_INTERNAL_SOURCE_NAMES`` (today: ``mm-events``)
+    is mm-owned infrastructure, not user-meaningful fleet activity. The
+    retro skill enumerates user-facing sources only — filter at
+    ``make_mm_push_event`` so the event row never carries the internal
+    name."""
+
+    def test_filters_mm_events_from_sources_list(self):
+        ev = events.make_mm_push_event(
+            device="dev-a",
+            mm_version="0.11.0",
+            sources=["claude", "mm-events", "gstack"],
+        )
+        assert "mm-events" not in ev["sources"]
+        assert ev["sources"] == ["claude", "gstack"]
+
+    def test_empty_sources_stays_empty(self):
+        ev = events.make_mm_push_event(device="dev-a", mm_version="0.11.0")
+        assert ev["sources"] == []
+
+    def test_only_internal_names_yields_empty(self):
+        ev = events.make_mm_push_event(device="dev-a", mm_version="0.11.0", sources=["mm-events"])
+        assert ev["sources"] == []
+
+    def test_user_only_sources_pass_through(self):
+        ev = events.make_mm_push_event(
+            device="dev-a", mm_version="0.11.0", sources=["claude", "gstack"]
+        )
+        assert ev["sources"] == ["claude", "gstack"]
 
 
 class TestWriteOrderTransactionalPin:

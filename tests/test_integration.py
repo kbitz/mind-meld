@@ -3350,3 +3350,293 @@ class TestBackfillPreservesRawPaths:
         # backfill failure specifically is known-swallowable.
         assert "Traceback" not in result.output
         assert "Traceback" not in (result.stderr or "")
+
+
+class TestTrack7BEventsTail:
+    """Track 7B (v0.10.3): per-push events tail at HEAD of ``_push_core``.
+
+    See CLAUDE.md "Events tail in _push_core (load-bearing, v0.10.3)" for
+    the four invariants. These tests pin the wiring shape — the tail must
+    fire on every push attempt past the no-sources guard, never on
+    ``--dry-run``, never on un-migrated configs lacking ``mm-events``,
+    and must aggregate multi-claude scans into a single sessions-snapshot
+    row. Failures inside the tail are forensic-only and cannot fail the
+    push.
+    """
+
+    def _events_dir(self, tmp_path: Path) -> Path:
+        return tmp_path / "events_root" / "events"
+
+    def _make_config_with_events(
+        self,
+        tmp_path: Path,
+        storage_dir: Path,
+        claude_dir: Path,
+        device_id: str,
+        device_name: str,
+        *,
+        include_mm_events: bool = True,
+        extra_claude_dirs: list[Path] | None = None,
+    ) -> Path:
+        config_path = tmp_path / f"config_{device_id}.toml"
+        sources: list[dict] = [{"name": "claude", "path": str(claude_dir), "type": "claude"}]
+        for i, extra in enumerate(extra_claude_dirs or []):
+            sources.append({"name": f"claude-{i + 2}", "path": str(extra), "type": "claude"})
+        if include_mm_events:
+            sources.append(
+                {
+                    "name": "mm-events",
+                    "path": str(tmp_path / "events_root"),
+                    "type": "generic",
+                    "include_dirs": ["events"],
+                    "exclude_patterns": [],
+                }
+            )
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {"max_file_size": 52_428_800, "sources": sources},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        return config_path
+
+    def _seed_claude(self, claude_dir: Path) -> None:
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "user_role.md").write_text("---\nname: role\n---\nEng")
+        # session jsonl so walk_session_metadata has something to scan
+        sessions = claude_dir / "projects" / "-Users-kb-myapp"
+        (sessions / "session.jsonl").write_text(
+            json.dumps({"cwd": str(claude_dir.parent), "type": "user"}) + "\n"
+        )
+
+    def _bootstrap(self, storage_dir: Path) -> LocalBackend:
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        return backend
+
+    def _activate(self, monkeypatch, config_path: Path) -> None:
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+    def _events_files(self, events_dir: Path) -> list[Path]:
+        if not events_dir.is_dir():
+            return []
+        return sorted(events_dir.glob("*.jsonl"))
+
+    def _read_events(self, events_file: Path) -> list[dict]:
+        return [json.loads(ln) for ln in events_file.read_text().splitlines() if ln.strip()]
+
+    def test_events_tail_fires_on_successful_push(self, tmp_path, monkeypatch):
+        """Happy path: mm-events resolved, push succeeds, events file
+        appears with a final mm-push row (CT-4 invariant)."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+
+        events_files = self._events_files(self._events_dir(tmp_path))
+        assert len(events_files) == 1, "exactly one events file expected for one device"
+        rows = self._read_events(events_files[0])
+        assert rows, "events file must not be empty"
+        # CT-4: mm-push is the LAST row.
+        assert rows[-1]["type"] == "mm-push"
+        assert rows[-1]["device"] == "dev-a"
+
+    def test_events_tail_skipped_on_dry_run(self, tmp_path, monkeypatch):
+        """Preview contract: ``mm push --dry-run`` must not write any
+        events file. The tail returns immediately on dry_run=True."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        result = runner.invoke(app, ["push", "--dry-run"])
+        assert result.exit_code == 0, result.output
+
+        # No events file ever materialized.
+        assert self._events_files(self._events_dir(tmp_path)) == []
+
+    def test_events_tail_skipped_on_un_migrated_config(self, tmp_path, monkeypatch):
+        """Codex C1: a config that pre-dates v0.10.1 has no mm-events
+        source. The tail must no-op; pre-migration users see no
+        ``~/.local/share/mind-meld/events/`` cruft."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(
+            tmp_path, storage_dir, claude_a, "dev-a", "A", include_mm_events=False
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+
+        # Tail no-opped — no events_root materialized.
+        assert not self._events_dir(tmp_path).exists()
+
+    def test_events_tail_skipped_when_mm_events_disabled(self, tmp_path, monkeypatch):
+        """v0.10.0 disabled_sources path: when mm-events is in the
+        per-device disabled list, get_sources() drops it and the tail
+        no-ops (gate is "mm-events resolved", not just "not disabled")."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config_path = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        # Patch the config to disable mm-events on this device.
+        with config_path.open("rb") as f:
+            cfg = tomllib.loads(f.read().decode())
+        cfg["sync"]["disabled_sources"] = ["mm-events"]
+        save_config(cfg, config_path)
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config_path)
+
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        assert self._events_files(self._events_dir(tmp_path)) == []
+
+    def test_events_tail_failure_does_not_fail_push(self, tmp_path, monkeypatch):
+        """Forensic-only invariant: any exception inside the tail is
+        swallowed + breadcrumbed via ``mm: notice:``. The push proceeds."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        # Break events.discover_git_roots so the tail blows up.
+        def _boom(_config):
+            raise RuntimeError("synthetic walk failure")
+
+        monkeypatch.setattr(cli_module.events, "discover_git_roots", _boom)
+
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, (
+            f"push must succeed even when events tail crashes; output={result.output!r}"
+        )
+
+    def test_events_tail_iron_rule_fires_on_no_content_push(self, tmp_path, monkeypatch):
+        """IRON RULE: events tail fires on EVERY push attempt past the
+        no-sources guard, including the no-content-diff branch. Pre-Track
+        7B, no-content pushes never advanced the cursor — the head-position
+        wiring fixes that."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        # First push: real content, real events.
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        first = self._events_files(self._events_dir(tmp_path))
+        assert len(first) == 1
+        first_rows = self._read_events(first[0])
+
+        # Second push immediately: nothing changed in claude_a → no-content
+        # diff path. Events file must still gain a fresh mm-push row.
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        second_rows = self._read_events(first[0])
+        assert len(second_rows) > len(first_rows), (
+            "events tail did not fire on no-content push (IRON RULE regression)"
+        )
+        assert second_rows[-1]["type"] == "mm-push"
+
+    def test_events_tail_filters_mm_events_from_sources_field(self, tmp_path, monkeypatch):
+        """Codex C7: mm-events source name MUST NOT appear in the
+        ``sources`` field of the mm-push event (mm-owned infrastructure,
+        not user fleet activity)."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        push_row = next(r for r in rows if r.get("type") == "mm-push")
+        assert "mm-events" not in push_row["sources"]
+        assert "claude" in push_row["sources"]
+
+    def test_events_tail_aggregates_multi_claude_dirs(self, tmp_path, monkeypatch):
+        """Multi-claude aggregation: two ``type=claude`` sources → ONE
+        sessions-snapshot row with combined projects (mirrors
+        walk_git_projects' aggregate-into-one-row shape)."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_a2 = tmp_path / "machine_a" / ".claude2"
+        self._seed_claude(claude_a)
+        self._seed_claude(claude_a2)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(
+            tmp_path,
+            storage_dir,
+            claude_a,
+            "dev-a",
+            "A",
+            extra_claude_dirs=[claude_a2],
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        sessions_rows = [r for r in rows if r.get("type") == "sessions-snapshot"]
+        assert len(sessions_rows) == 1, (
+            f"expected exactly one sessions-snapshot row across multi-claude, "
+            f"got {len(sessions_rows)}"
+        )
+
+    def test_events_tail_records_device_id_on_snapshots(self, tmp_path, monkeypatch):
+        """All non-empty snapshot rows must carry the pushing device's
+        id. ``walk_git_projects`` and ``walk_session_metadata`` set
+        ``device: ""`` and the wiring fills it in."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        # Every row stamped with dev-a (no orphaned "" devices).
+        for row in rows:
+            assert row.get("device") == "dev-a", row
