@@ -19,7 +19,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources}.py
+src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events}.py
 src/mind_meld/storage/{local,keys}.py
 src/mind_meld/skills/  (placeholder subpackage; ships in wheel via `packages = ["src/mind_meld"]` so Group 8's `retro-fleet/SKILL.md` is findable via `importlib.resources.files("mind_meld") / "skills"`. Do NOT add a hatchling `force-include` for this dir — it would double-ship every file alongside the package walk.)
 
