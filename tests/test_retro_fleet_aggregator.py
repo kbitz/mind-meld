@@ -1,0 +1,799 @@
+"""Group 8 / Track 8A: retro-fleet aggregator pins.
+
+Pins all the load-bearing aggregation rules from /plan-eng-review:
+
+* CQ#3 — tolerant reader: empty fleet, missing gstack, torn JSONL line,
+  unknown fields, non-dict objects don't crash.
+* CQ#2 — `MM_EVENTS_DIR` env override.
+* Architecture #1 / Cross-model #1 — sessions-snapshot dedup-per-(device,
+  claude_dir): v=2 latest-per-tuple wins; v=1 surfaces as pre-v0.11.0
+  peer breadcrumb but is NOT summed.
+* Architecture #3 — `mm devices --format=json` failure degrades to
+  "events from N devices" (no "of M known" tail).
+* TODO#1 — skipped-events visible-failure breadcrumb in tail.
+* TODO#2 — window > retention warning.
+* Author filter via git config + optional [retro].author_emails.
+* Cherry-pick informational counted but not deduped (acknowledged
+  v1 limitation).
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from mind_meld.skills.retro_fleet import aggregator
+
+# ---------------------------------------------------------------------------
+# Fixtures — synthetic events for the table-tested aggregations.
+# ---------------------------------------------------------------------------
+
+
+NOW = datetime(2026, 4, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _ts(days_ago: float = 0.0) -> str:
+    """ISO 8601 UTC timestamp ``days_ago`` before NOW."""
+    return (NOW - timedelta(days=days_ago)).isoformat()
+
+
+def _git_event(
+    device: str,
+    days_ago: float,
+    commits: list[dict],
+    remote: str = "github.com/kb/mm",
+) -> dict:
+    return {
+        "v": 2,
+        "type": "git-snapshot",
+        "ts": _ts(days_ago),
+        "device": device,
+        "projects": [
+            {
+                "remote": f"https://{remote}.git",  # raw form — aggregator canonicalizes
+                "local_path": f"/Users/kb/{remote.split('/')[-1]}",
+                "commits": commits,
+            }
+        ],
+    }
+
+
+def _commit(
+    sha: str,
+    days_ago: float,
+    *,
+    author_email: str = "kb@example.com",
+    subject: str = "fix: thing",
+    add: int = 10,
+    dlt: int = 2,
+    files: int = 1,
+) -> dict:
+    return {
+        "sha": sha,
+        "date": _ts(days_ago),
+        "author_email": author_email,
+        "subject": subject,
+        "files": files,
+        "add": add,
+        "del": dlt,
+    }
+
+
+def _sessions_event(device: str, days_ago: float, projects: list[dict], v: int = 2) -> dict:
+    return {
+        "v": v,
+        "type": "sessions-snapshot",
+        "ts": _ts(days_ago),
+        "device": device,
+        "projects": projects,
+    }
+
+
+def _push_event(
+    device: str,
+    days_ago: float,
+    sources: list[str] | None = None,
+    discovery_errors: list[str] | None = None,
+) -> dict:
+    return {
+        "v": 2,
+        "type": "mm-push",
+        "ts": _ts(days_ago),
+        "device": device,
+        "mm_version": "0.11.0",
+        "sources": sources or ["claude", "gstack"],
+        "discovery_errors": discovery_errors or [],
+    }
+
+
+def _write_events(events_dir: Path, device: str, day_iso: str, events: list[dict]) -> None:
+    events_dir.mkdir(parents=True, exist_ok=True)
+    path = events_dir / f"{device}-{day_iso}.jsonl"
+    with open(path, "a", encoding="utf-8") as f:
+        for ev in events:
+            f.write(json.dumps(ev) + "\n")
+
+
+def _aggregate(
+    events_dir: Path,
+    *,
+    window_days: int = 7,
+    author_emails: frozenset[str] = frozenset(),
+    skill_usage_path: Path | None = None,
+    eureka_path: Path | None = None,
+    now: datetime = NOW,
+) -> aggregator.RetroData:
+    return aggregator.aggregate(
+        events_dir=events_dir,
+        window_days=window_days,
+        author_emails=author_emails,
+        skill_usage_path=skill_usage_path or (Path("/nonexistent/skill-usage.jsonl")),
+        eureka_path=eureka_path or (Path("/nonexistent/eureka.jsonl")),
+        now=now,
+    )
+
+
+# ---------------------------------------------------------------------------
+# T1 — Tolerant reader (CQ#3).
+# ---------------------------------------------------------------------------
+
+
+class TestTolerantReader:
+    def test_empty_fleet_renders_day_one_output(self, tmp_path):
+        """Day-1 fleet: zero events on disk → renders without crashing."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        data = _aggregate(events_dir)
+        assert data.git.commits == 0
+        assert data.sessions.total_sessions == 0
+        assert data.pushes.push_events == 0
+        # Skills/eureka unavailable when path doesn't exist.
+        assert data.skills.available is False
+        assert data.eureka.available is False
+        out = aggregator.format_retro(data)
+        assert "# Retro:" in out
+
+    def test_events_dir_absent_silently(self, tmp_path):
+        """Path that doesn't exist → empty data, no exception."""
+        data = _aggregate(tmp_path / "nonexistent-events")
+        assert data.git.commits == 0
+        assert data.skipped_lines == 0
+
+    def test_torn_jsonl_line_skipped_and_counted(self, tmp_path):
+        """Mid-line crash leaves a half-written record. Reader skips it,
+        counts it in skipped_lines, continues parsing the rest."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        path = events_dir / "dev-a-2026-04-28.jsonl"
+        # First line is fine, second is torn JSON, third is fine.
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(_push_event("dev-a", 0)) + "\n")
+            f.write('{"v":2,"type":"mm-push","ts":"2026-04-28T12:00:00Z",\n')  # torn
+            f.write(json.dumps(_push_event("dev-a", 0)) + "\n")
+        data = _aggregate(events_dir)
+        assert data.skipped_lines == 1
+        assert data.pushes.push_events == 2
+
+    def test_non_dict_lines_skipped(self, tmp_path):
+        """JSONL with array / scalar values is invalid for our schema —
+        skipped, counted."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        path = events_dir / "dev-a-2026-04-28.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps([1, 2, 3]) + "\n")  # array, not dict
+            f.write(json.dumps("just a string") + "\n")
+            f.write(json.dumps(_push_event("dev-a", 0)) + "\n")
+        data = _aggregate(events_dir)
+        assert data.skipped_lines == 2
+        assert data.pushes.push_events == 1
+
+    def test_invalid_utf8_bytes_replaced_not_crash(self, tmp_path):
+        """Adversarial-review regression: a JSONL file with invalid UTF-8
+        bytes used to crash with UnicodeDecodeError because the reader
+        opened with default ``errors="strict"``. Fix: open with
+        ``errors="replace"`` so a corrupt-byte run becomes U+FFFD and the
+        line still parses (and is skipped by JSONDecodeError, counted)."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        path = events_dir / "dev-a-2026-04-28.jsonl"
+        # Mix valid + invalid-UTF-8 bytes.
+        with open(path, "wb") as f:
+            f.write((json.dumps(_push_event("dev-a", 0)) + "\n").encode("utf-8"))
+            # Invalid UTF-8 sequence (lone continuation byte).
+            f.write(b"\x80\xff\x80 not valid json or utf-8\n")
+            f.write((json.dumps(_push_event("dev-a", 0)) + "\n").encode("utf-8"))
+        # Must not raise.
+        data = _aggregate(events_dir)
+        # Two valid push events parsed; one corrupt-line skipped.
+        assert data.pushes.push_events == 2
+        assert data.skipped_lines >= 1
+
+    def test_file_open_failure_counted_as_skipped(self, tmp_path, monkeypatch):
+        """Adversarial-review regression: per-file open failures used to
+        be silently ignored — a permission error or transient EIO on one
+        events file produced an incomplete retro with no breadcrumb. Fix:
+        bump skip_counter on file-open failure too. Visible-failure
+        contract: user sees 'N events skipped' in the tail."""
+        import builtins
+
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        path = events_dir / "dev-a-2026-04-28.jsonl"
+        path.write_text(json.dumps(_push_event("dev-a", 0)) + "\n")
+
+        # Force open() to raise OSError for our specific file.
+        original_open = builtins.open
+
+        def fake_open(p, *args, **kwargs):
+            if "dev-a-2026-04-28.jsonl" in str(p):
+                raise PermissionError("simulated EACCES")
+            return original_open(p, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+        data = _aggregate(events_dir)
+        # File couldn't be opened → counted as a skip.
+        assert data.skipped_lines >= 1
+        out = aggregator.format_retro(data)
+        assert "skipped" in out
+
+    def test_unknown_fields_in_event_tolerated(self, tmp_path):
+        """Unknown fields don't crash — forward-compat with future schema."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        ev = _push_event("dev-a", 0)
+        ev["future_field_we_dont_know_about"] = {"nested": "data"}
+        _write_events(events_dir, "dev-a", "2026-04-28", [ev])
+        data = _aggregate(events_dir)
+        assert data.pushes.push_events == 1
+        assert data.skipped_lines == 0  # Not a parse error — just unknown fields.
+
+    def test_missing_gstack_skill_usage_renders_section_omitted(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(events_dir, "dev-a", "2026-04-28", [_push_event("dev-a", 0)])
+        data = _aggregate(events_dir, skill_usage_path=tmp_path / "no-gstack.jsonl")
+        out = aggregator.format_retro(data)
+        assert "section omitted" in out
+
+    def test_gstack_skill_usage_unknown_field_tolerated(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        skill_path = tmp_path / "skill-usage.jsonl"
+        skill_path.write_text(
+            json.dumps({"skill": "ship", "ts": _ts(0), "future_unknown_field": True}) + "\n"
+        )
+        data = _aggregate(events_dir, skill_usage_path=skill_path)
+        assert data.skills.available is True
+        assert data.skills.invocations == 1
+
+
+# ---------------------------------------------------------------------------
+# T2 — Architecture #1 / Cross-model #1: sessions-snapshot dedup semantics.
+# ---------------------------------------------------------------------------
+
+
+class TestSessionsAggregation:
+    def test_v2_latest_snapshot_per_device_claude_dir_wins(self, tmp_path):
+        """The core regression for cross-model #1: 3 v=2 snapshots from the
+        same machine on the same day must NOT triple-count sessions. The
+        latest snapshot's sessions count is the truth."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_old = {"claude_dir": "-tmp-x", "sessions": 5, "total_kb": 100, "ephemeral": False}
+        proj_mid = {"claude_dir": "-tmp-x", "sessions": 7, "total_kb": 150, "ephemeral": False}
+        proj_new = {"claude_dir": "-tmp-x", "sessions": 9, "total_kb": 200, "ephemeral": False}
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _sessions_event("dev-a", days_ago=2.0, projects=[proj_old]),
+                _sessions_event("dev-a", days_ago=1.0, projects=[proj_mid]),
+                _sessions_event("dev-a", days_ago=0.5, projects=[proj_new]),
+            ],
+        )
+        data = _aggregate(events_dir)
+        # Latest wins → sessions=9, NOT 5+7+9=21.
+        assert data.sessions.total_sessions == 9
+        assert data.sessions.total_kb == 200
+
+    def test_v2_aggregation_sums_across_devices(self, tmp_path):
+        """Two devices, same project → sum across (device, claude_dir).
+        Distinct devices = distinct chats."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj = {"claude_dir": "-tmp-x", "sessions": 5, "total_kb": 100, "ephemeral": False}
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _sessions_event("dev-a", 1.0, [proj]),
+            ],
+        )
+        _write_events(
+            events_dir,
+            "dev-b",
+            "2026-04-28",
+            [
+                _sessions_event("dev-b", 1.0, [proj]),
+            ],
+        )
+        data = _aggregate(events_dir)
+        # Sum across (dev-a, -tmp-x) + (dev-b, -tmp-x) = 5 + 5 = 10.
+        assert data.sessions.total_sessions == 10
+        assert data.sessions.projects == 2
+
+    def test_v1_sessions_snapshot_NOT_summed_into_totals(self, tmp_path):
+        """Cross-model #1 fix: pre-v0.11.0 v=1 snapshots have delta semantics
+        that don't reconcile with v=2's full inventory. Aggregator MUST NOT
+        sum them — it surfaces the device as a pre-v2 peer instead."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_v1 = {"claude_dir": "-tmp-x", "sessions": 99, "total_kb": 9999, "ephemeral": False}
+        _write_events(
+            events_dir,
+            "dev-old",
+            "2026-04-28",
+            [
+                _sessions_event("dev-old", 1.0, [proj_v1], v=1),
+            ],
+        )
+        data = _aggregate(events_dir)
+        assert data.sessions.total_sessions == 0  # NOT 99
+        assert "dev-old" in data.sessions.pre_v2_peers
+        out = aggregator.format_retro(data)
+        assert "pre-v0.11.0" in out
+
+    def test_ephemeral_split(self, tmp_path):
+        """Conductor workspaces marked ephemeral are split out in the totals
+        AND in the most-active section."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_normal = {"claude_dir": "-tmp-x", "sessions": 5, "total_kb": 100, "ephemeral": False}
+        proj_eph = {"claude_dir": "-conductor-y", "sessions": 3, "total_kb": 50, "ephemeral": True}
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _sessions_event("dev-a", 1.0, [proj_normal, proj_eph]),
+            ],
+        )
+        data = _aggregate(events_dir)
+        assert data.sessions.total_sessions == 8
+        assert data.sessions.ephemeral_sessions == 3
+        assert data.sessions.ephemeral_projects == 1
+
+    def test_window_scoped_by_last_session_at(self, tmp_path):
+        """Adversarial-review regression: pre-fix, walk_session_metadata
+        ignored ``since``, so a 7d retro could include a 60d-old session
+        as long as the device pushed today (snapshot's `ts` is `now`, but
+        the underlying jsonl mtimes are old).
+
+        The fix: stage-2 filter by ``last_session_at`` falling inside the
+        window. Projects with NO recent activity are excluded from totals.
+        Projects active inside the window are included (their full count
+        — accepting some historical-session inflation — but at least the
+        '0 sessions in 7 days' lie is closed).
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Project A: last activity 60 days ago — well outside a 7d window.
+        proj_inactive = {
+            "claude_dir": "-tmp-inactive",
+            "sessions": 999,
+            "total_kb": 99999,
+            "ephemeral": False,
+            "last_session_at": _ts(60.0),
+        }
+        # Project B: last activity 2 days ago — inside the 7d window.
+        proj_active = {
+            "claude_dir": "-tmp-active",
+            "sessions": 5,
+            "total_kb": 100,
+            "ephemeral": False,
+            "last_session_at": _ts(2.0),
+        }
+        # Snapshot is fresh (ts=now), so it passes the snapshot-ts filter.
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_sessions_event("dev-a", 0.0, [proj_inactive, proj_active])],
+        )
+        data = _aggregate(events_dir, window_days=7)
+        # Inactive project's 999 sessions MUST NOT be included.
+        assert data.sessions.total_sessions == 5
+        assert data.sessions.projects == 1
+        # The included project is the active one.
+        assert data.sessions.total_kb == 100
+
+    def test_sessions_no_last_session_at_field_kept(self, tmp_path):
+        """When a snapshot lacks `last_session_at` (older fixture, fresh
+        bootstrap with zero jsonls), the project is INCLUDED — empty data
+        is honest. The fail-open here is a v1 trade-off: rather than
+        silently drop ambiguous data, surface it."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_no_last = {
+            "claude_dir": "-tmp-x",
+            "sessions": 3,
+            "total_kb": 50,
+            "ephemeral": False,
+        }
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_sessions_event("dev-a", 0.0, [proj_no_last])],
+        )
+        data = _aggregate(events_dir, window_days=7)
+        assert data.sessions.total_sessions == 3
+        assert data.sessions.projects == 1
+
+    def test_sessions_outside_window_excluded(self, tmp_path):
+        """A session-snapshot with ts older than `since` is excluded."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        old_proj = {"claude_dir": "-tmp-old", "sessions": 999, "total_kb": 9999, "ephemeral": False}
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-03-01",
+            [
+                _sessions_event("dev-a", days_ago=60.0, projects=[old_proj]),
+            ],
+        )
+        data = _aggregate(events_dir, window_days=7)
+        assert data.sessions.total_sessions == 0
+
+
+# ---------------------------------------------------------------------------
+# T3 — Git aggregation.
+# ---------------------------------------------------------------------------
+
+
+class TestGitAggregation:
+    def test_cross_device_same_sha_dedup(self, tmp_path):
+        """The same commit captured by two devices counts ONCE thanks to
+        canonical-URL + sha dedup."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        c = _commit("abc123", 1.0, add=50, dlt=10)
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event("dev-a", 1.0, [c], remote="github.com/kb/mm"),
+            ],
+        )
+        _write_events(
+            events_dir,
+            "dev-b",
+            "2026-04-28",
+            [
+                _git_event("dev-b", 1.0, [c], remote="github.com/kb/mm"),
+            ],
+        )
+        data = _aggregate(events_dir)
+        assert data.git.commits == 1
+        assert data.git.additions == 50
+        assert data.git.deletions == 10
+
+    def test_canonicalization_unifies_url_forms(self, tmp_path):
+        """Two devices with different URL forms (https vs scp) of the same
+        repo dedup correctly."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        c = _commit("abc123", 1.0)
+        ev_a = _git_event("dev-a", 1.0, [c])
+        ev_a["projects"][0]["remote"] = "https://github.com/kb/mm.git"
+        ev_b = _git_event("dev-b", 1.0, [c])
+        ev_b["projects"][0]["remote"] = "git@github.com:kb/mm.git"
+        _write_events(events_dir, "dev-a", "2026-04-28", [ev_a])
+        _write_events(events_dir, "dev-b", "2026-04-28", [ev_b])
+        data = _aggregate(events_dir)
+        assert data.git.commits == 1
+
+    def test_cherrypick_counted_separately_with_breadcrumb(self, tmp_path):
+        """Cherry-picked commits get distinct shas but the same subject.
+        Counted separately (acknowledged v1 limitation), reported via
+        cherrypick_pairs."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        c1 = _commit("aaa", 1.0, subject="fix: thing")
+        c2 = _commit("bbb", 1.0, subject="fix: thing")  # same subject, different sha
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event("dev-a", 1.0, [c1, c2]),
+            ],
+        )
+        data = _aggregate(events_dir)
+        assert data.git.commits == 2
+        assert data.git.cherrypick_pairs == 1
+
+    def test_author_filter(self, tmp_path):
+        """Author email filter applies — only matching commits counted."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        mine = _commit("abc", 1.0, author_email="kb@example.com")
+        not_mine = _commit("xyz", 1.0, author_email="bot@noreply.com")
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event("dev-a", 1.0, [mine, not_mine]),
+            ],
+        )
+        data = _aggregate(events_dir, author_emails=frozenset({"kb@example.com"}))
+        assert data.git.commits == 1
+        assert data.git.additions == 10  # _commit default
+
+    def test_no_author_filter_renders_all(self, tmp_path):
+        """Empty filter → all commits in window."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        c1 = _commit("aaa", 1.0, author_email="kb@example.com")
+        c2 = _commit("bbb", 1.0, author_email="someone@else.com")
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event("dev-a", 1.0, [c1, c2]),
+            ],
+        )
+        data = _aggregate(events_dir, author_emails=frozenset())
+        assert data.git.commits == 2
+
+    def test_commits_outside_window_excluded(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        old = _commit("aaa", 30.0)
+        recent = _commit("bbb", 1.0)
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event("dev-a", 1.0, [old, recent]),
+            ],
+        )
+        data = _aggregate(events_dir, window_days=7)
+        assert data.git.commits == 1
+
+
+# ---------------------------------------------------------------------------
+# T4 — Visible-failure breadcrumbs (TODO#1, TODO#2).
+# ---------------------------------------------------------------------------
+
+
+class TestVisibleFailures:
+    def test_skipped_lines_breadcrumb_in_output(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        path = events_dir / "dev-a-2026-04-28.jsonl"
+        path.write_text("not json at all\n" + json.dumps(_push_event("dev-a", 0)) + "\n")
+        data = _aggregate(events_dir)
+        assert data.skipped_lines == 1
+        out = aggregator.format_retro(data)
+        assert "1 event(s) skipped" in out
+
+    def test_window_exceeds_retention_breadcrumb(self, tmp_path):
+        """`/retro-fleet 365d` → output warns that 90d retention truncates."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        data = _aggregate(events_dir, window_days=365)
+        assert data.window_exceeds_retention is True
+        out = aggregator.format_retro(data)
+        assert "exceeds the 90-day events retention" in out
+
+    def test_window_within_retention_no_breadcrumb(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        data = _aggregate(events_dir, window_days=7)
+        assert data.window_exceeds_retention is False
+        out = aggregator.format_retro(data)
+        assert "exceeds" not in out
+
+
+# ---------------------------------------------------------------------------
+# T5 — Fleet count via `mm devices --format=json` (Architecture #3).
+# ---------------------------------------------------------------------------
+
+
+class TestFleetCount:
+    def test_mm_devices_failure_degrades_gracefully(self, tmp_path, monkeypatch):
+        """`mm devices --format=json` not on PATH → "events from N machine(s)"
+        without the "of M known" tail."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(events_dir, "dev-a", "2026-04-28", [_push_event("dev-a", 0)])
+
+        # Force the subprocess call to fail.
+        def fake_run(*args, **kwargs):
+            raise FileNotFoundError("mm not found")
+
+        monkeypatch.setattr(aggregator.subprocess, "run", fake_run)
+        data = _aggregate(events_dir)
+        assert data.fleet.devices_known is None
+        out = aggregator.format_retro(data)
+        assert "(known-fleet count unavailable)" in out
+
+    def test_mm_devices_success_renders_n_of_m(self, tmp_path, monkeypatch):
+        """JSON list with M devices + only N have events → "N of M"."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(events_dir, "dev-a", "2026-04-28", [_push_event("dev-a", 0)])
+
+        # Fake `mm devices --format=json` returning a 3-device fleet.
+        class FakeResult:
+            returncode = 0
+            stdout = json.dumps(
+                [
+                    {
+                        "device_id": "dev-a",
+                        "device_name": "Mac A",
+                        "last_seen": None,
+                        "last_seen_version": None,
+                        "is_self": True,
+                    },
+                    {
+                        "device_id": "dev-b",
+                        "device_name": "Mac B",
+                        "last_seen": None,
+                        "last_seen_version": None,
+                        "is_self": False,
+                    },
+                    {
+                        "device_id": "dev-c",
+                        "device_name": "Mac C",
+                        "last_seen": None,
+                        "last_seen_version": None,
+                        "is_self": False,
+                    },
+                ]
+            )
+            stderr = ""
+
+        def fake_run(*args, **kwargs):
+            return FakeResult()
+
+        monkeypatch.setattr(aggregator.subprocess, "run", fake_run)
+        data = _aggregate(events_dir)
+        assert data.fleet.devices_known == 3
+        assert len(data.fleet.devices_in_events) == 1
+        out = aggregator.format_retro(data)
+        assert "1 of 3 known machines" in out
+        assert "Fleet incomplete: 2 device(s)" in out
+
+    def test_mm_devices_returncode_failure_degrades(self, tmp_path, monkeypatch):
+        """Non-zero returncode (mm not initialized) degrades to None."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+
+        class FakeResult:
+            returncode = 1
+            stdout = ""
+            stderr = "Error: not initialized"
+
+        monkeypatch.setattr(aggregator.subprocess, "run", lambda *a, **k: FakeResult())
+        data = _aggregate(events_dir)
+        assert data.fleet.devices_known is None
+
+
+# ---------------------------------------------------------------------------
+# T6 — MM_EVENTS_DIR env override (CQ#2).
+# ---------------------------------------------------------------------------
+
+
+class TestEnvOverride:
+    def test_mm_events_dir_env_overrides_default(self, tmp_path, monkeypatch):
+        custom_dir = tmp_path / "custom-events"
+        custom_dir.mkdir()
+        monkeypatch.setenv("MM_EVENTS_DIR", str(custom_dir))
+        resolved = aggregator._resolve_events_dir()
+        assert resolved == custom_dir
+
+    def test_no_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.delenv("MM_EVENTS_DIR", raising=False)
+        resolved = aggregator._resolve_events_dir()
+        assert resolved == aggregator.DEFAULT_EVENTS_DIR
+
+
+# ---------------------------------------------------------------------------
+# T7 — Retention constant matches cli.
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionConstant:
+    def test_retention_constant_matches_cli(self):
+        """Aggregator hardcodes 90; mm cli hardcodes 90. If either drifts,
+        the window-exceeds breadcrumb is wrong. Pin the agreement."""
+        from mind_meld import cli as cli_module
+
+        assert aggregator.EVENTS_RETENTION_DAYS == cli_module.EVENTS_RETENTION_DAYS
+
+
+# ---------------------------------------------------------------------------
+# T8 — Window arg parsing.
+# ---------------------------------------------------------------------------
+
+
+class TestWindowParsing:
+    def test_valid_windows(self):
+        assert aggregator._parse_window("7d") == 7
+        assert aggregator._parse_window("30d") == 30
+        assert aggregator._parse_window("1d") == 1
+
+    def test_invalid_windows_raise(self):
+        import argparse
+
+        with pytest.raises(argparse.ArgumentTypeError):
+            aggregator._parse_window("7w")
+        with pytest.raises(argparse.ArgumentTypeError):
+            aggregator._parse_window("0d")
+        with pytest.raises(argparse.ArgumentTypeError):
+            aggregator._parse_window("-1d")
+        with pytest.raises(argparse.ArgumentTypeError):
+            aggregator._parse_window("seven days")
+
+
+# ---------------------------------------------------------------------------
+# T9 — Output rendering smoke tests.
+# ---------------------------------------------------------------------------
+
+
+class TestRendering:
+    def test_renders_locked_format_headers(self, tmp_path):
+        """Every locked-format section must appear in output."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _push_event("dev-a", 1.0),
+                _git_event("dev-a", 1.0, [_commit("abc", 1.0)]),
+                _sessions_event(
+                    "dev-a",
+                    1.0,
+                    [
+                        {
+                            "claude_dir": "-tmp-x",
+                            "sessions": 3,
+                            "total_kb": 100,
+                            "ephemeral": False,
+                        },
+                    ],
+                ),
+            ],
+        )
+        data = _aggregate(events_dir)
+        out = aggregator.format_retro(data)
+        assert "## Code shipped" in out
+        assert "## Claude Code activity" in out
+        assert "## Skills used" in out
+        assert "this machine only" in out
+        assert "## Eureka moments" in out
+        assert "## mm sync activity" in out
+
+    def test_zero_events_renders_without_crashing(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        data = _aggregate(events_dir)
+        out = aggregator.format_retro(data)
+        # All sections present; substantive content gracefully degrades.
+        assert "0 commits" in out
+        assert "No Claude Code sessions captured" in out
