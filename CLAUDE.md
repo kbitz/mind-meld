@@ -21,7 +21,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 ## Source Layout
 src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events}.py
 src/mind_meld/storage/{local,keys}.py
-src/mind_meld/skills/  (placeholder subpackage; ships in wheel via `packages = ["src/mind_meld"]` so Group 8's `retro-fleet/SKILL.md` is findable via `importlib.resources.files("mind_meld") / "skills"`. Do NOT add a hatchling `force-include` for this dir — it would double-ship every file alongside the package walk.)
+src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). SKILL.md invokes the aggregator via `python -m mind_meld.skills.retro_fleet.aggregator`. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
 
 Storage keys are constructed via helpers in `storage/keys.py`
 (`manifest_key`, `blob_key`, `device_key`, `parse_blob_key`) which validate
@@ -212,6 +212,45 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 **Reap by FILENAME date, NOT mtime (Codex C5, C6).** iCloud restores can rewrite mtimes back to "now" while the filename date (`<device>-YYYY-MM-DD.jsonl`) is intrinsic to the event-day boundary the file was written for. The mm-events path resolves through `get_sources(config)` so user-customized paths are honored. Always-on (no `--events` flag) — events retention is fleet policy.
 
 **Initial cursor lookback (Codex C9).** `last_push_ts(events_dir, device_id)` returns `now - INITIAL_CURSOR_LOOKBACK_DAYS` (30) when no prior `mm-push` event exists. New fleet members joining mid-quarter scan back 30 days of git history; older context is invisible to retro until a manual backfill. Document the bound in skill output: "First-run window: last 30 days of activity. Older history is intentionally outside the retro window."
+
+## Sessions snapshot v=2 full-inventory (load-bearing, v0.11.0)
+
+`EVENTS_SCHEMA_VERSION` bumped 1 → 2 in Group 8. Pre-v0.11.0, `walk_session_metadata` filtered jsonls by `mtime >= since_ts` — each snapshot was a DELTA. Naive sum of v=1 snapshots double-counted any chat that was touched across pushes; latest-only-wins undercounted by losing prior windows. Codex outside-voice review caught the trap during `/plan-eng-review` for Group 8 (cross-model tension #1).
+
+v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is counted regardless of mtime. The aggregator picks the LATEST v=2 snapshot per `(device, claude_dir)` — produces an accurate point-in-time sessions count for the rendering machine's view of the fleet. mm-push and git-snapshot rows keep delta semantics (commits since last push, dedup-by-sha aggregator side); only sessions-snapshot semantics changed.
+
+**Mixed-fleet transition rule.** Pre-v0.11.0 peers still emit v=1 sessions rows. The retro-fleet aggregator treats v=1 sessions as below-threshold and surfaces "Sessions count incomplete: peer X is on pre-v0.11.0" as part of the fleet-incomplete breadcrumb. Numbers are honestly low, never overcounted. Once the fleet rolls to v0.11.0, every peer emits v=2 and the count is exact.
+
+**`since` parameter retained for API stability.** `walk_session_metadata(claude_dir, since, *, deadline_monotonic)` still accepts `since` to keep the call-site signature stable; the value is now ignored (suppressed via `# noqa: ARG001`). A future v=3 schema can re-introduce delta semantics with a new field name without breaking callers.
+
+## Group 8 retro-fleet skill — symlink installer (load-bearing, v0.11.0)
+
+`_ensure_retro_skill_link()` symlinks `~/.claude/skills/retro-fleet` → `<wheel>/mind_meld/skills/retro_fleet/`. Source dir is `retro_fleet/` (underscore — Python identifier so `python -m mind_meld.skills.retro_fleet.aggregator` works); link name is `retro-fleet` (hyphen — Claude Code skill convention). The conventions and importability both resolve cleanly via the rename.
+
+**Five-branch state machine.** `target.exists()` returns False on a dangling symlink while `is_symlink()` returns True — these are checked in this order: (1) skills-dir-absent → silent skip (no Claude Code installed); (2) `target.is_symlink() and not target.exists()` → DANGLING-symlink branch, unlink + recreate (REGRESSION-class for `pipx reinstall` recovery; pre-Group-8 design routed dangling links into "exists, don't replace" forever); (3) `target.is_symlink() and target.resolve() == skill_src.resolve()` → already-correct, no-op; (4) `target.exists()` → conflict-skip with `mm: notice:`; (5) target absent → `target.symlink_to(skill_src)`. Every `OSError` from `symlink_to` is wrapped — TOCTOU `FileExistsError`, `PermissionError` on read-only `~/.claude`, `OSError` on filesystems without symlink support all degrade to a stderr breadcrumb without crashing push.
+
+**Two-marker 24h-TTL gate (cross-model #3).** A single TTL marker can't distinguish "skip until tomorrow because it just succeeded" from "skip until tomorrow because the user has their own file there" — touching the marker on conflict skips silently for 24h, leaving it untouched re-emits the notice every push (hostile noise). Two markers under `~/.config/mind-meld/`: `.skill-link-checked` (success) and `.skill-link-conflict` (deliberate-skip). Transient failures (OSError) touch neither, so next push retries. `_marker_is_fresh()` wraps `os.stat` in try/except and **fail-opens** on EACCES / EIO so a chmod-restricted config dir doesn't crash push (TODO#3 critical-gap fix).
+
+**Hook positions.** `mm init` calls `_ensure_retro_skill_link(dry_run=False)` unconditionally at the end. `_push_core` HEAD calls `_ensure_retro_skill_link()` AFTER `_ensure_device_registered` but BEFORE `_run_events_tail` (Architecture #5 lock-in: stacked self-heals before the events tail's load-bearing capture block). Gated by `_skill_link_check_due()` — one `os.stat` syscall per push on the steady-state path. `dry_run` is plumbed through and gates the install (preview contract; mirrors `_ensure_device_registered`).
+
+## `mm devices --format=json` (v0.11.0)
+
+JSON formatter alongside the Rich Table renderer. Schema (stable contract for the retro-fleet aggregator's subprocess consumer):
+
+```json
+[
+  {
+    "device_id": "<str>",
+    "device_name": "<str|null>",
+    "last_seen": "<iso str|null>",
+    "last_seen_version": "<str|null>",
+    "is_self": <bool>
+  },
+  ...
+]
+```
+
+Empty fleet returns `[]`. Sorted alphabetically by `device_id` for cross-platform stability (`list_devices` filesystem iteration is FS-dependent on Linux ext4 vs macOS APFS — without the sort, two peers walking the same fleet could produce different orderings). Plain `print(json.dumps(...))` — Rich injects styling that breaks the JSON contract. Pinned by `tests/test_devices_json.py`.
 
 ## Pull/push history log (v0.9.1)
 `pullhistory.append(verb, device, source, rel_path, action, ...)` writes one JSONL line to `~/.config/mind-meld/pull-history.jsonl` (mode 0600, fcntl.flock-guarded, 1MB cap with line-boundary rotation to `.1`). Wired into `_pull_core` (per-outcome from `_pull_one_source` + `excluded` from the consumer-boundary filter) and `_upload_changed_blobs` (`uploaded`). Failures are swallowed — history is forensic-only, never block sync. `mm log` queries with `--source / --since / --action / --verb / --limit / --format` filters. Reader tolerates a torn first line in `.1` (crash-mid-rotate fingerprint).

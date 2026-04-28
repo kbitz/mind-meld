@@ -2,6 +2,80 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.0] - 2026-04-28
+
+**Group 8 / Track 8A: fleet-aware retro skill.** Adds a Claude Code
+skill that stitches activity from every Mac in your mind-meld fleet
+into one accurate, paste-ready markdown retro. Reads the synced
+`mm-events` log (Group 7), dedups commits across machines via
+canonical remote URL + sha, and renders a single-message retro you
+can paste into iMessage or email.
+
+### Added
+
+- **`/retro-fleet` Claude Code skill.** New skill at
+  `src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py}`. Run it
+  in Claude Code as `/retro-fleet 7d` (or `30d`, etc.) to get a
+  fleet-wide retro that mirrors the gstack `/retro` shape but stitches
+  activity across every Mac in your fleet. Output is paste-ready for
+  iMessage / email / Slack — not a dashboard.
+
+- **`mm devices --format=json` flag.** New JSON formatter alongside
+  the existing Rich Table renderer. Stable schema: `[{device_id,
+  device_name, last_seen, last_seen_version, is_self}, ...]`. Sorted
+  alphabetically by `device_id` for cross-platform stability. Empty
+  fleet returns `[]`. Used by `/retro-fleet` for the "M of N known
+  devices" breadcrumb; usable by anyone who wants to script against
+  device state.
+
+- **`_ensure_retro_skill_link` symlink installer.** Drops the
+  `~/.claude/skills/retro-fleet` symlink at `mm init` and self-heals
+  on every push (24h-TTL gated, ~1 syscall in steady state). Five-
+  branch state machine: target absent → create; correct symlink →
+  no-op; dangling symlink → unlink + replace (covers `pipx reinstall`
+  recovery); user's own file at the target → leave alone, notice
+  once per day; `OSError` on creation → forensic-only breadcrumb,
+  push continues.
+
+### Changed
+
+- **Sessions-snapshot schema bumped v=1 → v=2.** Pre-v0.11.0
+  `walk_session_metadata` filtered jsonls by mtime, making each
+  snapshot a delta. v=2 emits a full inventory so the retro
+  aggregator can pick the latest snapshot per `(device, claude_dir)`
+  and produce honest point-in-time numbers. Mixed-fleet handling:
+  pre-v0.11.0 peers still emit v=1 rows; the aggregator surfaces them
+  as "Sessions count incomplete: peer X is on pre-v0.11.0" rather
+  than overcounting.
+
+- **mm-push event sources field is now names-only.** The `sources`
+  field on `mm-push` events is `list[str]` (source names only); the
+  retro skill reads per-source content stats from the synced manifest
+  at retro time. `MM_INTERNAL_SOURCE_NAMES` (today: `mm-events`) are
+  filtered out so they don't show up as user-meaningful fleet activity.
+
+### Fixed
+
+- **Sessions retro window now scoped by `last_session_at`.** Pre-fix
+  (caught in adversarial review), a 7d retro could include a 60d-old
+  session as long as the device pushed today. Aggregator now filters
+  projects whose `last_session_at` falls outside the requested window.
+  Numbers stop silently lying.
+
+- **Tolerant reader survives invalid UTF-8.** Aggregator opens JSONL
+  files with `errors="replace"` so a corrupt-byte run in one event
+  doesn't crash the whole retro. Lines that won't parse are counted
+  in the visible-failure tail breadcrumb.
+
+- **File-open failures bumped into `skipped_lines`.** Pre-fix, an
+  unreadable events file (EACCES, transient EIO) was silently dropped
+  from the retro with no breadcrumb. Now counted; user sees `Note: N
+  events skipped` in the tail.
+
+- **`mm devices` subprocess invokes via `python -m mind_meld.cli`.**
+  Sidesteps PATH-hijacking and venv-version skew when the aggregator's
+  parent venv has a different `mm` than the one earlier on PATH.
+
 ## [0.10.3] - 2026-04-28
 
 **Track 7B: events tail wired into the push hot path.** Track 7A's
