@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import json
 import os
 import re
 import secrets
@@ -117,6 +118,16 @@ CONFLICT_AGE_DAYS = 30
 # C6) — iCloud restores produce misleading mtimes.
 EVENTS_RETENTION_DAYS = 90
 _EVENTS_FILENAME_DATE_RE = re.compile(r"^(?P<device>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$")
+
+# Group 8 / Track 8A: 24h-TTL gate for the retro-fleet skill symlink installer.
+# Two markers (cross-model #3 from /plan-eng-review): success caches the happy
+# path; conflict-skip suppresses the per-push notice when the user has their
+# own file at the target. Transient failure paths (OSError) leave both
+# untouched so next push retries — matches the visible-failure contract.
+SKILL_LINK_TTL_SECONDS = 24 * 60 * 60
+_SKILL_LINK_NAME = "retro-fleet"
+_SKILL_LINK_SUCCESS_MARKER = "skill-link-checked"
+_SKILL_LINK_CONFLICT_MARKER = "skill-link-conflict"
 
 # Track 5E (v0.9.2 BREAKING): minimum peer version required for safe pull.
 # v0.9.2 inverted the conflict-direction semantics — a peer running an
@@ -2065,6 +2076,12 @@ def init() -> None:
     # path with no prior config to load (D6 reasoning).
     upgrade.run_transition_hook(config)
 
+    # Group 8 / Track 8A: drop the retro-fleet skill symlink at init time
+    # (no 24h gate here — first-install pass should always try). Idempotent
+    # if the user already has a correct symlink. Conflicts emit a one-line
+    # notice; failures are forensic-only.
+    _ensure_retro_skill_link(dry_run=False)
+
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
 
 
@@ -2167,6 +2184,169 @@ def _ensure_device_registered(
             f"mm: warning: device entry self-heal failed ({type(e).__name__}): {e}"
         )
         raise
+
+
+def _ensure_retro_skill_link(*, dry_run: bool = False) -> None:
+    """Group 8 / Track 8A symlink self-heal for the retro-fleet skill.
+
+    Three states (cross-model #3 from /plan-eng-review uses a 2-marker gate
+    so deliberate-conflict skips don't spam stderr forever):
+
+    * **success** — target absent OR target is a correct symlink at our
+      skill source. Idempotent. Touch ``skill-link-checked`` marker.
+    * **conflict-skip** — target exists as a real file or wrong symlink.
+      Don't clobber the user's file. Emit ``mm: notice:`` once per 24h
+      (gated by ``skill-link-conflict`` marker). User can ``rm`` to take
+      mm's version.
+    * **transient-failure** — TOCTOU FileExistsError, PermissionError on
+      read-only ~/.claude, OSError on a filesystem without symlink
+      support. CQ#1 forensic-only contract: emit ``mm: notice:``,
+      return, leave both markers alone so next push retries.
+
+    Dangling-symlink branch (Test review #1 IRON-RULE pin from
+    /plan-eng-review): a symlink whose target was deleted (e.g., after
+    ``pipx reinstall`` rebuilt the venv at a different path) is unlinked
+    and replaced. Pre-fix, ``target.is_symlink() and target.resolve() ==
+    src.resolve()`` skipped this case because resolve() returns the bad
+    path; the second branch then matched ``target.is_symlink()`` and
+    routed into "exists, don't replace" — silent permanent broken state.
+
+    Called from ``mm init`` (always, no gate) and ``_push_core`` HEAD
+    (24h-TTL gated). Both gates are read with ``os.stat`` wrapped in
+    try/except (TODO#3 critical-gap fix: EACCES on the marker dir must
+    fail-open so push doesn't crash).
+    """
+    if dry_run:
+        return
+
+    target = Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME
+    skills_dir = target.parent
+    if not skills_dir.exists():
+        # Silent skip — no Claude Code installed on this machine. Touching
+        # the success marker would suppress retries if the user installs
+        # Claude Code later in the day; leave it alone so the 24h check
+        # naturally re-evaluates after sync.
+        return
+
+    try:
+        skill_src = _resolve_retro_skill_src()
+    except Exception as e:
+        sys.stderr.write(
+            f"mm: notice: retro-fleet skill source unresolvable: "
+            f"{type(e).__name__}: {safe_str(e)}\n"
+        )
+        return
+
+    # Branch 1: dangling symlink → unlink + recreate.
+    # Path.exists() returns False on a dangling symlink while is_symlink()
+    # returns True. This branch was missing in the original /plan-eng-review
+    # design and is REGRESSION-class for pipx-reinstall recovery.
+    if target.is_symlink() and not target.exists():
+        try:
+            target.unlink()
+        except OSError as e:
+            sys.stderr.write(
+                f"mm: notice: retro-fleet skill dangling-link cleanup failed: "
+                f"{type(e).__name__}: {safe_str(e)}\n"
+            )
+            return
+        # Fall through to symlink_to creation below.
+    # Branch 2: target is a correct, intact symlink to our source → no-op.
+    elif target.is_symlink() and target.exists():
+        try:
+            if target.resolve() == skill_src.resolve():
+                _touch_marker(_SKILL_LINK_SUCCESS_MARKER)
+                return
+        except OSError:
+            # resolve() can raise on a path with permission issues — fall
+            # through to the conflict-skip branch.
+            pass
+        # Wrong target — user's own symlink elsewhere. Conflict-skip.
+        _emit_conflict_notice(target)
+        return
+    # Branch 3: a real file or directory at the target → conflict-skip.
+    elif target.exists():
+        _emit_conflict_notice(target)
+        return
+
+    # Branch 4: target is absent (or just unlinked from dangling branch above).
+    # Create the symlink.
+    try:
+        target.symlink_to(skill_src)
+    except OSError as e:
+        # CQ#1: TOCTOU FileExistsError, EACCES, EPERM, ENOTSUP — forensic
+        # only. Don't crash push; don't touch markers; next push retries.
+        sys.stderr.write(
+            f"mm: notice: retro-fleet skill link install failed: "
+            f"{type(e).__name__}: {safe_str(e)}\n"
+        )
+        return
+    _touch_marker(_SKILL_LINK_SUCCESS_MARKER)
+
+
+def _resolve_retro_skill_src() -> Path:
+    """Return the on-disk dir that the symlink should point at.
+
+    Subtle: the on-disk dir is named ``retro_fleet`` (Python identifier) but
+    the symlink target name is ``retro-fleet`` (Claude Code skill convention).
+    The aggregator imports cleanly via ``mind_meld.skills.retro_fleet`` and
+    Claude Code reads the symlinked dir as ``retro-fleet``.
+    """
+    import importlib.resources
+
+    return Path(str(importlib.resources.files("mind_meld") / "skills" / "retro_fleet"))
+
+
+def _emit_conflict_notice(target: Path) -> None:
+    """Notice once per 24h — gated by the conflict marker. Cross-model #3
+    from /plan-eng-review: per-push spam on a deliberate conflict is
+    hostile; the gate suppresses repeats."""
+    if _marker_is_fresh(_SKILL_LINK_CONFLICT_MARKER):
+        return
+    sys.stderr.write(
+        f"mm: notice: skill at {safe_str(str(target))} exists; not replacing "
+        f"(remove the file to take mm's retro-fleet skill)\n"
+    )
+    _touch_marker(_SKILL_LINK_CONFLICT_MARKER)
+
+
+def _marker_is_fresh(name: str) -> bool:
+    """Return True iff the marker exists AND its mtime is within
+    ``SKILL_LINK_TTL_SECONDS``. TODO#3 critical-gap fix: stat failure
+    fail-open (treat as if no marker — re-run installer)."""
+    marker = _config_dir() / f".{name}"
+    try:
+        st = marker.stat()
+    except OSError:
+        # FileNotFoundError, EACCES, EIO — fail-open. Returns False so the
+        # caller runs the installer; matches the visible-failure contract
+        # (no silent broken state).
+        return False
+    age = time.time() - st.st_mtime
+    return age < SKILL_LINK_TTL_SECONDS
+
+
+def _touch_marker(name: str) -> None:
+    """Mtime-touch the named marker. Best-effort; OSError is swallowed
+    silently (the next push will simply re-run the installer)."""
+    marker_dir = _config_dir()
+    try:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / f".{name}").touch()
+    except OSError:
+        pass
+
+
+def _config_dir() -> Path:
+    return Path("~/.config/mind-meld").expanduser()
+
+
+def _skill_link_check_due() -> bool:
+    """24h-TTL gate consulted by ``_push_core``. Returns True when the
+    installer should run — either because the success marker is stale OR
+    the marker is missing (fresh install). The conflict marker is
+    consulted separately by ``_emit_conflict_notice``."""
+    return not _marker_is_fresh(_SKILL_LINK_SUCCESS_MARKER)
 
 
 def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
@@ -2273,6 +2453,16 @@ def _push_core(
 
     backend = get_backend(config)
     _ensure_device_registered(backend, device_id, device_name, dry_run=dry_run)
+
+    # Group 8 / Track 8A retro-fleet skill self-heal. Position locked in
+    # /plan-eng-review Architecture #5: AFTER device self-heal (storage-
+    # write before any walk), BEFORE events tail (local-FS self-heals
+    # stacked, events tail is the load-bearing always-runs block). Gated by
+    # 24h-TTL — the marker stat is the entire hot-path cost on the steady-
+    # state push (~1 syscall). dry_run gates the install too (preview
+    # contract; mirrors _ensure_device_registered).
+    if not dry_run and _skill_link_check_due():
+        _ensure_retro_skill_link(dry_run=False)
 
     # Build local manifest (v2 with sources)
     sources = get_sources(config)
@@ -3936,12 +4126,58 @@ def diag(
 
 
 @app.command()
-def devices() -> None:
-    """List all registered devices."""
+def devices(
+    fmt: str = typer.Option(
+        "table",
+        "--format",
+        help="Output format: 'table' (human) or 'json' (machine).",
+        case_sensitive=False,
+    ),
+) -> None:
+    """List all registered devices.
+
+    ``--format=json`` emits a single JSON array on stdout. Each entry has the
+    keys ``device_id``, ``device_name``, ``last_seen``, ``last_seen_version``;
+    missing fields are emitted as ``null`` (not em-dashes \u2014 em-dashes are a
+    table-rendering convention). Empty fleet renders as ``[]``. Stable contract
+    for the Group 8 retro-fleet skill's ``mm devices --format=json`` consumer.
+    """
     config = _get_config()
     backend = get_backend(config)
     device_list = _list_devices_warn(backend)
     my_id = config["device"]["id"]
+
+    fmt_lower = fmt.lower()
+    if fmt_lower not in ("table", "json"):
+        _error(f"--format must be 'table' or 'json', got {fmt!r}")
+        return  # unreachable
+
+    if fmt_lower == "json":
+        # Stable contract for the retro-fleet skill: emit a JSON list with
+        # canonical keys. Render missing fields as null (not em-dashes \u2014
+        # em-dashes are a table-side rendering convention). Print to stdout
+        # so subprocess consumers can capture it cleanly.
+        #
+        # Sort by device_id for stable output across platforms \u2014 list_devices
+        # iterates the storage directory and macOS APFS typically yields
+        # alphabetical order, but Linux ext4 and other filesystems do not.
+        # Cross-platform peers must see the same order or any consumer's
+        # diff against a prior snapshot would flap.
+        sorted_devices = sorted(device_list, key=lambda d: d["device_id"])
+        records = [
+            {
+                "device_id": d["device_id"],
+                "device_name": d.get("device_name"),
+                "last_seen": d.get("last_seen"),
+                "last_seen_version": d.get("last_seen_version"),
+                "is_self": d["device_id"] == my_id,
+            }
+            for d in sorted_devices
+        ]
+        # Use plain print, not console \u2014 Rich injects styling that breaks the
+        # JSON contract. sort_keys=True for stable per-record key order.
+        print(json.dumps(records, sort_keys=True))
+        return
 
     if not device_list:
         console.print("[yellow]No devices registered.[/yellow]")

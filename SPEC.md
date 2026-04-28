@@ -319,7 +319,7 @@ mm push                     # build manifest, diff against remote, upload change
 mm pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
 mm status [--source NAME]   # show local vs remote state, pending changes
-mm devices                  # list registered devices
+mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
 mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
                                              # annotates modified files as write / merge / skip / conflict
 mm gc [--conflicts]         # delete orphaned blobs; with --conflicts, also reap .sync-conflict-* files >30d

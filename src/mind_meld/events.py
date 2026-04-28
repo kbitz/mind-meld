@@ -62,7 +62,28 @@ MAX_GIT_WORKERS = 8
 PER_REPO_TIMEOUT_FLOOR_MS = 200
 PER_REPO_TIMEOUT_CAP_MS = 2000
 
-EVENTS_SCHEMA_VERSION = 1
+EVENTS_SCHEMA_VERSION = 2
+"""Bumped from 1 → 2 for Group 8 (v0.11.0).
+
+v=1 sessions-snapshot rows shipped by Track 7A had DELTA semantics: only
+sessions whose mtime advanced since the cursor were counted. Naive sum of v=1
+snapshots double-counted a single chat that was touched across pushes; latest-
+only-wins undercounted by losing prior windows. Codex outside-voice review
+caught the trap during /plan-eng-review for Group 8.
+
+v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is
+counted regardless of mtime. Aggregator picks the LATEST v=2 snapshot per
+(device, claude_dir) — gives an accurate point-in-time sessions count for the
+rendering machine's view of the fleet.
+
+mm-push and git-snapshot rows keep delta semantics (commits since last push,
+dedup-by-sha aggregator side). Only sessions-snapshot changed semantics.
+
+Mixed-fleet transition: peers on pre-v0.11.0 still emit v=1 sessions rows.
+The retro-fleet aggregator treats v=1 sessions as below-threshold and surfaces
+'sessions count low for peer X — pre-v0.11.0' as part of the fleet-incomplete
+breadcrumb. Numbers are honestly low, never overcounted. Once the fleet rolls
+to v0.11.0, every peer emits v=2 and the count is exact."""
 
 _GIT_LOG_FORMAT = "%x1e%H%x09%cI%x09%ae%x09%s"
 """Record-separator (\\x1e) prefix + tab-delimited fields:
@@ -638,13 +659,20 @@ _CONDUCTOR_PATTERN = re.compile(r"/conductor/workspaces/")
 
 def walk_session_metadata(
     claude_dir: Path,
-    since: datetime,
+    since: datetime,  # noqa: ARG001 — kept for API stability; v=2 ignores it (see EVENTS_SCHEMA_VERSION docstring)
     *,
     deadline_monotonic: float | None = None,
 ) -> list[SessionsSnapshot]:
     """Walk ``<claude_dir>/projects/<encoded>/*.jsonl`` aggregating per-project
     session metadata. Returns one SessionsSnapshot row aggregating all
     projects (single row mirrors walk_git_projects' shape).
+
+    v=2 FULL INVENTORY (Group 8). Every jsonl is counted regardless of mtime.
+    The ``since`` parameter is retained for API stability but ignored — the
+    aggregator picks the LATEST snapshot per (device, claude_dir) so a snap-
+    shot's value is its current point-in-time view of the local sessions, not
+    a delta against the prior cursor. See EVENTS_SCHEMA_VERSION docstring for
+    the cross-model-review rationale that drove this change.
 
     `ephemeral: True` when the decoded project path matches
     `*/conductor/workspaces/*` — matched on the decoded path string, NOT
@@ -671,7 +699,6 @@ def walk_session_metadata(
     if not projects_root.is_dir():
         return [snapshot]
 
-    since_ts = since.timestamp()
     out: list[SessionMetadata] = []
     try:
         with os.scandir(projects_root) as proj_iter:
@@ -680,7 +707,7 @@ def walk_session_metadata(
                     break
                 if not proj_entry.is_dir(follow_symlinks=False):
                     continue
-                meta = _scan_one_project(proj_entry, since_ts)
+                meta = _scan_one_project(proj_entry)
                 if meta is not None:
                     out.append(meta)
     except OSError:
@@ -692,10 +719,11 @@ def walk_session_metadata(
 
 def _scan_one_project(
     proj_entry: os.DirEntry,
-    since_ts: float,
 ) -> SessionMetadata | None:
     """One project dir → SessionMetadata. Returns None if the dir has no
-    qualifying jsonl files."""
+    qualifying jsonl files.
+
+    v=2 full-inventory: counts every .jsonl regardless of mtime."""
     sessions = 0
     total_bytes = 0
     last_mtime = 0.0
@@ -710,8 +738,6 @@ def _scan_one_project(
                 try:
                     st = f_entry.stat()
                 except OSError:
-                    continue
-                if st.st_mtime < since_ts:
                     continue
                 sessions += 1
                 total_bytes += st.st_size
