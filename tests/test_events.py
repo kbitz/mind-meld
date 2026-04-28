@@ -497,6 +497,39 @@ class TestWalkSessionMetadata:
         )
         assert len(out[0]["projects"]) == 5
 
+    def test_v2_full_inventory_ignores_since(self, tmp_path):
+        """Group 8 cross-model #1 fix: sessions-snapshot is v=2 full inventory.
+
+        Pre-v0.11.0 semantics filtered jsonls by ``mtime >= since_ts``, making
+        each snapshot a delta. Aggregating across snapshots double-counted any
+        session touched in multiple windows; latest-only-wins undercounted by
+        dropping older windows. v=2 ignores ``since`` and counts EVERY jsonl,
+        so the aggregator's latest-per-(device, claude_dir) rule produces a
+        truthful point-in-time count.
+
+        Pin: a jsonl with mtime older than `since` must STILL be counted.
+        """
+        import os
+
+        proj = tmp_path / "projects" / "-tmp-old"
+        proj.mkdir(parents=True)
+        old_jsonl = proj / "old.jsonl"
+        old_jsonl.write_text(json.dumps({"cwd": "/tmp/old", "type": "user"}) + "\n")
+        # Make the file mtime far older than `since`.
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).timestamp()
+        os.utime(old_jsonl, (old_ts, old_ts))
+
+        # `since` is just 1 day ago — pre-v0.11.0 (v=1) would have filtered
+        # this file out.
+        since = datetime.now(timezone.utc) - timedelta(days=1)
+        out = events.walk_session_metadata(tmp_path, since)
+        assert out[0]["v"] == events.EVENTS_SCHEMA_VERSION
+        assert out[0]["v"] == 2
+        assert len(out[0]["projects"]) == 1
+        assert out[0]["projects"][0]["sessions"] == 1, (
+            "v=2 full-inventory must count every jsonl regardless of mtime"
+        )
+
     def test_pathological_session_walk_no_cwd_anywhere(self, tmp_path):
         """T2: walks must not crash when no project has a `cwd` field —
         decoded path falls back to the encoded directory name."""
