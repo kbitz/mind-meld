@@ -44,10 +44,11 @@ from concurrent.futures import (
 )
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TypedDict
 from urllib.parse import urlsplit
 
 from mind_meld import fsutil
+from mind_meld.config import MM_INTERNAL_SOURCE_NAMES
 
 # ---------------------------------------------------------------------------
 # Module-level named constants (C3). Track 7B imports the budget pair to
@@ -131,7 +132,7 @@ class MmPushEvent(TypedDict, total=False):
     ts: str
     device: str
     mm_version: str
-    sources: list[dict]
+    sources: list[str]
     discovery_errors: list[str]
 
 
@@ -638,6 +639,8 @@ _CONDUCTOR_PATTERN = re.compile(r"/conductor/workspaces/")
 def walk_session_metadata(
     claude_dir: Path,
     since: datetime,
+    *,
+    deadline_monotonic: float | None = None,
 ) -> list[SessionsSnapshot]:
     """Walk ``<claude_dir>/projects/<encoded>/*.jsonl`` aggregating per-project
     session metadata. Returns one SessionsSnapshot row aggregating all
@@ -648,6 +651,13 @@ def walk_session_metadata(
     on path existence (Conductor workspaces are routinely destroyed).
 
     Performance target: <500ms for 10k files via os.scandir 2-level walk.
+
+    Codex C4: ``_read_cwd_from_latest_jsonl`` reads jsonl files line-by-line
+    until a ``cwd`` field appears, so a single pathological project (no cwd
+    anywhere, large jsonls) can blow the wall-clock budget. The optional
+    ``deadline_monotonic`` (a ``time.monotonic()`` value) is checked at the
+    top of each project iteration and aborts the scandir loop. Track 7B's
+    wiring side passes the same deadline shared with walk_git_projects.
     """
     ts_now = datetime.now(timezone.utc).isoformat()
     snapshot: SessionsSnapshot = {
@@ -666,6 +676,8 @@ def walk_session_metadata(
     try:
         with os.scandir(projects_root) as proj_iter:
             for proj_entry in proj_iter:
+                if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
+                    break
                 if not proj_entry.is_dir(follow_symlinks=False):
                     continue
                 meta = _scan_one_project(proj_entry, since_ts)
@@ -824,18 +836,29 @@ def make_mm_push_event(
     *,
     device: str,
     mm_version: str,
-    sources: list[dict[str, Any]] | None = None,
+    sources: list[str] | None = None,
     discovery_errors: list[str] | None = None,
     ts: datetime | None = None,
 ) -> MmPushEvent:
     """Construct an mm-push event row. Caller appends as the LAST element
-    of the events list passed to write_push_event (CT-4)."""
+    of the events list passed to write_push_event (CT-4).
+
+    ``sources`` is the list of resolved source NAMES (not dicts) that
+    participated in this push. ``MM_INTERNAL_SOURCE_NAMES`` are filtered
+    out: ``mm-events`` is mm-owned infrastructure, not user-meaningful
+    fleet activity, so it shouldn't show up in the retro skill's source
+    enumeration (Codex C7). Group 8's retro skill enumerates per-source
+    content stats from the synced manifest at retro time (D1D), so this
+    field stays a names-only list (Codex C2: ``iter_source_diffs(skip_un
+    changed=True)`` makes per-source counts unreliable on the no-content
+    push path)."""
+    filtered = [s for s in (sources or []) if s not in MM_INTERNAL_SOURCE_NAMES]
     return {
         "v": EVENTS_SCHEMA_VERSION,
         "type": "mm-push",
         "ts": (ts or datetime.now(timezone.utc)).isoformat(),
         "device": device,
         "mm_version": mm_version,
-        "sources": sources or [],
+        "sources": filtered,
         "discovery_errors": discovery_errors or [],
     }

@@ -2,6 +2,70 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.10.3] - 2026-04-28
+
+**Track 7B: events tail wired into the push hot path.** Track 7A's
+`events.py` now runs at the HEAD of `_push_core` on every push attempt,
+writing per-device daily JSONL rows (git-snapshot, sessions-snapshot,
+mm-push) to the synced `mm-events` source. `mm gc` now reaps event files
+older than 90 days, and tombstone propagation handles fleet-wide
+retention so peers drop their copies on pull. Patch bump because there's
+still no consumer until Group 8's `retro-fleet` skill ships at v0.11.0;
+this PR makes the data start flowing locally so the foundation is real
+when the retro skill lands.
+
+### Added
+
+- **`_run_events_tail` at the head of `_push_core`** (`src/mind_meld/cli.py`).
+  Runs after `_ensure_device_registered`'s self-heal and the no-sources
+  guard, BEFORE `build_manifest_v2` — the event file lands on disk in
+  time to be uploaded same push (no one-push lag). Gate is "mm-events
+  resolved in `get_sources()`", which covers fresh / migrated / un-
+  migrated configs uniformly without a migration prompt. Wall-clock
+  budget is 250ms for `mm autopush` and 500ms for interactive `mm push`,
+  enforced via `time.monotonic()` and plumbed into `walk_session_metadata`
+  through a new `deadline_monotonic` keyword-only parameter so a
+  pathological project (large jsonls, no `cwd` field anywhere) can't
+  blow past the budget. Failures inside the tail are forensic-only —
+  caught and breadcrumbed via `mm: notice:` to stderr; the push proceeds.
+  `mm push --dry-run` is a no-op (preview contract).
+
+- **`_gc_old_event_files` reaper at `mm gc`** (`src/mind_meld/cli.py`).
+  Always-on (events retention is fleet policy, not opt-in). Reaps day
+  files older than 90 days by parsing the `<device>-YYYY-MM-DD.jsonl`
+  filename — NOT mtime, because iCloud restores can rewrite mtimes back
+  to "now" while the filename date is intrinsic to the event-day boundary.
+  Path resolves through `get_sources()` so user-customized mm-events
+  paths are honored. Honors `--dry-run` and `--verbose`. Fleet retention
+  fans out via tombstone propagation: this device unlinks → next push
+  generates a tombstone → all peers drop their copy on pull, including
+  offline peers when they come back online.
+
+### Changed
+
+- **`MmPushEvent.sources` schema simplified to `list[str]`** (names only).
+  Codex C2 caught that `iter_source_diffs(skip_unchanged=True)` drops
+  unchanged sources from the diff loop, breaking per-source counts on
+  the no-content push path. Group 8's retro skill enumerates per-source
+  content stats from the synced manifest at retro time, not from the
+  event row.
+
+- **`make_mm_push_event` filters `MM_INTERNAL_SOURCE_NAMES`** from the
+  sources list. `mm-events` is mm-owned infrastructure, not user-
+  meaningful fleet activity, so it never appears in the retro skill's
+  source enumeration.
+
+### Tests
+
+- 28 new tests across `tests/test_events.py` (+7), `tests/test_integration.py`
+  (`TestTrack7BEventsTail`, +9), and the new `tests/test_gc_events.py`
+  (+12). Pins the four load-bearing invariants (head-position single-call
+  -site, dry_run no-op, mm-events resolved gate, wall-clock budget),
+  multi-claude aggregation into one sessions-snapshot row, the IRON RULE
+  (events tail fires on no-content pushes), reap-by-filename-date with
+  misleading mtime, and reap → next push generates tombstone. Total:
+  1052 pass, 0 fail.
+
 ## [0.10.2] - 2026-04-28
 
 **Track 7A: events.py foundation for fleet-aware retro.** Internal module
