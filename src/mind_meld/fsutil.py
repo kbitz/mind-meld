@@ -28,6 +28,7 @@ import os
 import stat
 import sys
 import tempfile
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from mind_meld.errors import StorageError
@@ -138,6 +139,65 @@ def atomic_write_bytes(
             except OSError:
                 pass
         raise StorageError(f"storage: atomic_write_bytes({path}) — {e}") from e
+
+
+def flock_append_jsonl(
+    path: Path,
+    lines: Iterable[bytes],
+    *,
+    mode: int = 0o600,
+    on_locked: Callable[[int], None] | None = None,
+) -> None:
+    """Append N JSONL rows to `path` atomically under fcntl.flock(LOCK_EX).
+
+    Each element of `lines` is one JSON-encoded row WITHOUT a trailing newline;
+    the helper appends a single `\\n` after each row. All N rows share one
+    flock window — best-effort batching, NOT transactionality (a crash mid-batch
+    leaves a prefix of the rows on disk).
+
+    Contract:
+      - Parent dir created with parents=True (mode 0o700) if missing.
+      - File created with O_APPEND if missing; perms enforced via os.fchmod.
+      - LOCK_EX is BLOCKING (no LOCK_NB / no retry budget). mm.lockfile already
+        serializes push-vs-push at the higher layer; cross-process contention
+        on this helper is rare in practice.
+      - Best-effort: OSError swallowed silently. Callers are forensic logs
+        (pullhistory, mm-events), not data integrity — a crashed FS or
+        permission flip MUST NOT break the calling sync.
+      - `on_locked(fd)` runs under flock AFTER the writes complete; pullhistory
+        uses this for its line-boundary rotation closure. Exceptions raised
+        from the callback are swallowed (same forensic-only stance).
+    """
+    payload = b"".join(line + b"\n" for line in lines)
+    if not payload:
+        return  # nothing to write; avoid creating the file
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(
+            str(path),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            mode,
+        )
+        try:
+            try:
+                os.fchmod(fd, mode)
+            except OSError:
+                pass  # fchmod can fail on some filesystems; perms are best-effort
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                os.write(fd, payload)
+                if on_locked is not None:
+                    try:
+                        on_locked(fd)
+                    except Exception:
+                        pass  # forensic-only; never break the calling sync
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    except OSError:
+        return  # forensic aid only; never block the calling sync
 
 
 def fsync_dir(path: Path) -> None:

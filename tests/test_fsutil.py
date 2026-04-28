@@ -298,3 +298,79 @@ class TestFsyncDir:
             fsutil.fsync_dir(tmp_path)
         # Exactly one close call for the dir fd we opened.
         assert len(closed) == 1
+
+
+class TestFlockAppendJsonl:
+    """Helper extracted in C1; pullhistory and events both use it."""
+
+    def test_appends_single_line_with_trailing_newline(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'])
+        assert path.read_bytes() == b'{"a":1}\n'
+
+    def test_appends_multiple_lines_in_one_window(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        fsutil.flock_append_jsonl(path, [b'{"a":1}', b'{"a":2}', b'{"a":3}'])
+        assert path.read_text().splitlines() == ['{"a":1}', '{"a":2}', '{"a":3}']
+
+    def test_empty_lines_no_op(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        fsutil.flock_append_jsonl(path, [])
+        assert not path.exists(), "empty input must not create the file"
+
+    def test_creates_parent_dir(self, tmp_path):
+        path = tmp_path / "deep" / "nested" / "log.jsonl"
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'])
+        assert path.exists()
+
+    def test_mode_0600_default(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'])
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_mode_override(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'], mode=0o644)
+        # mode applies to both creation AND any existing file (fchmod runs every call)
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+    def test_on_locked_callback_runs_under_flock(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        captured: list[int] = []
+
+        def cb(fd):
+            captured.append(fd)
+            # If the callback truly runs under flock, the fd is open and writable
+            assert os.fstat(fd).st_size > 0  # data already written
+
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'], on_locked=cb)
+        assert len(captured) == 1
+
+    def test_on_locked_exception_swallowed(self, tmp_path):
+        """Forensic-only contract: callback errors don't break callers."""
+        path = tmp_path / "log.jsonl"
+
+        def boom(fd):
+            raise RuntimeError("nope")
+
+        # MUST NOT raise
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'], on_locked=boom)
+        assert path.read_bytes() == b'{"a":1}\n'
+
+    def test_oserror_swallowed(self, tmp_path, monkeypatch):
+        """Forensic-only contract: OSError on the underlying open / write
+        path is swallowed so a wedged FS never breaks the calling sync."""
+        path = tmp_path / "log.jsonl"
+
+        def bad_open(*args, **kwargs):
+            raise OSError(errno.EIO, "io error")
+
+        monkeypatch.setattr(fsutil.os, "open", bad_open)
+        # MUST NOT raise
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'])
+
+    def test_append_preserves_existing_content(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        path.write_bytes(b'{"a":0}\n')
+        fsutil.flock_append_jsonl(path, [b'{"a":1}', b'{"a":2}'])
+        assert path.read_text().splitlines() == ['{"a":0}', '{"a":1}', '{"a":2}']
