@@ -6,21 +6,21 @@ group must be set-disjoint on `_touches:_` footprints. Pre-flight items are
 trivial fixes any agent can pick up.
 
 Items originate from the 2026-04-22 `/full-review` audit, review follow-ups
-accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x/v0.9.x/v0.10.0, /plan-eng-review
-on 2026-04-23, the 2026-04-24 first-pull conflict-UX session, the v0.9.4 Track 5D
-adversarial review, the 2026-04-25 v0.9.5 auto-upgrade /plan-ceo-review, and
-`docs/designs/fleet-retro.md` (2026-04-27 design doc for v0.11.0).
+accumulated across v0.5.1/v0.6.x/v0.7.x/v0.8.x/v0.9.x/v0.10.x/v0.11.x,
+/plan-eng-review on 2026-04-23, the 2026-04-24 first-pull conflict-UX
+session, the v0.9.4 Track 5D adversarial review, the 2026-04-25 v0.9.5
+auto-upgrade /plan-ceo-review, and `docs/archive/fleet-retro.md` (2026-04-27
+design doc; archived after v0.11.0 shipped).
 
-**Cleanup-sweep set (Groups 1–5) shipped through v0.9.4.** v0.9.5
-(auto-upgrade nudge), v0.9.6 (public-readiness scrub), and v0.10.0
-(per-machine source toggle) shipped outside the original cleanup-sweep
-plan — see PROGRESS.md and CHANGELOG.md. **Group 6** (release
-infrastructure polish — GitHub Releases backfill) shipped 2026-04-27.
-**Group 7 preflight** (security hardening + concurrency safety +
-correctness fixes + mm-events default source) shipped as v0.10.1 on
-2026-04-27. Two new Groups remain in flight: **Group 7** Tracks 7A+7B
-(events.py module + `_push_core` wiring) and **Group 8** (retro-fleet
-skill — depends on Group 7).
+**The original v0.x → v1.0 plan is complete.** Groups 1–8 shipped through
+v0.11.0. Five releases shipped outside the original cleanup-sweep plan: v0.9.5
+(auto-upgrade nudge), v0.9.6 (public-readiness scrub), v0.10.0 (per-machine
+source toggle), v0.10.1 (Group 7 preflight — security/concurrency/correctness
+sweep + mm-events default source), and v0.11.1 (conflict-prompt UX redesign —
+`(b)oth` → `(s)kip` rename, three-number divergence summary, peer-controlled
+`device_name` sanitization extension, init-time device-id collision detection,
+extracted `safety.py` + `conflictdiff.py` modules). **Group 9** (post-v1.0
+pull-performance + fresh-Mac onboarding polish) is the only in-flight work.
 
 ---
 
@@ -117,75 +117,65 @@ _Track 6A (GitHub Releases backfill — 36 release entries created via `gh relea
 
 ---
 
-## Group 7: mm-events foundation (event capture)
+## Group 7: mm-events foundation (event capture) ✓ Complete
 _Depends on: none_
 
 Implements the foundation for the fleet-aware retro per
-`docs/designs/fleet-retro.md`: per-device JSONL event log written on every
+`docs/archive/fleet-retro.md`: per-device JSONL event log written on every
 push, capturing `mm-push`, `git-snapshot`, and `sessions-snapshot` events.
 New `mm-events` source surfaces the events on synced storage; `_push_core`
-tail-position write inside a hard time budget; `mm gc` reaps after 90 days
+HEAD-position write inside a hard time budget; `mm gc` reaps after 90 days
 via existing tombstone plumbing. No external API dependency.
 
-**Pre-flight ✅ Complete (v0.10.1, 2026-04-27).** All 8 preflight items shipped together (the 6 originally listed plus 2 codex-outside-voice expansions: `safe_text` for diff-content lines + `_devices_write_lock` for forward-defense of `update_last_seen`). See PROGRESS.md and CHANGELOG.md for full notes.
+_Group 7 preflight — ✓ Complete (v0.10.1, 2026-04-27). 8 items shipped: `safe_str()`/`safe_text()` peer-controlled string sanitization sweep (~30 print sites), pull-time case-collision detection, `register_device` create-only via `put_exclusive`, `update_last_seen` flock, `walk_generic_source`/`_find_conflict_files` filesystem-identity dedup, `mm-events` default source + `MM_INTERNAL_SOURCE_NAMES` frozenset, `src/mind_meld/skills/` placeholder subpackage. See PROGRESS.md and CHANGELOG.md._
 
-- ✓ ANSI-escape sanitization on peer-supplied paths -- expanded from "wrap rel_path print sites with rich.markup.escape()" to a proper `safe_str()` / `safe_text()` helper sweep across ~30 print sites (filenames, source/device names, error tails, diff content, `mm devices` table cells). Strips full CSI / OSC / DCS / C1 grammar (closes the OSC 52 clipboard-write vector that `rich.markup.escape` alone wouldn't). _src/mind_meld/cli.py + tests/test_safe_str.py._
-- ✓ `walk_generic_source` double-hash dedup -- shipped with `set[tuple[st_dev, st_ino]]` filesystem-identity dedup (stronger than the originally-planned `set[Path]`) + deterministic pre-sort (rglob iteration is FS-dependent on APFS; sort-then-dedup avoids phantom add/delete fleet churn). _src/mind_meld/manifest.py + tests/test_manifest.py._
-- ✓ `_find_conflict_files` case-insensitive dedup -- shipped as filesystem-identity dedup (`(src_name, st_dev, st_ino)` tuple, with `(src_name, str)` fallback on stat failure) — same shape as the walker. Stronger than the originally-planned `os.path.normcase` key. _src/mind_meld/cli.py + tests/test_conflict_copy.py._
-- ✓ `register_device` `registered:` timestamp preservation -- shipped as create-only via `LocalBackend.put_exclusive` (atomic `os.link` + EEXIST detection). Holds the create-only invariant at the FS layer regardless of iCloud `.icloud` placeholder state — stronger than the originally-planned fetch-then-write (which still has a TOCTOU window). _src/mind_meld/devices.py + tests/test_devices.py._
-- ✓ pyproject.toml hatchling -- `src/mind_meld/skills/` is a real subpackage (`__init__.py` present) shipping via existing `packages = ["src/mind_meld"]`. No hatchling `force-include` needed (would double-ship). Findable via `importlib.resources.files("mind_meld") / "skills"`. _pyproject.toml + tests/test_wheel.py._
-- ✓ DEFAULT_SOURCES `mm-events` entry -- shipped at `~/.local/share/mind-meld/` with `include_dirs = ["events"]` (subdir nesting plays cleanly with `walk_generic_source`; avoids the `["."]` pathlib quirk). `get_sources()` bootstraps the directory (mode 0o700) on first call so the source isn't inert until first write. New `MM_INTERNAL_SOURCE_NAMES = frozenset({"mm-events"})` short-circuits the init Y/n prompt; init guard refuses on zero user-facing sources. _src/mind_meld/config.py + tests/test_config.py._
-- ✓ (codex-outside-voice expansion) `safe_text()` Rich Text wrapper for diff-content lines -- `Text()` alone defangs Rich markup but passes raw ANSI/OSC/DCS through; same trust-boundary leak `safe_str` closes for filenames. _src/mind_meld/cli.py + tests/test_safe_str.py._
-- ✓ (codex-outside-voice expansion) `_devices_write_lock()` flock around `update_last_seen` RMW -- forward-defense for the moment a non-deterministic `devices/<id>.json` field lands; today's deterministic fields don't lose data, but the lock makes future field-adders safe by default. `fcntl.LOCK_EX | LOCK_NB` with ~750ms retry budget; degrade-with-warning on contention. _src/mind_meld/devices.py + tests/test_devices.py._
+_Track 7A (`events.py` module — `canonicalize_remote_url`, `walk_git_projects` budget+concurrency, `walk_session_metadata` Conductor-ephemeral detection, cursor + write_push_event under flock) — ✓ Complete (v0.10.2, 2026-04-28). 4 tasks shipped._
 
-### Track 7A: events.py module
-_4 tasks . ~1 day (human) / ~30 min (CC) . medium risk . src/mind_meld/events.py (new)_
-_touches: src/mind_meld/events.py, tests/test_events.py_
+_Track 7B (`_push_core` wiring + gc retention — `_run_events_tail` HEAD-position with 250ms autopush / 500ms interactive budget plumbed to `walk_session_metadata`'s `deadline_monotonic`, `_gc_old_event_files` reaps by filename date not mtime, fleet retention via tombstone propagation) — ✓ Complete (v0.10.3, 2026-04-28). 3 tasks shipped._
 
-Pure-logic foundation. Fully isolated from cli.py wiring.
-
-- **`canonicalize_remote_url` table-tested function** -- normalize git remote URLs to `<host>/<org>/<repo>` form: strip scheme, user/auth segment, port, trailing `.git`; lowercase host, preserve path case. Required for `(remote, sha)` dedup across machines. Multi-remote repos: only `origin` captured (v1 limitation); cherry-picked commits counted separately (v1 limitation). _src/mind_meld/events.py, ~30 lines + 5-row table test._ (S)
-- **`walk_git_projects` with budget + concurrency** -- discovers `.git/` dirs under configured roots; `ThreadPoolExecutor(max_workers=8)`; per-repo subprocess timeout `max(500, total_budget_remaining // repos_remaining)` capped at 2000ms. Single git command per repo: `git -C <path> log --since=<iso> --numstat -M -C --format='%x1e%H%x09%aI%x09%ae%x09%s'`. Parser handles binary rows (`-\t-\tpath`), rename rows (`old => new` → preserve `new`), empty/merge commits with no numstat rows. Per-repo failures: silent skip + emit one `git_snapshot_skip` line for forensic trail. _src/mind_meld/events.py, ~120 lines + parser tests._ (M)
-- **`walk_session_metadata` with Conductor-workspace detection** -- `os.scandir`-based 2-level walk of `~/.claude/projects/*/`. Sets `ephemeral: True` if decoded project path matches `*/conductor/workspaces/*` (matched on the *decoded path string*, NOT path existence — Conductor workspaces are routinely destroyed). Perf target: <500ms for 10k files. _src/mind_meld/events.py, ~60 lines + path-pattern test._ (S)
-- **Cursor read/write + write_push_event with mandatory flock** -- `~/.config/mind-meld/event-cursor.json` (mode 0600, fcntl.flock) and per-device daily JSONL (mode 0600, O_APPEND under flock). Lock-order invariant: cursor flock is INNERMOST; release before any other lock acquisition. First-run cursor returns `now - 30d`. _src/mind_meld/events.py, ~50 lines + concurrent-writer test._ (S)
-
-### Track 7B: _push_core wiring + gc retention
-_3 tasks . ~0.5 day (human) / ~20 min (CC) . medium risk . src/mind_meld/cli.py_
-_touches: src/mind_meld/cli.py, tests/test_integration.py_
-
-Integrates events.py into the push hot path with a hard time budget.
-
-- **`_push_core` tail-position event write** -- after `upgrade.emit_nudge_if_due()`, call `events.write_push_event(...)`. Captures 1× `mm-push` event + N× `git-snapshot` (per-repo) + M× `sessions-snapshot` (per-project). Preserves the v0.9.5 nudge tail-position invariant (events are after the nudge — local file IO doesn't stack with cold-cache HTTP latency). Gated on `not dry_run`. _src/mind_meld/cli.py, ~25 lines._ (S)
-- **Time budget: 500ms interactive / 250ms autopush, with silent-skip-on-exceed** -- partial events already written are kept; remaining capture aborts silently. Cursor advanced to `now` regardless (some commits in abort window may be missed; retro is forensic-only — perfect commit accounting requires retry/resume infrastructure that's overkill for v1). Skill output includes "budget abort on <date>" breadcrumb when applicable. Failure handling uses `mm: notice:` (NOT `mm: warning:`) per CLAUDE.md curated taxonomy. _src/mind_meld/cli.py + src/mind_meld/events.py, ~20 lines + budget-exceed test._ (S)
-- **`mm gc` 90-day events retention via tombstone reuse** -- gc deletes JSONL files older than 90 days locally; the next push generates deletion tombstones via the existing tombstone-on-absent-file plumbing (which propagates to peers as normal). No new GC layer; consistent with truth-based-manifests invariant. _src/mind_meld/cli.py, ~10 lines + reaping test._ (XS)
+**Hotfix** (post-ship fixes; serial, one-at-a-time):
+- **`get_sources` bootstrap fires on every read-only command [pull-perf:source=ship,ts=2026-04-27]** — `_bootstrap_mm_events_path` runs from `get_sources()` (~11 sites including read-only `mm sources` / `mm status` / `mm conflicts` / `mm diff` / `mm log` plus `_get_setup`). Users with chmod-restricted home see `mm: warning:` spam on every invocation (no rate-limiting, no de-dup). Fix: gate bootstrap to mutator commands (push/pull/init/migrate-config), or add once-per-process suppression (`_pull_core` calls `get_sources` twice via `_get_setup`). Pre-filed in CLAUDE.md as known UX rough edge during v0.10.1. _src/mind_meld/config.py, ~10 lines._ (XS)
 
 ---
 
-## Group 8: retro-fleet skill (consumer)
+## Group 8: retro-fleet skill (consumer) ✓ Complete
 
-The user-facing surface of the fleet-aware retro (depends on Group 7's
-event log existing): a skill shipped in the mm
-wheel and symlinked into `~/.claude/skills/` at `mm init`. Reads the synced
-event log across all devices, dedups by `(canonical_remote_url, sha)`, and
-renders gstack `/retro`-shaped markdown. Skill is acknowledged as an
-mm-internal API consumer; schema versioning lives in `events.py` and the
-skill's reader. Locked output format owned by mm (not coupled to gstack
-evolution).
+The user-facing surface of the fleet-aware retro: a Claude Code skill
+shipped in the mm wheel and symlinked into `~/.claude/skills/` at `mm init`,
+reading the synced event log across all devices, dedupping commits by
+`(canonical_remote_url, sha)`, picking the latest sessions-snapshot per
+`(device, claude_dir)`, and rendering gstack `/retro`-shaped markdown with
+locked output format owned by mm.
 
-### Track 8A: SKILL.md + aggregator + symlink installer + CI smoke test ✓ Complete (v0.11.0)
-_All planned tasks shipped + 6 review-applied scope expansions._
-_touches: src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}, src/mind_meld/{cli.py,events.py}, tests/{test_skill_link,test_retro_fleet_aggregator,test_devices_json,test_wheel,test_events}.py_
+_Track 8A (SKILL.md + aggregator + symlink installer + CI smoke test) — ✓ Complete (v0.11.0, 2026-04-28). All planned tasks shipped + 6 review-applied scope expansions; ~1100 LOC; 1107/1107 tests pass; 13 review-applied lock-ins from /plan-eng-review. `mm devices --format=json` surface added (stable schema). `EVENTS_SCHEMA_VERSION` bumped 1 → 2 (sessions-snapshot now FULL INVENTORY; latest-per-tuple is honest). Symlink installer 5-branch state machine including dangling-symlink branch (pipx-reinstall recovery). Two-marker 24h-TTL gate (`.skill-link-checked` + `.skill-link-conflict`) with fail-open on EACCES/EIO. Mixed-fleet handling surfaces "Sessions count incomplete: peer X on pre-v0.11.0" instead of overcounting. Full notes in CHANGELOG.md, PROGRESS.md, CLAUDE.md._
 
-- ✓ **`retro_fleet/SKILL.md` thin orchestrator** -- markdown skill that invokes `python -m mind_meld.skills.retro_fleet.aggregator <window>`. SKILL.md stays minimal (~120 lines); the load-bearing aggregation lives in a separate Python module so ruff + pytest catch bugs that markdown-heredoc Python wouldn't (Architecture #2 from /plan-eng-review). _src/mind_meld/skills/retro_fleet/SKILL.md._
-- ✓ **`retro_fleet/aggregator.py` aggregator with tolerant reader** -- importable as `mind_meld.skills.retro_fleet.aggregator`. Reads mm-events JSONL + gstack analytics + eureka with per-file open + per-line `json.loads` + per-field `isinstance` checks (CQ#3 contract). `MM_EVENTS_DIR` env override for power users (CQ#2). Author filter via `git config --global user.email` + optional `[retro].author_emails` mm-config knob. Subprocess `mm devices --format=json` for the "M of N known devices" breadcrumb, degrades to "events from N machines" on failure. Skipped-events tail breadcrumb (TODO#1 visible-failure contract); window > retention warning (TODO#2). _src/mind_meld/skills/retro_fleet/aggregator.py, ~700 lines._
-- ✓ **events.py v=2 full-inventory schema bump** -- `walk_session_metadata` no longer filters jsonls by `since_ts`. v=1 (delta) snapshots from pre-v0.11.0 peers continue parsing but are NOT summed into sessions totals; aggregator surfaces them as "sessions count incomplete: N peer(s) on pre-v0.11.0" breadcrumb (cross-model #1 from /plan-eng-review codex outside-voice). _src/mind_meld/events.py + tests/test_events.py._
-- ✓ **`mm devices --format=json` flag** -- JSON formatter alongside Rich Table; alphabetical sort by `device_id` for cross-platform stability; `null` for missing optional fields; empty fleet returns `[]`. Stable contract for the aggregator's subprocess consumer (Architecture #3). _src/mind_meld/cli.py + tests/test_devices_json.py._
-- ✓ **`_ensure_retro_skill_link` symlink installer** -- 5-branch state machine including the explicit dangling-symlink branch (`is_symlink() and not exists()` — REGRESSION-class fix for `pipx reinstall` recovery, missing in the original plan). `symlink_to` wrapped in try/except OSError → `mm: notice:` (CQ#1 forensic-only contract). _src/mind_meld/cli.py, ~150 lines._
-- ✓ **Two-marker 24h-TTL gate** -- `.skill-link-checked` (success) + `.skill-link-conflict` (deliberate-skip) under `~/.config/mind-meld/`. Transient failures touch neither so next push retries (cross-model #3 from /plan-eng-review). `_marker_is_fresh()` fail-opens on EACCES / EIO so a chmod-restricted config dir doesn't crash push (TODO#3 critical-gap fix). _src/mind_meld/cli.py._
-- ✓ **Wire installer into `mm init` (unconditional) + `_push_core` HEAD (gated)** -- gate position locked AFTER `_ensure_device_registered` and BEFORE `_run_events_tail` (Architecture #5: stacked self-heals; events tail is the load-bearing always-runs block). `dry_run` plumbed through both call sites. _src/mind_meld/cli.py._
-- ✓ **CI smoke tests + release-checklist manual smoke** -- `tests/test_wheel.py` extended with SKILL.md + aggregator.py presence + module-importability pins. `tests/test_skill_link.py` (13 tests, every branch + the dangling-symlink IRON-RULE regression). `tests/test_retro_fleet_aggregator.py` (31 tests, every aggregation rule + tolerant reader edge cases). _tests/{test_skill_link,test_retro_fleet_aggregator,test_devices_json,test_wheel}.py._
+**Hotfix** (post-ship fixes; serial, one-at-a-time):
+- **Aggregator `mm-events` custom-path notice [ship:source=adversarial,ts=2026-04-28]** — power users with `path: <custom>` on the `mm-events` sync source get a silently-empty retro unless they also set `MM_EVENTS_DIR`. Fix: when `_resolve_events_dir()` returns the default and config has a non-default `mm-events` path, print `mm: notice:` from the aggregator pointing at the env override. _src/mind_meld/skills/retro_fleet/aggregator.py, ~15 lines._ (XS)
+- **Aggregator reads entire event corpus into memory before filtering [ship:source=adversarial,ts=2026-04-28]** — `aggregate()` does `events = list(_read_events(...))` upfront then filters per-event. With v=2 full-inventory snapshots × 90-day retention × N machines, file count + per-event size could OOM the skill on a heavily-used fleet (~10MB on kb's 3-Mac fleet today is fine; revisit if memory becomes user-visible). Fix sketch: stream + filter per-file, accumulate only window-matching events. _src/mind_meld/skills/retro_fleet/aggregator.py, ~40 lines._ (S)
+- **`walk_session_metadata` v=2 full-inventory may consistently exceed events-tail budget [ship:source=adversarial,ts=2026-04-28]** — pre-v=2's mtime-since-cursor filter dropped untouched projects from the walk; v=2 walks every project every push (cap is wall-clock budget, not work-skipping). Users with 200+ Claude Code project dirs may consistently see `mm: notice: events tail budget exceeded`. Fix: pin a benchmark + bump budget if real fleets blow it, OR reintroduce a fast-path that early-returns when no jsonl mtime advanced past the previous snapshot's `last_session_at` (covers steady-state without losing v=2 correctness). _src/mind_meld/events.py, ~30 lines._ (S)
+- **Sessions dedup key drops data on encoded-name collision across multiple Claude source roots [ship:source=adversarial,ts=2026-04-28]** — aggregator dedups by `(device, claude_dir)` where `claude_dir` is just the encoded directory name. If a user configures two `type: claude` source roots and both contain a project encoded as e.g. `-Users-kb-Documents-foo`, one snapshot's data overwrites the other in `latest[(device, claude_dir)]`. Edge case (most users have one Claude root). Fix: include source root path in the snapshot's `claude_dir` or in the dedup key. _src/mind_meld/events.py + src/mind_meld/skills/retro_fleet/aggregator.py, ~25 lines._ (S)
+- **Mid-upgrade peer "pre-v0.11.0" breadcrumb persists after the peer upgrades [ship:source=adversarial,ts=2026-04-28]** — peer that emitted v=1 sessions snapshots within the retro window will show in `pre_v2_peers` even after upgrading. Breadcrumb stays accurate (their v=1 snapshots ARE incomplete) but appears misleading once the fleet has finished upgrading. Acceptable v1 behavior; window naturally moves past v=1 snapshots within 7-30 days. Document if dogfood reveals as confusing. _src/mind_meld/skills/retro_fleet/aggregator.py, ~5 lines._ (XS)
 
-**Final delta: ~1100 LOC (vs ~285 originally estimated). 1107/1107 tests pass; ruff check + ruff format clean. 13 review-applied lock-ins applied during /plan-eng-review.**
+---
+
+## Group 9: Pull performance + fresh-Mac onboarding
+_Depends on: none_
+
+Surfaced 2026-04-27 from a pull-perf dogfood session on kb's 349C-kb-ms:
+670/1449 blobs (46%) were iCloud cloud-only (`st_blocks == 0`); sequential
+`backend.get()` measured 509–1050ms per blob, parallel-x8 measured 143ms per
+blob — **7.3× speedup**, fully network-bound (File Provider supports concurrent
+downloads natively). Push isn't affected (only reads files it just wrote;
+always resident). Group covers the parallelization fix plus a paired
+onboarding nudge so fresh Macs don't see slow first pulls until iCloud
+materializes blobs.
+
+### Track 9A: Parallel blob fetch + brctl pin nudge
+_2 tasks . ~0.5 day (human) / ~25 min (CC) . medium risk . src/mind_meld/cli.py_
+_touches: src/mind_meld/cli.py, tests/test_integration.py_
+
+- **Parallelize blob fetches in `_download_and_apply` (cli.py:1320)** -- wrap the per-file `backend.get(bkey)` call in `concurrent.futures.ThreadPoolExecutor(max_workers=8)` + `as_completed` (NOT `map` — one slow blob shouldn't gate the rest). Keep decrypt + `_apply_incoming_file` single-threaded (cheap, GIL-friendly, preserves the existing per-file try/except + `outcomes` dict semantics). Care: error/skip outcome ordering under reordering, and the progress bar's `_advance` callback must remain thread-safe (Rich `Progress.advance` is). Measured 7.3× speedup on 1449-blob fresh-Mac pull. _src/mind_meld/cli.py, ~150 lines (executor wrap + outcome-ordering preservation + concurrency test + thread-safety regression pin)._ (M)
+- **`mm init` post-success `brctl download` nudge** -- print one-line `mm: notice:` after init success: `Tip: keep blobs local with: brctl download "<storage_path>/data" (or right-click → Keep Downloaded in Finder)`. README "Claude Code Integration" / FAQ section update. Surfaces the iCloud-pinning knob without making decisions for the user. Even with parallelization, a freshly-set-up Mac will see slow first pulls until iCloud materializes blobs. _src/mind_meld/cli.py, ~5 lines + README section._ (XS)
 
 ---
 
@@ -200,24 +190,20 @@ Adjacency list (who depends on whom):
 - Group 4 ← {}     ✓ Complete (v0.8.11)
 - Group 5 ← {}     ✓ Complete (5A/5B/5C/5E shipped through v0.9.2 + v0.9.3 hotfix + 5D shipped v0.9.4)
 - Group 6 ← {}     ✓ Complete (Track 6A — GitHub Releases backfill, 2026-04-27)
-- Group 7 ← {}     active (mm-events foundation — fleet-retro v0.11.0)
-- Group 8 ← {7}    blocked on 7 (retro-fleet skill consumer)
+- Group 7 ← {}     ✓ Complete (preflight v0.10.1 + Track 7A v0.10.2 + Track 7B v0.10.3)
+- Group 8 ← {7}    ✓ Complete (Track 8A v0.11.0)
+- Group 9 ← {}     active (pull performance + fresh-Mac onboarding)
 ```
 
 Track detail per active group:
 
 ```
-Group 7: mm-events foundation
-  Pre-flight .............. ✓ Complete (v0.10.1, 8 items shipped)
-  +-- Track 7A ........... ~30 min (CC) .. 4 tasks .. events.py module
-  +-- Track 7B ........... ~20 min (CC) .. 3 tasks .. _push_core wiring + gc
-
-Group 8: retro-fleet skill
-  +-- Track 8A ........... ~45 min (CC) .. 4 tasks .. skill + symlink + CI
+Group 9: Pull performance + fresh-Mac onboarding
+  +-- Track 9A ........... ~25 min (CC) .. 2 tasks .. parallel fetch + brctl nudge
 ```
 
-**Active total: 2 in-flight Groups (7, 8). 3 Tracks. 11 tasks remaining (Group 7 preflight ✓ shipped v0.10.1).**
-**Shipped: Groups 1, 2, 3, 4, 5 (Tracks 5A + 5B + 5C + 5D + 5E + Group 5 preflight + v0.9.3 hotfix), 6 (Track 6A — GitHub Releases backfill), 7 preflight (v0.10.1) — see PROGRESS.md.**
+**Active total: 1 in-flight Group (9). 1 Track. 2 tasks.**
+**Original v0.x → v1.0 plan complete: Groups 1–8 shipped through v0.11.0. See PROGRESS.md.**
 
 ---
 
@@ -246,6 +232,8 @@ Items triaged but deferred. Not organized into Groups/Tracks.
 - **`MM_NO_VERSION_CHECK=1` env var as alternate CI override** — Redundant with the `--no-check-version` flag. Add only if env-var ergonomics surface as real demand (e.g., a CI hook that wants to set the override once for all mm invocations). _Effort: XS._ (XS) [plan-ceo-review] _Deferred because: original write-up says "Add only if env-var ergonomics surface as real demand."_
 
 - **Pagination beyond 100 tags for `/repos/kbitz/mind-meld/tags`** — `upgrade.py` fetches with `?per_page=100` (max). At current release velocity (30 tags / 6 months) this gives ~3 years of headroom. Past 100 tags, latest detection may miss the highest semver if GitHub's tag sort places older tags on page 1. Revisit when tag count crosses ~80; either add Link-header pagination or trust GitHub's creation-desc default. _Effort: S._ (S) [plan-eng-review] _Deferred because: ~3 years of headroom before the cap matters._
+
+- **`tests/conftest.py::_isolate_devices_write_lock` couples every test to `mind_meld.devices` import** — autouse fixture imports `mind_meld.devices` so it can monkeypatch `DEVICES_WRITE_LOCK`. Couples otherwise-independent tests (`test_wheel.py`, `test_version.py`) to the devices module's import chain. A future bug wedging devices.py at import time would break unrelated tests, masking the real root cause. Forward-defense fix: scope the fixture narrower (`@pytest.fixture` consumed explicitly by tests touching devices), OR move `DEVICES_WRITE_LOCK` to a config-style constants module redirectable without touching devices. _Effort: XS._ (XS) [ship pre-landing review 2026-04-27] _Deferred because: forward-defense; no real-world failure has surfaced from the coupling. Land if a devices.py import bug ever masks unrelated test failures._
 
 ---
 
