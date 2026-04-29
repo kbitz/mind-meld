@@ -2,6 +2,109 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.1] - 2026-04-29 — BREAKING (interactive prompt)
+
+**Conflict resolution prompt UX overhaul.** The `mm resolve` and inline
+`mm pull --conflict-mode prompt` interactive prompts were unreadable —
+users could not tell which side was local vs remote, the option labels
+referenced internal jargon (canonical/sidecar), and `(b)oth` looked like
+a merge but was actually a skip. This release redesigns the prompt around
+concrete file actions, color-coded LOCAL/REMOTE banners, peer-name
+attribution, and a 3-number divergence summary.
+
+### Added
+
+- **Color LOCAL/REMOTE banners above the diff.** Each conflict prompt
+  prints a red `LOCAL ▌ <filename>` and green `REMOTE ▌ <filename>
+  (from <peer_name>)` banner so visual identification doesn't depend on
+  parsing unified-diff `+`/`-` prefixes. Banners go through
+  `safe_text(...)` so peer-controlled paths AND peer-controlled
+  `device_name` strings can't smuggle ANSI/OSC/CSI/DCS escapes to the
+  terminal.
+
+- **Peer-name attribution.** The REMOTE banner resolves the
+  conflict-filename's 8-char device prefix against the registered
+  devices list and renders `(from <peer_name>)` when known. Falls back
+  to `(unknown peer)` when no peer matches and `(ambiguous -- N peers
+  match this prefix)` on collision (T4 cross-model finding).
+
+- **Three-number divergence summary.** Pre-diff line shows
+  `M removed-or-replaced lines on local side; N added-or-replaced on
+  remote side; K total diff lines.` Honest about unified-diff semantics
+  (a 1-line replacement is M=1, N=1, K=2 — not "two independent edits").
+
+- **Init-time device-id collision regenerate.** `mm init` now scans
+  existing peers for the new device's 8-char prefix and regenerates on
+  collision (up to 5 retries, then `mm: warning:` and proceed). UUID4
+  prefix collisions on 32 bits are extremely unlikely under healthy RNG
+  but a cloned-from-snapshot peer or deterministic-RNG bug could collide
+  reproducibly. Forward-defense plus a runtime fallback.
+
+- **`src/mind_meld/conflictdiff.py`** module: leaf primitives
+  `render_prompt`, `render_banner`, `count_divergent_lines`. Pure
+  functions, easy to unit-test without CLI fixtures.
+
+- **`src/mind_meld/safety.py`** module: extracted `safe_str`, `safe_text`,
+  `strip_terminal_escapes` from cli.py so `conflictdiff.py` can import
+  them without circular dependency. Re-exported from cli.py for
+  backwards compat with any out-of-tree imports; tests now import
+  directly from `mind_meld.safety`.
+
+- **`devices.lookup_device_by_short_id(devices, short_id)`** pure helper
+  + `manifest.parse_conflict_device_short(name)` parser used by both
+  prompt sites to attribute the REMOTE side.
+
+- **`devices.generate_unique_short_device_id(devices)`** for init-time
+  collision prevention.
+
+### Changed (BREAKING — interactive prompt only)
+
+- **Default key flipped from `b` to `s`.** Pressing Enter at a conflict
+  prompt now skips the conflict (leaves both files on disk) instead of
+  defaulting to `(b)oth`. Same on-disk effect as before; the rename
+  reflects what the option actually does. The pre-1.0 `b`/`both`
+  letters are accepted as deprecation aliases with a one-time
+  `mm: notice:` until 1.0 — no silent-data-loss risk in mapping them
+  through (this is unlike v0.9.0's loud rejection of `c`/`f`, which
+  encoded directional ambiguity).
+
+- **Honest skip lifecycle copy.** The prompt now reads
+  `(s)kip → leave both files on disk; run `mm resolve` later or delete
+  manually` instead of "decide on the next pull" — pulling again does
+  NOT re-prompt unless remote changes again, so the old wording was
+  misleading (T2 cross-model finding).
+
+- **Concrete-action option copy.** Each option now reads as the file
+  action it performs, e.g. `(l)ocal → discard <conflict-name>, keep
+  <canonical-name> as-is`. Canonical/sidecar terminology removed from
+  user-facing output.
+
+- **Banner sanitization extended to `device_name`.** `device_name` is
+  set via `typer.prompt` at peer init, plaintext-synced via
+  `devices/<id>.json`, and peer-controlled at the rendering machine.
+  Banner rendering now strips terminal escapes from this input too —
+  closes the same trust-boundary leak v0.10.1 closed for filenames
+  (T6 cross-model finding).
+
+- **Device-list cache hoisted at loop entry.** `_resolve_interactive_loop`
+  now accepts the device list as a parameter, populated once by `mm
+  resolve` from `list_devices(backend)`. Avoids N storage hits on a
+  multi-conflict walk; iCloud cold-cache reads can otherwise stack to
+  multi-second latency per conflict.
+
+### Migration
+
+Stale scripts piping `b\n` into `mm resolve` continue to work — they
+trigger the deprecation alias and print `mm: notice: 'b' / 'both' now
+means 'skip'; use 's' going forward (alias removed at 1.0).` to stderr.
+On-disk effect is identical to the pre-v0.12 behavior. Update such
+scripts to pipe `s\n` to silence the notice.
+
+The pre-v0.9.0 letters `c` (keep canonical) and `f` (from-other) remain
+loud-rejected with `mm: error:` and `Exit(1)`. Those encoded directional
+ambiguity that the v0.9.2 inversion broke; a silent map-through would
+risk data loss.
+
 ## [0.11.0] - 2026-04-28
 
 **Group 8 / Track 8A: fleet-aware retro skill.** Adds a Claude Code
