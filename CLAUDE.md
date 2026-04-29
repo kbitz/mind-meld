@@ -19,9 +19,24 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events}.py
+src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events,safety,conflictdiff}.py
 src/mind_meld/storage/{local,keys}.py
 src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). SKILL.md invokes the aggregator via `python -m mind_meld.skills.retro_fleet.aggregator`. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
+
+`safety.py` (v0.11.1) holds the peer-controlled string sanitization
+helpers — `safe_str`, `safe_text`, `strip_terminal_escapes`. Originally
+defined in cli.py through v0.11.x; extracted so `conflictdiff.py` can
+import them without a cli.py-conflictdiff.py circular import. cli.py
+re-exports these names for backwards compat with any out-of-tree
+imports; tests should import from `mind_meld.safety` directly.
+
+`conflictdiff.py` (v0.11.1) holds pure leaf primitives for the conflict
+prompts: `render_prompt`, `render_banner`, `count_divergent_lines`. Both
+prompt sites (`_resolve_interactive_loop` post-pull walk, and
+`_prompt_conflict_choice` inline pull-time) call these helpers; site-
+level dispatch (pre-inversion / post-inversion / canonical-missing)
+stays at each call site — see "Conflict-direction inversion" section
+for why filename-prefix dispatch is load-bearing.
 
 Storage keys are constructed via helpers in `storage/keys.py`
 (`manifest_key`, `blob_key`, `device_key`, `parse_blob_key`) which validate
@@ -112,6 +127,31 @@ behavior is preserved.
 
 `_resolve_interactive_loop` is dual-mode dispatched BY FILENAME PREFIX (not timestamp — sound, since post-v0.9.2 code never produces a `v0-` file directly). `v0-` files: `(l)ocal` renames sidecar over canonical, `(r)emote` unlinks sidecar. No-prefix files: `(l)ocal` unlinks sidecar, `(r)emote` renames sidecar over canonical. Diff fromfile/tofile labels flip per row to match.
 
+## Conflict-prompt UX (load-bearing, v0.11.1 BREAKING — interactive prompt)
+
+The two interactive prompt sites (`_resolve_interactive_loop` post-pull walk in cli.py:5688, `_prompt_conflict_choice` inline pull-time in cli.py:1115) share leaf primitives in `src/mind_meld/conflictdiff.py`: `render_prompt`, `render_banner`, `count_divergent_lines`. Site-level dispatch over the four shapes (canonical-exists × pre-inversion / post-inversion × canonical-missing) stays at each call site — burying it in a helper would hide the load-bearing filename-prefix dispatch.
+
+**`(b)oth` → `(s)kip` rename + alias.** Default key changed from `b` to `s` in v0.11.1. Same on-disk effect — both leave the canonical and `.sync-conflict-*` files in place — but the option name now matches the action. The pre-1.0 letters `b` / `both` are aliased to skip with a one-time `mm: notice:` so stale scripts continue to work; alias removes at 1.0. **Exact-match dispatch** (`if choice in ("b", "both")`): `back`/`browse`/`between` must NOT silently trigger the alias.
+
+The pre-v0.9.0 letters `c` / `f` remain LOUD-rejected (real silent-data-loss risk in mapping them through post-inversion). The asymmetry is deliberate: `c`/`f` encoded directional ambiguity that the v0.9.2 inversion broke; `b` does not.
+
+**Honest skip-lifecycle copy.** The `(s)kip` line reads `leave both files on disk; run `mm resolve` later or delete manually` — explicit that the next pull does NOT re-prompt unless remote changes again, so the conflict file persists indefinitely. Codex outside-voice review (T2) caught the misleading prior wording ("decide on the next pull").
+
+**Three-number divergence summary.** `count_divergent_lines` counts `-` / `+` lines in the unified diff (excluding the `---` / `+++` headers) and returns `(M, N, K)` where M = removed-or-replaced, N = added-or-replaced, K = M + N. Wording is honest about replacement semantics: a 1-line replacement is M=1, N=1, K=2 (counting both old and new). Codex T1 caught the original "unique to local/remote" wording as pseudo-precision.
+
+**Banner attribution chain.** `parse_conflict_device_short(name)` (manifest.py) extracts the 8-char device prefix from the conflict filename. `lookup_device_by_short_id(devices, short_id)` (devices.py) is a pure function over the existing devices list returning `(device | None, count)`:
+* `(None, 0)` — no peer matches; banner shows `(unknown peer)`.
+* `(device, 1)` — exact attribution; banner shows `(from <device_name>)`.
+* `(None, N)` for N > 1 — collision; banner shows `(ambiguous -- N peers match this prefix)` AND emits a one-shot per-prefix `mm: notice:` to stderr (forensic breadcrumb for fleet-config issues; codex T4 caught the stderr-only-is-too-quiet hazard).
+
+**Device list cache hoisted.** `mm resolve` calls `list_devices(backend)` ONCE before entering the walk and threads the resulting list into `_resolve_interactive_loop`. iCloud cold-cache reads can stack to multi-second per `list_devices` call; without hoisting, an N-conflict walk would N+1 on storage. The same pattern flows through `_pull_one_source` → `_download_and_apply` → `_apply_incoming_file` → `_prompt_conflict_choice` for the inline pull-time prompt.
+
+**Init-time device-id collision regenerate.** `generate_unique_short_device_id(devices, max_retries=5)` (devices.py) draws `uuid.uuid4().hex[:8]` and retries on collision against the existing fleet. After exhaustion, returns the last drawn id and emits `mm: warning:` — runtime `lookup_device_by_short_id` defends in depth via the multi-match path, so a colliding install is degraded for attribution but not catastrophic. Wired into `_register_and_save` at init; runtime helper handles legacy collisions on already-registered fleets.
+
+**`Literal['pre_inversion', 'post_inversion']` not `bool`.** `render_prompt(canonical, conflict, mode)` takes a typed mode string, not a True/False flag. A boolean that flips canonical/sidecar semantics is exactly the footgun class the v0.9.2 inversion section warns about; codex T6 caught the smell. Matches existing pattern (`ManifestFetch.status: Literal['ok','missing','corrupt']`).
+
+**Inline pull-time prompt is post-inversion only.** `_prompt_conflict_choice` is called from `_apply_incoming_file` during pull, BEFORE `_apply_conflict` writes the sidecar — and `_apply_conflict` (post-v0.9.2) only ever produces post-inversion files. Pre-inversion files surface only later, in `mm resolve`'s discovery walk. So the inline path passes `mode="post_inversion"` unconditionally; the four-shape dispatch lives in `_resolve_interactive_loop` only.
+
 `_check_fleet_version_or_refuse(backend, my_device_id)` runs at the top of `_pull_core` BEFORE any I/O. Per-peer classification via `packaging.version.Version` against `INVERSION_MIN_VERSION = "0.9.2"`: safe (>= 0.9.2 → ALLOW), inactive (last_seen missing → ALLOW), pre-v0.9.2 (last_seen present, version missing or < threshold → REFUSE), dropped (corrupt device.json → REFUSE by storage key). Refusal message names every offending peer; recovery is `pip install --upgrade mind-meld` + `mm push` on each peer. Implementation uses `list_devices_with_drops` (silent variant) so the `_select_devices`-side `_list_devices_warn` only logs once if the fleet check passes.
 
 `update_last_seen` writes `last_seen_version: __version__` alongside `last_seen` on every push. Forward-compatible (older mm tolerates unknown keys). `mm devices` table surfaces it as a column.
@@ -154,6 +194,10 @@ Every synced filename AND file body crosses an untrusted trust boundary. Without
 `safe_text(s, **kwargs) -> rich.text.Text` is the diff-content variant. Use for diff CONTENT lines (peer-controlled file bytes printed via `console.print`). `Text()` alone defangs Rich markup but passes raw ANSI/OSC/DCS through to the terminal — same trust-boundary leak `safe_str` closes for filenames. Strip escapes first.
 
 Sweep covers ~30 print sites: pull-prediction widget, upload progress, conflict prompts, write/merge/conflict apply paths, all `_apply_*` / `_pull_*` error tails, `mm devices` table cells, `mm diff` per-source headers, fleet-version refusal listing, `_print_pull_summary` warnings, `_resolve_interactive_loop` headers + prompts + diff labels + diff content + outcome lines. `mm devices` Rich Table cells are sanitized too — Table cells interpret markup AND pass raw escapes through (verified). All sites pinned in `tests/test_safe_str.py`.
+
+**v0.11.1 extension — banner trust boundary covers `device_name` too.** The conflict-prompt LOCAL/REMOTE banners (Track 12A, conflictdiff.py) interpolate two peer-controlled strings: the conflict filename AND the peer's `device_name` (set via `typer.prompt` at peer init, plaintext-synced via `devices/<id>.json`, and rendered as `(from <peer_name>)` on the REMOTE banner). `render_banner` wraps both inputs in `safe_text` BEFORE composition so a peer planting OSC 52 / CSI / DCS in their own `device_name` cannot reach the terminal of any peer that pulls. Codex outside-voice review (T6) caught this — pre-v0.11.1 the sanitization sweep covered filenames but not `device_name`. Pinned by `tests/test_safe_str.py::TestConflictBannerSanitization`.
+
+**v0.11.1 module move.** `safe_str`, `safe_text`, `strip_terminal_escapes` live in `mind_meld.safety` (extracted from cli.py to break the cli↔conflictdiff circular import). cli.py re-exports the names for backwards compat; new tests should import from `mind_meld.safety` directly.
 
 ## `register_device` create-only contract (load-bearing, v0.10.1)
 Pre-v0.10.1, `register_device` always wrote `backend.put(key, ...)`. The push-time `_ensure_device_registered` self-heal (v0.9.4) called `register_device` whenever `backend.exists(key)` returned False. iCloud's `.icloud` placeholder (cloud-only, lazy-materialized) creates a TOCTOU window where `backend.exists()` reports False but the entry actually exists on storage — the self-heal re-registered, silently bumping the `registered:` first-registration timestamp on every push.

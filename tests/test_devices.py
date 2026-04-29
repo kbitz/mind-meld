@@ -173,3 +173,163 @@ class TestUpdateLastSeenFlock:
         data = json.loads(backend.get(device_key("dev-a")))
         assert "last_seen" in data, "register_device must not clobber update_last_seen's write"
         assert "last_seen_version" in data
+
+
+class TestLookupDeviceByShortId:
+    """Pins for the conflict-prompt-ux device-name lookup helper.
+
+    Single source of truth for attribution rendering on the REMOTE banner
+    line of `mm pull` / `mm resolve`. Pure function over the existing
+    devices list -- callers `list_devices(backend)` once at the start of
+    an interactive walk and pass the same list in per-conflict.
+    """
+
+    def test_zero_matches_returns_none_and_zero(self) -> None:
+        from mind_meld.devices import lookup_device_by_short_id
+
+        devices = [
+            {"device_id": "aaaa1111", "device_name": "Mac A"},
+            {"device_id": "bbbb2222", "device_name": "Mac B"},
+        ]
+        assert lookup_device_by_short_id(devices, "deadbeef") == (None, 0)
+
+    def test_one_match_returns_dict_and_count_one(self) -> None:
+        from mind_meld.devices import lookup_device_by_short_id
+
+        a = {"device_id": "aaaa1111", "device_name": "Mac A"}
+        b = {"device_id": "bbbb2222", "device_name": "Mac B"}
+        result, count = lookup_device_by_short_id([a, b], "aaaa1111")
+        assert result is a
+        assert count == 1
+
+    def test_multiple_matches_returns_none_and_count(self, monkeypatch, capsys) -> None:
+        # Reset the one-shot notice cache to make the test deterministic.
+        from mind_meld import devices as _devices
+
+        monkeypatch.setattr(_devices, "_AMBIGUOUS_PREFIX_NOTICED", set())
+        from mind_meld.devices import lookup_device_by_short_id
+
+        devs = [
+            {"device_id": "aaaa1111", "device_name": "Mac A"},
+            {"device_id": "aaaa2222", "device_name": "Mac B"},
+            {"device_id": "bbbb3333", "device_name": "Mac C"},
+        ]
+        result, count = lookup_device_by_short_id(devs, "aaaa")
+        assert result is None
+        assert count == 2
+        captured = capsys.readouterr()
+        assert "mm: notice:" in captured.err
+        assert "matches 2 peers" in captured.err
+        assert "aaaa1111" in captured.err
+        assert "aaaa2222" in captured.err
+
+    def test_multiple_matches_notice_is_one_shot_per_prefix(self, monkeypatch, capsys) -> None:
+        from mind_meld import devices as _devices
+
+        monkeypatch.setattr(_devices, "_AMBIGUOUS_PREFIX_NOTICED", set())
+        from mind_meld.devices import lookup_device_by_short_id
+
+        devs = [
+            {"device_id": "aaaa1111", "device_name": "Mac A"},
+            {"device_id": "aaaa2222", "device_name": "Mac B"},
+        ]
+        # First call: notice fires.
+        lookup_device_by_short_id(devs, "aaaa")
+        first = capsys.readouterr().err
+        assert "mm: notice:" in first
+        # Second call with the same prefix: no notice.
+        lookup_device_by_short_id(devs, "aaaa")
+        second = capsys.readouterr().err
+        assert second == ""
+
+    def test_multiple_matches_distinct_prefixes_each_notice_once(self, monkeypatch, capsys) -> None:
+        from mind_meld import devices as _devices
+
+        monkeypatch.setattr(_devices, "_AMBIGUOUS_PREFIX_NOTICED", set())
+        from mind_meld.devices import lookup_device_by_short_id
+
+        devs = [
+            {"device_id": "aaaa1111", "device_name": "Mac A"},
+            {"device_id": "aaaa2222", "device_name": "Mac B"},
+            {"device_id": "bbbb3333", "device_name": "Mac C"},
+            {"device_id": "bbbb4444", "device_name": "Mac D"},
+        ]
+        lookup_device_by_short_id(devs, "aaaa")
+        lookup_device_by_short_id(devs, "bbbb")
+        err = capsys.readouterr().err
+        # Two distinct prefix notices; not deduped against each other.
+        assert err.count("mm: notice:") == 2
+
+    def test_short_id_shorter_than_8_chars_uses_prefix(self) -> None:
+        # Forward-defense: caller may pass a sub-8-char prefix if the
+        # filename convention ever changes.
+        from mind_meld.devices import lookup_device_by_short_id
+
+        devs = [
+            {"device_id": "aaaa1111", "device_name": "Mac A"},
+            {"device_id": "bbbb2222", "device_name": "Mac B"},
+        ]
+        result, count = lookup_device_by_short_id(devs, "aa")
+        assert result is devs[0]
+        assert count == 1
+
+
+class TestGenerateUniqueShortDeviceId:
+    """Pins for init-time device-id collision prevention.
+
+    UUID4 prefix collisions on 32 bits are extremely unlikely under healthy
+    RNG (~1 in 4 billion per draw) but a cloned-from-snapshot peer or a
+    deterministic-RNG bug could collide reproducibly. The runtime
+    `lookup_device_by_short_id` helper still defends in depth via its
+    multi-match path.
+    """
+
+    def test_returns_id_when_no_existing_devices(self) -> None:
+        from mind_meld.devices import generate_unique_short_device_id
+
+        out = generate_unique_short_device_id([])
+        assert isinstance(out, str)
+        assert len(out) == 8
+
+    def test_returns_id_when_no_collision(self) -> None:
+        from mind_meld.devices import generate_unique_short_device_id
+
+        existing = [{"device_id": "deadbeef", "device_name": "Mac A"}]
+        out = generate_unique_short_device_id(existing)
+        assert out != "deadbeef"
+
+    def test_retries_on_collision_then_succeeds(self, monkeypatch) -> None:
+        # Force the first uuid4 draw to collide; the second draw is unique.
+        from mind_meld import devices as _devices
+
+        draws = iter(["aaaa1111", "bbbb2222", "cccc3333"])
+
+        class _FakeUUID:
+            def __init__(self, hex_value: str) -> None:
+                self.hex = hex_value + "0" * (32 - len(hex_value))
+
+        def _fake_uuid4() -> _FakeUUID:
+            return _FakeUUID(next(draws))
+
+        monkeypatch.setattr(_devices.uuid, "uuid4", _fake_uuid4)
+
+        existing = [{"device_id": "aaaa1111", "device_name": "Mac A"}]
+        out = _devices.generate_unique_short_device_id(existing)
+        assert out == "bbbb2222"
+
+    def test_warns_when_retry_budget_exhausted(self, monkeypatch, capsys) -> None:
+        from mind_meld import devices as _devices
+
+        # Every draw collides with an existing device.
+        class _FakeUUID:
+            hex = "aaaa1111" + "0" * 24
+
+        monkeypatch.setattr(_devices.uuid, "uuid4", lambda: _FakeUUID())
+
+        existing = [{"device_id": "aaaa1111", "device_name": "Mac A"}]
+        out = _devices.generate_unique_short_device_id(existing, max_retries=3)
+        assert out == "aaaa1111"
+        captured = capsys.readouterr()
+        assert "mm: warning:" in captured.err
+        assert "could not generate" in captured.err
+        assert "3 attempts" in captured.err

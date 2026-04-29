@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -187,6 +188,102 @@ def list_devices_with_drops(
     drops: list[tuple[str, str]] = []
     valid = _list_devices_impl(backend, on_drop=lambda k, r: drops.append((k, r)))
     return valid, drops
+
+
+# Process-local set of device-short prefixes for which we've already emitted
+# the "ambiguous prefix" mm: notice:. Avoids spamming stderr when
+# lookup_device_by_short_id is called once per conflict in a multi-conflict
+# walk against a fleet that has a real prefix collision.
+_AMBIGUOUS_PREFIX_NOTICED: set[str] = set()
+
+# Default retry budget for generate_unique_short_device_id. Each retry is a
+# fresh uuid4 draw -- collisions are 1-in-4-billion per draw at 32 bits, so
+# 5 retries makes a non-collision overwhelmingly likely even on a fleet with
+# a deterministic-RNG bug. After exhaustion we emit a warning and fall back
+# to the last-generated id; the runtime lookup_device_by_short_id helper
+# still defends in depth via its multi-match path.
+_GENERATE_DEVICE_ID_RETRY_BUDGET = 5
+
+
+def generate_unique_short_device_id(
+    devices: list[dict[str, Any]],
+    *,
+    max_retries: int = _GENERATE_DEVICE_ID_RETRY_BUDGET,
+) -> str:
+    """Generate an 8-char device id that doesn't collide with existing peers.
+
+    Today's ``device_id`` is ``uuid.uuid4().hex[:8]`` (32 bits). Collisions
+    inside a fleet are extremely unlikely under healthy RNG (~1 in 4 billion
+    per pair) but not impossible -- and a deterministic-RNG bug or a peer
+    cloned from a snapshot could collide reproducibly. Init-time prevention
+    is cheap; running ``list_devices`` once and retrying on collision gives
+    forward defense plus a warning if the retry budget is exhausted.
+
+    Returns the freshly-generated id. After ``max_retries`` consecutive
+    collisions, emits a ``mm: warning:`` to stderr and returns the last id
+    drawn -- the conflict-prompt-ux runtime still defends in depth via
+    :func:`lookup_device_by_short_id`'s multi-match path, so a colliding
+    install isn't catastrophic, just degraded for attribution.
+    """
+    existing = {d.get("device_id") for d in devices if isinstance(d.get("device_id"), str)}
+    last_drawn = ""
+    for _attempt in range(max_retries):
+        candidate = uuid.uuid4().hex[:8]
+        if candidate not in existing:
+            return candidate
+        last_drawn = candidate
+    sys.stderr.write(
+        f"mm: warning: could not generate a non-colliding device id in "
+        f"{max_retries} attempts; proceeding with {last_drawn} -- attribution "
+        "may be degraded if collisions persist\n"
+    )
+    return last_drawn
+
+
+def lookup_device_by_short_id(
+    devices: list[dict[str, Any]],
+    short_id: str,
+) -> tuple[dict[str, Any] | None, int]:
+    """Resolve a conflict-filename's 8-char device prefix to a peer record.
+
+    Returns ``(device_dict, match_count)``:
+      * ``(None, 0)`` -- no peer matches the prefix (unknown peer).
+      * ``(device, 1)`` -- exactly one match; safe to attribute.
+      * ``(None, N)`` for N > 1 -- prefix collision; refuse to attribute,
+        emit a one-shot ``mm: notice:`` to stderr (per-prefix, per-process)
+        so the user has a forensic breadcrumb. Caller is expected to render
+        an in-prompt "ambiguous -- N peers match" annotation using the
+        match count returned here.
+
+    Pure function over the existing devices list (callers should
+    ``list_devices(backend)`` ONCE at the start of an interactive walk and
+    pass the resulting list in for every conflict, avoiding N storage
+    round-trips on a multi-conflict resolve).
+
+    Today's ``device_short`` is the full 8-char ``uuid.uuid4().hex[:8]`` --
+    so a "match" is exact-equality against ``device_id``. The function
+    accepts shorter prefixes too (forward-defense if the convention ever
+    grows or shrinks the prefix length); semantics are: any ``device_id``
+    whose first ``len(short_id)`` characters equal ``short_id`` is a match.
+    """
+    matches = [d for d in devices if d.get("device_id", "")[: len(short_id)] == short_id]
+    count = len(matches)
+    if count == 0:
+        return (None, 0)
+    if count == 1:
+        return (matches[0], 1)
+    # Multiple matches: refuse to attribute. One-shot notice so a real
+    # fleet-config issue surfaces forensically without spamming on every
+    # conflict in a walk.
+    if short_id not in _AMBIGUOUS_PREFIX_NOTICED:
+        _AMBIGUOUS_PREFIX_NOTICED.add(short_id)
+        names = ", ".join(sorted(d.get("device_id", "?") for d in matches))
+        sys.stderr.write(
+            f"mm: notice: device-id prefix {short_id!r} matches "
+            f"{count} peers ({names}); attribution disabled for "
+            "this prefix until you rename one of the devices\n"
+        )
+    return (None, count)
 
 
 def _list_devices_impl(

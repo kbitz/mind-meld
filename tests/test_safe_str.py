@@ -18,7 +18,7 @@ import pytest
 from rich.console import Console
 from rich.text import Text
 
-from mind_meld.cli import safe_str, safe_text, strip_terminal_escapes
+from mind_meld.safety import safe_str, safe_text, strip_terminal_escapes
 
 
 class TestStripsAnsi:
@@ -161,3 +161,66 @@ class TestStripTerminalEscapesBroadCoverage:
     def test_does_not_strip_normal_brackets(self):
         # Square brackets that are NOT terminal escapes survive.
         assert strip_terminal_escapes("plain [bracketed] text") == "plain [bracketed] text"
+
+
+class TestConflictBannerSanitization:
+    """Cross-model tension T5 + T6 (eng-review 2026-04-29): peer-controlled
+    bytes flow into the conflict-prompt LOCAL/REMOTE banners through both
+    the conflict-file path AND the peer-supplied device_name. Banner
+    rendering MUST strip terminal escapes from BOTH inputs before the
+    Text/Console layer renders them, otherwise OSC 52 / CSI / DCS leak
+    to the terminal.
+    """
+
+    @staticmethod
+    def _render(text):
+        c = Console(record=True, width=120, force_terminal=True, color_system="truecolor")
+        c.print(text)
+        return c.export_text()
+
+    def test_banner_strips_osc52_from_filename(self):
+        from mind_meld.conflictdiff import render_banner
+
+        evil_path = "notes\x1b]52;c;ZXZpbA==\x07.md"
+        out = self._render(render_banner("local", evil_path, None))
+        assert "\x1b]52" not in out
+        assert "\x07" not in out
+        assert "notes" in out
+
+    def test_banner_strips_csi_from_filename(self):
+        from mind_meld.conflictdiff import render_banner
+
+        evil_path = "notes\x1b[2Jcleared.md"
+        out = self._render(render_banner("local", evil_path, None))
+        assert "\x1b[2J" not in out
+        assert "notes" in out
+        assert "cleared.md" in out
+
+    def test_banner_strips_osc52_from_device_name(self):
+        from mind_meld.conflictdiff import render_banner
+
+        # A peer's device_name is set via typer.prompt at init on each
+        # peer machine, then plaintext-synced via devices/<id>.json. A
+        # malicious or confused peer can plant escapes in their own
+        # device_name and have them reach every other machine that pulls.
+        evil_name = "kb-mbp\x1b]52;c;ZXZpbA==\x07"
+        out = self._render(render_banner("remote", "notes.sync-conflict-X.md", evil_name))
+        assert "\x1b]52" not in out
+        assert "\x07" not in out
+        assert "kb-mbp" in out
+
+    def test_banner_strips_csi_from_device_name(self):
+        from mind_meld.conflictdiff import render_banner
+
+        evil_name = "kb-mbp\x1b[2J"
+        out = self._render(render_banner("remote", "notes.sync-conflict-X.md", evil_name))
+        assert "\x1b[2J" not in out
+        assert "kb-mbp" in out
+
+    def test_banner_strips_dcs_from_filename(self):
+        from mind_meld.conflictdiff import render_banner
+
+        evil_path = "notes\x1bP1$rm\x1b\\.md"
+        out = self._render(render_banner("local", evil_path, None))
+        assert "\x1bP" not in out
+        assert "notes" in out

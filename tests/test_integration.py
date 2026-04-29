@@ -1519,8 +1519,8 @@ class TestInversion5E:
         monkeypatch.setattr("mind_meld.config.LOCK_PATH", tmp_path / "lock")
         monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", tmp_path / "lock")
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-        # User picks 'b' (kept both — no further mutation).
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "b")
+        # User picks 's' (skip; both files left on disk -- no mutation).
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
 
         result = runner.invoke(app, ["resolve"])
         assert result.exit_code == 0, result.output

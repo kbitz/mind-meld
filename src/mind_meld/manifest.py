@@ -72,6 +72,54 @@ def is_conflict_filename(name: str) -> bool:
     return fnmatch.fnmatch(name, CONFLICT_PATTERN) or fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
 
 
+def parse_conflict_device_short(name: str) -> str | None:
+    """Extract the device-short id from a conflict filename, if present.
+
+    Returns the 8-char device prefix `conflict_filename()` stamped into the
+    name, or ``None`` if `name` doesn't match the conflict pattern. Handles
+    both post-inversion (no prefix) and pre-inversion (`v0-`) shapes, plus
+    the optional 4-char same-second random suffix.
+
+    Filename grammar produced by ``conflict_filename``:
+      ``<stem>.sync-conflict-[v0-]<8d>-<6d>-<device8>[-<rand4>]<ext>``
+
+    The device is the segment immediately after the 8-digit date and 6-digit
+    time. If the conflict portion ends with the optional ``-<rand4>`` collision
+    suffix, the device is the last-but-one segment; otherwise it's the last
+    one before the file extension.
+
+    Used by ``mm resolve`` to attribute the REMOTE side of a conflict to a
+    peer device-name rather than the bare hex id.
+    """
+    if not is_conflict_filename(name):
+        return None
+    # Find the conflict infix; everything to the right is the metadata
+    # block plus optional file extension.
+    try:
+        infix_at = name.rindex(CONFLICT_INFIX)
+    except ValueError:
+        return None
+    after = name[infix_at + len(CONFLICT_INFIX) :]
+    # Strip optional v0- prefix that marks pre-inversion-migrated files.
+    if after.startswith(CONFLICT_V0_PREFIX):
+        after = after[len(CONFLICT_V0_PREFIX) :]
+    # Strip the file extension (last "." in `after`, if any). Conflict
+    # files always carry the original extension at the very end.
+    last_dot = after.rfind(".")
+    metadata = after[:last_dot] if last_dot != -1 else after
+    parts = metadata.split("-")
+    # parts shape: [<8d>, <6d>, <device8>] OR [<8d>, <6d>, <device8>, <rand4>]
+    # `is_conflict_filename` already enforced the leading shape, so any
+    # length < 3 here is a malformed file we can't attribute.
+    if len(parts) < 3:
+        return None
+    # If the trailing segment looks like the 4-char random suffix (hex,
+    # length 4), drop it. Otherwise the trailing segment IS the device.
+    if len(parts) >= 4 and len(parts[-1]) == 4 and all(c in "0123456789abcdef" for c in parts[-1]):
+        return parts[-2]
+    return parts[-1]
+
+
 def is_pre_inversion_conflict_filename(name: str) -> bool:
     """Return True iff `name` is a `v0-`-prefixed conflict copy.
 

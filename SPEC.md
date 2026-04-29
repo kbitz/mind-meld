@@ -489,13 +489,21 @@ Pull re-reads local hash and mtime at apply time so the decision reflects the ac
 
 **Conflict mode.** `mm pull --conflict-mode` takes one of three values:
 - `keep-both` (default): auto-keep-both via the inverted [C] path — local stays at canonical, remote lands in `.sync-conflict-*`.
-- `prompt`: per-file prompt (unified diff + pick: local / remote / both / abort).
+- `prompt`: per-file prompt (unified diff + pick: local / remote / skip / abort, default skip in v0.11.1+; pre-1.0 letters `b` / `both` accepted as deprecated alias mapping to skip).
 - `fail`: preflight every file via `_predict_pull_outcome`. If any file would conflict, print the list and exit **3** with **no writes**. For CI use. Best-effort — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
+
+**Conflict-prompt UX (v0.11.1).** Both prompt sites (inline `mm pull --conflict-mode prompt` and `mm resolve`) render:
+1. Color LOCAL/REMOTE banners above the diff (red + green gutters, peer-name attribution on the REMOTE banner via `lookup_device_by_short_id`).
+2. Three-number divergence summary `M removed-or-replaced / N added-or-replaced / K total diff lines`.
+3. The unified diff (`+`/`-` colored as before).
+4. Concrete-action option copy: `(l)ocal → discard <conflict>, keep <canonical>` / `(r)emote → overwrite <canonical> with <conflict> bytes` / `(s)kip → leave both files; run `mm resolve` later or delete manually` / `(a)bort → stop reviewing; exit`.
+
+Default flipped from `b` to `s` in v0.11.1; `b` / `both` aliased with one-time stderr notice until 1.0. The prior `c` / `f` letters from pre-v0.9.0 remain loud-rejected (real silent-data-loss risk pre-inversion).
 
 **Post-hoc resolution commands:**
 
 - `mm conflicts` — list every `.sync-conflict-*` file across synced sources with age, canonical sibling, and per-row Mode column (`pre-v0.9.2` for `v0-`-prefixed files, `v0.9.2+` otherwise). Read-only; does NOT migrate pre-inversion files.
-- `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows a unified diff, prompts for a winner. Dual-mode dispatch by filename prefix: `v0-` → pre-inversion ops ((l) renames sidecar over canonical, (r) unlinks sidecar); no prefix → post-inversion ops ((l) unlinks sidecar, (r) renames sidecar over canonical). Acquires the mm lockfile so autopull can't race the rename/unlink. Migrates pre-inversion files to `v0-` prefix on first discovery.
+- `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows banners + divergence summary + unified diff, prompts for a winner. Dual-mode dispatch by filename prefix: `v0-` → pre-inversion ops ((l) renames sidecar over canonical, (r) unlinks sidecar); no prefix → post-inversion ops ((l) unlinks sidecar, (r) renames sidecar over canonical). Acquires the mm lockfile so autopull can't race the rename/unlink. Migrates pre-inversion files to `v0-` prefix on first discovery.
 - `mm gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days). Matches both prefixed and un-prefixed forms via `is_conflict_filename`.
 
 **Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.mind-meld-log.md`, and `mm diff` annotations all reflect the split so cross-machine work is visible.
