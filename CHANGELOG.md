@@ -2,6 +2,79 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.3] - 2026-04-29
+
+**Group 8 hotfixes — retro-fleet skill correctness + ergonomic notice.**
+Two fixes from the v0.11.0 adversarial review against the retro-fleet
+aggregator. The data-loss fix is the load-bearing one: two configured
+`type: claude` source roots that share an encoded project name silently
+overwrote each other in the aggregator's `latest` dict. The notice is
+the smaller piece — power users with a custom `mm-events` `path:` got
+silently-empty retros unless they also set `MM_EVENTS_DIR`.
+
+### Fixed
+
+- **Sessions dedup key now includes `source_root` (Group 8 hotfix #4).**
+  `aggregate_sessions` keys snapshots by `(device, source_root,
+  claude_dir)` instead of `(device, claude_dir)`. `walk_session_metadata`
+  threads the parent `claude_dir` (the source-root path) through to
+  `_scan_one_project`, which writes it to each emitted `SessionMetadata`
+  as a new `source_root: str` field. Pre-fix, two `type: claude` source
+  roots that both contained a project encoded as e.g.
+  `-Users-kb-Documents-foo` silently overwrote each other; now they are
+  preserved as distinct entries and their session counts sum correctly.
+  `SessionMetadata` is `TypedDict, total=False` so the schema change is
+  additive — no v=3 bump.
+- **Coalesce pass merges legacy keys during the rollout window.**
+  Records on synced storage from pre-fix builds have no `source_root`
+  field (treated as `""`); records from post-fix builds carry the
+  populated path. During the rollout window both shapes coexist for the
+  same project. The aggregator now drops `(device, "", claude_dir)`
+  keys when `(device, "<root>", claude_dir)` exists for the same device
+  AND the populated sibling is at least as fresh as the legacy record
+  (codex adversarial caught the freshness gap — without the timestamp
+  guard, a downgrade or interleaved-fleet push could erase newer legacy
+  data with a stale populated sibling that itself gets window-filtered
+  out, returning zero sessions for an active project). Distinct
+  populated `source_root` values are preserved (the legitimate
+  two-source-root case the fix is for).
+- **Custom-path notice respects `disabled_sources` (codex adversarial
+  catch).** When `[sync].disabled_sources` contains `mm-events`, the
+  user has opted out per-machine; `_read_mm_events_config_path` now
+  returns None so the notice stays silent. Without this, users who
+  disabled `mm-events` saw a recurring nudge to set `MM_EVENTS_DIR` for
+  a source the CLI no longer writes — fails the visible-failure
+  contract.
+- **`mm: notice:` for custom `mm-events` path without env override
+  (Group 8 hotfix #1).** When the retro-fleet skill runs from the CLI
+  with `MM_EVENTS_DIR` unset and the user has an `mm-events` source
+  configured at a non-default path, the aggregator now writes one line
+  to stderr pointing at the env override. Notice fires only from
+  `main()` — library callers of `aggregate()` never see it. Tolerant
+  of missing / malformed config (no notice, no crash).
+
+### Added
+
+- **5 new tests pinning the custom-path notice gating logic**
+  (`TestCustomPathNotice` in `tests/test_retro_fleet_aggregator.py`).
+- **4 new tests pinning the source_root dedup + coalesce invariants**
+  (`TestSessionsSourceRoot`), including the REGRESSION pin
+  `test_two_distinct_source_roots_kept_separate`.
+- **`test_source_root_field_emitted`** in
+  `tests/test_events.py::TestWalkSessionMetadata`.
+
+### Deferred (with concrete re-open triggers)
+
+- **Aggregator memory streaming** — observation-bar; revisit on first
+  user-visible memory pressure signal (peer reporting OOM or
+  `events_dir` cumulative size > ~200MB).
+- **Events tail budget tuning** — speculative; needs benchmark on a
+  heavy-fleet machine (200+ Claude project dirs) before deciding.
+  Re-open when a real user hits `mm: notice: events tail budget
+  exceeded` repeatedly.
+- **Pre-v0.11.0 breadcrumb persistence cleanup** — naturally
+  self-correcting within the 7-30 day retro window.
+
 ## [0.11.2] - 2026-04-29
 
 **Group 7 hotfix — `mm: warning:` no longer spams on every read-only command.**
