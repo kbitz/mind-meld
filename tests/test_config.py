@@ -1248,6 +1248,11 @@ class TestMmEventsSource:
         """Permission denied on mkdir → mm: warning: stderr breadcrumb,
         source dropped via path-existence filter. Visible-failure contract
         per CLAUDE.md curated stderr taxonomy."""
+        # Reset module-level warned-paths cache so this test is robust to
+        # ordering against test_bootstrap_warns_once_per_process.
+        from mind_meld import config as _config_module
+
+        monkeypatch.setattr(_config_module, "_BOOTSTRAP_WARNED_PATHS", set())
         monkeypatch.setenv("HOME", str(tmp_path))
         # Make ~/.local/share read-only so mkdir of mind-meld/ fails.
         share = tmp_path / ".local" / "share"
@@ -1269,4 +1274,44 @@ class TestMmEventsSource:
             assert "mm-events" not in names
         finally:
             # Restore so tmp cleanup can rm.
+            share.chmod(0o755)
+
+    def test_bootstrap_warns_once_per_process(self, tmp_path, monkeypatch, capsys):
+        """Group 7 hotfix regression: chmod-restricted home must NOT spam
+        `mm: warning:` on every read-only command. First call surfaces the
+        breadcrumb (visible-failure contract); subsequent calls in the
+        same process stay silent.
+
+        Pinned by docs/ROADMAP.md Group 7 hotfix bullet — `_bootstrap_mm_events_path`
+        is called from ~11 sites including read-only `mm sources` / `mm status` /
+        `mm conflicts` / `mm diff` / `mm log`.
+        """
+        from mind_meld import config as _config_module
+
+        monkeypatch.setattr(_config_module, "_BOOTSTRAP_WARNED_PATHS", set())
+        monkeypatch.setenv("HOME", str(tmp_path))
+        share = tmp_path / ".local" / "share"
+        share.mkdir(parents=True)
+        share.chmod(0o500)
+        try:
+            config = {
+                "device": {"id": "d1", "name": "Mac"},
+                "storage": {"path": str(tmp_path / "icloud")},
+                "sync": {},
+            }
+            # Simulate 5 invocations (~roughly the read-only command-chain
+            # observed when a user runs `mm status` in the wedged state).
+            for _ in range(5):
+                sources = get_sources(config)
+                # Path-existence filter drops mm-events on every call (no
+                # behavior change there) — the cache only suppresses the
+                # warning emit + mkdir attempt.
+                assert "mm-events" not in [s["name"] for s in sources]
+            captured = capsys.readouterr()
+            occurrences = captured.err.count("mm: warning: could not create mm-events")
+            assert occurrences == 1, (
+                f"expected exactly 1 warning across 5 get_sources() calls, "
+                f"got {occurrences}; stderr was:\n{captured.err}"
+            )
+        finally:
             share.chmod(0o755)

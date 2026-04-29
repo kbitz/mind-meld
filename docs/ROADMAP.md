@@ -134,7 +134,7 @@ _Track 7A (`events.py` module — `canonicalize_remote_url`, `walk_git_projects`
 _Track 7B (`_push_core` wiring + gc retention — `_run_events_tail` HEAD-position with 250ms autopush / 500ms interactive budget plumbed to `walk_session_metadata`'s `deadline_monotonic`, `_gc_old_event_files` reaps by filename date not mtime, fleet retention via tombstone propagation) — ✓ Complete (v0.10.3, 2026-04-28). 3 tasks shipped._
 
 **Hotfix** (post-ship fixes; serial, one-at-a-time):
-- **`get_sources` bootstrap fires on every read-only command [pull-perf:source=ship,ts=2026-04-27]** — `_bootstrap_mm_events_path` runs from `get_sources()` (~11 sites including read-only `mm sources` / `mm status` / `mm conflicts` / `mm diff` / `mm log` plus `_get_setup`). Users with chmod-restricted home see `mm: warning:` spam on every invocation (no rate-limiting, no de-dup). Fix: gate bootstrap to mutator commands (push/pull/init/migrate-config), or add once-per-process suppression (`_pull_core` calls `get_sources` twice via `_get_setup`). Pre-filed in CLAUDE.md as known UX rough edge during v0.10.1. _src/mind_meld/config.py, ~10 lines._ (XS)
+- ~~**`get_sources` bootstrap fires on every read-only command**~~ — ✓ Shipped v0.11.2 (2026-04-29). Module-level `_BOOTSTRAP_WARNED_PATHS` set; first failure still surfaces `mm: warning:` (visible-failure contract preserved), subsequent calls in same process short-circuit silently. Pinned by `test_bootstrap_warns_once_per_process` regression test.
 
 ---
 

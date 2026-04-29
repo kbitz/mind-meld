@@ -31,6 +31,17 @@ DEFAULT_STORAGE_PATH = str(
 # not user-prompted). Per-machine opt-out remains via `mm disable-source`.
 MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
 
+# Paths whose bootstrap mkdir has already failed in this process. Used by
+# `_bootstrap_mm_events_path` to suppress repeat `mm: warning:` emit on
+# chmod-restricted homes — the first failed call still surfaces the
+# breadcrumb (visible-failure contract per CLAUDE.md), but the subsequent
+# ~10 read-only command sites that re-call `get_sources()` stay silent.
+# Per-path keying (not per-process) preserves the contract for the unlikely
+# case of two failing mm-internal source paths. Tests touching the failure
+# path must reset via `monkeypatch.setattr(config, "_BOOTSTRAP_WARNED_PATHS",
+# set())` since this is module-level state.
+_BOOTSTRAP_WARNED_PATHS: set[str] = set()
+
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
@@ -335,15 +346,25 @@ def _bootstrap_mm_events_path(path: str) -> None:
 
     Idempotent — `exist_ok=True` makes re-call a no-op. Failure (permission
     denied on a chmod-restricted home, EROFS on a readonly mount) emits a
-    single `mm: warning:` line to stderr and returns; the path-existence
-    filter in get_sources will then drop the source from the resolved list.
+    single `mm: warning:` line to stderr per process per path and returns;
+    the path-existence filter in get_sources will then drop the source from
+    the resolved list.
+
+    Warn-once via `_BOOTSTRAP_WARNED_PATHS`: chmod-restricted users see one
+    breadcrumb on the first read-only command in a process, then silence
+    for the ~10 subsequent `get_sources()` call sites. Visible-failure
+    contract is preserved (monitoring catches the first occurrence).
     """
     p = Path(path).expanduser()
     if p.exists():
         return
+    path_key = str(p)
+    if path_key in _BOOTSTRAP_WARNED_PATHS:
+        return
     try:
         p.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as e:
+        _BOOTSTRAP_WARNED_PATHS.add(path_key)
         sys.stderr.write(
             f"mm: warning: could not create mm-events source dir {p} ({type(e).__name__}: {e}); "
             "events will not be synced from this device\n"
