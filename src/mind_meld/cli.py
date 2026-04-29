@@ -14,7 +14,6 @@ import re
 import secrets
 import sys
 import time
-import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -23,7 +22,6 @@ from typing import Any, Literal
 
 import typer
 from rich.console import Console
-from rich.markup import escape as rich_markup_escape
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -32,7 +30,6 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
-from rich.text import Text
 
 from mind_meld import __version__, events, fsutil, pullhistory, seen_sources, sidecar, upgrade
 from mind_meld import config as _config_module
@@ -64,7 +61,10 @@ from mind_meld.crypto import (
 )
 from mind_meld.devices import (
     _list_devices_impl,
+    generate_unique_short_device_id,
+    list_devices,
     list_devices_with_drops,
+    lookup_device_by_short_id,
     register_device,
     update_last_seen,
 )
@@ -95,6 +95,11 @@ from mind_meld.manifest import (
     serialize_manifest,
 )
 from mind_meld.merge import merge_file, should_merge
+from mind_meld.safety import (  # noqa: F401 — re-exported for backwards-compat
+    safe_str,
+    safe_text,
+    strip_terminal_escapes,
+)
 from mind_meld.storage import get_backend
 from mind_meld.storage.keys import (
     DATA_PREFIX,
@@ -228,71 +233,6 @@ console = Console()
 # level instance rather than constructing ad-hoc keeps color-capability
 # detection and terminal-width behavior consistent across call sites.
 stderr_console = Console(stderr=True)
-
-
-# Group 7 preflight #1 + D2 + D7: peer-controlled string sanitization.
-# Filenames AND file contents come from sync peers. Without sanitization,
-# a peer can plant Rich markup ([/red]…[red]) or terminal escape sequences
-# (CSI \x1b[2J clear screen, OSC 52 \x1b]52;c;<b64>\x07 clipboard write,
-# OSC 0/2 title spoof, DCS, C1 8-bit) in any synced filename or file body
-# and have them rendered as control output during pull/conflict/merge
-# feedback. The OSC 52 vector is particularly nasty — many terminals
-# (xterm, iTerm2, kitty, alacritty) honor base64-encoded clipboard writes
-# from remote-controlled escape sequences, silently changing the user's
-# clipboard contents.
-#
-# strip_terminal_escapes removes the full set of common escape grammars.
-# safe_str composes that with Rich markup escaping so peer-controlled
-# strings render as literal text in markup contexts.
-#
-# Diff CONTENT (where {line} is bytes from a remote file) goes through
-# safe_text() instead, which strips escapes BEFORE wrapping in Rich's
-# Text() — Text() alone defangs markup but passes raw ANSI through,
-# which would re-open the very channel safe_str closes for filenames.
-_ANSI_ESCAPE_RE = re.compile(
-    # CSI: ESC [ params final-byte (40-126) — matches \x1b[2J, \x1b[31m, etc.
-    r"\x1b\[[\d;?]*[\x40-\x7e]"
-    # OSC: ESC ] params terminator (BEL or ESC \) — matches \x1b]52;c;...\x07
-    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-    # DCS / SOS / PM / APC: ESC P/X/^/_ params terminator (ESC \)
-    r"|\x1b[PX^_][^\x1b]*\x1b\\"
-    # 8-bit C1 introducer (rarely-used 0x9b CSI variant)
-    r"|\x9b[\d;?]*[\x40-\x7e]"
-    # Single-byte escapes: SS2, SS3, RIS, etc. (ESC + single 0x40-0x5F char)
-    r"|\x1b[\x40-\x5f]"
-)
-
-
-def strip_terminal_escapes(s: str) -> str:
-    """Strip CSI / OSC / DCS / C1 / single-byte terminal escape sequences.
-
-    The peer-controlled trust boundary spans more than just CSI color
-    codes. Apply BEFORE rendering any peer-controlled string to a
-    real terminal — Rich's Text() does not strip these.
-    """
-    return _ANSI_ESCAPE_RE.sub("", s)
-
-
-def safe_str(s: object) -> str:
-    """Return a Rich-safe, escape-stripped representation of `s`.
-
-    Use at every print site interpolating a peer-controlled string
-    (filenames, paths, source names, device names, error message tails).
-    Returns a plain str so f-string composition with Rich markup tags
-    continues to work — `f"[red]write failed:[/red] {safe_str(rel_path)}"`.
-    """
-    return rich_markup_escape(strip_terminal_escapes(str(s)))
-
-
-def safe_text(s: str, **kwargs: object) -> Text:
-    """Return a Rich Text wrapping a terminal-escape-stripped str.
-
-    Use for diff CONTENT lines (peer-controlled file bytes printed via
-    console.print). Text() alone defangs Rich markup but passes raw
-    ANSI/OSC/DCS through to the terminal — which is the same trust-
-    boundary leak safe_str closes for filenames. Strip escapes first.
-    """
-    return Text(strip_terminal_escapes(s), **kwargs)
 
 
 def _version_callback(value: bool) -> None:
@@ -1179,9 +1119,30 @@ def _prompt_conflict_choice(
     rel_path: str,
     local_path: Path,
     remote_data: bytes,
+    peer_name: str | None = None,
+    ambiguous_count: int = 0,
 ) -> str:
-    """Prompt interactively for how to handle one conflict. Default keep-both."""
+    """Prompt interactively for how to handle one conflict. Default skip.
+
+    ``peer_name`` is the human-readable name of the device that pushed the
+    remote bytes (resolved by the caller via ``lookup_device_by_short_id``);
+    ``None`` if unknown or ambiguous. ``ambiguous_count`` is the number of
+    matching peers when the device-id prefix collides (>=2); zero otherwise.
+    Both flow into the REMOTE banner so the user sees attribution at the
+    moment of the choice.
+
+    Returns one of: ``keep-canonical`` (= keep local), ``keep-remote``,
+    ``abort``, ``keep-both``. ``keep-both`` is what (s)kip emits today --
+    the on-disk effect is "leave both files in place." Caller's existing
+    branches treat ``keep-both`` as "fall through to _apply_conflict."
+    """
     import difflib
+
+    from mind_meld.conflictdiff import (
+        count_divergent_lines,
+        render_banner,
+        render_prompt,
+    )
 
     try:
         local_text = local_path.read_text(errors="replace").splitlines()
@@ -1202,12 +1163,32 @@ def _prompt_conflict_choice(
     )
 
     console.print(f"\n[bold yellow]Conflict:[/bold yellow] {safe_rel}")
+    # Inline pull-time prompt only ever sees post-inversion conflicts --
+    # pre-inversion files are migrated by `_resolve_interactive_loop`'s
+    # discovery path, never produced here. So local = local, remote =
+    # remote with no flip.
+    console.print(render_banner("local", local_path.name, None))
+    console.print(
+        render_banner(
+            "remote",
+            local_path.name,
+            peer_name,
+            ambiguous_count=ambiguous_count,
+        )
+    )
+
+    m, n, k = count_divergent_lines(diff)
+    if k:
+        console.print(
+            f"  [dim]{m} removed-or-replaced lines on local side; "
+            f"{n} added-or-replaced on remote side; {k} total diff lines.[/dim]"
+        )
+
     if diff:
         for line in diff[:60]:
             # Diff lines carry peer-controlled bytes (file contents).
             # Use safe_text() so Rich strips terminal escapes (CSI/OSC/DCS)
-            # AND defangs markup \u2014 Text() alone passes raw escapes through.
-            # Group 7 preflight #1 D7 codex finding #2 + adversarial #1.
+            # AND defangs markup -- Text() alone passes raw escapes through.
             if line.startswith("+") and not line.startswith("+++"):
                 console.print(safe_text(line, style="green"))
             elif line.startswith("-") and not line.startswith("---"):
@@ -1219,16 +1200,35 @@ def _prompt_conflict_choice(
     else:
         console.print("  [dim](files differ but text diff is empty \u2014 likely binary)[/dim]")
 
-    console.print(
-        "[bold]Keep which version?[/bold] (b)oth [default] / (l)ocal / (r)emote / (a)bort pull"
-    )
-    choice = typer.prompt("Choice", default="b", show_default=False).strip().lower()
+    # Inline pull-time prompts post-inversion only. The conflict file is
+    # not on disk yet at this site -- _apply_conflict writes it AFTER this
+    # function returns "keep-both" -- so render_prompt's "discard
+    # <conflict-name>" copy doesn't quite apply at first glance. Use the
+    # bare basename of the local file as both labels: the canonical
+    # filename in both positions so the user sees the action's target.
+    console.print(render_prompt(safe_rel, safe_rel, "post_inversion"))
+    choice = typer.prompt("Choice", default="s", show_default=False).strip().lower()
+
+    # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both"
+    # which is exactly the on-disk effect of (s)kip today. Map through
+    # with a one-time notice so users learn the new letter.
+    if choice in ("b", "both"):
+        print(
+            "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward "
+            "(alias removed at 1.0).",
+            file=sys.stderr,
+        )
+        choice = "s"
+
     if choice in ("l", "local", "keep-canonical"):
         return "keep-canonical"
     if choice in ("r", "remote", "keep-remote"):
         return "keep-remote"
     if choice in ("a", "abort"):
         return "abort"
+    # Default-or-skip path: any unrecognized input AND (s)kip itself.
+    # Returns the legacy "keep-both" string because callers still branch
+    # on that constant; on-disk effect is unchanged.
     return "keep-both"
 
 
@@ -1365,6 +1365,7 @@ def _apply_incoming_file(
     remote_device_id: str,
     interactive_resolve: bool = False,
     verbose: bool = False,
+    devices: list[dict[str, Any]] | None = None,
 ) -> ApplyOutcome:
     """Dispatch one decrypted remote file to the appropriate _apply_* helper.
 
@@ -1415,7 +1416,22 @@ def _apply_incoming_file(
 
     # [C] conflict path. Optionally prompt the user; default keep-both.
     if interactive_resolve:
-        choice = _prompt_conflict_choice(rel_path, local_path, plain_data)
+        # Resolve the remote_device_id against the cached devices list
+        # so the inline banner shows "(from <peer_name>)" rather than
+        # "(unknown peer)" when attribution is available. Falls back
+        # cleanly when devices is None (unit tests, library callers).
+        peer_name: str | None = None
+        ambiguous_count = 0
+        if devices:
+            short = remote_device_id[:8]
+            match, count = lookup_device_by_short_id(devices, short)
+            if match is not None:
+                peer_name = match.get("device_name")
+            elif count > 1:
+                ambiguous_count = count
+        choice = _prompt_conflict_choice(
+            rel_path, local_path, plain_data, peer_name, ambiguous_count
+        )
         if choice == "keep-canonical":
             # Post-inversion: canonical IS local, so "keep-canonical" =
             # "keep-local" — both work as user-facing labels. The internal
@@ -1456,6 +1472,7 @@ def _download_and_apply(
     interactive_resolve: bool = False,
     verbose: bool = False,
     quiet: bool = False,
+    devices: list[dict[str, Any]] | None = None,
 ) -> tuple[int, dict[ApplyOutcome, list[str]]]:
     """Download blobs and dispatch each to _apply_incoming_file.
 
@@ -1566,6 +1583,7 @@ def _download_and_apply(
                 remote_device_id=source_device_id,
                 interactive_resolve=interactive_resolve,
                 verbose=verbose and not quiet,
+                devices=devices,
             )
             outcomes[outcome].append(rel_path)
             _advance()
@@ -2023,7 +2041,14 @@ def init() -> None:
 
     is_first_device = fetch.status == "missing"
 
-    device_id = uuid.uuid4().hex[:8]
+    # Init-time collision prevention: scan existing peers and regenerate
+    # the 8-char device_id on collision. UUID4 prefix collisions are
+    # extremely unlikely (~1 in 4 billion per draw) but a deterministic-RNG
+    # bug or a cloned-from-snapshot peer could collide reproducibly.
+    # Cheap to defend in depth; runtime lookup_device_by_short_id still
+    # handles a stray collision if we exhaust the retry budget.
+    existing_devices = list_devices(backend) if not is_first_device else []
+    device_id = generate_unique_short_device_id(existing_devices)
     device_name = typer.prompt("Device name", default=_default_device_name())
 
     passphrase = _prompt_passphrase(is_first_device)
@@ -3038,6 +3063,7 @@ def _pull_one_source(
     dry_run: bool,
     verbose_console: bool,
     quiet: bool = False,
+    devices: list[dict[str, Any]] | None = None,
 ) -> _PerSourceResult:
     """Pull one source from one peer. Returns _PerSourceResult.
 
@@ -3103,6 +3129,7 @@ def _pull_one_source(
         interactive_resolve=interactive_resolve,
         verbose=verbose_console,
         quiet=quiet,
+        devices=devices,
     )
 
     touched_parents: set[Path] = set()
@@ -3613,6 +3640,7 @@ def _pull_core(
                     dry_run=dry_run,
                     verbose_console=(verbose and not quiet),
                     quiet=quiet,
+                    devices=all_devices,
                 )
 
                 if dry_run and per_source.dry_run_diff is not None:
@@ -5629,14 +5657,19 @@ def resolve(
 ) -> None:
     """Interactively resolve .sync-conflict-* files.
 
-    For each conflict: shows a unified diff of remote vs local, then
-    prompts: (l)ocal / (r)emote / (b)oth [default] / (a)bort.
+    For each conflict: prints color LOCAL/REMOTE banners (with peer-name
+    attribution when known), a 3-number divergence summary, the unified
+    diff, then prompts:
+      (l)ocal / (r)emote / (s)kip [default] / (a)bort.
 
     (l)ocal keeps your edits on this machine and discards the bytes from
     the other machine.
     (r)emote keeps the bytes from the other machine and discards your
     local edits on this conflict.
-    (b)oth leaves both files in place (default — no data loss).
+    (s)kip leaves both files on disk; you can run `mm resolve` again
+    later or delete the .sync-conflict-* file manually. Note: the next
+    `mm pull` does NOT re-prompt unless remote changes again -- the
+    .sync-conflict-* file persists until you act on it.
     (a)bort exits the resolve walk; previously-resolved conflicts stay
     resolved.
 
@@ -5646,11 +5679,13 @@ def resolve(
     Acquires the mm lockfile so an autopull running in parallel can't
     race with our rename/unlink operations on the synced files.
 
-    Old input letters `c` and `f` from prior versions are rejected loudly
-    to prevent silent fall-through on stale scripts (visible-failure
-    contract; see CLAUDE.md).
+    Backwards-compat letters: `c` / `f` from pre-v0.9.0 are still
+    rejected loudly (real silent-data-loss risk pre-inversion). `b` /
+    `both` from pre-v0.11.x is aliased to (s)kip with a one-time notice
+    until 1.0 -- same on-disk effect, no risk in mapping it through.
     """
     config = _get_config()
+    backend = get_backend(config)
 
     try:
         acquire_lock()
@@ -5673,7 +5708,11 @@ def resolve(
         if not hits:
             console.print("[green]No conflict files.[/green]")
             return
-        _, failed = _resolve_interactive_loop(hits)
+        # Cache the device list ONCE -- N-conflict walks would otherwise hit
+        # storage N times to attribute the REMOTE side, and iCloud cold-cache
+        # reads can spike to multi-second per call.
+        devices = list_devices(backend)
+        _, failed = _resolve_interactive_loop(hits, devices)
     finally:
         release_lock()
 
@@ -5685,9 +5724,19 @@ def resolve(
         raise typer.Exit(1)
 
 
-def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tuple[int, int]:
+def _resolve_interactive_loop(
+    hits: list[tuple[str, Path, Path | None]],
+    devices: list[dict[str, Any]] | None = None,
+) -> tuple[int, int]:
     """Walk each conflict and prompt for resolution. Extracted so `resolve`
     stays a thin wrapper around acquire/release lock boilerplate.
+
+    ``devices`` is the cached device list from ``list_devices(backend)``,
+    used by the REMOTE banner to attribute conflict bytes to a peer name.
+    None disables attribution -- legacy callers and unit tests can pass
+    ``None`` (or omit the arg) and get an "(unknown peer)" annotation.
+    Cache hoisted at the loop entry so a multi-conflict walk doesn't N+1
+    on iCloud cold-cache reads.
 
     Returns (resolved, failed). `failed` covers per-conflict OSErrors
     (rename/unlink/read) that left the conflict file in place. `resolve`
@@ -5697,6 +5746,17 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
     """
     import difflib
 
+    from mind_meld.conflictdiff import (
+        count_divergent_lines,
+        render_banner,
+        render_prompt,
+    )
+    from mind_meld.manifest import (
+        is_pre_inversion_conflict_filename,
+        parse_conflict_device_short,
+    )
+
+    devices = devices or []
     resolved = 0
     failed = 0
     for src_name, cpath, canonical in hits:
@@ -5709,8 +5769,6 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
             # files were produced when sidecar = local bytes; post-inversion
             # files have sidecar = remote bytes. The promote/delete ops are
             # the same; only the preface wording flips.
-            from mind_meld.manifest import is_pre_inversion_conflict_filename
-
             if is_pre_inversion_conflict_filename(cpath.name):
                 console.print(
                     "  [dim]No canonical file exists. This pre-v0.9.2 "
@@ -5768,9 +5826,10 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
         # pre-inversion files are migrated to the prefix at discovery time
         # by `_migrate_pre_inversion_conflict`. Mixed prefixes in one walk
         # are expected during migration.
-        from mind_meld.manifest import is_pre_inversion_conflict_filename
-
         is_pre_inversion = is_pre_inversion_conflict_filename(cpath.name)
+        mode: Literal["pre_inversion", "post_inversion"] = (
+            "pre_inversion" if is_pre_inversion else "post_inversion"
+        )
 
         try:
             canonical_text = canonical.read_text(errors="replace").splitlines()
@@ -5780,21 +5839,49 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
             failed += 1
             continue
 
-        # Sanitize peer-controlled filenames in the diff labels (Group 7
-        # preflight #1 D7: difflib labels are printed through Rich at line
-        # ~5400, which would otherwise interpret markup in a peer filename).
-        safe_canonical_name = safe_str(canonical.name)
-        safe_cpath_name = safe_str(cpath.name)
+        # Banner attribution: pull the device-short out of the conflict
+        # filename and look it up against the cached devices list.
+        short = parse_conflict_device_short(cpath.name)
+        peer_name: str | None = None
+        ambiguous_count = 0
+        if short is not None:
+            match, count = lookup_device_by_short_id(devices, short)
+            if match is not None:
+                peer_name = match.get("device_name")
+            elif count > 1:
+                ambiguous_count = count
+
+        # Diff label semantics:
+        #   pre_inversion: canonical = remote, cpath = local.
+        #   post_inversion: canonical = local, cpath = remote.
         if is_pre_inversion:
-            # Pre-inversion: canonical = remote, cpath = local.
             from_text, to_text = canonical_text, cpath_text
-            from_label = f"remote ({safe_canonical_name})"
-            to_label = f"local  ({safe_cpath_name})"
+            from_label = f"remote ({safe_str(canonical.name)})"
+            to_label = f"local  ({safe_str(cpath.name)})"
+            local_path_for_banner = cpath
+            remote_path_for_banner = canonical
         else:
-            # Post-inversion: canonical = local, cpath = remote.
             from_text, to_text = canonical_text, cpath_text
-            from_label = f"local  ({safe_canonical_name})"
-            to_label = f"remote ({safe_cpath_name})"
+            from_label = f"local  ({safe_str(canonical.name)})"
+            to_label = f"remote ({safe_str(cpath.name)})"
+            local_path_for_banner = canonical
+            remote_path_for_banner = cpath
+
+        # Color banners ABOVE the diff so the user can scan-identify which
+        # side is which without parsing diff prefixes. Both peer-controlled
+        # paths AND the peer-controlled device_name flow into render_banner,
+        # which strips terminal escapes via safe_text before they reach the
+        # terminal (closes the same trust boundary safe_str closes for
+        # filenames).
+        console.print(render_banner("local", local_path_for_banner.name, None))
+        console.print(
+            render_banner(
+                "remote",
+                remote_path_for_banner.name,
+                peer_name,
+                ambiguous_count=ambiguous_count,
+            )
+        )
 
         diff = list(
             difflib.unified_diff(
@@ -5806,6 +5893,18 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 n=3,
             )
         )
+
+        # Three-number divergence summary BEFORE the diff so the user
+        # gets a glance at scale. Replacements count as one M and one N
+        # (a 1-line change is "1 removed-or-replaced + 1 added-or-replaced",
+        # K=2) -- the wording is honest about that.
+        m, n, k = count_divergent_lines(diff)
+        if k:
+            console.print(
+                f"  [dim]{m} removed-or-replaced lines on local side; "
+                f"{n} added-or-replaced on remote side; {k} total diff lines.[/dim]"
+            )
+
         if diff:
             # Diff CONTENT is peer-controlled bytes — render via safe_text()
             # so Rich strips terminal escapes (CSI/OSC/DCS) AND defangs
@@ -5822,32 +5921,22 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
         else:
             console.print("  [dim](files differ but text diff is empty — likely binary)[/dim]")
 
-        if is_pre_inversion:
-            console.print(
-                "  [bold]Which side do you want to keep?[/bold] "
-                "local = your pre-conflict edits on this machine "
-                "(currently in the [italic]sidecar[/italic] file); "
-                "remote = bytes from the other machine "
-                "(currently at [italic]canonical[/italic])."
+        # Concrete-action prompt copy. Filenames pre-sanitized via safe_str
+        # since render_prompt does plain f-string interpolation.
+        console.print(
+            render_prompt(
+                safe_str(canonical.name),
+                safe_str(cpath.name),
+                mode,
             )
-        else:
-            console.print(
-                "  [bold]Which side do you want to keep?[/bold] "
-                "local = your edits on this machine "
-                "(currently at [italic]canonical[/italic]); "
-                "remote = bytes from the other machine "
-                "(currently in the [italic]sidecar[/italic] file)."
-            )
-        console.print("  (l)ocal / (r)emote / (b)oth [default] / (a)bort")
-        choice = typer.prompt("  Choice", default="b", show_default=False).strip().lower()
+        )
+        choice = typer.prompt("  Choice", default="s", show_default=False).strip().lower()
 
-        # Backward-compat: reject the old letters loudly per the
-        # visible-failure contract (CLAUDE.md). Without this, a stale
-        # script piping "c\n" or "f\n" would silently fall through to
-        # the default ("kept both" no-op) — masking the relabel.
-        # Pre-1.0 BREAKING; CHANGELOG note at v0.9.0.
-        # Exact-match (not startswith): otherwise "cancel" / "continue"
-        # would trigger the legacy rejection. (codex /review v0.9.0)
+        # Backward-compat (v0.9.0 BREAKING): old letters `c` / `f` are still
+        # rejected loudly. They encoded directional ambiguity post-inversion
+        # (real silent-data-loss risk -- "kept canonical" meant local OR
+        # remote depending on inversion era). Exact-match (not startswith):
+        # otherwise "cancel" / "continue" would trip the rejection.
         if choice in ("c", "f"):
             print(
                 "mm: error: input letters 'c' and 'f' are no longer accepted. "
@@ -5856,6 +5945,20 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
                 file=sys.stderr,
             )
             raise typer.Exit(1)
+
+        # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both
+        # files; no change" which is exactly what `(s)kip` does today. No
+        # silent-data-loss risk in mapping it through; emit a notice once
+        # so users learn the new letter, then perform skip semantics.
+        # Exact-match: "back"/"browse"/"between" must NOT silently trip
+        # the alias.
+        if choice in ("b", "both"):
+            print(
+                "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward "
+                "(alias removed at 1.0).",
+                file=sys.stderr,
+            )
+            choice = "s"
 
         # Exact-match dispatch (not startswith): "leave" / "lookup" must
         # not silently keep local; "retry" / "remove" must not silently
@@ -5912,7 +6015,10 @@ def _resolve_interactive_loop(hits: list[tuple[str, Path, Path | None]]) -> tupl
         elif choice in ("a", "abort"):
             raise typer.Abort()
         else:
-            console.print("  [dim]kept both; no change[/dim]")
+            # Default-or-skip path -- includes (s)kip, plain Enter, and any
+            # unrecognized input. Both files stay on disk; user can run
+            # `mm resolve` later or delete the .sync-conflict-* manually.
+            console.print("  [dim]skipped; both files left on disk[/dim]")
 
     if failed:
         console.print(f"\n[bold]Resolved {resolved} of {len(hits)}; {failed} failed.[/bold]")

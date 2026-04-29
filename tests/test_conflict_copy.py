@@ -963,16 +963,81 @@ class TestResolveInteractiveLoop:
         assert canonical.read_bytes() == b"local content", "canonical untouched — already local"
         assert not conflict.exists(), "remote sidecar should be unlinked"
 
-    def test_keep_both_is_noop(self, tmp_path: Path, monkeypatch) -> None:
-        """User picks 'b' (default) — both files remain unchanged."""
+    def test_skip_is_noop(self, tmp_path: Path, monkeypatch) -> None:
+        """User picks 's' (default) — both files remain unchanged."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
+
+    def test_skip_default_on_enter(self, tmp_path: Path, monkeypatch) -> None:
+        """REGRESSION: default key flipped from 'b' to 's' in v0.11.x.
+        Empty input (Enter) maps to the default and leaves both files."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        # Simulate an empty submission by returning "" -- typer.prompt
+        # would normally substitute the default; we approximate that
+        # by returning the default key directly.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: kw.get("default", ""))
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
+
+    def test_b_alias_warns_then_skips(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """Pre-1.0 deprecation alias: 'b' / 'both' map to (s)kip with a
+        one-time stderr notice. On-disk effect identical to skip --
+        no risk of silent data loss in mapping it through."""
 
         canonical, conflict = self._make_conflict_pair(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "b")
 
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
+        # Skip semantics: nothing changes on disk.
         assert canonical.read_bytes() == b"local content"
         assert conflict.read_bytes() == b"remote content"
+
+        captured = capsys.readouterr()
+        assert "mm: notice:" in captured.err
+        assert "now means 'skip'" in captured.err
+
+    def test_full_word_both_alias_warns_then_skips(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """The full word 'both' is also accepted as the deprecation alias."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "both")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
+
+        captured = capsys.readouterr()
+        assert "mm: notice:" in captured.err
+
+    def test_back_does_not_trigger_b_alias(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """REGRESSION: alias dispatch is exact-match, not startswith.
+        'back', 'browse', 'between' must NOT silently trigger the alias."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "back")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        # Falls through to the unrecognized-input branch -- skip semantics.
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
+        # No alias notice should fire for 'back'.
+        captured = capsys.readouterr()
+        assert "mm: notice:" not in captured.err
 
     def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
@@ -1296,3 +1361,219 @@ class TestPredictPullOutcome:
         _set_mtime(f, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
         info = _remote_info("other", datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
         assert _predict_pull_outcome("a.md", info, tmp_path) == "conflict"
+
+
+class TestResolveInteractiveLoopNewBehavior:
+    """v0.12.0 conflict-prompt-ux additions:
+    * color LOCAL/REMOTE banners above the diff
+    * device-name attribution on the REMOTE banner
+    * three-number divergence summary
+    * (b)oth -> (s)kip alias with one-time notice
+    * (a)bort leaves all on-disk state unchanged
+    """
+
+    @staticmethod
+    def _make_conflict_pair(tmp_path: Path) -> tuple[Path, Path]:
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"local content\n")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"remote content\n")
+        return canonical, conflict
+
+    def test_device_name_surfaced_on_remote_banner(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Conflict filename's device prefix resolves against the cached
+        devices list; banner shows '(from <peer_name>)'."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        # Capture Console output by redirecting Rich's console.
+        from mind_meld import cli as _cli
+
+        out_lines: list[str] = []
+        monkeypatch.setattr(
+            _cli.console,
+            "print",
+            lambda *args, **kw: out_lines.append(" ".join(str(a) for a in args)),
+        )
+
+        devices = [{"device_id": "devA1234", "device_name": "kb-mbp"}]
+        _resolve_interactive_loop([("s1", conflict, canonical)], devices)
+
+        joined = "\n".join(out_lines)
+        assert "from " in joined and "kb-mbp" in joined
+
+    def test_unknown_peer_fallback_when_no_match(self, tmp_path: Path, monkeypatch) -> None:
+        """Conflict filename's device prefix doesn't match any registered
+        peer -- banner falls back to '(unknown peer)'."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        from mind_meld import cli as _cli
+
+        out_lines: list[str] = []
+        monkeypatch.setattr(
+            _cli.console,
+            "print",
+            lambda *args, **kw: out_lines.append(" ".join(str(a) for a in args)),
+        )
+
+        devices = [{"device_id": "deadbeef", "device_name": "Other Mac"}]
+        _resolve_interactive_loop([("s1", conflict, canonical)], devices)
+
+        joined = "\n".join(out_lines)
+        assert "unknown peer" in joined
+        assert "Other Mac" not in joined
+
+    def test_ambiguous_prefix_renders_in_banner(self, tmp_path: Path, monkeypatch) -> None:
+        """Two registered peers share the conflict's 8-char prefix;
+        banner annotates 'ambiguous -- N peers match this prefix'
+        (T4 cross-model finding) and refuses to attribute either name."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        # Reset the per-process notice cache so capsys sees the stderr.
+        from mind_meld import cli as _cli
+        from mind_meld import devices as _devices
+
+        monkeypatch.setattr(_devices, "_AMBIGUOUS_PREFIX_NOTICED", set())
+
+        out_lines: list[str] = []
+        monkeypatch.setattr(
+            _cli.console,
+            "print",
+            lambda *args, **kw: out_lines.append(" ".join(str(a) for a in args)),
+        )
+
+        # Both these IDs share the "devA1234" prefix the test conflict
+        # filename uses -- collision against the lookup helper.
+        devices = [
+            {"device_id": "devA1234", "device_name": "Mac A"},
+            {"device_id": "devA1234alt", "device_name": "Mac B"},
+        ]
+        _resolve_interactive_loop([("s1", conflict, canonical)], devices)
+
+        joined = "\n".join(out_lines)
+        assert "ambiguous" in joined
+        assert "2 peers match" in joined
+        # Neither peer name should leak (we refused to attribute).
+        assert "Mac A" not in joined
+        assert "Mac B" not in joined
+
+    def test_divergence_summary_shows_three_numbers(self, tmp_path: Path, monkeypatch) -> None:
+        """Pre-diff summary gives M / N / K so the user sees scale."""
+
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"line1\nline2\n")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        # 1 line replaced + 1 new line added on the remote side.
+        conflict.write_bytes(b"line1\nLINE2-CHANGED\nline3\n")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        from mind_meld import cli as _cli
+
+        out_lines: list[str] = []
+        monkeypatch.setattr(
+            _cli.console,
+            "print",
+            lambda *args, **kw: out_lines.append(" ".join(str(a) for a in args)),
+        )
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        joined = "\n".join(out_lines)
+        assert "removed-or-replaced" in joined
+        assert "added-or-replaced" in joined
+        assert "total diff lines" in joined
+
+    def test_remote_overwrites_only_after_typed_confirmation(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """ROLLBACK regression (T7 / codex): pressing Enter must NOT
+        promote remote bytes. Default is (s)kip; only an explicit 'r'
+        triggers the destructive overwrite."""
+
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        # Simulate Enter by returning the default key the prompt was
+        # configured with.
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: kw.get("default", ""))
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        # Default is 's' -- no overwrite.
+        assert canonical.read_bytes() == b"local content\n"
+        assert conflict.read_bytes() == b"remote content\n"
+
+    def test_abort_leaves_all_files_unchanged(self, tmp_path: Path, monkeypatch) -> None:
+        """ROLLBACK regression: 'a' must leave every conflict in the
+        walk untouched, including subsequent unprocessed conflicts."""
+
+        canonical1, conflict1 = self._make_conflict_pair(tmp_path)
+        canonical2 = tmp_path / "second.md"
+        canonical2.write_bytes(b"local2 content\n")
+        conflict2 = tmp_path / "second.sync-conflict-20260421-143056-devA1234.md"
+        conflict2.write_bytes(b"remote2 content\n")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "a")
+
+        with pytest.raises(typer.Abort):
+            _resolve_interactive_loop(
+                [
+                    ("s1", conflict1, canonical1),
+                    ("s1", conflict2, canonical2),
+                ]
+            )
+
+        assert canonical1.read_bytes() == b"local content\n"
+        assert conflict1.read_bytes() == b"remote content\n"
+        assert canonical2.read_bytes() == b"local2 content\n"
+        assert conflict2.read_bytes() == b"remote2 content\n"
+
+
+class TestParseConflictDeviceShort:
+    """Parser pin for ``manifest.parse_conflict_device_short``.
+
+    The conflict-prompt-ux REMOTE banner attribution depends on extracting
+    the 8-char device prefix `conflict_filename()` stamps into a sidecar
+    name. Two grammar shapes (post-inversion / pre-inversion `v0-`), plus
+    the optional 4-char same-second random suffix, plus extension stripping.
+    """
+
+    def test_post_inversion_extracts_device(self) -> None:
+        from mind_meld.manifest import parse_conflict_device_short
+
+        assert (
+            parse_conflict_device_short("user.sync-conflict-20260421-143055-devA1234.md")
+            == "devA1234"
+        )
+
+    def test_pre_inversion_v0_prefix_extracts_device(self) -> None:
+        from mind_meld.manifest import parse_conflict_device_short
+
+        assert (
+            parse_conflict_device_short("role.sync-conflict-v0-20260420-120000-devA1234.md")
+            == "devA1234"
+        )
+
+    def test_random_suffix_dropped_in_favor_of_device(self) -> None:
+        from mind_meld.manifest import parse_conflict_device_short
+
+        # Same-second collision suffix `-abcd` (4 hex chars). Device stays
+        # as the segment before the suffix.
+        assert (
+            parse_conflict_device_short("user.sync-conflict-20260421-143055-devA1234-abcd.md")
+            == "devA1234"
+        )
+
+    def test_non_conflict_filename_returns_none(self) -> None:
+        from mind_meld.manifest import parse_conflict_device_short
+
+        assert parse_conflict_device_short("plain.md") is None
+        assert parse_conflict_device_short("user.sync-conflict-log.md") is None
+
+    def test_multidot_stem_preserves_device(self) -> None:
+        from mind_meld.manifest import parse_conflict_device_short
+
+        assert (
+            parse_conflict_device_short("notes.draft.sync-conflict-20260421-143055-devA1234.md")
+            == "devA1234"
+        )
