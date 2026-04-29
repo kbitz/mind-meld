@@ -2,6 +2,32 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.2] - 2026-04-29
+
+**Group 7 hotfix — `mm: warning:` no longer spams on every read-only command.**
+Users with a chmod-restricted `~/.local/share/` (or any environment where
+`mkdir` for the `mm-events` source dir fails) saw the
+`mm: warning: could not create mm-events source dir ...` line on every
+invocation of `mm sources` / `mm status` / `mm conflicts` / `mm diff` /
+`mm log` (~11 internal call sites of `get_sources()`). The warning now
+fires once per process per failing path; subsequent calls in the same
+process short-circuit silently.
+
+### Fixed
+
+- **Bootstrap warning warns once per process per path.**
+  `_bootstrap_mm_events_path` now consults a module-level
+  `_BOOTSTRAP_WARNED_PATHS: set[str]` and skips both the `mkdir` retry
+  and the `mm: warning:` emit on subsequent calls for any path that
+  already failed in the current process. First failure still surfaces
+  the breadcrumb (visible-failure contract preserved — monitoring
+  catches the wedge); per-path keying preserves the contract for the
+  unlikely case of two failing mm-internal source paths. Pinned by a
+  new `test_bootstrap_warns_once_per_process` regression test that
+  calls `get_sources()` 5× and asserts exactly 1 warning is emitted.
+  Existing failure-path test now resets the cache via `monkeypatch`
+  for ordering independence.
+
 ## [0.11.1] - 2026-04-29 — BREAKING (interactive prompt)
 
 **Conflict resolution prompt UX overhaul.** The `mm resolve` and inline
