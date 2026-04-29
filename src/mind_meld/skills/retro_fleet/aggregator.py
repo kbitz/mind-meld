@@ -352,10 +352,27 @@ def aggregate_sessions(
     since: datetime,
     until: datetime,
 ) -> SessionsAggregate:
-    """Pick the LATEST v=2 sessions-snapshot per (device, claude_dir) within
-    the window, then filter to projects whose ``last_session_at`` falls inside
-    the window — sum across that filtered set. v=1 snapshots flag the device
-    as pre-v2 but contribute zero to totals.
+    """Pick the LATEST v=2 sessions-snapshot per (device, source_root,
+    claude_dir) within the window, then filter to projects whose
+    ``last_session_at`` falls inside the window — sum across that filtered
+    set. v=1 snapshots flag the device as pre-v2 but contribute zero to
+    totals.
+
+    Three-tuple key (Group 8 hotfix). Pre-fix the key was ``(device,
+    claude_dir)`` where ``claude_dir`` is the encoded directory NAME. Two
+    configured ``type: claude`` source roots that both contain a project
+    encoded as e.g. ``-Users-kb-Documents-foo`` would silently overwrite
+    each other in ``latest``. The added ``source_root`` component preserves
+    them as distinct entries.
+
+    Coalesce pass for rollout: pre-fix records on synced storage have no
+    ``source_root`` field (treated as ``""``); post-fix records carry the
+    populated path. During the rollout window both shapes coexist for the
+    same project — without coalescing, both keys are kept and sessions
+    double-count for the upgrade week. The pass drops ``(device, "",
+    claude_dir)`` keys when ``(device, "<root>", claude_dir)`` exists for
+    the same device, preserving distinct populated source_roots (the
+    legitimate two-source-root case the fix is for).
 
     Two-stage window filter (cross-model adversarial review fix). Pre-fix,
     the aggregator only filtered by the snapshot event's ``ts`` field, so a
@@ -373,8 +390,8 @@ def aggregate_sessions(
     boundaries but stops the silent all-time-data-in-7-day-retro corruption.
     """
     out = SessionsAggregate()
-    # latest[(device, claude_dir)] = (ts_dt, project_dict)
-    latest: dict[tuple[str, str], tuple[datetime, dict]] = {}
+    # latest[(device, source_root, claude_dir)] = (ts_dt, project_dict)
+    latest: dict[tuple[str, str, str], tuple[datetime, dict]] = {}
     for ev in events:
         if ev.get("type") != "sessions-snapshot":
             continue
@@ -398,10 +415,36 @@ def aggregate_sessions(
             claude_dir = proj.get("claude_dir")
             if not isinstance(claude_dir, str) or not claude_dir:
                 continue
-            key = (device, claude_dir)
+            source_root_raw = proj.get("source_root", "")
+            source_root = source_root_raw if isinstance(source_root_raw, str) else ""
+            key = (device, source_root, claude_dir)
             prior = latest.get(key)
             if prior is None or prior[0] < ts_dt:
                 latest[key] = (ts_dt, proj)
+
+    # Coalesce: drop (device, "", claude_dir) keys ONLY when a populated
+    # sibling (device, "<root>", claude_dir) exists AND that sibling's ts is
+    # at least as fresh as the legacy record. Without the freshness guard,
+    # an older populated record can erase a newer legacy record (codex
+    # adversarial review caught this — a downgrade or interleaved-fleet
+    # push leaves the newer data in the legacy key, and the populated
+    # sibling may itself be window-filtered out, returning zero sessions
+    # for an active project). Preserves legitimate distinct source_roots
+    # (the original bug fix); collapses pre-fix records during rollout
+    # only when the post-fix successor is the same age or newer.
+    populated_max_ts: dict[tuple[str, str], datetime] = {}
+    for (d, sr, c), (ts, _) in latest.items():
+        if sr:
+            prior = populated_max_ts.get((d, c))
+            if prior is None or ts > prior:
+                populated_max_ts[(d, c)] = ts
+    to_drop = [
+        (d, sr, c)
+        for (d, sr, c), (ts, _) in latest.items()
+        if sr == "" and (d, c) in populated_max_ts and populated_max_ts[(d, c)] >= ts
+    ]
+    for k in to_drop:
+        del latest[k]
 
     # Stage 2: filter the latest-per-tuple set by `last_session_at` falling
     # inside the retro window. A project whose most recent session activity
@@ -409,7 +452,7 @@ def aggregate_sessions(
     # snapshot's full-inventory count would inflate the totals with all-time
     # data. Drop those projects (the device still appears in fleet counts
     # because its mm-push event matched, just contributes 0 sessions).
-    filtered_latest: dict[tuple[str, str], tuple[datetime, dict]] = {}
+    filtered_latest: dict[tuple[str, str, str], tuple[datetime, dict]] = {}
     for key, (ts_dt, proj) in latest.items():
         last_at = _parse_iso(proj.get("last_session_at"))
         if last_at is None:
@@ -425,7 +468,7 @@ def aggregate_sessions(
 
     # Aggregate the "latest per tuple" set.
     project_decoded_to_sessions: dict[tuple[str, bool], int] = defaultdict(int)
-    for (_device, _claude_dir), (_ts, proj) in latest.items():
+    for (_device, _source_root, _claude_dir), (_ts, proj) in latest.items():
         sessions = _safe_int(proj.get("sessions"))
         total_kb = _safe_int(proj.get("total_kb"))
         ephemeral = bool(proj.get("ephemeral", False))
@@ -839,6 +882,74 @@ def _resolve_events_dir() -> Path:
     return DEFAULT_EVENTS_DIR
 
 
+def _read_mm_events_config_path() -> Path | None:
+    """Best-effort read of mm config.toml's ``mm-events`` source ``path``
+    field. Returns the expanded Path or None on any failure (config absent,
+    malformed, no mm-events source, mm-events disabled per-machine).
+    Mirrors ``_read_config_author_emails``'s tolerant pattern — never
+    raises.
+
+    Disabled-source gate: if ``[sync].disabled_sources`` contains
+    ``mm-events``, the user has explicitly opted out per-machine. Return
+    None so ``_emit_custom_path_notice_if_due`` stays silent — a notice
+    nudging them to set ``MM_EVENTS_DIR`` for a source they disabled
+    fails the visible-failure contract."""
+    try:
+        from mind_meld.config import CONFIG_PATH, load_config
+
+        cfg = load_config(CONFIG_PATH)
+    except Exception:
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    sync = cfg.get("sync")
+    if not isinstance(sync, dict):
+        return None
+    disabled_raw = sync.get("disabled_sources")
+    disabled = set(disabled_raw) if isinstance(disabled_raw, list) else set()
+    if "mm-events" in disabled:
+        return None
+    sources = sync.get("sources")
+    if not isinstance(sources, list):
+        return None
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        if src.get("name") != "mm-events":
+            continue
+        path = src.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        return Path(path).expanduser()
+    return None
+
+
+def _emit_custom_path_notice_if_due(events_dir: Path) -> None:
+    """Emit a one-line ``mm: notice:`` to stderr when the user has an
+    ``mm-events`` source configured at a non-default path AND
+    ``MM_EVENTS_DIR`` is unset — surfaces the silent-empty-retro hazard
+    flagged by adversarial review.
+
+    Gated to the CLI entry point (called from ``main()``); library callers
+    of ``aggregate()`` never see the notice. Silent in every other
+    scenario: env override set, config matches default, config unreadable,
+    no mm-events source configured."""
+    if os.environ.get("MM_EVENTS_DIR"):
+        return
+    if events_dir != DEFAULT_EVENTS_DIR:
+        return  # called via env override (already returned above) or non-default param path
+    cfg_path = _read_mm_events_config_path()
+    if cfg_path is None:
+        return  # no mm-events source configured (pre-v0.10.1) or unreadable config
+    if cfg_path == DEFAULT_EVENTS_DIR.parent:
+        return  # config matches default base path; nothing to point out
+    sys.stderr.write(
+        f"mm: notice: mm-events source configured at {cfg_path} but "
+        f"MM_EVENTS_DIR is unset; retro will read from {DEFAULT_EVENTS_DIR}. "
+        f"Set MM_EVENTS_DIR={cfg_path}/events to override.\n"
+    )
+
+
 def _parse_window(s: str) -> int:
     m = WINDOW_PATTERN.match(s)
     if m is None:
@@ -869,6 +980,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     events_dir = _resolve_events_dir()
+    _emit_custom_path_notice_if_due(events_dir)
     author_emails = frozenset() if args.no_author_filter else gather_author_emails()
     data = aggregate(
         events_dir=events_dir,

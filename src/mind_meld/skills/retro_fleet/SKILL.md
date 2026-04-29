@@ -35,7 +35,7 @@ sync fleet-wide via the `mm-events` source.
 
 This skill runs the aggregator that ships with mm
 (`mind_meld.skills.retro_fleet.aggregator`) to read those files, dedup commits
-by `(canonical_remote_url, sha)`, sum sessions across `(device, claude_dir)`
+by `(canonical_remote_url, sha)`, sum sessions across `(device, source_root, claude_dir)`
 tuples (latest-snapshot-wins per tuple — the v=2 schema is full inventory),
 and render a markdown retro.
 

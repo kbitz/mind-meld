@@ -797,3 +797,288 @@ class TestRendering:
         # All sections present; substantive content gracefully degrades.
         assert "0 commits" in out
         assert "No Claude Code sessions captured" in out
+
+
+# ---------------------------------------------------------------------------
+# T10 — Custom-path notice (Group 8 hotfix #1).
+# ---------------------------------------------------------------------------
+
+
+class TestCustomPathNotice:
+    """``mm: notice:`` for the silent-empty-retro hazard when a power user has
+    a non-default ``mm-events`` source path configured but ``MM_EVENTS_DIR``
+    isn't set. Library callers of ``aggregate()`` never see the notice — it
+    fires only from ``main()``."""
+
+    def test_env_set_suppresses_notice(self, monkeypatch, capsys):
+        monkeypatch.setenv("MM_EVENTS_DIR", "/tmp/whatever")
+        aggregator._emit_custom_path_notice_if_due(aggregator.DEFAULT_EVENTS_DIR)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_config_matches_default_no_notice(self, monkeypatch, capsys):
+        monkeypatch.delenv("MM_EVENTS_DIR", raising=False)
+        monkeypatch.setattr(
+            aggregator,
+            "_read_mm_events_config_path",
+            lambda: aggregator.DEFAULT_EVENTS_DIR.parent,
+        )
+        aggregator._emit_custom_path_notice_if_due(aggregator.DEFAULT_EVENTS_DIR)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_config_differs_emits_notice(self, monkeypatch, capsys, tmp_path):
+        """REGRESSION: the actual hotfix — non-default config path with no env
+        override surfaces the notice pointing at the env var."""
+        monkeypatch.delenv("MM_EVENTS_DIR", raising=False)
+        custom_path = tmp_path / "custom-mm"
+        monkeypatch.setattr(
+            aggregator,
+            "_read_mm_events_config_path",
+            lambda: custom_path,
+        )
+        aggregator._emit_custom_path_notice_if_due(aggregator.DEFAULT_EVENTS_DIR)
+        captured = capsys.readouterr()
+        assert "mm: notice:" in captured.err
+        assert str(custom_path) in captured.err
+        assert "MM_EVENTS_DIR=" in captured.err
+
+    def test_config_unreadable_no_notice(self, monkeypatch, capsys):
+        """Tolerant reader returning None (config absent, malformed, no
+        mm-events source) means the notice stays silent — no crash."""
+        monkeypatch.delenv("MM_EVENTS_DIR", raising=False)
+        monkeypatch.setattr(aggregator, "_read_mm_events_config_path", lambda: None)
+        aggregator._emit_custom_path_notice_if_due(aggregator.DEFAULT_EVENTS_DIR)
+        captured = capsys.readouterr()
+        assert captured.err == ""
+
+    def test_read_mm_events_config_path_handles_malformed_config(self, monkeypatch):
+        """Direct exercise of the tolerant reader: a load_config raise
+        returns None, never propagates."""
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated load_config failure")
+
+        # Patch import-site so any access to load_config in the helper raises.
+        import mind_meld.config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "load_config", boom)
+        result = aggregator._read_mm_events_config_path()
+        assert result is None
+
+    def test_disabled_mm_events_returns_none(self, monkeypatch):
+        """REGRESSION (codex adversarial 2026-04-29): when
+        ``[sync].disabled_sources`` contains ``mm-events``, the user has
+        opted out per-machine. The reader returns None so the notice
+        stays silent — nudging a user to set MM_EVENTS_DIR for a source
+        they disabled fails the visible-failure contract."""
+        import mind_meld.config as cfg_mod
+
+        def fake_load_config(*args, **kwargs):
+            return {
+                "sync": {
+                    "disabled_sources": ["mm-events"],
+                    "sources": [
+                        {"name": "mm-events", "path": "/Users/kb/custom-events"},
+                    ],
+                }
+            }
+
+        monkeypatch.setattr(cfg_mod, "load_config", fake_load_config)
+        result = aggregator._read_mm_events_config_path()
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# T11 — source_root dedup + coalesce (Group 8 hotfix #4).
+# ---------------------------------------------------------------------------
+
+
+class TestSessionsSourceRoot:
+    """Pin the encoded-name-collision fix: snapshots carry ``source_root`` and
+    the aggregator keys ``(device, source_root, claude_dir)``. Coalesce
+    drops legacy empty-source_root records when a populated sibling exists
+    on the same device.
+
+    test_two_distinct_source_roots_kept_separate is a REGRESSION-class
+    pin: the actual silent-data-loss bug being fixed. Pre-fix, the same
+    encoded ``claude_dir`` from two source roots silently overwrote each
+    other in ``latest``."""
+
+    def test_two_distinct_source_roots_kept_separate(self, tmp_path):
+        """REGRESSION (Group 8 hotfix #4): two ``type: claude`` source roots
+        that both contain a project encoded as ``-Users-kb-Documents-foo``
+        must be kept as distinct entries; sessions counts must SUM across
+        the two source roots, not silently overwrite."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_a = {
+            "claude_dir": "-Users-kb-Documents-foo",
+            "source_root": "/Users/kb/.claude",
+            "sessions": 5,
+            "total_kb": 100,
+            "ephemeral": False,
+        }
+        proj_b = {
+            "claude_dir": "-Users-kb-Documents-foo",
+            "source_root": "/Users/kb/work-claude",
+            "sessions": 7,
+            "total_kb": 200,
+            "ephemeral": False,
+        }
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_sessions_event("dev-a", 1.0, [proj_a, proj_b])],
+        )
+        data = _aggregate(events_dir)
+        # Both source roots contribute distinct projects; totals sum.
+        assert data.sessions.total_sessions == 12
+        assert data.sessions.projects == 2
+        assert data.sessions.total_kb == 300
+
+    def test_legacy_empty_only_records_kept(self, tmp_path):
+        """Pre-fix records (no ``source_root`` field) without any populated
+        sibling are kept — pre-upgrade fleet data must still render."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # No source_root field at all (legacy record shape)
+        proj_legacy = {
+            "claude_dir": "-tmp-x",
+            "sessions": 5,
+            "total_kb": 100,
+            "ephemeral": False,
+        }
+        _write_events(
+            events_dir,
+            "dev-old",
+            "2026-04-28",
+            [_sessions_event("dev-old", 1.0, [proj_legacy])],
+        )
+        data = _aggregate(events_dir)
+        assert data.sessions.total_sessions == 5
+        assert data.sessions.projects == 1
+
+    def test_legacy_empty_dropped_when_populated_sibling_for_same_device(self, tmp_path):
+        """Rollout-window scenario: same device has an old record (no
+        source_root) and a new record (populated source_root) for the same
+        encoded project. Coalesce drops the empty key; only the populated
+        record contributes."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_legacy = {
+            "claude_dir": "-tmp-x",
+            "sessions": 99,  # high count to make double-counting visible if it leaks
+            "total_kb": 1000,
+            "ephemeral": False,
+        }
+        proj_populated = {
+            "claude_dir": "-tmp-x",
+            "source_root": "/Users/kb/.claude",
+            "sessions": 5,
+            "total_kb": 100,
+            "ephemeral": False,
+        }
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _sessions_event("dev-a", 2.0, [proj_legacy]),
+                _sessions_event("dev-a", 1.0, [proj_populated]),
+            ],
+        )
+        data = _aggregate(events_dir)
+        # Legacy 99 is dropped; only the populated 5 counts.
+        assert data.sessions.total_sessions == 5
+        assert data.sessions.projects == 1
+
+    def test_legacy_empty_kept_when_no_populated_sibling_anywhere(self, tmp_path):
+        """Mixed-fleet, distinct projects: peer-old has only empty records
+        for project X; peer-new has populated records for project Y. Empty
+        record for X must NOT be dropped — there's no sibling that would
+        override it."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_old = {
+            "claude_dir": "-tmp-x",
+            "sessions": 3,
+            "total_kb": 50,
+            "ephemeral": False,
+        }
+        proj_new = {
+            "claude_dir": "-tmp-y",
+            "source_root": "/Users/kb/.claude",
+            "sessions": 7,
+            "total_kb": 150,
+            "ephemeral": False,
+        }
+        _write_events(
+            events_dir,
+            "dev-old",
+            "2026-04-28",
+            [_sessions_event("dev-old", 1.0, [proj_old])],
+        )
+        _write_events(
+            events_dir,
+            "dev-new",
+            "2026-04-28",
+            [_sessions_event("dev-new", 1.0, [proj_new])],
+        )
+        data = _aggregate(events_dir)
+        # Both records contribute (different projects, different devices).
+        assert data.sessions.total_sessions == 10
+        assert data.sessions.projects == 2
+
+    def test_legacy_kept_when_populated_sibling_is_older(self, tmp_path):
+        """REGRESSION (codex adversarial 2026-04-29): coalesce must NOT drop
+        a legacy record when its populated sibling has an OLDER ts. Without
+        the freshness guard, a downgrade or interleaved-fleet push leaves
+        the newer data in the legacy key; an unconditional drop erases the
+        active sessions and the populated sibling may itself be window-
+        filtered out (last_session_at older than `since`), returning zero
+        for an active project.
+
+        Scenario: same device, same encoded project. Populated record
+        pushed Tuesday 09:00 with stale last_session_at (60d ago). Legacy
+        record pushed Tuesday 10:00 with active last_session_at (now).
+        Pre-fix coalesce: dropped legacy → populated filtered out by
+        last_session_at gate → 0 sessions despite active activity.
+        Post-fix: coalesce only drops when populated is at least as fresh,
+        so legacy survives and contributes its 99 active sessions.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj_legacy = {
+            "claude_dir": "-tmp-x",
+            "sessions": 99,
+            "total_kb": 1000,
+            "ephemeral": False,
+            "last_session_at": _ts(0.0),  # active
+        }
+        proj_populated_stale = {
+            "claude_dir": "-tmp-x",
+            "source_root": "/Users/kb/.claude",
+            "sessions": 5,
+            "total_kb": 100,
+            "ephemeral": False,
+            "last_session_at": _ts(60.0),  # outside any reasonable window
+        }
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                # Populated record OLDER than legacy
+                _sessions_event("dev-a", 1.5, [proj_populated_stale]),
+                # Legacy record NEWER than populated (interleaved-fleet
+                # or downgrade scenario)
+                _sessions_event("dev-a", 1.0, [proj_legacy]),
+            ],
+        )
+        data = _aggregate(events_dir, window_days=7)
+        # Legacy survives the coalesce; its 99 sessions contribute.
+        # Populated stale sibling is window-filtered out.
+        assert data.sessions.total_sessions == 99
+        assert data.sessions.projects == 1
