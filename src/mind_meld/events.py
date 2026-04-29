@@ -133,6 +133,7 @@ class GitSnapshot(TypedDict, total=False):
 
 class SessionMetadata(TypedDict, total=False):
     claude_dir: str
+    source_root: str
     sessions: int
     total_kb: int
     last_session_at: str
@@ -699,6 +700,7 @@ def walk_session_metadata(
     if not projects_root.is_dir():
         return [snapshot]
 
+    source_root = str(claude_dir)
     out: list[SessionMetadata] = []
     try:
         with os.scandir(projects_root) as proj_iter:
@@ -707,7 +709,7 @@ def walk_session_metadata(
                     break
                 if not proj_entry.is_dir(follow_symlinks=False):
                     continue
-                meta = _scan_one_project(proj_entry)
+                meta = _scan_one_project(proj_entry, source_root=source_root)
                 if meta is not None:
                     out.append(meta)
     except OSError:
@@ -719,11 +721,19 @@ def walk_session_metadata(
 
 def _scan_one_project(
     proj_entry: os.DirEntry,
+    *,
+    source_root: str,
 ) -> SessionMetadata | None:
     """One project dir → SessionMetadata. Returns None if the dir has no
     qualifying jsonl files.
 
-    v=2 full-inventory: counts every .jsonl regardless of mtime."""
+    v=2 full-inventory: counts every .jsonl regardless of mtime.
+
+    ``source_root`` is the str of the parent claude_dir passed to
+    ``walk_session_metadata`` — distinguishes (device, claude_dir) tuples
+    that share an encoded project name across two configured ``type:
+    claude`` source roots. The aggregator keys on ``(device, source_root,
+    claude_dir)`` to avoid silent overwrite on encoded-name collision."""
     sessions = 0
     total_bytes = 0
     last_mtime = 0.0
@@ -754,6 +764,7 @@ def _scan_one_project(
     last_iso = datetime.fromtimestamp(last_mtime, tz=timezone.utc).isoformat() if last_mtime else ""
     return {
         "claude_dir": proj_entry.name,
+        "source_root": source_root,
         "sessions": sessions,
         "total_kb": total_bytes // 1024,
         "last_session_at": last_iso,

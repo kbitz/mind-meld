@@ -546,6 +546,24 @@ class TestWalkSessionMetadata:
         # No crash, ephemeral derived from the encoded fallback name.
         assert out[0]["projects"][0]["ephemeral"] is False
 
+    def test_source_root_field_emitted(self, tmp_path):
+        """Group 8 hotfix #4: every emitted SessionMetadata carries a
+        ``source_root`` field equal to the str of the claude_dir argument
+        passed to ``walk_session_metadata``. The aggregator keys
+        ``(device, source_root, claude_dir)`` to avoid silent overwrite
+        when two configured ``type: claude`` source roots share an encoded
+        project name."""
+        proj = tmp_path / "projects" / "-Users-kb-Documents-foo"
+        proj.mkdir(parents=True)
+        (proj / "session.jsonl").write_text(
+            json.dumps({"cwd": "/Users/kb/Documents/foo", "type": "user"}) + "\n"
+        )
+        out = events.walk_session_metadata(
+            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
+        )
+        assert len(out[0]["projects"]) == 1
+        assert out[0]["projects"][0]["source_root"] == str(tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # T1 — last_push_ts (cursor derivation)
