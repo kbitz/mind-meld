@@ -49,6 +49,56 @@ class TestRenderPrompt:
         assert "stop reviewing; exit" in post
         assert "stop reviewing; exit" in pre
 
+    def test_merge_option_absent_by_default(self) -> None:
+        out = render_prompt("notes.md", "notes.sync-conflict-X.md", "post_inversion")
+        assert "(m)erge" not in out
+
+    def test_merge_option_clean_when_available_zero_conflicts(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            merge_available=True,
+            merge_conflicts=0,
+        )
+        assert "(m)erge" in out
+        assert "clean, no markers" in out
+        assert "<<<<<<<" not in out
+
+    def test_merge_option_marker_count_when_dirty(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            merge_available=True,
+            merge_conflicts=2,
+        )
+        assert "(m)erge" in out
+        assert "2 <<<<<<< regions" in out
+        assert "resolve in editor after" in out
+
+    def test_merge_option_singular_grammar_for_one_conflict(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            merge_available=True,
+            merge_conflicts=1,
+        )
+        assert "1 <<<<<<< region" in out
+        assert "1 <<<<<<< regions" not in out
+
+    def test_merge_option_renders_in_pre_inversion_mode(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "v0-notes.sync-conflict-X.md",
+            "pre_inversion",
+            merge_available=True,
+            merge_conflicts=0,
+        )
+        assert "(m)erge" in out
+        assert "promote v0-notes.sync-conflict-X.md" in out
+
 
 class TestRenderBanner:
     def _render_to_str(self, text) -> str:
