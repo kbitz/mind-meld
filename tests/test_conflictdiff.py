@@ -99,6 +99,94 @@ class TestRenderPrompt:
         assert "(m)erge" in out
         assert "promote v0-notes.sync-conflict-X.md" in out
 
+    def test_drop_counts_omitted_when_unset(self) -> None:
+        out = render_prompt("notes.md", "notes.sync-conflict-X.md", "post_inversion")
+        # Default behavior (binary content / no diff) -- no drop annotation.
+        assert "drops" not in out
+
+    def test_drop_counts_post_inversion(self) -> None:
+        # M=0 local-only, N=1 remote-only: this is the screenshot case.
+        # (l)ocal end-state = local bytes, drops the 1 peer-only line.
+        # (r)emote end-state = remote bytes, drops 0 of the user's lines.
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            local_only_lines=0,
+            remote_only_lines=1,
+        )
+        # Annotations attach to the right lines.
+        local_line = next(line for line in out.splitlines() if "(l)ocal" in line)
+        remote_line = next(line for line in out.splitlines() if "(r)emote" in line)
+        assert "drops 1 peer line" in local_line
+        assert "drops 0 of your lines" in remote_line
+
+    def test_drop_counts_pre_inversion(self) -> None:
+        # In pre_inversion the actions flip: (l)ocal promotes the conflict
+        # file (your local edits), (r)emote keeps canonical (remote bytes).
+        # The semantic drop counts are still local_only/remote_only --
+        # the caller is responsible for mapping the raw diff m/n correctly.
+        out = render_prompt(
+            "notes.md",
+            "v0-notes.sync-conflict-X.md",
+            "pre_inversion",
+            local_only_lines=2,
+            remote_only_lines=3,
+        )
+        local_line = next(line for line in out.splitlines() if "(l)ocal" in line)
+        remote_line = next(line for line in out.splitlines() if "(r)emote" in line)
+        # (l)ocal end-state = local bytes, drops the 3 peer-only lines.
+        assert "drops 3 peer lines" in local_line
+        # (r)emote end-state = remote bytes, drops the 2 of-yours.
+        assert "drops 2 of your lines" in remote_line
+
+    def test_drop_counts_pluralization(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            local_only_lines=1,
+            remote_only_lines=1,
+        )
+        # Singular form for count==1.
+        assert "drops 1 peer line)" in out
+        assert "drops 1 of your line)" in out
+        assert "drops 1 peer lines" not in out
+        assert "drops 1 of your lines" not in out
+
+    def test_drop_counts_zero_zero_still_annotates(self) -> None:
+        # Defensive: empty-diff prompts should pass None for both counts
+        # (suppressing the annotation entirely). But if a caller passes
+        # zeros, the annotation still renders -- "drops 0 lines" is honest
+        # when the caller has actually compared and found no unique lines.
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            local_only_lines=0,
+            remote_only_lines=0,
+        )
+        assert "drops 0 peer lines" in out
+        assert "drops 0 of your lines" in out
+
+    def test_drop_counts_require_both(self) -> None:
+        # Annotations only render when BOTH counts are provided. Asymmetric
+        # callers pass through with no annotation, NOT a half-rendered prompt.
+        local_only_set = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            local_only_lines=2,
+        )
+        remote_only_set = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            remote_only_lines=3,
+        )
+        assert "drops" not in local_only_set
+        assert "drops" not in remote_only_set
+
 
 class TestRenderBanner:
     def _render_to_str(self, text) -> str:

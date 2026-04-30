@@ -36,6 +36,8 @@ def render_prompt(
     *,
     merge_available: bool = False,
     merge_conflicts: int = 0,
+    local_only_lines: int | None = None,
+    remote_only_lines: int | None = None,
 ) -> str:
     """Return the four- or five-option choice copy for a conflict prompt.
 
@@ -63,7 +65,17 @@ def render_prompt(
     annotates the (m) line so the user knows whether the merged
     candidate is clean or contains ``<<<<<<<`` markers they would have
     to resolve in a text editor afterward.
+
+    ``local_only_lines`` / ``remote_only_lines`` are the count of unified-
+    diff lines unique to each side (semantic, mode-corrected -- the caller
+    maps the raw diff ``m``/``n`` from ``count_divergent_lines`` to these
+    based on ``mode``). When BOTH are non-None, each destructive choice
+    line gets a ``(drops N ...)`` suffix so the user sees the consequence
+    inline: ``(l)ocal`` drops the peer-only lines (end state = local
+    bytes); ``(r)emote`` drops the local-only lines. Pass ``None`` (the
+    default) for binary-content prompts where the diff was empty.
     """
+    show_counts = local_only_lines is not None and remote_only_lines is not None
     if mode == "post_inversion":
         local_line = f"  (l)ocal   -> discard {conflict_name}, keep {canonical_name} as-is"
         remote_line = f"  (r)emote  -> overwrite {canonical_name} with bytes from {conflict_name}"
@@ -75,6 +87,11 @@ def render_prompt(
             f"  (r)emote  -> discard {conflict_name} (your local edits); "
             f"keep {canonical_name} as-is"
         )
+    if show_counts:
+        # (l)ocal end-state = local bytes; the peer-unique lines are dropped.
+        # (r)emote end-state = remote bytes; the local-unique lines are dropped.
+        local_line += "  " + _drop_suffix(remote_only_lines or 0, side="peer")
+        remote_line += "  " + _drop_suffix(local_only_lines or 0, side="your")
     lines = ["[bold]Keep which?[/bold]"]
     if merge_available:
         if merge_conflicts == 0:
@@ -95,6 +112,14 @@ def render_prompt(
     )
     lines.append("  (a)bort   -> stop reviewing; exit")
     return "\n".join(lines)
+
+
+def _drop_suffix(count: int, *, side: Literal["peer", "your"]) -> str:
+    """Render the ``(drops N ...)`` annotation appended to (l)ocal / (r)emote."""
+    plural = "" if count == 1 else "s"
+    if side == "peer":
+        return f"[dim](drops {count} peer line{plural})[/dim]"
+    return f"[dim](drops {count} of your line{plural})[/dim]"
 
 
 def render_banner(
