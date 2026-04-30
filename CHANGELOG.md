@@ -2,6 +2,43 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.8] - 2026-04-30
+
+**Fresh-install machines see their past 30 days of activity in retro-fleet
+immediately, instead of an empty retro until the first push.** `mm init` now
+runs an event backfill at the end of setup that captures 30 days of git
+commits + a full sessions inventory and writes them to the local events log.
+The first real push uploads them, and other peers pick them up on the next
+pull. Closes the gap between init and first push, where retro-fleet would
+otherwise show zero activity for the new machine.
+
+### Added
+
+- **`_run_events_backfill` helper in `cli.py`.** Mirrors `_run_events_tail`
+  but writes only `git-snapshot` + `sessions-snapshot` rows — no `mm-push`
+  event. Push counts in retro stay honest (an init-counted-as-push would
+  inflate the per-window count by 1 on every fresh machine), and the
+  cursor stays at "no prior push" so the first real push re-walks the
+  same 30-day window. Aggregator dedups via
+  `(canonical_remote_url, sha)`, so the trade-off is a one-time ~500ms
+  duplicate `git log` walk on the first push, paid once per machine.
+- **Init wiring at end of `init`.** Runs after `_register_and_save` and
+  `_ensure_retro_skill_link`, resolves sources via `get_sources(config)`
+  so `mm-events` is bootstrapped before walk runs. Forensic-only on
+  failure: a single `mm: notice:` to stderr, init proceeds.
+- **Six tests in `tests/test_init_events_backfill.py`.** Pin the helper
+  shape (no `mm-push` row, `mm-events`-resolved gate, failure
+  breadcrumb, claude-source-optional, 30-day since window) plus one
+  init-wiring smoke test that confirms `init` actually calls the helper.
+
+### Changed
+
+- **`events.py:14-17` docstring corrected.** The pre-Track-7B comment
+  about events being "local-only until the next push" was stale —
+  Track 7B wired the call at the HEAD of `_push_core` (BEFORE
+  `build_manifest_v2`), so events upload same-push. Docstring now
+  describes the actual semantics and references the init-time backfill.
+
 ## [0.11.7] - 2026-04-30
 
 **Retro-fleet aggregator no longer conflates foreign-file parse errors
