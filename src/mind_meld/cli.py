@@ -87,10 +87,12 @@ from mind_meld.manifest import (
     generate_tombstones,
     hash_file,
     is_conflict_filename,
+    is_pre_inversion_conflict_filename,
     is_tombstoned,
     load_manifest,
     mtime_from_manifest,
     mtime_from_path,
+    parse_conflict_device_short,
     read_and_hash,
     serialize_manifest,
 )
@@ -1204,11 +1206,14 @@ def _prompt_conflict_choice(
         )
     )
 
+    # Inline pull-time site is post_inversion only (see comment above):
+    # diff is local -> remote, so m = local-only, n = remote-only directly.
     m, n, k = count_divergent_lines(diff)
     if k:
         console.print(
-            f"  [dim]{m} removed-or-replaced lines on local side; "
-            f"{n} added-or-replaced on remote side; {k} total diff lines.[/dim]"
+            f"  [dim]{m} unique line{'' if m == 1 else 's'} of yours; "
+            f"{n} unique line{'' if n == 1 else 's'} from peer; "
+            f"{k} total diff lines.[/dim]"
         )
 
     if diff:
@@ -1232,6 +1237,10 @@ def _prompt_conflict_choice(
     # "discard <conflict-name>" copy doesn't quite apply at first glance.
     # Use the bare basename of the local file as both labels: the canonical
     # filename in both positions so the user sees the action's target.
+    # Suppress drop-count annotations on empty-diff (binary) -- annotating
+    # "drops 0 lines" when we couldn't compare would be a false reassurance.
+    prompt_m: int | None = m if diff else None
+    prompt_n: int | None = n if diff else None
     console.print(
         render_prompt(
             safe_rel,
@@ -1239,6 +1248,8 @@ def _prompt_conflict_choice(
             "post_inversion",
             merge_available=merge_available,
             merge_conflicts=max(merge_conflicts, 0),
+            local_only_lines=prompt_m,
+            remote_only_lines=prompt_n,
         )
     )
     prompt_default = "m" if (merge_available and merge_conflicts == 0) else "s"
@@ -1334,6 +1345,45 @@ def _apply_merge(
     return "merged"
 
 
+def _existing_post_inversion_sidecars_from_peer(canonical: Path, device_short: str) -> list[Path]:
+    """List post-inversion ``.sync-conflict-*`` siblings of `canonical` from one peer.
+
+    Used by ``_apply_conflict`` to dedup against prior pulls: every pull
+    where peer bytes still don't match local would otherwise create
+    another timestamped sidecar (``conflict_filename`` always stamps
+    ``datetime.now()``), so users were accumulating N near-identical
+    sidecars per peer over N pulls.
+
+    Skips ``v0-``-prefixed pre-inversion sidecars. Those hold LOCAL
+    bytes from a pre-v0.9.2 conflict and must NEVER be reaped by the
+    apply path -- they encode user data that may not exist anywhere
+    else (the local file was renamed out under the inverted semantics).
+    The user resolves them through ``mm resolve``'s migration path.
+
+    Returns sidecars whose parsed device_short matches ``device_short``.
+    Listing failures (permission, transient FS errors) return empty so
+    the caller falls through to the existing write path.
+    """
+    parent = canonical.parent
+    pattern = f"{canonical.stem}{CONFLICT_INFIX}*{canonical.suffix}"
+    out: list[Path] = []
+    try:
+        candidates = list(parent.glob(pattern))
+    except OSError:
+        return []
+    for sibling in candidates:
+        if not sibling.is_file():
+            continue
+        if not is_conflict_filename(sibling.name):
+            continue
+        if is_pre_inversion_conflict_filename(sibling.name):
+            continue
+        if parse_conflict_device_short(sibling.name) != device_short:
+            continue
+        out.append(sibling)
+    return out
+
+
 def _apply_conflict(
     local_path: Path,
     rel_path: str,
@@ -1354,6 +1404,15 @@ def _apply_conflict(
     is newer or mtimes are equal \u2014 but "remote newer" never meant "remote
     correct for this machine."
 
+    Per-peer dedup (post-v0.11.4): before writing, scan for existing
+    post-inversion sidecars from this peer for the same canonical. If
+    one already holds the same bytes, skip the write -- the prior
+    sidecar already represents this conflict, and stamping a fresh
+    timestamp would just accumulate near-identical files. If existing
+    sidecars hold STALE bytes (peer pushed something newer), reap them
+    before writing the new one so the user sees one current sidecar
+    per peer rather than a timeline of every pull.
+
     Failure modes (per-file isolation; never destroys local without a
     recoverable trail):
       * sidecar path-build (empty/None remote_device_id from corrupt peer
@@ -1362,6 +1421,44 @@ def _apply_conflict(
         canonical because we never wrote it out \u2014 the inversion makes
         rollback unnecessary.
     """
+    # Per-peer dedup. Empty/None remote_device_id falls through to the
+    # ValueError branch below where conflict_filename refuses to mint a
+    # path -- skip the dedup scan for that case (we couldn't attribute
+    # any existing sidecar to this peer anyway).
+    if remote_device_id:
+        device_short = remote_device_id[:8]
+        existing = _existing_post_inversion_sidecars_from_peer(local_path, device_short)
+        for sidecar in existing:
+            try:
+                if sidecar.read_bytes() == plain_data:
+                    # Idempotent: peer bytes unchanged from a prior pull;
+                    # the existing sidecar already represents this conflict.
+                    # Skip the write so we don't accumulate duplicates.
+                    if verbose:
+                        console.print(
+                            f"  [yellow]conflict (unchanged):[/yellow] "
+                            f"{safe_str(rel_path)} "
+                            f"(existing sidecar {safe_str(sidecar.name)})"
+                        )
+                    return "conflicted"
+            except OSError:
+                # Stat/read failure on one candidate -- treat as non-match
+                # and let the reap-and-write path handle it.
+                continue
+        # No content match. Reap stale snapshots from this peer (peer
+        # pushed something different since the last sidecar) before
+        # writing the new one. Best-effort: unlink failures degrade to
+        # accumulation, never block the write.
+        for sidecar in existing:
+            try:
+                sidecar.unlink()
+            except OSError as e:
+                print(
+                    f"mm: warning: stale sidecar unlink failed: "
+                    f"{safe_str(sidecar.name)} \u2014 {safe_str(e)}",
+                    file=sys.stderr,
+                )
+
     try:
         conflict_path = conflict_filename(local_path, remote_device_id)
     except ValueError as e:
@@ -5996,14 +6093,26 @@ def _resolve_interactive_loop(
         )
 
         # Three-number divergence summary BEFORE the diff so the user
-        # gets a glance at scale. Replacements count as one M and one N
-        # (a 1-line change is "1 removed-or-replaced + 1 added-or-replaced",
-        # K=2) -- the wording is honest about that.
+        # gets a glance at scale. count_divergent_lines returns counts
+        # keyed to the diff's from/to sides, which differ across modes:
+        # in pre-inversion the diff is remote->local, so m = remote-only
+        # and n = local-only. Map to semantic local/remote counts before
+        # rendering so the summary copy stays honest in both modes AND
+        # the prompt's (drops N ...) annotations are mode-correct.
+        # Replacements count as one of each (a 1-line change is "1 of
+        # yours + 1 from peer", K=2) -- the wording is honest about that.
         m, n, k = count_divergent_lines(diff)
+        if is_pre_inversion:
+            local_only, remote_only = n, m
+        else:
+            local_only, remote_only = m, n
         if k:
             console.print(
-                f"  [dim]{m} removed-or-replaced lines on local side; "
-                f"{n} added-or-replaced on remote side; {k} total diff lines.[/dim]"
+                f"  [dim]{local_only} unique line"
+                f"{'' if local_only == 1 else 's'} of yours; "
+                f"{remote_only} unique line"
+                f"{'' if remote_only == 1 else 's'} from peer; "
+                f"{k} total diff lines.[/dim]"
             )
 
         if diff:
@@ -6027,6 +6136,12 @@ def _resolve_interactive_loop(
         # is offered when the LCS attempt succeeded (binary content sets
         # merge_available=False); the default key flips to (m) when the
         # merged result is clean -- the user just hits Enter to accept.
+        # Pass semantic local/remote line counts so render_prompt can
+        # annotate (l)ocal / (r)emote with the consequential drop count.
+        # Suppress the counts on empty-diff (binary) so the annotation
+        # doesn't claim "drops 0 lines" when we couldn't actually compare.
+        prompt_local_only: int | None = local_only if diff else None
+        prompt_remote_only: int | None = remote_only if diff else None
         console.print(
             render_prompt(
                 safe_str(canonical.name),
@@ -6034,6 +6149,8 @@ def _resolve_interactive_loop(
                 mode,
                 merge_available=merge_available,
                 merge_conflicts=max(merge_conflicts, 0),
+                local_only_lines=prompt_local_only,
+                remote_only_lines=prompt_remote_only,
             )
         )
         prompt_default = "m" if (merge_available and merge_conflicts == 0) else "s"

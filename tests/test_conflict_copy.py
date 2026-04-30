@@ -245,19 +245,20 @@ class TestApplyIncomingFile:
         assert list(local.parent.glob(f"*{CONFLICT_INFIX}*")) == []
 
     def test_pull_is_idempotent_after_conflict(self, tmp_path: Path) -> None:
-        """Second apply of the same remote data: local still differs from
-        remote (canonical = local bytes post-inversion), so we'd build
-        ANOTHER sidecar — but `conflict_filename` collision-detects and
-        the existing sidecar still has the same remote bytes.
+        """REGRESSION (post-v0.11.4): re-pulling the same remote bytes for
+        an already-conflicted file does NOT accumulate timestamped sidecars.
 
-        Pre-inversion, the second apply matched on hash because canonical
-        held remote bytes. Post-inversion the convergence story is
-        different: every re-pull writes another timestamped sidecar (the
-        collision-suffix branch fires). For idempotence, callers should
-        still gate via diff_files upstream — which is what production
-        does. This test pins the per-file behavior: distinct outcome
-        ('conflicted' both times), and the sidecar count grows by one
-        per call.
+        Pre-fix behavior: every re-apply stamped `datetime.now()` into a
+        fresh filename (`conflict_filename` collision-detected only same-
+        SECOND duplicates) so users running `mm pull` against a peer
+        that hadn't rebased yet would walk away from a single conflict
+        with N timestamped sidecars after N pulls. The screenshot bug
+        had three sidecars from one peer at 11:59 / 12:33 / 14:15.
+
+        Post-fix: `_apply_conflict` scans existing sidecars from this
+        peer for this canonical and skips the write when bytes match.
+        Outcome is still "conflicted" (the conflict still exists on
+        disk) -- we just don't add a duplicate.
         """
         rel = "memory/user_role.md"
         local = tmp_path / rel
@@ -276,12 +277,6 @@ class TestApplyIncomingFile:
             remote_device_id="devA1234",
         )
         assert first == "conflicted"
-        # Canonical is still local bytes — `local_hash` on the second call
-        # does NOT match remote_sha, so we re-enter the conflict branch.
-        # This is divergent from pre-inversion idempotence; production
-        # callers (`_pull_one_source`) gate via diff_files BEFORE
-        # `_apply_incoming_file` runs, so the second pull simply doesn't
-        # reach this code path.
 
         second = _apply_incoming_file(
             local_path=local,
@@ -290,10 +285,124 @@ class TestApplyIncomingFile:
             remote_info=info,
             remote_device_id="devA1234",
         )
-        assert second == "conflicted"  # Re-conflict because canonical = local stayed
-        # Collision-suffix branch yields two distinct sidecars.
+        # Outcome is still "conflicted" -- the conflict state persists on
+        # disk, we just didn't write a duplicate sidecar.
+        assert second == "conflicted"
         conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert len(conflicts) == 1
+        assert conflicts[0].read_bytes() == b"remote content"
+
+    def test_pull_replaces_stale_sidecar_when_peer_pushes_new_bytes(self, tmp_path: Path) -> None:
+        """Different bytes from the same peer across pulls -> single sidecar
+        with the latest content (stale snapshot reaped).
+
+        Without this, peer X pushing R1 then R2 between two pulls would
+        leave the user with sidecar(R1) AND sidecar(R2) -- merging the
+        stale R1 could resurrect peer-deleted content. The reap keeps
+        at most one current-state sidecar per peer.
+        """
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+
+        info_old = _remote_info(
+            hashlib.sha256(b"peer R1").hexdigest(),
+            datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
+        )
+        info_new = _remote_info(
+            hashlib.sha256(b"peer R2").hexdigest(),
+            datetime(2026, 4, 21, 13, 0, tzinfo=timezone.utc),
+        )
+
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"peer R1",
+            remote_info=info_old,
+            remote_device_id="devA1234",
+        )
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"peer R2",
+            remote_info=info_new,
+            remote_device_id="devA1234",
+        )
+
+        conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert len(conflicts) == 1
+        assert conflicts[0].read_bytes() == b"peer R2"
+
+    def test_dedup_does_not_collapse_sidecars_from_different_peers(self, tmp_path: Path) -> None:
+        """Per-peer dedup must NOT cross peers. Two peers with the same
+        canonical produce two distinct sidecars (one per device_short).
+        """
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+
+        info = _remote_info("remotehash", datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
+
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"peer A bytes",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"peer B bytes",
+            remote_info=info,
+            remote_device_id="devB5678",
+        )
+
+        conflicts = sorted(local.parent.glob(f"*{CONFLICT_INFIX}*"))
         assert len(conflicts) == 2
+        # Each sidecar carries its peer's bytes.
+        contents = {c.read_bytes() for c in conflicts}
+        assert contents == {b"peer A bytes", b"peer B bytes"}
+
+    def test_dedup_does_not_reap_pre_inversion_sidecar_from_same_peer(self, tmp_path: Path) -> None:
+        """Pre-inversion (v0-) sidecars hold LOCAL bytes from a pre-v0.9.2
+        conflict and must NEVER be reaped by the apply path -- they
+        encode user data the inverted semantics rotated out of canonical.
+        Dedup is post-inversion-only.
+        """
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+
+        # Plant a pre-inversion (v0-) sidecar from devA1234.
+        v0_sidecar = local.parent / "user_role.sync-conflict-v0-20260101-100000-devA1234.md"
+        v0_sidecar.write_bytes(b"local-bytes-from-pre-inversion-era")
+
+        info = _remote_info("remotehash", datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"current peer bytes",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+
+        # Both sidecars co-exist: v0- (pre-inversion, local bytes) AND a
+        # fresh post-inversion sidecar (peer bytes).
+        all_sidecars = sorted(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert len(all_sidecars) == 2
+        v0_files = [s for s in all_sidecars if "sync-conflict-v0-" in s.name]
+        post_files = [s for s in all_sidecars if "sync-conflict-v0-" not in s.name]
+        assert len(v0_files) == 1
+        assert v0_files[0].read_bytes() == b"local-bytes-from-pre-inversion-era"
+        assert len(post_files) == 1
+        assert post_files[0].read_bytes() == b"current peer bytes"
 
 
 class TestConflictFilename:
@@ -1485,8 +1594,12 @@ class TestResolveInteractiveLoopNewBehavior:
         _resolve_interactive_loop([("s1", conflict, canonical)])
 
         joined = "\n".join(out_lines)
-        assert "removed-or-replaced" in joined
-        assert "added-or-replaced" in joined
+        # Summary names the user's lines and the peer's lines explicitly
+        # so the count is mode-correct in pre_inversion too (post-clarity
+        # rename from the older "removed-or-replaced on local side" copy
+        # which was wrong in pre_inversion).
+        assert "of yours" in joined
+        assert "from peer" in joined
         assert "total diff lines" in joined
 
     def test_remote_overwrites_only_after_typed_confirmation(
