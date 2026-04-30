@@ -5,10 +5,19 @@ entries appended on different machines:
 
   .jsonl files — set-union of lines, sorted by 'ts' field if present.
   MEMORY.md    — line-union of the index file (preserves entries from all machines).
+
+For the residual conflict path (files that should_merge() rejects -- prose
+memory entry files, etc.) ``lcs_merge`` offers a 3-way merge using
+LCS(local, remote) as a synthetic ancestor so additive edits on either
+side land cleanly. Driven by the (m)erge prompt option in
+``_resolve_interactive_loop`` and ``_prompt_conflict_choice`` -- never
+applied silently. See CLAUDE.md "Conflict-prompt UX" for the user-facing
+contract.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 from collections.abc import Callable
@@ -127,3 +136,101 @@ def _extract_ts(line: str) -> str | None:
     except (json.JSONDecodeError, ValueError):
         pass
     return None
+
+
+# LCS-as-synthetic-base 3-way merge for the residual conflict path.
+#
+# Without a stored last-synced hash (the deferred Future TODO), we can't
+# do a true 3-way merge. The trick: SequenceMatcher.get_opcodes() on
+# (local, remote) implicitly treats the longest common subsequence as
+# the shared ancestor. "equal" runs are kept; one-sided "insert" /
+# "delete" are kept (lossless additive); "replace" runs become git-style
+# conflict markers that fall through to user resolution.
+#
+# This is conservative enough that the (m)erge prompt option can offer
+# the result for user confirmation -- the only silent-data-loss vector
+# would be a wrong "equal" alignment on pathological inputs (lots of
+# repeated short lines). Memory/JSONL/markdown content sees mostly-
+# unique lines, so misalignment is rare and visible (markers).
+_CONFLICT_OPEN = "<<<<<<< local\n"
+_CONFLICT_SEP = "=======\n"
+_CONFLICT_CLOSE = ">>>>>>> remote\n"
+
+
+def lcs_merge(local_bytes: bytes, remote_bytes: bytes) -> tuple[bytes, int]:
+    """Three-way merge with LCS(local, remote) as synthetic ancestor.
+
+    Returns ``(merged_bytes, conflict_count)``. ``conflict_count == 0``
+    means the merge produced no ``<<<<<<<`` markers and is safe to
+    accept; ``> 0`` means at least one region was edited differently on
+    each side and the merged result contains git-style conflict markers
+    the user must resolve manually.
+
+    Binary inputs (NUL byte present) are detected and skipped:
+    ``conflict_count`` is set to ``-1`` to signal "merge not attempted"
+    so callers can suppress the (m) option entirely. Returned bytes in
+    the binary case are ``b""``.
+
+    Lines are split via ``splitlines()`` (no keepends) so a trailing-
+    newline variation between local and remote does not trip the LCS
+    into a spurious ``replace`` on the only line of a file. The merged
+    output joins lines with ``\\n`` and re-attaches a final ``\\n`` if
+    either input had one.
+    """
+    # Two-stage binary detection. NUL byte is the cheap fast-path (catches
+    # most binaries, UTF-16 with high-byte zeros, etc). Strict UTF-8 decode
+    # is the load-bearing check: a 7-bit-clean or NUL-free non-text payload
+    # (some packed binary, mojibake, UTF-16-LE without BOM where high bytes
+    # happen non-zero) would otherwise pass the NUL check, get decoded with
+    # errors="replace", and round-trip through utf-8 as a lossy "merge"
+    # that silently overwrites canonical with corrupted bytes on (m)
+    # accept. Strict decode rejects those paths up front.
+    if b"\x00" in local_bytes or b"\x00" in remote_bytes:
+        return b"", -1
+    try:
+        local_text = local_bytes.decode("utf-8")
+        remote_text = remote_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return b"", -1
+
+    # Split WITHOUT keepends so trailing-newline variations don't trip
+    # the LCS into a spurious "replace" on the only line of a file.
+    # Re-attach a uniform "\n" terminator on output; the file's final
+    # newline tracks whichever input had one.
+    local_lines = local_text.splitlines()
+    remote_lines = remote_text.splitlines()
+
+    matcher = difflib.SequenceMatcher(a=local_lines, b=remote_lines, autojunk=False)
+    out: list[str] = []
+    conflicts = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            out.extend(local_lines[i1:i2])
+        elif tag == "delete":
+            # Lines in local but not remote. Without a real base we can't
+            # tell apart "we added these" from "remote removed these";
+            # keep them either way (lossless additive interpretation).
+            out.extend(local_lines[i1:i2])
+        elif tag == "insert":
+            # Symmetric: lines in remote but not local -> kept as
+            # "peer added" under the same lossless rule.
+            out.extend(remote_lines[j1:j2])
+        elif tag == "replace":
+            # Both sides differ on this region. Conservative: emit
+            # git-style conflict markers and let the user resolve.
+            conflicts += 1
+            out.append(_CONFLICT_OPEN.rstrip("\n"))
+            out.extend(local_lines[i1:i2])
+            out.append(_CONFLICT_SEP.rstrip("\n"))
+            out.extend(remote_lines[j1:j2])
+            out.append(_CONFLICT_CLOSE.rstrip("\n"))
+
+    if not out:
+        return b"", conflicts
+
+    body = "\n".join(out)
+    # Preserve trailing-newline behavior: if either input ended with
+    # "\n" the merged file does too.
+    if local_text.endswith("\n") or remote_text.endswith("\n"):
+        body = body + "\n"
+    return body.encode("utf-8"), conflicts
