@@ -2,6 +2,68 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.5] - 2026-04-30
+
+**Pull-time conflict sidecars no longer accumulate across pulls; conflict
+prompt shows the consequential drop count up-front.** Two fixes wrapped
+together. The bug: every `mm pull` where a peer's bytes still differed
+from local stamped a fresh timestamped `.sync-conflict-*` sidecar,
+even when an earlier sidecar from that same peer already carried the
+same bytes. Users hitting `mm resolve` saw the same canonical filename
+in three consecutive prompts and worried `(m)erge` was duplicating
+content. The dedup keeps at most one current-state sidecar per peer.
+The UX fix: `(l)ocal` and `(r)emote` lines now end with `(drops N peer
+line(s))` / `(drops N of your line(s))` so the consequence is visible
+inline without translating the diff to "what do I lose."
+
+### Added
+
+- **`_existing_post_inversion_sidecars_from_peer(canonical, device_short)`.**
+  Lists post-inversion `.sync-conflict-*` siblings of a canonical from
+  one peer device. Skips `v0-` pre-inversion sidecars (those hold local
+  bytes from a pre-v0.9.2 conflict and must never be reaped by the
+  apply path). Used by `_apply_conflict` for per-peer dedup.
+- **`(drops N ...)` annotations on `(l)ocal` / `(r)emote` in
+  `conflictdiff.render_prompt`.** New `local_only_lines` /
+  `remote_only_lines` kwargs append a dim-styled drop count to each
+  destructive choice. `(l)ocal` end-state = local bytes (drops the
+  peer-only lines); `(r)emote` end-state = remote bytes (drops the
+  user's local-only lines). Suppressed when the diff is empty (binary
+  content) — annotating "drops 0 lines" without a real comparison
+  would be a false reassurance.
+
+### Changed
+
+- **`_apply_conflict` deduplicates by peer before writing.** Before
+  stamping a fresh sidecar, scans existing post-inversion sidecars from
+  the same peer for the same canonical. If one already holds bytes
+  equal to `plain_data`: skip the write (idempotent — outcome stays
+  `"conflicted"`). If existing sidecars hold stale bytes (peer pushed
+  something newer): unlink them, then write the current sidecar. Fleet
+  user sees one current-state sidecar per peer, never a per-pull
+  timeline. Empty/`None` `remote_device_id` falls through to the
+  existing ValueError branch.
+- **Divergence summary copy now uses semantic local/remote labels.** Was
+  `M removed-or-replaced lines on local side; N added-or-replaced on
+  remote side` — sloppy in `pre_inversion` mode where canonical = remote
+  and the raw `m`/`n` from `count_divergent_lines` swap meaning. New
+  copy: `N unique line(s) of yours; M unique line(s) from peer; K total
+  diff lines.` Mode-correct in both pre- and post-inversion. Both
+  prompt sites updated.
+
+### Tests
+
+- `tests/test_conflictdiff.py::TestRenderPrompt`: 6 new cases covering
+  drop-count annotations (default omission, post/pre inversion mappings,
+  pluralization, zero-zero, asymmetric kwargs).
+- `tests/test_conflict_copy.py::TestApplyIncomingFile`: 3 new cases —
+  `test_pull_replaces_stale_sidecar_when_peer_pushes_new_bytes`,
+  `test_dedup_does_not_collapse_sidecars_from_different_peers`,
+  `test_dedup_does_not_reap_pre_inversion_sidecar_from_same_peer`.
+  Existing `test_pull_is_idempotent_after_conflict` rewritten — pre-fix
+  asserted `len == 2` (documenting the bug); now asserts `len == 1`
+  with peer's current bytes.
+
 ## [0.11.4] - 2026-04-30
 
 **`(m)erge` option in conflict-resolution prompt — LCS-as-synthetic-base
