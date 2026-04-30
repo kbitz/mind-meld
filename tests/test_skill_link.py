@@ -234,17 +234,74 @@ class TestSkillLinkCheckDue:
     def test_no_marker_means_check_due(self, config_dir):
         assert cli_module._skill_link_check_due() is True
 
-    def test_fresh_marker_means_not_due(self, config_dir):
+    def test_fresh_marker_with_correct_link_means_not_due(self, target, skill_src, config_dir):
+        """Steady state: marker fresh AND link points at our source → skip.
+        Both conditions are required post-drift-check."""
+        target.symlink_to(skill_src)
         marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
         assert cli_module._skill_link_check_due() is False
 
-    def test_stale_marker_means_due(self, config_dir):
+    def test_stale_marker_means_due(self, target, skill_src, config_dir):
+        target.symlink_to(skill_src)
         marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        # Set mtime to 25h ago.
         old = time.time() - (25 * 3600)
         os.utime(marker, (old, old))
+        assert cli_module._skill_link_check_due() is True
+
+    def test_fresh_marker_but_link_missing_means_due(self, skill_src, config_dir):
+        """REGRESSION pin for the post-cleanup-recovery bug: marker got
+        touched on a previous push but the link was later removed by hand
+        (e.g. user cleaning up an old workspace path). Pre-fix the fresh
+        marker silently suppressed self-heal for 24h."""
+        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker.touch()
+        # No symlink at target. Drift check must trip.
+        assert cli_module._skill_link_check_due() is True
+
+    def test_fresh_marker_but_link_dangling_means_due(
+        self, target, skill_src, _isolate_paths, config_dir
+    ):
+        """Marker fresh, link points at a directory that no longer exists
+        (mirrors the dangling-symlink IRON-RULE case from TestDanglingSymlink
+        but at the gate level so push self-heals on the next call)."""
+        deleted_target = _isolate_paths / "old-venv" / "skills" / "retro_fleet"
+        deleted_target.mkdir(parents=True)
+        target.symlink_to(deleted_target)
+        import shutil
+
+        shutil.rmtree(deleted_target.parent.parent)
+        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker.touch()
+        assert cli_module._skill_link_check_due() is True
+
+    def test_fresh_marker_but_link_wrong_target_means_due(
+        self, target, skill_src, _isolate_paths, config_dir
+    ):
+        """Marker fresh, link points at a different (still-extant) dir.
+        E.g. user manually pointed retro-fleet at their own skill copy."""
+        their_dir = _isolate_paths / "their-skill"
+        their_dir.mkdir()
+        target.symlink_to(their_dir)
+        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker.touch()
+        assert cli_module._skill_link_check_due() is True
+
+    def test_drift_check_resolver_failure_fails_open(self, target, config_dir, monkeypatch):
+        """If ``_resolve_retro_skill_src`` raises during the drift check,
+        the gate fails open (returns True) so the installer runs and
+        emits its own forensic notice."""
+        target_dir = target.parent / "anything"
+        target_dir.mkdir()
+        target.symlink_to(target_dir)
+        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker.touch()
+
+        def boom():
+            raise RuntimeError("resolver simulated failure")
+
+        monkeypatch.setattr(cli_module, "_resolve_retro_skill_src", boom)
         assert cli_module._skill_link_check_due() is True
 
     def test_marker_stat_failure_fails_open(self, config_dir, monkeypatch):
@@ -254,7 +311,6 @@ class TestSkillLinkCheckDue:
         marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
 
-        # Force stat to raise.
         from pathlib import Path
 
         original_stat = Path.stat
@@ -265,7 +321,6 @@ class TestSkillLinkCheckDue:
             return original_stat(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "stat", fake_stat)
-        # Fail-open → returns True (treat as if no marker).
         assert cli_module._skill_link_check_due() is True
 
 
@@ -280,3 +335,83 @@ class TestDryRun:
         cli_module._ensure_retro_skill_link(dry_run=True)
         assert not target.exists()
         assert not (config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}").exists()
+
+
+# ---------------------------------------------------------------------------
+# `mm install-skills` user-facing command.
+# ---------------------------------------------------------------------------
+
+
+class TestInstallSkillsCommand:
+    """The user-facing companion to ``_ensure_retro_skill_link``: explicit
+    install on demand, useful when the steady-state self-heal hasn't run
+    yet (fresh machine) or when the user wants to force a re-install
+    after manual cleanup. Bypasses the 24h TTL gate by calling the
+    installer directly."""
+
+    def _runner(self):
+        from typer.testing import CliRunner
+
+        return CliRunner()
+
+    def test_creates_symlink_when_absent(self, target, skill_src, _isolate_paths):
+        from mind_meld.cli import app
+
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert "Installed" in result.output
+        assert target.is_symlink()
+        assert target.resolve() == skill_src.resolve()
+
+    def test_idempotent_on_correct_link(self, target, skill_src):
+        from mind_meld.cli import app
+
+        target.symlink_to(skill_src)
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert "Installed" in result.output
+
+    def test_self_heals_dangling_link(self, target, skill_src, _isolate_paths):
+        from mind_meld.cli import app
+
+        deleted_target = _isolate_paths / "old-venv" / "skills" / "retro_fleet"
+        deleted_target.mkdir(parents=True)
+        target.symlink_to(deleted_target)
+        import shutil
+
+        shutil.rmtree(deleted_target.parent.parent)
+
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert target.exists()  # no longer dangling
+        assert target.resolve() == skill_src.resolve()
+
+    def test_errors_on_conflict_real_file(self, target, skill_src):
+        from mind_meld.cli import app
+
+        target.write_text("user's own retro-fleet")
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 1
+        assert target.read_text() == "user's own retro-fleet"
+
+    def test_errors_when_claude_skills_dir_missing(self, _isolate_paths, skill_src):
+        import shutil
+
+        from mind_meld.cli import app
+
+        shutil.rmtree(_isolate_paths / ".claude")
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 1
+        assert "does not exist" in result.output or "does not exist" in (result.stderr or "")
+
+    def test_bypasses_ttl_gate(self, target, skill_src, config_dir):
+        """The CLI command runs the installer regardless of the 24h-TTL
+        marker. The gate only governs the implicit self-heal in push."""
+        from mind_meld.cli import app
+
+        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker.touch()  # fresh — would suppress push-time self-heal
+        # Link is still missing; the command must create it anyway.
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert target.is_symlink()

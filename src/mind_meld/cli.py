@@ -2523,11 +2523,42 @@ def _config_dir() -> Path:
 
 
 def _skill_link_check_due() -> bool:
-    """24h-TTL gate consulted by ``_push_core``. Returns True when the
-    installer should run — either because the success marker is stale OR
-    the marker is missing (fresh install). The conflict marker is
-    consulted separately by ``_emit_conflict_notice``."""
-    return not _marker_is_fresh(_SKILL_LINK_SUCCESS_MARKER)
+    """Gate consulted by ``_push_core``. Returns True when the installer
+    should run.
+
+    Two paths to True:
+
+    1. **Marker is stale** (or absent) — the original 24h-TTL behavior.
+    2. **Marker is fresh but link state has drifted** — link is missing,
+       dangling, or pointing somewhere other than our source. Pre-fix
+       (post-v0.11.0 / pre-this-fix) the fresh marker silently suppressed
+       self-heal for 24h. The case in the wild: pipx-installed mm 0.11.0
+       creates the link successfully and touches the marker; user later
+       removes the link manually (e.g. cleaning up an old conductor
+       workspace whose path the link used to point at on a previous
+       install); next push sees fresh marker + missing link and skips
+       the installer for the rest of the day. The drift check costs one
+       ``lstat`` + one ``readlink`` + ``importlib.resources`` resolution
+       on the steady-state path — negligible vs the rest of push.
+
+    Any I/O or resolver error in the drift check fails open (returns
+    True) so the installer runs and emits its own notice. The conflict
+    marker is consulted separately by ``_emit_conflict_notice``.
+    """
+    if not _marker_is_fresh(_SKILL_LINK_SUCCESS_MARKER):
+        return True
+    target = Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME
+    try:
+        if not target.is_symlink():
+            return True
+        if not target.exists():
+            return True  # dangling
+        skill_src = _resolve_retro_skill_src()
+        if target.resolve() != skill_src.resolve():
+            return True  # wrong target (e.g. stale workspace path)
+    except Exception:
+        return True
+    return False
 
 
 def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
@@ -5154,6 +5185,67 @@ def migrate_config(
     written config.
     """
     _migrate_config_core(yes=yes, dry_run=dry_run)
+
+
+# ── install-skills ────────────────────────────────────────────────────
+
+
+@app.command(name="install-skills")
+def install_skills_cmd() -> None:
+    """Install (or re-install) the retro-fleet Claude Code skill symlink.
+
+    Force-runs the same self-heal that ``mm init`` and ``mm push`` invoke
+    automatically, bypassing the steady-state TTL gate. Intended for:
+
+    * post-cleanup recovery (link removed by hand, e.g. after deleting an
+      old pipx workspace whose path the link pointed at)
+    * manual install on a machine where ``mm push`` hasn't run yet
+    * verifying the link state on a fresh ``pipx install`` of mm
+
+    The symlink target follows the wheel: pipx upgrades replace the
+    contents of ``~/.local/pipx/venvs/mind-meld/`` in place, so the link
+    auto-updates on every ``pipx upgrade mind-meld``.
+    """
+    target = Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME
+    skills_dir = target.parent
+    if not skills_dir.exists():
+        typer.echo(
+            f"mm: error: {skills_dir} does not exist; install Claude Code first",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        skill_src = _resolve_retro_skill_src()
+    except Exception as e:
+        typer.echo(
+            f"mm: error: skill source unresolvable: {type(e).__name__}: {safe_str(e)}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from e
+
+    _ensure_retro_skill_link(dry_run=False)
+
+    if target.is_symlink() and target.exists():
+        try:
+            if target.resolve() == skill_src.resolve():
+                typer.echo(f"Installed: {target} -> {skill_src}")
+                return
+        except OSError:
+            pass
+
+    if target.exists() or target.is_symlink():
+        typer.echo(
+            f"mm: error: {target} exists and is not mm's symlink; "
+            f"remove it and re-run (mm's source is {skill_src})",
+            err=True,
+        )
+    else:
+        typer.echo(
+            "mm: error: install did not complete (see stderr above for details)",
+            err=True,
+        )
+    raise typer.Exit(code=1)
 
 
 # ── log ───────────────────────────────────────────────────────────────
