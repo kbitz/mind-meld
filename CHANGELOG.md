@@ -2,6 +2,56 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.4] - 2026-04-30
+
+**`(m)erge` option in conflict-resolution prompt — LCS-as-synthetic-base
+3-way merge for the trivial-additive case.** Most cross-fleet conflict
+files (memory entry markdown, prose docs, append-mostly notes) end up as
+divergence-pairs where one side is a strict superset of the other or
+the additions land in non-overlapping regions. Today's prompt forces a
+manual `(l)ocal` / `(r)emote` / `(s)kip` choice on every one. The new
+`(m)erge` option offers a user-confirmed 3-way merge using
+``LCS(local, remote)`` as a synthetic ancestor — additive edits on
+either side land cleanly; only same-region replace edits emit
+`<<<<<<<` markers and stay manual. Default key flips from `s` to `m`
+when the merged result is clean (zero markers); user just hits Enter.
+
+### Added
+
+- **`mind_meld.merge.lcs_merge(local_bytes, remote_bytes) -> (bytes, int)`.**
+  Pure-Python 3-way merge using `difflib.SequenceMatcher.get_opcodes()`.
+  ``equal`` runs are kept; one-sided ``insert`` / ``delete`` are
+  treated as additive (lossless union); ``replace`` runs become
+  git-style conflict markers. Returns ``conflict_count = -1`` for
+  binary input (NUL byte present) so callers suppress the (m) option.
+  Trailing newlines preserved when either input had one.
+- **`(m)erge` option in `_resolve_interactive_loop` and
+  `_prompt_conflict_choice`.** Both prompt sites attempt
+  ``lcs_merge`` before showing the prompt; ``conflictdiff.render_prompt``
+  takes new ``merge_available`` and ``merge_conflicts`` keyword args
+  that control whether the option line renders and whether the default
+  flips to (m). On (m): canonical receives merged bytes via
+  ``atomic_write_bytes``; sidecar is best-effort unlinked (failure
+  surfaces as `mm: warning:` and falls back to the existing 30-day
+  `mm gc --conflicts` reaper). Mode-symmetric across pre-inversion
+  (`v0-`) and post-inversion sidecars.
+- **`merged-via-lcs` `ApplyOutcome`.** Distinct from `merged` (which
+  covers the `.jsonl` / `MEMORY.md` line-union path) so `mm log
+  --action merged-via-lcs` post-dogfood gives an honest count of how
+  often the LCS path fires. Schema-additive in `pullhistory.jsonl`.
+
+### Notes
+
+- LCS-as-synthetic-base sidesteps the missing-stored-base problem
+  (the deferred Future TODO "Three-way merge base") with the trick:
+  lines both sides agree on form the LCS = base; one-sided edits are
+  lossless additive; same-region edits show as conflict markers.
+  Conservative enough to ship behind an explicit user confirmation.
+- Pure Python: no subprocess to `git`, no new PyPI dep. If dogfood
+  reveals misalignment on pathological prose with lots of repeated
+  short lines, the implementation can swap to subprocess-`git
+  merge-file` behind the same `lcs_merge` signature.
+
 ## [0.11.3] - 2026-04-29
 
 **Group 8 hotfixes — retro-fleet skill correctness + ergonomic notice.**

@@ -160,11 +160,12 @@ class TestApplyConflict:
 
 
 class TestEmptyOutcomes:
-    def test_has_all_six_keys(self) -> None:
+    def test_has_all_outcome_keys(self) -> None:
         outcomes = _empty_outcomes()
         assert set(outcomes.keys()) == {
             "written",
             "merged",
+            "merged-via-lcs",
             "skipped",
             "conflicted",
             "unchanged",
@@ -474,6 +475,7 @@ class TestPullOneSource:
             outcomes = {
                 "written": list(to_download.keys()),
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": [],
@@ -519,6 +521,7 @@ class TestPullOneSource:
             return 1, {
                 "written": list(to_download.keys()),
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": [],
@@ -555,6 +558,7 @@ class TestPullOneSource:
                 for k in [
                     "written",
                     "merged",
+                    "merged-via-lcs",
                     "skipped",
                     "conflicted",
                     "unchanged",
@@ -589,6 +593,7 @@ class TestPullOneSource:
             return 1, {
                 "written": list(to_download.keys()),
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": [],
@@ -625,6 +630,7 @@ class TestPullOneSource:
                 for k in [
                     "written",
                     "merged",
+                    "merged-via-lcs",
                     "skipped",
                     "conflicted",
                     "unchanged",
@@ -796,6 +802,7 @@ def _make_per_source(
         outcomes={
             "written": written or [],
             "merged": [],
+            "merged-via-lcs": [],
             "skipped": [],
             "conflicted": conflicted or [],
             "unchanged": [],
@@ -1100,6 +1107,7 @@ class TestDownloadAndApplyQuietAndProgress:
         assert outcomes == {
             "written": [],
             "merged": [],
+            "merged-via-lcs": [],
             "skipped": [],
             "conflicted": [],
             "unchanged": [],
@@ -1238,6 +1246,7 @@ class TestHadChangesExcludesUnchanged:
             outcomes={
                 "written": [],
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": ["stale.md"],
@@ -1257,6 +1266,7 @@ class TestHadChangesExcludesUnchanged:
             outcomes={
                 "written": [],
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": ["a.md", "b.md"],
                 "conflicted": [],
                 "unchanged": [],
@@ -1275,6 +1285,7 @@ class TestHadChangesExcludesUnchanged:
             outcomes={
                 "written": [],
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": [],
@@ -1293,6 +1304,7 @@ class TestHadChangesExcludesUnchanged:
             outcomes={
                 "written": [],
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": [],
@@ -1378,6 +1390,7 @@ class TestWarningsSurvivePartialPull:
             return 10, {
                 "written": list(td.keys()),
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": [],
@@ -1479,6 +1492,7 @@ class TestWriteSyncLogBestEffort:
             return 10, {
                 "written": list(td.keys()),
                 "merged": [],
+                "merged-via-lcs": [],
                 "skipped": [],
                 "conflicted": [],
                 "unchanged": [],

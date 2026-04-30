@@ -1254,7 +1254,10 @@ class TestResolveExitCode:
         def boom(self, *a, **kw):
             raise OSError("simulated read failure")
 
-        monkeypatch.setattr(Path, "read_text", boom)
+        # _resolve_interactive_loop reads bytes (for lcs_merge) before
+        # decoding for the diff display, so the read trip-point is
+        # read_bytes now.
+        monkeypatch.setattr(Path, "read_bytes", boom)
 
         resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
         assert (resolved, failed) == (0, 1)

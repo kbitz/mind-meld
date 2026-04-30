@@ -113,7 +113,15 @@ from mind_meld.storage.keys import (
 from mind_meld.storage.local import LocalBackend
 from mind_meld.synclog import write_sync_log
 
-ApplyOutcome = Literal["written", "merged", "skipped", "conflicted", "unchanged", "failed"]
+ApplyOutcome = Literal[
+    "written",
+    "merged",
+    "merged-via-lcs",
+    "skipped",
+    "conflicted",
+    "unchanged",
+    "failed",
+]
 FetchStatus = Literal["ok", "missing", "corrupt"]
 CONFLICT_AGE_DAYS = 30
 # Track 7B (v0.10.3): per-device daily JSONL events files older than this
@@ -1121,7 +1129,7 @@ def _prompt_conflict_choice(
     remote_data: bytes,
     peer_name: str | None = None,
     ambiguous_count: int = 0,
-) -> str:
+) -> tuple[str, bytes | None]:
     """Prompt interactively for how to handle one conflict. Default skip.
 
     ``peer_name`` is the human-readable name of the device that pushed the
@@ -1131,10 +1139,13 @@ def _prompt_conflict_choice(
     Both flow into the REMOTE banner so the user sees attribution at the
     moment of the choice.
 
-    Returns one of: ``keep-canonical`` (= keep local), ``keep-remote``,
+    Returns ``(choice, merged_bytes)``. Choice is one of:
+    ``keep-canonical`` (= keep local), ``keep-remote``, ``merge``,
     ``abort``, ``keep-both``. ``keep-both`` is what (s)kip emits today --
-    the on-disk effect is "leave both files in place." Caller's existing
-    branches treat ``keep-both`` as "fall through to _apply_conflict."
+    the on-disk effect is "leave both files in place." ``merge`` is
+    accompanied by ``merged_bytes`` -- the LCS-merged result for the
+    caller to write to ``local_path``. For all other choices
+    ``merged_bytes`` is ``None``.
     """
     import difflib
 
@@ -1143,12 +1154,32 @@ def _prompt_conflict_choice(
         render_banner,
         render_prompt,
     )
+    from mind_meld.merge import lcs_merge
 
+    local_read_failed = False
     try:
-        local_text = local_path.read_text(errors="replace").splitlines()
+        local_bytes = local_path.read_bytes()
     except OSError:
-        local_text = ["<unreadable>"]
+        # Track the failure separately so the (m) option is not offered
+        # against an empty-substitute local. Without this, lcs_merge(b"",
+        # remote) returns remote as a "clean merge" with default-key (m)
+        # and the user would silently overwrite an unreadable-but-extant
+        # local with peer bytes (EACCES race, transient FS failure,
+        # iCloud placeholder hiccup).
+        local_bytes = b""
+        local_read_failed = True
+    local_text = local_bytes.decode("utf-8", errors="replace").splitlines()
     remote_text = remote_data.decode("utf-8", errors="replace").splitlines()
+
+    # Inline pull-time prompts post-inversion only -- _apply_conflict only
+    # produces post-inversion sidecars. local_bytes IS the local side;
+    # remote_data IS the peer side; lcs_merge returns conflict_count = -1
+    # when either side is binary so we can suppress (m).
+    if local_read_failed:
+        merged_bytes, merge_conflicts = b"", -1
+    else:
+        merged_bytes, merge_conflicts = lcs_merge(local_bytes, remote_data)
+    merge_available = merge_conflicts >= 0
 
     safe_rel = safe_str(rel_path)
     diff = list(
@@ -1163,10 +1194,6 @@ def _prompt_conflict_choice(
     )
 
     console.print(f"\n[bold yellow]Conflict:[/bold yellow] {safe_rel}")
-    # Inline pull-time prompt only ever sees post-inversion conflicts --
-    # pre-inversion files are migrated by `_resolve_interactive_loop`'s
-    # discovery path, never produced here. So local = local, remote =
-    # remote with no flip.
     console.print(render_banner("local", local_path.name, None))
     console.print(
         render_banner(
@@ -1200,14 +1227,22 @@ def _prompt_conflict_choice(
     else:
         console.print("  [dim](files differ but text diff is empty \u2014 likely binary)[/dim]")
 
-    # Inline pull-time prompts post-inversion only. The conflict file is
-    # not on disk yet at this site -- _apply_conflict writes it AFTER this
-    # function returns "keep-both" -- so render_prompt's "discard
-    # <conflict-name>" copy doesn't quite apply at first glance. Use the
-    # bare basename of the local file as both labels: the canonical
+    # The conflict file is not on disk yet at this site -- _apply_conflict
+    # writes it AFTER this function returns "keep-both" -- so render_prompt's
+    # "discard <conflict-name>" copy doesn't quite apply at first glance.
+    # Use the bare basename of the local file as both labels: the canonical
     # filename in both positions so the user sees the action's target.
-    console.print(render_prompt(safe_rel, safe_rel, "post_inversion"))
-    choice = typer.prompt("Choice", default="s", show_default=False).strip().lower()
+    console.print(
+        render_prompt(
+            safe_rel,
+            safe_rel,
+            "post_inversion",
+            merge_available=merge_available,
+            merge_conflicts=max(merge_conflicts, 0),
+        )
+    )
+    prompt_default = "m" if (merge_available and merge_conflicts == 0) else "s"
+    choice = typer.prompt("Choice", default=prompt_default, show_default=False).strip().lower()
 
     # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both"
     # which is exactly the on-disk effect of (s)kip today. Map through
@@ -1221,15 +1256,19 @@ def _prompt_conflict_choice(
         choice = "s"
 
     if choice in ("l", "local", "keep-canonical"):
-        return "keep-canonical"
+        return "keep-canonical", None
     if choice in ("r", "remote", "keep-remote"):
-        return "keep-remote"
+        return "keep-remote", None
+    if choice in ("m", "merge"):
+        if merge_available:
+            return "merge", merged_bytes
+        # (m) was not offered (binary content) -- treat the literal
+        # letter as skip rather than writing potentially-empty bytes.
+        return "keep-both", None
     if choice in ("a", "abort"):
-        return "abort"
+        return "abort", None
     # Default-or-skip path: any unrecognized input AND (s)kip itself.
-    # Returns the legacy "keep-both" string because callers still branch
-    # on that constant; on-disk effect is unchanged.
-    return "keep-both"
+    return "keep-both", None
 
 
 # \u2500\u2500 _apply_incoming_file decision tree \u2500\u2500\u2500
@@ -1241,6 +1280,8 @@ def _prompt_conflict_choice(
 #   local hash == remote hash               -> UNCHANGED
 #   should_merge(rel_path)                  -> MERGED    (jsonl / MEMORY.md)
 #   local mtime > remote mtime              -> SKIPPED   (local newer)
+#   local mtime <= remote mtime + (m)erge   -> MERGED-VIA-LCS  (user confirmed)
+#                                              write merged_bytes -> canonical
 #   local mtime <= remote mtime             -> CONFLICTED  (v0.9.2 INVERTED)
 #        keep canonical at LOCAL bytes (no rename, no rollback)
 #        write REMOTE bytes -> .sync-conflict-<ts>-<device>.<ext>
@@ -1429,7 +1470,7 @@ def _apply_incoming_file(
                 peer_name = match.get("device_name")
             elif count > 1:
                 ambiguous_count = count
-        choice = _prompt_conflict_choice(
+        choice, merged_bytes = _prompt_conflict_choice(
             rel_path, local_path, plain_data, peer_name, ambiguous_count
         )
         if choice == "keep-canonical":
@@ -1455,6 +1496,23 @@ def _apply_incoming_file(
                     f"  [yellow]\u2193[/yellow] {safe_str(rel_path)} (remote kept by user)"
                 )
             return "written"
+        if choice == "merge":
+            # User accepted the LCS-merged result inline. Write merged
+            # bytes to canonical; the sidecar was never created (we
+            # suppress _apply_conflict by returning "merged-via-lcs"
+            # here). Refusal of (m) when merge wasn't offered already
+            # mapped to "keep-both" inside _prompt_conflict_choice.
+            assert merged_bytes is not None  # invariant: choice=="merge" -> bytes
+            try:
+                fsutil.atomic_write_bytes(local_path, merged_bytes, fsync=False)
+            except (OSError, StorageError) as e:
+                console.print(
+                    f"  [red]merge write failed:[/red] {safe_str(rel_path)} — {safe_str(e)}"
+                )
+                return "failed"
+            if verbose:
+                console.print(f"  [cyan]merged[/cyan] {safe_str(rel_path)} (LCS)")
+            return "merged-via-lcs"
         if choice == "abort":
             raise typer.Abort()
         # choice == "keep-both" -> fall through to _apply_conflict
@@ -1499,6 +1557,7 @@ def _download_and_apply(
     outcomes: dict[ApplyOutcome, list[str]] = {
         "written": [],
         "merged": [],
+        "merged-via-lcs": [],
         "skipped": [],
         "conflicted": [],
         "unchanged": [],
@@ -3040,6 +3099,7 @@ def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
     return {
         "written": [],
         "merged": [],
+        "merged-via-lcs": [],
         "skipped": [],
         "conflicted": [],
         "unchanged": [],
@@ -3133,7 +3193,12 @@ def _pull_one_source(
     )
 
     touched_parents: set[Path] = set()
-    for rel in outcomes["written"] + outcomes["merged"] + outcomes["conflicted"]:
+    for rel in (
+        outcomes["written"]
+        + outcomes["merged"]
+        + outcomes["merged-via-lcs"]
+        + outcomes["conflicted"]
+    ):
         touched_parents.add((base_path / rel).parent)
 
     return _PerSourceResult(
@@ -3303,7 +3368,7 @@ def _print_pull_summary(
     # Per-source lines (conflicts/failures always; verbose otherwise).
     for r in per_source_results:
         src_written = len(r.outcomes["written"])
-        src_merged = len(r.outcomes["merged"])
+        src_merged = len(r.outcomes["merged"]) + len(r.outcomes["merged-via-lcs"])
         src_skipped = len(r.outcomes["skipped"])
         src_conflicted = len(r.outcomes["conflicted"])
         src_failed = len(r.outcomes["failed"])
@@ -3661,7 +3726,9 @@ def _pull_core(
                 bytes_transferred += per_source.bytes_transferred
                 touched_parents |= per_source.touched_parents
                 total_written += len(per_source.outcomes["written"])
-                total_merged += len(per_source.outcomes["merged"])
+                total_merged += len(per_source.outcomes["merged"]) + len(
+                    per_source.outcomes["merged-via-lcs"]
+                )
                 total_skipped += len(per_source.outcomes["skipped"])
                 total_conflicted += len(per_source.outcomes["conflicted"])
                 total_failed += len(per_source.outcomes["failed"])
@@ -3672,7 +3739,14 @@ def _pull_core(
                 # convergence (no I/O), and logging it would dwarf the
                 # forensic signal in the file. All other outcomes ARE
                 # I/O events worth recording.
-                for action_key in ("written", "merged", "skipped", "conflicted", "failed"):
+                for action_key in (
+                    "written",
+                    "merged",
+                    "merged-via-lcs",
+                    "skipped",
+                    "conflicted",
+                    "failed",
+                ):
                     for rel_path in per_source.outcomes.get(action_key, []):
                         remote_info = src_data.get("files", {}).get(rel_path, {})
                         pullhistory.append(
@@ -3696,7 +3770,10 @@ def _pull_core(
                             device_name=dname,
                             device_id=did,
                             new_files=per_source.outcomes["written"],
-                            modified_files=per_source.outcomes["merged"],
+                            modified_files=(
+                                per_source.outcomes["merged"]
+                                + per_source.outcomes["merged-via-lcs"]
+                            ),
                             deleted_files=[],
                             conflicted_files=per_source.outcomes["conflicted"],
                             skipped_files=per_source.outcomes["skipped"],
@@ -4985,7 +5062,16 @@ def migrate_config(
 # ── log ───────────────────────────────────────────────────────────────
 
 
-_LogAction = Literal["written", "merged", "skipped", "conflicted", "excluded", "uploaded", "failed"]
+_LogAction = Literal[
+    "written",
+    "merged",
+    "merged-via-lcs",
+    "skipped",
+    "conflicted",
+    "excluded",
+    "uploaded",
+    "failed",
+]
 _LogVerb = Literal["pull", "push", "self-upgrade"]
 
 
@@ -5755,6 +5841,7 @@ def _resolve_interactive_loop(
         is_pre_inversion_conflict_filename,
         parse_conflict_device_short,
     )
+    from mind_meld.merge import lcs_merge
 
     devices = devices or []
     resolved = 0
@@ -5832,12 +5919,26 @@ def _resolve_interactive_loop(
         )
 
         try:
-            canonical_text = canonical.read_text(errors="replace").splitlines()
-            cpath_text = cpath.read_text(errors="replace").splitlines()
+            canonical_bytes = canonical.read_bytes()
+            cpath_bytes = cpath.read_bytes()
         except OSError as e:
             console.print(f"  [red]read failed:[/red] {safe_str(e)}")
             failed += 1
             continue
+
+        canonical_text = canonical_bytes.decode("utf-8", errors="replace").splitlines()
+        cpath_text = cpath_bytes.decode("utf-8", errors="replace").splitlines()
+
+        # Try LCS-as-synthetic-base 3-way merge so the (m)erge prompt option
+        # can offer a clean union of additive edits. lcs_merge respects the
+        # inversion-mode argument order so the embedded `<<<<<<< local` /
+        # `>>>>>>> remote` markers stay accurate even on v0- files. Binary
+        # input (NUL byte) returns conflict_count = -1 -- suppress (m).
+        if is_pre_inversion:
+            merged_bytes, merge_conflicts = lcs_merge(cpath_bytes, canonical_bytes)
+        else:
+            merged_bytes, merge_conflicts = lcs_merge(canonical_bytes, cpath_bytes)
+        merge_available = merge_conflicts >= 0
 
         # Banner attribution: pull the device-short out of the conflict
         # filename and look it up against the cached devices list.
@@ -5922,15 +6023,23 @@ def _resolve_interactive_loop(
             console.print("  [dim](files differ but text diff is empty — likely binary)[/dim]")
 
         # Concrete-action prompt copy. Filenames pre-sanitized via safe_str
-        # since render_prompt does plain f-string interpolation.
+        # since render_prompt does plain f-string interpolation. (m)erge
+        # is offered when the LCS attempt succeeded (binary content sets
+        # merge_available=False); the default key flips to (m) when the
+        # merged result is clean -- the user just hits Enter to accept.
         console.print(
             render_prompt(
                 safe_str(canonical.name),
                 safe_str(cpath.name),
                 mode,
+                merge_available=merge_available,
+                merge_conflicts=max(merge_conflicts, 0),
             )
         )
-        choice = typer.prompt("  Choice", default="s", show_default=False).strip().lower()
+        prompt_default = "m" if (merge_available and merge_conflicts == 0) else "s"
+        choice = (
+            typer.prompt("  Choice", default=prompt_default, show_default=False).strip().lower()
+        )
 
         # Backward-compat (v0.9.0 BREAKING): old letters `c` / `f` are still
         # rejected loudly. They encoded directional ambiguity post-inversion
@@ -6012,6 +6121,49 @@ def _resolve_interactive_loop(
                 except OSError as e:
                     console.print(f"  [red]rename failed:[/red] {safe_str(e)}")
                     failed += 1
+        elif choice in ("m", "merge"):
+            # (m)erge accept: write merged_bytes to canonical, drop sidecar.
+            # Refuse silently when merge_available is False -- (m) was not
+            # offered, treat any "m" / "merge" string as skip rather than
+            # writing potentially-empty bytes from the binary-skip branch.
+            if not merge_available:
+                console.print(
+                    "  [dim]merge unavailable for this file; "
+                    "skipped (both files left on disk)[/dim]"
+                )
+            else:
+                try:
+                    fsutil.atomic_write_bytes(canonical, merged_bytes, fsync=False)
+                except (OSError, StorageError) as e:
+                    console.print(
+                        f"  [red]merge write failed:[/red] {safe_str(canonical.name)} — "
+                        f"{safe_str(e)}"
+                    )
+                    failed += 1
+                    continue
+                # Sidecar unlink is best-effort: canonical already holds the
+                # merged bytes, so a unlink failure is cosmetic. Stale
+                # sidecars get reaped by `mm gc --conflicts` (30d TTL).
+                try:
+                    cpath.unlink()
+                except OSError as e:
+                    print(
+                        f"mm: warning: merged result written; sidecar unlink "
+                        f"failed: {safe_str(cpath.name)} — {safe_str(e)}",
+                        file=sys.stderr,
+                    )
+                if merge_conflicts == 0:
+                    console.print(
+                        f"  [cyan]merged[/cyan] {safe_str(canonical.name)} (clean LCS merge)"
+                    )
+                else:
+                    console.print(
+                        f"  [cyan]merged[/cyan] {safe_str(canonical.name)} "
+                        f"(contains {merge_conflicts} <<<<<<< region"
+                        f"{'s' if merge_conflicts != 1 else ''}; "
+                        f"resolve in editor)"
+                    )
+                resolved += 1
         elif choice in ("a", "abort"):
             raise typer.Abort()
         else:

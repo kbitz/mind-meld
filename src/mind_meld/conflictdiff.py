@@ -33,8 +33,11 @@ def render_prompt(
     canonical_name: str,
     conflict_name: str,
     mode: InversionMode,
+    *,
+    merge_available: bool = False,
+    merge_conflicts: int = 0,
 ) -> str:
-    """Return the four-option choice copy for an existing-canonical conflict.
+    """Return the four- or five-option choice copy for a conflict prompt.
 
     ``canonical_name`` and ``conflict_name`` are the bare filenames of the
     two on-disk files. The caller must ``safe_str`` these BEFORE passing
@@ -52,6 +55,14 @@ def render_prompt(
     flips: in post_inversion local-keep is "discard the conflict file",
     while in pre_inversion local-keep is "promote the conflict file
     (which holds local bytes) over canonical."
+
+    ``merge_available`` enables the ``(m)erge`` option line. The caller
+    runs ``mind_meld.merge.lcs_merge`` BEFORE calling this and passes
+    ``merge_available=True`` only when binary content was not detected
+    (``conflict_count >= 0``). ``merge_conflicts`` (0 or positive)
+    annotates the (m) line so the user knows whether the merged
+    candidate is clean or contains ``<<<<<<<`` markers they would have
+    to resolve in a text editor afterward.
     """
     if mode == "post_inversion":
         local_line = f"  (l)ocal   -> discard {conflict_name}, keep {canonical_name} as-is"
@@ -64,14 +75,26 @@ def render_prompt(
             f"  (r)emote  -> discard {conflict_name} (your local edits); "
             f"keep {canonical_name} as-is"
         )
-    return (
-        "[bold]Keep which?[/bold]\n"
-        f"{local_line}\n"
-        f"{remote_line}\n"
-        "  (s)kip    -> leave both files on disk; "
-        "run `mm resolve` later or delete manually\n"
-        "  (a)bort   -> stop reviewing; exit"
+    lines = ["[bold]Keep which?[/bold]"]
+    if merge_available:
+        if merge_conflicts == 0:
+            merge_line = (
+                f"  (m)erge   -> accept LCS-merged result over {canonical_name} (clean, no markers)"
+            )
+        else:
+            merge_line = (
+                f"  (m)erge   -> accept LCS-merged result over {canonical_name} "
+                f"(contains {merge_conflicts} <<<<<<< region"
+                f"{'s' if merge_conflicts != 1 else ''}; resolve in editor after)"
+            )
+        lines.append(merge_line)
+    lines.append(local_line)
+    lines.append(remote_line)
+    lines.append(
+        "  (s)kip    -> leave both files on disk; run `mm resolve` later or delete manually"
     )
+    lines.append("  (a)bort   -> stop reviewing; exit")
+    return "\n".join(lines)
 
 
 def render_banner(

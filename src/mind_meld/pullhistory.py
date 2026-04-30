@@ -10,8 +10,8 @@ object per line. Two row classes share the file:
       "device": "<this device's id>",
       "source": "<source name>",
       "rel_path": "<file's relative path within source>",
-      "action": "written"|"merged"|"skipped"|"conflicted"|"excluded"|
-                "uploaded"|"failed",
+      "action": "written"|"merged"|"merged-via-lcs"|"skipped"|"conflicted"|
+                "excluded"|"uploaded"|"failed",
       "local_sha": "<optional sha256 hex>",
       "remote_sha": "<optional sha256 hex>",
       "sidecar": "<optional sidecar filename if action=conflicted>"
@@ -64,7 +64,16 @@ HISTORY_PATH = HISTORY_DIR / "pull-history.jsonl"
 ROTATED_SUFFIX = ".1"
 _ROTATE_BYTES = 1_000_000  # 1MB cap; rotate at line boundary on next write
 
-Action = Literal["written", "merged", "skipped", "conflicted", "excluded", "uploaded", "failed"]
+Action = Literal[
+    "written",
+    "merged",
+    "merged-via-lcs",
+    "skipped",
+    "conflicted",
+    "excluded",
+    "uploaded",
+    "failed",
+]
 Verb = Literal["pull", "push", "self-upgrade"]
 
 
