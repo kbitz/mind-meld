@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.11.6] - 2026-04-30
+## [0.11.7] - 2026-04-30
 
 **Retro-fleet aggregator no longer conflates foreign-file parse errors
 with mm event corruption; tests no longer pollute the user's real
@@ -59,7 +59,52 @@ into the real `~/.config/mind-meld/pull-history.jsonl`.
   Existing tests that assert on the total continue to pass; new tests
   drill into per-category counts to verify discriminated behavior.
 
+## [0.11.6] - 2026-04-30
 
+**`mm install-skills` — explicit user-facing command for the retro-fleet
+Claude Code skill symlink, plus a drift-aware steady-state gate.** The
+push-time self-heal at `_ensure_retro_skill_link()` already auto-installs
+the symlink and tracks the wheel via `pipx upgrade`, but two gaps showed
+up in the field: (1) no discoverable way to install on demand (e.g. on
+a fresh machine before the first push, or after manual cleanup of an
+old workspace path), and (2) the 24h success-marker silently suppressed
+self-heal when the link drifted out of sync (user removed it by hand,
+pipx venv rebuild at a different path) — the marker promised "link is
+good" without verifying.
+
+### Added
+
+- **`mm install-skills`** — force-runs the installer ignoring the 24h
+  TTL gate. Reports `Installed: <target> -> <skill_src>` on success;
+  exits 1 with an actionable error when the target is a non-mm file or
+  symlink, or when `~/.claude/skills` doesn't exist (no Claude Code
+  installed).
+
+### Changed
+
+- **`_skill_link_check_due()` verifies link state before short-circuiting
+  on a fresh marker.** Returns True when the link is missing, dangling,
+  or pointing somewhere other than our resolved skill source — even if
+  the success marker is fresh. Adds one `lstat` + one `readlink` +
+  `importlib.resources.files()` call to the steady-state push path
+  (negligible). Any I/O or resolver error in the drift check fails open
+  (returns True) so the installer runs and emits its own forensic
+  notice.
+
+### Tests
+
+- `tests/test_skill_link.py::TestSkillLinkCheckDue`: 4 new cases covering
+  fresh-marker-but-link-missing (REGRESSION pin for the post-cleanup
+  recovery bug), fresh-marker-but-link-dangling, fresh-marker-but-link-
+  wrong-target, and resolver-failure fail-open. Existing
+  `test_fresh_marker_means_not_due` updated to also set up a correct
+  symlink — the steady-state gate now requires both conditions.
+- `tests/test_skill_link.py::TestInstallSkillsCommand`: 6 new cases for
+  the new CLI command — creates-when-absent, idempotent-on-correct,
+  self-heals-dangling, errors-on-conflict, errors-when-no-claude-code,
+  and bypasses-TTL-gate.
+
+## [0.11.5] - 2026-04-30
 
 **Pull-time conflict sidecars no longer accumulate across pulls; conflict
 prompt shows the consequential drop count up-front.** Two fixes wrapped
