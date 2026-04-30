@@ -2263,6 +2263,14 @@ def init() -> None:
     # notice; failures are forensic-only.
     _ensure_retro_skill_link(dry_run=False)
 
+    # Init-time event backfill (v0.11.8). Captures the past 30 days of git
+    # commits + a full sessions inventory so retro-fleet works immediately
+    # after init, without waiting for the first push to populate events.
+    # Resolves sources via get_sources() so mm-events bootstraps the events
+    # dir before walk runs. Forensic-only on failure; init proceeds.
+    resolved_sources = get_sources(config)
+    _run_events_backfill(config, resolved_sources, device_id)
+
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
 
 
@@ -2643,6 +2651,76 @@ def _run_events_tail(
             sys.stderr.write("mm: notice: events tail budget exceeded\n")
     except Exception as e:
         sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
+
+
+def _run_events_backfill(
+    config: dict,
+    sources: list[dict],
+    device_id: str,
+) -> None:
+    """Init-time backfill of git+sessions events for the past 30 days.
+
+    Mirrors ``_run_events_tail`` but writes only ``git-snapshot`` and
+    ``sessions-snapshot`` rows — NO ``mm-push`` row. Two consequences:
+
+    * Push-count semantics stay honest: an init-counted-as-push would
+      inflate the per-window mm-push count in the retro by 1 on every
+      fresh-install machine.
+    * The cursor (``last_push_ts``) stays at "no prior mm-push" so the
+      first real push walks the same 30-day range. Aggregator dedups via
+      ``(canonical_remote_url, sha)`` so retro output is unchanged; cost
+      is one extra ~500ms ``git log`` walk on the first push, paid once
+      per machine.
+
+    Idempotent at the aggregator layer (commits dedup; sessions latest-
+    per-tuple wins). Forensic-only on failure: stderr breadcrumb, init
+    proceeds.
+    """
+    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if mm_events_src is None:
+        return
+    try:
+        budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
+        deadline = time.monotonic() + budget_ms / 1000.0
+        events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+
+        # Explicit 30-day window. last_push_ts() returns the same value
+        # on first run, but stating intent at the call site makes the
+        # backfill semantics legible without chasing a default.
+        since = datetime.now(timezone.utc) - timedelta(days=events.INITIAL_CURSOR_LOOKBACK_DAYS)
+
+        roots, _errs = events.discover_git_roots(config)
+        g_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
+        for r in g_rows:
+            r["device"] = device_id
+
+        claude_paths = _enabled_claude_paths(sources)
+        agg_projects: list[dict] = []
+        for claude_dir in claude_paths:
+            for row in events.walk_session_metadata(
+                claude_dir, since=since, deadline_monotonic=deadline
+            ):
+                agg_projects.extend(row.get("projects", []))
+        s_rows: list[dict] = []
+        if claude_paths:
+            s_rows.append(
+                {
+                    "v": events.EVENTS_SCHEMA_VERSION,
+                    "type": "sessions-snapshot",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "device": device_id,
+                    "projects": agg_projects,
+                }
+            )
+
+        rows_to_write = [*g_rows, *s_rows]
+        if rows_to_write:
+            events.write_push_event(events_dir, device_id, rows_to_write)
+
+        if time.monotonic() > deadline:
+            sys.stderr.write("mm: notice: events backfill budget exceeded\n")
+    except Exception as e:
+        sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")
 
 
 def _push_core(

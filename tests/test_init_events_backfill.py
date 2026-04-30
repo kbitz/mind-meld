@@ -1,0 +1,249 @@
+"""Tests for the init-time event backfill (v0.11.8).
+
+`_run_events_backfill` runs at the END of ``mm init`` and writes a 30-day
+git-snapshot + sessions-snapshot to the local events file, but NO mm-push
+event (push counts stay honest; first real push sets the cursor).
+
+These tests pin the helper directly. The init wiring itself is exercised
+by the existing TestInitFlow integration suite — adding a second runner-
+based path here would fight ``~/.claude`` defaults that the existing tests
+already navigate around.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from mind_meld import cli as cli_module
+from mind_meld import events
+
+
+def _read_events(events_file: Path) -> list[dict]:
+    return [json.loads(ln) for ln in events_file.read_text().splitlines() if ln.strip()]
+
+
+def _make_git_repo(repo_dir: Path) -> None:
+    """Create a minimal local git repo with one commit so walk_git_projects
+    has something real to capture."""
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_dir, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo_dir, check=True)
+    (repo_dir / "README.md").write_text("hi\n")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo_dir, check=True)
+
+
+def _seed_claude_with_repo(claude_dir: Path, repo_dir: Path) -> None:
+    """Write a session jsonl whose ``cwd`` field points at a real git repo
+    so ``_probe_claude`` returns the repo as a discoverable root."""
+    proj_dir = claude_dir / "projects" / "-test-repo"
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    (proj_dir / "session.jsonl").write_text(
+        json.dumps({"cwd": str(repo_dir), "type": "user"}) + "\n"
+    )
+
+
+def _make_sources(events_root: Path, claude_dir: Path | None) -> list[dict]:
+    """Construct the resolved-sources list shape that `_run_events_backfill`
+    expects (output of ``get_sources(config)``)."""
+    sources: list[dict] = []
+    if claude_dir is not None:
+        sources.append({"name": "claude", "path": str(claude_dir), "type": "claude"})
+    sources.append(
+        {
+            "name": "mm-events",
+            "path": str(events_root),
+            "type": "generic",
+            "include_dirs": ["events"],
+            "exclude_patterns": [],
+        }
+    )
+    return sources
+
+
+class TestRunEventsBackfill:
+    def test_writes_git_and_sessions_snapshots_no_mm_push(self, tmp_path):
+        """Happy path: backfill writes one git-snapshot + one sessions-
+        snapshot row to the events file. NO mm-push row — the cursor stays
+        at "no prior push" so the first real push re-walks the same window
+        (aggregator dedups via canonical_remote_url + sha)."""
+        events_root = tmp_path / "events_root"
+        claude_dir = tmp_path / ".claude"
+        repo = tmp_path / "myrepo"
+        _make_git_repo(repo)
+        _seed_claude_with_repo(claude_dir, repo)
+
+        sources = _make_sources(events_root, claude_dir)
+        config = {"sync": {"sources": sources}}
+
+        cli_module._run_events_backfill(config, sources, "dev-a")
+
+        files = sorted((events_root / "events").glob("*.jsonl"))
+        assert len(files) == 1, "exactly one events file expected"
+        rows = _read_events(files[0])
+
+        types = [r["type"] for r in rows]
+        assert "git-snapshot" in types
+        assert "sessions-snapshot" in types
+        assert "mm-push" not in types, (
+            "backfill must not write an mm-push row — keeps push counts honest "
+            "and lets the first real push set the cursor"
+        )
+        for r in rows:
+            assert r["device"] == "dev-a"
+
+    def test_skipped_when_mm_events_source_absent(self, tmp_path):
+        """An un-migrated config (pre-v0.10.1, no mm-events source) must
+        no-op silently. No events_root materialized."""
+        events_root = tmp_path / "events_root"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(parents=True)
+
+        # mm-events source NOT in the list.
+        sources = [{"name": "claude", "path": str(claude_dir), "type": "claude"}]
+        config: dict = {"sync": {"sources": sources}}
+
+        cli_module._run_events_backfill(config, sources, "dev-a")
+
+        assert not (events_root / "events").exists(), (
+            "backfill must not create an events tree when mm-events is absent from sources"
+        )
+
+    def test_failure_breadcrumb_does_not_raise(self, tmp_path, monkeypatch, capsys):
+        """Forensic-only invariant (mirrors `_run_events_tail`): an exception
+        from ``discover_git_roots`` (or any inner walk) is swallowed and a
+        single ``mm: notice:`` line goes to stderr. The caller (``mm init``)
+        proceeds."""
+        events_root = tmp_path / "events_root"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir(parents=True)
+        sources = _make_sources(events_root, claude_dir)
+        config = {"sync": {"sources": sources}}
+
+        def boom(_config):
+            raise RuntimeError("synthetic walk failure")
+
+        monkeypatch.setattr(cli_module.events, "discover_git_roots", boom)
+
+        # Must not raise.
+        cli_module._run_events_backfill(config, sources, "dev-a")
+
+        captured = capsys.readouterr()
+        assert "mm: notice: events backfill failed" in captured.err
+        assert "RuntimeError" in captured.err
+        # No events file written when discovery itself blew up.
+        assert not (events_root / "events").exists()
+
+    def test_no_claude_sources_writes_git_only(self, tmp_path):
+        """A config with only mm-events (no claude) → backfill writes a
+        git-snapshot row but NO sessions-snapshot row. Mirrors the existing
+        ``_run_events_tail`` shape."""
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None)
+        config = {"sync": {"sources": sources}}
+
+        cli_module._run_events_backfill(config, sources, "dev-a")
+
+        files = sorted((events_root / "events").glob("*.jsonl"))
+        assert len(files) == 1
+        rows = _read_events(files[0])
+        types = [r["type"] for r in rows]
+        assert "sessions-snapshot" not in types
+        # walk_git_projects always returns one snapshot (possibly with empty
+        # projects list) — matches the tail's behavior.
+        assert "git-snapshot" in types
+        assert "mm-push" not in types
+
+    def test_backfill_uses_30_day_window(self, tmp_path, monkeypatch):
+        """The since= passed to walk_git_projects must be exactly
+        ``now - INITIAL_CURSOR_LOOKBACK_DAYS``. Pins the explicit-since
+        contract — the backfill MUST NOT read ``last_push_ts`` (which
+        would also default to now-30d on first run, but the explicit
+        since at the call site is what makes the backfill semantics
+        legible vs accidental)."""
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None)
+        config = {"sync": {"sources": sources}}
+
+        captured: dict = {}
+
+        def fake_walk(roots, since, total_budget_ms):
+            captured["since"] = since
+            return [
+                {
+                    "v": events.EVENTS_SCHEMA_VERSION,
+                    "type": "git-snapshot",
+                    "ts": "2026-01-01T00:00:00+00:00",
+                    "device": "",
+                    "projects": [],
+                    "skipped": [],
+                }
+            ]
+
+        monkeypatch.setattr(cli_module.events, "walk_git_projects", fake_walk)
+        monkeypatch.setattr(cli_module.events, "discover_git_roots", lambda _c: ([], []))
+
+        cli_module._run_events_backfill(config, sources, "dev-a")
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        since = captured["since"]
+        # Within a few seconds of now-30d.
+        delta = (now - since).total_seconds()
+        target = events.INITIAL_CURSOR_LOOKBACK_DAYS * 86400
+        assert abs(delta - target) < 60, (
+            f"since must be ~now-30d, got delta={delta}s vs target={target}s"
+        )
+
+
+class TestInitWiring:
+    """Smoke test that ``init`` actually calls ``_run_events_backfill``.
+
+    The full TestInitFlow suite already exercises init end-to-end; we just
+    need to confirm the wiring is present so a refactor that drops the
+    call site fails loudly."""
+
+    def test_init_calls_run_events_backfill(self, tmp_path, monkeypatch):
+        """Stub the backfill helper, drive ``mm init`` via the runner,
+        assert the helper was called once with the right device_id."""
+        from typer.testing import CliRunner
+
+        from mind_meld.cli import app
+
+        runner = CliRunner()
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
+
+        calls: list[tuple] = []
+
+        def stub_backfill(config, sources, device_id):
+            calls.append((config["device"]["id"], device_id, len(sources)))
+
+        monkeypatch.setattr("mind_meld.cli._run_events_backfill", stub_backfill)
+        # Stub the skill link installer too — irrelevant to this test and
+        # avoids touching ~/.claude.
+        monkeypatch.setattr("mind_meld.cli._ensure_retro_skill_link", lambda dry_run=False: None)
+
+        storage = tmp_path / "icloud"
+        # storage path, device name, passphrase x2, claude=Y, gstack=n
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+
+        assert len(calls) == 1, "init must call _run_events_backfill exactly once"
+        cfg_dev_id, called_dev_id, n_sources = calls[0]
+        assert cfg_dev_id == called_dev_id, "device_id must match config"
+        assert n_sources >= 1, "sources list must not be empty"
+
+
+if __name__ == "__main__":  # pragma: no cover
+    pytest.main([__file__, "-v"])

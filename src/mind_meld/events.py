@@ -12,14 +12,24 @@ The events log itself is the cursor (no separate cursor file): the most
 recent `mm-push` event's `ts` answers "since when do I scan?" on the next
 push. Pattern matches `pullhistory.py` (the log file is the state of truth).
 
-Local-write semantics. Events written at push tail are local-only until the
-NEXT push: the current push's manifest+blobs were already uploaded before
-this code runs. Forensic data is allowed one-push lag.
+Same-push upload semantics. Track 7B's wiring runs the events tail at the
+HEAD of `_push_core` (BEFORE `build_manifest_v2`), so the just-written
+events file IS picked up by the manifest build and uploaded as part of the
+SAME push. (Pre-Track-7B prototypes ran a true tail-position write that
+required next-push lag; the production wiring eliminated that lag — see
+CLAUDE.md "Events tail in _push_core" for the locked invariants.)
 
 Trust boundary. Track 7B's `_push_core` wiring MUST run the events tail on
 EVERY push attempt, including no-content-diff early returns. Without it,
 machines that push regularly but rarely change content silently never
 advance their cursor and never appear in fleet retros.
+
+Init-time backfill. cli.py's `_run_events_backfill` runs at the end of
+`mm init` and writes a 30-day git-snapshot + full sessions-snapshot, but
+NO mm-push event. Lets retro-fleet work immediately after init without
+waiting for the first push. The aggregator dedups commits via
+(canonical_remote_url, sha), so the first real push re-walking the same
+30-day window is harmless.
 
 Schema (v=1, total=False — forward-compat readers tolerate unknown fields):
 see TypedDict definitions below.
