@@ -67,6 +67,27 @@ def _isolate_devices_write_lock(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_devices, "DEVICES_WRITE_LOCK", tmp_path / "devices-write.lock")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
+    """Redirect pullhistory.HISTORY_DIR to a per-test path.
+
+    `pullhistory.append` writes to `~/.config/mind-meld/pull-history.jsonl`
+    by default. Tests that drive the CLI (test_track_*, test_integration)
+    end up calling `_pull_core` / `_push_core`, which call
+    `pullhistory.append` with the test's fixture device id (e.g. "dev-a",
+    "peerA"). Without this autouse, the lines leak into the user's real
+    pull-history file — observed as ~1MB of fixture-named entries
+    accumulating from CI / local pytest runs.
+
+    `pullhistory.history_path()` reads `HISTORY_DIR` at call time, so a
+    single setattr suffices. Per-test overrides via explicit monkeypatch
+    in test bodies still work — last write wins.
+    """
+    from mind_meld import pullhistory as _pullhistory
+
+    monkeypatch.setattr(_pullhistory, "HISTORY_DIR", tmp_path / "mm_state")
+
+
 @pytest.fixture
 def test_root_salt() -> bytes:
     """Exported for tests that need the fixture's root_salt explicitly."""

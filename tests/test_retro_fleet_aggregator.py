@@ -589,6 +589,122 @@ class TestVisibleFailures:
         out = aggregator.format_retro(data)
         assert "1 event(s) skipped" in out
 
+    def test_skip_categories_tracked_separately(self, tmp_path):
+        """Per-source skip counters discriminate mm events vs gstack files
+        — a torn gstack file shouldn't read as 'mm events skipped'."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # One torn line in mm events.
+        ev_path = events_dir / "dev-a-2026-04-28.jsonl"
+        ev_path.write_text("not json\n" + json.dumps(_push_event("dev-a", 0)) + "\n")
+        # Two malformed records in skill-usage.
+        skill_path = tmp_path / "skill-usage.jsonl"
+        skill_path.write_text("not json line 1\nalso not json\n")
+        # Three malformed records in eureka.
+        eureka_path = tmp_path / "eureka.jsonl"
+        eureka_path.write_text("garbage 1\ngarbage 2\ngarbage 3\n")
+        data = _aggregate(events_dir, skill_usage_path=skill_path, eureka_path=eureka_path)
+        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EVENTS) == 1
+        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_SKILL_USAGE) == 2
+        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EUREKA) == 3
+        assert data.skipped_lines == 6  # backward-compat sum
+
+    def test_per_source_breadcrumbs_name_the_file(self, tmp_path):
+        """format_retro renders one breadcrumb per affected file so the user
+        knows where to look — pre-fix all skips were lumped under
+        'event(s) skipped due to parse errors' regardless of source."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        skill_path = tmp_path / "skill-usage.jsonl"
+        skill_path.write_text("garbage\n")
+        eureka_path = tmp_path / "eureka.jsonl"
+        eureka_path.write_text("more garbage\n")
+        data = _aggregate(events_dir, skill_usage_path=skill_path, eureka_path=eureka_path)
+        out = aggregator.format_retro(data)
+        assert "skill-usage.jsonl" in out
+        assert "eureka.jsonl" in out
+        assert "gstack file format issue, not mm" in out
+        # No mm-events skips in this scenario — the mm-events breadcrumb
+        # must NOT fire (the user's bug report was the inverse: gstack
+        # parse errors masquerading as mm event corruption).
+        assert "skipped due to parse errors in mm event log" not in out
+
+    def test_pretty_printed_json_in_eureka_recovered(self, tmp_path):
+        """Some gstack tools have written multi-line pretty-printed JSON to
+        eureka.jsonl. The tolerant stream reader recovers those records via
+        raw_decode walk; only truly malformed chunks bump the skip counter.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        eureka_path = tmp_path / "eureka.jsonl"
+        # Three pretty-printed JSON objects with no JSONL formatting.
+        eureka_path.write_text(
+            '{\n  "insight": "first",\n  "ts": "2026-04-25T00:00:00Z"\n}\n'
+            '{\n  "insight": "second",\n  "ts": "2026-04-26T00:00:00Z"\n}\n'
+            '{\n  "insight": "third",\n  "ts": "2026-04-27T00:00:00Z"\n}\n'
+        )
+        data = _aggregate(events_dir, eureka_path=eureka_path)
+        # All three insights recovered from the multi-line format.
+        assert len(data.eureka.moments) == 3
+        # No skips — the file isn't JSONL but it IS valid JSON values.
+        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EUREKA, 0) == 0
+
+    def test_pretty_printed_json_in_skill_usage_recovered(self, tmp_path):
+        """Symmetric to the eureka case — skill-usage.jsonl uses the same
+        tolerant reader, so multi-line pretty JSON must recover cleanly
+        there too. Without this test, a regression in the skills parser
+        could ship unnoticed."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        skill_path = tmp_path / "skill-usage.jsonl"
+        skill_path.write_text(
+            '{\n  "skill": "ship",\n  "ts": "2026-04-26T00:00:00Z"\n}\n'
+            '{\n  "skill": "review",\n  "ts": "2026-04-27T00:00:00Z"\n}\n'
+        )
+        data = _aggregate(events_dir, skill_usage_path=skill_path)
+        assert data.skills.invocations == 2
+        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_SKILL_USAGE, 0) == 0
+
+    def test_breadcrumb_names_actual_path_not_hardcoded(self, tmp_path):
+        """Breadcrumbs must name the actual path passed to aggregate(), not
+        a hardcoded ~/.gstack/analytics/... pointer that misleads callers
+        using custom analytics paths."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        skill_path = tmp_path / "custom-skills.jsonl"
+        skill_path.write_text("garbage\n")
+        data = _aggregate(events_dir, skill_usage_path=skill_path)
+        out = aggregator.format_retro(data)
+        assert str(skill_path) in out
+        assert "~/.gstack/analytics/skill-usage.jsonl" not in out
+
+    def test_oversized_gstack_file_skipped_without_slurp(self, tmp_path, monkeypatch):
+        """A runaway gstack analytics file beyond JSON_STREAM_MAX_BYTES
+        must surface as a skip rather than spike aggregator memory. We
+        simulate by lowering the cap and writing a small file just above it.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        eureka_path = tmp_path / "eureka.jsonl"
+        eureka_path.write_text('{"insight":"x","ts":"2026-04-27T00:00:00Z"}\n' * 50)
+        monkeypatch.setattr(aggregator, "JSON_STREAM_MAX_BYTES", 100)
+        data = _aggregate(events_dir, eureka_path=eureka_path)
+        assert data.eureka.moments == []
+        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EUREKA, 0) == 1
+
+    def test_legacy_retrodata_with_skipped_lines_only_renders_breadcrumb(self):
+        """Backward-compat: a manually-constructed RetroData with
+        skipped_lines but no skipped_per_source still surfaces a breadcrumb
+        — preserves the visible-failure contract for foreign callers."""
+        data = aggregator.RetroData(
+            window_days=7,
+            since=NOW - timedelta(days=7),
+            until=NOW,
+            skipped_lines=4,
+        )
+        out = aggregator.format_retro(data)
+        assert "4 record(s) skipped" in out
+
     def test_window_exceeds_retention_breadcrumb(self, tmp_path):
         """`/retro-fleet 365d` → output warns that 90d retention truncates."""
         events_dir = tmp_path / "events"

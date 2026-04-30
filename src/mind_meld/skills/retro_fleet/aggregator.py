@@ -83,6 +83,11 @@ TOP_N_REPOS = 5
 TOP_N_PROJECTS = 5
 TOP_N_SKILLS = 10
 
+JSON_STREAM_MAX_BYTES = 50 * 1024 * 1024
+"""Cap on the foreign-format reader's whole-file slurp. Mirrors mm's default
+``max_file_size``. A runaway gstack analytics file beyond this is treated as
+unparseable rather than slurped into memory — the breadcrumb still surfaces."""
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses — everything is structured so format_retro() can render
@@ -140,6 +145,16 @@ class FleetState:
     devices_known_list: list[dict] = field(default_factory=list)
 
 
+# Skip-counter category keys. Kept as constants so call-sites stay
+# consistent and `format_retro` can map each category to a specific
+# breadcrumb message. "events" covers mm-owned event JSONLs (real data
+# quality signal); "skill_usage" / "eureka" cover gstack-owned analytics
+# files (foreign data, format may diverge from JSONL).
+SKIP_CATEGORY_EVENTS = "events"
+SKIP_CATEGORY_SKILL_USAGE = "skill_usage"
+SKIP_CATEGORY_EUREKA = "eureka"
+
+
 @dataclass
 class RetroData:
     window_days: int
@@ -151,7 +166,20 @@ class RetroData:
     skills: SkillsAggregate = field(default_factory=SkillsAggregate)
     eureka: EurekaAggregate = field(default_factory=EurekaAggregate)
     fleet: FleetState = field(default_factory=FleetState)
-    skipped_lines: int = 0  # TODO#1 visible-failure breadcrumb
+    # Per-category skip counters. Discriminates mm-owned event parse errors
+    # (real data quality signal) from gstack-owned analytics format issues
+    # (foreign file format, gstack's bug to fix). format_retro renders one
+    # breadcrumb per non-zero entry, naming the affected file.
+    skipped_per_source: dict[str, int] = field(default_factory=dict)
+    # Backwards-compat summed view. Equals sum(skipped_per_source.values()).
+    # Pre-existing tests assert on this field; new tests should drill into
+    # skipped_per_source to verify category-specific behavior.
+    skipped_lines: int = 0
+    # Actual paths used for foreign-format readers — threaded into the
+    # breadcrumb so a custom skill_usage_path / eureka_path renders honestly
+    # instead of always pointing at ~/.gstack/analytics/...
+    skill_usage_path: Path | None = None
+    eureka_path: Path | None = None
     window_exceeds_retention: bool = False  # TODO#2 visible-failure breadcrumb
 
 
@@ -160,24 +188,24 @@ class RetroData:
 # ---------------------------------------------------------------------------
 
 
-def _iter_jsonl(path: Path, *, skip_counter: list[int]) -> Iterator[dict]:
-    """Yield each parseable JSON object from a JSONL file.
+def _bump(skip_counter: dict[str, int], category: str, n: int = 1) -> None:
+    skip_counter[category] = skip_counter.get(category, 0) + n
 
+
+def _iter_jsonl(path: Path, *, skip_counter: dict[str, int], category: str) -> Iterator[dict]:
+    """Yield each parseable JSON object from a strict JSONL file.
+
+    Used for mm-owned event files (events.py guarantees one JSON object
+    per line, single-line, no trailing whitespace beyond a newline).
     Tolerant of: missing file (yields nothing, counted as skip), per-line
     decode errors (skipped, counted), invalid UTF-8 bytes (replaced via
     ``errors="replace"`` so the file still parses), empty lines, non-dict
     objects (skipped, counted). Never raises.
-
-    Adversarial-review fixes:
-    * ``errors="replace"`` so a corrupt-byte sequence in one line doesn't
-      raise UnicodeDecodeError and crash the whole retro.
-    * File-level open failures bump ``skip_counter`` instead of being
-      silently invisible (visible-failure contract).
     """
     try:
         f = open(path, encoding="utf-8", errors="replace")
     except OSError:
-        skip_counter[0] += 1
+        _bump(skip_counter, category)
         return
     with f:
         for line in f:
@@ -187,15 +215,67 @@ def _iter_jsonl(path: Path, *, skip_counter: list[int]) -> Iterator[dict]:
             try:
                 obj = json.loads(stripped)
             except json.JSONDecodeError:
-                skip_counter[0] += 1
+                _bump(skip_counter, category)
                 continue
             if not isinstance(obj, dict):
-                skip_counter[0] += 1
+                _bump(skip_counter, category)
                 continue
             yield obj
 
 
-def _read_events(events_dir: Path, *, skip_counter: list[int]) -> Iterator[dict]:
+def _iter_json_stream(path: Path, *, skip_counter: dict[str, int], category: str) -> Iterator[dict]:
+    """Yield JSON objects from a file that may be JSONL or multi-line JSON.
+
+    Used for gstack-owned analytics files where the on-disk format isn't
+    fully under mm's control. Reads the whole file as text, then walks it
+    with ``json.JSONDecoder.raw_decode`` — handles single-line-per-object
+    (canonical JSONL) AND pretty-printed objects spanning multiple lines.
+    On a malformed chunk, advances to the next newline and retries (so a
+    single broken record doesn't poison the rest of the file).
+
+    Each parseable dict is yielded; non-dict values, malformed chunks,
+    and file-open failures bump ``skip_counter[category]``. Never raises.
+
+    Files larger than ``JSON_STREAM_MAX_BYTES`` bump the skip counter and
+    return without slurping — protects against a runaway analytics file
+    spiking aggregator memory.
+    """
+    try:
+        if path.stat().st_size > JSON_STREAM_MAX_BYTES:
+            _bump(skip_counter, category)
+            return
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        _bump(skip_counter, category)
+        return
+    decoder = json.JSONDecoder()
+    pos = 0
+    n = len(text)
+    while pos < n:
+        while pos < n and text[pos].isspace():
+            pos += 1
+        if pos >= n:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            # Skip the unparseable chunk. Advance to the next newline so
+            # one bad record doesn't suppress the rest of the file. If no
+            # newline remains, the rest of the file is unrecoverable.
+            nl = text.find("\n", pos)
+            _bump(skip_counter, category)
+            if nl == -1:
+                return
+            pos = nl + 1
+            continue
+        if isinstance(obj, dict):
+            yield obj
+        else:
+            _bump(skip_counter, category)
+        pos = end
+
+
+def _read_events(events_dir: Path, *, skip_counter: dict[str, int]) -> Iterator[dict]:
     """Iterate every line of every ``*.jsonl`` under ``events_dir``.
 
     Per-file tolerance: an unreadable file bumps the skip counter and
@@ -208,24 +288,28 @@ def _read_events(events_dir: Path, *, skip_counter: list[int]) -> Iterator[dict]
     try:
         files = sorted(events_dir.glob("*.jsonl"))
     except OSError:
-        skip_counter[0] += 1
+        _bump(skip_counter, SKIP_CATEGORY_EVENTS)
         return
     for f in files:
-        yield from _iter_jsonl(f, skip_counter=skip_counter)
+        yield from _iter_jsonl(f, skip_counter=skip_counter, category=SKIP_CATEGORY_EVENTS)
 
 
-def _read_skill_usage(path: Path, *, skip_counter: list[int]) -> tuple[bool, list[dict]]:
+def _read_skill_usage(path: Path, *, skip_counter: dict[str, int]) -> tuple[bool, list[dict]]:
     """Return (available, events). available=False when the file is absent
     (no gstack on this machine — section omitted from output)."""
     if not path.is_file():
         return False, []
-    return True, list(_iter_jsonl(path, skip_counter=skip_counter))
+    return True, list(
+        _iter_json_stream(path, skip_counter=skip_counter, category=SKIP_CATEGORY_SKILL_USAGE)
+    )
 
 
-def _read_eureka(path: Path, *, skip_counter: list[int]) -> tuple[bool, list[dict]]:
+def _read_eureka(path: Path, *, skip_counter: dict[str, int]) -> tuple[bool, list[dict]]:
     if not path.is_file():
         return False, []
-    return True, list(_iter_jsonl(path, skip_counter=skip_counter))
+    return True, list(
+        _iter_json_stream(path, skip_counter=skip_counter, category=SKIP_CATEGORY_EUREKA)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -692,9 +776,10 @@ def aggregate(
     until = now or datetime.now(timezone.utc)
     since = until - timedelta(days=window_days)
 
-    # Single skip counter shared across all readers — surfaces in the tail
-    # breadcrumb regardless of which file produced parse errors.
-    skip_counter = [0]
+    # Per-category skip counters. Discriminates mm-owned event parse errors
+    # from gstack-owned analytics format issues so the tail breadcrumb can
+    # name the affected file instead of conflating them under one count.
+    skip_counter: dict[str, int] = {}
 
     events = list(_read_events(events_dir, skip_counter=skip_counter))
     skill_avail, skill_events = _read_skill_usage(skill_usage_path, skip_counter=skip_counter)
@@ -729,7 +814,10 @@ def aggregate(
             devices_known=devices_known,
             devices_known_list=devices_known_list,
         ),
-        skipped_lines=skip_counter[0],
+        skipped_per_source=dict(skip_counter),
+        skipped_lines=sum(skip_counter.values()),
+        skill_usage_path=skill_usage_path,
+        eureka_path=eureka_path,
         window_exceeds_retention=window_days > EVENTS_RETENTION_DAYS,
     )
 
@@ -853,10 +941,37 @@ def format_retro(data: RetroData) -> str:
         )
     lines.append("")
 
-    # Tail breadcrumbs (TODO#1, TODO#2 visible-failure contract).
-    if data.skipped_lines:
+    # Tail breadcrumbs (TODO#1, TODO#2 visible-failure contract). One line
+    # per affected file so the user knows where to look — conflating mm
+    # events with foreign gstack files under one count was misleading.
+    n_events = data.skipped_per_source.get(SKIP_CATEGORY_EVENTS, 0)
+    n_skill = data.skipped_per_source.get(SKIP_CATEGORY_SKILL_USAGE, 0)
+    n_eureka = data.skipped_per_source.get(SKIP_CATEGORY_EUREKA, 0)
+    if n_events:
         lines.append(
-            f"*Note: {data.skipped_lines} event(s) skipped due to parse errors. "
+            f"*Note: {n_events} event(s) skipped due to parse errors in mm event log. "
+            f"Output may be incomplete.*"
+        )
+    if n_skill:
+        skill_label = str(data.skill_usage_path) if data.skill_usage_path else "skill-usage.jsonl"
+        lines.append(
+            f"*Note: {n_skill} record(s) skipped in {skill_label} "
+            f"(gstack file format issue, not mm).*"
+        )
+    if n_eureka:
+        eureka_label = str(data.eureka_path) if data.eureka_path else "eureka.jsonl"
+        lines.append(
+            f"*Note: {n_eureka} record(s) skipped in {eureka_label} "
+            f"(gstack file format issue, not mm).*"
+        )
+    # Backward-compat fallback: a manually-constructed RetroData with
+    # skipped_lines set but no per-source breakdown (older callers, tests
+    # constructing RetroData directly) would otherwise render no breadcrumb
+    # at all. Aggregate() always populates per-source so this only fires
+    # for foreign callers — keeps the visible-failure contract intact.
+    if not data.skipped_per_source and data.skipped_lines:
+        lines.append(
+            f"*Note: {data.skipped_lines} record(s) skipped due to parse errors. "
             f"Output may be incomplete.*"
         )
     if data.window_exceeds_retention:

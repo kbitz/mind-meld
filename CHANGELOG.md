@@ -2,6 +2,63 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.7] - 2026-04-30
+
+**Retro-fleet aggregator no longer conflates foreign-file parse errors
+with mm event corruption; tests no longer pollute the user's real
+pull-history.** Two diagnostic-quality fixes for the retro-fleet skill.
+The aggregator's tail breadcrumb used to render `N event(s) skipped due
+to parse errors` regardless of which file failed — pointing the user at
+mm-owned data when the actual culprit was a malformed
+`~/.gstack/analytics/eureka.jsonl`. The breadcrumb now names the
+affected file and labels the cause (mm vs gstack). Independently, an
+autouse pytest fixture redirects `pullhistory.HISTORY_DIR` to a tmp
+path so test fixture device names (`dev-a`, `peerA`, etc.) stop leaking
+into the real `~/.config/mind-meld/pull-history.jsonl`.
+
+### Added
+
+- **`_iter_json_stream` tolerant reader (aggregator.py).** Walks files
+  with `json.JSONDecoder.raw_decode` so multi-line pretty-printed JSON
+  parses cleanly alongside canonical JSONL. Used for foreign-format
+  gstack files (`skill-usage.jsonl`, `eureka.jsonl`) where the on-disk
+  format isn't fully under mm's control. Bad chunks advance to the next
+  newline and recovery continues — one broken record doesn't poison the
+  rest of the file.
+- **`JSON_STREAM_MAX_BYTES = 50 MB` cap on the foreign reader.** A
+  runaway gstack file beyond the cap surfaces as a skip rather than
+  slurping into memory. Mirrors mm's default `max_file_size`.
+- **`SKIP_CATEGORY_*` constants.** Three categories — `events`,
+  `skill_usage`, `eureka` — keyed into the per-source skip counter so
+  call sites stay consistent and the breadcrumb maps each category to a
+  specific message naming the affected file.
+- **`RetroData.skipped_per_source: dict[str, int]`,
+  `skill_usage_path`, `eureka_path` fields.** Per-category breakdown
+  exposes the skip distribution; the path fields thread the actual
+  configured paths through to `format_retro` so breadcrumbs name the
+  real file even when callers use custom analytics paths.
+- **`_isolate_pullhistory` autouse fixture (tests/conftest.py).**
+  Redirects `pullhistory.HISTORY_DIR` to a per-test tmp path so
+  `pullhistory.append` calls during CLI-driven tests stop polluting the
+  user's real history. Mirrors the existing `_isolate_devices_write_lock`
+  pattern. Per-test override via explicit monkeypatch still works.
+
+### Changed
+
+- **`format_retro` renders one breadcrumb per affected source.** Was a
+  single `N event(s) skipped due to parse errors` line regardless of
+  source. Now renders up to three lines, each naming the actual file
+  and labeling the cause (`gstack file format issue, not mm` for
+  foreign files). A backward-compat fallback keeps the contract for
+  manually-constructed `RetroData` with `skipped_lines` set but no
+  per-source breakdown.
+- **`_read_skill_usage` / `_read_eureka` route through the tolerant
+  reader.** `_read_events` keeps the strict JSONL reader because
+  `events.py` writes pure single-line JSONL.
+- **`RetroData.skipped_lines` is now the sum of `skipped_per_source`.**
+  Existing tests that assert on the total continue to pass; new tests
+  drill into per-category counts to verify discriminated behavior.
+
 ## [0.11.6] - 2026-04-30
 
 **`mm install-skills` — explicit user-facing command for the retro-fleet
