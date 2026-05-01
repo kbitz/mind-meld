@@ -245,5 +245,63 @@ class TestInitWiring:
         assert n_sources >= 1, "sources list must not be empty"
 
 
+class TestEventsDirIsolation:
+    """Regression pin for the conftest `_isolate_mm_events_path` fixture.
+
+    Pre-fixture, runner-driven `mm init` tests wrote backfilled events to
+    the user's real `~/.local/share/mind-meld/events/<random-id>-<date>
+    .jsonl` because `DEFAULT_SOURCES['mm-events'].path` was unmodified.
+    Observed as 30+ phantom device-id files accumulating from local pytest
+    runs after v0.11.8 shipped the init backfill — phantoms then inflated
+    retro-fleet's `M of N known machines` header to absurd values.
+    """
+
+    def test_default_mm_events_path_is_redirected(self):
+        """The autouse fixture must redirect DEFAULT_SOURCES['mm-events']
+        away from `~/.local/share/mind-meld`. Bare assertion — the fixture
+        runs before this test body."""
+        from mind_meld.config import DEFAULT_SOURCES
+
+        target = next(s for s in DEFAULT_SOURCES if s.get("name") == "mm-events")
+        path = str(target["path"])
+        assert "_isolated_mm_events" in path, (
+            f"mm-events path should be redirected to per-test tmp; got {path}"
+        )
+        assert not path.startswith("~/"), "redirected path must already be expanded"
+
+    def test_runner_init_does_not_touch_real_events_dir(self, tmp_path, monkeypatch):
+        """Drive `mm init` end-to-end via the runner and verify no events
+        file is written to `~/.local/share/mind-meld/events/`. Pinned
+        without stubbing `_run_events_backfill` so the leak is caught
+        at the fixture layer rather than the call-site layer."""
+        from typer.testing import CliRunner
+
+        from mind_meld.cli import app
+
+        runner = CliRunner()
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
+        monkeypatch.setattr("mind_meld.cli._ensure_retro_skill_link", lambda dry_run=False: None)
+
+        # Snapshot the real events dir pre-init so we can compare.
+        real_dir = Path.home() / ".local" / "share" / "mind-meld" / "events"
+        before = set(real_dir.glob("*.jsonl")) if real_dir.is_dir() else set()
+
+        storage = tmp_path / "icloud"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+
+        after = set(real_dir.glob("*.jsonl")) if real_dir.is_dir() else set()
+        leaked = after - before
+        assert not leaked, (
+            f"runner-driven init wrote {len(leaked)} events file(s) to the real "
+            f"events dir: {sorted(p.name for p in leaked)}. The autouse "
+            f"`_isolate_mm_events_path` fixture is not redirecting correctly."
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

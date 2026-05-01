@@ -2,6 +2,108 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.10] - 2026-05-01
+
+**Retro-fleet now counts the work you actually did and stops being inflated
+by test-leaked phantom devices.** Three independent fixes that were stacking
+on each other to make retros look broken:
+
+- Tests that drove `mm init` end-to-end via the typer runner were writing
+  the v0.11.8 init backfill (a `git-snapshot` + `sessions-snapshot` row
+  per init) to the user's real `~/.local/share/mind-meld/events/`. Each
+  test run minted a fresh random device id, so 30+ phantom device files
+  accumulated locally and showed up in retro as e.g. "Activity across
+  33 of 3 known machines."
+- `gather_author_emails()` only consulted `git config --global user.email`,
+  so commits authored under any other configured identity (per-repo
+  override like a dotfiles repo using a personal email; GitHub
+  web-merge UI setting author to `<id>+<login>@users.noreply.github.com`)
+  silently fell out of the filter. Real-world impact: a 7-day window
+  on this repo went from "9 commits / +71 -61 LOC" to "48 commits /
+  +35,009 / -9,335 LOC" after the fix.
+- The header rendering said "N of M known machines" even when N > M,
+  reading as a counting bug rather than the data inconsistency it was.
+
+### Added
+
+- **`_isolate_mm_events_path` autouse fixture (tests/conftest.py).**
+  Mirrors the existing `_isolate_pullhistory` / `_isolate_devices_write_lock`
+  fixtures. Patches `DEFAULT_SOURCES['mm-events'].path` to a per-test
+  tmp directory via `monkeypatch.setitem` (mutates the existing dict in
+  place so `from mind_meld.config import DEFAULT_SOURCES` consumers in
+  cli.py see the patched path through their existing binding —
+  `setattr` would have only updated `config`'s namespace and left
+  `cli`'s reference stale).
+- **`TestEventsDirIsolation` regression pin (tests/test_init_events_backfill.py).**
+  Two tests: one asserts the fixture is active and the path is
+  redirected; the other drives `mm init` end-to-end via the runner
+  WITHOUT stubbing `_run_events_backfill` and verifies that no events
+  file appears in the real `~/.local/share/mind-meld/events/` after.
+- **Trust-rooted email gathering (aggregator.py).**
+  `gather_author_emails()` now unions four sources, all of which are
+  CONFIGURED identities on machines the user controls — never a
+  `git log` walk. Walking commits would harvest collaborator emails
+  on shared repos (their work sits in local history once you pull),
+  silently inflating retros with their commits as yours. Trust-
+  rooted scoping eliminates that class of false-positive entirely.
+
+  - `git config --global user.email` (global identity).
+  - `git config user.email` per discovered repo
+    (`_per_repo_user_emails`) — captures per-repo overrides where
+    the user has explicitly configured a different identity for a
+    specific project (e.g., a dotfiles repo using a personal email
+    where the global default is a work email).
+  - `[retro].author_emails` in mm config.toml (manual override —
+    canonical place to list identities you've used historically that
+    aren't currently configured anywhere on this machine).
+  - `<id>+<login>@users.noreply.github.com` derived from
+    `gh api user` (`_gh_noreply_email`) — PR-merges via the GitHub
+    web UI / `gh pr merge` set author to this form regardless of
+    local git config. Uniquely yours (the `<id>+<login>` pair can't
+    collide with a collaborator's noreply form), so including it in
+    the trust set does NOT open the collaborator-leak hole that a
+    broad `git log` walk would. Best-effort: missing/unauth `gh`,
+    malformed JSON, or unexpected shape all return None and the
+    function falls back without it.
+
+  Trade-off: this set may *under*-count if you have identities in use
+  on machines outside this one's reach (committing as
+  `karl@personal` on the iMac but the MacBook only has `kb@work`
+  configured, then running retro on the MacBook). Workaround: list
+  every identity in `[retro].author_emails` on each machine. Future
+  improvement: sync the trust set across the fleet via mm-events
+  (deferred).
+- **Wall-clock-bounded per-repo scan.** Total budget
+  `_PER_REPO_SCAN_BUDGET_SECONDS = 5.0` and per-repo timeout
+  `_PER_REPO_GIT_TIMEOUT_SECONDS = 2.0` keep the gather from
+  becoming a multi-second wait on a slow filesystem. Budget
+  exhaustion returns whatever was collected so far. Per-repo
+  failures (rc != 0, timeout, missing binary) skip silently.
+- **`TestGatherAuthorEmails` (11 tests, tests/test_retro_fleet_aggregator.py).**
+  Pins per-repo override union, gh noreply auto-derive, all four
+  gh-soft-fail modes (missing binary, unauth, malformed JSON,
+  unexpected shape), no-repos fallback, per-repo failure tolerance,
+  config-load failure fallback, and wall-clock budget enforcement.
+  Critically includes
+  `test_collaborator_email_in_shared_repo_history_NOT_included` which
+  builds a real local git repo with a user commit and a synthetic
+  collaborator commit, verifies the collaborator's email IS in the
+  local `git log`, and asserts it is NOT in the trust set —
+  load-bearing regression pin against any future drift toward a
+  log-walking design. Plus
+  `TestGitAggregationWithBroadenedFilter::test_noreply_commits_counted`
+  end-to-end check.
+
+### Changed
+
+- **Header rendering when `n_in_events > m_known` (aggregator.py).**
+  Renders "Activity from N machine(s) (M currently registered)" plus a
+  "Fleet inconsistency: K device id(s) in events but not in
+  `mm devices`" breadcrumb naming the delta and pointing the user at
+  the cleanup path. The pre-v0.11.9 "N of M known machines" wording is
+  preserved when `n_in_events <= m_known` (where it reads accurately).
+  Pinned by `TestFleetCount::test_more_events_than_known_renders_inconsistency`.
+
 ## [0.11.9] - 2026-05-01
 
 **Test suite cleanup — no behavior changes, no user-visible impact.** Pruned

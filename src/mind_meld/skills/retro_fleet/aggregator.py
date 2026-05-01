@@ -44,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -712,9 +713,49 @@ def get_known_devices() -> tuple[int | None, list[dict]]:
 
 
 def gather_author_emails() -> frozenset[str]:
-    """Read ``git config --global user.email`` + optional ``[retro]
-    .author_emails`` from mm config.toml. Returns lowercased set; empty
-    set means filter is disabled.
+    """Collect every email address that should count as "the user's commits"
+    for the retro window. Returns lowercased set; empty set means filter
+    is disabled.
+
+    Trust-rooted: only emails sourced from CONFIGURED identities on
+    machines the user controls. The aggregator filter is matched against
+    ``author_email`` on each captured commit, so any email in this set
+    will pull commits authored under that identity into the retro. A
+    broad ``git log`` walk that grabs every author/committer in
+    discovered repos would include collaborator emails on shared repos
+    (their PRs / pull-merged commits sit in the local history once you
+    pull) and silently inflate retros with their work as yours. Trust-
+    rooted scoping eliminates that class of false-positive entirely.
+
+    Four sources are unioned:
+
+    1. ``git config --global user.email`` — the canonical "this user"
+       email on this machine.
+    2. ``git config user.email`` from each discovered git root
+       (``_per_repo_user_emails``) — captures per-repo overrides where
+       the user has explicitly configured a different identity for a
+       specific project (e.g., a dotfiles repo using a personal email
+       where the global default is a work email).
+    3. ``[retro].author_emails`` in mm config.toml — manual override
+       list, per-machine, for identities the user has used historically
+       (different machine, since-revoked address) that aren't currently
+       configured anywhere on this machine.
+    4. ``<id>+<login>@users.noreply.github.com`` derived from
+       ``gh api user`` (``_gh_noreply_email``) — PR-merges via the
+       GitHub web UI set author to this form regardless of local git
+       config; without source #4 those commits would silently fall out
+       of the filter. Uniquely the user's — the ``<id>`` and
+       ``<login>`` together can't collide with a collaborator's
+       noreply form, so including this email in the trust set is safe
+       on shared repos.
+
+    Note: this set may *under*-count if the user has identities in use
+    on machines outside this one's reach (e.g., committing as
+    ``karl@personal`` on the iMac but the MacBook only has
+    ``kb@work`` configured locally and pulls iMac events via mm).
+    Workaround: list every identity in ``[retro].author_emails`` on
+    each machine. Future improvement: sync the trust set across the
+    fleet via mm-events (deferred).
     """
     emails: set[str] = set()
     # 1. git config --global user.email
@@ -731,12 +772,131 @@ def gather_author_emails() -> frozenset[str]:
                 emails.add(ge)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
-    # 2. mm config.toml — [retro].author_emails (per-machine; documented).
+    # 2. Per-repo user.email from each discovered git root.
+    for e in _per_repo_user_emails():
+        emails.add(e)
+    # 3. mm config.toml — [retro].author_emails (per-machine; documented).
     cfg_emails = _read_config_author_emails()
     for e in cfg_emails:
         if isinstance(e, str) and e:
             emails.add(e.lower())
+    # 4. GitHub noreply form derived from `gh api user`.
+    noreply = _gh_noreply_email()
+    if noreply:
+        emails.add(noreply.lower())
     return frozenset(emails)
+
+
+# Time budget for the per-repo `git config user.email` reads. One subprocess
+# per discovered repo. Bounded so a wedged filesystem or pathologically
+# slow git invocation doesn't turn the retro into a multi-second wait.
+_PER_REPO_SCAN_BUDGET_SECONDS = 5.0
+_PER_REPO_GIT_TIMEOUT_SECONDS = 2.0
+
+
+def _per_repo_user_emails() -> set[str]:
+    """For each discovered git root, read ``git config user.email``.
+    Returns lowercased set; empty set on any failure.
+
+    ``git config user.email`` (no ``--local``) returns the per-repo
+    override if one is set, else falls through to the global. The
+    union dedups against the global already added in
+    ``gather_author_emails`` so duplicates don't matter; what we
+    actually want is to catch the per-repo overrides where the user
+    has configured a different identity for a specific project.
+
+    Crucially does NOT walk ``git log`` — only reads configured
+    identity. Walking commits would pull in collaborator emails from
+    shared repos (their PRs/pulled-in commits sit in local history),
+    silently inflating retros with their work as yours. Trust-rooted
+    scoping defends against that class of false-positive.
+
+    Bounded total wall-clock at ``_PER_REPO_SCAN_BUDGET_SECONDS`` and
+    per-repo timeout at ``_PER_REPO_GIT_TIMEOUT_SECONDS``; budget
+    exhaustion returns whatever was collected so far.
+    """
+    try:
+        from mind_meld.config import CONFIG_PATH, load_config
+        from mind_meld.events import discover_git_roots
+    except Exception:
+        return set()
+
+    try:
+        cfg = load_config(CONFIG_PATH)
+    except Exception:
+        return set()
+
+    try:
+        roots, _errors = discover_git_roots(cfg if isinstance(cfg, dict) else {})
+    except Exception:
+        return set()
+
+    if not roots:
+        return set()
+
+    deadline = time.monotonic() + _PER_REPO_SCAN_BUDGET_SECONDS
+    out: set[str] = set()
+    for root in roots:
+        if time.monotonic() > deadline:
+            break
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), "config", "user.email"],
+                capture_output=True,
+                text=True,
+                timeout=_PER_REPO_GIT_TIMEOUT_SECONDS,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+        if result.returncode != 0:
+            continue
+        email = result.stdout.strip().lower()
+        if email:
+            out.add(email)
+    return out
+
+
+def _gh_noreply_email() -> str | None:
+    """Derive ``<id>+<login>@users.noreply.github.com`` from the local
+    ``gh`` CLI's authenticated user, or None on any failure.
+
+    Best-effort: a missing ``gh`` binary, unauthenticated session,
+    network hiccup, or unexpected JSON shape all return None. Retro
+    callers union the result into the trust set; an absent return
+    narrows the filter (PR-merges authored under the noreply form
+    silently fall out) but doesn't break aggregation.
+
+    Why include this at all: GitHub's web-merge UI (and ``gh pr merge``
+    by default) sets author = the per-user noreply form regardless of
+    local git config. Without this entry in the trust set, a user who
+    lands most work via PR-merge sees retros that drop the bulk of
+    their own activity. The per-user ``<id>+<login>`` form is unique
+    to one GitHub user, so including it in the trust set does NOT
+    open the collaborator-leak hole that a broad ``git log`` walk
+    would.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "api", "user"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    uid = data.get("id")
+    login = data.get("login")
+    if not isinstance(uid, int) or not isinstance(login, str) or not login:
+        return None
+    return f"{uid}+{login}@users.noreply.github.com"
 
 
 def _read_config_author_emails() -> list[str]:
@@ -841,12 +1001,30 @@ def format_retro(data: RetroData) -> str:
     n_in_events = len(data.fleet.devices_in_events)
     if data.fleet.devices_known is not None:
         m_known = data.fleet.devices_known
-        lines.append(f"**Activity across {n_in_events} of {m_known} known machines**")
-        if n_in_events < m_known:
-            missing = m_known - n_in_events
+        if n_in_events > m_known:
+            # Data inconsistency: more device IDs in the events log than are
+            # registered in storage. The honest read is "events came from N
+            # devices, M of which are currently registered." Pre-v0.11.9 this
+            # rendered as "N of M known machines" which read as a counting bug
+            # (e.g. "33 of 3"). The usual cause is stale events from
+            # de-registered or test-leaked phantom device IDs (events retain
+            # for 90 days; devices/<id>.json can disappear sooner).
+            extra = n_in_events - m_known
             lines.append(
-                f"*Fleet incomplete: {missing} device(s) haven't pushed events in this window.*"
+                f"**Activity from {n_in_events} machine(s) ({m_known} currently registered)**"
             )
+            lines.append(
+                f"*Fleet inconsistency: {extra} device id(s) in events but not in "
+                f"`mm devices`. Likely stale or phantom — run `mm gc --conflicts` "
+                f"and check for old event files in `~/.local/share/mind-meld/events/`.*"
+            )
+        else:
+            lines.append(f"**Activity across {n_in_events} of {m_known} known machines**")
+            if n_in_events < m_known:
+                missing = m_known - n_in_events
+                lines.append(
+                    f"*Fleet incomplete: {missing} device(s) haven't pushed events in this window.*"
+                )
     else:
         # mm devices unavailable — degrade gracefully.
         lines.append(

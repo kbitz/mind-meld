@@ -88,6 +88,54 @@ def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_pullhistory, "HISTORY_DIR", tmp_path / "mm_state")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mm_events_path(request, monkeypatch, tmp_path) -> None:
+    """Redirect DEFAULT_SOURCES['mm-events'].path to a per-test directory.
+
+    `mm init` (TestInitFlow + any future runner-driven test) calls
+    `_run_events_backfill` -> `get_sources(config)`, which expands the
+    mm-events source path. Without this isolation, every successful init
+    writes backfilled events to the user's real
+    `~/.local/share/mind-meld/events/<random-id>-<date>.jsonl`. Observed
+    as 30+ phantom device-id files accumulating from local pytest runs
+    after v0.11.8 added the init backfill — those phantom devices then
+    inflate retro-fleet's "M of N known machines" header.
+
+    `setitem` mutates the existing dict in place so consumers that did
+    `from mind_meld.config import DEFAULT_SOURCES` (cli.py at module
+    import time) see the patched path through their existing binding.
+    Replacing the list via `setattr` would only update `config`'s
+    namespace and leave `cli`'s stale reference to the original list.
+
+    Opt-out: tests that assert on the canonical `~/.local/share/mind-meld`
+    default value (e.g. `tests/test_config.py::TestMmEventsSource::
+    test_mm_events_default_shape`) can decorate themselves with
+    `@pytest.mark.no_mm_events_isolation` to skip the patch.
+    """
+    if request.node.get_closest_marker("no_mm_events_isolation"):
+        return
+    from mind_meld import config as _config
+
+    target = next(
+        (s for s in _config.DEFAULT_SOURCES if s.get("name") == "mm-events"),
+        None,
+    )
+    if target is None:
+        return
+    monkeypatch.setitem(target, "path", str(tmp_path / "_isolated_mm_events"))
+
+
+def pytest_configure(config) -> None:
+    """Register the `no_mm_events_isolation` marker so pytest doesn't
+    warn about unknown markers."""
+    config.addinivalue_line(
+        "markers",
+        "no_mm_events_isolation: opt out of the autouse "
+        "_isolate_mm_events_path fixture (for tests that assert on "
+        "DEFAULT_SOURCES['mm-events'].path canonical value)",
+    )
+
+
 @pytest.fixture
 def test_root_salt() -> bytes:
     """Exported for tests that need the fixture's root_salt explicitly."""
