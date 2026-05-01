@@ -2,6 +2,28 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.13] - 2026-05-01
+
+**No more `analytics/.last-sync-line` conflicts on every gstack pull.** The
+file is a per-machine cursor (a single integer tracking each device's
+progress through its own gstack analytics jsonl) and was syncing on every
+push, producing a `.sync-conflict-*` file every time two machines pulled
+from each other.
+
+### Changed
+
+- **`analytics/.last-sync-*` added to the gstack source's default
+  `exclude_patterns`.** Single fnmatch glob covers both observed cursor
+  files (`.last-sync-line`, `.last-sync-time`) and any future cursor in the
+  same family without another mm-side migration. Same hazard class as the
+  existing `config.yaml` / `projects/*/repo-mode.json` /
+  `projects/*/land-deploy-confirmed` exclusions: per-machine state, churns
+  on every pull, definitionally not meaningful to peers.
+- New mm installs pick up the exclude automatically. Existing users with
+  explicit `[[sync.sources]]` entries see the migration nudge via
+  `mm status` and the interactive `mm pull` / `mm push` prompt; running
+  `mm migrate-config` appends the missing glob.
+
 ## [0.11.12] - 2026-05-01
 
 **Retro-fleet output polish.** Six pieces of user feedback on the v0.11.10

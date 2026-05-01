@@ -85,12 +85,17 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         # per-machine. config.yaml: holds gstack version-check tracking
         # (last successful version per machine); syncing it actively breaks
         # the version mechanism on whichever machine pulls last (v0.9.3).
+        # analytics/.last-sync-*: per-machine cursor files (line + time) that
+        # track each device's progress through gstack's local analytics
+        # jsonls. Definitionally per-machine — syncing them produces a
+        # conflict file on every pull from any peer (v0.11.13).
         # Excluding at the per-source glob level keeps the global EXCLUDED
         # list focused on universal junk (.git, *.tmp, etc.).
         "exclude_patterns": [
             "config.yaml",
             "projects/*/repo-mode.json",
             "projects/*/land-deploy-confirmed",
+            "analytics/.last-sync-*",
         ],
     },
 ]
