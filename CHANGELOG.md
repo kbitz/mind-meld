@@ -2,6 +2,51 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.9] - 2026-05-01
+
+**Test suite cleanup — no behavior changes, no user-visible impact.** Pruned
+four duplicate tests, migrated two unique assertions into their behaviorally-
+named neighbors, and renamed three "Track" test files (named after merged
+refactor tracks) to behavior names so future contributors don't mistake them
+for stale archaeology.
+
+### Changed
+
+- **`tests/test_track_1a.py` → `tests/test_silent_failure_contract.py`.** Pins
+  the visible-failure contract for autopull/autopush (silent on missing config,
+  loud on corrupt config, breadcrumb on lock-held, etc.).
+- **`tests/test_track_1c.py` → `tests/test_pull_result.py`.** Pins
+  `iter_source_diffs`, `PullResult` degradation counters, autopull `degraded`
+  breadcrumb, GC malformed-sha safety, and autopull's typer.Exit handling for
+  fleet-version refusals.
+- **`tests/test_track_2a.py` → `tests/test_pull_helpers.py`.** Unit tests for
+  the helpers underneath `_pull_core` / `_apply_incoming_file`.
+- **`PASSPHRASE` constant in `tests/conftest.py`** renamed from
+  `"track-1a-test-passphrase"` to `"shared-cli-test-passphrase"` (no test
+  asserted the literal value).
+
+### Removed
+
+- **4 duplicate tests:** `test_register_device_does_not_seed_last_seen`
+  (covered by `test_devices.py::TestRegisterDeviceCreateOnly`),
+  `TestApplyConflict::test_happy_path_keeps_local_writes_remote_to_sidecar`
+  + `TestApplyConflict::test_empty_device_id_returns_failed` (covered through
+  the dispatcher in `test_conflict_copy.py::TestApplyIncomingFile`), and
+  `TestEmptyOutcomes::test_has_all_outcome_keys` (trivial structural check
+  exhaustively covered elsewhere).
+
+### Added
+
+- **Stderr emptiness assertions** in
+  `test_integration.py::TestAutoCommands::test_autopull_no_config_exits_silently`
+  + autopush twin (migrated from the deleted track_1a duplicate; integration
+  versions previously asserted `result.output == ""` only, missing stderr).
+- **Explicit JSONL set-membership assertions** in
+  `test_conflict_copy.py::TestApplyIncomingFile::test_merge_wins_for_jsonl_even_when_local_newer`
+  (migrated from the deleted track_2a `_apply_merge` happy-path test; the
+  weaker substring check it had before would let a regression silently drop
+  one side's overlap rows).
+
 ## [0.11.8] - 2026-04-30
 
 **Fresh-install machines see their past 30 days of activity in retro-fleet

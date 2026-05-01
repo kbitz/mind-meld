@@ -103,11 +103,10 @@ def test_memory_kb() -> int:
 # ─── Shared CLI integration helpers ──────────────────────────────────────
 #
 # Plain module-level functions imported by tests that drive the CLI via
-# CliRunner (test_track_1a.py, test_track_1c.py). Previously lived in
-# test_track_1a.py and were cross-imported — moved here so both test
-# modules pull from a stable, canonical location.
+# CliRunner. Canonical home for these so multiple test modules can pull from
+# a single location.
 
-PASSPHRASE = "track-1a-test-passphrase"
+PASSPHRASE = "shared-cli-test-passphrase"
 MEMORY_KB = 1024
 
 

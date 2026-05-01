@@ -1979,6 +1979,7 @@ class TestAutoCommands:
         result = runner.invoke(app, ["autopull"])
         assert result.exit_code == 0
         assert result.output == ""
+        assert (result.stderr or "") == ""
         # Breadcrumb confirms the silent-exit went through the config-missing
         # branch, not the broader exception-fallback path.
         breadcrumb_path = sidecar_dir / "last-autorun.json"
@@ -1994,6 +1995,7 @@ class TestAutoCommands:
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
         assert result.output == ""
+        assert (result.stderr or "") == ""
         breadcrumb_path = sidecar_dir / "last-autorun.json"
         assert breadcrumb_path.exists()
         breadcrumb = json.loads(breadcrumb_path.read_text())
