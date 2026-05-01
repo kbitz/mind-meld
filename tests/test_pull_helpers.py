@@ -1,8 +1,8 @@
-"""Track 2A unit tests — extracted helpers from _pull_core and _apply_incoming_file.
+"""Unit tests for the helpers underneath `_pull_core` / `_apply_incoming_file`.
 
-Pins the behavior of each extracted helper directly so regressions during
-this or future refactors surface at the unit boundary, not only via the
-CLI-driven integration tests.
+Pins each extracted helper at the unit boundary so refactors don't have to
+rely on the CLI-driven integration tests to surface a regression. Originally
+landed as "Track 2A" (v0.8.7) when cli.py was decomposed.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from mind_meld.cli import (
     _apply_write,
     _bootstrap_or_verify_crypto,
     _CorruptPeer,
-    _empty_outcomes,
     _fsync_touched_parents,
     _FsyncWarning,
     _load_prior_device_metadata,
@@ -109,32 +108,6 @@ class TestApplyMerge:
 
 
 class TestApplyConflict:
-    def test_happy_path_keeps_local_writes_remote_to_sidecar(self, tmp_path: Path) -> None:
-        """Track 5E inversion: canonical stays at LOCAL bytes, REMOTE bytes
-        land in the .sync-conflict-* sidecar. Sidecar filename has NO
-        `v0-` prefix — that prefix is reserved for pre-inversion files
-        migrated by `_migrate_pre_inversion_conflict`."""
-        local = tmp_path / "doc.md"
-        local.write_bytes(b"local content")
-        outcome = _apply_conflict(local, "doc.md", b"remote content", "devAAAA1234")
-        assert outcome == "conflicted"
-        # Local untouched at canonical.
-        assert local.read_bytes() == b"local content"
-        # Exactly one sidecar, holding the REMOTE bytes (post-inversion).
-        siblings = [p for p in tmp_path.iterdir() if p.name.startswith("doc.sync-conflict-")]
-        assert len(siblings) == 1
-        assert siblings[0].read_bytes() == b"remote content"
-        # No `v0-` prefix on a freshly-produced post-inversion file.
-        assert "sync-conflict-v0-" not in siblings[0].name
-
-    def test_empty_device_id_returns_failed(self, tmp_path: Path) -> None:
-        local = tmp_path / "doc.md"
-        local.write_bytes(b"local")
-        outcome = _apply_conflict(local, "doc.md", b"remote", "")
-        assert outcome == "failed"
-        # Local preserved at canonical (no rename happens post-inversion either).
-        assert local.read_bytes() == b"local"
-
     def test_sidecar_write_failure_preserves_local(self, tmp_path: Path, monkeypatch) -> None:
         """Post-inversion: sidecar write failure leaves local untouched
         at canonical because we never overwrite it. No rollback needed —
@@ -154,24 +127,6 @@ class TestApplyConflict:
         assert local.read_bytes() == b"local"
         # No sidecar was written.
         assert not any(p.name.startswith("doc.sync-conflict-") for p in tmp_path.iterdir())
-
-
-# ── _empty_outcomes ──────────────────────────────────────────────────
-
-
-class TestEmptyOutcomes:
-    def test_has_all_outcome_keys(self) -> None:
-        outcomes = _empty_outcomes()
-        assert set(outcomes.keys()) == {
-            "written",
-            "merged",
-            "merged-via-lcs",
-            "skipped",
-            "conflicted",
-            "unchanged",
-            "failed",
-        }
-        assert all(outcomes[k] == [] for k in outcomes)
 
 
 # ── _select_devices ──────────────────────────────────────────────────

@@ -1,13 +1,11 @@
-"""Track 1C tests: Post-1A cli.py follow-ups.
+"""PullResult, iter_source_diffs, and autopull degradation breadcrumbs.
 
-Covers:
-  - iter_source_diffs helper: source_filter + skip_unchanged semantics
-  - PullResult: durability_fsync_failures / corrupt_peer_count fields populate
-    from _pull_core finally block
-  - autopull breadcrumb: new "degraded" outcome fires on any of the 4
-    degradation signals (fsync / corrupt-peer / unknown-source / failed-file)
-  - REG-1: mm gc routes malformed (non-hex-sha) blob paths through the
-    malformed-count path, never reaps them as orphans
+Pins the unit semantics of `iter_source_diffs` (source_filter, skip_unchanged),
+the four `PullResult` degradation counters, the autopull "degraded" breadcrumb
+outcome (fires on fsync / corrupt-peer / unknown-source / failed-file), GC
+malformed-sha safety, and autopull's typer.Exit handling for fleet-version
+refusals. Originally landed as "Track 1C" (v0.8.6); kept as steady-state
+coverage for these stable surfaces.
 """
 
 from __future__ import annotations

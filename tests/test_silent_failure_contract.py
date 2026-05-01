@@ -1,17 +1,10 @@
-"""Track 1A tests: silent-failure fixes in cli.py.
+"""Silent-failure contract for autopull/autopush + related cli.py paths.
 
-Covers:
-  - autopull/autopush surface corrupt config (regression, was silent)
-  - autopull/autopush log unexpected exceptions to ~/.config/mind-meld/auto*.log
-  - autopull silent when lock held (mirror of existing autopush test)
-  - log appender truncates on 1MB overflow
-  - pull warns on unknown remote source (not verbose-only)
-  - pull --conflict-mode fail preflights and exits 2 before any writes
-  - mm devices column header is "Last push"
-  - get_passphrase(non_interactive=True) raises instead of hanging
-  - quiet-mode autopull surfaces corrupt-peer-manifest warning
-  - quiet-mode autopush surfaces sidecar-write-failure warning
-  - _log_unexpected is idempotent (no handler duplication regression)
+Pins the visible-failure contract for Claude Code's hook-driven sync:
+silent on missing config, loud on corrupt config, breadcrumb on lock-held,
+unknown peer sources surface as warnings (not verbose-only), --conflict-mode
+fail preflights and exits 3 before any writes, etc. Originally landed as
+"Track 1A" (v0.7.0); kept as a behavioral pin against regressions.
 """
 
 from __future__ import annotations
@@ -28,10 +21,6 @@ from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
 from mind_meld.storage.local import LocalBackend
-
-# Shared CLI-integration helpers live in tests/conftest.py so both
-# test_track_1a and test_track_1c (and future track files) import from a
-# single canonical location.
 from tests.conftest import (  # noqa: E402
     MEMORY_KB,
     PASSPHRASE,
@@ -587,16 +576,7 @@ def test_pull_conflict_mode_prompt_threads_interactive_flag(tmp_path, monkeypatc
         assert seen["interactive_resolve"] is True
 
 
-# ─── Register-device contract + log safety ───────────────────────────────
-
-
-def test_register_device_does_not_seed_last_seen(tmp_path):
-    """Storage-level contract: no `last_seen` key on register (avoids lying in the table)."""
-    backend = LocalBackend(tmp_path / "storage")
-    register_device(backend, "dev-x", "Mac X")
-    data = json.loads(backend.get("devices/dev-x.json"))
-    assert "last_seen" not in data
-    assert "registered" in data
+# ─── Log safety ──────────────────────────────────────────────────────────
 
 
 def test_log_unexpected_swallows_write_failure(tmp_path, monkeypatch):

@@ -108,16 +108,21 @@ class TestApplyIncomingFile:
         assert local.read_bytes() == b"same content"
 
     def test_merge_wins_for_jsonl_even_when_local_newer(self, tmp_path: Path) -> None:
-        """[M] precedes [S]: a newer local .jsonl still merges, not skips."""
+        """[M] precedes [S]: a newer local .jsonl still merges, not skips.
+
+        Also pins exact line-union set membership: every local line AND every
+        remote line is present in the merged output. A weaker substring check
+        would let a regression silently drop one side's overlap rows.
+        """
         rel = "projects/p1/learnings.jsonl"
         local = tmp_path / rel
         local.parent.mkdir(parents=True)
-        local.write_bytes(b'{"ts":"2026-01-01","key":"a"}\n')
+        local.write_bytes(b'{"ts":"2026-01-01","key":"a"}\n{"ts":"2026-01-02","key":"shared"}\n')
 
         # Local is "newer" than remote, but merge is the correct operation.
         _set_mtime(local, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
 
-        remote_data = b'{"ts":"2026-02-01","key":"b"}\n'
+        remote_data = b'{"ts":"2026-01-02","key":"shared"}\n{"ts":"2026-02-01","key":"b"}\n'
         info = _remote_info("bbb", datetime(2026, 1, 1, tzinfo=timezone.utc))
 
         outcome = _apply_incoming_file(
@@ -129,9 +134,10 @@ class TestApplyIncomingFile:
         )
 
         assert outcome == "merged"
-        merged = local.read_bytes().decode()
-        # Both lines present (order is ts-sorted)
-        assert "a" in merged and "b" in merged
+        merged_lines = set(local.read_bytes().splitlines())
+        assert b'{"ts":"2026-01-01","key":"a"}' in merged_lines
+        assert b'{"ts":"2026-01-02","key":"shared"}' in merged_lines
+        assert b'{"ts":"2026-02-01","key":"b"}' in merged_lines
 
     def test_merge_wins_for_memory_md(self, tmp_path: Path) -> None:
         """[M] MEMORY.md is line-union merged, not conflict-copied."""
