@@ -2,6 +2,26 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.15] - 2026-05-01
+
+**Shorten long repo URLs in retro-fleet output.** `retro-fleet`'s "Top
+repos" section now compresses long enterprise-style URLs (host with 3+
+path segments and over 60 chars) to `<host>/[...]/<last-segment>` so
+UUID-laden repository identifiers stop bloating the rendered retro and
+leaking instance/tenant detail into output that may be shared publicly.
+
+### Changed
+
+- **`format_retro` Top repos rendering applies `_shorten_repo_url`** to
+  each canonical URL before display. The canonical URL itself stays the
+  dedup key in `repos_by_count` — only the rendered markdown changes.
+- **GitHub / Bitbucket / basic GitLab URLs always pass through** unchanged
+  regardless of length. The compression gate requires both length > 60
+  chars AND 3+ path segments after the host, so canonical 2-path-segment
+  shapes (`host/org/repo`) are exempt by construction. Pinned by
+  `TestShortenRepoUrl::test_github_long_url_passthrough` and
+  `test_bitbucket_long_url_passthrough`.
+
 ## [0.11.14] - 2026-05-01
 
 **Token usage measurement in retro-fleet.** The "Claude Code activity"
