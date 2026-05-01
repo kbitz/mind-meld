@@ -807,6 +807,49 @@ class TestFleetCount:
         data = _aggregate(events_dir)
         assert data.fleet.devices_known is None
 
+    def test_more_events_than_known_renders_inconsistency(self, tmp_path, monkeypatch):
+        """N event-producing devices > M registered devices: render
+        "Activity from N machine(s) (M currently registered)" plus a
+        Fleet inconsistency breadcrumb naming the delta. Pre-v0.11.9 this
+        rendered as "N of M known machines" which read as a counting bug
+        when stale events accumulated (e.g. "33 of 3"). Real-world cause:
+        90-day events retention outlives device de-registration, plus
+        leaked test phantoms before the v0.11.9 conftest fixture landed."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # 5 distinct event-producing devices.
+        for i in range(5):
+            _write_events(
+                events_dir,
+                f"phantom-{i}",
+                "2026-04-28",
+                [_push_event(f"phantom-{i}", 0)],
+            )
+
+        # mm devices reports only 2 currently registered.
+        class FakeResult:
+            returncode = 0
+            stdout = json.dumps(
+                [
+                    {"device_id": "phantom-0", "device_name": "A", "is_self": True},
+                    {"device_id": "phantom-1", "device_name": "B", "is_self": False},
+                ]
+            )
+            stderr = ""
+
+        monkeypatch.setattr(aggregator.subprocess, "run", lambda *a, **k: FakeResult())
+        data = _aggregate(events_dir)
+        assert data.fleet.devices_known == 2
+        assert len(data.fleet.devices_in_events) == 5
+        out = aggregator.format_retro(data)
+        # New copy: descriptive of the actual data shape.
+        assert "Activity from 5 machine(s) (2 currently registered)" in out
+        assert "Fleet inconsistency: 3 device id(s)" in out
+        # Old "of known machines" copy must NOT appear in the inconsistency
+        # branch — that wording is reserved for the n_in_events <= m_known
+        # path where it reads accurately.
+        assert "5 of 2 known machines" not in out
+
 
 # ---------------------------------------------------------------------------
 # T6 — MM_EVENTS_DIR env override (CQ#2).
@@ -1198,3 +1241,382 @@ class TestSessionsSourceRoot:
         # Populated stale sibling is window-filtered out.
         assert data.sessions.total_sessions == 99
         assert data.sessions.projects == 1
+
+
+# ---------------------------------------------------------------------------
+# v0.11.9 — author email broadening via per-repo committer scan.
+# ---------------------------------------------------------------------------
+
+
+class TestGatherAuthorEmails:
+    """`gather_author_emails` is trust-rooted: it ONLY returns emails
+    from configured identities on machines the user controls (global git
+    config, per-repo overrides, manual config, gh-derived noreply form).
+    It deliberately does NOT walk `git log` to harvest emails — that
+    would pull in collaborator emails from shared repos and silently
+    inflate retros with their work as the user's.
+
+    Pre-v0.11.9 only the global + manual sources were considered; PR-
+    merged commits authored as `<id>+<login>@users.noreply.github.com`
+    silently fell out of the filter. v0.11.9 adds per-repo overrides
+    (for users with multiple identities configured locally) and the
+    gh-derived noreply form (for the bulk of PR-merge activity).
+    """
+
+    def _stub_subprocess(self, monkeypatch, handlers):
+        """Build a fake `subprocess.run` that dispatches by cmd prefix.
+
+        ``handlers`` is a dict mapping a tuple cmd prefix (e.g.
+        ``("git", "config")``) to either a (returncode, stdout) tuple
+        or an exception class to raise. Unmatched commands return
+        rc=1 / empty stdout.
+        """
+        import subprocess as _subprocess
+
+        class FakeResult:
+            def __init__(self, returncode, stdout):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = ""
+
+        def fake_run(cmd, **_kw):
+            for prefix, response in handlers.items():
+                if tuple(cmd[: len(prefix)]) == prefix:
+                    if isinstance(response, type) and issubclass(response, Exception):
+                        raise response("simulated")
+                    rc, out = response
+                    return FakeResult(rc, out)
+            return FakeResult(1, "")
+
+        monkeypatch.setattr(_subprocess, "run", fake_run)
+
+    def _stub_repos(self, monkeypatch, roots):
+        """Stub discover_git_roots + load_config so the gatherer
+        operates on synthetic repo paths instead of the real filesystem."""
+        from mind_meld import config as config_module
+        from mind_meld import events as events_module
+
+        monkeypatch.setattr(events_module, "discover_git_roots", lambda _cfg: (roots, []))
+        monkeypatch.setattr(config_module, "load_config", lambda _p: {})
+        monkeypatch.setattr(aggregator, "_read_config_author_emails", lambda: [])
+
+    def test_per_repo_overrides_unioned_with_global(self, monkeypatch):
+        """Per-repo `git config user.email` overrides land in the trust
+        set alongside the global. Captures the case where a user
+        configures a different identity for specific repos (e.g.,
+        dotfiles repo using a personal email where global is work)."""
+        self._stub_repos(monkeypatch, [Path("/fake/repo-a"), Path("/fake/repo-b")])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "-C", "/fake/repo-a", "config"): (0, "kb@wardbitz.com\n"),
+                ("git", "-C", "/fake/repo-b", "config"): (0, "kb@cnyfeeds.com\n"),
+                # `gh api user` returns auth error → no noreply form.
+                ("gh", "api"): (1, ""),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert "kb@cnyfeeds.com" in emails
+
+    def test_collaborator_email_in_shared_repo_history_NOT_included(self, monkeypatch, tmp_path):
+        """**Trust-rooted regression pin.** A shared repo where a
+        collaborator has commits in the local history must NOT leak
+        their email into the trust set. Pre-v0.11.9-rc2 a broad
+        `git log --format=%ae%n%ce` walk did exactly this — and an
+        intermediate v0.11.9-rc design retained the walk before being
+        reverted to this trust-rooted shape.
+
+        Setup: a real local git repo with two commits, one by the user
+        and one by a collaborator. The walk MUST NOT scan log output;
+        it MUST only read configured `git config user.email`.
+        """
+        import subprocess as real_subprocess
+
+        # Use a real git repo so we'd actually pick up alice's email if
+        # the implementation regressed to walking commits.
+        repo = tmp_path / "shared-repo"
+        repo.mkdir()
+        real_subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        real_subprocess.run(
+            ["git", "config", "user.email", "kb@wardbitz.com"], cwd=repo, check=True
+        )
+        real_subprocess.run(["git", "config", "user.name", "KB"], cwd=repo, check=True)
+        real_subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+        (repo / "a.txt").write_text("a")
+        real_subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+        real_subprocess.run(["git", "commit", "-q", "-m", "kb commit"], cwd=repo, check=True)
+
+        # Collaborator's commit in the same repo (e.g., pulled from upstream).
+        env = {
+            **__import__("os").environ,
+            "GIT_AUTHOR_EMAIL": "alice@collaborator.com",
+            "GIT_AUTHOR_NAME": "Alice",
+            "GIT_COMMITTER_EMAIL": "alice@collaborator.com",
+            "GIT_COMMITTER_NAME": "Alice",
+        }
+        (repo / "b.txt").write_text("b")
+        real_subprocess.run(["git", "add", "b.txt"], cwd=repo, check=True)
+        real_subprocess.run(
+            ["git", "commit", "-q", "-m", "alice commit"], cwd=repo, env=env, check=True
+        )
+
+        # Sanity: alice IS in the log.
+        log = real_subprocess.run(
+            ["git", "-C", str(repo), "log", "--format=%ae"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "alice@collaborator.com" in log.stdout
+
+        # Now stub the gatherer's repo discovery to return our shared repo.
+        self._stub_repos(monkeypatch, [repo])
+        # Don't stub subprocess — let real git run. Stub only `gh api`
+        # (no auth in the test env) and the `--global` lookup so the
+        # test machine's real global doesn't bleed in.
+        original_run = real_subprocess.run
+
+        def fake_run(cmd, **kw):
+            if tuple(cmd[:3]) == ("git", "config", "--global"):
+                # Return a synthetic global so the trust set is well-defined.
+
+                class R:
+                    returncode = 0
+                    stdout = "kb@wardbitz.com\n"
+                    stderr = ""
+
+                return R()
+            if tuple(cmd[:2]) == ("gh", "api"):
+
+                class R:
+                    returncode = 1
+                    stdout = ""
+                    stderr = ""
+
+                return R()
+            return original_run(cmd, **kw)
+
+        monkeypatch.setattr(real_subprocess, "run", fake_run)
+
+        emails = aggregator.gather_author_emails()
+        # User's identity is in the set.
+        assert "kb@wardbitz.com" in emails
+        # Collaborator's email IS in the local git log — and MUST NOT
+        # leak into the trust set. This is the load-bearing assertion.
+        assert "alice@collaborator.com" not in emails
+
+    def test_gh_noreply_email_added_when_authenticated(self, monkeypatch):
+        """`gh api user` returning {"id": 220245, "login": "kbitz"}
+        derives `220245+kbitz@users.noreply.github.com` and unions it
+        into the trust set. Critical for users who land most work via
+        PR-merge through GitHub's web UI (where author = the per-user
+        noreply form regardless of local git config)."""
+        self._stub_repos(monkeypatch, [])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("gh", "api"): (0, '{"id": 220245, "login": "kbitz"}'),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert "220245+kbitz@users.noreply.github.com" in emails
+
+    def test_gh_unavailable_falls_back_silently(self, monkeypatch):
+        """Missing `gh` binary → FileNotFoundError → no noreply entry,
+        rest of the trust set still populated. No noisy stderr."""
+        self._stub_repos(monkeypatch, [])
+
+        class FakeResult:
+            def __init__(self, rc, out):
+                self.returncode = rc
+                self.stdout = out
+                self.stderr = ""
+
+        import subprocess as _subprocess
+
+        def fake_run(cmd, **_kw):
+            if tuple(cmd[:2]) == ("gh", "api"):
+                raise FileNotFoundError("gh: command not found")
+            if tuple(cmd[:3]) == ("git", "config", "--global"):
+                return FakeResult(0, "kb@wardbitz.com\n")
+            return FakeResult(1, "")
+
+        monkeypatch.setattr(_subprocess, "run", fake_run)
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert all("noreply.github.com" not in e for e in emails)
+
+    def test_gh_unauthenticated_falls_back_silently(self, monkeypatch):
+        """`gh api user` rc != 0 (typical of unauthenticated gh) →
+        no noreply entry, no exception."""
+        self._stub_repos(monkeypatch, [])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("gh", "api"): (1, ""),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert all("noreply.github.com" not in e for e in emails)
+
+    def test_gh_malformed_json_returns_none(self, monkeypatch):
+        """A `gh` binary that returns non-JSON to `gh api user` (auth
+        warning printed to stdout, etc.) must not crash the gather."""
+        self._stub_repos(monkeypatch, [])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("gh", "api"): (0, "<<<not json>>>"),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert all("noreply.github.com" not in e for e in emails)
+
+    def test_gh_unexpected_shape_returns_none(self, monkeypatch):
+        """Missing/wrong-typed `id` or `login` fields in the gh response
+        → no noreply entry. Defends against gh API shape drift."""
+        self._stub_repos(monkeypatch, [])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("gh", "api"): (0, '{"id": "not-an-int", "login": "kbitz"}'),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert all("noreply.github.com" not in e for e in emails)
+
+    def test_no_repos_discovered_returns_global_plus_gh(self, monkeypatch):
+        """Empty discover_git_roots → only the global + gh sources
+        contribute. Falls back cleanly without exception."""
+        self._stub_repos(monkeypatch, [])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("gh", "api"): (1, ""),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert emails == frozenset({"kb@wardbitz.com"})
+
+    def test_per_repo_failure_skipped_silently(self, monkeypatch):
+        """A single repo's `git config user.email` failing skips that
+        repo and continues. No noisy stderr."""
+        self._stub_repos(monkeypatch, [Path("/fake/good"), Path("/fake/bad")])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "-C", "/fake/good", "config"): (0, "kb@personal.com\n"),
+                ("git", "-C", "/fake/bad", "config"): (128, ""),
+                ("gh", "api"): (1, ""),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert "kb@personal.com" in emails
+
+    def test_per_repo_scan_respects_wall_clock_budget(self, monkeypatch):
+        """When the budget is exhausted partway through the walk, the
+        function returns what was collected so far instead of running
+        unbounded. Bounded scan keeps the retro from becoming a
+        multi-second wait when the user has many discovered repos on
+        a slow filesystem."""
+        roots = [Path(f"/fake/repo-{i}") for i in range(100)]
+        self._stub_repos(monkeypatch, roots)
+        # Force a tiny budget so the loop bails after ~one iteration.
+        monkeypatch.setattr(aggregator, "_PER_REPO_SCAN_BUDGET_SECONDS", 0.001)
+
+        scanned: list[str] = []
+
+        class FakeResult:
+            def __init__(self, rc, stdout):
+                self.returncode = rc
+                self.stdout = stdout
+                self.stderr = ""
+
+        def fake_run(cmd, **_kw):
+            if tuple(cmd[:3]) == ("git", "config", "--global"):
+                return FakeResult(0, "kb@wardbitz.com\n")
+            if tuple(cmd[:2]) == ("gh", "api"):
+                return FakeResult(1, "")
+            if tuple(cmd[:2]) == ("git", "-C"):
+                scanned.append(cmd[2])
+                import time as _time
+
+                _time.sleep(0.005)
+                return FakeResult(0, "kb@personal.com\n")
+            return FakeResult(1, "")
+
+        import subprocess as _subprocess
+
+        monkeypatch.setattr(_subprocess, "run", fake_run)
+
+        emails = aggregator.gather_author_emails()
+        assert "kb@wardbitz.com" in emails
+        assert len(scanned) < 100, f"budget enforcement failed: scanned all {len(scanned)} repos"
+
+    def test_config_load_failure_falls_back_silently(self, monkeypatch):
+        """Missing / malformed config.toml in `_per_repo_user_emails`
+        → return empty set, no exception. The other gather sources
+        still contribute."""
+        from mind_meld import config as config_module
+
+        def boom(_p):
+            raise RuntimeError("config unreadable")
+
+        monkeypatch.setattr(config_module, "load_config", boom)
+        monkeypatch.setattr(aggregator, "_read_config_author_emails", lambda: [])
+        self._stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("gh", "api"): (1, ""),
+            },
+        )
+        emails = aggregator.gather_author_emails()
+        assert emails == frozenset({"kb@wardbitz.com"})
+
+
+class TestGitAggregationWithBroadenedFilter:
+    """End-to-end check that PR-merge commits authored under the noreply
+    form pass the filter when the email set includes the noreply alias
+    (which `gather_author_emails` now picks up automatically from per-repo
+    committer scans)."""
+
+    def test_noreply_commits_counted_when_alias_in_filter(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        direct = _commit("aaa", 1.0, author_email="kb@example.com")
+        merged = _commit("bbb", 1.0, author_email="220245+kbitz@users.noreply.github.com")
+        unrelated = _commit("ccc", 1.0, author_email="bot@example.com")
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event("dev-a", 1.0, [direct, merged, unrelated]),
+            ],
+        )
+        # Filter set includes both forms — PR-merge commits stop falling out.
+        data = _aggregate(
+            events_dir,
+            author_emails=frozenset(
+                {
+                    "kb@example.com",
+                    "220245+kbitz@users.noreply.github.com",
+                }
+            ),
+        )
+        assert data.git.commits == 2
+        assert data.git.additions == 20  # 2 commits × 10 each (default)

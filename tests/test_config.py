@@ -1197,7 +1197,12 @@ class TestMmEventsSource:
         names = [s["name"] for s in DEFAULT_SOURCES]
         assert "mm-events" in names
 
+    @pytest.mark.no_mm_events_isolation
     def test_mm_events_default_shape(self):
+        """Pinned shape of the mm-events default. Opts out of the autouse
+        `_isolate_mm_events_path` fixture (which patches `.path` to a
+        per-test tmp dir) so this test sees the canonical `~/.local/share`
+        value it documents."""
         entry = next(s for s in DEFAULT_SOURCES if s["name"] == "mm-events")
         assert entry["type"] == "generic"
         assert entry["path"] == "~/.local/share/mind-meld"
@@ -1209,10 +1214,15 @@ class TestMmEventsSource:
 
         assert "mm-events" in MM_INTERNAL_SOURCE_NAMES
 
+    @pytest.mark.no_mm_events_isolation
     def test_get_sources_bootstraps_mm_events_path(self, tmp_path, monkeypatch):
         """First get_sources() call on a fresh machine creates the
         mm-events base dir at mode 0700. Path-existence filter then
-        keeps the source in the resolved list."""
+        keeps the source in the resolved list.
+
+        Opts out of `_isolate_mm_events_path` so the canonical
+        `~/.local/share/mind-meld` path is used; HOME redirection then
+        keeps the bootstrap inside tmp_path."""
         # Redirect ~ to tmp_path so we don't pollute the real home dir.
         monkeypatch.setenv("HOME", str(tmp_path))
         config = {
@@ -1231,6 +1241,7 @@ class TestMmEventsSource:
         # high bits and check the bottom 9.
         assert (events_base.stat().st_mode & 0o777) == 0o700
 
+    @pytest.mark.no_mm_events_isolation
     def test_bootstrap_idempotent(self, tmp_path, monkeypatch):
         """Re-calling get_sources() doesn't fail when the dir already exists."""
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -1244,6 +1255,7 @@ class TestMmEventsSource:
         sources = get_sources(config)
         assert "mm-events" in [s["name"] for s in sources]
 
+    @pytest.mark.no_mm_events_isolation
     def test_bootstrap_failure_emits_warning_and_drops_source(self, tmp_path, monkeypatch, capsys):
         """Permission denied on mkdir → mm: warning: stderr breadcrumb,
         source dropped via path-existence filter. Visible-failure contract
@@ -1276,6 +1288,7 @@ class TestMmEventsSource:
             # Restore so tmp cleanup can rm.
             share.chmod(0o755)
 
+    @pytest.mark.no_mm_events_isolation
     def test_bootstrap_warns_once_per_process(self, tmp_path, monkeypatch, capsys):
         """Group 7 hotfix regression: chmod-restricted home must NOT spam
         `mm: warning:` on every read-only command. First call surfaces the
