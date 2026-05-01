@@ -541,7 +541,12 @@ class TestGetPassphraseExceptNarrow:
 
 
 class TestStorePassphraseInKeyringExceptNarrow:
-    """Pin the catch set for store_passphrase_in_keyring's write path."""
+    """Pin the catch set for store_passphrase_in_keyring's write path.
+
+    Each test deletes PYTEST_CURRENT_TEST so the pytest-guard at the top of
+    `store_passphrase_in_keyring` does NOT short-circuit — these tests
+    exercise the real-CLI write path that runs after the guard.
+    """
 
     def test_keyring_error_returns_false(self, monkeypatch):
         """KeyringError → graceful False (init prints a warning, keeps going)."""
@@ -551,6 +556,7 @@ class TestStorePassphraseInKeyringExceptNarrow:
         def boom(*_a, **_kw):
             raise PasswordSetError("backend refused write")
 
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.setattr(keyring, "set_password", boom)
         assert crypto.store_passphrase_in_keyring("pw") is False
 
@@ -561,6 +567,66 @@ class TestStorePassphraseInKeyringExceptNarrow:
         def boom(*_a, **_kw):
             raise RuntimeError("something structurally wrong")
 
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.setattr(keyring, "set_password", boom)
         with pytest.raises(RuntimeError, match="something structurally wrong"):
             crypto.store_passphrase_in_keyring("pw")
+
+
+class TestStorePassphrasePytestGuard:
+    """Pin the PYTEST_CURRENT_TEST guard at the top of store_passphrase_in_keyring.
+
+    Real-world incident: a dev-time path leaked the test fixture passphrase
+    (`pw123`) into the user's real macOS Keychain, breaking `mm pull` until
+    the entry was manually overwritten. The conftest `_isolate_keyring`
+    fixture covered in-process tests via `keyring.set_password` patching,
+    but a path that bypassed conftest could still hit the real Keychain.
+    PYTEST_CURRENT_TEST is set by pytest on every test phase (and
+    inherited by subprocesses), so refusing the write when it's set
+    makes the leak surface impossible regardless of stub coverage.
+    """
+
+    def test_returns_false_when_pytest_env_var_set_without_calling_keyring(self, monkeypatch):
+        """The guard short-circuits BEFORE `keyring.set_password` is reached.
+        If a test-environment process tried to write, we'd see the boom
+        below — but the guard fires first and returns False."""
+        import keyring
+
+        called = []
+
+        def boom(*_a, **_kw):
+            called.append(True)
+            raise AssertionError(
+                "store_passphrase_in_keyring reached keyring.set_password "
+                "while PYTEST_CURRENT_TEST was set — the guard at the top "
+                "of the function must short-circuit before this point."
+            )
+
+        monkeypatch.setattr(keyring, "set_password", boom)
+        # PYTEST_CURRENT_TEST is already set by pytest itself during this
+        # test's execution; assert that to make the pin honest about what
+        # it's exercising.
+        assert os.environ.get("PYTEST_CURRENT_TEST"), (
+            "PYTEST_CURRENT_TEST should be set by pytest during test execution"
+        )
+        assert crypto.store_passphrase_in_keyring("anything") is False
+        assert called == [], (
+            "keyring.set_password must not be called when PYTEST_CURRENT_TEST is set"
+        )
+
+    def test_falls_through_when_pytest_env_var_absent(self, monkeypatch):
+        """With PYTEST_CURRENT_TEST removed, the guard does NOT fire and the
+        write reaches `keyring.set_password` (stubbed here). This is the
+        real-CLI path — `mm init` from a user shell is the only legitimate
+        caller and runs without PYTEST_CURRENT_TEST set."""
+        import keyring
+
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        captured = []
+
+        def stub_set(service, account, password):
+            captured.append((service, account, password))
+
+        monkeypatch.setattr(keyring, "set_password", stub_set)
+        assert crypto.store_passphrase_in_keyring("real-passphrase") is True
+        assert captured == [("mind-meld", "passphrase", "real-passphrase")]

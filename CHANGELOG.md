@@ -2,6 +2,40 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.11] - 2026-05-01
+
+**Dev work can no longer poison your real macOS Keychain.** A test-fixture
+passphrase (`pw123`) reached a real fleet's Keychain via a path that bypassed
+conftest's `_isolate_keyring` fixture (most likely a non-pytest harness or a
+manual init against a placeholder storage path), wedging `mm pull` until
+the entry was manually overwritten.
+
+### Changed
+
+- **`crypto.store_passphrase_in_keyring` now short-circuits when
+  `PYTEST_CURRENT_TEST` is set in the environment.** Belt-and-suspenders
+  behind conftest's existing `keyring.set_password` stub: pytest sets
+  `PYTEST_CURRENT_TEST` for every test phase and the variable is inherited
+  by subprocesses, so any test-orchestrated path — in-process, subprocess,
+  `python -c '...'` from a test, ad-hoc REPL session under pytest — can no
+  longer reach the real Keychain regardless of which test layer remembers
+  to stub. Real-CLI `mm init` is unaffected (the variable is not set in a
+  user shell). Failure mode under the guard is loud and recoverable
+  ("No keyring available" yellow warning, set `MINDMELD_PASSPHRASE` or
+  re-run init in a clean env), versus the silent test-passphrase poisoning
+  the guard prevents.
+- `tests/test_crypto.py::TestStorePassphraseInKeyringExceptNarrow` now
+  `monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)` in both
+  pre-existing pins so they exercise the real-CLI write path past the new
+  guard.
+
+### Added
+
+- `tests/test_crypto.py::TestStorePassphrasePytestGuard` — two regression
+  pins: (1) guard fires under pytest, `keyring.set_password` is never
+  reached even when monkey-patched to raise; (2) guard does NOT fire when
+  `PYTEST_CURRENT_TEST` is absent, real-CLI write reaches keyring.
+
 ## [0.11.10] - 2026-05-01
 
 **Retro-fleet now counts the work you actually did and stops being inflated
