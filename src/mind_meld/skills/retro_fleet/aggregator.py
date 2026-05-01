@@ -109,6 +109,19 @@ class SessionsAggregate:
     ephemeral_projects: int = 0
     # devices still emitting v=1 sessions snapshots (pre-v0.11.0 peers).
     pre_v2_peers: set[str] = field(default_factory=set)
+    # Token totals across the retro window, sliced from per-project
+    # `tokens_by_day` maps. Empty defaults preserve "fleet has no token-
+    # aware peers" behavior cleanly.
+    tokens_input: int = 0
+    tokens_cache_create: int = 0
+    tokens_cache_read: int = 0
+    tokens_output: int = 0
+    tokens_by_model: dict[str, dict[str, int]] = field(default_factory=dict)
+    # Devices on v=2 schema but emitting snapshots WITHOUT `tokens_by_day`.
+    # Sniffed at aggregate time: any project with sessions > 0 and no
+    # tokens_by_day flags the device. Pre-v0.11.14 peers (mixed-fleet
+    # rollout window) AND any peer with cold token cache appear here.
+    pre_token_peers: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -530,7 +543,7 @@ def aggregate_sessions(
     latest = filtered_latest
 
     # Aggregate the "latest per tuple" set.
-    for (_device, _source_root, _claude_dir), (_ts, proj) in latest.items():
+    for (device, _source_root, _claude_dir), (_ts, proj) in latest.items():
         sessions = _safe_int(proj.get("sessions"))
         ephemeral = bool(proj.get("ephemeral", False))
         out.total_sessions += sessions
@@ -538,7 +551,53 @@ def aggregate_sessions(
         if ephemeral:
             out.ephemeral_sessions += sessions
             out.ephemeral_projects += 1
+
+        # Token aggregation (v0.11.14+). Slice tokens_by_day to [since, until]
+        # and merge into the running totals.
+        tokens_by_day = proj.get("tokens_by_day")
+        if isinstance(tokens_by_day, dict) and tokens_by_day:
+            _merge_token_window(out, tokens_by_day, since=since, until=until)
+        elif sessions > 0:
+            # Sessions exist but tokens_by_day is missing/empty. Either a
+            # pre-v0.11.14 peer (no field) or a peer whose token cache is
+            # cold (autopush gate skipped the token walk this push). Same
+            # user-visible signal: "tokens incomplete: device X."
+            out.pre_token_peers.add(device)
     return out
+
+
+def _merge_token_window(
+    out: SessionsAggregate,
+    tokens_by_day: dict,
+    *,
+    since: datetime,
+    until: datetime,
+) -> None:
+    """Sum the day buckets whose YYYY-MM-DD key falls in [since, until] into
+    ``out``'s token fields. Honest "tokens consumed THIS WINDOW" semantics
+    (per /plan-eng-review D6 — codex caught the per-window accuracy gap)."""
+    since_d = since.astimezone(timezone.utc).date().isoformat()
+    until_d = until.astimezone(timezone.utc).date().isoformat()
+    for day_key, bucket in tokens_by_day.items():
+        if not isinstance(day_key, str) or not (since_d <= day_key <= until_d):
+            continue
+        if not isinstance(bucket, dict):
+            continue
+        out.tokens_input += _safe_int(bucket.get("input"))
+        out.tokens_cache_create += _safe_int(bucket.get("cache_create"))
+        out.tokens_cache_read += _safe_int(bucket.get("cache_read"))
+        out.tokens_output += _safe_int(bucket.get("output"))
+        for model, mbucket in (bucket.get("by_model") or {}).items():
+            if not isinstance(model, str) or not isinstance(mbucket, dict):
+                continue
+            mtarget = out.tokens_by_model.setdefault(
+                model,
+                {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
+            )
+            mtarget["input"] += _safe_int(mbucket.get("input"))
+            mtarget["cache_create"] += _safe_int(mbucket.get("cache_create"))
+            mtarget["cache_read"] += _safe_int(mbucket.get("cache_read"))
+            mtarget["output"] += _safe_int(mbucket.get("output"))
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +996,120 @@ def aggregate(
 # ---------------------------------------------------------------------------
 
 
+def _format_token_count(n: int) -> str:
+    """Compact token count.
+
+    ``8_800_000_000`` → ``8.8B``,
+    ``12_400_000`` → ``12.4M``,
+    ``142_000`` → ``142k``,
+    ``898`` → ``898``.
+    One decimal place at each scale boundary."""
+    if n >= 1_000_000_000:
+        return f"{n / 1_000_000_000:.1f}B"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
+    """Append the v0.11.14+ token-usage block to ``lines``. Renders ONLY when
+    the fleet has any token data this window — otherwise no-op (clean
+    fresh-fleet output).
+
+    Format (4 lines of data + 1 caveat footer):
+
+      - Tokens this window: 12.4M in / 87.3M cache_read / 142k out
+      - Cache hit ratio:    87%
+      - Estimated cost:     ~$24.10 (Sonnet $18, Opus $6)
+      - Per-model:          Sonnet, Opus
+      - *Cost estimates do not account for subscription plan pricing.*
+    """
+    from mind_meld.token_usage import SUBSCRIPTION_CAVEAT, estimate_cost
+
+    total_in = sessions.tokens_input
+    total_cc = sessions.tokens_cache_create
+    total_cr = sessions.tokens_cache_read
+    total_out = sessions.tokens_output
+    total_all = total_in + total_cc + total_cr + total_out
+    if total_all == 0:
+        return  # no token data — hide block entirely
+
+    lines.append(
+        f"- Tokens this window: {_format_token_count(total_in)} in / "
+        f"{_format_token_count(total_cr)} cache_read / "
+        f"{_format_token_count(total_out)} out"
+    )
+
+    # Cache hit ratio = cache_read / (cache_read + cache_create + input).
+    # Output tokens are excluded — they're produced, not consumed via cache.
+    consumed = total_cr + total_cc + total_in
+    if consumed > 0:
+        hit_ratio = total_cr / consumed
+        lines.append(f"- Cache hit ratio:    {hit_ratio:.0%}")
+
+    total_cost, per_model_cost = estimate_cost(sessions.tokens_by_model)
+    if total_cost > 0:
+        # Sort per-model by cost descending; render compact "Sonnet $X, Opus $Y".
+        per_model_sorted = sorted(per_model_cost.items(), key=lambda kv: kv[1], reverse=True)
+        per_model_str = ", ".join(
+            f"{_short_model_name(m)} ${c:,.0f}" for m, c in per_model_sorted if c >= 1.0
+        )
+        cost_line = f"- Estimated cost:     ~${total_cost:,.2f}"
+        if per_model_str:
+            cost_line += f" ({per_model_str})"
+        lines.append(cost_line)
+
+    # Per-model session-name breadcrumb (which model families were active).
+    # Filter out <synthetic> — Claude Code internal turns aren't a user-
+    # facing model choice; including it in the list confuses the user.
+    active_models = sorted(m for m in sessions.tokens_by_model.keys() if m != "<synthetic>")
+    if active_models:
+        short_names = ", ".join(_short_model_name(m) for m in active_models)
+        lines.append(f"- Per-model:          {short_names}")
+
+    lines.append(f"- *{SUBSCRIPTION_CAVEAT}*")
+
+
+def _short_model_name(model: str) -> str:
+    """Compact model id for render — ``claude-opus-4-7`` → ``Opus 4.7``,
+    ``claude-sonnet-4-6`` → ``Sonnet 4.6``, ``<synthetic>`` → ``synthetic``.
+
+    Unknown shapes are sanitized via ``safety.safe_str`` before render —
+    ``model`` strings cross the sync boundary (peer's Claude Code jsonl →
+    SessionMetadata.tokens_by_day.by_model → mm-events file → this peer's
+    aggregator output → LLM-consumed markdown). A locally-compromised
+    Claude Code on peer A could plant a model string containing markdown
+    control chars or terminal escapes; without sanitization those would
+    flow into the rendered retro. Mirrors the v0.10.1 trust-boundary
+    sweep that ``safety.py`` was extracted to centralize."""
+    if not isinstance(model, str):
+        return ""
+    if model == "<synthetic>":
+        return "synthetic"
+    parts = model.split("-")
+    if len(parts) >= 4 and parts[0] == "claude":
+        # Family/version both come from the peer-controlled string but
+        # are bucketed into known character classes by the split — still
+        # defang via safe_str to defend against future schema drift.
+        family = _safe_short(parts[1].capitalize())
+        version = _safe_short(".".join(parts[2:4]))
+        return f"{family} {version}"
+    return _safe_short(model)
+
+
+def _safe_short(s: str) -> str:
+    """Strip terminal escapes + Rich markup, then bucket to a conservative
+    char class for markdown safety."""
+    from mind_meld.safety import safe_str
+
+    cleaned = safe_str(s) if isinstance(s, str) else ""
+    # Whitelist: alphanumerics, dots, dashes, underscores, parens, spaces.
+    # Anything else (newlines, backticks, angle brackets, pipes) becomes "_".
+    return re.sub(r"[^A-Za-z0-9._\-() ]", "_", cleaned)
+
+
 def format_retro(data: RetroData) -> str:
     """Render the markdown retro. Output is paste-ready for iMessage / email
     — single-message length when realistic data is present.
@@ -997,8 +1170,9 @@ def format_retro(data: RetroData) -> str:
 
     # Claude Code activity. Per-user feedback v0.11.12: drop MB total,
     # "counted separately" parenthetical, and Most active list — they were
-    # noise. Token usage is a deferred follow-up (would require schema bump
-    # + per-jsonl walk; see TODOS).
+    # noise. v0.11.14 adds the token-usage block (raw counts, cache hit
+    # ratio, cost equivalent) when the fleet has any token data; the
+    # subscription caveat is the closing footer.
     lines.append("## Claude Code activity")
     if data.sessions.total_sessions == 0 and not data.sessions.pre_v2_peers:
         lines.append("- No Claude Code sessions captured in this window.")
@@ -1011,6 +1185,9 @@ def format_retro(data: RetroData) -> str:
                 f"{data.sessions.ephemeral_sessions} of those sessions are in ephemeral "
                 f"Conductor workspaces."
             )
+        # Token block — only renders when fleet has any token data. Hides
+        # cleanly on a fresh fleet so empty zeros don't pollute output.
+        _render_token_block(lines, data.sessions)
     lines.append("")
 
     # Skills used (this machine only).
@@ -1043,6 +1220,13 @@ def format_retro(data: RetroData) -> str:
         notes.append(
             f"Sessions count incomplete: {n_pre} peer(s) on pre-v0.11.0 — upgrade for "
             f"accurate session totals."
+        )
+    if data.sessions.pre_token_peers:
+        n_token = len(data.sessions.pre_token_peers)
+        notes.append(
+            f"Tokens incomplete: {n_token} peer(s) on pre-v0.11.14 OR with cold token "
+            f"cache — upgrade and/or run `mm push` on those machines for accurate "
+            f"token totals."
         )
     if data.fleet.unregistered_event_devices:
         notes.append(

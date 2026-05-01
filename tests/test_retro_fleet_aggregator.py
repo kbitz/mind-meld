@@ -1609,3 +1609,211 @@ class TestGitAggregationWithBroadenedFilter:
         )
         assert data.git.commits == 2
         assert data.git.additions == 20  # 2 commits × 10 each (default)
+
+
+# ---------------------------------------------------------------------------
+# Token aggregation + rendering (v0.11.14+)
+# ---------------------------------------------------------------------------
+
+
+class TestTokenAggregation:
+    def _make_sessions_event(
+        self,
+        device,
+        ts,
+        *,
+        tokens_by_day=None,
+        last_session_at=None,
+        sessions=1,
+    ):
+        proj = {
+            "claude_dir": "-tmp-proj",
+            "source_root": "/Users/kb/.claude",
+            "sessions": sessions,
+            "total_kb": 100,
+            "last_session_at": last_session_at or ts,
+        }
+        if tokens_by_day is not None:
+            proj["tokens_by_day"] = tokens_by_day
+        return {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": ts,
+            "device": device,
+            "projects": [proj],
+        }
+
+    def test_no_tokens_means_pre_token_peer(self):
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        ev = self._make_sessions_event(
+            "dev-a",
+            "2026-05-01T12:00:00+00:00",
+            tokens_by_day=None,
+            sessions=1,
+        )
+        result = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        assert "dev-a" in result.pre_token_peers
+        assert result.tokens_input == 0
+
+    def test_tokens_summed_across_window_days(self):
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        ev = self._make_sessions_event(
+            "dev-a",
+            "2026-05-01T12:00:00+00:00",
+            tokens_by_day={
+                "2026-04-29": {
+                    "input": 10,
+                    "cache_create": 0,
+                    "cache_read": 100,
+                    "output": 5,
+                    "by_model": {
+                        "claude-opus-4-7": {
+                            "input": 10,
+                            "cache_create": 0,
+                            "cache_read": 100,
+                            "output": 5,
+                        }
+                    },
+                },
+                "2026-05-01": {
+                    "input": 30,
+                    "cache_create": 0,
+                    "cache_read": 300,
+                    "output": 15,
+                    "by_model": {
+                        "claude-sonnet-4-6": {
+                            "input": 30,
+                            "cache_create": 0,
+                            "cache_read": 300,
+                            "output": 15,
+                        }
+                    },
+                },
+            },
+        )
+        result = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 29, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        assert result.tokens_input == 40  # 10 + 30
+        assert result.tokens_cache_read == 400
+        assert "claude-opus-4-7" in result.tokens_by_model
+        assert "claude-sonnet-4-6" in result.tokens_by_model
+
+    def test_tokens_outside_window_excluded(self):
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        ev = self._make_sessions_event(
+            "dev-a",
+            "2026-05-01T12:00:00+00:00",
+            tokens_by_day={
+                "2026-01-01": {  # way outside window
+                    "input": 999,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                    "by_model": {},
+                },
+            },
+            last_session_at="2026-05-01T12:00:00+00:00",  # in window
+        )
+        result = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 29, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        assert result.tokens_input == 0  # outside-window day excluded
+        # Project still counted as session (last_session_at is in window).
+        # The tokens_by_day field IS present (just no in-window day matches),
+        # so this device does NOT get flagged as pre_token_peer — that's the
+        # right call for a token-aware peer with zero in-window activity.
+        assert "dev-a" not in result.pre_token_peers
+
+
+class TestTokenBlockRender:
+    def _data_with_tokens(self, **overrides):
+        from mind_meld.skills.retro_fleet.aggregator import (
+            RetroData,
+            SessionsAggregate,
+        )
+
+        data = RetroData(
+            window_days=7,
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+        data.sessions = SessionsAggregate(
+            total_sessions=17,
+            projects=4,
+            tokens_input=12_400_000,
+            tokens_cache_read=87_300_000,
+            tokens_cache_create=10_000_000,
+            tokens_output=142_000,
+            tokens_by_model={
+                "claude-sonnet-4-6": {
+                    "input": 4_000_000,
+                    "cache_create": 0,
+                    "cache_read": 50_000_000,
+                    "output": 100_000,
+                },
+                "claude-opus-4-7": {
+                    "input": 8_400_000,
+                    "cache_create": 10_000_000,
+                    "cache_read": 37_300_000,
+                    "output": 42_000,
+                },
+            },
+            **overrides,
+        )
+        return data
+
+    def test_render_includes_token_lines(self):
+        from mind_meld.skills.retro_fleet.aggregator import format_retro
+
+        data = self._data_with_tokens()
+        out = format_retro(data)
+        assert "Tokens this window:" in out
+        assert "12.4M in" in out
+        assert "87.3M cache_read" in out
+        assert "Cache hit ratio:" in out
+        assert "Estimated cost:" in out
+        assert "Per-model:" in out
+        assert "Sonnet 4.6" in out
+        assert "Opus 4.7" in out
+        # Subscription caveat as italicized footer.
+        assert "Cost estimates do not account for subscription plan pricing." in out
+
+    def test_render_hidden_when_no_tokens(self):
+        from mind_meld.skills.retro_fleet.aggregator import (
+            RetroData,
+            SessionsAggregate,
+            format_retro,
+        )
+
+        data = RetroData(
+            window_days=7,
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+        data.sessions = SessionsAggregate(total_sessions=5, projects=1)
+        out = format_retro(data)
+        # Token block lines absent.
+        assert "Tokens this window:" not in out
+        assert "Cache hit ratio:" not in out
+        # But the section is still present with sessions count.
+        assert "5 sessions across 1 projects" in out
+
+    def test_pre_token_peers_breadcrumb_in_notes(self):
+        from mind_meld.skills.retro_fleet.aggregator import format_retro
+
+        data = self._data_with_tokens()
+        data.sessions.pre_token_peers = {"dev-mac-mini"}
+        out = format_retro(data)
+        assert "Tokens incomplete: 1 peer(s)" in out

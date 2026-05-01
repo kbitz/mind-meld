@@ -19,7 +19,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events,safety,conflictdiff}.py
+src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events,safety,conflictdiff,lockedjson,token_usage}.py
 src/mind_meld/storage/{local,keys}.py
 src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). SKILL.md invokes the aggregator via `python -m mind_meld.skills.retro_fleet.aggregator`. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
 
@@ -37,6 +37,40 @@ prompt sites (`_resolve_interactive_loop` post-pull walk, and
 level dispatch (pre-inversion / post-inversion / canonical-missing)
 stays at each call site — see "Conflict-direction inversion" section
 for why filename-prefix dispatch is load-bearing.
+
+`lockedjson.py` (v0.11.14) is the extracted single-file flock R/M/W
+primitive shared by `upgrade.py` (upgrade-state cache) and
+`token_usage.py` (per-jsonl token cache). Three contention modes —
+`block` (wait for lock, used by interactive paths), `raise` (fail-fast
+for tests), and `warn` (degrade with `mm: warning:` after a shared
+retry budget, used by autopush hooks). The retry budget is shared with
+the existing devices-write-lock's `_LOCK_RETRY_INTERVALS_S` schedule
+(~750ms total). `devices-write.lock` stays ad-hoc — its multi-file
+lock-on-sibling shape doesn't fit the single-file R/M/W contract. Do
+NOT route new flock-guarded JSON caches through ad-hoc fcntl calls;
+extend `lockedjson` if the contract needs to grow.
+
+`token_usage.py` (v0.11.14) walks Claude Code session jsonls (parent +
+subagents) and aggregates per-jsonl `message.usage` totals into a
+flock-guarded cache at `~/.config/mind-meld/session-tokens.json`.
+Subagent jsonls (`<session-uuid>/subagents/agent-*.jsonl`) contribute
+to the parent project's token totals — ~50% of fleet usage on this
+Mac flows through them — but do NOT bump `sessions` /
+`total_kb` / `last_session_at` (parent-only semantics preserved).
+Cache shape: `files[<jsonl-path>] = {size, mtime, by_day, message_ids}`,
+size + mtime keyed with re-stat-after-read for concurrent-append
+safety, message-level dedup by `message.id` UUID for retries /
+compaction artifacts, oversize line guard (16 MiB cap) with
+warn-once breadcrumb. The aggregator slices `tokens_by_day` to the
+retro window so weekly and quarterly retros see distinct, honest
+totals from the same snapshot. GC hook in `mm gc` reaps cache entries
+whose underlying jsonl is gone OR whose most recent `by_day` key is
+more than 90 days old. **Mixed-fleet mode**: the aggregator's
+field-presence sniff (any project with `sessions > 0` and no
+`tokens_by_day` flags the device into `pre_token_peers`) keeps token
+totals honest while peers upgrade — surfaces in Notes as `Tokens
+incomplete: N peer(s) on pre-v0.11.14 OR with cold token cache`. No
+`EVENTS_SCHEMA_VERSION` bump; the field is additive on v=2.
 
 Storage keys are constructed via helpers in `storage/keys.py`
 (`manifest_key`, `blob_key`, `device_key`, `parse_blob_key`) which validate

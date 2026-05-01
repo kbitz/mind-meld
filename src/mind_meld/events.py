@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import TypedDict
 from urllib.parse import urlsplit
 
-from mind_meld import fsutil
+from mind_meld import fsutil, token_usage
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES
 
 # ---------------------------------------------------------------------------
@@ -148,6 +148,14 @@ class SessionMetadata(TypedDict, total=False):
     total_kb: int
     last_session_at: str
     ephemeral: bool
+    # Token usage (v0.11.14+, additive on v=2 schema). Day-bucketed so the
+    # rendering machine slices to its retro window. Capped at 90 days at
+    # write time. Subagent jsonl tokens are summed into this same bucket
+    # (parent-session attribution) but do NOT bump sessions/total_kb/
+    # last_session_at — those preserve their parent-only semantics.
+    # See src/mind_meld/token_usage.py for the schema of each day bucket
+    # ({input, cache_create, cache_read, output, by_model: {model: {...}}}).
+    tokens_by_day: dict[str, dict]
 
 
 class SessionsSnapshot(TypedDict, total=False):
@@ -673,6 +681,7 @@ def walk_session_metadata(
     since: datetime,  # noqa: ARG001 — kept for API stability; v=2 ignores it (see EVENTS_SCHEMA_VERSION docstring)
     *,
     deadline_monotonic: float | None = None,
+    token_cache_files: dict | None = None,
 ) -> list[SessionsSnapshot]:
     """Walk ``<claude_dir>/projects/<encoded>/*.jsonl`` aggregating per-project
     session metadata. Returns one SessionsSnapshot row aggregating all
@@ -697,6 +706,13 @@ def walk_session_metadata(
     ``deadline_monotonic`` (a ``time.monotonic()`` value) is checked at the
     top of each project iteration and aborts the scandir loop. Track 7B's
     wiring side passes the same deadline shared with walk_git_projects.
+
+    Token aggregation (v0.11.14+): when ``token_cache_files`` is provided —
+    the ``files`` sub-dict of a locked ``token_usage`` cache — each scanned
+    project's ``tokens_by_day`` is populated by summing parent + subagent
+    jsonl token usage. When ``None``, no token data is added (used by tests
+    that don't exercise the token path, and by autopush when the cache is
+    cold).
     """
     ts_now = datetime.now(timezone.utc).isoformat()
     snapshot: SessionsSnapshot = {
@@ -719,7 +735,12 @@ def walk_session_metadata(
                     break
                 if not proj_entry.is_dir(follow_symlinks=False):
                     continue
-                meta = _scan_one_project(proj_entry, source_root=source_root)
+                meta = _scan_one_project(
+                    proj_entry,
+                    source_root=source_root,
+                    token_cache_files=token_cache_files,
+                    deadline_monotonic=deadline_monotonic,
+                )
                 if meta is not None:
                     out.append(meta)
     except OSError:
@@ -733,6 +754,8 @@ def _scan_one_project(
     proj_entry: os.DirEntry,
     *,
     source_root: str,
+    token_cache_files: dict | None = None,
+    deadline_monotonic: float | None = None,
 ) -> SessionMetadata | None:
     """One project dir → SessionMetadata. Returns None if the dir has no
     qualifying jsonl files.
@@ -743,36 +766,47 @@ def _scan_one_project(
     ``walk_session_metadata`` — distinguishes (device, claude_dir) tuples
     that share an encoded project name across two configured ``type:
     claude`` source roots. The aggregator keys on ``(device, source_root,
-    claude_dir)`` to avoid silent overwrite on encoded-name collision."""
+    claude_dir)`` to avoid silent overwrite on encoded-name collision.
+
+    Token aggregation (v0.11.14+): when ``token_cache_files`` is provided,
+    parent + subagent jsonls are walked into the per-jsonl cache and the
+    resulting per-day buckets are merged into ``tokens_by_day``. Subagent
+    jsonls live one level deeper at ``<session-uuid>/subagents/*.jsonl``;
+    they contribute to ``tokens_by_day`` ONLY (not ``sessions``,
+    ``total_kb``, or ``last_session_at`` — those preserve parent-only
+    semantics)."""
     sessions = 0
     total_bytes = 0
     last_mtime = 0.0
     cwd: str | None = None
+    parent_jsonls: list[Path] = []
+    subagent_jsonls: list[Path] = []
     try:
         with os.scandir(proj_entry.path) as f_iter:
             for f_entry in f_iter:
-                if not f_entry.name.endswith(".jsonl"):
-                    continue
-                if not f_entry.is_file(follow_symlinks=False):
-                    continue
-                try:
-                    st = f_entry.stat()
-                except OSError:
-                    continue
-                sessions += 1
-                total_bytes += st.st_size
-                if st.st_mtime > last_mtime:
-                    last_mtime = st.st_mtime
-                # Only read cwd from one file per project — first one wins.
-                if cwd is None:
-                    cwd = _read_cwd_from_latest_jsonl(Path(proj_entry.path))
+                if f_entry.name.endswith(".jsonl") and f_entry.is_file(follow_symlinks=False):
+                    try:
+                        st = f_entry.stat()
+                    except OSError:
+                        continue
+                    sessions += 1
+                    total_bytes += st.st_size
+                    if st.st_mtime > last_mtime:
+                        last_mtime = st.st_mtime
+                    parent_jsonls.append(Path(f_entry.path))
+                    # Only read cwd from one file per project — first one wins.
+                    if cwd is None:
+                        cwd = _read_cwd_from_latest_jsonl(Path(proj_entry.path))
+                elif f_entry.is_dir(follow_symlinks=False):
+                    # Look for <session-uuid>/subagents/*.jsonl one level deeper.
+                    subagent_jsonls.extend(_collect_subagent_jsonls(Path(f_entry.path)))
     except OSError:
         return None
     if sessions == 0:
         return None
     decoded_path = cwd or proj_entry.name  # fallback to encoded name
     last_iso = datetime.fromtimestamp(last_mtime, tz=timezone.utc).isoformat() if last_mtime else ""
-    return {
+    meta: SessionMetadata = {
         "claude_dir": proj_entry.name,
         "source_root": source_root,
         "sessions": sessions,
@@ -780,6 +814,63 @@ def _scan_one_project(
         "last_session_at": last_iso,
         "ephemeral": bool(_CONDUCTOR_PATTERN.search(decoded_path)),
     }
+    if token_cache_files is not None:
+        meta["tokens_by_day"] = _aggregate_tokens_for_project(
+            parent_jsonls + subagent_jsonls,
+            token_cache_files,
+            deadline_monotonic=deadline_monotonic,
+        )
+    return meta
+
+
+def _collect_subagent_jsonls(session_dir: Path) -> list[Path]:
+    """Yield jsonls under ``<session_dir>/subagents/``. Returns empty list
+    if no such dir or on any I/O failure."""
+    sub = session_dir / "subagents"
+    if not sub.is_dir():
+        return []
+    out: list[Path] = []
+    try:
+        with os.scandir(sub) as it:
+            for entry in it:
+                if entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False):
+                    out.append(Path(entry.path))
+    except OSError:
+        return []
+    return out
+
+
+def _aggregate_tokens_for_project(
+    jsonls: list[Path],
+    token_cache_files: dict,
+    *,
+    deadline_monotonic: float | None,
+) -> dict[str, dict]:
+    """Walk each jsonl through the token cache and merge their per-day
+    buckets. Returns a single ``{YYYY-MM-DD: {input, cache_create, ...,
+    by_model}}`` map."""
+    merged: dict[str, dict] = {}
+    for jl in jsonls:
+        by_day = token_usage.get_or_compute(
+            jl,
+            token_cache_files,
+            deadline_monotonic=deadline_monotonic,
+        )
+        for day, bucket in by_day.items():
+            target = merged.setdefault(
+                day,
+                {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0, "by_model": {}},
+            )
+            for k in ("input", "cache_create", "cache_read", "output"):
+                target[k] = target.get(k, 0) + bucket.get(k, 0)
+            for model, mbucket in (bucket.get("by_model") or {}).items():
+                mtarget = target.setdefault("by_model", {}).setdefault(
+                    model,
+                    {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
+                )
+                for k in ("input", "cache_create", "cache_read", "output"):
+                    mtarget[k] = mtarget.get(k, 0) + mbucket.get(k, 0)
+    return merged
 
 
 # ---------------------------------------------------------------------------

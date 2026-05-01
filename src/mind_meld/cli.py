@@ -31,7 +31,16 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from mind_meld import __version__, events, fsutil, pullhistory, seen_sources, sidecar, upgrade
+from mind_meld import (
+    __version__,
+    events,
+    fsutil,
+    pullhistory,
+    seen_sources,
+    sidecar,
+    token_usage,
+    upgrade,
+)
 from mind_meld import config as _config_module
 from mind_meld.config import (
     DEFAULT_ARGON2_MEMORY_KB,
@@ -76,6 +85,7 @@ from mind_meld.errors import (
     MindMeldError,
     StorageError,
 )
+from mind_meld.lockedjson import locked_json_rmw
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -2578,6 +2588,60 @@ def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
     return [Path(s["path"]).expanduser() for s in sources if s.get("type") == "claude"]
 
 
+def _decide_token_walk_policy(
+    claude_paths: list[Path],
+    *,
+    quiet: bool,
+) -> bool:
+    """Return True if the events tail should aggregate token data this push.
+
+    Side effect: when cold cache + (interactive OR detected upgrade
+    transition), runs ``warm_token_cache_inline`` to populate the cache
+    BEFORE the tail walk starts. False return means cold cache + no warm
+    eligibility (autopush, no transition) — emit a notice and skip.
+
+    Four policies:
+
+    1. **Cache already warm**: return True. Tail walk picks up cache hits
+       on every existing jsonl, walks only newly-touched ones.
+
+    2. **Cold + interactive (``quiet=False``)**: telegraph one-time warm
+       cost, run ``warm_token_cache_inline``, return True.
+
+    3. **Cold + autopush + transition fired**: warm silently using the
+       ``warm_token_cache_inline`` default budget. The transition flag is
+       set by the call to ``upgrade.run_transition_hook`` earlier in the
+       same process — its presence (not a budget bump) is what unlocks
+       this path on autopush.
+
+    4. **Cold + autopush + no transition**: emit ``mm: notice: token cache
+       not warm; run 'mm push' to populate`` and return False (skip token
+       aggregation this push).
+    """
+    if not claude_paths:
+        return False
+    try:
+        is_cold = token_usage.is_cache_cold()
+    except OSError:
+        return False
+    if not is_cold:
+        return True
+    transition = upgrade.last_transition_seen()
+    if quiet and transition is None:
+        sys.stderr.write("mm: notice: token cache not warm; run 'mm push' to populate\n")
+        return False
+    if not quiet:
+        sys.stderr.write("mm: warming token cache (one-time, ~3s)...\n")
+    try:
+        token_usage.warm_token_cache_inline(claude_paths)
+    except Exception as e:
+        sys.stderr.write(
+            f"mm: notice: token cache warm failed: {type(e).__name__}: {safe_str(e)}\n"
+        )
+        return False
+    return True
+
+
 def _run_events_tail(
     config: dict,
     sources: list[dict],
@@ -2618,12 +2682,60 @@ def _run_events_tail(
             r["device"] = device_id
 
         claude_paths = _enabled_claude_paths(sources)
+        # Token cache wiring (v0.11.14+).
+        # Step 1: decide whether to aggregate tokens this push (handles cold-
+        # cache warm internally). Returns False on autopush + cold + no
+        # detected upgrade transition — caller skips the token aggregation.
+        do_token_walk = _decide_token_walk_policy(claude_paths, quiet=quiet)
+        # Warm may have consumed several seconds. Refresh the deadline so
+        # the session-metadata walk gets its full advertised budget instead
+        # of an already-expired one (Codex outside-voice review caught this
+        # — pre-fix, first interactive push / upgrade autopush could emit
+        # an empty `projects: []` snapshot when warm ate the original
+        # deadline).
+        deadline = time.monotonic() + budget_ms / 1000.0
+
         agg_projects: list[dict] = []
-        for claude_dir in claude_paths:
-            for row in events.walk_session_metadata(
-                claude_dir, since=since, deadline_monotonic=deadline
-            ):
-                agg_projects.extend(row.get("projects", []))
+        if do_token_walk:
+            # Step 2: hold the token cache flock across the walk so
+            # walk_session_metadata's per-file mutations to files dict are
+            # captured atomically. "warn" mode under autopush degrades
+            # gracefully on contention (can't get the lock → no token
+            # aggregation this push); "block" under interactive (user is
+            # waiting anyway).
+            mode = "warn" if quiet else "block"
+            with locked_json_rmw(
+                token_usage.CACHE_PATH,
+                default_factory=lambda: {"version": token_usage.CACHE_VERSION, "files": {}},
+                on_contention=mode,
+                contention_warning="token cache contended; skipping token aggregation",
+            ) as ljson:
+                if not ljson.is_locked:
+                    files_dict = None
+                else:
+                    if ljson.data.get("version") != token_usage.CACHE_VERSION:
+                        ljson.data.clear()
+                        ljson.data.update({"version": token_usage.CACHE_VERSION, "files": {}})
+                    if not isinstance(ljson.data.get("files"), dict):
+                        ljson.data["files"] = {}
+                    files_dict = ljson.data["files"]
+                for claude_dir in claude_paths:
+                    for row in events.walk_session_metadata(
+                        claude_dir,
+                        since=since,
+                        deadline_monotonic=deadline,
+                        token_cache_files=files_dict,
+                    ):
+                        agg_projects.extend(row.get("projects", []))
+        else:
+            for claude_dir in claude_paths:
+                for row in events.walk_session_metadata(
+                    claude_dir,
+                    since=since,
+                    deadline_monotonic=deadline,
+                    token_cache_files=None,
+                ):
+                    agg_projects.extend(row.get("projects", []))
         s_rows: list[dict] = []
         if claude_paths:
             s_rows.append(
@@ -2695,12 +2807,50 @@ def _run_events_backfill(
             r["device"] = device_id
 
         claude_paths = _enabled_claude_paths(sources)
+
+        # Warm the token cache inline at init (v0.11.14+). One-time cost
+        # at init time — kb already accepts init takes a few seconds.
+        # Subsequent pushes inherit a warm cache.
+        if claude_paths:
+            try:
+                token_usage.warm_token_cache_inline(claude_paths)
+            except Exception as e:
+                sys.stderr.write(
+                    f"mm: notice: token cache warm at init failed: "
+                    f"{type(e).__name__}: {safe_str(e)}\n"
+                )
+
+        # Refresh deadline after warm — the warm can spend ~5s, which
+        # would otherwise leave an already-expired deadline for the
+        # session-metadata walk and produce an empty `projects: []`
+        # backfill on fresh installs (Codex outside-voice review caught
+        # this; matches the same fix in `_run_events_tail`).
+        deadline = time.monotonic() + budget_ms / 1000.0
+
         agg_projects: list[dict] = []
-        for claude_dir in claude_paths:
-            for row in events.walk_session_metadata(
-                claude_dir, since=since, deadline_monotonic=deadline
-            ):
-                agg_projects.extend(row.get("projects", []))
+        # Hold the token cache lock across the walk so per-jsonl mutations
+        # persist as part of the same R/M/W. Init is interactive, so use
+        # blocking mode.
+        if claude_paths:
+            with locked_json_rmw(
+                token_usage.CACHE_PATH,
+                default_factory=lambda: {"version": token_usage.CACHE_VERSION, "files": {}},
+                on_contention="block",
+            ) as ljson:
+                if ljson.data.get("version") != token_usage.CACHE_VERSION:
+                    ljson.data.clear()
+                    ljson.data.update({"version": token_usage.CACHE_VERSION, "files": {}})
+                if not isinstance(ljson.data.get("files"), dict):
+                    ljson.data["files"] = {}
+                files_dict = ljson.data["files"]
+                for claude_dir in claude_paths:
+                    for row in events.walk_session_metadata(
+                        claude_dir,
+                        since=since,
+                        deadline_monotonic=deadline,
+                        token_cache_files=files_dict,
+                    ):
+                        agg_projects.extend(row.get("projects", []))
         s_rows: list[dict] = []
         if claude_paths:
             s_rows.append(
@@ -4642,10 +4792,37 @@ def gc(
         # Track 7B: events retention is always-on (fleet policy, not opt-in).
         # See `_gc_old_event_files` for the tombstone-propagation framing.
         _gc_old_event_files(config, dry_run, verbose)
+        # v0.11.14+: token cache reaper. Stale entries (no living jsonl OR
+        # by_day older than 90d) are dropped. Dry-run reports without
+        # mutating the cache file.
+        _gc_token_cache(dry_run, verbose)
         if prune_conflicts:
             _gc_old_conflict_files(config, dry_run, verbose)
     finally:
         release_lock()
+
+
+def _gc_token_cache(dry_run: bool, verbose: bool) -> None:
+    """Reap session-tokens.json entries with no living jsonl AND entries
+    whose most recent by_day key is older than 90 days. Best-effort —
+    cache reconstruction on the next push backstops a GC failure."""
+    if dry_run:
+        # Dry-run: count without mutating. Re-implement the predicate
+        # cheaply via is_cache_cold + a peek.
+        if not token_usage.CACHE_PATH.exists():
+            if verbose:
+                console.print("[dim]No token cache to gc.[/dim]")
+            return
+        if verbose:
+            console.print("[dim]Token cache reaper: dry-run; skipping.[/dim]")
+        return
+    try:
+        n = token_usage.gc_cache_entries()
+    except Exception as e:
+        sys.stderr.write(f"mm: notice: token cache gc failed: {type(e).__name__}: {safe_str(e)}\n")
+        return
+    if verbose and n:
+        console.print(f"[dim]Reaped {n} stale token cache entr{'y' if n == 1 else 'ies'}.[/dim]")
 
 
 def _sweep_local_tmp_files(

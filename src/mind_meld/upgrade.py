@@ -32,9 +32,7 @@ so the warning-class reader trust stays focused on data-at-risk signals only.
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -46,6 +44,7 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 from mind_meld import __version__, fsutil, pullhistory
+from mind_meld.lockedjson import locked_json_rmw
 
 CACHE_DIR = Path.home() / ".config" / "mind-meld"
 CACHE_PATH = CACHE_DIR / "upgrade-state.json"
@@ -68,6 +67,14 @@ DEV_BUILD_SENTINEL = "0.0.0+dev"
 # calls in one mm invocation log at most one self-upgrade row. Reset on
 # interpreter exit (next mm invocation re-runs cleanly).
 _TRANSITION_DETECTED_THIS_INVOCATION = False
+
+# Set to the (old, new) tuple by `detect_self_version_transition` whenever a
+# real transition is observed in this process. Read by `_run_events_tail` to
+# decide whether to grant a one-time extended budget for the inline token-
+# cache warm (v0.11.14+ — first push after an mm upgrade gets ~5s instead
+# of the normal 250/500ms autopush/interactive budget). None on the steady-
+# state path (no transition this process). Reset on interpreter exit.
+_LAST_TRANSITION_SEEN: tuple[str, str] | None = None
 
 # Set by the global `--no-check-version` Typer flag in cli.py:_main.
 # When True, all upgrade-module side effects no-op for this invocation.
@@ -108,7 +115,7 @@ class UpgradeCheckResult:
     should_nudge: bool = False  # True only for "upgrade-available" past gate
 
 
-# ── Cache I/O (single file, single flock) ─────────────────────────────────
+# ── Cache I/O (single file, single flock — via mind_meld.lockedjson) ──────
 
 
 def _empty_cache() -> dict[str, Any]:
@@ -122,83 +129,14 @@ def _empty_cache() -> dict[str, Any]:
     }
 
 
-def _read_cache_locked(fd: int) -> dict[str, Any]:
-    """Read+parse cache from an already-flocked fd. Treat unreadable / corrupt
-    JSON as empty cache (first-run-equivalent), per plan §2 spec gap fix.
-    """
-    try:
-        os.lseek(fd, 0, os.SEEK_SET)
-        raw = os.read(fd, 1024 * 1024)
-    except OSError:
-        return _empty_cache()
-    if not raw:
-        return _empty_cache()
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return _empty_cache()
-    if not isinstance(parsed, dict):
-        return _empty_cache()
-    # Backfill missing keys (forward-compat with future schema additions).
+def _normalize_cache(parsed: dict[str, Any]) -> dict[str, Any]:
+    """Backfill missing keys onto a parsed cache (forward-compat with future
+    schema additions). Pre-extraction this lived inside the read helper;
+    the lockedjson helper hands us the raw parsed dict, so the backfill
+    moved here."""
     base = _empty_cache()
     base.update({k: parsed.get(k, base[k]) for k in base})
     return base
-
-
-def _write_cache_locked(fd: int, cache: dict[str, Any]) -> None:
-    """Write cache JSON to the already-flocked fd. Best-effort.
-
-    Truncates to 0 then writes — both under the same flock so torn writes
-    are not observable. Failures are swallowed; cache is forensic, never
-    block sync.
-    """
-    data = json.dumps(cache, sort_keys=True, indent=2).encode("utf-8")
-    try:
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, data)
-    except OSError:
-        return
-
-
-def _open_cache_fd() -> int | None:
-    """Open (creating if needed) the cache file with exclusive flock.
-
-    Returns the locked fd on success, None on failure (caller must no-op).
-    Caller MUST call `os.close(fd)` (which releases the flock).
-    """
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return None
-    try:
-        fd = os.open(str(CACHE_PATH), os.O_RDWR | os.O_CREAT, 0o600)
-    except OSError:
-        return None
-    try:
-        try:
-            os.fchmod(fd, 0o600)
-        except OSError:
-            pass  # best-effort on filesystems without fchmod
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    except OSError:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        return None
-    return fd
-
-
-def _release_cache_fd(fd: int) -> None:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
-    try:
-        os.close(fd)
-    except OSError:
-        pass
 
 
 # ── Tag-list HTTP adapter (testable seam) ─────────────────────────────────
@@ -306,90 +244,101 @@ def check_for_upgrade(
 
     now = now or datetime.now(timezone.utc)
 
-    fd = _open_cache_fd()
-    if fd is None:
-        # Can't even open the cache file — bail without nudging.
-        return UpgradeCheckResult(state="unknown", local=local, latest=None, install_cmd=None)
-
     try:
-        cache = _read_cache_locked(fd)
-        cached_latest = cache.get("latest_version")
+        with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:
+            if not ljson.is_locked:
+                # Helper degraded gracefully (only in non-block modes; we use
+                # default block mode here, so this path is unreachable today).
+                # Future-proof: bail without nudging.
+                return UpgradeCheckResult(
+                    state="unknown", local=local, latest=None, install_cmd=None
+                )
+            cache = _normalize_cache(ljson.data)
+            ljson.data.clear()
+            ljson.data.update(cache)  # write-through: helper persists ljson.data
+            cached_latest = cache.get("latest_version")
 
-        # Decide whether to fetch.
-        checked_at = _parse_iso(cache.get("checked_at"))
-        attempted_at = _parse_iso(cache.get("attempted_at"))
-        cache_fresh = checked_at is not None and (now - checked_at) < DEFAULT_THROTTLE
-        backoff_active = attempted_at is not None and (now - attempted_at) < DEFAULT_FAILURE_BACKOFF
+            # Decide whether to fetch.
+            checked_at = _parse_iso(cache.get("checked_at"))
+            attempted_at = _parse_iso(cache.get("attempted_at"))
+            cache_fresh = checked_at is not None and (now - checked_at) < DEFAULT_THROTTLE
+            backoff_active = (
+                attempted_at is not None and (now - attempted_at) < DEFAULT_FAILURE_BACKOFF
+            )
 
-        if not cache_fresh and not backoff_active:
-            # Stale cache + no recent failed attempt → fetch.
+            if not cache_fresh and not backoff_active:
+                # Stale cache + no recent failed attempt → fetch.
+                try:
+                    tags = _fetch_tags()
+                    picked = _pick_latest_tag(tags)
+                    if picked is None:
+                        # Empty array or all tags filtered. Treat as "unknown"
+                        # but mark attempted_at so we don't hammer.
+                        ljson.data["attempted_at"] = now.isoformat()
+                        return UpgradeCheckResult(
+                            state="unknown",
+                            local=local,
+                            latest=cached_latest,
+                            install_cmd=None,
+                        )
+                    cached_latest = picked[0].lstrip("v")
+                    ljson.data["latest_version"] = cached_latest
+                    ljson.data["checked_at"] = now.isoformat()
+                    ljson.data["attempted_at"] = now.isoformat()
+                except (
+                    urllib.error.URLError,
+                    urllib.error.HTTPError,
+                    OSError,
+                    json.JSONDecodeError,
+                    UnicodeDecodeError,
+                ):
+                    # Network or parse failure: update attempted_at only, fall
+                    # back to cached state.
+                    ljson.data["attempted_at"] = now.isoformat()
+                    if cached_latest is None:
+                        return UpgradeCheckResult(
+                            state="unknown", local=local, latest=None, install_cmd=None
+                        )
+
+            # Compare local vs cached_latest.
+            if cached_latest is None:
+                return UpgradeCheckResult(
+                    state="unknown", local=local, latest=None, install_cmd=None
+                )
+
             try:
-                tags = _fetch_tags()
-                picked = _pick_latest_tag(tags)
-                if picked is None:
-                    # Empty array or all tags filtered. Treat as "unknown"
-                    # but mark attempted_at so we don't hammer.
-                    cache["attempted_at"] = now.isoformat()
-                    _write_cache_locked(fd, cache)
-                    return UpgradeCheckResult(
-                        state="unknown", local=local, latest=cached_latest, install_cmd=None
-                    )
-                cached_latest = picked[0].lstrip("v")
-                cache["latest_version"] = cached_latest
-                cache["checked_at"] = now.isoformat()
-                cache["attempted_at"] = now.isoformat()
-                _write_cache_locked(fd, cache)
-            except (
-                urllib.error.URLError,
-                urllib.error.HTTPError,
-                OSError,
-                json.JSONDecodeError,
-                UnicodeDecodeError,
-            ):
-                # Network or parse failure: update attempted_at only, fall
-                # back to cached state.
-                cache["attempted_at"] = now.isoformat()
-                _write_cache_locked(fd, cache)
-                if cached_latest is None:
-                    return UpgradeCheckResult(
-                        state="unknown", local=local, latest=None, install_cmd=None
-                    )
+                local_v = Version(local)
+                latest_v = Version(cached_latest)
+            except InvalidVersion:
+                return UpgradeCheckResult(
+                    state="unknown", local=local, latest=cached_latest, install_cmd=None
+                )
 
-        # Compare local vs cached_latest.
-        if cached_latest is None:
-            return UpgradeCheckResult(state="unknown", local=local, latest=None, install_cmd=None)
+            if latest_v <= local_v:
+                return UpgradeCheckResult(
+                    state="current", local=local, latest=cached_latest, install_cmd=None
+                )
 
-        try:
-            local_v = Version(local)
-            latest_v = Version(cached_latest)
-        except InvalidVersion:
+            # Upgrade available. Apply nudge gate: last_nudged_version != latest
+            # OR last_nudged_at + 24h past.
+            install_cmd = INSTALL_CMD_TEMPLATE.format(tag=f"v{cached_latest}")
+            last_nudged_version = ljson.data.get("last_nudged_version")
+            last_nudged_at = _parse_iso(ljson.data.get("last_nudged_at"))
+            version_changed = last_nudged_version != cached_latest
+            gap_elapsed = last_nudged_at is None or (now - last_nudged_at) >= DEFAULT_NUDGE_GAP
+            should_nudge = version_changed or gap_elapsed
+
             return UpgradeCheckResult(
-                state="unknown", local=local, latest=cached_latest, install_cmd=None
+                state="upgrade-available",
+                local=local,
+                latest=cached_latest,
+                install_cmd=install_cmd,
+                should_nudge=should_nudge,
             )
-
-        if latest_v <= local_v:
-            return UpgradeCheckResult(
-                state="current", local=local, latest=cached_latest, install_cmd=None
-            )
-
-        # Upgrade available. Apply nudge gate: last_nudged_version != latest
-        # OR last_nudged_at + 24h past.
-        install_cmd = INSTALL_CMD_TEMPLATE.format(tag=f"v{cached_latest}")
-        last_nudged_version = cache.get("last_nudged_version")
-        last_nudged_at = _parse_iso(cache.get("last_nudged_at"))
-        version_changed = last_nudged_version != cached_latest
-        gap_elapsed = last_nudged_at is None or (now - last_nudged_at) >= DEFAULT_NUDGE_GAP
-        should_nudge = version_changed or gap_elapsed
-
-        return UpgradeCheckResult(
-            state="upgrade-available",
-            local=local,
-            latest=cached_latest,
-            install_cmd=install_cmd,
-            should_nudge=should_nudge,
-        )
-    finally:
-        _release_cache_fd(fd)
+    except OSError:
+        # mkdir / open failure — can't even create the cache file. Bail
+        # without nudging (matches pre-extraction _open_cache_fd None path).
+        return UpgradeCheckResult(state="unknown", local=local, latest=None, install_cmd=None)
 
 
 def record_nudge(latest_version: str, *, now: datetime | None = None) -> None:
@@ -397,16 +346,17 @@ def record_nudge(latest_version: str, *, now: datetime | None = None) -> None:
     this immediately after printing the `mm: notice:` line. Best-effort.
     """
     now = now or datetime.now(timezone.utc)
-    fd = _open_cache_fd()
-    if fd is None:
-        return
     try:
-        cache = _read_cache_locked(fd)
-        cache["last_nudged_version"] = latest_version
-        cache["last_nudged_at"] = now.isoformat()
-        _write_cache_locked(fd, cache)
-    finally:
-        _release_cache_fd(fd)
+        with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:
+            if not ljson.is_locked:
+                return
+            cache = _normalize_cache(ljson.data)
+            cache["last_nudged_version"] = latest_version
+            cache["last_nudged_at"] = now.isoformat()
+            ljson.data.clear()
+            ljson.data.update(cache)
+    except OSError:
+        return
 
 
 # ── Self-version transition detection ─────────────────────────────────────
@@ -439,7 +389,7 @@ def detect_self_version_transition(
     First-run path (cache absent OR last_seen_self_version is None): writes
     initial seed (current __version__), returns None (no log row).
     """
-    global _TRANSITION_DETECTED_THIS_INVOCATION
+    global _TRANSITION_DETECTED_THIS_INVOCATION, _LAST_TRANSITION_SEEN
 
     if _TRANSITION_DETECTED_THIS_INVOCATION:
         return None
@@ -448,32 +398,34 @@ def detect_self_version_transition(
     if __version__ == DEV_BUILD_SENTINEL:
         return None
 
-    fd = _open_cache_fd()
-    if fd is None:
-        return None
     try:
-        cache = _read_cache_locked(fd)
-        last_seen = cache.get("last_seen_self_version")
-        # Always update the cached self-version, even on first-run / no
-        # transition, so the next call has the right baseline.
-        cache["last_seen_self_version"] = __version__
-        _write_cache_locked(fd, cache)
+        with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:
+            if not ljson.is_locked:
+                return None
+            cache = _normalize_cache(ljson.data)
+            last_seen = cache.get("last_seen_self_version")
+            # Always update the cached self-version, even on first-run / no
+            # transition, so the next call has the right baseline.
+            cache["last_seen_self_version"] = __version__
+            ljson.data.clear()
+            ljson.data.update(cache)
 
-        if last_seen is None:
-            # First-run seed — no transition logged.
+            if last_seen is None:
+                # First-run seed — no transition logged.
+                _TRANSITION_DETECTED_THIS_INVOCATION = True
+                return None
+
+            if last_seen == __version__:
+                _TRANSITION_DETECTED_THIS_INVOCATION = True
+                return None
+
+            # Transition detected. Mark idempotency flag BEFORE returning so a
+            # caller that re-invokes within the same process doesn't double-log.
             _TRANSITION_DETECTED_THIS_INVOCATION = True
-            return None
-
-        if last_seen == __version__:
-            _TRANSITION_DETECTED_THIS_INVOCATION = True
-            return None
-
-        # Transition detected. Mark idempotency flag BEFORE returning so a
-        # caller that re-invokes within the same process doesn't double-log.
-        _TRANSITION_DETECTED_THIS_INVOCATION = True
-        return (last_seen, __version__)
-    finally:
-        _release_cache_fd(fd)
+            _LAST_TRANSITION_SEEN = (last_seen, __version__)
+            return (last_seen, __version__)
+    except OSError:
+        return None
 
 
 # ── Shared transition hook (D6: shared helper, NOT _get_config refactor) ──
@@ -553,9 +505,18 @@ def _parse_iso(s: Any) -> datetime | None:
 # Re-export for tests that need to reset between cases.
 def _reset_for_tests() -> None:
     """Clear within-process state. Tests call this in autouse fixtures."""
-    global _TRANSITION_DETECTED_THIS_INVOCATION, _INVOCATION_SKIP
+    global _TRANSITION_DETECTED_THIS_INVOCATION, _INVOCATION_SKIP, _LAST_TRANSITION_SEEN
     _TRANSITION_DETECTED_THIS_INVOCATION = False
     _INVOCATION_SKIP = False
+    _LAST_TRANSITION_SEEN = None
+
+
+def last_transition_seen() -> tuple[str, str] | None:
+    """Return the (old, new) version tuple from the most recent transition
+    detected in this process, or None on the steady-state path. Used by
+    ``_run_events_tail`` to grant a one-time extended warm budget for the
+    token cache after an mm upgrade."""
+    return _LAST_TRANSITION_SEEN
 
 
 __all__ = [
