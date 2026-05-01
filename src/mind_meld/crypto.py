@@ -520,7 +520,20 @@ def store_passphrase_in_keyring(passphrase: str) -> bool:
     Narrow catch (see `get_passphrase` for the rationale): only
     `keyring.errors.KeyringError` and `ImportError` are converted to a
     False return. Other exception kinds propagate.
+
+    Pytest guard: the conftest `_isolate_keyring` autouse fixture stubs
+    keyring writes for in-process tests, but a path that bypasses
+    conftest (subprocess to a `python -c '...'` that imports mind_meld,
+    a non-pytest harness, an editable-install REPL session, or a manual
+    `mm init` run during dev) would otherwise hit the user's real
+    Keychain. PYTEST_CURRENT_TEST is set by pytest itself for every
+    test phase and is inherited by subprocesses — refusing the write
+    when it's set makes the test → real-Keychain leak surface
+    impossible regardless of which test layer remembers to stub.
     """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+
     try:
         import keyring as kr
         from keyring.errors import KeyringError
