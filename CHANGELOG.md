@@ -2,6 +2,78 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.14] - 2026-05-01
+
+**Token usage measurement in retro-fleet.** The "Claude Code activity"
+section in `/retro-fleet` now answers the question kb actually asks at
+retro time: how much did Claude Code consume this week, was it Sonnet or
+Opus heavy, did the cache do its job, what would this have cost at API
+list rates. Real numbers from this Mac's 30-day window: 12.4M input,
+8.8B cache_read, 18.9M output, 98% cache hit ratio, ~$17,749 list-price
+equivalent across Opus 4.7 / 4.6 / 4.5 / Sonnet 4.6 / Haiku 4.5.
+
+### Added
+
+- **Per-message token aggregation across parent + subagent jsonls.**
+  `walk_jsonl_token_buckets` sums `message.usage.{input, cache_create,
+  cache_read, output}` from every assistant message in
+  `~/.claude/projects/<encoded>/*.jsonl` and
+  `<session-uuid>/subagents/agent-*.jsonl`. Subagent jsonls
+  contribute to the parent project's token totals (~50% of fleet
+  usage on this Mac) but do NOT bump `sessions`/`total_kb`/
+  `last_session_at` — those preserve parent-only semantics.
+- **Day-bucketed token snapshot field on `SessionMetadata`.** New
+  `tokens_by_day: dict[YYYY-MM-DD, {input, cache_create, cache_read,
+  output, by_model}]` field, capped at 90 days per entry. Aggregator
+  slices to the retro window — `/retro-fleet weekly` and
+  `/retro-fleet quarterly` see distinct, honest totals from the same
+  snapshot.
+- **Per-jsonl token cache at `~/.config/mind-meld/session-tokens.json`.**
+  flock-guarded R/M/W via the new `mind_meld.lockedjson` helper; size
+  + mtime keyed; concurrent-append safety via re-stat after read;
+  oversize line guard (16 MiB cap, warn-once breadcrumb); message-level
+  dedup by `message.id` UUID for retries / compaction artifacts.
+- **Inline cache warm at `mm init` and first interactive `mm push`.**
+  ~3-second one-time walk, telegraphed via `mm: warming token cache
+  (one-time, ~3s)...`. Autopush hooks skip the token walk when the
+  cache is cold and emit `mm: notice: token cache not warm; run
+  'mm push' to populate` instead. First push after a detected upgrade
+  transition (via `upgrade.last_transition_seen()`) triggers an
+  inline warm even on autopush so machines warm automatically after
+  upgrade.
+- **Token cache GC.** `mm gc` reaps cache entries whose underlying
+  jsonl is gone OR whose most recent `by_day` key is more than 90
+  days old. Bounded growth per machine (~125 KB / week / project).
+- **Token-usage render in retro output.** Under "Claude Code
+  activity": `Tokens this window: 12.4M in / 8.8B cache_read / 18.9M
+  out`, `Cache hit ratio: 98%`, `Estimated cost: ~$17,749 (Opus 4.7
+  $11,460, Opus 4.6 $6,261, ...)`, `Per-model: Haiku 4.5, Opus 4.5,
+  Opus 4.6, Opus 4.7, Sonnet 4.6`, plus a section caveat: *Cost
+  estimates do not account for subscription plan pricing.*
+- **`mind_meld.lockedjson` — extracted single-file flock R/M/W
+  primitive.** Three contention modes (`block` / `raise` / `warn`)
+  with a shared retry budget. `upgrade.py` retrofitted to use it;
+  `token_usage.py` uses it from day one. `devices-write.lock` stays
+  ad-hoc — its multi-file lock-on-sibling shape doesn't fit cleanly.
+
+### Changed
+
+- **Mixed-fleet handling for token-aware peers.** Field-presence sniff
+  in `aggregate_sessions`: any project with `sessions > 0` and no
+  `tokens_by_day` flags the device into `pre_token_peers`. Surfaces
+  in Notes as: `Tokens incomplete: N peer(s) on pre-v0.11.14 OR with
+  cold token cache — upgrade and/or run mm push on those machines for
+  accurate token totals.` Same shape as the existing v=1 sessions
+  handling. No `EVENTS_SCHEMA_VERSION` bump — additive on v=2.
+
+### Fixed
+
+- Peer-controlled model strings now sanitized via `safety.safe_str`
+  before render (terminal-escape + Rich-markup defang). Closes a
+  trust-boundary gap in the markdown retro output where a corrupted
+  peer jsonl could plant control characters in the LLM-consumed
+  rendering.
+
 ## [0.11.13] - 2026-05-01
 
 **No more `analytics/.last-sync-line` conflicts on every gstack pull.** The
