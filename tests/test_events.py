@@ -796,3 +796,107 @@ class TestWriteOrderTransactionalPin:
         # Cursor stayed at default (now-30d) — partial git-snapshot doesn't move it
         delta = (datetime.now(timezone.utc) - ts).total_seconds()
         assert abs(delta - 30 * 86400) < 10
+
+
+# ---------------------------------------------------------------------------
+# Token aggregation hook (v0.11.14+)
+# ---------------------------------------------------------------------------
+
+
+class TestTokenAggregationHook:
+    """Pin events.py's wiring into token_usage.get_or_compute.
+
+    Subagent contribution rule: tokens-only. Subagent jsonls MUST NOT
+    bump sessions/total_kb/last_session_at — those preserve parent-only
+    semantics."""
+
+    def _write_session_jsonl(self, path, msg_id="m1", model="claude-opus-4-7"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "message": {
+                        "id": msg_id,
+                        "role": "assistant",
+                        "model": model,
+                        "usage": {
+                            "input_tokens": 100,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 1000,
+                            "output_tokens": 50,
+                        },
+                    },
+                    "timestamp": "2026-05-01T12:00:00.000Z",
+                }
+            )
+            + "\n"
+        )
+
+    def test_no_token_cache_means_no_tokens_field(self, tmp_path):
+        proj = tmp_path / "projects" / "-tmp-proj"
+        proj.mkdir(parents=True)
+        self._write_session_jsonl(proj / "session.jsonl")
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            token_cache_files=None,
+        )
+        meta = out[0]["projects"][0]
+        assert "tokens_by_day" not in meta
+
+    def test_token_cache_populates_tokens_by_day(self, tmp_path):
+        proj = tmp_path / "projects" / "-tmp-proj"
+        proj.mkdir(parents=True)
+        self._write_session_jsonl(proj / "session.jsonl")
+        cache_files: dict = {}
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            token_cache_files=cache_files,
+        )
+        meta = out[0]["projects"][0]
+        assert "tokens_by_day" in meta
+        assert "2026-05-01" in meta["tokens_by_day"]
+        assert meta["tokens_by_day"]["2026-05-01"]["input"] == 100
+
+    def test_subagent_jsonls_contribute_tokens_not_sessions(self, tmp_path):
+        proj = tmp_path / "projects" / "-tmp-proj"
+        proj.mkdir(parents=True)
+        # Parent jsonl
+        self._write_session_jsonl(proj / "session.jsonl", msg_id="parent")
+        # Subagent jsonls under <session-uuid>/subagents/
+        sub_dir = proj / "abc-uuid" / "subagents"
+        sub_dir.mkdir(parents=True)
+        self._write_session_jsonl(sub_dir / "agent-1.jsonl", msg_id="sub-1")
+        self._write_session_jsonl(sub_dir / "agent-2.jsonl", msg_id="sub-2")
+
+        cache_files: dict = {}
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            token_cache_files=cache_files,
+        )
+        meta = out[0]["projects"][0]
+        # sessions counts ONLY parent jsonls — NOT subagents.
+        assert meta["sessions"] == 1
+        # tokens_by_day INCLUDES all 3 messages (parent + 2 subagents).
+        # Each is 100 input tokens, deduped by id (different ids), so 300 total.
+        assert meta["tokens_by_day"]["2026-05-01"]["input"] == 300
+
+    def test_subagent_only_dir_yields_no_session(self, tmp_path):
+        """A project dir with ONLY subagent jsonls and no parent jsonl
+        should still return None — `sessions == 0` triggers the existing
+        skip path, preserving parent-only semantics for the meta."""
+        proj = tmp_path / "projects" / "-tmp-proj"
+        proj.mkdir(parents=True)
+        sub_dir = proj / "abc-uuid" / "subagents"
+        sub_dir.mkdir(parents=True)
+        self._write_session_jsonl(sub_dir / "agent-1.jsonl", msg_id="orphan")
+        cache_files: dict = {}
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            token_cache_files=cache_files,
+        )
+        # No sessions (no parent jsonls) → no project rendered.
+        assert out[0]["projects"] == []
