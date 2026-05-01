@@ -1328,9 +1328,7 @@ class TestGatherAuthorEmails:
         repo = tmp_path / "shared-repo"
         repo.mkdir()
         real_subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        real_subprocess.run(
-            ["git", "config", "user.email", "kb@example.com"], cwd=repo, check=True
-        )
+        real_subprocess.run(["git", "config", "user.email", "kb@example.com"], cwd=repo, check=True)
         real_subprocess.run(["git", "config", "user.name", "KB"], cwd=repo, check=True)
         real_subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
         (repo / "a.txt").write_text("a")
