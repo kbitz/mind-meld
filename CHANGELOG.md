@@ -2,6 +2,36 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.16] - 2026-05-01
+
+**Scrub real email fixtures from public test suite + sync docs to
+v0.11.13 default.** v0.11.10's trust-rooted-author work added real
+personal/work email addresses (`kb@wardbitz.com`, `kb@cnyfeeds.com`)
+as test fixtures in `tests/test_retro_fleet_aggregator.py`. The
+personal address was already exposed via legacy commit author
+metadata, but the work address had never appeared in the public repo
+until that PR. Replaced all 26 occurrences with `example.com` /
+`example.org` equivalents that preserve the test's two-distinct-
+identities semantics. Also normalized 3 occurrences of
+`kb@personal.com` (real domain, not the user's) to
+`kb-personal@example.com` for fixture consistency. CLAUDE.md and
+README.md were missing the v0.11.13 default exclude
+`analytics/.last-sync-*` (gstack per-machine analytics cursor files);
+both now match `src/mind_meld/config.py:DEFAULT_SOURCES`.
+
+### Fixed
+
+- **Test fixtures use clearly-fake email domains.** All 29 real-domain
+  email occurrences in `tests/test_retro_fleet_aggregator.py` now use
+  `@example.com` / `@example.org` per RFC 2606. The 71 retro-fleet
+  aggregator tests still pass — replacements are byte-equivalent at
+  the assertion layer.
+- **`exclude_patterns` doc drift.** `CLAUDE.md` (`## exclude_patterns`
+  section) and `README.md` (gstack defaults bullet) now list
+  `analytics/.last-sync-*` alongside the v0.9.3-shipped excludes. The
+  doc bump retroactively pulls v0.11.13's addition into the prose
+  surface that explains gstack's default-source contract.
+
 ## [0.11.15] - 2026-05-01
 
 **Shorten long repo URLs in retro-fleet output.** `retro-fleet`'s "Top

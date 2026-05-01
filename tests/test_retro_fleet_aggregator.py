@@ -1298,16 +1298,16 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
-                ("git", "-C", "/fake/repo-a", "config"): (0, "kb@wardbitz.com\n"),
-                ("git", "-C", "/fake/repo-b", "config"): (0, "kb@cnyfeeds.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "-C", "/fake/repo-a", "config"): (0, "kb@example.com\n"),
+                ("git", "-C", "/fake/repo-b", "config"): (0, "kb-work@example.com\n"),
                 # `gh api user` returns auth error → no noreply form.
                 ("gh", "api"): (1, ""),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
-        assert "kb@cnyfeeds.com" in emails
+        assert "kb@example.com" in emails
+        assert "kb-work@example.com" in emails
 
     def test_collaborator_email_in_shared_repo_history_NOT_included(self, monkeypatch, tmp_path):
         """**Trust-rooted regression pin.** A shared repo where a
@@ -1328,9 +1328,7 @@ class TestGatherAuthorEmails:
         repo = tmp_path / "shared-repo"
         repo.mkdir()
         real_subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        real_subprocess.run(
-            ["git", "config", "user.email", "kb@wardbitz.com"], cwd=repo, check=True
-        )
+        real_subprocess.run(["git", "config", "user.email", "kb@example.com"], cwd=repo, check=True)
         real_subprocess.run(["git", "config", "user.name", "KB"], cwd=repo, check=True)
         real_subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
         (repo / "a.txt").write_text("a")
@@ -1373,7 +1371,7 @@ class TestGatherAuthorEmails:
 
                 class R:
                     returncode = 0
-                    stdout = "kb@wardbitz.com\n"
+                    stdout = "kb@example.com\n"
                     stderr = ""
 
                 return R()
@@ -1391,7 +1389,7 @@ class TestGatherAuthorEmails:
 
         emails = aggregator.gather_author_emails()
         # User's identity is in the set.
-        assert "kb@wardbitz.com" in emails
+        assert "kb@example.com" in emails
         # Collaborator's email IS in the local git log — and MUST NOT
         # leak into the trust set. This is the load-bearing assertion.
         assert "alice@collaborator.com" not in emails
@@ -1406,12 +1404,12 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
                 ("gh", "api"): (0, '{"id": 220245, "login": "kbitz"}'),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
+        assert "kb@example.com" in emails
         assert "220245+kbitz@users.noreply.github.com" in emails
 
     def test_gh_unavailable_falls_back_silently(self, monkeypatch):
@@ -1431,12 +1429,12 @@ class TestGatherAuthorEmails:
             if tuple(cmd[:2]) == ("gh", "api"):
                 raise FileNotFoundError("gh: command not found")
             if tuple(cmd[:3]) == ("git", "config", "--global"):
-                return FakeResult(0, "kb@wardbitz.com\n")
+                return FakeResult(0, "kb@example.com\n")
             return FakeResult(1, "")
 
         monkeypatch.setattr(_subprocess, "run", fake_run)
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
+        assert "kb@example.com" in emails
         assert all("noreply.github.com" not in e for e in emails)
 
     def test_gh_unauthenticated_falls_back_silently(self, monkeypatch):
@@ -1446,12 +1444,12 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
+        assert "kb@example.com" in emails
         assert all("noreply.github.com" not in e for e in emails)
 
     def test_gh_malformed_json_returns_none(self, monkeypatch):
@@ -1461,12 +1459,12 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
                 ("gh", "api"): (0, "<<<not json>>>"),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
+        assert "kb@example.com" in emails
         assert all("noreply.github.com" not in e for e in emails)
 
     def test_gh_unexpected_shape_returns_none(self, monkeypatch):
@@ -1476,12 +1474,12 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
                 ("gh", "api"): (0, '{"id": "not-an-int", "login": "kbitz"}'),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
+        assert "kb@example.com" in emails
         assert all("noreply.github.com" not in e for e in emails)
 
     def test_no_repos_discovered_returns_global_plus_gh(self, monkeypatch):
@@ -1491,12 +1489,12 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert emails == frozenset({"kb@wardbitz.com"})
+        assert emails == frozenset({"kb@example.com"})
 
     def test_per_repo_failure_skipped_silently(self, monkeypatch):
         """A single repo's `git config user.email` failing skips that
@@ -1505,15 +1503,15 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
-                ("git", "-C", "/fake/good", "config"): (0, "kb@personal.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("git", "-C", "/fake/good", "config"): (0, "kb-personal@example.com\n"),
                 ("git", "-C", "/fake/bad", "config"): (128, ""),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
-        assert "kb@personal.com" in emails
+        assert "kb@example.com" in emails
+        assert "kb-personal@example.com" in emails
 
     def test_per_repo_scan_respects_wall_clock_budget(self, monkeypatch):
         """When the budget is exhausted partway through the walk, the
@@ -1536,7 +1534,7 @@ class TestGatherAuthorEmails:
 
         def fake_run(cmd, **_kw):
             if tuple(cmd[:3]) == ("git", "config", "--global"):
-                return FakeResult(0, "kb@wardbitz.com\n")
+                return FakeResult(0, "kb@example.com\n")
             if tuple(cmd[:2]) == ("gh", "api"):
                 return FakeResult(1, "")
             if tuple(cmd[:2]) == ("git", "-C"):
@@ -1544,7 +1542,7 @@ class TestGatherAuthorEmails:
                 import time as _time
 
                 _time.sleep(0.005)
-                return FakeResult(0, "kb@personal.com\n")
+                return FakeResult(0, "kb-personal@example.com\n")
             return FakeResult(1, "")
 
         import subprocess as _subprocess
@@ -1552,7 +1550,7 @@ class TestGatherAuthorEmails:
         monkeypatch.setattr(_subprocess, "run", fake_run)
 
         emails = aggregator.gather_author_emails()
-        assert "kb@wardbitz.com" in emails
+        assert "kb@example.com" in emails
         assert len(scanned) < 100, f"budget enforcement failed: scanned all {len(scanned)} repos"
 
     def test_config_load_failure_falls_back_silently(self, monkeypatch):
@@ -1569,12 +1567,12 @@ class TestGatherAuthorEmails:
         self._stub_subprocess(
             monkeypatch,
             {
-                ("git", "config", "--global"): (0, "kb@wardbitz.com\n"),
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
                 ("gh", "api"): (1, ""),
             },
         )
         emails = aggregator.gather_author_emails()
-        assert emails == frozenset({"kb@wardbitz.com"})
+        assert emails == frozenset({"kb@example.com"})
 
 
 class TestGitAggregationWithBroadenedFilter:
