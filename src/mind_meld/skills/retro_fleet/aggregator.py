@@ -996,6 +996,41 @@ def aggregate(
 # ---------------------------------------------------------------------------
 
 
+_REPO_URL_MAX_LEN = 60
+"""Length threshold above which ``_shorten_repo_url`` compresses middle path
+segments to ``[...]``. Enterprise-style URLs that embed UUID-shaped
+repository identifiers in the path can clock in at ~135 chars and leak
+identifying context into retros that may be shared publicly; typical
+``github.com/org/repo`` URLs are well under 30 and pass through unchanged."""
+
+_REPO_URL_MIN_SEGMENTS_TO_COMPRESS = 4
+"""Minimum number of slash-separated parts (host + path segments) required to
+trigger middle compression. A canonical 2-path-segment URL like
+``github.com/org/repo`` has 3 parts and is therefore exempt regardless of
+length — there's nothing meaningful to compress between host and last segment.
+``gitlab.com/group/subgroup/repo`` (3 path segments / 4 parts) is the first
+shape that compresses, and only if it also exceeds the length threshold."""
+
+
+def _shorten_repo_url(canonical: str, max_len: int = _REPO_URL_MAX_LEN) -> str:
+    """Render-only compression of long canonical URLs.
+
+    Returns ``canonical`` unchanged when under ``max_len`` OR when the path has
+    fewer than 3 segments after the host (covers GitHub / Bitbucket / basic
+    GitLab regardless of length — those have a single ``org/repo`` path and
+    nothing meaningful to compress between host and last segment). Otherwise
+    returns ``<host>/[...]/<last-segment>``. The canonical URL itself is
+    preserved as the dedup key in ``repos_by_count`` — this only affects the
+    markdown rendered by ``format_retro``.
+    """
+    if not canonical or len(canonical) <= max_len:
+        return canonical
+    parts = canonical.split("/")
+    if len(parts) < _REPO_URL_MIN_SEGMENTS_TO_COMPRESS:
+        return canonical
+    return f"{parts[0]}/[...]/{parts[-1]}"
+
+
 def _format_token_count(n: int) -> str:
     """Compact token count.
 
@@ -1165,7 +1200,7 @@ def format_retro(data: RetroData) -> str:
         ]
         lines.append("- Top repos:")
         for r, n in top_repos:
-            lines.append(f"  - {r} ({n})")
+            lines.append(f"  - {_shorten_repo_url(r)} ({n})")
     lines.append("")
 
     # Claude Code activity. Per-user feedback v0.11.12: drop MB total,

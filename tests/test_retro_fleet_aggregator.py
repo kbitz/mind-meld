@@ -1817,3 +1817,78 @@ class TestTokenBlockRender:
         data.sessions.pre_token_peers = {"dev-mac-mini"}
         out = format_retro(data)
         assert "Tokens incomplete: 1 peer(s)" in out
+
+
+class TestShortenRepoUrl:
+    """Render-only compression of long canonical URLs."""
+
+    def test_short_url_passthrough(self):
+        # Typical github URL stays untouched.
+        assert aggregator._shorten_repo_url("github.com/foo/bar") == "github.com/foo/bar"
+
+    def test_three_segment_under_threshold_passthrough(self):
+        # gitlab-style nested group, still well under threshold.
+        url = "gitlab.com/group/subgroup/repo"
+        assert aggregator._shorten_repo_url(url) == url
+
+    def test_github_long_url_passthrough(self):
+        # Worst-case canonical GitHub URL — long org + long repo, well over the
+        # 60-char length threshold. A 2-path-segment host has nothing
+        # meaningful to compress between host and repo, so it must stay intact
+        # regardless of length.
+        url = "github.com/really-long-organization-name/really-long-repository-name-here"
+        assert len(url) > aggregator._REPO_URL_MAX_LEN  # gate the test against the constant
+        assert aggregator._shorten_repo_url(url) == url
+
+    def test_bitbucket_long_url_passthrough(self):
+        # Same shape as GitHub — host/org/repo. Pin so a future tightening of
+        # the rule doesn't accidentally start trimming bitbucket URLs.
+        url = "bitbucket.org/some-organization-name/some-fairly-long-repository-name"
+        assert len(url) > aggregator._REPO_URL_MAX_LEN
+        assert aggregator._shorten_repo_url(url) == url
+
+    def test_gitlab_long_nested_group_compresses(self):
+        # GitLab's 3-path-segment nested-group shape (group/subgroup/repo) IS
+        # eligible for compression once it crosses the length threshold —
+        # documented behavior, called out so a reader of this test sees the
+        # boundary explicitly.
+        url = "gitlab.example.com/very-long-group-name/very-long-subgroup-name/repo-name"
+        assert len(url) > aggregator._REPO_URL_MAX_LEN
+        assert aggregator._shorten_repo_url(url) == "gitlab.example.com/[...]/repo-name"
+
+    def test_long_url_with_uuid_segment_compresses_middle(self):
+        # Enterprise-style URL: 5 parts (host + 4 path segments), one of which
+        # is a UUID-shaped repository identifier. Synthetic host/path —
+        # exercises the rule without leaking any specific tenant or repo.
+        url = "git.example.com/org/team/00000000-0000-0000-0000-000000000000/Some-Long-Repo-Name"
+        assert aggregator._shorten_repo_url(url) == "git.example.com/[...]/Some-Long-Repo-Name"
+
+    def test_empty_string_passthrough(self):
+        assert aggregator._shorten_repo_url("") == ""
+
+    def test_two_segment_long_passthrough(self):
+        # Single-path-segment URL has nothing meaningful to compress.
+        url = "host.example.com/" + "x" * 200
+        assert aggregator._shorten_repo_url(url) == url
+
+    def test_format_retro_renders_shortened_url(self):
+        long_url = (
+            "git.example.com/org/team/00000000-0000-0000-0000-000000000000/Some-Long-Repo-Name"
+        )
+        data = aggregator.RetroData(
+            window_days=7,
+            since=NOW - timedelta(days=7),
+            until=NOW,
+        )
+        data.git = aggregator.GitAggregate(
+            commits=3,
+            additions=10,
+            deletions=2,
+            repos_by_count={long_url: 3},
+        )
+        out = aggregator.format_retro(data)
+        assert "git.example.com/[...]/Some-Long-Repo-Name" in out
+        # The UUID-shaped middle segment must NOT survive into the rendered output.
+        assert "00000000-0000-0000-0000-000000000000" not in out
+        # But the dedup key in the data is preserved (canonical, not shortened).
+        assert long_url in data.git.repos_by_count
