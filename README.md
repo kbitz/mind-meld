@@ -177,6 +177,8 @@ Inside Claude Code:
 
 The skill renders a paste-ready markdown retro — drop it into iMessage, Slack, or email. Commits are deduped across machines via `(canonical remote URL, sha)` so the same PR landed once but pushed from two laptops counts as one.
 
+**Token usage and cost (v0.11.14).** Under the "Claude Code activity" section the retro now answers: how much did Claude Code consume this window, was it Sonnet- or Opus-heavy, did the cache do its job, what would this have cost at API list rates. The numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days. Cost estimates use API list prices and explicitly say so — they don't account for subscription plan pricing.
+
 The skill is auto-installed at `~/.claude/skills/retro-fleet` on `mm init`, and self-heals every push (24h-TTL gated, ~1 syscall in steady state) so a `pipx reinstall` rebuild can't leave you with a dangling symlink. If you already have your own file at that path, mm leaves it alone and prints a one-time `mm: notice:` so you know.
 
 **Caveats the output is honest about:**
