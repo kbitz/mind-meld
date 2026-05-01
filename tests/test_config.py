@@ -171,12 +171,33 @@ class TestDefaultSources:
         """5C: per-machine artifacts (repo-mode.json, land-deploy-confirmed)
         must be in the default exclude_patterns. Losing this regression-pins
         the 2026-04-24 first-pull conflict bug. v0.9.3 added
-        config.yaml for the gstack version-check reason (see test above)."""
+        config.yaml for the gstack version-check reason (see test above).
+        v0.11.13 added analytics/.last-sync-* (per-machine cursor files
+        that churn-conflict on every pull)."""
         gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
         patterns = gstack.get("exclude_patterns") or []
         assert "projects/*/repo-mode.json" in patterns
         assert "projects/*/land-deploy-confirmed" in patterns
         assert "config.yaml" in patterns
+        assert "analytics/.last-sync-*" in patterns
+
+    def test_gstack_analytics_last_sync_glob_matches(self):
+        """The `analytics/.last-sync-*` glob is meant to match both
+        observed cursor files (`.last-sync-line`, `.last-sync-time`).
+        Pin the fnmatch behavior so a future glob refactor can't silently
+        narrow the match without breaking this test."""
+        import fnmatch
+
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        patterns = gstack.get("exclude_patterns") or []
+        glob = "analytics/.last-sync-*"
+        assert glob in patterns
+        assert fnmatch.fnmatch("analytics/.last-sync-line", glob)
+        assert fnmatch.fnmatch("analytics/.last-sync-time", glob)
+        # And does NOT match the user-meaningful append-only logs in
+        # the same directory.
+        assert not fnmatch.fnmatch("analytics/skill-usage.jsonl", glob)
+        assert not fnmatch.fnmatch("analytics/eureka.jsonl", glob)
 
 
 class TestExcludePatternsValidation:
