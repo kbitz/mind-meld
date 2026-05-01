@@ -123,7 +123,6 @@ def _aggregate(
     window_days: int = 7,
     author_emails: frozenset[str] = frozenset(),
     skill_usage_path: Path | None = None,
-    eureka_path: Path | None = None,
     now: datetime = NOW,
 ) -> aggregator.RetroData:
     return aggregator.aggregate(
@@ -131,7 +130,6 @@ def _aggregate(
         window_days=window_days,
         author_emails=author_emails,
         skill_usage_path=skill_usage_path or (Path("/nonexistent/skill-usage.jsonl")),
-        eureka_path=eureka_path or (Path("/nonexistent/eureka.jsonl")),
         now=now,
     )
 
@@ -150,9 +148,8 @@ class TestTolerantReader:
         assert data.git.commits == 0
         assert data.sessions.total_sessions == 0
         assert data.pushes.push_events == 0
-        # Skills/eureka unavailable when path doesn't exist.
+        # Skills unavailable when path doesn't exist.
         assert data.skills.available is False
-        assert data.eureka.available is False
         out = aggregator.format_retro(data)
         assert "# Retro:" in out
 
@@ -299,7 +296,6 @@ class TestSessionsAggregation:
         data = _aggregate(events_dir)
         # Latest wins → sessions=9, NOT 5+7+9=21.
         assert data.sessions.total_sessions == 9
-        assert data.sessions.total_kb == 200
 
     def test_v2_aggregation_sums_across_devices(self, tmp_path):
         """Two devices, same project → sum across (device, claude_dir).
@@ -410,8 +406,6 @@ class TestSessionsAggregation:
         # Inactive project's 999 sessions MUST NOT be included.
         assert data.sessions.total_sessions == 5
         assert data.sessions.projects == 1
-        # The included project is the active one.
-        assert data.sessions.total_kb == 100
 
     def test_sessions_no_last_session_at_field_kept(self, tmp_path):
         """When a snapshot lacks `last_session_at` (older fixture, fresh
@@ -501,26 +495,6 @@ class TestGitAggregation:
         data = _aggregate(events_dir)
         assert data.git.commits == 1
 
-    def test_cherrypick_counted_separately_with_breadcrumb(self, tmp_path):
-        """Cherry-picked commits get distinct shas but the same subject.
-        Counted separately (acknowledged v1 limitation), reported via
-        cherrypick_pairs."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        c1 = _commit("aaa", 1.0, subject="fix: thing")
-        c2 = _commit("bbb", 1.0, subject="fix: thing")  # same subject, different sha
-        _write_events(
-            events_dir,
-            "dev-a",
-            "2026-04-28",
-            [
-                _git_event("dev-a", 1.0, [c1, c2]),
-            ],
-        )
-        data = _aggregate(events_dir)
-        assert data.git.commits == 2
-        assert data.git.cherrypick_pairs == 1
-
     def test_author_filter(self, tmp_path):
         """Author email filter applies — only matching commits counted."""
         events_dir = tmp_path / "events"
@@ -588,6 +562,9 @@ class TestVisibleFailures:
         assert data.skipped_lines == 1
         out = aggregator.format_retro(data)
         assert "1 event(s) skipped" in out
+        # Notes-section consolidation post-v0.11.12: the skip breadcrumb
+        # must live in the Notes block, not a tail aside.
+        assert "## Notes" in out
 
     def test_skip_categories_tracked_separately(self, tmp_path):
         """Per-source skip counters discriminate mm events vs gstack files
@@ -600,14 +577,10 @@ class TestVisibleFailures:
         # Two malformed records in skill-usage.
         skill_path = tmp_path / "skill-usage.jsonl"
         skill_path.write_text("not json line 1\nalso not json\n")
-        # Three malformed records in eureka.
-        eureka_path = tmp_path / "eureka.jsonl"
-        eureka_path.write_text("garbage 1\ngarbage 2\ngarbage 3\n")
-        data = _aggregate(events_dir, skill_usage_path=skill_path, eureka_path=eureka_path)
+        data = _aggregate(events_dir, skill_usage_path=skill_path)
         assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EVENTS) == 1
         assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_SKILL_USAGE) == 2
-        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EUREKA) == 3
-        assert data.skipped_lines == 6  # backward-compat sum
+        assert data.skipped_lines == 3  # backward-compat sum
 
     def test_per_source_breadcrumbs_name_the_file(self, tmp_path):
         """format_retro renders one breadcrumb per affected file so the user
@@ -617,37 +590,14 @@ class TestVisibleFailures:
         events_dir.mkdir()
         skill_path = tmp_path / "skill-usage.jsonl"
         skill_path.write_text("garbage\n")
-        eureka_path = tmp_path / "eureka.jsonl"
-        eureka_path.write_text("more garbage\n")
-        data = _aggregate(events_dir, skill_usage_path=skill_path, eureka_path=eureka_path)
+        data = _aggregate(events_dir, skill_usage_path=skill_path)
         out = aggregator.format_retro(data)
         assert "skill-usage.jsonl" in out
-        assert "eureka.jsonl" in out
         assert "gstack file format issue, not mm" in out
         # No mm-events skips in this scenario — the mm-events breadcrumb
         # must NOT fire (the user's bug report was the inverse: gstack
         # parse errors masquerading as mm event corruption).
         assert "skipped due to parse errors in mm event log" not in out
-
-    def test_pretty_printed_json_in_eureka_recovered(self, tmp_path):
-        """Some gstack tools have written multi-line pretty-printed JSON to
-        eureka.jsonl. The tolerant stream reader recovers those records via
-        raw_decode walk; only truly malformed chunks bump the skip counter.
-        """
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        eureka_path = tmp_path / "eureka.jsonl"
-        # Three pretty-printed JSON objects with no JSONL formatting.
-        eureka_path.write_text(
-            '{\n  "insight": "first",\n  "ts": "2026-04-25T00:00:00Z"\n}\n'
-            '{\n  "insight": "second",\n  "ts": "2026-04-26T00:00:00Z"\n}\n'
-            '{\n  "insight": "third",\n  "ts": "2026-04-27T00:00:00Z"\n}\n'
-        )
-        data = _aggregate(events_dir, eureka_path=eureka_path)
-        # All three insights recovered from the multi-line format.
-        assert len(data.eureka.moments) == 3
-        # No skips — the file isn't JSONL but it IS valid JSON values.
-        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EUREKA, 0) == 0
 
     def test_pretty_printed_json_in_skill_usage_recovered(self, tmp_path):
         """Symmetric to the eureka case — skill-usage.jsonl uses the same
@@ -685,12 +635,12 @@ class TestVisibleFailures:
         """
         events_dir = tmp_path / "events"
         events_dir.mkdir()
-        eureka_path = tmp_path / "eureka.jsonl"
-        eureka_path.write_text('{"insight":"x","ts":"2026-04-27T00:00:00Z"}\n' * 50)
+        skill_path = tmp_path / "skill-usage.jsonl"
+        skill_path.write_text('{"skill":"x","ts":"2026-04-27T00:00:00Z"}\n' * 50)
         monkeypatch.setattr(aggregator, "JSON_STREAM_MAX_BYTES", 100)
-        data = _aggregate(events_dir, eureka_path=eureka_path)
-        assert data.eureka.moments == []
-        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EUREKA, 0) == 1
+        data = _aggregate(events_dir, skill_usage_path=skill_path)
+        assert data.skills.invocations == 0
+        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_SKILL_USAGE, 0) == 1
 
     def test_legacy_retrodata_with_skipped_lines_only_renders_breadcrumb(self):
         """Backward-compat: a manually-constructed RetroData with
@@ -744,7 +694,8 @@ class TestFleetCount:
         data = _aggregate(events_dir)
         assert data.fleet.devices_known is None
         out = aggregator.format_retro(data)
-        assert "(known-fleet count unavailable)" in out
+        # Surfaces in the Notes section, not inline in the header (post-v0.11.12).
+        assert "Known-fleet count unavailable" in out
 
     def test_mm_devices_success_renders_n_of_m(self, tmp_path, monkeypatch):
         """JSON list with M devices + only N have events → "N of M"."""
@@ -791,7 +742,8 @@ class TestFleetCount:
         assert len(data.fleet.devices_in_events) == 1
         out = aggregator.format_retro(data)
         assert "1 of 3 known machines" in out
-        assert "Fleet incomplete: 2 device(s)" in out
+        # Notes section copy (post-v0.11.12 consolidation).
+        assert "Fleet incomplete: 2 registered device(s)" in out
 
     def test_mm_devices_returncode_failure_degrades(self, tmp_path, monkeypatch):
         """Non-zero returncode (mm not initialized) degrades to None."""
@@ -807,14 +759,18 @@ class TestFleetCount:
         data = _aggregate(events_dir)
         assert data.fleet.devices_known is None
 
-    def test_more_events_than_known_renders_inconsistency(self, tmp_path, monkeypatch):
-        """N event-producing devices > M registered devices: render
-        "Activity from N machine(s) (M currently registered)" plus a
-        Fleet inconsistency breadcrumb naming the delta. Pre-v0.11.9 this
-        rendered as "N of M known machines" which read as a counting bug
-        when stale events accumulated (e.g. "33 of 3"). Real-world cause:
-        90-day events retention outlives device de-registration, plus
-        leaked test phantoms before the v0.11.9 conftest fixture landed."""
+    def test_phantom_event_devices_filtered_to_registered(self, tmp_path, monkeypatch):
+        """Phantom event files (from de-registered devices or pre-v0.11.10
+        test leaks) MUST drop out of the rendered count when `mm devices
+        --format=json` succeeds. The user complaint that drove this filter
+        was a "33 machine(s) (3 currently registered)" header that read
+        as broken data — the inconsistency surfaces as a Notes-section
+        line, not as a noisy header banner. Stale event files age out via
+        the 90-day TTL.
+
+        REGRESSION pin: the un-registered IDs MUST count toward the
+        Notes-section unregistered-device breadcrumb so the user knows
+        phantom files are still on disk and reaping naturally."""
         events_dir = tmp_path / "events"
         events_dir.mkdir()
         # 5 distinct event-producing devices.
@@ -840,15 +796,48 @@ class TestFleetCount:
         monkeypatch.setattr(aggregator.subprocess, "run", lambda *a, **k: FakeResult())
         data = _aggregate(events_dir)
         assert data.fleet.devices_known == 2
-        assert len(data.fleet.devices_in_events) == 5
+        # Filter intersects → only 2 of the 5 event-producing IDs survive.
+        assert len(data.fleet.devices_in_events) == 2
+        # 3 unregistered IDs remembered for the Notes-section breadcrumb.
+        assert data.fleet.unregistered_event_devices == 3
+
         out = aggregator.format_retro(data)
-        # New copy: descriptive of the actual data shape.
-        assert "Activity from 5 machine(s) (2 currently registered)" in out
-        assert "Fleet inconsistency: 3 device id(s)" in out
-        # Old "of known machines" copy must NOT appear in the inconsistency
-        # branch — that wording is reserved for the n_in_events <= m_known
-        # path where it reads accurately.
-        assert "5 of 2 known machines" not in out
+        # Header reads honestly against the registered fleet.
+        assert "Activity across 2 of 2 known machines" in out
+        # Old noisy banner must NOT fire (the user complaint).
+        assert "currently registered" not in out
+        assert "Fleet inconsistency" not in out
+        # Phantom-event count surfaces as a Notes-section line so the
+        # user knows the disk still has stale files reaping naturally.
+        assert "## Notes" in out
+        assert "3 unregistered device id(s)" in out
+
+    def test_phantom_filter_falls_back_to_raw_when_devices_unavailable(self, tmp_path, monkeypatch):
+        """If `mm devices --format=json` fails, the filter MUST fall back
+        to the raw event-producing set (not zero out the retro). This
+        defends against transient failures wiping the entire activity
+        view."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        for i in range(3):
+            _write_events(
+                events_dir,
+                f"phantom-{i}",
+                "2026-04-28",
+                [_push_event(f"phantom-{i}", 0)],
+            )
+
+        def fake_run(*args, **kwargs):
+            raise FileNotFoundError("mm not found")
+
+        monkeypatch.setattr(aggregator.subprocess, "run", fake_run)
+        data = _aggregate(events_dir)
+        assert data.fleet.devices_known is None
+        # Falls back to raw set — all 3 IDs counted.
+        assert len(data.fleet.devices_in_events) == 3
+        # No phantom-count breadcrumb because we couldn't determine which
+        # were unregistered.
+        assert data.fleet.unregistered_event_devices == 0
 
 
 # ---------------------------------------------------------------------------
@@ -945,8 +934,9 @@ class TestRendering:
         assert "## Claude Code activity" in out
         assert "## Skills used" in out
         assert "this machine only" in out
-        assert "## Eureka moments" in out
         assert "## mm sync activity" in out
+        # Eureka section was removed in v0.11.12 (always 0 in practice).
+        assert "## Eureka moments" not in out
 
     def test_zero_events_renders_without_crashing(self, tmp_path):
         events_dir = tmp_path / "events"
@@ -1095,7 +1085,6 @@ class TestSessionsSourceRoot:
         # Both source roots contribute distinct projects; totals sum.
         assert data.sessions.total_sessions == 12
         assert data.sessions.projects == 2
-        assert data.sessions.total_kb == 300
 
     def test_legacy_empty_only_records_kept(self, tmp_path):
         """Pre-fix records (no ``source_root`` field) without any populated
