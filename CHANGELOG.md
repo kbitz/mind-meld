@@ -2,6 +2,72 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.12] - 2026-05-01
+
+**Retro-fleet output polish.** Six pieces of user feedback on the v0.11.10
+shape addressed in one pass: noise cut, signal kept, phantoms hidden.
+
+### Changed
+
+- **All notes consolidated into a single tail `## Notes` section.** Pre-fix
+  asides were sprinkled through every section body (fleet-incomplete and
+  pre-v2 banners under the header, cherry-pick note inside Code shipped,
+  "counted separately" parenthetical inside Claude Code activity, parse-
+  error breadcrumbs at the document tail). Post-fix every aside lives in
+  one `## Notes` block at the end; the section is omitted entirely when
+  there's nothing to surface.
+- **Code shipped — Top repos render as a sub-bulleted list** instead of a
+  comma-joined run-on line. With many active repos the prior format wrapped
+  to 3+ display lines and lost legibility.
+- **Code shipped — cherry-pick "informational" line dropped.** "N commit
+  subject(s) appear under multiple SHAs (cherry-picks counted separately)"
+  was unclear and not actionable; the commit count is honest at the
+  fleet-canonical `(remote, sha)` key.
+- **Claude Code activity slimmed to the one useful line.** Dropped the
+  total-MB-of-session-content line, the "(N in ephemeral Conductor
+  workspaces, counted separately)" parenthetical, and the Most-active
+  project list — all three were noise the user explicitly called out.
+  The ephemeral-session count survives as a one-line Notes entry when
+  non-zero.
+- **Eureka section removed.** It rendered "0 / No eureka moments captured"
+  in practice while emitting 28+ skipped-record breadcrumbs from the
+  gstack-side `eureka.jsonl` format. The dataclass, reader, aggregator,
+  and the dependent skip-counter category were deleted.
+- **Phantom-event filter at the aggregator.** Event-producing device IDs
+  are now intersected with the registered fleet from `mm devices
+  --format=json` so de-registered or test-leaked phantom IDs drop out of
+  the rendered count rather than surfacing as a "33 machine(s) (3
+  currently registered)" banner. Stale on-disk event files keep aging out
+  via the existing 90-day TTL in `_gc_old_event_files`. Falls back to the
+  raw set when `mm devices` fails (transient registry failures must not
+  zero the retro).
+
+### Added
+
+- `FleetState.unregistered_event_devices` — count of phantom IDs filtered
+  out, surfaced as a single Notes-section line so the user sees that disk
+  cleanup is happening on its own.
+- Regression pins for the new filter: events from unregistered IDs drop
+  out, the unregistered count flows to the Notes section, and the filter
+  falls back to the raw set when `mm devices` fails.
+
+### Removed
+
+- `EurekaAggregate`, `aggregate_eureka`, `_read_eureka`,
+  `RetroData.eureka`, `RetroData.eureka_path`, `aggregate(eureka_path=...)`
+  parameter, `SKIP_CATEGORY_EUREKA`, `GSTACK_RETROS_DIR` constant.
+- `SessionsAggregate.total_kb` and `SessionsAggregate.most_active`
+  (their renderings were dropped from `format_retro`).
+- `GitAggregate.cherrypick_pairs`.
+- The `TOP_N_PROJECTS` constant.
+
+### Known follow-up
+
+- Token-usage measurement under Claude Code activity. Adding it requires a
+  v=3 sessions-snapshot schema bump (sum `message.usage` from each session
+  jsonl into the snapshot) plus probably a per-jsonl sidecar cache to stay
+  under the 250ms autopush wall-clock budget. Deferred.
+
 ## [0.11.11] - 2026-05-01
 
 **Dev work can no longer poison your real macOS Keychain.** A test-fixture

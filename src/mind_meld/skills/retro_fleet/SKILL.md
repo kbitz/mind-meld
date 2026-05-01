@@ -60,19 +60,24 @@ The aggregator writes complete markdown to stdout. Show it to the user
 verbatim. The output is paste-ready for iMessage, Slack, or email — no
 post-processing required.
 
-The aggregator's output may include any of these tail breadcrumbs:
+The aggregator's output may include a `## Notes` section at the end
+consolidating any of these data-quality / diagnostic lines (the section is
+omitted when there is nothing to surface):
 
-- `*Note: N event(s) skipped due to parse errors.*` — visible-failure
-  contract: torn JSONL lines were skipped. Output is partial.
-- `*Note: requested 365d window exceeds the 90-day events retention.*` —
-  user asked for a window longer than `EVENTS_RETENTION_DAYS`. Older days
-  are reaped by `mm gc` and not in the data.
-- `*Sessions count incomplete: N peer(s) on pre-v0.11.0...*` — those peers
-  still emit v=1 sessions snapshots (delta semantics). Their session totals
-  are honestly omitted instead of double-counted.
-- `*Fleet incomplete: N device(s) haven't pushed events in this window.*` —
-  registered devices that haven't pushed during the retro window. Activity
-  may be incomplete from them.
+- `Fleet incomplete: N registered device(s) haven't pushed events in this
+  window.` — activity may be incomplete from those peers.
+- `N unregistered device id(s) had events in this window (filtered out).` —
+  phantom event files from de-registered or test-leaked devices were
+  skipped from the rendered count. Stale files reap automatically after 90
+  days via `mm gc`.
+- `Sessions count incomplete: N peer(s) on pre-v0.11.0` — those peers still
+  emit v=1 sessions snapshots (delta semantics). Their session totals are
+  honestly omitted instead of double-counted.
+- `N event(s) skipped due to parse errors in mm event log.` — torn JSONL
+  lines were skipped. Output is partial.
+- `Requested Nd window exceeds the 90-day events retention.` — user asked
+  for a window longer than `EVENTS_RETENTION_DAYS`. Older days are reaped
+  by `mm gc` and not in the data.
 
 ## Author email filtering
 
@@ -99,10 +104,14 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
 
 - It does not query GitHub directly. Everything comes from the synced events log.
 - It does not include sessions from machines that haven't yet upgraded to mm
-  v0.11.0+ (those peers emit pre-v=2 snapshots). The breadcrumb tells the
-  user which peers need to upgrade.
+  v0.11.0+ (those peers emit pre-v=2 snapshots). The Notes section names
+  which peers need to upgrade.
 - It does not aggregate `~/.gstack/analytics/` data across the fleet. Skill
-  invocation counts and eureka moments are read locally only — the section
-  is labeled "this machine only".
+  invocation counts are read locally only — the section is labeled "this
+  machine only".
+- It does not currently measure Claude Code token usage. Adding it is a
+  known follow-up — would require summing `message.usage` from each session
+  jsonl into a v=3 sessions-snapshot field, with a per-file sidecar cache
+  to stay under the events-tail wall-clock budget.
 - It does not save the output to a file. `> /tmp/retro.md` is the v1 save
   story. A `--save` flag is deferred to v2.

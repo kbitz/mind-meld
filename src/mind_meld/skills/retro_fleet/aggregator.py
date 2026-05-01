@@ -10,30 +10,30 @@ Inputs (all tolerant of missing / corrupt / unknown-field files):
 * ``$MM_EVENTS_DIR`` (or ``~/.local/share/mind-meld/events``) — fleet events
   written by ``_run_events_tail`` on every push. v=2 sessions snapshots are
   full inventory (Group 8); v=1 are delta-semantic relics from pre-v0.11.0
-  peers (counted into "Fleet incomplete" breadcrumb, not into totals).
+  peers (surfaced in the Notes section, not summed into totals).
 * ``~/.gstack/analytics/skill-usage.jsonl`` — gstack-owned, schema-dependency
   is load-bearing per the design doc; reader degrades to "Skills section
   omitted" on absence and tolerates unknown fields.
-* ``~/.gstack/analytics/eureka.jsonl`` — same tolerance.
-* ``mm devices --format=json`` (subprocess) — for the "M of N known devices"
-  breadcrumb. Failure degrades to "events from N devices" without the M.
+* ``mm devices --format=json`` (subprocess) — for the "N of M known machines"
+  header AND the phantom-event filter (see ``aggregate``). Failure degrades
+  to all-events-counted with a "known-fleet count unavailable" note.
 
-Aggregation rules (locked in /plan-eng-review):
+Aggregation rules:
 
 * Git: dedup by ``(canonicalize_remote_url(remote), sha)``; sum LOC; group by
   repo for top-N.
-* Sessions: pick LATEST v=2 snapshot per ``(device, claude_dir)``; sum across
-  tuples. v=1 snapshots are NOT summed (delta semantics would inflate counts);
-  they only contribute to the "pre-v0.11.0 peer" breadcrumb.
+* Sessions: pick LATEST v=2 snapshot per ``(device, source_root, claude_dir)``;
+  sum across tuples. v=1 snapshots are NOT summed.
 * Skills: as-rendered on this machine; locked-output breadcrumb says so.
-* Eureka: union, window-filtered.
 * mm-push: count by (device).
+* Phantom-event filter: when ``mm devices --format=json`` succeeds, intersect
+  event-producing IDs with the registered fleet so de-registered or test-
+  leaked phantom IDs fall out of the rendered count. Stale event files age
+  out via the existing 90-day retention.
 
-Visible-failure contract: skipped lines / files surface as a tail breadcrumb
-("Note: N events skipped due to parse errors") so the user sees data quality
-instead of a silently-truncated retro. A retro window exceeding
-``EVENTS_RETENTION_DAYS`` (90) prints a "Note: window exceeds N-day events
-retention" line.
+Visible-failure contract: data-quality and diagnostic asides are
+consolidated into the tail Notes section so the user sees them in one place
+rather than scattered across each section's body.
 """
 
 from __future__ import annotations
@@ -45,7 +45,6 @@ import re
 import subprocess
 import sys
 import time
-from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -68,7 +67,6 @@ DEFAULT_EVENTS_DIR = Path("~/.local/share/mind-meld/events").expanduser()
 call."""
 
 GSTACK_ANALYTICS_DIR = Path("~/.gstack/analytics").expanduser()
-GSTACK_RETROS_DIR = Path("~/.gstack/retros").expanduser()
 
 V2_SCHEMA_VERSION = 2
 """sessions-snapshot schema version that the aggregator treats as full
@@ -81,7 +79,6 @@ WINDOW_PATTERN = re.compile(r"^(\d+)d$")
 deferred to v2."""
 
 TOP_N_REPOS = 5
-TOP_N_PROJECTS = 5
 TOP_N_SKILLS = 10
 
 JSON_STREAM_MAX_BYTES = 50 * 1024 * 1024
@@ -102,18 +99,14 @@ class GitAggregate:
     additions: int = 0
     deletions: int = 0
     repos_by_count: dict[str, int] = field(default_factory=dict)
-    cherrypick_pairs: int = 0  # informational; same subject, different shas
 
 
 @dataclass
 class SessionsAggregate:
     total_sessions: int = 0
-    total_kb: int = 0
     projects: int = 0
     ephemeral_sessions: int = 0
     ephemeral_projects: int = 0
-    # (decoded_path, sessions, ephemeral) — top-N most active projects.
-    most_active: list[tuple[str, int, bool]] = field(default_factory=list)
     # devices still emitting v=1 sessions snapshots (pre-v0.11.0 peers).
     pre_v2_peers: set[str] = field(default_factory=set)
 
@@ -121,7 +114,6 @@ class SessionsAggregate:
 @dataclass
 class PushesAggregate:
     push_events: int = 0
-    pull_events: int = 0  # placeholder — events log doesn't currently emit pulls (v2)
     devices_with_pushes: set[str] = field(default_factory=set)
     discovery_errors: list[str] = field(default_factory=list)
 
@@ -134,26 +126,28 @@ class SkillsAggregate:
 
 
 @dataclass
-class EurekaAggregate:
-    moments: list[tuple[str, str, str]] = field(default_factory=list)  # (insight, project, ts)
-    available: bool = True
-
-
-@dataclass
 class FleetState:
+    # Set of device IDs with events in the window, intersected with the
+    # registered fleet (`mm devices --format=json`) when available. Phantom
+    # IDs from de-registered or test-leaked devices fall out at this filter
+    # rather than surfacing as an "N machine(s) (M registered)" inconsistency
+    # banner. When `mm devices` fails, falls back to all event-producing IDs.
     devices_in_events: set[str] = field(default_factory=set)
     devices_known: int | None = None  # None = `mm devices --format=json` failed; degrade gracefully
     devices_known_list: list[dict] = field(default_factory=list)
+    # Count of unregistered device IDs that produced events in the window.
+    # Surfaced as a one-line note in the Notes section so the user knows
+    # phantom-event files exist on disk (reaped by the 90-day TTL).
+    unregistered_event_devices: int = 0
 
 
 # Skip-counter category keys. Kept as constants so call-sites stay
 # consistent and `format_retro` can map each category to a specific
 # breadcrumb message. "events" covers mm-owned event JSONLs (real data
-# quality signal); "skill_usage" / "eureka" cover gstack-owned analytics
-# files (foreign data, format may diverge from JSONL).
+# quality signal); "skill_usage" covers gstack-owned analytics files
+# (foreign data, format may diverge from JSONL).
 SKIP_CATEGORY_EVENTS = "events"
 SKIP_CATEGORY_SKILL_USAGE = "skill_usage"
-SKIP_CATEGORY_EUREKA = "eureka"
 
 
 @dataclass
@@ -165,7 +159,6 @@ class RetroData:
     sessions: SessionsAggregate = field(default_factory=SessionsAggregate)
     pushes: PushesAggregate = field(default_factory=PushesAggregate)
     skills: SkillsAggregate = field(default_factory=SkillsAggregate)
-    eureka: EurekaAggregate = field(default_factory=EurekaAggregate)
     fleet: FleetState = field(default_factory=FleetState)
     # Per-category skip counters. Discriminates mm-owned event parse errors
     # (real data quality signal) from gstack-owned analytics format issues
@@ -176,11 +169,10 @@ class RetroData:
     # Pre-existing tests assert on this field; new tests should drill into
     # skipped_per_source to verify category-specific behavior.
     skipped_lines: int = 0
-    # Actual paths used for foreign-format readers — threaded into the
-    # breadcrumb so a custom skill_usage_path / eureka_path renders honestly
+    # Actual path used for the foreign-format skill-usage reader — threaded
+    # into the breadcrumb so a custom skill_usage_path renders honestly
     # instead of always pointing at ~/.gstack/analytics/...
     skill_usage_path: Path | None = None
-    eureka_path: Path | None = None
     window_exceeds_retention: bool = False  # TODO#2 visible-failure breadcrumb
 
 
@@ -305,14 +297,6 @@ def _read_skill_usage(path: Path, *, skip_counter: dict[str, int]) -> tuple[bool
     )
 
 
-def _read_eureka(path: Path, *, skip_counter: dict[str, int]) -> tuple[bool, list[dict]]:
-    if not path.is_file():
-        return False, []
-    return True, list(
-        _iter_json_stream(path, skip_counter=skip_counter, category=SKIP_CATEGORY_EUREKA)
-    )
-
-
 # ---------------------------------------------------------------------------
 # Window filtering — events are timestamped UTC ISO 8601.
 # ---------------------------------------------------------------------------
@@ -366,7 +350,6 @@ def aggregate_git(
     """
     canonicalize = _import_canonicalize()
     seen_keys: set[tuple[str, str]] = set()
-    seen_subjects: dict[str, int] = defaultdict(int)
     out = GitAggregate()
     for ev in events:
         if ev.get("type") != "git-snapshot":
@@ -398,16 +381,11 @@ def aggregate_git(
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                subject = c.get("subject")
-                if isinstance(subject, str) and subject:
-                    seen_subjects[subject] += 1
                 out.commits += 1
                 out.additions += _safe_int(c.get("add"))
                 out.deletions += _safe_int(c.get("del"))
                 if remote:
                     out.repos_by_count[remote] = out.repos_by_count.get(remote, 0) + 1
-    # Cherry-pick informational: same subject ≥ 2× across distinct shas.
-    out.cherrypick_pairs = sum(1 for n in seen_subjects.values() if n > 1)
     return out
 
 
@@ -552,29 +530,14 @@ def aggregate_sessions(
     latest = filtered_latest
 
     # Aggregate the "latest per tuple" set.
-    project_decoded_to_sessions: dict[tuple[str, bool], int] = defaultdict(int)
     for (_device, _source_root, _claude_dir), (_ts, proj) in latest.items():
         sessions = _safe_int(proj.get("sessions"))
-        total_kb = _safe_int(proj.get("total_kb"))
         ephemeral = bool(proj.get("ephemeral", False))
         out.total_sessions += sessions
-        out.total_kb += total_kb
         out.projects += 1
         if ephemeral:
             out.ephemeral_sessions += sessions
             out.ephemeral_projects += 1
-        # Aggregate per-decoded-path for "most active" — falls back to
-        # encoded claude_dir when cwd was unavailable upstream.
-        decoded = proj.get("decoded_path")
-        if not isinstance(decoded, str) or not decoded:
-            decoded = proj.get("claude_dir") or ""
-        project_decoded_to_sessions[(decoded, ephemeral)] += sessions
-    # Top by sessions.
-    out.most_active = sorted(
-        ((d, n, eph) for (d, eph), n in project_decoded_to_sessions.items()),
-        key=lambda t: t[1],
-        reverse=True,
-    )[:TOP_N_PROJECTS]
     return out
 
 
@@ -633,39 +596,6 @@ def aggregate_skills(
             continue
         out.invocations += 1
         out.by_skill[skill] = out.by_skill.get(skill, 0) + 1
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Eureka aggregation — gstack-owned, window-filtered.
-# ---------------------------------------------------------------------------
-
-
-def aggregate_eureka(
-    available: bool,
-    events: Iterable[dict],
-    *,
-    since: datetime,
-    until: datetime,
-) -> EurekaAggregate:
-    out = EurekaAggregate(available=available)
-    if not available:
-        return out
-    for ev in events:
-        if not _within_window(ev.get("ts"), since, until):
-            continue
-        insight = ev.get("insight")
-        if not isinstance(insight, str) or not insight:
-            continue
-        project = ev.get("branch") or ev.get("skill") or "?"
-        ts = ev.get("ts")
-        out.moments.append(
-            (
-                insight,
-                str(project)[:60],
-                str(ts)[:10] if isinstance(ts, str) else "?",
-            )
-        )
     return out
 
 
@@ -928,7 +858,6 @@ def aggregate(
     window_days: int,
     author_emails: frozenset[str],
     skill_usage_path: Path,
-    eureka_path: Path,
     now: datetime | None = None,
 ) -> RetroData:
     """Read every input source, aggregate per the locked rules, return the
@@ -943,22 +872,44 @@ def aggregate(
 
     events = list(_read_events(events_dir, skip_counter=skip_counter))
     skill_avail, skill_events = _read_skill_usage(skill_usage_path, skip_counter=skip_counter)
-    eureka_avail, eureka_events = _read_eureka(eureka_path, skip_counter=skip_counter)
 
     git = aggregate_git(events, since=since, until=until, author_emails=author_emails)
     sessions = aggregate_sessions(events, since=since, until=until)
     pushes = aggregate_pushes(events, since=since, until=until)
     skills = aggregate_skills(skill_avail, skill_events, since=since, until=until)
-    eureka = aggregate_eureka(eureka_avail, eureka_events, since=since, until=until)
 
     devices_known, devices_known_list = get_known_devices()
 
-    # Devices that have produced events in the window.
-    devices_in_events: set[str] = set(pushes.devices_with_pushes)
+    # All event-producing devices in the window — pre-filter superset.
+    raw_devices_in_events: set[str] = set(pushes.devices_with_pushes)
     for ev in events:
         d = ev.get("device")
         if isinstance(d, str) and d and _within_window(ev.get("ts"), since, until):
-            devices_in_events.add(d)
+            raw_devices_in_events.add(d)
+
+    # Phantom-event filter (post-v0.11.11). Phantom event files persist for
+    # the 90-day retention window after a device is de-registered (or after
+    # a leaked test creates a synthetic device id), and pre-filter would
+    # surface them as "Activity from N machines (M registered)" — the user-
+    # facing complaint the v0.11.10 test-isolation fix did NOT address.
+    # When `mm devices --format=json` succeeds, intersect to currently-
+    # registered IDs (gate on `devices_known is not None`, not on the list
+    # being non-empty — a successful read against a zeroed fleet should
+    # still filter, not fall through to the raw set). Stale event files
+    # age out via the existing 90-day TTL in `_gc_old_event_files`. Falls
+    # back to the raw set only when the registry is unavailable so a
+    # transient `mm devices` failure never zeros the retro.
+    if devices_known is not None:
+        registered_ids = {
+            d.get("device_id")
+            for d in devices_known_list
+            if isinstance(d, dict) and isinstance(d.get("device_id"), str)
+        }
+        devices_in_events = raw_devices_in_events & registered_ids
+        unregistered = len(raw_devices_in_events - registered_ids)
+    else:
+        devices_in_events = raw_devices_in_events
+        unregistered = 0
 
     return RetroData(
         window_days=window_days,
@@ -968,16 +919,15 @@ def aggregate(
         sessions=sessions,
         pushes=pushes,
         skills=skills,
-        eureka=eureka,
         fleet=FleetState(
             devices_in_events=devices_in_events,
             devices_known=devices_known,
             devices_known_list=devices_known_list,
+            unregistered_event_devices=unregistered,
         ),
         skipped_per_source=dict(skip_counter),
         skipped_lines=sum(skip_counter.values()),
         skill_usage_path=skill_usage_path,
-        eureka_path=eureka_path,
         window_exceeds_retention=window_days > EVENTS_RETENTION_DAYS,
     )
 
@@ -988,54 +938,45 @@ def aggregate(
 
 
 def format_retro(data: RetroData) -> str:
-    """Render the locked-format markdown retro. Output is paste-ready for
-    iMessage / email — single-message length when realistic data is present."""
+    """Render the markdown retro. Output is paste-ready for iMessage / email
+    — single-message length when realistic data is present.
+
+    Section layout (post-v0.11.12 polish):
+
+    * Header — date range + activity-across-N-machines line. No inline notes.
+    * Code shipped — commits, LOC, top repos as a sub-bulleted list.
+    * Claude Code activity — sessions and project count only. Token usage
+      is a deferred follow-up.
+    * Skills used — this-machine-only invocation rollup.
+    * mm sync activity — push counts.
+    * Notes — every aside (fleet-incomplete, pre-v2 peers, parse errors,
+      retention, phantom-event count, ephemeral split, discovery errors)
+      consolidated. Section omitted entirely when there's nothing to note.
+    """
     lines: list[str] = []
+    notes: list[str] = []
+
     lines.append(
         f"# Retro: {data.since.date().isoformat()} → {data.until.date().isoformat()} "
         f"({data.window_days}d)"
     )
     lines.append("")
 
-    # Activity-across-N-machines header.
+    # Activity-across-N-machines header. Phantom events are filtered out at
+    # aggregate() so the count reflects the active fleet.
     n_in_events = len(data.fleet.devices_in_events)
     if data.fleet.devices_known is not None:
         m_known = data.fleet.devices_known
-        if n_in_events > m_known:
-            # Data inconsistency: more device IDs in the events log than are
-            # registered in storage. The honest read is "events came from N
-            # devices, M of which are currently registered." Pre-v0.11.9 this
-            # rendered as "N of M known machines" which read as a counting bug
-            # (e.g. "33 of 3"). The usual cause is stale events from
-            # de-registered or test-leaked phantom device IDs (events retain
-            # for 90 days; devices/<id>.json can disappear sooner).
-            extra = n_in_events - m_known
-            lines.append(
-                f"**Activity from {n_in_events} machine(s) ({m_known} currently registered)**"
+        lines.append(f"**Activity across {n_in_events} of {m_known} known machines**")
+        if n_in_events < m_known:
+            missing = m_known - n_in_events
+            notes.append(
+                f"Fleet incomplete: {missing} registered device(s) haven't pushed "
+                f"events in this window."
             )
-            lines.append(
-                f"*Fleet inconsistency: {extra} device id(s) in events but not in "
-                f"`mm devices`. Likely stale or phantom — run `mm gc --conflicts` "
-                f"and check for old event files in `~/.local/share/mind-meld/events/`.*"
-            )
-        else:
-            lines.append(f"**Activity across {n_in_events} of {m_known} known machines**")
-            if n_in_events < m_known:
-                missing = m_known - n_in_events
-                lines.append(
-                    f"*Fleet incomplete: {missing} device(s) haven't pushed events in this window.*"
-                )
     else:
-        # mm devices unavailable — degrade gracefully.
-        lines.append(
-            f"**Activity across {n_in_events} machine(s)** *(known-fleet count unavailable)*"
-        )
-    if data.sessions.pre_v2_peers:
-        n_pre = len(data.sessions.pre_v2_peers)
-        lines.append(
-            f"*Sessions count incomplete: {n_pre} peer(s) on pre-v0.11.0 — "
-            f"upgrade for accurate session totals.*"
-        )
+        lines.append(f"**Activity across {n_in_events} machine(s)**")
+        notes.append("Known-fleet count unavailable (`mm devices --format=json` failed).")
     lines.append("")
 
     # Code shipped.
@@ -1049,36 +990,27 @@ def format_retro(data: RetroData) -> str:
         top_repos = sorted(data.git.repos_by_count.items(), key=lambda kv: kv[1], reverse=True)[
             :TOP_N_REPOS
         ]
-        formatted = ", ".join(f"{r} ({n})" for r, n in top_repos)
-        lines.append(f"- Top repos: {formatted}")
-    if data.git.cherrypick_pairs:
-        lines.append(
-            f"- *Note: {data.git.cherrypick_pairs} commit subject(s) appear under "
-            f"multiple SHAs (cherry-picks counted separately).*"
-        )
+        lines.append("- Top repos:")
+        for r, n in top_repos:
+            lines.append(f"  - {r} ({n})")
     lines.append("")
 
-    # Claude Code activity.
+    # Claude Code activity. Per-user feedback v0.11.12: drop MB total,
+    # "counted separately" parenthetical, and Most active list — they were
+    # noise. Token usage is a deferred follow-up (would require schema bump
+    # + per-jsonl walk; see TODOS).
     lines.append("## Claude Code activity")
     if data.sessions.total_sessions == 0 and not data.sessions.pre_v2_peers:
         lines.append("- No Claude Code sessions captured in this window.")
     else:
-        non_eph = data.sessions.total_sessions - data.sessions.ephemeral_sessions
-        eph = data.sessions.ephemeral_sessions
         lines.append(
-            f"- {data.sessions.total_sessions} sessions across "
-            f"{data.sessions.projects} projects "
-            f"({eph} in ephemeral Conductor workspaces, counted separately)"
+            f"- {data.sessions.total_sessions} sessions across {data.sessions.projects} projects"
         )
-        mb = data.sessions.total_kb / 1024
-        lines.append(f"- {mb:,.1f} MB total session content")
-        if data.sessions.most_active:
-            formatted = ", ".join(
-                f"{p} ({n}{' ephemeral' if eph else ''})" for p, n, eph in data.sessions.most_active
+        if data.sessions.ephemeral_sessions:
+            notes.append(
+                f"{data.sessions.ephemeral_sessions} of those sessions are in ephemeral "
+                f"Conductor workspaces."
             )
-            lines.append(f"- Most active: {formatted}")
-        # Defensive: mention non_eph in passing if both buckets non-zero.
-        _ = non_eph  # suppress unused-var lint
     lines.append("")
 
     # Skills used (this machine only).
@@ -1095,69 +1027,64 @@ def format_retro(data: RetroData) -> str:
         lines.append(f"- {formatted}")
     lines.append("")
 
-    # Eureka moments.
-    lines.append(f"## Eureka moments ({len(data.eureka.moments)})")
-    if not data.eureka.available:
-        lines.append("- *gstack eureka log not found on this machine — section omitted.*")
-    elif not data.eureka.moments:
-        lines.append("- No eureka moments captured.")
-    else:
-        for insight, project, ts in data.eureka.moments[:TOP_N_SKILLS]:
-            lines.append(f'- "{insight}" ({project}, {ts})')
-    lines.append("")
-
     # mm sync activity.
     lines.append("## mm sync activity")
     lines.append(
         f"- {data.pushes.push_events} pushes across "
         f"{len(data.pushes.devices_with_pushes)} device(s)"
     )
-    if data.pushes.discovery_errors:
-        n_errs = len(data.pushes.discovery_errors)
-        lines.append(
-            f"- *{n_errs} discovery error(s) recorded — see mm: notice: stderr breadcrumbs.*"
-        )
     lines.append("")
 
-    # Tail breadcrumbs (TODO#1, TODO#2 visible-failure contract). One line
-    # per affected file so the user knows where to look — conflating mm
-    # events with foreign gstack files under one count was misleading.
+    # Collect remaining notes — most live in this block (rather than in
+    # render-site appends above) because they describe data quality, not
+    # activity. Order: data-trust signals first, then visibility/diagnostic.
+    if data.sessions.pre_v2_peers:
+        n_pre = len(data.sessions.pre_v2_peers)
+        notes.append(
+            f"Sessions count incomplete: {n_pre} peer(s) on pre-v0.11.0 — upgrade for "
+            f"accurate session totals."
+        )
+    if data.fleet.unregistered_event_devices:
+        notes.append(
+            f"{data.fleet.unregistered_event_devices} unregistered device id(s) had "
+            f"events in this window (filtered out). Stale event files reap automatically "
+            f"after {EVENTS_RETENTION_DAYS} days."
+        )
+    if data.pushes.discovery_errors:
+        notes.append(
+            f"{len(data.pushes.discovery_errors)} discovery error(s) recorded — see "
+            f"mm: notice: stderr breadcrumbs."
+        )
     n_events = data.skipped_per_source.get(SKIP_CATEGORY_EVENTS, 0)
     n_skill = data.skipped_per_source.get(SKIP_CATEGORY_SKILL_USAGE, 0)
-    n_eureka = data.skipped_per_source.get(SKIP_CATEGORY_EUREKA, 0)
     if n_events:
-        lines.append(
-            f"*Note: {n_events} event(s) skipped due to parse errors in mm event log. "
-            f"Output may be incomplete.*"
+        notes.append(
+            f"{n_events} event(s) skipped due to parse errors in mm event log. "
+            f"Output may be incomplete."
         )
     if n_skill:
         skill_label = str(data.skill_usage_path) if data.skill_usage_path else "skill-usage.jsonl"
-        lines.append(
-            f"*Note: {n_skill} record(s) skipped in {skill_label} "
-            f"(gstack file format issue, not mm).*"
+        notes.append(
+            f"{n_skill} record(s) skipped in {skill_label} (gstack file format issue, not mm)."
         )
-    if n_eureka:
-        eureka_label = str(data.eureka_path) if data.eureka_path else "eureka.jsonl"
-        lines.append(
-            f"*Note: {n_eureka} record(s) skipped in {eureka_label} "
-            f"(gstack file format issue, not mm).*"
-        )
-    # Backward-compat fallback: a manually-constructed RetroData with
-    # skipped_lines set but no per-source breakdown (older callers, tests
-    # constructing RetroData directly) would otherwise render no breadcrumb
-    # at all. Aggregate() always populates per-source so this only fires
-    # for foreign callers — keeps the visible-failure contract intact.
+    # Backward-compat fallback for foreign callers that set skipped_lines
+    # without populating skipped_per_source. aggregate() always populates
+    # per-source, so this only fires for hand-built RetroData.
     if not data.skipped_per_source and data.skipped_lines:
-        lines.append(
-            f"*Note: {data.skipped_lines} record(s) skipped due to parse errors. "
-            f"Output may be incomplete.*"
+        notes.append(
+            f"{data.skipped_lines} record(s) skipped due to parse errors. Output may be incomplete."
         )
     if data.window_exceeds_retention:
-        lines.append(
-            f"*Note: requested {data.window_days}d window exceeds the "
-            f"{EVENTS_RETENTION_DAYS}-day events retention. Older days are "
-            f"reaped by `mm gc` and will not appear in this retro.*"
+        notes.append(
+            f"Requested {data.window_days}d window exceeds the {EVENTS_RETENTION_DAYS}-day "
+            f"events retention. Older days are reaped by `mm gc` and will not appear."
         )
+
+    if notes:
+        lines.append("## Notes")
+        for n in notes:
+            lines.append(f"- {n}")
+        lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -1280,7 +1207,6 @@ def main(argv: list[str] | None = None) -> int:
         window_days=args.window,
         author_emails=author_emails,
         skill_usage_path=GSTACK_ANALYTICS_DIR / "skill-usage.jsonl",
-        eureka_path=GSTACK_ANALYTICS_DIR / "eureka.jsonl",
     )
     sys.stdout.write(format_retro(data))
     return 0
