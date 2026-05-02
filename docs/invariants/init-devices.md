@@ -1,0 +1,52 @@
+# Init / devices / trust boundary — load-bearing invariants
+
+Read BEFORE editing any of these:
+
+- `src/mind_meld/cli.py` — `_register_and_save` / `_ensure_device_registered` / `init_cmd` / `_init_storage_guard`
+- `src/mind_meld/devices.py` — `register_device` / `update_last_seen` / `list_devices` / `_devices_write_lock`
+- `src/mind_meld/storage/local.py` — `LocalBackend.put_exclusive`
+- `src/mind_meld/safety.py` — `safe_str` / `safe_text` / `strip_terminal_escapes`
+- Anywhere a peer-controlled string is rendered (filename, path, source name, device name, `str(e)` exception tail) — use `safe_str` / `safe_text`
+
+Tests: `tests/test_devices.py`, `tests/test_safe_str.py`, `tests/test_silent_failure_contract.py`, `tests/test_storage_local.py`, `tests/test_recover.py`.
+
+---
+
+## Init order + push-time self-heal (load-bearing, v0.9.4)
+`_register_and_save` (renamed from `_save_and_register`) writes the remote first, the local pointer last: `register_device(backend, ...)` → `save_config(...)` → keyring store. Canonical filesystem/DB transaction discipline — a SIGKILL/OOM/power-loss in the window between the two writes leaves an inert orphan storage entry (recoverable on retry init via `_init_storage_guard`'s orphan-case prompt), never the inverse half-state where local config claims a `device_id` storage doesn't contain. Pre-v0.9.4 produced the inverse mapping. Do NOT reorder these calls.
+
+If `save_config` raises (disk full, permissions), a best-effort `backend.delete(device_key(device_id))` cleanup runs before the original exception propagates — keeps orphans from accumulating in storage when normal save failures hit. Cleanup-failure surfaces a `mm: warning:` stderr breadcrumb but does NOT mask the original save error (visible-failure contract). The `device_key(device_id)` storage key is precomputed BEFORE `register_device` so the cleanup-warning f-string can't itself raise from `device_key`'s validation and mask the real cause (codex adversarial 2026-04-25).
+
+`_ensure_device_registered(backend, device_id, device_name, *, dry_run)` runs at the top of `_push_core` BEFORE any push work. If `devices/<my_id>.json` is absent, it recreates it via `register_device`. Two scenarios converge: future v0.9.4+ SIGKILL crash mid-init (cosmetic) AND retroactive fix for pre-v0.9.4 victims of the v0.8.15..v0.9.3 inverted half-state — those users had been pushing manifests under an ID no peer recognized, silently. First push after upgrading to v0.9.4 self-heals. Gated on `not dry_run` (codex review: `mm push --dry-run` must not mutate storage). Register failures emit a `mm: warning:` stderr breadcrumb before re-raising — load-bearing for autopush, whose generic `except Exception` would otherwise swallow the failure and silently no-op every push.
+
+## `register_device` create-only contract (load-bearing, v0.10.1)
+Pre-v0.10.1, `register_device` always wrote `backend.put(key, ...)`. The push-time `_ensure_device_registered` self-heal (v0.9.4) called `register_device` whenever `backend.exists(key)` returned False. iCloud's `.icloud` placeholder (cloud-only, lazy-materialized) creates a TOCTOU window where `backend.exists()` reports False but the entry actually exists on storage — the self-heal re-registered, silently bumping the `registered:` first-registration timestamp on every push.
+
+v0.10.1 routes `register_device` through `LocalBackend.put_exclusive(key, data)` (atomic `os.link` with `EEXIST` detection) so the create-only invariant holds at the filesystem layer regardless of placeholder state. Existing entries surface as `StorageError`, which the function swallows + returns. Original `registered:` timestamps are preserved across re-registration. Idempotent: self-heal callers can re-register safely.
+
+## Devices write lock (load-bearing, v0.10.1)
+`update_last_seen` does a read-modify-write of `devices/<id>.json` on every push (mutates `last_seen` + `last_seen_version`). Concurrent autopush + interactive push could race on the RMW. Today's deterministic fields (`last_seen`, `last_seen_version`) don't lose data because both writers compute the same effective state, but any FUTURE non-deterministic field (e.g. per-machine notes, error counters, partial-progress markers) would lose interleaved updates.
+
+`_devices_write_lock()` is a `contextlib.contextmanager` wrapping the RMW in `fcntl.LOCK_EX | LOCK_NB` against `~/.config/mind-meld/devices-write.lock` (mode 0o600, parent dir auto-created). Brief retry budget on contention — `_LOCK_RETRY_INTERVALS_S = (0.05, 0.1, 0.2, 0.4)` (~750ms total before degrading). Total acquire wait stays well under 1 second since the critical section is one storage GET + one storage PUT.
+
+On exhausted retries, degrade to executing without the lock and emit one `mm: warning: device write lock contended; skipping last_seen update for this push` line to stderr (visible-failure contract). Today's deterministic fields are safe under degraded operation; the warning lets the user catch a stuck-process scenario before any future non-deterministic field starts losing data.
+
+The lock is LOCAL (per-machine config dir) — `fcntl.flock` is a local-process primitive and never reaches synced storage. All RMW callers MUST hold the flock for the read AND write so an interleaved read can't observe a partial state. Routing field-adders through this lock is forward-defense for concurrency safety.
+
+## Peer-controlled string sanitization (load-bearing, v0.10.1, security)
+Every synced filename AND file body crosses an untrusted trust boundary. Without sanitization, a peer can plant Rich markup (`[/red]…[red]`) or terminal escape sequences in any synced filename or file body and have them rendered as control output during `mm pull` / `mm conflicts` / `mm resolve` / `mm devices` / `mm status`. The OSC 52 vector is particularly nasty — many terminals (xterm, iTerm2, kitty, alacritty) honor base64-encoded clipboard writes from remote-controlled escape sequences, silently changing the user's clipboard. CSI `\x1b[2J` clears the screen; OSC 0/2 spoofs the title; DCS / C1 8-bit are also covered.
+
+`strip_terminal_escapes(s)` removes the full common-grammar set: CSI `\x1b[…[\x40-\x7e]`, OSC `\x1b]…(BEL|ST)`, DCS, single-byte `\x1b[\x40-\x5f]`, and the rarely-used 0x9b 8-bit C1 CSI variant. Apply BEFORE rendering any peer-controlled string to a real terminal — Rich's `Text()` does NOT strip these.
+
+`safe_str(s)` composes `strip_terminal_escapes` with `rich.markup.escape` and returns a plain `str`, so f-string composition with Rich markup tags continues to work: `f"[red]write failed:[/red] {safe_str(rel_path)}"`. Use at every print site interpolating a peer-controlled string (filenames, paths, source names, device names, error message tails — including exceptions whose `str(e)` echoes peer-supplied bytes).
+
+`safe_text(s, **kwargs) -> rich.text.Text` is the diff-content variant. Use for diff CONTENT lines (peer-controlled file bytes printed via `console.print`). `Text()` alone defangs Rich markup but passes raw ANSI/OSC/DCS through to the terminal — same trust-boundary leak `safe_str` closes for filenames. Strip escapes first.
+
+Sweep covers ~30 print sites: pull-prediction widget, upload progress, conflict prompts, write/merge/conflict apply paths, all `_apply_*` / `_pull_*` error tails, `mm devices` table cells, `mm diff` per-source headers, fleet-version refusal listing, `_print_pull_summary` warnings, `_resolve_interactive_loop` headers + prompts + diff labels + diff content + outcome lines. `mm devices` Rich Table cells are sanitized too — Table cells interpret markup AND pass raw escapes through (verified). All sites pinned in `tests/test_safe_str.py`.
+
+**v0.11.1 extension — banner trust boundary covers `device_name` too.** The conflict-prompt LOCAL/REMOTE banners (Track 12A, conflictdiff.py) interpolate two peer-controlled strings: the conflict filename AND the peer's `device_name` (set via `typer.prompt` at peer init, plaintext-synced via `devices/<id>.json`, and rendered as `(from <peer_name>)` on the REMOTE banner). `render_banner` wraps both inputs in `safe_text` BEFORE composition so a peer planting OSC 52 / CSI / DCS in their own `device_name` cannot reach the terminal of any peer that pulls. Codex outside-voice review (T6) caught this — pre-v0.11.1 the sanitization sweep covered filenames but not `device_name`. Pinned by `tests/test_safe_str.py::TestConflictBannerSanitization`.
+
+**v0.11.1 module move.** `safe_str`, `safe_text`, `strip_terminal_escapes` live in `mind_meld.safety` (extracted from cli.py to break the cli↔conflictdiff circular import). cli.py re-exports the names for backwards compat; new tests should import from `mind_meld.safety` directly.
+
+## `store_passphrase_in_keyring` PYTEST_CURRENT_TEST guard (load-bearing, v0.11.11)
+A test-fixture passphrase (`pw123`) reached a real fleet's macOS Keychain through a path that bypassed conftest's `_isolate_keyring` autouse fixture (most likely a non-pytest harness or manual init against a placeholder storage path), wedging `mm pull` until the user manually overwrote the entry. Production `crypto.store_passphrase_in_keyring` now short-circuits to `False` when `os.environ.get("PYTEST_CURRENT_TEST")` is truthy. pytest sets that variable on every test phase and it's inherited by subprocesses, so any test-orchestrated path (in-process, subprocess, `python -c '...'` from a test, REPL under pytest) physically cannot reach `keyring.set_password` against the real macOS Keychain. Real-CLI `mm init` from a user shell is unaffected. Failure mode under the guard is the existing "[yellow]No keyring available[/yellow]" warning path — recoverable via `MINDMELD_PASSPHRASE` env var or re-running init in a clean env, strictly better than the silent passphrase poisoning the guard prevents. Existing `TestStorePassphraseInKeyringExceptNarrow` pins `monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)` so they exercise the real-CLI write path past the guard; new `TestStorePassphrasePytestGuard` pins both branches.
