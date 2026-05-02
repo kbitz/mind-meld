@@ -68,6 +68,27 @@ def _isolate_devices_write_lock(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
+    """Redirect ``mind_meld.identity.CACHE_PATH`` to a per-test path.
+
+    ``identity.gather_local_identities`` writes
+    ``~/.config/mind-meld/identity-cache.json`` on first read of a stale
+    cache. Without isolation, every test that drives push tail / retro
+    aggregator (test_events, test_init_events_backfill, test_retro_fleet_
+    aggregator, test_integration) would pollute the user's real config
+    dir AND read whatever was previously cached there — non-deterministic
+    test runs.
+
+    Pattern mirrors ``_isolate_pullhistory``: ``CACHE_PATH`` is module-
+    level, read at call time inside ``locked_json_rmw``, so a single
+    ``setattr`` suffices.
+    """
+    from mind_meld import identity as _identity
+
+    monkeypatch.setattr(_identity, "CACHE_PATH", tmp_path / "identity-cache.json")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
     """Redirect pullhistory.HISTORY_DIR to a per-test path.
 

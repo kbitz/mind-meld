@@ -35,6 +35,7 @@ from mind_meld import (
     __version__,
     events,
     fsutil,
+    identity,
     pullhistory,
     seen_sources,
     sidecar,
@@ -2749,11 +2750,21 @@ def _run_events_tail(
             )
 
         source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
+        # Fleet-wide author-email trust set (v0.11.17). gather_local_identities
+        # is cache-first: hot path is ~1ms; cold/stale path emits a single
+        # `mm: notice: refreshing identity cache (one-off)` line and runs a
+        # synchronous refresh inline (D1 from /plan-eng-review — the user
+        # accepted the one-off slow path over budget contortions). Emitted
+        # as `local_emails: []` (explicit empty) when this machine has no
+        # configured identities — distinguishable from "pre-v0.11.17 peer
+        # with no field at all" so the aggregator can choose its fallback.
+        local_emails = identity.gather_local_identities(allow_refresh=True)
         mm_event = events.make_mm_push_event(
             device=device_id,
             mm_version=__version__,
             sources=source_names,
             discovery_errors=errs,
+            local_emails=local_emails,
         )
         # CT-4 invariant: mm-push event LAST so a partial write doesn't
         # advance the next-push cursor.
@@ -2866,6 +2877,17 @@ def _run_events_backfill(
         rows_to_write = [*g_rows, *s_rows]
         if rows_to_write:
             events.write_push_event(events_dir, device_id, rows_to_write)
+
+        # Warm the identity cache at init (v0.11.17, D5 from /plan-eng-review).
+        # First push after init then has hot identity data and emits no
+        # slow-path notice. Failure is forensic-only — backfill proceeds.
+        try:
+            identity.refresh_identity_cache(force=True)
+        except Exception as e:
+            sys.stderr.write(
+                f"mm: notice: identity cache warm at init failed: "
+                f"{type(e).__name__}: {safe_str(e)}\n"
+            )
 
         if time.monotonic() > deadline:
             sys.stderr.write("mm: notice: events backfill budget exceeded\n")
@@ -5501,6 +5523,52 @@ def install_skills_cmd() -> None:
             err=True,
         )
     raise typer.Exit(code=1)
+
+
+# ── refresh-identity ──────────────────────────────────────────────────
+
+
+@app.command(name="refresh-identity")
+def refresh_identity_cmd(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit the resulting email list as JSON to stdout."
+    ),
+) -> None:
+    """Force-refresh the local identity cache.
+
+    The cache feeds the ``local_emails`` field on every ``mm push``
+    event (v0.11.17+), which the retro-fleet aggregator unions across
+    peers to build a fleet-wide author-email trust set. The cache
+    refreshes itself on a 7-day TTL automatically; this subcommand is the
+    explicit knob for picking up identity changes immediately:
+
+    * after editing ``[retro].author_emails`` in mm ``config.toml``
+    * after ``gh auth login`` / changing the GitHub CLI account
+    * after editing ``git config --global user.email``
+    * after adding a per-repo ``user.email`` override
+
+    Sources unioned: global git config, per-repo git config (every
+    discovered git root, bounded by a 5s wall-clock budget), mm's
+    ``[retro].author_emails`` config knob, and the GitHub
+    ``<id>+<login>@users.noreply.github.com`` form when ``gh`` is
+    authenticated. A failed source contributes nothing — the cache still
+    rebuilds with what was reachable.
+    """
+    emails = identity.refresh_identity_cache(force=True)
+    if json_output:
+        typer.echo(json.dumps(sorted(emails)))
+        return
+    if not emails:
+        typer.echo(
+            "mm: warning: no author emails resolved — check `git config "
+            "--global user.email`, `gh auth status`, and "
+            "`[retro].author_emails` in your mm config",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    typer.echo(f"Refreshed identity cache: {len(emails)} email(s)")
+    for e in emails:
+        typer.echo(f"  {e}")
 
 
 # ── log ───────────────────────────────────────────────────────────────

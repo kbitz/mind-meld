@@ -19,7 +19,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events,safety,conflictdiff,lockedjson,token_usage}.py
+src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events,safety,conflictdiff,lockedjson,token_usage,identity}.py
 src/mind_meld/storage/{local,keys}.py
 src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). SKILL.md invokes the aggregator via `python -m mind_meld.skills.retro_fleet.aggregator`. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
 
@@ -91,7 +91,7 @@ Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). Run `ru
 GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool — multi-OS + multi-Python matrix is theater for this project). Runs ruff check + ruff format --check + pytest + wheel build + `mm --version` smoke. Asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). pip cache keyed on `pyproject.toml`. No `paths:` filter — every PR runs CI (avoids the branch-protection pending-forever footgun for path-skipped required checks).
 
 ## Commands
-mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources
+mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills
 
 Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 2 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--conflicts` (also reap `.sync-conflict-*` files older than 30 days).
@@ -360,6 +360,117 @@ v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is cou
 **Hook positions.** `mm init` calls `_ensure_retro_skill_link(dry_run=False)` unconditionally at the end. `_push_core` HEAD calls `_ensure_retro_skill_link()` AFTER `_ensure_device_registered` but BEFORE `_run_events_tail` (Architecture #5 lock-in: stacked self-heals before the events tail's load-bearing capture block). Gated by `_skill_link_check_due()` — one `os.stat` (marker freshness) + ~3 syscalls (drift verification) per push on the steady-state path. `dry_run` is plumbed through and gates the install (preview contract; mirrors `_ensure_device_registered`).
 
 **`mm install-skills` user-facing CLI (post-v0.11.5).** Force-runs `_ensure_retro_skill_link(dry_run=False)` ignoring the TTL gate. Use cases: post-cleanup recovery (link manually removed), fresh-machine install before first push, verifying the link state after `pipx upgrade mind-meld`. Reports `Installed: <target> -> <skill_src>` on success; exits 1 with an actionable error when the target is a non-mm file/symlink (the user must remove it themselves — the installer never clobbers a non-mm file at the target) or when `~/.claude/skills` doesn't exist (no Claude Code installed). The CLI surface is intentionally kebab-case-plural to match `migrate-config` / `enable-source` / `reconfigure-sources` and to leave room for future skills mm might ship.
+
+## Fleet-wide author email trust set (load-bearing, v0.11.17)
+
+`mind_meld.identity` owns the running machine's locally-known author-
+email set. The cache at `~/.config/mind-meld/identity-cache.json` (mode
+0600, fcntl-flocked via `lockedjson.locked_json_rmw`, 7-day TTL) feeds
+both push tail and retro render so they share state. Pre-v0.11.17, the
+gather lived in `aggregator.py` and ran every retro — different machines
+produced different filters from the same synced events, breaking
+cross-fleet retro determinism.
+
+**Push-time emit.** `_run_events_tail` calls `identity.gather_local_
+identities(allow_refresh=True)` and threads the result into
+`make_mm_push_event(local_emails=...)`. Every `mm-push` event row on
+synced storage carries the emitting machine's identity set. Cache hit
+is ~1ms; cold/stale cache emits a single `mm: notice: refreshing
+identity cache (one-off)` and runs a synchronous refresh inline.
+**No autopush-budget contortions** — D1 from /plan-eng-review locked
+"synchronous refresh on cold cache, tell the user, accept the one-off
+slow path." No background threads, no empty-emit-and-self-heal-later.
+
+**Retro-time union.** `aggregator.aggregate_local_emails_from_events`
+walks every `mm-push` row in the events dir and unions every peer's
+`local_emails` field into a single fleet-wide set. The aggregator
+combines this with the running machine's locally-passed `author_emails`
+(default: `gather_author_emails()` shim → identity cache) to build the
+effective filter. `aggregate_git` filters commits against that union.
+Result: machine A and machine B running the same retro after sync
+produce byte-identical output (pinned by `TestFleetDeterminism`).
+
+**`author_emails: frozenset[str] | None` semantics.** `None` = filter
+explicitly disabled (`--no-author-filter` wires this). Non-None
+(possibly empty `frozenset()`) = union with fleet emails, then filter.
+The `None` carve-out is load-bearing: an empty `frozenset()` would
+silently re-enable the filter via the union if the user's intent
+"render every commit" wasn't preserved separately.
+
+**Mixed-fleet rollout (D3 from /plan-eng-review: lockstep upgrade,
+no breadcrumb).** A pre-v0.11.17 peer's `mm-push` row has no
+`local_emails` key. The union step skips those rows silently — that
+peer's identities aren't in the fleet trust set until they upgrade
+and push. The running machine's local set still covers itself
+(self-fallback). No `pre_emails_peers` Notes counter ships; the user
+upgrades all peers in lockstep instead. Pinned by
+`TestMixedFleetRegression` — three scenarios: legacy-rows-aggregate-
+cleanly, running-machine-local-covers-self, empty-fleet-falls-back-
+to-local.
+
+**Init-time cache warm (D5).** `_run_events_backfill` calls
+`identity.refresh_identity_cache(force=True)` at the end of `mm init`
+so the first push after init has a hot cache and emits no slow-path
+notice. Failure is forensic-only via `mm: notice:`; backfill proceeds.
+Init isn't time-budgeted — extending it by ~1-5s on cold network for
+`gh api user` is invisible.
+
+**Sources unioned at refresh time** (any single source's failure
+yields nothing for that source; cache still rebuilds with what was
+reachable):
+
+1. `git config --global user.email`
+2. Per-repo `git config user.email` for every discovered git root,
+   bounded by `_PER_REPO_BUDGET_S` total wall-clock (5s)
+3. `[retro].author_emails` from mm `config.toml` — additive (D4 from
+   /plan-eng-review: backwards compat with existing configs)
+4. `<id>+<login>@users.noreply.github.com` derived from `gh api user`
+   when `gh` is authenticated
+
+**Trust-rooted invariant.** Identity gather NEVER walks `git log` for
+author emails. Walking commits would pull in collaborator emails on
+shared repos (their PRs / pulled-in commits sit in local history) and
+silently inflate the trust set. Only configured identities count.
+REGRESSION pin: `tests/test_identity.py::TestGatherSources::
+test_collaborator_email_in_repo_history_NOT_included` builds a real
+git repo with both kb and alice commits and asserts alice doesn't
+leak into the gather output.
+
+**`mm refresh-identity` user-facing CLI.** Force-runs
+`refresh_identity_cache(force=True)` ignoring the TTL. Use after
+editing `[retro].author_emails`, `gh auth login`, or
+`git config --global user.email`. `--json` flag for scripting; default
+output lists the resolved emails. Exits 1 with a `mm: warning:` when
+no emails resolve. Kebab-case-plural matches `mm install-skills` /
+`mm migrate-config` / `mm reconfigure-sources` precedent.
+
+**`MmPushEvent.local_emails` schema is `list[str]` (additive on v=2,
+total=False, no schema bump).** Same precedent as v0.11.14's
+`tokens_by_day`. Pre-v0.11.17 readers tolerate the unknown field;
+post-v0.11.17 readers extract it via `.get("local_emails")` (defensive
+parse — non-list, non-string entries are silently skipped). Empty list
+is emitted explicitly when the running machine has no configured
+identities, distinguishable on the wire from "pre-v0.11.17 peer with
+no field at all."
+
+**Cache file mode 0600 (lockedjson contract).** Identity data isn't
+secret but is per-user. Mirrors `token_usage` and `upgrade-state`
+cache permissions. Tests pin via `os.stat(...).st_mode & 0o777`.
+
+**`aggregator.gather_author_emails()` is a thin shim** that delegates
+to `identity.gather_local_identities()`. Backwards-compat preserved
+for any out-of-tree library callers. Tests that previously
+monkeypatched `aggregator._read_config_author_emails` /
+`_per_repo_user_emails` / `_gh_noreply_email` now monkeypatch the
+identity-side equivalents (`identity._gather_config_author_emails`,
+`identity._gather_per_repo_emails`, `identity._gather_gh_noreply_email`).
+
+**Conftest cache isolation.** `_isolate_identity_cache(monkeypatch,
+tmp_path)` in `tests/conftest.py` redirects `identity.CACHE_PATH` to
+a per-test temp file. Without it, test runs would pollute the user's
+real `~/.config/mind-meld/identity-cache.json` AND read whatever was
+previously cached there — non-deterministic. Mirrors `_isolate_pull
+history` and `_isolate_devices_write_lock` pattern.
 
 ## `mm devices --format=json` (v0.11.0)
 

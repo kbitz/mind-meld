@@ -43,3 +43,14 @@ Inbox for unprocessed items. Other skills (`/full-review`, `/investigate`,
   sites collapse to `with token_usage.lock_and_get_files("block") as files:`.
   Owner of the cache-shape invariants is then `token_usage.py`, not cli.py.
   _Effort: S._
+
+- [plan-eng-review identity, defer] **`[retro].deny_emails` subtractive override.**
+  Fleet-wide author-email trust set (v0.11.17) is additive only via union
+  of every peer's `local_emails`. To remove an email (stolen credential,
+  wrong-account commit, deprecated alias) the user must wait for the 90-day
+  events retention to age it out. Real but rare use case. Fix: add
+  `[retro].deny_emails: list[str]` config knob; aggregator subtracts the
+  denylist after the additive union. Symmetric with the existing
+  `[retro].author_emails` additive knob. Per-machine config (config.toml is
+  per-machine, never synced) so denial is local; if the user wants
+  fleet-wide denial, they replicate the config. _Effort: S._

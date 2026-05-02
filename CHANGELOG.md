@@ -2,6 +2,73 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.17] - 2026-05-01
+
+**Fleet-wide author email trust set: identical retros across every
+machine after sync.** Pre-v0.11.17 the retro-fleet aggregator built
+its author-email filter from the running machine's local state only —
+`git config --global user.email`, per-repo overrides, gh noreply
+form, `[retro].author_emails`. Two machines with different identities
+produced different retros from the same synced events. The fix:
+each push embeds the locally-known emails in a new `local_emails`
+field on the `mm-push` event row; the aggregator unions across every
+peer's rows at retro time. After push+pull, every machine sees the
+same union and renders identical output.
+
+### Added
+
+- **`mind_meld.identity` module.** Single owner of the locally-known
+  author-email set. Cached at `~/.config/mind-meld/identity-cache.json`
+  (mode 0600, fcntl-flocked via the existing `lockedjson` primitive),
+  7-day TTL. Cold/stale paths emit a single `mm: notice: refreshing
+  identity cache (one-off)` to stderr and run a synchronous refresh
+  inline. The user explicitly accepted the one-off slow path during
+  /plan-eng-review (D1) — no autopush-budget contortions, no
+  background threads. Sources unioned: global git config, per-repo
+  git config (5s wall-clock budget), `[retro].author_emails`,
+  `gh api user`-derived noreply form. Trust-rooted: never walks
+  `git log` so collaborator emails on shared repos can't leak in.
+- **`local_emails` field on `MmPushEvent`.** Additive on the v=2
+  TypedDict (no schema bump — same precedent as v0.11.14's
+  `tokens_by_day`). Absent on pre-v0.11.17 peer rows;
+  aggregator silently skips those at the union step. Empty list is
+  emitted explicitly when the running machine has no configured
+  identities, distinguishable on the wire from "pre-v0.11.17 peer."
+- **`mm refresh-identity` CLI subcommand.** Force-refreshes the
+  cache. Use after editing `[retro].author_emails`, running
+  `gh auth login`, or changing `git config --global user.email`.
+  `--json` flag for scripting; default output lists the resolved
+  emails. Exits 1 with a `mm: warning:` when no emails resolve.
+- **Identity cache warm at `mm init`.** `_run_events_backfill` now
+  calls `identity.refresh_identity_cache(force=True)` at the end of
+  init so the first push has a hot cache and emits no slow-path
+  notice. Init isn't time-budgeted; this is free.
+
+### Changed
+
+- **`aggregator.aggregate(author_emails=...)` signature.** Now accepts
+  `frozenset[str] | None`. `None` means filter explicitly disabled
+  (used by `--no-author-filter`). Non-None is unioned with every
+  peer's `local_emails` from on-disk events to build the fleet-wide
+  trust set. Empty `frozenset()` with no fleet activity preserves the
+  pre-v0.11.17 behavior of "filter disabled."
+- **`aggregator.gather_author_emails()` is now a thin shim** that
+  delegates to `mind_meld.identity.gather_local_identities()`.
+  Backwards-compat preserved for any out-of-tree library callers
+  importing the function directly.
+
+### Migration
+
+- **Lockstep upgrade recommended.** During the rollout window, peers
+  on v0.11.16 emit no `local_emails` field; their identities aren't
+  in the fleet union until they upgrade and push. The running
+  machine's local set still covers self-emitted commits via the
+  fallback path. Per /plan-eng-review (D3), no `pre_emails_peers`
+  Notes breadcrumb ships — upgrade all peers in lockstep instead.
+- **Existing `[retro].author_emails` configs keep working unchanged.**
+  Per /plan-eng-review (D4), the knob is additive: local config
+  unions with the fleet trust set rather than replacing it.
+
 ## [0.11.16] - 2026-05-01
 
 **Scrub real email fixtures from public test suite + sync docs to
