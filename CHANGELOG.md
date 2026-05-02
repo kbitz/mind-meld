@@ -2,6 +2,39 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.17] - 2026-05-01
+
+**Suppress phantom `merged` reports when pull merge is a no-op.** Every
+`mm pull` was reporting "1 merged" (or more) for `.jsonl` and
+`MEMORY.md` files even when the line-union merge produced bytes
+byte-identical to what was already on disk — the dominant case when
+local already contains everything remote has. Users felt like new
+content was arriving on every pull when in fact nothing had changed.
+`_apply_merge` now compares the merged result to local bytes; on
+equality it skips the write entirely (preserving mtime, so the next
+push doesn't manufacture a phantom modified entry from the touched
+file) and returns `unchanged` instead of `merged`. The `unchanged`
+outcome was already excluded from pull-summary totals, pullhistory,
+and the per-project `.mind-meld-log.md` sync log, so the noise
+disappears across all reporting surfaces with no further plumbing.
+Real merges (where remote contributes lines local doesn't have) still
+write and report `merged` as before. Dry-run preview
+(`_predict_pull_outcome`) may slightly over-count merges by comparison
+since it can't run the merge without downloading the blob — documented
+inline.
+
+### Fixed
+
+- **Phantom merge reports on `mm pull`.** `.jsonl` and `MEMORY.md`
+  files where local was a strict superset of remote no longer report
+  as `merged`. The merge result is compared to local bytes; when
+  equal, the write is skipped and the outcome is `unchanged`. Three
+  regression tests pinned in
+  `tests/test_pull_helpers.py::TestApplyMerge`: a JSONL no-op (with
+  `atomic_write_bytes` monkeypatched to a sentinel that asserts on
+  call), a `MEMORY.md` no-op, and a counter-test that real merges
+  still write.
+
 ## [0.11.16] - 2026-05-01
 
 **Scrub real email fixtures from public test suite + sync docs to
