@@ -1284,10 +1284,13 @@ class TestGatherAuthorEmails:
         operates on synthetic repo paths instead of the real filesystem."""
         from mind_meld import config as config_module
         from mind_meld import events as events_module
+        from mind_meld import identity as identity_module
 
         monkeypatch.setattr(events_module, "discover_git_roots", lambda _cfg: (roots, []))
         monkeypatch.setattr(config_module, "load_config", lambda _p: {})
-        monkeypatch.setattr(aggregator, "_read_config_author_emails", lambda: [])
+        # v0.11.17: gather logic moved from aggregator.py to identity.py.
+        # The mm config.toml [retro].author_emails read lives here now.
+        monkeypatch.setattr(identity_module, "_gather_config_author_emails", lambda: [])
 
     def test_per_repo_overrides_unioned_with_global(self, monkeypatch):
         """Per-repo `git config user.email` overrides land in the trust
@@ -1395,8 +1398,8 @@ class TestGatherAuthorEmails:
         assert "alice@collaborator.com" not in emails
 
     def test_gh_noreply_email_added_when_authenticated(self, monkeypatch):
-        """`gh api user` returning {"id": 220245, "login": "kbitz"}
-        derives `220245+kbitz@users.noreply.github.com` and unions it
+        """`gh api user` returning {"id": 99999, "login": "fakeuser"}
+        derives `99999+fakeuser@users.noreply.github.com` and unions it
         into the trust set. Critical for users who land most work via
         PR-merge through GitHub's web UI (where author = the per-user
         noreply form regardless of local git config)."""
@@ -1405,12 +1408,12 @@ class TestGatherAuthorEmails:
             monkeypatch,
             {
                 ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("gh", "api"): (0, '{"id": 220245, "login": "kbitz"}'),
+                ("gh", "api"): (0, '{"id": 99999, "login": "fakeuser"}'),
             },
         )
         emails = aggregator.gather_author_emails()
         assert "kb@example.com" in emails
-        assert "220245+kbitz@users.noreply.github.com" in emails
+        assert "99999+fakeuser@users.noreply.github.com" in emails
 
     def test_gh_unavailable_falls_back_silently(self, monkeypatch):
         """Missing `gh` binary → FileNotFoundError → no noreply entry,
@@ -1475,7 +1478,7 @@ class TestGatherAuthorEmails:
             monkeypatch,
             {
                 ("git", "config", "--global"): (0, "kb@example.com\n"),
-                ("gh", "api"): (0, '{"id": "not-an-int", "login": "kbitz"}'),
+                ("gh", "api"): (0, '{"id": "not-an-int", "login": "fakeuser"}'),
             },
         )
         emails = aggregator.gather_author_emails()
@@ -1519,10 +1522,13 @@ class TestGatherAuthorEmails:
         unbounded. Bounded scan keeps the retro from becoming a
         multi-second wait when the user has many discovered repos on
         a slow filesystem."""
+        from mind_meld import identity as identity_module
+
         roots = [Path(f"/fake/repo-{i}") for i in range(100)]
         self._stub_repos(monkeypatch, roots)
         # Force a tiny budget so the loop bails after ~one iteration.
-        monkeypatch.setattr(aggregator, "_PER_REPO_SCAN_BUDGET_SECONDS", 0.001)
+        # v0.11.17: budget constant moved with gather logic to identity.py.
+        monkeypatch.setattr(identity_module, "_PER_REPO_BUDGET_S", 0.001)
 
         scanned: list[str] = []
 
@@ -1554,16 +1560,17 @@ class TestGatherAuthorEmails:
         assert len(scanned) < 100, f"budget enforcement failed: scanned all {len(scanned)} repos"
 
     def test_config_load_failure_falls_back_silently(self, monkeypatch):
-        """Missing / malformed config.toml in `_per_repo_user_emails`
-        → return empty set, no exception. The other gather sources
-        still contribute."""
+        """Missing / malformed config.toml in
+        ``identity._gather_per_repo_emails`` → return empty set, no
+        exception. The other gather sources still contribute."""
         from mind_meld import config as config_module
+        from mind_meld import identity as identity_module
 
         def boom(_p):
             raise RuntimeError("config unreadable")
 
         monkeypatch.setattr(config_module, "load_config", boom)
-        monkeypatch.setattr(aggregator, "_read_config_author_emails", lambda: [])
+        monkeypatch.setattr(identity_module, "_gather_config_author_emails", lambda: [])
         self._stub_subprocess(
             monkeypatch,
             {
@@ -1585,7 +1592,7 @@ class TestGitAggregationWithBroadenedFilter:
         events_dir = tmp_path / "events"
         events_dir.mkdir()
         direct = _commit("aaa", 1.0, author_email="kb@example.com")
-        merged = _commit("bbb", 1.0, author_email="220245+kbitz@users.noreply.github.com")
+        merged = _commit("bbb", 1.0, author_email="99999+fakeuser@users.noreply.github.com")
         unrelated = _commit("ccc", 1.0, author_email="bot@example.com")
         _write_events(
             events_dir,
@@ -1601,7 +1608,7 @@ class TestGitAggregationWithBroadenedFilter:
             author_emails=frozenset(
                 {
                     "kb@example.com",
-                    "220245+kbitz@users.noreply.github.com",
+                    "99999+fakeuser@users.noreply.github.com",
                 }
             ),
         )
@@ -1890,3 +1897,342 @@ class TestShortenRepoUrl:
         assert "00000000-0000-0000-0000-000000000000" not in out
         # But the dedup key in the data is preserved (canonical, not shortened).
         assert long_url in data.git.repos_by_count
+
+
+# ---------------------------------------------------------------------------
+# v0.11.17 — Fleet-wide author email trust set via local_emails union.
+# ---------------------------------------------------------------------------
+
+
+def _push_event_with_emails(
+    device: str,
+    days_ago: float,
+    local_emails: list[str] | None,
+    *,
+    sources: list[str] | None = None,
+) -> dict:
+    """Variant of ``_push_event`` that controls the ``local_emails`` field.
+
+    ``local_emails=None`` produces a row with NO ``local_emails`` key —
+    representing pre-v0.11.17 peers. Empty list / non-empty list emit
+    the field explicitly."""
+    ev = {
+        "v": 2,
+        "type": "mm-push",
+        "ts": _ts(days_ago),
+        "device": device,
+        "mm_version": "0.11.17",
+        "sources": sources or ["claude", "gstack"],
+        "discovery_errors": [],
+    }
+    if local_emails is not None:
+        ev["local_emails"] = list(local_emails)
+    return ev
+
+
+class TestAggregateLocalEmailsFromEvents:
+    """``aggregate_local_emails_from_events`` is the union primitive.
+    Walks every mm-push row, accumulates ``local_emails`` into a single
+    set, lowercased + deduped."""
+
+    def test_unions_across_peers(self):
+        events = [
+            _push_event_with_emails("a", 1.0, ["a@example.com"]),
+            _push_event_with_emails("b", 1.0, ["b@example.com"]),
+        ]
+        union = aggregator.aggregate_local_emails_from_events(events)
+        assert union == {"a@example.com", "b@example.com"}
+
+    def test_dedups_same_email_across_peers(self):
+        events = [
+            _push_event_with_emails("a", 1.0, ["shared@example.com"]),
+            _push_event_with_emails("b", 1.0, ["shared@example.com"]),
+        ]
+        union = aggregator.aggregate_local_emails_from_events(events)
+        assert union == {"shared@example.com"}
+
+    def test_lowercases_case_variant_input(self):
+        """Defense in depth: a peer that emitted mixed-case (shouldn't,
+        but might from a buggy / pre-fix version) gets normalized."""
+        events = [_push_event_with_emails("a", 1.0, ["KB@Example.COM"])]
+        union = aggregator.aggregate_local_emails_from_events(events)
+        assert union == {"kb@example.com"}
+
+    def test_skips_pre_v0_11_17_rows(self):
+        """A row WITHOUT ``local_emails`` key (pre-v0.11.17 peer) is
+        silently skipped — contributes nothing to the union."""
+        events = [
+            _push_event_with_emails("a", 1.0, None),  # legacy
+            _push_event_with_emails("b", 1.0, ["b@example.com"]),
+        ]
+        union = aggregator.aggregate_local_emails_from_events(events)
+        assert union == {"b@example.com"}
+
+    def test_ignores_non_mm_push_events(self):
+        """git-snapshot / sessions-snapshot rows have no local_emails;
+        the function must filter by event type."""
+        events = [
+            _git_event("a", 1.0, [_commit("aaa", 1.0)]),
+            _sessions_event("a", 1.0, []),
+            _push_event_with_emails("a", 1.0, ["mine@example.com"]),
+        ]
+        union = aggregator.aggregate_local_emails_from_events(events)
+        assert union == {"mine@example.com"}
+
+    def test_tolerates_malformed_local_emails_field(self):
+        """Non-list / non-string entries don't crash the union."""
+        events = [
+            {
+                "v": 2,
+                "type": "mm-push",
+                "ts": _ts(1),
+                "device": "a",
+                "local_emails": "not-a-list",  # malformed
+            },
+            {
+                "v": 2,
+                "type": "mm-push",
+                "ts": _ts(1),
+                "device": "b",
+                "local_emails": [None, 42, "valid@example.com", ""],  # mixed
+            },
+        ]
+        union = aggregator.aggregate_local_emails_from_events(events)
+        assert union == {"valid@example.com"}
+
+
+class TestAggregateUnionWiring:
+    """End-to-end: ``aggregate()`` builds the fleet-wide trust set by
+    unioning every peer's ``local_emails`` and the running machine's
+    locally-passed ``author_emails``, then filters commits with the
+    result. This is the user-facing contract: identical retros across
+    machines after sync."""
+
+    def test_local_set_unions_with_fleet(self, tmp_path):
+        """Machine A passes its own emails; the fleet has machine B's
+        emails too. Effective filter = union. Commits authored by
+        either email are counted."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Machine B's mm-push event (peer-emitted, contains its emails).
+        _write_events(
+            events_dir,
+            "dev-b",
+            "2026-04-28",
+            [_push_event_with_emails("dev-b", 0.5, ["b@example.com"])],
+        )
+        # Commits in window: one by machine A's user, one by machine B's user.
+        c_a = _commit("aaa", 1.0, author_email="a@example.com")
+        c_b = _commit("bbb", 1.0, author_email="b@example.com")
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_git_event("dev-a", 1.0, [c_a, c_b])],
+        )
+        data = _aggregate(events_dir, author_emails=frozenset({"a@example.com"}))
+        # Both commits pass the union filter.
+        assert data.git.commits == 2
+
+    def test_none_author_emails_disables_filter_entirely(self, tmp_path):
+        """``--no-author-filter`` (passed as ``None``) renders ALL
+        commits regardless of fleet ``local_emails``. Explicit user
+        intent survives the union step."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-b",
+            "2026-04-28",
+            [_push_event_with_emails("dev-b", 0.5, ["b@example.com"])],
+        )
+        c_a = _commit("aaa", 1.0, author_email="a@example.com")
+        c_strange = _commit("ccc", 1.0, author_email="random@third-party.com")
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_git_event("dev-a", 1.0, [c_a, c_strange])],
+        )
+        data = _aggregate(events_dir, author_emails=None)
+        # Filter disabled; both commits including the third-party one
+        # are rendered.
+        assert data.git.commits == 2
+
+    def test_fleet_emails_alone_filter_when_local_empty(self, tmp_path):
+        """Running machine has no local identities (gather returned
+        empty frozenset) but fleet has peers with ``local_emails``.
+        The union still narrows the filter — fleet emails apply."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-b",
+            "2026-04-28",
+            [_push_event_with_emails("dev-b", 0.5, ["b@example.com"])],
+        )
+        c_b = _commit("bbb", 1.0, author_email="b@example.com")
+        c_other = _commit("ccc", 1.0, author_email="someone-else@example.com")
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_git_event("dev-a", 1.0, [c_b, c_other])],
+        )
+        # Empty author_emails (running machine had no identities) +
+        # fleet has b@example.com → union is {b@example.com} →
+        # filter applies; only b@example.com commits pass.
+        data = _aggregate(events_dir, author_emails=frozenset())
+        assert data.git.commits == 1
+
+
+class TestMixedFleetRegression:
+    """**REGRESSION pin (mandatory per /plan-eng-review test review).**
+
+    During the v0.11.17 rollout window, peers will be on a mix of
+    v0.11.16 (no ``local_emails`` key on mm-push rows) and v0.11.17
+    (emits the field). The aggregator MUST handle both shapes
+    cleanly and union what's available without crashing."""
+
+    def test_pre_v0_11_17_rows_aggregate_cleanly(self, tmp_path):
+        """Mixed shapes in the same events dir → union picks up only
+        the v0.11.17 rows' emails; pre-v0.11.17 rows contribute zero
+        without raising. Aggregator output is honest about what it
+        could see."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Pre-v0.11.17 peer: NO local_emails key.
+        _write_events(
+            events_dir,
+            "dev-old",
+            "2026-04-28",
+            [_push_event_with_emails("dev-old", 0.5, None)],
+        )
+        # Post-v0.11.17 peer: emits the field.
+        _write_events(
+            events_dir,
+            "dev-new",
+            "2026-04-28",
+            [_push_event_with_emails("dev-new", 0.5, ["new@example.com"])],
+        )
+        # Both peers committed in-window; only one's email is in the union.
+        _write_events(
+            events_dir,
+            "dev-old",
+            "2026-04-28",
+            [_git_event("dev-old", 1.0, [_commit("aaa", 1.0, author_email="old@example.com")])],
+        )
+        _write_events(
+            events_dir,
+            "dev-new",
+            "2026-04-28",
+            [_git_event("dev-new", 1.0, [_commit("bbb", 1.0, author_email="new@example.com")])],
+        )
+        # Filter on running machine's local set (empty) ∪ fleet emails =
+        # {new@example.com}. old@example.com falls out of the filter
+        # because the old peer didn't publish its identities.
+        data = _aggregate(events_dir, author_emails=frozenset())
+        assert data.git.commits == 1
+        # No crash, no traceback. Aggregator surfaces honest output.
+
+    def test_running_machine_local_covers_pre_v0_11_17_self(self, tmp_path):
+        """The running machine's own identity (passed as
+        ``author_emails``) ALWAYS covers itself, regardless of what
+        peers emit. So a pre-v0.11.17 peer's commits still count IF
+        the running machine has that identity locally configured."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Pre-v0.11.17 peer with NO local_emails.
+        _write_events(
+            events_dir,
+            "dev-old",
+            "2026-04-28",
+            [_push_event_with_emails("dev-old", 0.5, None)],
+        )
+        # Pre-v0.11.17 peer's git commit under "shared@example.com".
+        _write_events(
+            events_dir,
+            "dev-old",
+            "2026-04-28",
+            [
+                _git_event(
+                    "dev-old",
+                    1.0,
+                    [_commit("aaa", 1.0, author_email="shared@example.com")],
+                )
+            ],
+        )
+        # Running machine knows about shared@example.com via its own
+        # identity gather.
+        data = _aggregate(events_dir, author_emails=frozenset({"shared@example.com"}))
+        assert data.git.commits == 1
+
+    def test_empty_fleet_falls_back_to_local(self, tmp_path):
+        """No mm-push events on disk at all → fleet union is empty;
+        running machine's local set is the only filter. Preserves
+        single-machine retro behavior on a fresh fleet."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_git_event("dev-a", 1.0, [_commit("aaa", 1.0, author_email="kb@example.com")])],
+        )
+        # No mm-push events emitted yet; only git-snapshot.
+        data = _aggregate(events_dir, author_emails=frozenset({"kb@example.com"}))
+        assert data.git.commits == 1
+
+
+class TestFleetDeterminism:
+    """**The user-facing invariant.** Two machines that have pushed-and-
+    pulled produce identical retros. Pin it: same events on disk on both
+    machines → same aggregator output bytes."""
+
+    def test_identical_events_produce_identical_retro(self, tmp_path):
+        """Build a synthetic fleet of events. Run aggregate twice with
+        different ``author_emails`` (simulating two machines, each
+        passing its own gather). Output should be byte-identical for
+        the git/sessions/pushes sections — only thing that varies is
+        the input identity, which the union absorbs."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Two peers both publish their identities + a commit.
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _push_event_with_emails("dev-a", 0.5, ["kb-machine-a@example.com"]),
+                _git_event(
+                    "dev-a",
+                    1.0,
+                    [_commit("aaa", 1.0, author_email="kb-machine-a@example.com")],
+                ),
+            ],
+        )
+        _write_events(
+            events_dir,
+            "dev-b",
+            "2026-04-28",
+            [
+                _push_event_with_emails("dev-b", 0.5, ["kb-machine-b@example.com"]),
+                _git_event(
+                    "dev-b",
+                    1.0,
+                    [_commit("bbb", 1.0, author_email="kb-machine-b@example.com")],
+                ),
+            ],
+        )
+
+        # Machine A's view: passes its own gather.
+        data_a = _aggregate(events_dir, author_emails=frozenset({"kb-machine-a@example.com"}))
+        # Machine B's view: passes its own gather.
+        data_b = _aggregate(events_dir, author_emails=frozenset({"kb-machine-b@example.com"}))
+        # Both retros count both commits (union filter applies on both).
+        assert data_a.git.commits == 2
+        assert data_b.git.commits == 2
+        # Render them and assert byte-identical output.
+        out_a = aggregator.format_retro(data_a)
+        out_b = aggregator.format_retro(data_b)
+        assert out_a == out_b

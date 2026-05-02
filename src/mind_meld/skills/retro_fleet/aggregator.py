@@ -44,11 +44,12 @@ import os
 import re
 import subprocess
 import sys
-import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from mind_meld import identity
 
 # ---------------------------------------------------------------------------
 # Constants — kept in lockstep with mm's source-of-truth values.
@@ -702,208 +703,47 @@ def get_known_devices() -> tuple[int | None, list[dict]]:
 
 
 def gather_author_emails() -> frozenset[str]:
-    """Collect every email address that should count as "the user's commits"
-    for the retro window. Returns lowercased set; empty set means filter
-    is disabled.
+    """Backwards-compat shim around ``mind_meld.identity.gather_local_
+    identities``. Returns the running machine's locally-known emails as a
+    frozenset.
 
-    Trust-rooted: only emails sourced from CONFIGURED identities on
-    machines the user controls. The aggregator filter is matched against
-    ``author_email`` on each captured commit, so any email in this set
-    will pull commits authored under that identity into the retro. A
-    broad ``git log`` walk that grabs every author/committer in
-    discovered repos would include collaborator emails on shared repos
-    (their PRs / pull-merged commits sit in the local history once you
-    pull) and silently inflate retros with their work as yours. Trust-
-    rooted scoping eliminates that class of false-positive entirely.
-
-    Four sources are unioned:
-
-    1. ``git config --global user.email`` — the canonical "this user"
-       email on this machine.
-    2. ``git config user.email`` from each discovered git root
-       (``_per_repo_user_emails``) — captures per-repo overrides where
-       the user has explicitly configured a different identity for a
-       specific project (e.g., a dotfiles repo using a personal email
-       where the global default is a work email).
-    3. ``[retro].author_emails`` in mm config.toml — manual override
-       list, per-machine, for identities the user has used historically
-       (different machine, since-revoked address) that aren't currently
-       configured anywhere on this machine.
-    4. ``<id>+<login>@users.noreply.github.com`` derived from
-       ``gh api user`` (``_gh_noreply_email``) — PR-merges via the
-       GitHub web UI set author to this form regardless of local git
-       config; without source #4 those commits would silently fall out
-       of the filter. Uniquely the user's — the ``<id>`` and
-       ``<login>`` together can't collide with a collaborator's
-       noreply form, so including this email in the trust set is safe
-       on shared repos.
-
-    Note: this set may *under*-count if the user has identities in use
-    on machines outside this one's reach (e.g., committing as
-    ``karl@personal`` on the iMac but the MacBook only has
-    ``kb@work`` configured locally and pulls iMac events via mm).
-    Workaround: list every identity in ``[retro].author_emails`` on
-    each machine. Future improvement: sync the trust set across the
-    fleet via mm-events (deferred).
+    Pre-v0.11.17 this function performed all four subprocess walks itself
+    and returned a per-machine filter. Post-v0.11.17 the canonical store
+    of "my emails" is ``mind_meld.identity``, which provides a flock-
+    protected 7d-TTL cache so push tail and retro render share state.
+    This shim preserves the old API for library callers who were importing
+    ``gather_author_emails`` directly. The retro filter itself is now a
+    fleet-wide UNION (see ``aggregate``); this function only contributes
+    the local-machine slice.
     """
-    emails: set[str] = set()
-    # 1. git config --global user.email
-    try:
-        result = subprocess.run(
-            ["git", "config", "--global", "user.email"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        if result.returncode == 0:
-            ge = result.stdout.strip().lower()
-            if ge:
-                emails.add(ge)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
-    # 2. Per-repo user.email from each discovered git root.
-    for e in _per_repo_user_emails():
-        emails.add(e)
-    # 3. mm config.toml — [retro].author_emails (per-machine; documented).
-    cfg_emails = _read_config_author_emails()
-    for e in cfg_emails:
-        if isinstance(e, str) and e:
-            emails.add(e.lower())
-    # 4. GitHub noreply form derived from `gh api user`.
-    noreply = _gh_noreply_email()
-    if noreply:
-        emails.add(noreply.lower())
-    return frozenset(emails)
+    return frozenset(identity.gather_local_identities(allow_refresh=True))
 
 
-# Time budget for the per-repo `git config user.email` reads. One subprocess
-# per discovered repo. Bounded so a wedged filesystem or pathologically
-# slow git invocation doesn't turn the retro into a multi-second wait.
-_PER_REPO_SCAN_BUDGET_SECONDS = 5.0
-_PER_REPO_GIT_TIMEOUT_SECONDS = 2.0
+def aggregate_local_emails_from_events(events: Iterable[dict]) -> set[str]:
+    """Walk every ``mm-push`` event row and union its ``local_emails`` field
+    into a single fleet-wide trust set.
 
+    Pre-v0.11.17 mm-push rows have no ``local_emails`` key at all and
+    contribute nothing. Post-v0.11.17 rows carry the emitting machine's
+    locally-known emails. The union is the same on every machine after
+    sync, so retros become deterministic across the fleet.
 
-def _per_repo_user_emails() -> set[str]:
-    """For each discovered git root, read ``git config user.email``.
-    Returns lowercased set; empty set on any failure.
-
-    ``git config user.email`` (no ``--local``) returns the per-repo
-    override if one is set, else falls through to the global. The
-    union dedups against the global already added in
-    ``gather_author_emails`` so duplicates don't matter; what we
-    actually want is to catch the per-repo overrides where the user
-    has configured a different identity for a specific project.
-
-    Crucially does NOT walk ``git log`` — only reads configured
-    identity. Walking commits would pull in collaborator emails from
-    shared repos (their PRs/pulled-in commits sit in local history),
-    silently inflating retros with their work as yours. Trust-rooted
-    scoping defends against that class of false-positive.
-
-    Bounded total wall-clock at ``_PER_REPO_SCAN_BUDGET_SECONDS`` and
-    per-repo timeout at ``_PER_REPO_GIT_TIMEOUT_SECONDS``; budget
-    exhaustion returns whatever was collected so far.
+    Tolerant: bad shapes (non-list, non-string entries) are silently
+    skipped. Lowercased and deduped at the entry level — the emitter
+    already lowercases, but defense in depth keeps a misbehaving peer
+    from poisoning the union with case-variant duplicates.
     """
-    try:
-        from mind_meld.config import CONFIG_PATH, load_config
-        from mind_meld.events import discover_git_roots
-    except Exception:
-        return set()
-
-    try:
-        cfg = load_config(CONFIG_PATH)
-    except Exception:
-        return set()
-
-    try:
-        roots, _errors = discover_git_roots(cfg if isinstance(cfg, dict) else {})
-    except Exception:
-        return set()
-
-    if not roots:
-        return set()
-
-    deadline = time.monotonic() + _PER_REPO_SCAN_BUDGET_SECONDS
     out: set[str] = set()
-    for root in roots:
-        if time.monotonic() > deadline:
-            break
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(root), "config", "user.email"],
-                capture_output=True,
-                text=True,
-                timeout=_PER_REPO_GIT_TIMEOUT_SECONDS,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    for ev in events:
+        if ev.get("type") != "mm-push":
             continue
-        if result.returncode != 0:
+        emails = ev.get("local_emails")
+        if not isinstance(emails, list):
             continue
-        email = result.stdout.strip().lower()
-        if email:
-            out.add(email)
+        for e in emails:
+            if isinstance(e, str) and e:
+                out.add(e.lower())
     return out
-
-
-def _gh_noreply_email() -> str | None:
-    """Derive ``<id>+<login>@users.noreply.github.com`` from the local
-    ``gh`` CLI's authenticated user, or None on any failure.
-
-    Best-effort: a missing ``gh`` binary, unauthenticated session,
-    network hiccup, or unexpected JSON shape all return None. Retro
-    callers union the result into the trust set; an absent return
-    narrows the filter (PR-merges authored under the noreply form
-    silently fall out) but doesn't break aggregation.
-
-    Why include this at all: GitHub's web-merge UI (and ``gh pr merge``
-    by default) sets author = the per-user noreply form regardless of
-    local git config. Without this entry in the trust set, a user who
-    lands most work via PR-merge sees retros that drop the bulk of
-    their own activity. The per-user ``<id>+<login>`` form is unique
-    to one GitHub user, so including it in the trust set does NOT
-    open the collaborator-leak hole that a broad ``git log`` walk
-    would.
-    """
-    try:
-        result = subprocess.run(
-            ["gh", "api", "user"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    uid = data.get("id")
-    login = data.get("login")
-    if not isinstance(uid, int) or not isinstance(login, str) or not login:
-        return None
-    return f"{uid}+{login}@users.noreply.github.com"
-
-
-def _read_config_author_emails() -> list[str]:
-    """Best-effort read of mm config.toml's ``[retro].author_emails``.
-    Tolerates missing / malformed config — returns []."""
-    try:
-        from mind_meld.config import CONFIG_PATH, load_config
-
-        cfg = load_config(CONFIG_PATH)
-    except Exception:
-        return []
-    retro = cfg.get("retro") if isinstance(cfg, dict) else None
-    if not isinstance(retro, dict):
-        return []
-    aliases = retro.get("author_emails")
-    if not isinstance(aliases, list):
-        return []
-    return [a for a in aliases if isinstance(a, str)]
 
 
 # ---------------------------------------------------------------------------
@@ -915,12 +755,27 @@ def aggregate(
     *,
     events_dir: Path,
     window_days: int,
-    author_emails: frozenset[str],
+    author_emails: frozenset[str] | None,
     skill_usage_path: Path,
     now: datetime | None = None,
 ) -> RetroData:
     """Read every input source, aggregate per the locked rules, return the
-    structured retro data. ``format_retro(data)`` renders it."""
+    structured retro data. ``format_retro(data)`` renders it.
+
+    ``author_emails`` semantics (v0.11.17 — fleet-wide trust set):
+
+    * ``None`` — filter explicitly disabled. ``--no-author-filter``
+      passes None. All commits in window are rendered.
+    * non-None ``frozenset[str]`` — running machine's locally-known
+      emails. The aggregator UNIONS this with every peer's
+      ``local_emails`` from their ``mm-push`` event rows to build the
+      fleet-wide trust set, then filters with the union. Pre-v0.11.17
+      peers omit ``local_emails`` and contribute nothing to the union;
+      the running machine's local set covers them via fallback.
+
+    Two machines that have pushed-and-pulled produce identical retros
+    because the fleet union is identical on every machine after sync.
+    """
     until = now or datetime.now(timezone.utc)
     since = until - timedelta(days=window_days)
 
@@ -932,7 +787,17 @@ def aggregate(
     events = list(_read_events(events_dir, skip_counter=skip_counter))
     skill_avail, skill_events = _read_skill_usage(skill_usage_path, skip_counter=skip_counter)
 
-    git = aggregate_git(events, since=since, until=until, author_emails=author_emails)
+    # Fleet-wide trust set (v0.11.17): union every peer's ``local_emails``
+    # field across all mm-push events on disk, then OR-in the running
+    # machine's local set. Result is identical on every machine after
+    # sync, so retros become deterministic across the fleet.
+    if author_emails is None:
+        effective_emails: frozenset[str] = frozenset()
+    else:
+        fleet_emails = aggregate_local_emails_from_events(events)
+        effective_emails = frozenset(author_emails | fleet_emails)
+
+    git = aggregate_git(events, since=since, until=until, author_emails=effective_emails)
     sessions = aggregate_sessions(events, since=since, until=until)
     pushes = aggregate_pushes(events, since=since, until=until)
     skills = aggregate_skills(skill_avail, skill_events, since=since, until=until)
@@ -1420,7 +1285,11 @@ def main(argv: list[str] | None = None) -> int:
 
     events_dir = _resolve_events_dir()
     _emit_custom_path_notice_if_due(events_dir)
-    author_emails = frozenset() if args.no_author_filter else gather_author_emails()
+    # ``None`` means filter is explicitly disabled (post-v0.11.17 semantics);
+    # an empty frozenset would still be unioned with fleet emails inside
+    # ``aggregate``. Wire ``--no-author-filter`` to None so the user's
+    # intent (render every commit) survives the union.
+    author_emails: frozenset[str] | None = None if args.no_author_filter else gather_author_emails()
     data = aggregate(
         events_dir=events_dir,
         window_days=args.window,

@@ -174,6 +174,14 @@ class MmPushEvent(TypedDict, total=False):
     mm_version: str
     sources: list[str]
     discovery_errors: list[str]
+    # local_emails (v0.11.17+, additive on v=2 schema). The locally-known
+    # author-email trust set on the emitting machine. The retro-fleet
+    # aggregator unions this across every peer's mm-push events to build a
+    # fleet-wide filter set, replacing the pre-v0.11.17 per-machine gather
+    # that produced different retros on each machine. Forward-compat:
+    # absent on pre-v0.11.17 peers; aggregator falls back to local gather
+    # for those rows. See mind_meld.identity.
+    local_emails: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -976,6 +984,7 @@ def make_mm_push_event(
     mm_version: str,
     sources: list[str] | None = None,
     discovery_errors: list[str] | None = None,
+    local_emails: list[str] | None = None,
     ts: datetime | None = None,
 ) -> MmPushEvent:
     """Construct an mm-push event row. Caller appends as the LAST element
@@ -989,9 +998,17 @@ def make_mm_push_event(
     content stats from the synced manifest at retro time (D1D), so this
     field stays a names-only list (Codex C2: ``iter_source_diffs(skip_un
     changed=True)`` makes per-source counts unreliable on the no-content
-    push path)."""
+    push path).
+
+    ``local_emails`` (v0.11.17+) is the locally-known author-email trust
+    set, emitted so the retro-fleet aggregator can union across peers and
+    produce identical retros on every machine. Pass ``None`` (or omit) to
+    keep the field off the event row entirely — pre-v0.11.17 callers and
+    cold-cache emitters get the same wire shape as before. An empty list
+    is emitted as ``"local_emails": []`` (explicit "machine had nothing to
+    contribute," distinguishable from "pre-v0.11.17 peer")."""
     filtered = [s for s in (sources or []) if s not in MM_INTERNAL_SOURCE_NAMES]
-    return {
+    event: MmPushEvent = {
         "v": EVENTS_SCHEMA_VERSION,
         "type": "mm-push",
         "ts": (ts or datetime.now(timezone.utc)).isoformat(),
@@ -1000,3 +1017,6 @@ def make_mm_push_event(
         "sources": filtered,
         "discovery_errors": discovery_errors or [],
     }
+    if local_emails is not None:
+        event["local_emails"] = list(local_emails)
+    return event

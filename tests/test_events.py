@@ -768,6 +768,57 @@ class TestMakeMmPushEventInternalFilter:
         assert ev["sources"] == ["claude", "gstack"]
 
 
+class TestMmPushEventLocalEmails:
+    """v0.11.17 — ``local_emails`` field on ``MmPushEvent``. Aggregator
+    unions across peers' rows to build a fleet-wide author-email trust
+    set, replacing the per-machine gather that produced different retros
+    on each machine.
+
+    Forward-compat: caller passing ``None`` (or omitting) yields an event
+    row with no ``local_emails`` key — wire-compatible with pre-v0.11.17
+    peers reading it."""
+
+    def test_emails_present_when_supplied(self):
+        ev = events.make_mm_push_event(
+            device="dev-a",
+            mm_version="0.11.17",
+            local_emails=["a@example.com", "b@example.com"],
+        )
+        assert ev["local_emails"] == ["a@example.com", "b@example.com"]
+
+    def test_field_omitted_when_none(self):
+        """Absent ``local_emails`` arg → key NOT in the event row.
+        Distinguishable from explicit empty-list at the aggregator."""
+        ev = events.make_mm_push_event(device="dev-a", mm_version="0.11.17")
+        assert "local_emails" not in ev
+
+    def test_empty_list_emitted_explicitly(self):
+        """Empty list is preserved on the wire — distinguishable from
+        absent. Pre-v0.11.17 peers omit the field entirely; v0.11.17+
+        peers with cold cache emit ``[]``. The aggregator can fall back
+        to local gather for the former, take the latter at face value."""
+        ev = events.make_mm_push_event(device="dev-a", mm_version="0.11.17", local_emails=[])
+        assert ev["local_emails"] == []
+
+    def test_emails_jsonl_round_trip(self, tmp_path):
+        """Write event → read jsonl → parse → assert ``local_emails``
+        survives. Pins the wire format for forensic comparison."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        push = events.make_mm_push_event(
+            device="dev-a",
+            mm_version="0.11.17",
+            local_emails=["kb@example.com", "kb-work@example.com"],
+        )
+        events.write_push_event(events_dir, "dev-a", [push])
+        files = list(events_dir.glob("*.jsonl"))
+        assert len(files) == 1
+        line = files[0].read_text(encoding="utf-8").strip()
+        parsed = json.loads(line)
+        assert parsed["type"] == "mm-push"
+        assert parsed["local_emails"] == ["kb@example.com", "kb-work@example.com"]
+
+
 class TestWriteOrderTransactionalPin:
     def test_partial_write_does_not_advance_cursor(self, tmp_path):
         """CT-4: mm-push event MUST be LAST. If the caller crashes between
