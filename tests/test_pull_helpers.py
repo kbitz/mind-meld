@@ -103,6 +103,62 @@ class TestApplyMerge:
         outcome = _apply_merge(local, "notes.jsonl", b'{"b":2}\n')
         assert outcome == "failed"
 
+    def test_noop_merge_returns_unchanged_jsonl(self, tmp_path: Path, monkeypatch) -> None:
+        """Local is a strict superset of remote → merged bytes equal local
+        bytes → return "unchanged" without touching disk.
+
+        Phantom-activity regression: pre-fix, every pull reported "merged"
+        even when the merge produced no actual change, giving users the
+        impression that new content had arrived.
+        """
+        from mind_meld import cli as cli_module
+
+        local = tmp_path / "notes.jsonl"
+        local.write_bytes(b'{"a":1}\n{"b":2}\n')
+        original_mtime = local.stat().st_mtime
+        original_bytes = local.read_bytes()
+
+        # Sentinel: blow up if anything tries to write. The no-op path
+        # must skip the write entirely.
+        def must_not_write(*a, **kw):
+            raise AssertionError("no-op merge must not call atomic_write_bytes")
+
+        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", must_not_write)
+
+        # Remote is a subset of local — line-union merge produces local's bytes.
+        outcome = _apply_merge(local, "notes.jsonl", b'{"a":1}\n')
+
+        assert outcome == "unchanged"
+        assert local.read_bytes() == original_bytes
+        assert local.stat().st_mtime == original_mtime
+
+    def test_noop_merge_returns_unchanged_memory_md(self, tmp_path: Path) -> None:
+        """MEMORY.md is the other mergeable file class. Same no-op rule."""
+        local = tmp_path / "MEMORY.md"
+        local.write_bytes(b"- entry one\n- entry two\n")
+        original_bytes = local.read_bytes()
+
+        outcome = _apply_merge(local, "MEMORY.md", b"- entry one\n")
+
+        assert outcome == "unchanged"
+        # _join_lines sorts lexicographically; "- entry one" < "- entry two".
+        # Both are present in local, so the merge result equals local bytes
+        # by content union — the file on disk must be untouched either way.
+        assert local.read_bytes() == original_bytes
+
+    def test_real_merge_still_writes(self, tmp_path: Path) -> None:
+        """Counter-test: when remote contains lines local doesn't have,
+        the merge IS a real change → write happens, return "merged"."""
+        local = tmp_path / "notes.jsonl"
+        local.write_bytes(b'{"a":1}\n')
+
+        outcome = _apply_merge(local, "notes.jsonl", b'{"a":1}\n{"b":2}\n')
+
+        assert outcome == "merged"
+        lines = set(local.read_bytes().splitlines())
+        assert b'{"a":1}' in lines
+        assert b'{"b":2}' in lines
+
 
 # ── _apply_conflict ──────────────────────────────────────────────────
 

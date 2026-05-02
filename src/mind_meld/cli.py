@@ -1011,6 +1011,12 @@ def _predict_pull_outcome(
     if local_hash == remote_info.get("sha256"):
         return "unchanged"
     if should_merge(rel_path):
+        # Conservative: predicting "unchanged" for a no-op line-union merge
+        # would require downloading + decrypting the blob here (the
+        # manifest sha differs because local has lines remote doesn't),
+        # which dry-run can't afford. Real pull suppresses no-op merges
+        # in `_apply_merge`; dry-run may slightly over-count merges by
+        # comparison.
         return "merge"
     try:
         local_mtime = mtime_from_path(local_path)
@@ -1343,10 +1349,24 @@ def _apply_merge(
     plain_data: bytes,
     verbose: bool = False,
 ) -> ApplyOutcome:
-    """[M] mergeable: jsonl / MEMORY.md are line-union safe."""
+    """[M] mergeable: jsonl / MEMORY.md are line-union safe.
+
+    No-op suppression: if the line-union merge produces bytes byte-identical
+    to what's already on disk (the dominant case when local is a strict
+    superset of remote, e.g. peer's MEMORY.md already covered by ours), we
+    skip the write entirely and return "unchanged". Skipping the write also
+    avoids touching mtime \u2014 which would itself fabricate a phantom
+    modification on the next push. The "merged" count then reflects only
+    files that actually changed, eliminating the "every pull says
+    1+ merged" noise users were seeing.
+    """
     try:
         local_bytes = local_path.read_bytes()
         merged = merge_file(rel_path, local_bytes, plain_data)
+        if merged == local_bytes:
+            if verbose:
+                console.print(f"  [dim]= {safe_str(rel_path)} (merge no-op)[/dim]")
+            return "unchanged"
         fsutil.atomic_write_bytes(local_path, merged, fsync=False)
     except (OSError, StorageError) as e:
         console.print(f"  [red]merge failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}")

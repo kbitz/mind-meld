@@ -2,10 +2,10 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.11.17] - 2026-05-01
+## [0.11.18] - 2026-05-01
 
 **Fleet-wide author email trust set: identical retros across every
-machine after sync.** Pre-v0.11.17 the retro-fleet aggregator built
+machine after sync.** Pre-v0.11.18 the retro-fleet aggregator built
 its author-email filter from the running machine's local state only —
 `git config --global user.email`, per-repo overrides, gh noreply
 form, `[retro].author_emails`. Two machines with different identities
@@ -30,10 +30,10 @@ same union and renders identical output.
   `git log` so collaborator emails on shared repos can't leak in.
 - **`local_emails` field on `MmPushEvent`.** Additive on the v=2
   TypedDict (no schema bump — same precedent as v0.11.14's
-  `tokens_by_day`). Absent on pre-v0.11.17 peer rows;
+  `tokens_by_day`). Absent on pre-v0.11.18 peer rows;
   aggregator silently skips those at the union step. Empty list is
   emitted explicitly when the running machine has no configured
-  identities, distinguishable on the wire from "pre-v0.11.17 peer."
+  identities, distinguishable on the wire from "pre-v0.11.18 peer."
 - **`mm refresh-identity` CLI subcommand.** Force-refreshes the
   cache. Use after editing `[retro].author_emails`, running
   `gh auth login`, or changing `git config --global user.email`.
@@ -51,7 +51,7 @@ same union and renders identical output.
   (used by `--no-author-filter`). Non-None is unioned with every
   peer's `local_emails` from on-disk events to build the fleet-wide
   trust set. Empty `frozenset()` with no fleet activity preserves the
-  pre-v0.11.17 behavior of "filter disabled."
+  pre-v0.11.18 behavior of "filter disabled."
 - **`aggregator.gather_author_emails()` is now a thin shim** that
   delegates to `mind_meld.identity.gather_local_identities()`.
   Backwards-compat preserved for any out-of-tree library callers
@@ -60,7 +60,7 @@ same union and renders identical output.
 ### Migration
 
 - **Lockstep upgrade recommended.** During the rollout window, peers
-  on v0.11.16 emit no `local_emails` field; their identities aren't
+  on v0.11.17 emit no `local_emails` field; their identities aren't
   in the fleet union until they upgrade and push. The running
   machine's local set still covers self-emitted commits via the
   fallback path. Per /plan-eng-review (D3), no `pre_emails_peers`
@@ -68,6 +68,50 @@ same union and renders identical output.
 - **Existing `[retro].author_emails` configs keep working unchanged.**
   Per /plan-eng-review (D4), the knob is additive: local config
   unions with the fleet trust set rather than replacing it.
+
+### Documentation
+
+- **CLAUDE.md split into `docs/invariants/`.** CLAUDE.md grew to 584
+  lines as load-bearing invariants accumulated across 17 minor
+  releases. Split per-topic invariant blocks into 5 files under
+  `docs/invariants/` (sync, conflicts, init-devices, events-retro,
+  auto-upgrade). CLAUDE.md keeps orientation, Auto Commands, Spec
+  pointer, and a new file-path-keyed routing-rules table that names
+  which invariant doc to read FIRST when editing each code area.
+  CLAUDE.md drops 584 → 98 lines (83% reduction).
+
+## [0.11.17] - 2026-05-01
+
+**Suppress phantom `merged` reports when pull merge is a no-op.** Every
+`mm pull` was reporting "1 merged" (or more) for `.jsonl` and
+`MEMORY.md` files even when the line-union merge produced bytes
+byte-identical to what was already on disk — the dominant case when
+local already contains everything remote has. Users felt like new
+content was arriving on every pull when in fact nothing had changed.
+`_apply_merge` now compares the merged result to local bytes; on
+equality it skips the write entirely (preserving mtime, so the next
+push doesn't manufacture a phantom modified entry from the touched
+file) and returns `unchanged` instead of `merged`. The `unchanged`
+outcome was already excluded from pull-summary totals, pullhistory,
+and the per-project `.mind-meld-log.md` sync log, so the noise
+disappears across all reporting surfaces with no further plumbing.
+Real merges (where remote contributes lines local doesn't have) still
+write and report `merged` as before. Dry-run preview
+(`_predict_pull_outcome`) may slightly over-count merges by comparison
+since it can't run the merge without downloading the blob — documented
+inline.
+
+### Fixed
+
+- **Phantom merge reports on `mm pull`.** `.jsonl` and `MEMORY.md`
+  files where local was a strict superset of remote no longer report
+  as `merged`. The merge result is compared to local bytes; when
+  equal, the write is skipped and the outcome is `unchanged`. Three
+  regression tests pinned in
+  `tests/test_pull_helpers.py::TestApplyMerge`: a JSONL no-op (with
+  `atomic_write_bytes` monkeypatched to a sentinel that asserts on
+  call), a `MEMORY.md` no-op, and a counter-test that real merges
+  still write.
 
 ## [0.11.16] - 2026-05-01
 
