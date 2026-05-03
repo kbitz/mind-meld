@@ -282,6 +282,66 @@ class TestGatherSources:
         emails = identity.refresh_identity_cache(force=True)
         assert all("noreply" not in e for e in emails)
 
+    def test_gh_string_encoded_uid_accepted(self, monkeypatch):
+        """v0.11.19: GitHub Enterprise instances may return ``id`` as a
+        decimal-digit string (large numeric values that would otherwise
+        overflow JS Number safely-representable bounds). Accept it."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (
+                    0,
+                    '{"id": "12345678901234567890", "login": "ghuser"}',
+                ),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert "12345678901234567890+ghuser@users.noreply.github.com" in emails
+
+    def test_gh_bool_uid_rejected(self, monkeypatch):
+        """``bool`` is a subclass of ``int`` in Python; reject explicitly
+        so a hostile / malformed response can't smuggle ``True`` (=1) or
+        ``False`` (=0) into the email form."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (0, '{"id": true, "login": "ghuser"}'),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert all("noreply" not in e for e in emails)
+
+    def test_gh_negative_uid_rejected(self, monkeypatch):
+        """Negative ``id`` is nonsensical for a GitHub user — reject."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (0, '{"id": -1, "login": "ghuser"}'),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert all("noreply" not in e for e in emails)
+
+    def test_gh_string_with_non_digits_rejected(self, monkeypatch):
+        """A string ``id`` containing anything beyond ``[0-9]`` is
+        rejected — guards against ``"99999\\nINJECTED"`` and similar."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (0, '{"id": "99999abc", "login": "ghuser"}'),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert all("noreply" not in e for e in emails)
+
     def test_config_author_emails_unioned(self, monkeypatch):
         """``[retro].author_emails`` from mm config.toml is additive
         (D4 from /plan-eng-review — backwards compat with existing

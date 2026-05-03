@@ -360,6 +360,11 @@ def _gather_gh_noreply_email() -> str | None:
     PR-merge attribution. The per-user ``<id>+<login>`` form is unique to
     one GitHub user, so including it in the trust set does NOT open a
     collaborator-leak hole.
+
+    ``id`` accepted as either ``int`` (github.com canonical shape) OR
+    decimal-digit ``str`` (some GitHub Enterprise instances return string-
+    encoded ids when the underlying numeric value would otherwise overflow
+    a JSON Number safely-representable bound). Reject everything else.
     """
     try:
         result = subprocess.run(
@@ -378,11 +383,28 @@ def _gather_gh_noreply_email() -> str | None:
         return None
     if not isinstance(data, dict):
         return None
-    uid = data.get("id")
+    uid = _coerce_gh_uid(data.get("id"))
     login = data.get("login")
-    if not isinstance(uid, int) or not isinstance(login, str) or not login:
+    if uid is None or not isinstance(login, str) or not login:
         return None
     return f"{uid}+{login}@users.noreply.github.com".lower()
+
+
+def _coerce_gh_uid(raw: object) -> int | None:
+    """Accept ``int`` or decimal-digit ``str``; reject bools and anything
+    else. Returns the integer value or None."""
+    if isinstance(raw, bool):
+        # bool is a subclass of int — reject explicitly so a hostile
+        # response can't smuggle ``True`` / ``False`` into the email form.
+        return None
+    if isinstance(raw, int):
+        return raw if raw >= 0 else None
+    if isinstance(raw, str) and raw.isdigit():
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
 
 
 __all__ = [
