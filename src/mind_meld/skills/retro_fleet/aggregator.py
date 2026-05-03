@@ -1010,6 +1010,25 @@ def _safe_short(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9._\-() ]", "_", cleaned)
 
 
+def _safe_repo_url(s: str) -> str:
+    """Strip terminal escapes + bucket to a URL-safe char class.
+
+    Same trust-boundary class as ``_safe_short``: ``canonical_remote_url``
+    is peer-controlled (each peer's ``git remote get-url origin`` flows
+    through ``canonicalize_remote_url`` into ``GitAggregate.repos_by_count``
+    and out into the LLM-consumed retro markdown). v0.11.14 closed this
+    gap for model strings; repo URLs were the residual surface.
+
+    Whitelist allows valid canonical-URL characters
+    (alphanumerics, ``.`` ``-`` ``/`` ``_`` ``~``); anything else
+    — newlines, backticks, angle brackets, pipes, square brackets,
+    surviving control bytes — becomes ``_``."""
+    from mind_meld.safety import strip_terminal_escapes
+
+    cleaned = strip_terminal_escapes(s) if isinstance(s, str) else ""
+    return re.sub(r"[^A-Za-z0-9._\-/~]", "_", cleaned)
+
+
 def format_retro(data: RetroData) -> str:
     """Render the markdown retro. Output is paste-ready for iMessage / email
     — single-message length when realistic data is present.
@@ -1065,7 +1084,10 @@ def format_retro(data: RetroData) -> str:
         ]
         lines.append("- Top repos:")
         for r, n in top_repos:
-            lines.append(f"  - {_shorten_repo_url(r)} ({n})")
+            # Defang BEFORE shorten: ``_shorten_repo_url`` adds a trusted
+            # ``[...]`` placeholder that the URL-safe whitelist would
+            # otherwise bucket to ``_..._``.
+            lines.append(f"  - {_shorten_repo_url(_safe_repo_url(r))} ({n})")
     lines.append("")
 
     # Claude Code activity. Per-user feedback v0.11.12: drop MB total,
