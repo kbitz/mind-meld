@@ -653,14 +653,10 @@ class TestLockDiscipline:
         monkeypatch.setattr(identity, "_do_full_gather", probing_gather)
         return observed
 
-    def test_gather_local_identities_releases_flock_during_gather(
-        self, monkeypatch
-    ):
+    def test_gather_local_identities_releases_flock_during_gather(self, monkeypatch):
         """Stale cache + ``allow_refresh=True`` exercises the slow path.
         Probe inside ``_do_full_gather`` confirms the flock is NOT held."""
-        old_ts = datetime.now(timezone.utc) - timedelta(
-            seconds=identity.TTL_SECONDS + 60
-        )
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 60)
         identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         identity.CACHE_PATH.write_text(
             json.dumps(
@@ -671,23 +667,17 @@ class TestLockDiscipline:
                 }
             )
         )
-        observed = self._probe_lock_during_gather(
-            monkeypatch, ["fresh@example.com"]
-        )
+        observed = self._probe_lock_during_gather(monkeypatch, ["fresh@example.com"])
         emails = identity.gather_local_identities(allow_refresh=True)
         assert emails == ["fresh@example.com"]
         assert observed["held_during_gather"] is False, (
             "flock must be released before the slow subprocess gather"
         )
 
-    def test_refresh_identity_cache_releases_flock_during_gather(
-        self, monkeypatch
-    ):
+    def test_refresh_identity_cache_releases_flock_during_gather(self, monkeypatch):
         """``force=True`` always exercises the slow path. Same probe
         confirms the flock is NOT held during ``_do_full_gather``."""
-        observed = self._probe_lock_during_gather(
-            monkeypatch, ["forced@example.com"]
-        )
+        observed = self._probe_lock_during_gather(monkeypatch, ["forced@example.com"])
         emails = identity.refresh_identity_cache(force=True)
         assert emails == ["forced@example.com"]
         assert observed["held_during_gather"] is False, (
@@ -701,9 +691,7 @@ class TestLockDiscipline:
         in practice (same machine, same identities) but the contract
         prevents stale-but-newer overwrites."""
         # Stale cache to enter the slow path.
-        old_ts = datetime.now(timezone.utc) - timedelta(
-            seconds=identity.TTL_SECONDS + 60
-        )
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 60)
         identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         identity.CACHE_PATH.write_text(
             json.dumps(
@@ -722,9 +710,7 @@ class TestLockDiscipline:
                 json.dumps(
                     {
                         "version": identity.CACHE_VERSION,
-                        "refreshed_at": _isoformat(
-                            datetime.now(timezone.utc)
-                        ),
+                        "refreshed_at": _isoformat(datetime.now(timezone.utc)),
                         "emails": ["peer-wrote@example.com"],
                     }
                 )
@@ -748,9 +734,7 @@ class TestLockDiscipline:
                 json.dumps(
                     {
                         "version": identity.CACHE_VERSION,
-                        "refreshed_at": _isoformat(
-                            datetime.now(timezone.utc)
-                        ),
+                        "refreshed_at": _isoformat(datetime.now(timezone.utc)),
                         "emails": ["peer-wrote@example.com"],
                     }
                 )
