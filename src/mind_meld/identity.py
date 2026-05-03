@@ -90,7 +90,16 @@ def gather_local_identities(*, allow_refresh: bool = True) -> list[str]:
       cache holds (possibly empty).
 
     Never raises. Pure-cache failures degrade to an empty list.
+
+    Lock discipline (v0.11.19): the flock is held only for the brief
+    read and (post-gather) write phases — NOT during ``_do_full_gather``.
+    The full gather budgets up to ~10s of subprocess wall-clock
+    (``_GIT_GLOBAL_TIMEOUT_S`` + ``_PER_REPO_BUDGET_S`` + ``_GH_TIMEOUT_S``);
+    holding the flock across that window would block any concurrent
+    autopush hook for the same duration. Release-acquire keeps the lock
+    window in the millisecond range.
     """
+    # Phase 1: brief read under lock. Decide whether refresh is needed.
     try:
         with locked_json_rmw(
             CACHE_PATH,
@@ -102,16 +111,19 @@ def gather_local_identities(*, allow_refresh: bool = True) -> list[str]:
                 cache.clear()
                 cache.update(_default_cache())
             stale = _is_cache_stale(cache)
-            if stale and allow_refresh:
-                sys.stderr.write("mm: notice: refreshing identity cache (one-off)\n")
-                emails = _do_full_gather()
-                cache["version"] = CACHE_VERSION
-                cache["refreshed_at"] = datetime.now(timezone.utc).isoformat()
-                cache["emails"] = emails
-                return list(emails)
-            return list(cache.get("emails") or [])
+            if not stale or not allow_refresh:
+                return list(cache.get("emails") or [])
+            sys.stderr.write("mm: notice: refreshing identity cache (one-off)\n")
     except Exception:
         return []
+
+    # Phase 2: slow subprocess gather, no flock held.
+    emails = _do_full_gather()
+
+    # Phase 3: brief write under lock. A concurrent caller may have written
+    # a fresh cache while we were gathering; in that case use theirs and
+    # skip our write (idempotent: same machine, same identity sources).
+    return _persist_or_yield_concurrent(emails)
 
 
 def refresh_identity_cache(*, force: bool = False) -> list[str]:
@@ -123,7 +135,12 @@ def refresh_identity_cache(*, force: bool = False) -> list[str]:
 
     Returns the resulting email list. On failure, returns whatever was in
     the cache before (may be empty).
+
+    Same lock discipline as ``gather_local_identities``: gather runs
+    outside the flock so concurrent callers don't queue on subprocess wall-
+    clock.
     """
+    # Phase 1: brief read. Skip when fresh and not forced.
     try:
         with locked_json_rmw(
             CACHE_PATH,
@@ -136,13 +153,54 @@ def refresh_identity_cache(*, force: bool = False) -> list[str]:
                 cache.update(_default_cache())
             if not force and not _is_cache_stale(cache):
                 return list(cache.get("emails") or [])
-            emails = _do_full_gather()
+    except Exception:
+        return []
+
+    # Phase 2: slow subprocess gather, no flock held.
+    emails = _do_full_gather()
+
+    # Phase 3: write — but on ``force=False``, defer to a concurrent fresh
+    # write if one landed. ``force=True`` always overwrites.
+    if force:
+        return _persist_force(emails)
+    return _persist_or_yield_concurrent(emails)
+
+
+def _persist_or_yield_concurrent(emails: list[str]) -> list[str]:
+    """Phase-3 write helper. If a concurrent writer landed a fresh cache
+    while we were gathering, use theirs; otherwise persist ours."""
+    try:
+        with locked_json_rmw(
+            CACHE_PATH,
+            default_factory=_default_cache,
+            on_contention="block",
+        ) as ljson:
+            cache = ljson.data
+            if _is_valid_cache(cache) and not _is_cache_stale(cache):
+                return list(cache.get("emails") or [])
             cache["version"] = CACHE_VERSION
             cache["refreshed_at"] = datetime.now(timezone.utc).isoformat()
             cache["emails"] = emails
             return list(emails)
     except Exception:
-        return []
+        return list(emails)
+
+
+def _persist_force(emails: list[str]) -> list[str]:
+    """Phase-3 write helper for ``force=True``: always overwrite."""
+    try:
+        with locked_json_rmw(
+            CACHE_PATH,
+            default_factory=_default_cache,
+            on_contention="block",
+        ) as ljson:
+            cache = ljson.data
+            cache["version"] = CACHE_VERSION
+            cache["refreshed_at"] = datetime.now(timezone.utc).isoformat()
+            cache["emails"] = emails
+            return list(emails)
+    except Exception:
+        return list(emails)
 
 
 # ---------------------------------------------------------------------------
