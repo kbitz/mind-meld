@@ -1115,6 +1115,110 @@ class TestLoadManifest:
             )
 
 
+class TestLoadManifestRelPathTraversal:
+    """Path-traversal defense at the manifest load boundary.
+
+    A peer with the storage passphrase can mint an authenticated manifest
+    whose ``sources[*].files`` keys are free-form UTF-8. Without this guard,
+    `_download_and_apply` would build ``base_path / rel_path`` and write
+    decrypted bytes outside the source root — Python's `Path /` follows
+    `..` segments and lets an absolute right-hand side override the base.
+    Mirrors `storage/keys.py`'s sibling defense for the sha256 component.
+    """
+
+    def _wrap(self, files: dict[str, Any], tombstones: dict[str, Any] | None = None) -> bytes:
+        m: dict[str, Any] = {
+            "device_id": "a",
+            "sources": {"claude": {"base_path": "", "files": files}},
+            "tombstones": tombstones or {},
+        }
+        return serialize_manifest(m)
+
+    def test_rejects_parent_dir_segment(self):
+        with pytest.raises(ManifestError, match=r"'\.\.' segments"):
+            load_manifest(
+                self._wrap({"../../etc/passwd": {"sha256": "h", "size": 1, "mtime": "t"}})
+            )
+
+    def test_rejects_parent_dir_in_middle(self):
+        with pytest.raises(ManifestError, match=r"'\.\.' segments"):
+            load_manifest(self._wrap({"a/../../etc/x": {"sha256": "h", "size": 1, "mtime": "t"}}))
+
+    def test_rejects_bare_parent_dir(self):
+        with pytest.raises(ManifestError, match=r"'\.\.' segments"):
+            load_manifest(self._wrap({"..": {"sha256": "h", "size": 1, "mtime": "t"}}))
+
+    def test_rejects_backslash_parent_dir(self):
+        # Mixed/back-slash spelled traversal — Python's Path / on POSIX
+        # treats backslash as a literal char, but on case-insensitive
+        # filesystems with cross-platform tooling we still refuse to
+        # let any ".." spelling through the load boundary.
+        with pytest.raises(ManifestError, match=r"'\.\.' segments"):
+            load_manifest(self._wrap({"a\\..\\etc\\x": {"sha256": "h", "size": 1, "mtime": "t"}}))
+
+    def test_rejects_absolute_posix_path(self):
+        # Path('/base') / '/etc/passwd' returns Path('/etc/passwd') —
+        # absolute RHS overrides base entirely.
+        with pytest.raises(ManifestError, match="must not be absolute"):
+            load_manifest(
+                self._wrap({"/etc/cron.d/mm-pwn": {"sha256": "h", "size": 1, "mtime": "t"}})
+            )
+
+    def test_rejects_absolute_backslash_path(self):
+        with pytest.raises(ManifestError, match="must not be absolute"):
+            load_manifest(
+                self._wrap({"\\Windows\\System32\\evil": {"sha256": "h", "size": 1, "mtime": "t"}})
+            )
+
+    def test_rejects_drive_letter(self):
+        with pytest.raises(ManifestError, match="drive letter"):
+            load_manifest(self._wrap({"C:Windows\\evil": {"sha256": "h", "size": 1, "mtime": "t"}}))
+
+    def test_rejects_null_byte(self):
+        with pytest.raises(ManifestError, match="null bytes"):
+            load_manifest(self._wrap({"a\x00b": {"sha256": "h", "size": 1, "mtime": "t"}}))
+
+    def test_rejects_empty_key(self):
+        with pytest.raises(ManifestError, match="non-empty"):
+            load_manifest(self._wrap({"": {"sha256": "h", "size": 1, "mtime": "t"}}))
+
+    def test_rejects_traversal_in_tombstone_path_part(self):
+        # Tombstones don't drive deletion (pull is additive-only), but a
+        # tombstone keyed on a `..` path could still mask legitimate files
+        # via `is_tombstoned` checks. Reject at the load boundary to keep
+        # the invariant uniform.
+        with pytest.raises(ManifestError, match=r"'\.\.' segments"):
+            load_manifest(
+                self._wrap(
+                    {},
+                    tombstones={
+                        "claude:../../etc/passwd": {
+                            "deleted_at": "2026-04-22T10:00:00+00:00",
+                            "device_id": "a",
+                        }
+                    },
+                )
+            )
+
+    def test_accepts_normal_relative_paths(self):
+        # Confirm the validator does NOT false-positive on legitimate
+        # paths that contain dots in extensions or single-dot hidden
+        # filenames — ".env.local", "a.b.c.md", "memory/.gitkeep" all
+        # contain `.` segments that are NOT `..`.
+        loaded = load_manifest(
+            self._wrap(
+                {
+                    "memory/user_role.md": {"sha256": "h", "size": 1, "mtime": "t"},
+                    "todos/.env.local": {"sha256": "h", "size": 1, "mtime": "t"},
+                    "memory/a.b.c.md": {"sha256": "h", "size": 1, "mtime": "t"},
+                    "deeply/nested/path/file.txt": {"sha256": "h", "size": 1, "mtime": "t"},
+                }
+            )
+        )
+        assert "memory/user_role.md" in loaded["sources"]["claude"]["files"]
+        assert "todos/.env.local" in loaded["sources"]["claude"]["files"]
+
+
 class TestRecordFile:
     """Direct coverage of the _record_file pipeline helper.
 

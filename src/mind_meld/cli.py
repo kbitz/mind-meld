@@ -1762,6 +1762,30 @@ def _download_and_apply(
             bytes_transferred += len(enc_data)
             local_path = base_path / rel_path
 
+            # Belt-and-braces: load_manifest already rejects rel_paths
+            # that could escape via '..' / absolute / null-byte (see
+            # manifest._validate_rel_path). Re-check the FULLY-RESOLVED
+            # path here so any future load path that bypasses load_manifest
+            # (test fixtures, legacy on-disk caches) still cannot direct
+            # writes outside the source root. resolve(strict=False) handles
+            # not-yet-created files; matching .resolve() on both sides
+            # normalizes symlinks consistently so legit symlinked source
+            # roots don't false-positive.
+            try:
+                resolved_local = local_path.resolve(strict=False)
+                resolved_base = base_path.resolve(strict=False)
+                _path_inside_base = resolved_local.is_relative_to(resolved_base)
+            except (OSError, ValueError):
+                _path_inside_base = False
+            if not _path_inside_base:
+                if not quiet:
+                    console.print(
+                        f"  [red]rejected (would escape source root):[/red] {safe_str(rel_path)}"
+                    )
+                outcomes["failed"].append(rel_path)
+                _advance()
+                continue
+
             outcome = _apply_incoming_file(
                 local_path=local_path,
                 rel_path=rel_path,

@@ -2028,3 +2028,107 @@ class TestBootstrapOrVerifyCrypto:
         assert rs == winner_salt
         assert mk == 1024
         assert kc == winner_keycheck
+
+
+class TestDownloadAndApplyPathTraversalGuard:
+    """Belt-and-braces defense in `_download_and_apply` (v0.11.21).
+
+    `manifest.load_manifest` rejects malformed rel_paths at the front door,
+    but a future load path that bypasses that boundary (legacy on-disk
+    cache, hand-built test fixture) must STILL not let a peer-controlled
+    `..` segment or absolute path escape the source root. This test
+    constructs a `to_download` dict directly (skipping load_manifest) and
+    confirms the cli.py-side `is_relative_to(base_path)` guard catches it.
+
+    Threat: passphrase + storage-write attacker mints a manifest containing
+    `'../../.ssh/authorized_keys'` -> `_download_and_apply` would otherwise
+    `mkdir(parents=True)` and `atomic_write_bytes` outside `tmp_path`.
+    """
+
+    def _patch_decrypt_chain(self, monkeypatch, payload: bytes) -> MagicMock:
+        """Patch backend.get/decrypt so any rel_path that survives the
+        guard reaches `_apply_incoming_file` with `payload`. We assert
+        on outcome + filesystem state to detect escapes."""
+        from mind_meld import cli as cli_module
+
+        backend = MagicMock()
+        backend.get = MagicMock(return_value=b"opaque-ciphertext")
+        monkeypatch.setattr(cli_module, "decrypt", lambda *a, **kw: payload)
+        return backend
+
+    def test_rejects_parent_dir_escape(self, tmp_path, monkeypatch) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"attacker-bytes")
+        # Construct a base inside tmp_path with a known sibling we can
+        # check stayed unwritten.
+        base = tmp_path / "src" / "claude"
+        base.mkdir(parents=True)
+        sentinel_outside = tmp_path / "should_not_exist"
+        # Two `..` segments climb from <tmp_path>/src/claude back to
+        # <tmp_path>, then write `should_not_exist` — outside `base`.
+        bad_rel = "../../should_not_exist"
+
+        bt, outcomes = _download_and_apply(
+            backend,
+            base,
+            {bad_rel: _info("h")},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        # File must NOT have been written outside the source root.
+        assert not sentinel_outside.exists()
+        # Outcome must be `failed` (per-file isolation, not raise).
+        assert outcomes["failed"] == [bad_rel]
+        assert outcomes["written"] == []
+
+    def test_rejects_absolute_path_override(self, tmp_path, monkeypatch) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"attacker-bytes")
+        base = tmp_path / "src" / "claude"
+        base.mkdir(parents=True)
+        # Absolute key — `Path(base) / '/abs/...'` returns the abs path,
+        # overriding base entirely.
+        abs_target = tmp_path / "absolute_escape_target"
+        bad_rel = str(abs_target)
+
+        bt, outcomes = _download_and_apply(
+            backend,
+            base,
+            {bad_rel: _info("h")},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        assert not abs_target.exists()
+        assert outcomes["failed"] == [bad_rel]
+        assert outcomes["written"] == []
+
+    def test_accepts_legitimate_nested_path(self, tmp_path, monkeypatch) -> None:
+        """Sanity: the guard does NOT false-positive on legitimate
+        nested paths inside the source root."""
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"good-bytes")
+        base = tmp_path / "src" / "claude"
+        base.mkdir(parents=True)
+        good_rel = "memory/deeply/nested/file.md"
+
+        bt, outcomes = _download_and_apply(
+            backend,
+            base,
+            {good_rel: _info(_sha(b"good-bytes"))},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        # File written, no failure
+        assert (base / good_rel).exists()
+        assert (base / good_rel).read_bytes() == b"good-bytes"
+        assert outcomes["written"] == [good_rel]
+        assert outcomes["failed"] == []
