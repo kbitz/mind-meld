@@ -2,6 +2,37 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.20] - 2026-05-04
+
+**Fix `mm pull` re-merging the same files on every invocation.** Three
+consecutive `mm pull`s on identical inputs reliably reported new
+"merged" files because `merge_jsonl`'s sort key was non-deterministic
+across processes for tied timestamps — defeating the no-op suppression
+in `_apply_merge` and causing fleet-wide ping-pong re-uploads.
+
+### Fixed
+
+- **`merge_jsonl` tied-`ts` sort is now deterministic across processes
+  (merge.py).** The merge built its line collection by iterating a
+  `set`, then sorted with `key=lambda x: x[0]` — `ts` only. Tied-`ts`
+  lines retained set-iteration order, which is hash-randomized per
+  Python process via `PYTHONHASHSEED`. Each `mm pull` is a fresh
+  process → fresh seed → different ordering → merged bytes ≠ local
+  bytes → `_apply_merge`'s no-op suppression failed → "merged" outcome
+  fired forever. The downstream effect: every pull rewrote the file,
+  every push shipped a new SHA, and other devices saw the file as
+  "modified" → re-merged on their next pull, generating a perpetual
+  fleet-wide loop on any jsonl with sub-second `ts` collisions
+  (`analytics/skill-usage.jsonl`, `projects/*/resources-shown.jsonl`,
+  etc). Fix: tie-break on full line content
+  (`key=lambda x: (x[0], x[1])`). Pinned by
+  `test_tied_ts_ordered_by_full_line_content` (contract) and
+  `test_jsonl_tied_ts_deterministic_across_hash_seeds` (subprocess
+  cross-seed determinism). One final canonicalizing merge will fire
+  per affected file on each device's next pull, after which the file
+  stabilizes. `merge_lines` (MEMORY.md) was already deterministic —
+  it sorts on full line content via `sorted(merged)`.
+
 ## [0.11.19] - 2026-05-03
 
 **Group 8 hotfix sweep — three bugs caught during a forward-looking

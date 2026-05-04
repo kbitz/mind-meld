@@ -68,6 +68,16 @@ def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
 
     Dedup: byte-exact after whitespace strip.
     Sort: by 'ts' field if present, then lexicographic for non-JSON lines.
+
+    INVARIANT (load-bearing): the sort key MUST break ties on full line
+    content, not on `ts` alone. The line collection is built by iterating
+    a `set`, whose iteration order is hash-randomized across Python
+    processes. A `ts`-only sort key leaves tied lines in set-iteration
+    order, so two consecutive `mm pull` invocations on identical inputs
+    produce different bytes — the no-op suppression in `_apply_merge`
+    fails (`merged != local_bytes`), the file is rewritten, and the
+    "merged" outcome fires on every pull forever. Pinned by
+    `test_jsonl_tied_ts_deterministic_across_hash_seeds` in test_merge.py.
     """
     local_lines = _split_lines(local_bytes)
     remote_lines = _split_lines(remote_bytes)
@@ -75,7 +85,8 @@ def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
     # Union by content (set dedup)
     merged = set(local_lines) | set(remote_lines)
 
-    # Sort: timestamped lines first (by ts), then non-timestamped lexicographically
+    # Sort: timestamped lines first (by ts, then full line content),
+    # then non-timestamped lexicographically.
     timestamped = []
     non_timestamped = []
     for line in merged:
@@ -85,7 +96,7 @@ def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
         else:
             non_timestamped.append(line)
 
-    timestamped.sort(key=lambda x: x[0])
+    timestamped.sort(key=lambda x: (x[0], x[1]))
     non_timestamped.sort()
 
     result_lines = [line for _, line in timestamped] + non_timestamped

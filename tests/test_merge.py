@@ -1,5 +1,11 @@
 """Tests for merge logic — JSONL, MEMORY.md, and LCS-based 3-way merge."""
 
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
 from mind_meld.merge import lcs_merge, merge_file, merge_jsonl, merge_lines, should_merge
 
 
@@ -106,6 +112,82 @@ class TestMergeJsonl:
         result = merge_jsonl(local, remote)
         lines = result.decode().strip().splitlines()
         assert len(lines) == 1
+
+    def test_tied_ts_ordered_by_full_line_content(self):
+        """Lines sharing a `ts` value MUST sort by full line content as the
+        tiebreaker, not retain set-iteration order. Otherwise the merge
+        result varies across processes (set hash randomization), defeating
+        the no-op suppression in `_apply_merge` and causing every `mm pull`
+        to re-merge the file forever. See INVARIANT in merge.py.
+        """
+        ts = "2026-01-01T00:00:00Z"
+        # Input order is gamma, beta, alpha. After tie-break on content,
+        # output is alpha, beta, gamma.
+        g = f'{{"ts":"{ts}","k":"gamma"}}\n'.encode()
+        b = f'{{"ts":"{ts}","k":"beta"}}\n'.encode()
+        a = f'{{"ts":"{ts}","k":"alpha"}}\n'.encode()
+        result = merge_jsonl(g + b + a, b"")
+        lines = result.decode().strip().splitlines()
+        assert lines[0].endswith('"k":"alpha"}'), lines
+        assert lines[1].endswith('"k":"beta"}'), lines
+        assert lines[2].endswith('"k":"gamma"}'), lines
+
+    def test_jsonl_tied_ts_deterministic_across_hash_seeds(self, tmp_path: Path):
+        """Regression: pre-fix, three consecutive `mm pull`s reliably
+        re-merged the same files because each pull's merge produced
+        different bytes than the prior pull's local result.
+
+        Root cause: `merge_jsonl` built its line set then sorted by `ts`
+        only. Tied-`ts` lines retained set-iteration order, which is
+        hash-randomized per Python process via `PYTHONHASHSEED`. Each
+        `mm pull` invocation is a fresh process → fresh seed → different
+        ordering → `merged != local_bytes` → no-op suppression in
+        `_apply_merge` fails → "merged" fires forever.
+
+        This test runs `merge_jsonl` in three subprocesses with three
+        different hash seeds and asserts the bytes are identical. With
+        the buggy `key=lambda x: x[0]`, this test fails at SOME seed
+        triple (flaky on the bug, deterministic on the fix).
+        """
+        runner = tmp_path / "runner.py"
+        runner.write_text(
+            textwrap.dedent(
+                """
+                import sys
+                from mind_meld.merge import merge_jsonl
+
+                ts = "2026-01-01T00:00:00Z"
+                # Eight tied-ts lines — enough that random set-iteration
+                # order is overwhelmingly unlikely to match content order
+                # by chance under any single hash seed.
+                lines = b"".join(
+                    f'{{"ts":"{ts}","k":"v{i}"}}\\n'.encode()
+                    for i in range(8)
+                )
+                sys.stdout.buffer.write(merge_jsonl(lines, b""))
+                """
+            ).strip()
+        )
+
+        def run(seed: str) -> bytes:
+            env = os.environ.copy()
+            env["PYTHONHASHSEED"] = seed
+            return subprocess.run(
+                [sys.executable, str(runner)],
+                env=env,
+                capture_output=True,
+                check=True,
+            ).stdout
+
+        out1 = run("1")
+        out2 = run("42")
+        out3 = run("999999")
+        assert out1 == out2 == out3, (
+            f"merge_jsonl output differs across hash seeds:\n"
+            f"  seed=1:      {out1!r}\n"
+            f"  seed=42:     {out2!r}\n"
+            f"  seed=999999: {out3!r}"
+        )
 
 
 class TestMergeLines:
