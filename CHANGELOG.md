@@ -2,6 +2,81 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.21] - 2026-05-04
+
+**Security: close pull-side path-traversal gap on peer-crafted manifest
+`rel_path` keys.** A peer with the storage passphrase could mint an
+authenticated manifest whose `sources[*].files` keys contained `..`
+segments or absolute paths; on `mm pull`, `_download_and_apply` would
+build `local_path = base_path / rel_path` (cli.py:1763) and write
+decrypted blob bytes anywhere the user could write — `~/.ssh/authorized_keys`,
+`~/.zshrc`, `/etc/cron.d/*`, etc. — escalating passphrase + storage-write
+into RCE on every fleet device that pulls. The sibling defense for the
+`sha256` storage-key component already existed (`storage/keys.py:_validate_component`,
+v0.8.x); this extends the same pattern to `rel_path`, which is the more
+reachable surface (sha is hex-bounded, rel_path is free-form UTF-8).
+
+### Fixed
+
+- **`manifest._validate_rel_path` rejects unsafe rel-paths at the load
+  boundary (manifest.py).** New helper called from `load_manifest` over
+  every `sources[*].files` key and every tombstone path part. Rejects:
+  empty string, null bytes, leading `/` or `\` (absolute path — Python's
+  `Path('/base') / '/abs'` returns `Path('/abs')`), Windows drive letters
+  (`C:foo`), and any segment equal to `..` after splitting on either
+  separator. Honest writers (`manifest.walk_*`) build rel keys via
+  `path.relative_to(base)`, which by construction NEVER produces `..`
+  segments or absolute paths — so the validator only fires on
+  attacker-crafted manifests; legitimate sync is unaffected.
+  `_fetch_remote_manifest` already catches `ManifestError` and falls
+  through to the sidecar/peer recovery chain, so a malicious manifest
+  degrades to a clean "corrupt" status rather than crashing the pull.
+  Pinned by `tests/test_manifest.py::TestLoadManifestRelPathTraversal`
+  (11 cases covering `..`/absolute/drive-letter/null-byte/empty/tombstone
+  variants plus a sanity case for legitimate nested paths).
+
+- **`_download_and_apply` belt-and-braces `is_relative_to(base_path)`
+  guard (cli.py).** Even though `load_manifest` is the canonical load
+  boundary, a future load path that bypasses it (legacy on-disk cache,
+  hand-built test fixture) must STILL not let a peer-controlled rel_path
+  escape. Before calling `_apply_incoming_file`, resolve both
+  `local_path` and `base_path` with `resolve(strict=False)` (handles
+  not-yet-created files and normalizes symlinks consistently on both
+  sides — symlinked source roots stay legitimate) and assert
+  `local_path.is_relative_to(base_path)`. Rejected files surface as a
+  per-file `failed` outcome (matching the v0.8.1 bad-blob-key isolation
+  pattern), so per-file isolation is preserved and the rest of the pull
+  continues. Pinned by
+  `tests/test_pull_helpers.py::TestDownloadAndApplyPathTraversalGuard`
+  (3 cases: `..`-escape, absolute-path override, legitimate nested-path
+  sanity check).
+
+- **Fuzz strategies narrowed for round-trip tests
+  (`tests/test_manifest_fuzz.py`).** The pre-v0.11.21
+  `tombstone_key_strategy` and `source_files_strategy` generated
+  arbitrary text (including `\x00`, `..`, absolute paths) and flowed
+  into `test_load_manifest_round_trip_preserves_keys` and
+  `test_v1_promotion_migrates_bare_tombstone_keys`, which now pass
+  through the new validator. Replaced with `valid_rel_path_strategy`
+  (path-safe-alphabet segments, no `..`/`.` segments) so round-trip
+  tests fuzz the happy path. The wild-input invariant (normalize
+  tolerates garbage) is still covered by `arbitrary_dict_strategy`
+  because `normalize_manifest` itself is unchanged; the load-side
+  rejection of garbage is covered by the existing
+  `test_load_manifest_either_returns_normalized_or_raises`.
+
+### Documented
+
+- **New invariant in `docs/invariants/sync.md`: rel_path traversal
+  defense (load-bearing, v0.11.21, security).** Captures the threat
+  model (passphrase-holder escalation), the rejection grammar, the
+  explicit "do NOT pre-`posixpath.normpath`" footgun (normpath collapses
+  `a/..` to `.` and would silently drop the suspicious segment), and
+  the defense-in-depth split between the load-boundary validator and
+  the apply-site `is_relative_to` assertion. Routing entry added to
+  `CLAUDE.md` invariant table for `cli.py:_download_and_apply` and
+  `manifest.py:_validate_rel_path`.
+
 ## [0.11.20] - 2026-05-04
 
 **Fix `mm pull` re-merging the same files on every invocation.** Three

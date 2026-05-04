@@ -590,20 +590,71 @@ def deserialize_manifest(data: bytes) -> dict[str, Any]:
         raise ManifestError(f"manifest: failed to parse — {e}") from e
 
 
+def _validate_rel_path(rel: Any, *, where: str) -> None:
+    """Reject a manifest rel_path that could escape its source's base dir.
+
+    Threat model: a peer with the storage passphrase can mint an authenticated
+    manifest whose ``sources.<name>.files`` keys are free-form UTF-8. Without
+    this guard, `_download_and_apply` builds ``local_path = base_path / rel``
+    and writes decrypted bytes there — Python's `Path /` follows ``..``
+    segments and lets an absolute right-hand side override the base entirely
+    (``Path('/base') / '/etc/passwd' == Path('/etc/passwd')``). A crafted key
+    like ``'../../.ssh/authorized_keys'`` lands attacker-chosen bytes outside
+    the source root and escalates passphrase + storage-write into local code
+    execution on every fleet device that pulls.
+
+    Mirrors `storage/keys.py:_validate_component`'s style for the sibling
+    sha256 defense — sha is hex-bounded, rel_path is free-form, so the
+    rel_path surface is strictly more reachable. Raise loudly at the load
+    boundary; `_fetch_remote_manifest` already catches ManifestError and
+    falls through to sidecar/peer recovery.
+    """
+    if not isinstance(rel, str):
+        raise ManifestError(f"manifest: {where} must be a string")
+    if not rel:
+        raise ManifestError(f"manifest: {where} must be non-empty")
+    if "\x00" in rel:
+        raise ManifestError(f"manifest: {where} must not contain null bytes")
+    # Reject Windows-style absolute paths and leading separators uniformly.
+    # POSIX `Path('/base') / '/etc/x'` returns `/etc/x` — absolute RHS wins.
+    if rel.startswith("/") or rel.startswith("\\"):
+        raise ManifestError(f"manifest: {where} must not be absolute (got {rel!r})")
+    # Drive-letter form ("C:foo", "C:\\foo"). macOS-only project today, but
+    # this is cheap belt-and-braces — `Path` semantics on Windows would
+    # also let drive-letter strings escape.
+    if len(rel) >= 2 and rel[1] == ":" and rel[0].isalpha():
+        raise ManifestError(f"manifest: {where} must not contain a drive letter (got {rel!r})")
+    # Per-segment ".." check. Honest writers (manifest.walk_*) build
+    # rel keys via `path.relative_to(base)`, which NEVER produces ".."
+    # segments — only an attacker-crafted manifest would. Reject any
+    # ".." segment under either separator (forward or back slash) so
+    # mixed spellings like `a\\..\\b` or `a/..\\b` are caught uniformly.
+    # We do NOT pre-`normpath`: posixpath.normpath collapses `a/..` to
+    # `.` and would silently drop the suspicious segment before the
+    # check, defeating the defense.
+    for segment in rel.replace("\\", "/").split("/"):
+        if segment == "..":
+            raise ManifestError(f"manifest: {where} must not contain '..' segments (got {rel!r})")
+
+
 def load_manifest(data: bytes) -> dict[str, Any]:
     """Decode JSON bytes into a v2-normalized manifest dict.
 
     Single load boundary for every manifest path (remote fetch, sidecar
     recovery, test fixtures). Guarantees the returned dict has dict-typed
     `sources` and `tombstones`, each source entry has a dict-typed `files`,
-    and each tombstone value is a dict. Callers may rely on these invariants.
+    and each tombstone value is a dict. Every key in `sources[*].files` is
+    confined to a relative path inside its source — no '..' segments, no
+    absolute paths, no null bytes (see `_validate_rel_path`). Callers may
+    rely on these invariants.
 
-    Raises ManifestError on bad bytes, non-dict top-level JSON, or any
-    inner-shape violation. Enforcing the full shape at the load boundary
-    turns a downstream AttributeError (deep in collect_tombstones,
-    _merge_manifests, or the diff loop) into a clean recoverable error at
-    the front door — `_fetch_remote_manifest` already catches ManifestError
-    and falls through to the sidecar/peer recovery chain.
+    Raises ManifestError on bad bytes, non-dict top-level JSON, any inner-
+    shape violation, or any rel_path that could escape its source root.
+    Enforcing the full shape at the load boundary turns a downstream
+    AttributeError (deep in collect_tombstones, _merge_manifests, or the
+    diff loop) into a clean recoverable error at the front door —
+    `_fetch_remote_manifest` already catches ManifestError and falls
+    through to the sidecar/peer recovery chain.
     """
     parsed = deserialize_manifest(data)
     if not isinstance(parsed, dict):
@@ -621,9 +672,20 @@ def load_manifest(data: bytes) -> dict[str, Any]:
         files = src_data.get("files", {})
         if not isinstance(files, dict):
             raise ManifestError(f"manifest: sources[{src_name!r}]['files'] must be an object")
+        for rel in files.keys():
+            _validate_rel_path(rel, where=f"sources[{src_name!r}]['files'] key")
     for key, info in tombstones.items():
         if not isinstance(info, dict):
             raise ManifestError(f"manifest: tombstones[{key!r}] must be an object")
+        # Tombstone keys are `<src>:<rel_path>` post-normalize. Validate the
+        # path part — a tombstone with `..` doesn't drive deletion (pull is
+        # additive-only), but a malformed key shouldn't survive the load
+        # boundary either, and a tombstone keyed on `..` could otherwise
+        # mask legitimate files in `is_tombstoned` checks.
+        if isinstance(key, str) and ":" in key:
+            _, _, rel = key.partition(":")
+            if rel:
+                _validate_rel_path(rel, where=f"tombstones[{key!r}] path part")
     return normalized
 
 

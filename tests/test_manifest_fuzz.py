@@ -55,17 +55,37 @@ wild_tombstone_value_strategy = st.one_of(
     st.integers(),
 )
 
-# Tombstone keys span "obviously normalized", "clearly bare path", and "weird".
+# Valid rel-paths for round-trip tests. v0.11.21 added a path-traversal
+# guard at the load boundary (manifest._validate_rel_path) that rejects
+# `..` segments, absolute paths, drive letters, and null bytes. Round-trip
+# fuzz strategies must therefore produce ONLY paths that pass that guard,
+# or `test_load_manifest_round_trip_preserves_keys` and
+# `test_v1_promotion_migrates_bare_tombstone_keys` would fuzz themselves
+# into the rejection path. The wild-input invariant (normalize tolerates
+# garbage) is still covered by `arbitrary_dict_strategy` below, and the
+# load-side rejection is covered by
+# `test_load_manifest_either_returns_normalized_or_raises`.
+_PATH_SAFE_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+valid_rel_path_strategy = st.lists(
+    st.text(min_size=1, max_size=10, alphabet=_PATH_SAFE_ALPHABET).filter(
+        lambda s: s != ".." and s != "."
+    ),
+    min_size=1,
+    max_size=4,
+).map("/".join)
+
+# Tombstone keys span "clearly bare path" and "already-normalized claude:/gstack:".
+# All forms must produce paths that survive `load_manifest`'s validator.
 tombstone_key_strategy = st.one_of(
-    st.text(min_size=1, max_size=60).filter(lambda s: ":" not in s),  # bare paths
-    st.tuples(st.sampled_from(["claude", "gstack", "other"]), st.text(min_size=1, max_size=40)).map(
-        lambda t: f"{t[0]}:{t[1]}"
-    ),  # already-normalized
-    st.text(min_size=0, max_size=80),  # anything-goes including empty + multi-colon
+    valid_rel_path_strategy,  # bare paths -> v1→v2 migration prepends "claude:"
+    st.tuples(
+        st.sampled_from(["claude", "gstack", "other"]),
+        valid_rel_path_strategy,
+    ).map(lambda t: f"{t[0]}:{t[1]}"),  # already-normalized
 )
 
 source_files_strategy = st.dictionaries(
-    st.text(min_size=1, max_size=40),
+    valid_rel_path_strategy,
     st.fixed_dictionaries(
         {
             "sha256": st.text(min_size=64, max_size=64, alphabet="0123456789abcdef"),
@@ -109,9 +129,12 @@ v1_manifest_strategy = st.fixed_dictionaries(
         "base_path": st.text(min_size=0, max_size=80),
         "files": source_files_strategy,
         # Bare-path tombstones that the v1→v2 promotion is supposed to migrate.
-        # Values must be dicts so load_manifest's hardened shape check accepts them.
+        # Values must be dicts so load_manifest's hardened shape check accepts
+        # them. Keys must pass the v0.11.21 rel-path validator (no `..`, no
+        # absolute, no null bytes) — bare paths are a subset of valid rel-paths
+        # so we reuse the same strategy.
         "tombstones": st.dictionaries(
-            st.text(min_size=1, max_size=60).filter(lambda s: ":" not in s),
+            valid_rel_path_strategy,
             valid_tombstone_value_strategy,
             max_size=6,
         ),
