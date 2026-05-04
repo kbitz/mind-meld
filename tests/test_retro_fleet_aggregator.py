@@ -1899,6 +1899,74 @@ class TestShortenRepoUrl:
         assert long_url in data.git.repos_by_count
 
 
+class TestSafeRepoUrl:
+    """Render-time defang of peer-controlled canonical_remote_url.
+
+    Same trust-boundary class as v0.11.14's model-string sanitization
+    (residual gap that was missed during that sweep). ``canonicalize_remote_url``
+    preserves ANSI / OSC / DCS escape sequences and bell characters; without
+    render-time defang they survive into the LLM-consumed retro markdown.
+    """
+
+    def test_clean_url_passthrough(self):
+        assert aggregator._safe_repo_url("github.com/foo/bar") == "github.com/foo/bar"
+
+    def test_csi_escape_stripped(self):
+        # ANSI color CSI sequence — most common terminal-escape vector.
+        evil = "github.com/\x1b[31mfoo/\x1b[0mbar"
+        out = aggregator._safe_repo_url(evil)
+        assert "\x1b" not in out
+        assert out == "github.com/foo/bar"
+
+    def test_osc_52_clipboard_escape_stripped(self):
+        # OSC 52 is the clipboard-write escape — silent clipboard takeover
+        # vector. strip_terminal_escapes handles the full OSC grammar.
+        evil = "github.com/foo/\x1b]52;c;ZXZpbA==\x07bar"
+        out = aggregator._safe_repo_url(evil)
+        assert "\x1b" not in out
+        assert "\x07" not in out
+
+    def test_bell_and_control_bytes_bucketed(self):
+        # Bare control bytes (no ESC prefix) survive strip_terminal_escapes
+        # but get bucketed to "_" by the whitelist.
+        evil = "github.com/foo\x07bar/baz"
+        out = aggregator._safe_repo_url(evil)
+        assert "\x07" not in out
+        assert "_" in out
+
+    def test_markdown_breakers_bucketed(self):
+        # Newlines, backticks, brackets, pipes — all break markdown table /
+        # list rendering and could confuse an LLM consumer.
+        evil = "github.com/foo`evil`/bar\n## INJECTED"
+        out = aggregator._safe_repo_url(evil)
+        assert "`" not in out
+        assert "\n" not in out
+        assert "#" not in out
+
+    def test_format_retro_strips_escapes_from_top_repos(self):
+        # End-to-end pin: peer-controlled canonical with embedded ANSI flows
+        # through repos_by_count, _shorten_repo_url, and format_retro without
+        # planting escape sequences in the rendered markdown.
+        evil_url = "github.com/\x1b[31mevil/\x1b[0muser-repo"
+        data = aggregator.RetroData(
+            window_days=7,
+            since=NOW - timedelta(days=7),
+            until=NOW,
+        )
+        data.git = aggregator.GitAggregate(
+            commits=2,
+            additions=5,
+            deletions=1,
+            repos_by_count={evil_url: 2},
+        )
+        out = aggregator.format_retro(data)
+        # No raw escape bytes in the rendered output.
+        assert "\x1b" not in out
+        # Canonical URL itself (the dedup key) is preserved on the data
+        # struct — defang is render-only.
+        assert evil_url in data.git.repos_by_count
+
+
 # ---------------------------------------------------------------------------
 # v0.11.17 — Fleet-wide author email trust set via local_emails union.
 # ---------------------------------------------------------------------------

@@ -282,6 +282,66 @@ class TestGatherSources:
         emails = identity.refresh_identity_cache(force=True)
         assert all("noreply" not in e for e in emails)
 
+    def test_gh_string_encoded_uid_accepted(self, monkeypatch):
+        """v0.11.19: GitHub Enterprise instances may return ``id`` as a
+        decimal-digit string (large numeric values that would otherwise
+        overflow JS Number safely-representable bounds). Accept it."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (
+                    0,
+                    '{"id": "12345678901234567890", "login": "ghuser"}',
+                ),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert "12345678901234567890+ghuser@users.noreply.github.com" in emails
+
+    def test_gh_bool_uid_rejected(self, monkeypatch):
+        """``bool`` is a subclass of ``int`` in Python; reject explicitly
+        so a hostile / malformed response can't smuggle ``True`` (=1) or
+        ``False`` (=0) into the email form."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (0, '{"id": true, "login": "ghuser"}'),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert all("noreply" not in e for e in emails)
+
+    def test_gh_negative_uid_rejected(self, monkeypatch):
+        """Negative ``id`` is nonsensical for a GitHub user — reject."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (0, '{"id": -1, "login": "ghuser"}'),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert all("noreply" not in e for e in emails)
+
+    def test_gh_string_with_non_digits_rejected(self, monkeypatch):
+        """A string ``id`` containing anything beyond ``[0-9]`` is
+        rejected — guards against ``"99999\\nINJECTED"`` and similar."""
+        _stub_repos(monkeypatch, [])
+        _stub_subprocess(
+            monkeypatch,
+            {
+                ("git", "config", "--global"): (0, "kb@example.com\n"),
+                ("gh", "api"): (0, '{"id": "99999abc", "login": "ghuser"}'),
+            },
+        )
+        emails = identity.refresh_identity_cache(force=True)
+        assert all("noreply" not in e for e in emails)
+
     def test_config_author_emails_unioned(self, monkeypatch):
         """``[retro].author_emails`` from mm config.toml is additive
         (D4 from /plan-eng-review — backwards compat with existing
@@ -548,3 +608,141 @@ class TestFleetIntegration:
         )
         emails_b = identity.refresh_identity_cache(force=True)
         assert emails_b == ["machine-b@example.com"]
+
+
+# ---------------------------------------------------------------------------
+# Lock discipline (v0.11.19) — flock released during slow subprocess gather.
+# ---------------------------------------------------------------------------
+
+
+class TestLockDiscipline:
+    """Pin v0.11.19's release-acquire lock pattern: the flock on
+    ``identity-cache.json`` MUST NOT be held during the subprocess walk
+    in ``_do_full_gather``. Holding it would block any concurrent autopush
+    hook for the duration of the walk (~10s worst case)."""
+
+    def _probe_lock_during_gather(
+        self, monkeypatch, refresh_emails: list[str]
+    ) -> tuple[list[str], bool]:
+        """Patch ``_do_full_gather`` to attempt a non-blocking flock on
+        ``CACHE_PATH``. Return (emails, lock_held_during_gather).
+        ``lock_held=False`` means the production code released the flock
+        before invoking the gather — the desired behavior."""
+        import fcntl
+        import os
+
+        # Ensure the file exists so the probe can open it.
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.touch()
+
+        observed: dict[str, bool] = {}
+
+        def probing_gather() -> list[str]:
+            fd = os.open(str(identity.CACHE_PATH), os.O_RDWR)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    observed["held_during_gather"] = False
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except BlockingIOError:
+                    observed["held_during_gather"] = True
+            finally:
+                os.close(fd)
+            return refresh_emails
+
+        monkeypatch.setattr(identity, "_do_full_gather", probing_gather)
+        return observed
+
+    def test_gather_local_identities_releases_flock_during_gather(self, monkeypatch):
+        """Stale cache + ``allow_refresh=True`` exercises the slow path.
+        Probe inside ``_do_full_gather`` confirms the flock is NOT held."""
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 60)
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": identity.CACHE_VERSION,
+                    "refreshed_at": _isoformat(old_ts),
+                    "emails": ["old@example.com"],
+                }
+            )
+        )
+        observed = self._probe_lock_during_gather(monkeypatch, ["fresh@example.com"])
+        emails = identity.gather_local_identities(allow_refresh=True)
+        assert emails == ["fresh@example.com"]
+        assert observed["held_during_gather"] is False, (
+            "flock must be released before the slow subprocess gather"
+        )
+
+    def test_refresh_identity_cache_releases_flock_during_gather(self, monkeypatch):
+        """``force=True`` always exercises the slow path. Same probe
+        confirms the flock is NOT held during ``_do_full_gather``."""
+        observed = self._probe_lock_during_gather(monkeypatch, ["forced@example.com"])
+        emails = identity.refresh_identity_cache(force=True)
+        assert emails == ["forced@example.com"]
+        assert observed["held_during_gather"] is False, (
+            "flock must be released before the slow subprocess gather"
+        )
+
+    def test_concurrent_writer_freshness_wins(self, monkeypatch):
+        """Phase-3 freshness re-check: if a peer writer landed a fresh
+        cache while we were gathering, ``gather_local_identities`` must
+        defer to their result instead of overwriting with ours. Idempotent
+        in practice (same machine, same identities) but the contract
+        prevents stale-but-newer overwrites."""
+        # Stale cache to enter the slow path.
+        old_ts = datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 60)
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": identity.CACHE_VERSION,
+                    "refreshed_at": _isoformat(old_ts),
+                    "emails": ["old@example.com"],
+                }
+            )
+        )
+
+        # Inside the gather (lock released), simulate a peer writing a
+        # fresh cache before we re-acquire to write.
+        def gather_then_peer_writes() -> list[str]:
+            identity.CACHE_PATH.write_text(
+                json.dumps(
+                    {
+                        "version": identity.CACHE_VERSION,
+                        "refreshed_at": _isoformat(datetime.now(timezone.utc)),
+                        "emails": ["peer-wrote@example.com"],
+                    }
+                )
+            )
+            return ["our-gather@example.com"]
+
+        monkeypatch.setattr(identity, "_do_full_gather", gather_then_peer_writes)
+
+        emails = identity.gather_local_identities(allow_refresh=True)
+        # Peer's value wins because it landed fresh first.
+        assert emails == ["peer-wrote@example.com"]
+
+    def test_force_refresh_overwrites_concurrent_writer(self, monkeypatch):
+        """``refresh_identity_cache(force=True)`` IS the explicit override
+        knob (e.g. ``mm refresh-identity``). It always overwrites even if
+        a concurrent writer landed a fresh cache during our gather."""
+
+        def gather_then_peer_writes() -> list[str]:
+            identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            identity.CACHE_PATH.write_text(
+                json.dumps(
+                    {
+                        "version": identity.CACHE_VERSION,
+                        "refreshed_at": _isoformat(datetime.now(timezone.utc)),
+                        "emails": ["peer-wrote@example.com"],
+                    }
+                )
+            )
+            return ["force-overwrites@example.com"]
+
+        monkeypatch.setattr(identity, "_do_full_gather", gather_then_peer_writes)
+
+        emails = identity.refresh_identity_cache(force=True)
+        # Force wins over the peer's fresh write.
+        assert emails == ["force-overwrites@example.com"]

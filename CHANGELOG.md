@@ -2,6 +2,57 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.19] - 2026-05-03
+
+**Group 8 hotfix sweep — three bugs caught during a forward-looking
+review of the retro-fleet code paths.** One residual trust-boundary
+gap missed during the v0.11.14 model-string defang, one concurrency
+anti-pattern in the v0.11.17 identity cache, and one GHE schema-variant
+intolerance in the noreply email derivation.
+
+### Fixed
+
+- **Peer-controlled repo URLs are now defanged before render
+  (aggregator.py).** `canonicalize_remote_url` preserves ANSI / OSC /
+  DCS escape sequences and bell characters from peer-controlled
+  `git remote get-url origin` output. The shortening helper then
+  rendered that string directly into the LLM-consumed retro markdown —
+  same trust-boundary class as v0.11.14's model-string defang, just
+  missed for repo URLs. New `_safe_repo_url` helper
+  (`strip_terminal_escapes` + URL-safe whitelist) is applied BEFORE
+  `_shorten_repo_url` so the trusted `[...]` placeholder isn't itself
+  bucketed by the whitelist. Pinned by `TestSafeRepoUrl` (CSI strip,
+  OSC 52 clipboard escape strip, bare control byte bucket, markdown
+  breakers bucket, end-to-end `format_retro` escape strip).
+- **`identity` flock released during slow subprocess gather
+  (identity.py).** `gather_local_identities` and
+  `refresh_identity_cache` previously held the
+  `identity-cache.json` flock for the entire `_do_full_gather`
+  walk — up to ~10s wall-clock (`_GIT_GLOBAL_TIMEOUT_S` +
+  `_PER_REPO_BUDGET_S` + `_GH_TIMEOUT_S`). A concurrent autopush hook
+  would block on the lock for that duration, blowing past the 250ms
+  events-tail budget for no benefit. Refactored to release-acquire:
+  brief read under flock → release → slow gather → brief write under
+  flock. Phase-3 write splits into `_persist_or_yield_concurrent`
+  (defers to a peer writer that landed a fresh cache during the
+  gather) and `_persist_force` (always overwrites, used by
+  `mm refresh-identity`). Pinned by `TestLockDiscipline`: a
+  non-blocking flock probe inside `_do_full_gather` confirms the
+  lock is released for both code paths; concurrent-writer freshness
+  re-check; force-mode override of peer writer.
+- **`gh api user` `id` now accepts decimal-digit `str` shape
+  (identity.py).** `_gather_gh_noreply_email` previously required
+  `data["id"]` to be `int`, which is canonical for github.com but
+  not for some GitHub Enterprise instances that return string-encoded
+  ids when the underlying numeric value would overflow a JSON Number
+  safely-representable bound. Dropping those uids on the floor lost
+  the user's PR-merge attribution. New `_coerce_gh_uid` accepts
+  non-negative `int` OR decimal-digit-only `str` (via `.isdigit` +
+  `int()` round-trip — the strict whitelist guards against payloads
+  like `"99999\nINJECTED"`). Rejects `bool` (subclass of `int` in
+  Python — explicit), negative `int`, and non-digit `str`. Pinned by
+  4 new gh tests covering accept and reject paths.
+
 ## [0.11.18] - 2026-05-01
 
 **Fleet-wide author email trust set: identical retros across every
