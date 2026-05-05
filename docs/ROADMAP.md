@@ -20,7 +20,9 @@ sweep + mm-events default source), and v0.11.1 (conflict-prompt UX redesign —
 `(b)oth` → `(s)kip` rename, three-number divergence summary, peer-controlled
 `device_name` sanitization extension, init-time device-id collision detection,
 extracted `safety.py` + `conflictdiff.py` modules). **Group 9** (post-v1.0
-pull-performance + fresh-Mac onboarding polish) is the only in-flight work.
+pull-performance + fresh-Mac onboarding polish) is in-flight; **Group 10**
+(token-usage post-ship cleanup deferred from /ship review of v0.11.14+) is
+queued behind it on a `cli.py` collision serialization.
 
 ---
 
@@ -179,6 +181,27 @@ _touches: src/mind_meld/cli.py, tests/test_integration.py_
 
 ---
 
+## Group 10: Token-usage post-ship cleanup
+
+Four DRY + perf items deferred from /ship pre-landing reviews of the v0.11.14+
+token-usage work (`token_usage.py` + `lockedjson.py` introduction). All scoped
+to internal hygiene — no public-API change, no user-visible behavior change.
+Group 10 serializes after Group 9 (default linear chain) because Track 10A's
+task 4 edits the `_run_events_tail` / `_run_events_backfill` sites in
+`cli.py`, which collides with Group 9's Track 9A `_download_and_apply` edit
+on file (different functions, same file).
+
+### Track 10A: Token-usage DRY + perf polish
+_4 tasks . ~0.5 day (human) / ~30 min (CC) . low risk . src/mind_meld/token_usage.py + src/mind_meld/lockedjson.py + src/mind_meld/cli.py_
+_touches: src/mind_meld/token_usage.py, src/mind_meld/lockedjson.py, src/mind_meld/events.py, src/mind_meld/cli.py, src/mind_meld/skills/retro_fleet/aggregator.py_
+
+- **DRY: extract `_merge_usage_bucket` helper** -- the 4-key bucket-merge pattern `for k in ('input', 'cache_create', 'cache_read', 'output'): target[k] += src.get(k, 0)` (plus the paired `by_model` walk) is duplicated at 6 sites across 3 modules: `token_usage._accumulate`, `token_usage.slice_window`, `events._aggregate_tokens_for_project`, `aggregator._merge_token_window`. Adding a 5th token field (e.g. `cache_anthropic`) requires touching all 6. Fix: extract `token_usage._merge_usage_bucket(target, src)` and `_merge_by_model(target, src)`. _src/mind_meld/token_usage.py + events.py + skills/retro_fleet/aggregator.py, ~50 lines._ (S) [ship]
+- **Dirty-flag write skip in `lockedjson.locked_json_rmw`** -- cache is rewritten on every normal context exit, even when caller made zero mutations. On steady-state warm cache (~100% cache hits), every `mm push` pays the 320KB JSON serialization for no actual change. Within budget but wasted I/O on the hot path. Fix: track a `dirty` flag on `LockedJson`; default False; set True on caller mutation; skip `_write_json` when not set. Or hash the parsed dict on yield vs on exit. _src/mind_meld/lockedjson.py, ~30 lines._ (S) [ship]
+- **`is_cache_cold` cheap stat-heuristic** -- `is_cache_cold()` slurps and parses the entire (~320KB) cache JSON to check whether `files` dict is empty. Called from `_decide_token_walk_policy` on every push BEFORE acquiring the flock that re-parses the same bytes. Fix: replace with stat-based heuristic — file missing OR `st_size < 64` bytes treated as cold (well below any non-empty `{version, files: {...}}` payload). Saves the `json.loads` round-trip on the hot path. Documents the unlocked-read race in the docstring. _src/mind_meld/token_usage.py, ~15 lines._ (XS) [ship]
+- **DRY: cli.py token-cache lock+normalize block** -- the `with locked_json_rmw(...) ... ljson.data["files"] = {}` normalize block is duplicated verbatim between `_run_events_tail` and `_run_events_backfill` (~30 lines each). Same shape, same defensive re-validation. Fix: extract a `token_usage.lock_and_get_files(on_contention)` context manager that yields the `files` dict directly, so cli.py call sites collapse to `with token_usage.lock_and_get_files("block") as files:`. Owner of the cache-shape invariants is then `token_usage.py`, not cli.py. _src/mind_meld/cli.py + token_usage.py, ~60 lines._ (S) [ship]
+
+---
+
 ## Execution Map
 
 Adjacency list (who depends on whom):
@@ -193,6 +216,7 @@ Adjacency list (who depends on whom):
 - Group 7 ← {}     ✓ Complete (preflight v0.10.1 + Track 7A v0.10.2 + Track 7B v0.10.3)
 - Group 8 ← {7}    ✓ Complete (Track 8A v0.11.0)
 - Group 9 ← {}     active (pull performance + fresh-Mac onboarding)
+- Group 10 ← {9}   queued (token-usage post-ship cleanup; cli.py collision serialization)
 ```
 
 Track detail per active group:
@@ -200,9 +224,12 @@ Track detail per active group:
 ```
 Group 9: Pull performance + fresh-Mac onboarding
   +-- Track 9A ........... ~25 min (CC) .. 2 tasks .. parallel fetch + brctl nudge
+
+Group 10: Token-usage post-ship cleanup
+  +-- Track 10A .......... ~30 min (CC) .. 4 tasks .. DRY + perf polish
 ```
 
-**Active total: 1 in-flight Group (9). 1 Track. 2 tasks.**
+**Active total: 1 in-flight Group (9). 1 queued Group (10). 2 Tracks. 6 tasks.**
 **Original v0.x → v1.0 plan complete: Groups 1–8 shipped through v0.11.0. See PROGRESS.md.**
 
 ---
@@ -234,6 +261,8 @@ Items triaged but deferred. Not organized into Groups/Tracks.
 - **Pagination beyond 100 tags for `/repos/kbitz/mind-meld/tags`** — `upgrade.py` fetches with `?per_page=100` (max). At current release velocity (30 tags / 6 months) this gives ~3 years of headroom. Past 100 tags, latest detection may miss the highest semver if GitHub's tag sort places older tags on page 1. Revisit when tag count crosses ~80; either add Link-header pagination or trust GitHub's creation-desc default. _Effort: S._ (S) [plan-eng-review] _Deferred because: ~3 years of headroom before the cap matters._
 
 - **`tests/conftest.py::_isolate_devices_write_lock` couples every test to `mind_meld.devices` import** — autouse fixture imports `mind_meld.devices` so it can monkeypatch `DEVICES_WRITE_LOCK`. Couples otherwise-independent tests (`test_wheel.py`, `test_version.py`) to the devices module's import chain. A future bug wedging devices.py at import time would break unrelated tests, masking the real root cause. Forward-defense fix: scope the fixture narrower (`@pytest.fixture` consumed explicitly by tests touching devices), OR move `DEVICES_WRITE_LOCK` to a config-style constants module redirectable without touching devices. _Effort: XS._ (XS) [ship pre-landing review 2026-04-27] _Deferred because: forward-defense; no real-world failure has surfaced from the coupling. Land if a devices.py import bug ever masks unrelated test failures._
+
+- **`[retro].deny_emails` subtractive override** — fleet-wide author-email trust set (v0.11.17 `identity.py`) is additive only via union of every peer's `local_emails`. To remove an email (stolen credential, wrong-account commit, deprecated alias) the user must wait for the 90-day events retention to age it out. Real but rare use case. Fix: add `[retro].deny_emails: list[str]` config knob; aggregator subtracts the denylist after the additive union. Symmetric with the existing `[retro].author_emails` additive knob. Per-machine config (config.toml is per-machine, never synced) so denial is local; if the user wants fleet-wide denial, they replicate the config. _src/mind_meld/skills/retro_fleet/aggregator.py + config.py, ~30 lines._ (S) [plan-eng-review] _Deferred because: the originating eng-review tag was explicitly `defer`; symmetric design is ready to land when demand surfaces (credential leak, account hygiene)._
 
 ---
 
