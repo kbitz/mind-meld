@@ -156,6 +156,15 @@ class SessionMetadata(TypedDict, total=False):
     # See src/mind_meld/token_usage.py for the schema of each day bucket
     # ({input, cache_create, cache_read, output, by_model: {model: {...}}}).
     tokens_by_day: dict[str, dict]
+    # Skill invocations (v0.11.27+, additive on v=2 schema). Same walk as
+    # tokens. Shape: ``{YYYY-MM-DD: {skill_name: count}}``. Subagent
+    # invocations attribute to parent project bucket. KEY-PRESENT-VALUE-
+    # EMPTY semantics are load-bearing: aggregator's mixed-fleet detector
+    # uses ``"skills_by_day" not in proj`` to flag pre-v0.11.27 peers.
+    # An empty dict means "this project had sessions but no Skill usage
+    # in the captured window" — distinct from "peer doesn't emit yet"
+    # (key absent). See docs/invariants/events-retro.md.
+    skills_by_day: dict[str, dict[str, int]]
 
 
 class SessionsSnapshot(TypedDict, total=False):
@@ -782,7 +791,17 @@ def _scan_one_project(
     jsonls live one level deeper at ``<session-uuid>/subagents/*.jsonl``;
     they contribute to ``tokens_by_day`` ONLY (not ``sessions``,
     ``total_kb``, or ``last_session_at`` — those preserve parent-only
-    semantics)."""
+    semantics).
+
+    Skill aggregation (v0.11.27+): same walk also populates
+    ``skills_by_day`` from each assistant ``tool_use`` block with
+    ``name == "Skill"``. Subagent skill invocations roll into the
+    parent project's bucket via the same attribution rule. Empty
+    dict (project has sessions but no Skill blocks) is preserved as a
+    KEY-PRESENT-VALUE-EMPTY signal — the aggregator's mixed-fleet
+    detector relies on absent vs. empty to distinguish pre-v0.11.27
+    peers from no-skill-activity sessions (D4 from /plan-eng-review
+    2026-05-06)."""
     sessions = 0
     total_bytes = 0
     last_mtime = 0.0
@@ -823,11 +842,16 @@ def _scan_one_project(
         "ephemeral": bool(_CONDUCTOR_PATTERN.search(decoded_path)),
     }
     if token_cache_files is not None:
-        meta["tokens_by_day"] = _aggregate_tokens_for_project(
+        tokens_by_day, skills_by_day = _aggregate_jsonl_views_for_project(
             parent_jsonls + subagent_jsonls,
             token_cache_files,
             deadline_monotonic=deadline_monotonic,
         )
+        meta["tokens_by_day"] = tokens_by_day
+        # KEY-PRESENT-VALUE-EMPTY is intentional (D4): aggregator
+        # discriminates pre-v0.11.27 peers from "no skills used" via
+        # ``"skills_by_day" not in proj``. Always set the key here.
+        meta["skills_by_day"] = skills_by_day
     return meta
 
 
@@ -848,28 +872,37 @@ def _collect_subagent_jsonls(session_dir: Path) -> list[Path]:
     return out
 
 
-def _aggregate_tokens_for_project(
+def _aggregate_jsonl_views_for_project(
     jsonls: list[Path],
     token_cache_files: dict,
     *,
     deadline_monotonic: float | None,
-) -> dict[str, dict]:
-    """Walk each jsonl through the token cache and merge their per-day
-    buckets. Returns a single ``{YYYY-MM-DD: {input, cache_create, ...,
-    by_model}}`` map."""
-    merged: dict[str, dict] = {}
+) -> tuple[dict[str, dict], dict[str, dict[str, int]]]:
+    """Walk each jsonl through the per-jsonl cache and merge per-day
+    views. Returns ``(tokens_by_day, skills_by_day)`` — both keyed by
+    ``YYYY-MM-DD``.
+
+    Subagent jsonls are passed in flat alongside parent jsonls; both
+    contribute to the same project's tokens AND skills (parent-project
+    attribution, mirroring the existing token rule)."""
+    merged_tokens: dict[str, dict] = {}
+    merged_skills: dict[str, dict[str, int]] = {}
     for jl in jsonls:
-        by_day = token_usage.get_or_compute(
+        by_day, skills_by_day = token_usage.get_or_compute(
             jl,
             token_cache_files,
             deadline_monotonic=deadline_monotonic,
         )
         for day, bucket in by_day.items():
-            target = merged.setdefault(day, token_usage.zero_day_bucket())
+            target = merged_tokens.setdefault(day, token_usage.zero_day_bucket())
             token_usage.merge_usage_bucket(target, bucket)
             # zero_day_bucket() guarantees `by_model` is present.
             token_usage.merge_by_model(target["by_model"], bucket.get("by_model") or {})
-    return merged
+        for day, sbucket in skills_by_day.items():
+            day_tgt = merged_skills.setdefault(day, {})
+            for skill, count in sbucket.items():
+                day_tgt[skill] = day_tgt.get(skill, 0) + count
+    return merged_tokens, merged_skills
 
 
 # ---------------------------------------------------------------------------

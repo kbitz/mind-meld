@@ -2,6 +2,79 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.27] - 2026-05-06
+
+**Fleet-wide skill-invocation counts via Claude Code session jsonls.**
+`mm retro-fleet` was reporting `0` skill invocations on machines where
+the user had obviously been using skills heavily. Root cause: gstack's
+`~/.gstack/analytics/skill-usage.jsonl` (the prior data source) silently
+stopped logging `skill_run` events on 2026-04-26. That source was also
+this-machine-only — peers' skill activity never landed in the retro.
+
+Replaced with Claude Code's own session jsonls — every Skill tool
+invocation is recorded as an assistant `tool_use` block with
+`name:"Skill"`, `input.skill`, and a UTC timestamp. Same jsonl tree
+`token_usage` already walks. The walker now produces two views in one
+I/O pass: `tokens_by_day` (existing) AND `skills_by_day` (new). Both
+views land on the v=2 `sessions-snapshot` event row per project; the
+aggregator slices `skills_by_day` to the retro window exactly like it
+slices tokens.
+
+Skill counts are now FLEET-WIDE — the locked output drops the
+"this machine only" caveat from the Skills section header.
+
+**Schema additions (additive on v=2, no schema bump):**
+- `SessionMetadata.skills_by_day: dict[str, dict[str, int]]`
+- `CacheEntry.skills_by_day` + new public `SkillBuckets` type alias
+- `SkillsAggregate.pre_skills_peers: set[str]`
+
+**Mixed-fleet rollout — load-bearing discriminator (D4 from
+/plan-eng-review 2026-05-06):** `pre_skills_peers` detection uses
+`"skills_by_day" not in proj` (KEY-ABSENT), NOT a falsy-check. Empty
+`{}` is a content signal ("no skills used in window"), not a version
+signal. Distinct from `pre_token_peers` semantics where every session
+generates tokens.
+
+**Cache shape upgrade gate (D2):** `token_usage.get_or_compute` checks
+`"skills_by_day" in entry` on the size/mtime cache hit — pre-v0.11.27
+entries match size/mtime but lack the field, so they fall through to
+a fresh walk. NOT a `CACHE_VERSION` bump (would invalidate token data
+fleet-wide unnecessarily).
+
+**Skill dedup is by `tool_use.id`** (Anthropic `toolu_*` format),
+independent of the existing `message.id` token dedup. Claude Code
+emits each model iteration as a separate jsonl line under the same
+`message.id` — iterations have DIFFERENT content blocks, so message-id
+dedup drops legitimate skill calls. Caught at smoke-test time on real
+data.
+
+**Trust boundary (defense-in-depth):** skill names are sanitized at
+RENDER time via `_safe_short` (mirrors v0.11.14 model-name sanitization).
+
+**API changes:**
+- New: `walk_jsonl_buckets(path) -> tuple[dict[str, DayBucket], SkillBuckets]`
+- `walk_jsonl_token_buckets` retained as back-compat shim
+- `get_or_compute(...)` returns tuple of both views
+- `events._aggregate_tokens_for_project` renamed to
+  `_aggregate_jsonl_views_for_project`; returns both views
+- `aggregator.aggregate_sessions(...)` returns
+  `tuple[SessionsAggregate, SkillsAggregate]`
+
+**Removed:** the gstack-analytics reader path (`_iter_json_stream`,
+`_read_skill_usage`, the standalone `aggregate_skills` function,
+`GSTACK_ANALYTICS_DIR`, `JSON_STREAM_MAX_BYTES`,
+`SKIP_CATEGORY_SKILL_USAGE`, `RetroData.skill_usage_path`, the
+`aggregate(... skill_usage_path=...)` parameter). ~80 lines deleted.
+
+**Test coverage:** 17 new tests across `tests/test_token_usage.py`,
+`tests/test_events.py`, and `tests/test_retro_fleet_aggregator.py`,
+covering skill detection, tool-use-id dedup, malformed-shape
+tolerance, the D2 cache-upgrade gate, the D4 absent-vs-empty
+discriminator, subagent skill attribution, the trust-boundary
+sanitizer, and the "this machine only" caveat absence. 6 obsolete
+gstack-analytics tests removed (event-side parse-error tolerance
+still covered by `TestTolerantReader`).
+
 ## [0.11.26] - 2026-05-06
 
 **Release workflow fix: drop dead PROGRESS auto-append; backfill v0.11.24 + v0.11.25 rows.** The v0.11.24+ release workflow's "Append PROGRESS.md row" step was rejected by branch protection on every release where the row wasn't already in the PR — the workflow tried to `git push` a chore commit directly to `main`, but the ruleset requires PRs. v0.11.23 only "succeeded" because the row was pre-added in PR #74 and the script's idempotent skip exited 0 before reaching the push. v0.11.24 and v0.11.25 both hit the wall and shipped tagged + released but without their PROGRESS rows.

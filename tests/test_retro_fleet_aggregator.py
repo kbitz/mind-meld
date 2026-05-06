@@ -122,14 +122,17 @@ def _aggregate(
     *,
     window_days: int = 7,
     author_emails: frozenset[str] = frozenset(),
-    skill_usage_path: Path | None = None,
+    skill_usage_path: Path | None = None,  # vestigial; ignored post-v0.11.27
     now: datetime = NOW,
 ) -> aggregator.RetroData:
+    # ``skill_usage_path`` was removed from ``aggregate()`` when the gstack-
+    # analytics reader was deleted. Kept on this helper's signature so older
+    # tests that pass it through continue to call the helper unchanged;
+    # value is ignored.
     return aggregator.aggregate(
         events_dir=events_dir,
         window_days=window_days,
         author_emails=author_emails,
-        skill_usage_path=skill_usage_path or (Path("/nonexistent/skill-usage.jsonl")),
         now=now,
     )
 
@@ -256,16 +259,13 @@ class TestTolerantReader:
         out = aggregator.format_retro(data)
         assert "section omitted" in out
 
-    def test_gstack_skill_usage_unknown_field_tolerated(self, tmp_path):
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        skill_path = tmp_path / "skill-usage.jsonl"
-        skill_path.write_text(
-            json.dumps({"skill": "ship", "ts": _ts(0), "future_unknown_field": True}) + "\n"
-        )
-        data = _aggregate(events_dir, skill_usage_path=skill_path)
-        assert data.skills.available is True
-        assert data.skills.invocations == 1
+    # NOTE (v0.11.27): the gstack-analytics skill-usage.jsonl reader was
+    # retired with the fleet-skill-counts pivot. The "unknown field
+    # tolerated" behavior was load-bearing only for that reader; once
+    # we read skills out of v=2 sessions-snapshot events, the field
+    # surface is the SessionMetadata TypedDict (total=False), and
+    # tolerance for unknown peer fields is covered by the per-key
+    # ``isinstance`` guards in ``aggregate_sessions``. Test removed.
 
 
 # ---------------------------------------------------------------------------
@@ -749,81 +749,17 @@ class TestVisibleFailures:
         # must live in the Notes block, not a tail aside.
         assert "## Notes" in out
 
-    def test_skip_categories_tracked_separately(self, tmp_path):
-        """Per-source skip counters discriminate mm events vs gstack files
-        — a torn gstack file shouldn't read as 'mm events skipped'."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        # One torn line in mm events.
-        ev_path = events_dir / "dev-a-2026-04-28.jsonl"
-        ev_path.write_text("not json\n" + json.dumps(_push_event("dev-a", 0)) + "\n")
-        # Two malformed records in skill-usage.
-        skill_path = tmp_path / "skill-usage.jsonl"
-        skill_path.write_text("not json line 1\nalso not json\n")
-        data = _aggregate(events_dir, skill_usage_path=skill_path)
-        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_EVENTS) == 1
-        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_SKILL_USAGE) == 2
-        assert data.skipped_lines == 3  # backward-compat sum
-
-    def test_per_source_breadcrumbs_name_the_file(self, tmp_path):
-        """format_retro renders one breadcrumb per affected file so the user
-        knows where to look — pre-fix all skips were lumped under
-        'event(s) skipped due to parse errors' regardless of source."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        skill_path = tmp_path / "skill-usage.jsonl"
-        skill_path.write_text("garbage\n")
-        data = _aggregate(events_dir, skill_usage_path=skill_path)
-        out = aggregator.format_retro(data)
-        assert "skill-usage.jsonl" in out
-        assert "gstack file format issue, not mm" in out
-        # No mm-events skips in this scenario — the mm-events breadcrumb
-        # must NOT fire (the user's bug report was the inverse: gstack
-        # parse errors masquerading as mm event corruption).
-        assert "skipped due to parse errors in mm event log" not in out
-
-    def test_pretty_printed_json_in_skill_usage_recovered(self, tmp_path):
-        """Symmetric to the eureka case — skill-usage.jsonl uses the same
-        tolerant reader, so multi-line pretty JSON must recover cleanly
-        there too. Without this test, a regression in the skills parser
-        could ship unnoticed."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        skill_path = tmp_path / "skill-usage.jsonl"
-        skill_path.write_text(
-            '{\n  "skill": "ship",\n  "ts": "2026-04-26T00:00:00Z"\n}\n'
-            '{\n  "skill": "review",\n  "ts": "2026-04-27T00:00:00Z"\n}\n'
-        )
-        data = _aggregate(events_dir, skill_usage_path=skill_path)
-        assert data.skills.invocations == 2
-        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_SKILL_USAGE, 0) == 0
-
-    def test_breadcrumb_names_actual_path_not_hardcoded(self, tmp_path):
-        """Breadcrumbs must name the actual path passed to aggregate(), not
-        a hardcoded ~/.gstack/analytics/... pointer that misleads callers
-        using custom analytics paths."""
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        skill_path = tmp_path / "custom-skills.jsonl"
-        skill_path.write_text("garbage\n")
-        data = _aggregate(events_dir, skill_usage_path=skill_path)
-        out = aggregator.format_retro(data)
-        assert str(skill_path) in out
-        assert "~/.gstack/analytics/skill-usage.jsonl" not in out
-
-    def test_oversized_gstack_file_skipped_without_slurp(self, tmp_path, monkeypatch):
-        """A runaway gstack analytics file beyond JSON_STREAM_MAX_BYTES
-        must surface as a skip rather than spike aggregator memory. We
-        simulate by lowering the cap and writing a small file just above it.
-        """
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        skill_path = tmp_path / "skill-usage.jsonl"
-        skill_path.write_text('{"skill":"x","ts":"2026-04-27T00:00:00Z"}\n' * 50)
-        monkeypatch.setattr(aggregator, "JSON_STREAM_MAX_BYTES", 100)
-        data = _aggregate(events_dir, skill_usage_path=skill_path)
-        assert data.skills.invocations == 0
-        assert data.skipped_per_source.get(aggregator.SKIP_CATEGORY_SKILL_USAGE, 0) == 1
+    # NOTE (v0.11.27): the five gstack-analytics tests that previously
+    # lived here — skip-categories-tracked-separately, per-source-
+    # breadcrumbs-name-the-file, pretty-printed-json-in-skill-usage-
+    # recovered, breadcrumb-names-actual-path-not-hardcoded, and
+    # oversized-gstack-file-skipped-without-slurp — all exercised the
+    # ~/.gstack/analytics/skill-usage.jsonl reader. That reader was
+    # retired with the fleet-skill-counts pivot. The events-side
+    # parse-error tolerance is still covered by the remaining
+    # ``test_torn_event_line_skipped`` / ``test_unreadable_file_continues``
+    # tests in TestTolerantReader. Fleet-skill-coverage tests live in
+    # the new TestFleetSkillsAggregation class.
 
     def test_legacy_retrodata_with_skipped_lines_only_renders_breadcrumb(self):
         """Backward-compat: a manually-constructed RetroData with
@@ -1116,7 +1052,9 @@ class TestRendering:
         assert "## Code shipped" in out
         assert "## Claude Code activity" in out
         assert "## Skills used" in out
-        assert "this machine only" in out
+        # D5#5 (v0.11.27): Skills section is fleet-wide, not this-machine-only.
+        # Lock against accidental reintroduction of the old caveat string.
+        assert "this machine only" not in out
         assert "## mm sync activity" in out
         # Eureka section was removed in v0.11.12 (always 0 in practice).
         assert "## Eureka moments" not in out
@@ -1840,7 +1778,7 @@ class TestTokenAggregation:
             tokens_by_day=None,
             sessions=1,
         )
-        result = aggregate_sessions(
+        result, _skills_unused = aggregate_sessions(
             [ev],
             since=datetime(2026, 4, 24, tzinfo=timezone.utc),
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
@@ -1885,7 +1823,7 @@ class TestTokenAggregation:
                 },
             },
         )
-        result = aggregate_sessions(
+        result, _skills_unused = aggregate_sessions(
             [ev],
             since=datetime(2026, 4, 29, tzinfo=timezone.utc),
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
@@ -1912,7 +1850,7 @@ class TestTokenAggregation:
             },
             last_session_at="2026-05-01T12:00:00+00:00",  # in window
         )
-        result = aggregate_sessions(
+        result, _skills_unused = aggregate_sessions(
             [ev],
             since=datetime(2026, 4, 29, tzinfo=timezone.utc),
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
@@ -2059,7 +1997,7 @@ class TestSyntheticAndUnpricedTokens:
                 }
             }
         )
-        result = aggregate_sessions(
+        result, _skills_unused = aggregate_sessions(
             [ev],
             since=datetime(2026, 4, 29, tzinfo=timezone.utc),
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
@@ -2238,7 +2176,7 @@ class TestTrack10ASafeIntRetention:
                 }
             },
         )
-        result = aggregate_sessions(
+        result, _skills_unused = aggregate_sessions(
             [ev],
             since=datetime(2026, 4, 24, tzinfo=timezone.utc),
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
@@ -2361,7 +2299,7 @@ class TestTrack10AFleetRetroDeterminism:
             ],
         }
 
-        result = aggregate_sessions(
+        result, _skills_unused = aggregate_sessions(
             [ev_a, ev_b],
             since=datetime(2026, 4, 24, tzinfo=timezone.utc),
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
@@ -2437,7 +2375,7 @@ class TestTrack10AFleetRetroDeterminism:
                 }
             ],
         }
-        result = aggregate_sessions(
+        result, _skills_unused = aggregate_sessions(
             [ev],
             since=datetime(2026, 4, 24, tzinfo=timezone.utc),
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
@@ -2931,3 +2869,195 @@ class TestFleetDeterminism:
         out_a = aggregator.format_retro(data_a)
         out_b = aggregator.format_retro(data_b)
         assert out_a == out_b
+
+
+# ---------------------------------------------------------------------------
+# Fleet skills aggregation (v0.11.27 plan tests #11-#17 + D4 + D5#5).
+# Drawn from the test diagram in /plan-eng-review §3 / 2026-05-06.
+# ---------------------------------------------------------------------------
+
+
+def _proj_with_skills(
+    *,
+    claude_dir: str = "-tmp-x",
+    sessions: int = 1,
+    skills_by_day: dict | None = None,
+    last_session_at: str | None = None,
+) -> dict:
+    """Build a v=2 sessions-snapshot project with the new skills field
+    explicitly present (KEY-PRESENT semantics)."""
+    proj = {
+        "claude_dir": claude_dir,
+        "source_root": "/tmp/claude",
+        "sessions": sessions,
+        "total_kb": 100,
+        "ephemeral": False,
+        "last_session_at": last_session_at or _ts(0.5),
+    }
+    if skills_by_day is not None:
+        proj["skills_by_day"] = skills_by_day
+    return proj
+
+
+def _proj_without_skills_field(
+    *,
+    claude_dir: str = "-tmp-x",
+    sessions: int = 1,
+    last_session_at: str | None = None,
+) -> dict:
+    """Build a v=2 project from a pre-v0.11.27 peer — KEY ABSENT."""
+    return {
+        "claude_dir": claude_dir,
+        "source_root": "/tmp/claude",
+        "sessions": sessions,
+        "total_kb": 100,
+        "ephemeral": False,
+        "last_session_at": last_session_at or _ts(0.5),
+    }
+
+
+class TestFleetSkillsAggregation:
+    def test_mixed_fleet_pre_skills_peers_flagged_correctly(self, tmp_path):
+        """Plan test #11: three peers — two emit skills_by_day, one doesn't.
+        ``pre_skills_peers`` contains the missing-field peer only. Top
+        skills + invocation count match union of the two contributors."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        today = _ts(0).split("T")[0]
+        for dev, has_skills, payload in [
+            ("dev-a", True, {today: {"ship": 5, "review": 2}}),
+            ("dev-b", True, {today: {"ship": 3}}),
+            ("dev-c", False, None),  # no skills_by_day key on its proj rows
+        ]:
+            proj = (
+                _proj_with_skills(claude_dir=f"-tmp-{dev}", skills_by_day=payload)
+                if has_skills
+                else _proj_without_skills_field(claude_dir=f"-tmp-{dev}")
+            )
+            _write_events(
+                events_dir, dev, "2026-04-28", [_sessions_event(dev, days_ago=0.5, projects=[proj])]
+            )
+        data = _aggregate(events_dir)
+        assert data.skills.pre_skills_peers == {"dev-c"}
+        assert data.skills.invocations == 10  # 5+2 from a, 3 from b
+        assert data.skills.by_skill == {"ship": 8, "review": 2}
+
+    def test_d4_empty_skills_dict_does_not_flag_pre_skills_peer(self, tmp_path):
+        """D4 correctness gate (locks in the false-positive fix). Project
+        has sessions > 0 but ``skills_by_day == {}`` (KEY PRESENT, value
+        empty — meaning "no Skill usage in window"). Must NOT appear in
+        ``pre_skills_peers``."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj = _proj_with_skills(skills_by_day={})  # KEY PRESENT, value EMPTY
+        _write_events(events_dir, "dev-a", "2026-04-28", [_sessions_event("dev-a", 0.5, [proj])])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.skills.pre_skills_peers
+        assert data.skills.invocations == 0
+        assert data.skills.available is True  # field is present → fleet has rolled out
+
+    def test_d5_no_skills_this_window_zero_invocations_no_flag(self, tmp_path):
+        """Plan test #13 (D5#4): peer has skills_by_day populated but
+        every day-key falls outside [since, until] → 0 invocations,
+        pre_skills_peers EMPTY (peer is on new mm; just no activity)."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Skill activity 60 days ago — outside default 7d window.
+        old_day = (NOW - timedelta(days=60)).date().isoformat()
+        proj = _proj_with_skills(
+            skills_by_day={old_day: {"ship": 100}},
+            last_session_at=_ts(0.5),  # last session is recent so project survives stage-2 filter
+        )
+        _write_events(events_dir, "dev-a", "2026-04-28", [_sessions_event("dev-a", 0.5, [proj])])
+        data = _aggregate(events_dir, window_days=7)
+        assert data.skills.invocations == 0
+        assert "dev-a" not in data.skills.pre_skills_peers
+        assert data.skills.available is True
+
+    def test_trust_boundary_skill_name_sanitized_at_render(self, tmp_path):
+        """Plan test #14: peer plants ``skill = "evil\\x1b[2J\\nfake header"``.
+        ``format_retro`` output strips terminal escapes + buckets non-
+        whitelisted chars (including the embedded newline) to ``_``. No
+        newline bleeds into a section header."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        evil = "evil\x1b[2J\nfake header"
+        today = _ts(0).split("T")[0]
+        proj = _proj_with_skills(skills_by_day={today: {evil: 1}})
+        _write_events(events_dir, "dev-a", "2026-04-28", [_sessions_event("dev-a", 0.5, [proj])])
+        data = _aggregate(events_dir)
+        out = aggregator.format_retro(data)
+        # No raw escape sequence survives.
+        assert "\x1b" not in out
+        # Embedded newline must NOT bleed into a section header — every
+        # line that starts with the rendered skill chunk should appear in
+        # the Skills section bullet, not as a fake header.
+        assert "\n## fake header" not in out
+
+    def test_phantom_event_filter_header_semantics_not_data_filter(self, tmp_path, monkeypatch):
+        """Plan test #15 corrected: the phantom-event filter affects
+        ``devices_in_events`` (header count) and ``unregistered_event_devices``
+        (Notes breadcrumb), but does NOT filter session/token/skill DATA
+        from the totals — same semantics as the existing token aggregation.
+        Future work could tighten this if it becomes a problem; for now
+        the test pins the actual existing behavior so a refactor that
+        accidentally diverges (e.g. starts filtering skills data while
+        leaving tokens unfiltered) trips this test."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        today = _ts(0).split("T")[0]
+        proj = _proj_with_skills(skills_by_day={today: {"ship": 99}})
+        _write_events(
+            events_dir,
+            "phantom-x",
+            "2026-04-28",
+            [
+                _sessions_event("phantom-x", 0.5, [proj]),
+                _push_event("phantom-x", 0.5),
+            ],
+        )
+        # Mock `mm devices --format=json` to register zero devices —
+        # phantom-x is unregistered.
+        monkeypatch.setattr(
+            aggregator,
+            "get_known_devices",
+            lambda: (0, []),
+        )
+        data = _aggregate(events_dir)
+        # Header-level filter: device captured as unregistered.
+        assert data.fleet.unregistered_event_devices == 1
+        assert "phantom-x" not in data.fleet.devices_in_events
+        # Data-level: phantom's skill data flows through (parity with token
+        # aggregation behavior); ``unregistered_event_devices`` breadcrumb
+        # is the user-facing surface that warns "stale data may be present".
+        assert data.skills.invocations == 99
+
+    def test_empty_fleet_no_peer_ships_skills_renders_omitted(self, tmp_path):
+        """Plan test #16: every peer is on pre-v0.11.27 (no skills_by_day
+        on any project) → ``available = False`` → renderer emits the
+        "section omitted" caveat instead of "0 invocations"."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj = _proj_without_skills_field()
+        _write_events(events_dir, "dev-a", "2026-04-28", [_sessions_event("dev-a", 0.5, [proj])])
+        data = _aggregate(events_dir)
+        assert data.skills.available is False
+        out = aggregator.format_retro(data)
+        assert "section omitted" in out
+
+    def test_d5_5_format_retro_never_contains_this_machine_only(self, tmp_path):
+        """D5#5 regression gate: assert the legacy "this machine only"
+        caveat is absent across multiple fleet shapes (with skills,
+        without, mixed, empty fleet)."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        today = _ts(0).split("T")[0]
+        for dev, proj in [
+            ("dev-a", _proj_with_skills(skills_by_day={today: {"ship": 1}})),
+            ("dev-b", _proj_with_skills(skills_by_day={})),
+            ("dev-c", _proj_without_skills_field()),
+        ]:
+            _write_events(events_dir, dev, "2026-04-28", [_sessions_event(dev, 0.5, [proj])])
+        data = _aggregate(events_dir)
+        out = aggregator.format_retro(data)
+        assert "this machine only" not in out

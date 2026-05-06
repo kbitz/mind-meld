@@ -414,12 +414,12 @@ class TestGetOrCompute:
         _write_jsonl(path, [_wrap(_assistant_msg())])
         cache: dict = {}
         # Miss.
-        result1 = tu.get_or_compute(path, cache)
-        assert result1["2026-05-01"]["input"] == 100
+        by_day1, _skills1 = tu.get_or_compute(path, cache)
+        assert by_day1["2026-05-01"]["input"] == 100
         assert str(path.resolve()) in cache
         # Hit (cache populated).
-        result2 = tu.get_or_compute(path, cache)
-        assert result2 == result1
+        by_day2, _skills2 = tu.get_or_compute(path, cache)
+        assert by_day2 == by_day1
 
     def test_size_drift_triggers_remwalk(self, tmp_path: Path) -> None:
         path = tmp_path / "growing.jsonl"
@@ -429,8 +429,8 @@ class TestGetOrCompute:
         # Append a second message.
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(_wrap(_assistant_msg(msg_id="b"))) + "\n")
-        result = tu.get_or_compute(path, cache)
-        assert result["2026-05-01"]["input"] == 200
+        by_day, _skills = tu.get_or_compute(path, cache)
+        assert by_day["2026-05-01"]["input"] == 200
 
     def test_concurrent_append_during_walk_skips_persist(self, tmp_path: Path, monkeypatch) -> None:
         """If size/mtime drift between pre-stat and post-stat, do NOT
@@ -440,19 +440,19 @@ class TestGetOrCompute:
         _write_jsonl(path, [_wrap(_assistant_msg(msg_id="a"))])
         cache: dict = {}
 
-        original_walk = tu.walk_jsonl_token_buckets
+        original_walk = tu.walk_jsonl_buckets
 
-        def walk_then_append(p: Path) -> dict:
+        def walk_then_append(p: Path):
             result = original_walk(p)
             # Simulate a concurrent append after the walk finished.
             with p.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(_wrap(_assistant_msg(msg_id="b"))) + "\n")
             return result
 
-        monkeypatch.setattr(tu, "walk_jsonl_token_buckets", walk_then_append)
-        result = tu.get_or_compute(path, cache)
+        monkeypatch.setattr(tu, "walk_jsonl_buckets", walk_then_append)
+        by_day, _skills = tu.get_or_compute(path, cache)
         # Result is returned but cache NOT updated — next push will re-walk.
-        assert result["2026-05-01"]["input"] == 100
+        assert by_day["2026-05-01"]["input"] == 100
         assert str(path.resolve()) not in cache
 
     def test_deadline_exceeded_returns_cached_or_empty(self, tmp_path: Path) -> None:
@@ -463,14 +463,14 @@ class TestGetOrCompute:
         import time as _time
 
         result = tu.get_or_compute(path, cache, deadline_monotonic=_time.monotonic() - 1)
-        assert result == {}
+        assert result == ({}, {})
         assert str(path.resolve()) not in cache
 
     def test_unreadable_file(self, tmp_path: Path) -> None:
         path = tmp_path / "missing.jsonl"
         cache: dict = {}
         result = tu.get_or_compute(path, cache)
-        assert result == {}
+        assert result == ({}, {})
 
 
 # ---------------------------------------------------------------------------
@@ -894,3 +894,232 @@ class TestGcCacheEntries:
         tu.warm_token_cache_inline([claude_dir])
         reaped = tu.gc_cache_entries()
         assert reaped == 0
+
+
+# ---------------------------------------------------------------------------
+# Skill detection (v0.11.27, fleet-skill-counts plan tests #1-#4 + D2)
+# ---------------------------------------------------------------------------
+
+
+_TOOL_ID_COUNTER = [0]
+
+
+def _skill_block(skill: str, *, tool_id: str | None = None) -> dict:
+    """Synthesize a Claude Code ``tool_use`` block for the Skill tool.
+
+    Tool ids are generated unique by default (mirrors Anthropic's
+    ``toolu_*`` format guarantee). Tests that need a deliberate-retry
+    fixture (same tool_id reused) pass ``tool_id=...`` explicitly."""
+    if tool_id is None:
+        _TOOL_ID_COUNTER[0] += 1
+        tool_id = f"toolu_test_{_TOOL_ID_COUNTER[0]}"
+    return {
+        "type": "tool_use",
+        "id": tool_id,
+        "name": "Skill",
+        "input": {"skill": skill, "args": ""},
+    }
+
+
+def _assistant_with_blocks(blocks: list[dict], *, msg_id: str = "msg_a") -> dict:
+    """Assistant message with content blocks AND minimal usage so the
+    walker's existing token-side parse_usage() also accepts it. Mirrors
+    the real Claude Code jsonl shape captured during /plan-eng-review."""
+    return {
+        "id": msg_id,
+        "role": "assistant",
+        "model": "claude-opus-4-7",
+        "content": blocks,
+        "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 1,
+        },
+    }
+
+
+class TestSkillDetection:
+    def test_two_skill_blocks_same_day_dedup_aware(self, tmp_path: Path) -> None:
+        """Plan test #1 (revised): TWO distinct Skill invocations
+        (different ``tool_use.id``s) within the same message both count;
+        a duplicate ``tool_use.id`` retry is deduped to one. Pinned by
+        the smoke-test bug we caught — Claude Code emits multiple jsonl
+        lines for the same ``message.id`` under streaming-iteration
+        semantics, so dedup MUST be by ``tool_use.id``, not ``message.id``."""
+        path = tmp_path / "session.jsonl"
+        _write_jsonl(
+            path,
+            [
+                _wrap(
+                    _assistant_with_blocks(
+                        [
+                            _skill_block("ship", tool_id="toolu_a"),
+                            _skill_block("ship", tool_id="toolu_b"),
+                        ],
+                        msg_id="m1",
+                    ),
+                    ts="2026-05-01T12:00:00Z",
+                ),
+                # Duplicate tool_use.id retry (same toolu_a) — DEDUPED.
+                _wrap(
+                    _assistant_with_blocks([_skill_block("ship", tool_id="toolu_a")], msg_id="m1"),
+                    ts="2026-05-01T12:00:01Z",
+                ),
+            ],
+        )
+        _by_day, skills = tu.walk_jsonl_buckets(path)
+        # toolu_a + toolu_b counted; the second toolu_a retry deduped.
+        assert skills == {"2026-05-01": {"ship": 2}}
+
+    def test_skill_dedup_by_tool_id_not_message_id(self, tmp_path: Path) -> None:
+        """REGRESSION pin for the smoke-test bug: when two jsonl entries
+        share the same ``message.id`` but carry different content blocks
+        (the Claude Code streaming-iteration shape), each entry's
+        ``tool_use`` blocks must be counted independently. Pre-fix the
+        walker deduped by ``message.id`` and dropped the second iteration."""
+        path = tmp_path / "session.jsonl"
+        _write_jsonl(
+            path,
+            [
+                # Iteration 1: text only, no Skill.
+                _wrap(
+                    _assistant_with_blocks(
+                        [{"type": "text", "text": "thinking..."}], msg_id="msg_X"
+                    ),
+                    ts="2026-05-01T12:00:00Z",
+                ),
+                # Iteration 2: same message.id, but a Skill tool_use.
+                # Pre-fix this got skipped (msg_X already seen). Post-fix
+                # the skill detection runs independently of message dedup.
+                _wrap(
+                    _assistant_with_blocks(
+                        [_skill_block("plan-eng-review", tool_id="toolu_p1")],
+                        msg_id="msg_X",
+                    ),
+                    ts="2026-05-01T12:00:01Z",
+                ),
+            ],
+        )
+        _by_day, skills = tu.walk_jsonl_buckets(path)
+        assert skills == {"2026-05-01": {"plan-eng-review": 1}}
+
+    def test_non_skill_tool_use_blocks_ignored(self, tmp_path: Path) -> None:
+        """Plan test #2: Edit/Bash/etc tool_use blocks must not count.
+        Token aggregation still works on the same message."""
+        path = tmp_path / "session.jsonl"
+        _write_jsonl(
+            path,
+            [
+                _wrap(
+                    _assistant_with_blocks(
+                        [
+                            {"type": "tool_use", "name": "Edit", "input": {"file": "x"}},
+                            {"type": "tool_use", "name": "Bash", "input": {"cmd": "ls"}},
+                            _skill_block("plan-eng-review"),
+                        ],
+                        msg_id="m1",
+                    ),
+                    ts="2026-05-01T12:00:00Z",
+                ),
+            ],
+        )
+        by_day, skills = tu.walk_jsonl_buckets(path)
+        assert skills == {"2026-05-01": {"plan-eng-review": 1}}
+        # Tokens still recorded for the same message.
+        assert by_day["2026-05-01"]["input"] == 1
+
+    def test_malformed_skill_blocks_skipped(self, tmp_path: Path) -> None:
+        """Plan test #3: every malformed shape skipped without raising."""
+        path = tmp_path / "session.jsonl"
+        _write_jsonl(
+            path,
+            [
+                _wrap(
+                    _assistant_with_blocks(
+                        [
+                            # ``input`` missing
+                            {"type": "tool_use", "name": "Skill"},
+                            # ``input`` not a dict
+                            {"type": "tool_use", "name": "Skill", "input": "ship"},
+                            # ``input.skill`` non-string
+                            {"type": "tool_use", "name": "Skill", "input": {"skill": 42}},
+                            # ``input.skill`` empty string
+                            {"type": "tool_use", "name": "Skill", "input": {"skill": ""}},
+                            # ``input.skill`` missing
+                            {"type": "tool_use", "name": "Skill", "input": {}},
+                            # block itself not a dict
+                        ],
+                        msg_id="m1",
+                    ),
+                    ts="2026-05-01T12:00:00Z",
+                ),
+            ],
+        )
+        _by_day, skills = tu.walk_jsonl_buckets(path)
+        # Empty-bucket pruning drops days with no skills entirely.
+        assert skills == {}
+
+    def test_walk_jsonl_buckets_returns_tuple_shape(self, tmp_path: Path) -> None:
+        """Plan test #4: tuple shape from new walker; shim returns single."""
+        path = tmp_path / "session.jsonl"
+        _write_jsonl(path, [_wrap(_assistant_with_blocks([_skill_block("ship")], msg_id="m1"))])
+        result = tu.walk_jsonl_buckets(path)
+        assert isinstance(result, tuple) and len(result) == 2
+        # Shim drops the skills view (back-compat with pre-v0.11.27 callers).
+        shim_result = tu.walk_jsonl_token_buckets(path)
+        assert isinstance(shim_result, dict)
+
+
+class TestCacheShapeUpgradeGate:
+    def test_d2_old_entry_without_skills_field_triggers_rewalk(self, tmp_path: Path) -> None:
+        """D2 from /plan-eng-review 2026-05-06: a pre-v0.11.27 cache entry
+        with ``by_day`` populated but no ``skills_by_day`` key must trigger
+        a re-walk on the next ``get_or_compute``, populating both views.
+        Token data must survive the rebuild byte-identical to what the
+        walk re-derives.
+
+        Locks in the surgical fix: per-entry presence check (NOT a
+        version bump that would invalidate token data fleet-wide)."""
+        path = tmp_path / "session.jsonl"
+        _write_jsonl(path, [_wrap(_assistant_with_blocks([_skill_block("ship")], msg_id="m1"))])
+        # Pre-populate cache with the OLD shape: by_day only, no skills_by_day.
+        st = path.stat()
+        cache: dict = {
+            str(path.resolve()): {
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "by_day": {"2026-05-01": {"input": 999, "by_model": {}}},  # stale token data
+                # NB: no "skills_by_day" key — pre-v0.11.27 shape
+            }
+        }
+        by_day, skills = tu.get_or_compute(path, cache)
+        # Re-walk must have happened — entry now has skills_by_day populated.
+        entry = cache[str(path.resolve())]
+        assert "skills_by_day" in entry
+        assert entry["skills_by_day"] == {"2026-05-01": {"ship": 1}}
+        # Returned views reflect the FRESH walk, not the stale by_day.
+        assert by_day["2026-05-01"]["input"] == 1
+        assert skills == {"2026-05-01": {"ship": 1}}
+
+    def test_full_shape_cache_hit_no_rewalk(self, tmp_path: Path, monkeypatch) -> None:
+        """Plan test #6: cache entry has BOTH fields and matching size/mtime
+        → cached views returned without calling the walker."""
+        path = tmp_path / "session.jsonl"
+        _write_jsonl(path, [_wrap(_assistant_with_blocks([_skill_block("ship")], msg_id="m1"))])
+        # Populate cache via real walk first.
+        cache: dict = {}
+        tu.get_or_compute(path, cache)
+        # Now monkeypatch the walker to detect any unwanted re-walk.
+        called = {"n": 0}
+
+        def boom(p: Path):
+            called["n"] += 1
+            return {}, {}
+
+        monkeypatch.setattr(tu, "walk_jsonl_buckets", boom)
+        # Second call should hit the cache and NOT call the walker.
+        by_day, skills = tu.get_or_compute(path, cache)
+        assert called["n"] == 0
+        assert "2026-05-01" in by_day
+        assert skills == {"2026-05-01": {"ship": 1}}
