@@ -1,7 +1,7 @@
 """Mind Meld CLI — built with Typer.
 
 Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
-          sources, conflicts, resolve.
+          sources, conflicts, resolve, retro-fleet.
 """
 
 from __future__ import annotations
@@ -5567,6 +5567,41 @@ def install_skills_cmd() -> None:
             err=True,
         )
     raise typer.Exit(code=1)
+
+
+# ── retro-fleet ───────────────────────────────────────────────────────
+
+
+@app.command(name="retro-fleet")
+def retro_fleet_cmd(
+    window: str = typer.Argument("7d", help="Retro window (Nd, e.g. '7d', '30d'). Days only."),
+    no_author_filter: bool = typer.Option(
+        False,
+        "--no-author-filter",
+        help="Disable author-email filter; render ALL fleet commits.",
+    ),
+) -> None:
+    """Render fleet retrospective markdown to stdout.
+
+    Primarily invoked by the ``retro-fleet`` Claude Code skill — direct CLI
+    use is fine for scripted exports (``mm retro-fleet 30d > /tmp/retro.md``)
+    but loses the LLM judgment layer (natural-language window parsing,
+    error-translation) the skill provides.
+
+    Thin wrapper around ``mind_meld.skills.retro_fleet.aggregator.main``.
+    Routes through ``mm`` (guaranteed on PATH wherever mm is installed)
+    instead of the prior ``python -m mind_meld.skills.retro_fleet.aggregator``
+    invocation, which assumed a ``python`` executable on PATH with mm
+    importable — false on macOS systems where only ``python3`` is on PATH,
+    and structurally false for pipx installs whose ``mm`` lives in an
+    isolated venv that nothing else sees.
+    """
+    from mind_meld.skills.retro_fleet.aggregator import main as _aggregator_main
+
+    argv = [window]
+    if no_author_filter:
+        argv.append("--no-author-filter")
+    raise typer.Exit(code=_aggregator_main(argv))
 
 
 # ── refresh-identity ──────────────────────────────────────────────────
