@@ -2,6 +2,30 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.22.1] - 2026-05-05
+
+**Roadmap reassessment.** Docs-only ship: drained 5 inbox items from
+`docs/TODOS.md ## Unprocessed` and added Group 10 (token-usage
+post-ship cleanup) to `docs/ROADMAP.md`. Group 10 is a single Track
+10A with 4 tasks deferred from /ship pre-landing reviews of the
+v0.11.14+ token_usage.py + lockedjson.py work: DRY for
+`_merge_usage_bucket`, dirty-flag write skip in
+`lockedjson.locked_json_rmw`, `is_cache_cold` cheap stat-heuristic,
+and DRY for the `cli.py` token-cache lock+normalize block. Group 10
+serializes after Group 9 (cli.py file collision). The
+`[retro].deny_emails` subtractive override (plan-eng-review,
+explicit `defer` tag) was triaged to Future. No code, test, or
+behavior changes — `## TODO_FORMAT` audit goes from fail → pass.
+
+### Changed
+
+- **`docs/ROADMAP.md`** — added Group 10 with Track 10A (4 tasks);
+  updated intro paragraph to mention Group 10 queued behind Group 9;
+  appended Group 10 to the Execution Map adjacency list and Track
+  detail; added `[retro].deny_emails` to the Future section.
+- **`docs/TODOS.md`** — drained `## Unprocessed` (5 legacy bullets →
+  0); section now empty awaiting next inbox item.
+
 ## [0.11.23] - 2026-05-05
 
 **Token totals in `retro-fleet` now share the cost-estimate basis,
