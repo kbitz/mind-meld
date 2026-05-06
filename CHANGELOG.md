@@ -2,6 +2,47 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.23] - 2026-05-05
+
+**Token totals in `retro-fleet` now share the cost-estimate basis,
+and unpriced-model volume is surfaced in Notes.** Prior versions summed
+top-level day-bucket totals — which include `<synthetic>` (Claude Code's
+internal tool-execution turns) — into the displayed "Tokens this window"
+line, while `estimate_cost` correctly excluded them. The result was a
+displayed token count larger than the cost line implied. Now both share
+the same per-model basis. As a follow-on, models present in the fleet's
+`tokens_by_model` but missing from `PRICING` are flagged in a Notes line
+so the cost line is honestly an under-estimate rather than silently
+missing volume.
+
+### Fixed
+
+- **`_merge_token_window` derives top-level totals from `by_model`
+  excluding `COST_EXCLUDED_MODELS` (aggregator.py).** `<synthetic>` rows
+  no longer contribute to `tokens_input` / `tokens_cache_create` /
+  `tokens_cache_read` / `tokens_output`. `tokens_by_model` retains every
+  peer-reported entry so render-side filters (per-model line, cost
+  estimate, unpriced-model breadcrumb) keep operating on the full set.
+  Pinned by `tests/test_retro_fleet_aggregator.py::TestSyntheticAndUnpricedTokens`
+  with a bucket whose top-level numbers are deliberately wrong vs. the
+  by_model truth so a future regression that re-introduces top-level
+  summing fails the test loudly.
+
+### Added
+
+- **Unpriced-model breadcrumb in `format_retro` Notes (aggregator.py).**
+  New `_unpriced_token_summary` walks `tokens_by_model`, counts entries
+  that are neither in `PRICING` nor in `COST_EXCLUDED_MODELS`, and sums
+  their token volume. When non-zero, format_retro emits a single Notes
+  line: *"`6.0M` tokens from `1` unpriced model(s) excluded from cost
+  estimate."* Renders only when there is real unpriced volume — a fleet
+  whose only non-priced model is `<synthetic>` (cost-excluded by design,
+  not unpriced) gets no note. The stderr breadcrumb in
+  `token_usage.estimate_cost` is preserved for runtime visibility; the
+  Notes line is the at-rest record in the rendered retro. Pinned by
+  three cases in the same test class (renders, hidden-when-clean,
+  synthetic-alone-doesn't-trigger).
+
 ## [0.11.22] - 2026-05-05
 
 **Fix: `mm retro-fleet` CLI subcommand replaces the `python -m

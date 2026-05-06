@@ -580,7 +580,18 @@ def _merge_token_window(
 ) -> None:
     """Sum the day buckets whose YYYY-MM-DD key falls in [since, until] into
     ``out``'s token fields. Honest "tokens consumed THIS WINDOW" semantics
-    (per /plan-eng-review D6 — codex caught the per-window accuracy gap)."""
+    (per /plan-eng-review D6 — codex caught the per-window accuracy gap).
+
+    Top-level totals (``tokens_input`` / ``tokens_output`` / etc.) derive
+    from per-model entries EXCLUDING ``COST_EXCLUDED_MODELS`` so the
+    rendered "Tokens this window" line shares the same basis as the cost
+    estimate. ``<synthetic>`` rows are Claude Code's internal tool-execution
+    turns that don't actually call the API — they belong neither in cost
+    nor in the user-facing total. ``tokens_by_model`` retains every peer-
+    reported entry so the unpriced-model breadcrumb in ``format_retro``
+    can surface volume that was excluded from the cost line."""
+    from mind_meld.token_usage import COST_EXCLUDED_MODELS
+
     since_d = since.astimezone(timezone.utc).date().isoformat()
     until_d = until.astimezone(timezone.utc).date().isoformat()
     for day_key, bucket in tokens_by_day.items():
@@ -588,10 +599,6 @@ def _merge_token_window(
             continue
         if not isinstance(bucket, dict):
             continue
-        out.tokens_input += _safe_int(bucket.get("input"))
-        out.tokens_cache_create += _safe_int(bucket.get("cache_create"))
-        out.tokens_cache_read += _safe_int(bucket.get("cache_read"))
-        out.tokens_output += _safe_int(bucket.get("output"))
         for model, mbucket in (bucket.get("by_model") or {}).items():
             if not isinstance(model, str) or not isinstance(mbucket, dict):
                 continue
@@ -599,10 +606,20 @@ def _merge_token_window(
                 model,
                 {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
             )
-            mtarget["input"] += _safe_int(mbucket.get("input"))
-            mtarget["cache_create"] += _safe_int(mbucket.get("cache_create"))
-            mtarget["cache_read"] += _safe_int(mbucket.get("cache_read"))
-            mtarget["output"] += _safe_int(mbucket.get("output"))
+            in_ = _safe_int(mbucket.get("input"))
+            cc = _safe_int(mbucket.get("cache_create"))
+            cr = _safe_int(mbucket.get("cache_read"))
+            outp = _safe_int(mbucket.get("output"))
+            mtarget["input"] += in_
+            mtarget["cache_create"] += cc
+            mtarget["cache_read"] += cr
+            mtarget["output"] += outp
+            if model in COST_EXCLUDED_MODELS:
+                continue
+            out.tokens_input += in_
+            out.tokens_cache_create += cc
+            out.tokens_cache_read += cr
+            out.tokens_output += outp
 
 
 # ---------------------------------------------------------------------------
@@ -976,6 +993,30 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
     lines.append(f"- *{SUBSCRIPTION_CAVEAT}*")
 
 
+def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple[int, int]:
+    """Return ``(total_tokens, model_count)`` for models present in the fleet
+    data but absent from ``PRICING`` and not in ``COST_EXCLUDED_MODELS``.
+
+    Same semantics as ``estimate_cost``'s skip path — if a model isn't
+    priced, its tokens still count toward displayed totals but contribute
+    zero to cost. Surfaced as a Notes line so the cost line is honestly
+    flagged as a lower bound when older or unrecognized model ids show up
+    in jsonls."""
+    from mind_meld.token_usage import COST_EXCLUDED_MODELS, PRICING
+
+    total = 0
+    n = 0
+    for model, mbucket in (tokens_by_model or {}).items():
+        if model in PRICING or model in COST_EXCLUDED_MODELS:
+            continue
+        if not isinstance(mbucket, dict):
+            continue
+        for k in ("input", "cache_create", "cache_read", "output"):
+            total += _safe_int(mbucket.get(k))
+        n += 1
+    return total, n
+
+
 def _short_model_name(model: str) -> str:
     """Compact model id for render — ``claude-opus-4-7`` → ``Opus 4.7``,
     ``claude-sonnet-4-6`` → ``Sonnet 4.6``, ``<synthetic>`` → ``synthetic``.
@@ -1153,6 +1194,17 @@ def format_retro(data: RetroData) -> str:
             f"Tokens incomplete: {n_token} peer(s) on pre-v0.11.14 OR with cold token "
             f"cache — upgrade and/or run `mm push` on those machines for accurate "
             f"token totals."
+        )
+    # Unpriced-model breadcrumb. Models present in the fleet's
+    # ``tokens_by_model`` but missing from the pricing table contribute to
+    # the displayed token totals (they're real API traffic) but are skipped
+    # by ``estimate_cost``. Surface the volume so a reader knows the cost
+    # line is an under-estimate rather than authoritative.
+    unpriced_tokens, unpriced_models = _unpriced_token_summary(data.sessions.tokens_by_model)
+    if unpriced_tokens > 0:
+        notes.append(
+            f"{_format_token_count(unpriced_tokens)} tokens from {unpriced_models} unpriced "
+            f"model(s) excluded from cost estimate."
         )
     if data.fleet.unregistered_event_devices:
         notes.append(
