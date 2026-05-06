@@ -172,12 +172,13 @@ always resident). Group covers the parallelization fix plus a paired
 onboarding nudge so fresh Macs don't see slow first pulls until iCloud
 materializes blobs.
 
-### Track 9A: Parallel blob fetch + brctl pin nudge
-_2 tasks . ~0.5 day (human) / ~25 min (CC) . medium risk . src/mind_meld/cli.py_
-_touches: src/mind_meld/cli.py, tests/test_integration.py_
+### Track 9A: Auto-pin storage on init
+_1 task . ~30 min (CC) . low risk . src/mind_meld/cli.py_
+_touches: src/mind_meld/cli.py, tests/test_init_auto_pin.py, README.md_
 
-- **Parallelize blob fetches in `_download_and_apply` (cli.py:1320)** -- wrap the per-file `backend.get(bkey)` call in `concurrent.futures.ThreadPoolExecutor(max_workers=8)` + `as_completed` (NOT `map` — one slow blob shouldn't gate the rest). Keep decrypt + `_apply_incoming_file` single-threaded (cheap, GIL-friendly, preserves the existing per-file try/except + `outcomes` dict semantics). Care: error/skip outcome ordering under reordering, and the progress bar's `_advance` callback must remain thread-safe (Rich `Progress.advance` is). Measured 7.3× speedup on 1449-blob fresh-Mac pull. _src/mind_meld/cli.py, ~150 lines (executor wrap + outcome-ordering preservation + concurrency test + thread-safety regression pin)._ (M)
-- **`mm init` post-success `brctl download` nudge** -- print one-line `mm: notice:` after init success: `Tip: keep blobs local with: brctl download "<storage_path>/data" (or right-click → Keep Downloaded in Finder)`. README "Claude Code Integration" / FAQ section update. Surfaces the iCloud-pinning knob without making decisions for the user. Even with parallelization, a freshly-set-up Mac will see slow first pulls until iCloud materializes blobs. _src/mind_meld/cli.py, ~5 lines + README section._ (XS)
+Scope reduced via /plan-eng-review (2026-05-06): the original 2-task plan paired a 150-line parallel-fetch optimization with a 5-line manual nudge. Dogfooding showed the parallelization solved a problem the nudge prevents — once the storage folder is pinned, `mm pull` reads resident blobs and is already fast (<5s on the measured 1449-blob workload). D5 then upgraded the nudge from manual print to `brctl` auto-pin so the user pays no manual step. Parallel-fetch is preserved in Future with a clear revisit trigger.
+
+- **Auto-pin iCloud storage on `mm init`** — call `brctl download <storage_path>` (Apple's iCloud File Provider CLI) once at the end of `init` after registration succeeds. Surfaces a one-line `Storage pinned for fast pulls.` confirmation; falls back silently to a Finder right-click tip on any error (`brctl` missing, timeout, non-zero exit, non-iCloud storage path). Best-effort; `brctl download` is non-destructive, idempotent, and async — it queues the request and returns immediately while iCloud materializes files in the background. _src/mind_meld/cli.py (~50 lines: helper + import + call site), tests/test_init_auto_pin.py (6 tests: success, non-iCloud skip, brctl missing, timeout, non-zero, init-wiring smoke), README.md (new "Fast pulls" section)._ (S)
 
 ---
 
@@ -186,10 +187,9 @@ _touches: src/mind_meld/cli.py, tests/test_integration.py_
 Four DRY + perf items deferred from /ship pre-landing reviews of the v0.11.14+
 token-usage work (`token_usage.py` + `lockedjson.py` introduction). All scoped
 to internal hygiene — no public-API change, no user-visible behavior change.
-Group 10 serializes after Group 9 (default linear chain) because Track 10A's
-task 4 edits the `_run_events_tail` / `_run_events_backfill` sites in
-`cli.py`, which collides with Group 9's Track 9A `_download_and_apply` edit
-on file (different functions, same file).
+Independent of Group 9 (Track 9A's scope-reduced auto-pin only edits `init` /
+adds a helper above it; Track 10A's task 4 edits `_run_events_tail` /
+`_run_events_backfill` — different cli.py regions, mergeable in either order).
 
 ### Track 10A: Token-usage DRY + perf polish
 _4 tasks . ~0.5 day (human) / ~30 min (CC) . low risk . src/mind_meld/token_usage.py + src/mind_meld/lockedjson.py + src/mind_meld/cli.py_
@@ -223,13 +223,13 @@ Track detail per active group:
 
 ```
 Group 9: Pull performance + fresh-Mac onboarding
-  +-- Track 9A ........... ~25 min (CC) .. 2 tasks .. parallel fetch + brctl nudge
+  +-- Track 9A ........... ~30 min (CC) .. 1 task  .. auto-pin storage on init
 
 Group 10: Token-usage post-ship cleanup
   +-- Track 10A .......... ~30 min (CC) .. 4 tasks .. DRY + perf polish
 ```
 
-**Active total: 1 in-flight Group (9). 1 queued Group (10). 2 Tracks. 6 tasks.**
+**Active total: 1 in-flight Group (9). 1 queued Group (10). 2 Tracks. 5 tasks.**
 **Original v0.x → v1.0 plan complete: Groups 1–8 shipped through v0.11.0. See PROGRESS.md.**
 
 ---
@@ -237,6 +237,8 @@ Group 10: Token-usage post-ship cleanup
 ## Future (Phase 2+)
 
 Items triaged but deferred. Not organized into Groups/Tracks.
+
+- **Parallel blob fetch in `_download_and_apply`** — wrap the per-file `backend.get(bkey)` call in `concurrent.futures.ThreadPoolExecutor(max_workers=8)` + `as_completed` (mirror `events.py:walk_git_projects`'s shape verbatim). Keep decrypt + `_apply_incoming_file` single-threaded; preserve `to_download` insertion order through the apply phase so `outcomes` lists, sync-log row order, and `pullhistory.jsonl` row order match the pre-parallelization rendering (architecture decision D1, /plan-eng-review 2026-05-06). Submit-all-upfront pattern (D2): all N futures live in the executor at once with peak memory ≈ N × avg_enc_blob_size (~70MB on the measured 1449-blob workload, ~500MB at 10k blobs — within Python budget but observable). Measured 7.3× speedup (509ms → 143ms per blob) on a fresh-Mac iCloud-cold pull. _src/mind_meld/cli.py, ~150 lines (executor wrap + outcome-ordering preservation + concurrency test + thread-safety regression pin)._ (M) [plan-eng-review 2026-05-06] _Deferred because: Track 9A's auto-pin (`brctl download` at init) prevents the slow-pull case at the source. Parallelization only helps users on a non-iCloud storage path or those whose auto-pin was revoked. Revisit trigger: a user reports sustained slow `mm pull` (>30s) AFTER the auto-pin ran successfully, OR a fleet hits 10k+ blobs with user-visible memory pressure during pull._
 
 - **Selective sync (`sync.include` / `sync.exclude`)** — per-project filtering so users with dozens of Claude projects can sync just the 2-3 they actively use across machines. Config schema + glob validation + walker integration + CLI flag surface. _src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/cli.py, ~180 lines._ (M) _Deferred because: no user demand signal yet; revisit on first support case from someone with dozens of projects who wants to sync just 2-3._
 
