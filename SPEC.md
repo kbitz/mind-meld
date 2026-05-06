@@ -328,6 +328,16 @@ mm conflicts                # list unresolved .sync-conflict-* files across sour
 mm resolve [PATH]           # interactively resolve conflict files (unified diff + pick winner)
 mm autopull                 # silent pull for Claude Code (one-line output, never prompts)
 mm autopush                 # silent push for Claude Code (one-line output, never prompts)
+mm enable-source NAME       # turn a configured sync source ON for this machine
+mm disable-source NAME [--force]   # turn a configured sync source OFF for this machine; --force accepts unknown names (forward-compat for not-yet-shipped sources)
+mm reconfigure-sources      # re-run the source picker against current config + new defaults
+mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
+mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
+mm install-skills           # install / re-install the ~/.claude/skills/retro-fleet symlink (force-runs the same self-heal mm init / mm push invoke automatically)
+mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N] [--format jsonl|table]
+                            # query the per-file pull/push history log
+mm retro-fleet [WINDOW] [--no-author-filter]
+                            # render fleet retrospective markdown to stdout (default 7d). Public CLI surface for the /retro-fleet Claude Code skill; safe to invoke directly for scripted exports.
 ```
 
 ### Global Flags
