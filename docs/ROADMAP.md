@@ -215,22 +215,12 @@ Adjacency list (who depends on whom):
 - Group 6 ← {}     ✓ Complete (Track 6A — GitHub Releases backfill, 2026-04-27)
 - Group 7 ← {}     ✓ Complete (preflight v0.10.1 + Track 7A v0.10.2 + Track 7B v0.10.3)
 - Group 8 ← {7}    ✓ Complete (Track 8A v0.11.0)
-- Group 9 ← {}     active (pull performance + fresh-Mac onboarding)
-- Group 10 ← {9}   queued (token-usage post-ship cleanup; cli.py collision serialization)
+- Group 9 ← {}     ✓ Complete (Track 9A v0.11.23 — auto-pin iCloud storage on init)
+- Group 10 ← {9}   ✓ Complete (Track 10A v0.11.24 — token-usage DRY + perf polish)
 ```
 
-Track detail per active group:
-
-```
-Group 9: Pull performance + fresh-Mac onboarding
-  +-- Track 9A ........... ~30 min (CC) .. 1 task  .. auto-pin storage on init
-
-Group 10: Token-usage post-ship cleanup
-  +-- Track 10A .......... ~30 min (CC) .. 4 tasks .. DRY + perf polish
-```
-
-**Active total: 1 in-flight Group (9). 1 queued Group (10). 2 Tracks. 5 tasks.**
-**Original v0.x → v1.0 plan complete: Groups 1–8 shipped through v0.11.0. See PROGRESS.md.**
+**All Groups 1–10 shipped through v0.11.24. See PROGRESS.md.**
+**Original v0.x → v1.0 plan complete: Groups 1–8 shipped through v0.11.0.**
 
 ---
 

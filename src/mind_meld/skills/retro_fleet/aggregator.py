@@ -590,7 +590,7 @@ def _merge_token_window(
     nor in the user-facing total. ``tokens_by_model`` retains every peer-
     reported entry so the unpriced-model breadcrumb in ``format_retro``
     can surface volume that was excluded from the cost line."""
-    from mind_meld.token_usage import COST_EXCLUDED_MODELS
+    from mind_meld.token_usage import COST_EXCLUDED_MODELS, zero_model_bucket
 
     since_d = since.astimezone(timezone.utc).date().isoformat()
     until_d = until.astimezone(timezone.utc).date().isoformat()
@@ -602,10 +602,12 @@ def _merge_token_window(
         for model, mbucket in (bucket.get("by_model") or {}).items():
             if not isinstance(model, str) or not isinstance(mbucket, dict):
                 continue
-            mtarget = out.tokens_by_model.setdefault(
-                model,
-                {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
-            )
+            # Bespoke loop kept (NOT merge_by_model from token_usage): peer-
+            # controlled events cross a trust boundary, so every field flows
+            # through `_safe_int`. token_usage's helper is for trusted local
+            # data and intentionally skips that hardening. /plan-eng-review
+            # cross-model tension #3 (2026-05-06).
+            mtarget = out.tokens_by_model.setdefault(model, zero_model_bucket())
             in_ = _safe_int(mbucket.get("input"))
             cc = _safe_int(mbucket.get("cache_create"))
             cr = _safe_int(mbucket.get("cache_read"))
@@ -1002,7 +1004,7 @@ def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple
     zero to cost. Surfaced as a Notes line so the cost line is honestly
     flagged as a lower bound when older or unrecognized model ids show up
     in jsonls."""
-    from mind_meld.token_usage import COST_EXCLUDED_MODELS, PRICING
+    from mind_meld.token_usage import COST_EXCLUDED_MODELS, PRICING, TOKEN_FIELDS
 
     total = 0
     n = 0
@@ -1011,7 +1013,7 @@ def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple
             continue
         if not isinstance(mbucket, dict):
             continue
-        for k in ("input", "cache_create", "cache_read", "output"):
+        for k in TOKEN_FIELDS:
             total += _safe_int(mbucket.get(k))
         n += 1
     return total, n

@@ -2003,6 +2003,271 @@ class TestSyntheticAndUnpricedTokens:
         assert "unpriced" not in out
 
 
+class TestTrack10ASafeIntRetention:
+    """REGRESSION pin (cross-model tension #3, /plan-eng-review 2026-05-06):
+    Track 10A's helper extraction must NOT leak the token_usage helpers
+    into aggregator's peer-controlled merge loop. The aggregator keeps
+    its bespoke loop with `_safe_int` hardening; a shared helper from
+    token_usage would do raw `target[k] += src.get(k, 0)` and crash on
+    a string-typed token field from a malformed peer event."""
+
+    def _make_sessions_event(self, device, ts, tokens_by_day):
+        return {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": ts,
+            "device": device,
+            "projects": [
+                {
+                    "claude_dir": "-tmp-proj",
+                    "source_root": "/Users/kb/.claude",
+                    "sessions": 1,
+                    "total_kb": 100,
+                    "last_session_at": ts,
+                    "tokens_by_day": tokens_by_day,
+                }
+            ],
+        }
+
+    def test_string_typed_token_field_does_not_crash(self):
+        """A peer's malformed event with a string-typed token field
+        (e.g. `"input": "abc"` instead of `100`) must NOT crash
+        aggregation. `_safe_int` coerces non-int values to 0."""
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        ev = self._make_sessions_event(
+            "evil-peer",
+            "2026-05-01T12:00:00+00:00",
+            tokens_by_day={
+                "2026-05-01": {
+                    "input": 0,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                    "by_model": {
+                        "claude-opus-4-7": {
+                            "input": "not-a-number",  # malformed
+                            "cache_create": [1, 2, 3],  # malformed
+                            "cache_read": None,  # malformed
+                            "output": 50,  # legit
+                        }
+                    },
+                }
+            },
+        )
+        result = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        # Malformed fields coerce to 0; legitimate field counted.
+        assert result.tokens_input == 0
+        assert result.tokens_cache_create == 0
+        assert result.tokens_cache_read == 0
+        assert result.tokens_output == 50
+        # Per-model bucket retains the model with the partial data.
+        assert "claude-opus-4-7" in result.tokens_by_model
+        assert result.tokens_by_model["claude-opus-4-7"]["output"] == 50
+
+
+class TestTrack10AFleetRetroDeterminism:
+    """REGRESSION pin (D6, /plan-eng-review 2026-05-06): the Track 10A
+    refactor must not change retro output for fixed inputs. Pinned with
+    BOTH a per-total numerical assertion (catches arithmetic drift) AND
+    a small synthetic events fixture exercising 2 devices × 2 models ×
+    multiple days."""
+
+    def test_per_total_aggregation_byte_identical(self):
+        """Two devices, two models, three days. Assert exact totals
+        across `tokens_input` / `tokens_cache_create` / `tokens_cache_read`
+        / `tokens_output` and the per-model breakdown. Updates here ARE
+        meaningful semantic changes; the test should be updated
+        deliberately."""
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        # Device A — Opus
+        ev_a = {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": "2026-05-01T12:00:00+00:00",
+            "device": "dev-a",
+            "projects": [
+                {
+                    "claude_dir": "-proj-a",
+                    "source_root": "/Users/kb/.claude",
+                    "sessions": 5,
+                    "total_kb": 1000,
+                    "last_session_at": "2026-05-01T12:00:00+00:00",
+                    "tokens_by_day": {
+                        "2026-04-29": {
+                            "input": 100,
+                            "cache_create": 50,
+                            "cache_read": 1000,
+                            "output": 200,
+                            "by_model": {
+                                "claude-opus-4-7": {
+                                    "input": 100,
+                                    "cache_create": 50,
+                                    "cache_read": 1000,
+                                    "output": 200,
+                                }
+                            },
+                        },
+                        "2026-04-30": {
+                            "input": 200,
+                            "cache_create": 0,
+                            "cache_read": 2000,
+                            "output": 100,
+                            "by_model": {
+                                "claude-opus-4-7": {
+                                    "input": 200,
+                                    "cache_create": 0,
+                                    "cache_read": 2000,
+                                    "output": 100,
+                                }
+                            },
+                        },
+                    },
+                }
+            ],
+        }
+        # Device B — Sonnet + Haiku, partial overlap day
+        ev_b = {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": "2026-05-01T12:00:00+00:00",
+            "device": "dev-b",
+            "projects": [
+                {
+                    "claude_dir": "-proj-b",
+                    "source_root": "/Users/kb/.claude",
+                    "sessions": 3,
+                    "total_kb": 500,
+                    "last_session_at": "2026-05-01T12:00:00+00:00",
+                    "tokens_by_day": {
+                        "2026-04-30": {
+                            "input": 50,
+                            "cache_create": 25,
+                            "cache_read": 500,
+                            "output": 75,
+                            "by_model": {
+                                "claude-sonnet-4-6": {
+                                    "input": 50,
+                                    "cache_create": 25,
+                                    "cache_read": 500,
+                                    "output": 75,
+                                }
+                            },
+                        },
+                        "2026-05-01": {
+                            "input": 25,
+                            "cache_create": 0,
+                            "cache_read": 250,
+                            "output": 50,
+                            "by_model": {
+                                "claude-haiku-4-5": {
+                                    "input": 25,
+                                    "cache_create": 0,
+                                    "cache_read": 250,
+                                    "output": 50,
+                                }
+                            },
+                        },
+                    },
+                }
+            ],
+        }
+
+        result = aggregate_sessions(
+            [ev_a, ev_b],
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+
+        # Per-total assertions — these are the load-bearing numbers.
+        assert result.tokens_input == 100 + 200 + 50 + 25  # 375
+        assert result.tokens_cache_create == 50 + 0 + 25 + 0  # 75
+        assert result.tokens_cache_read == 1000 + 2000 + 500 + 250  # 3750
+        assert result.tokens_output == 200 + 100 + 75 + 50  # 425
+
+        # Per-model breakdown.
+        assert result.tokens_by_model["claude-opus-4-7"] == {
+            "input": 300,
+            "cache_create": 50,
+            "cache_read": 3000,
+            "output": 300,
+        }
+        assert result.tokens_by_model["claude-sonnet-4-6"] == {
+            "input": 50,
+            "cache_create": 25,
+            "cache_read": 500,
+            "output": 75,
+        }
+        assert result.tokens_by_model["claude-haiku-4-5"] == {
+            "input": 25,
+            "cache_create": 0,
+            "cache_read": 250,
+            "output": 50,
+        }
+
+    def test_cost_excluded_synthetic_filters_top_level_only(self):
+        """REGRESSION pin: the aggregator's bespoke filtered loop
+        (D1, /plan-eng-review) keeps `<synthetic>` out of the
+        top-level totals BUT preserves it in `tokens_by_model` so the
+        unpriced-tokens breadcrumb can surface volume."""
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        ev = {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": "2026-05-01T12:00:00+00:00",
+            "device": "dev-a",
+            "projects": [
+                {
+                    "claude_dir": "-proj-a",
+                    "source_root": "/Users/kb/.claude",
+                    "sessions": 1,
+                    "total_kb": 100,
+                    "last_session_at": "2026-05-01T12:00:00+00:00",
+                    "tokens_by_day": {
+                        "2026-04-30": {
+                            "input": 1000,
+                            "cache_create": 0,
+                            "cache_read": 0,
+                            "output": 500,
+                            "by_model": {
+                                "claude-opus-4-7": {
+                                    "input": 100,
+                                    "cache_create": 0,
+                                    "cache_read": 0,
+                                    "output": 50,
+                                },
+                                "<synthetic>": {
+                                    "input": 900,
+                                    "cache_create": 0,
+                                    "cache_read": 0,
+                                    "output": 450,
+                                },
+                            },
+                        },
+                    },
+                }
+            ],
+        }
+        result = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        # Top-level totals exclude synthetic.
+        assert result.tokens_input == 100
+        assert result.tokens_output == 50
+        # tokens_by_model retains synthetic for unpriced breadcrumb.
+        assert "<synthetic>" in result.tokens_by_model
+        assert result.tokens_by_model["<synthetic>"]["input"] == 900
+        assert result.tokens_by_model["claude-opus-4-7"]["input"] == 100
+
+
 class TestShortenRepoUrl:
     """Render-only compression of long canonical URLs."""
 

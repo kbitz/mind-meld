@@ -46,10 +46,10 @@ class TestLockedJsonHappyPath:
             assert ljson.data == {"existing": "value"}
 
     def test_no_mutation_still_writes_normalized_json(self, tmp_path: Path) -> None:
-        """The current implementation always rewrites on exit (truncate +
-        write). That's a small efficiency loss; pinning it as expected so
-        a future "dirty-flag" optimization is a deliberate change with a
-        new test."""
+        """A no-mutation context normalizes the file. Track 10A briefly
+        added a skip-write optimization but reverted it after measuring
+        net-negative perf (sha256(json.dumps(...)) twice cost more than
+        a single os.write since _write_json doesn't fsync)."""
         path = tmp_path / "cache.json"
         path.write_text('{"a":1}')  # not pretty-printed
         with locked_json_rmw(path):
