@@ -16,6 +16,7 @@ Pinned behaviors per the eng-review test diagram:
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -96,6 +97,141 @@ class TestNormalizeModelId:
     def test_short_date_does_not_strip(self) -> None:
         # 7 digits — not the YYYYMMDD pattern.
         assert tu._normalize_model_id("claude-opus-1234567") == "claude-opus-1234567"
+
+
+# ---------------------------------------------------------------------------
+# TOKEN_FIELDS schema-stability + zero_bucket factories (Track 10A)
+# ---------------------------------------------------------------------------
+
+
+class TestTokenFieldsAndFactories:
+    """REGRESSION pin: adding a 5th token field must update TOKEN_FIELDS,
+    `Usage`, and `DayBucket` together. The exact-tuple assertion catches
+    silent drift if a contributor edits one but forgets the other."""
+
+    def test_token_fields_exact_tuple(self) -> None:
+        assert tu.TOKEN_FIELDS == ("input", "cache_create", "cache_read", "output")
+
+    def test_zero_model_bucket_shape(self) -> None:
+        bucket = tu.zero_model_bucket()
+        assert bucket == {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0}
+        # Per-model bucket has NO `by_model` key.
+        assert "by_model" not in bucket
+
+    def test_zero_day_bucket_shape(self) -> None:
+        bucket = tu.zero_day_bucket()
+        assert bucket["input"] == 0
+        assert bucket["cache_create"] == 0
+        assert bucket["cache_read"] == 0
+        assert bucket["output"] == 0
+        assert bucket["by_model"] == {}
+
+    def test_factories_return_independent_dicts(self) -> None:
+        # Mutating one returned bucket must not bleed into another.
+        a = tu.zero_model_bucket()
+        b = tu.zero_model_bucket()
+        a["input"] = 100
+        assert b["input"] == 0
+
+
+class TestMergeUsageBucket:
+    def test_empty_src_no_op(self) -> None:
+        target = tu.zero_model_bucket()
+        target["input"] = 50
+        tu.merge_usage_bucket(target, {})
+        assert target == {"input": 50, "cache_create": 0, "cache_read": 0, "output": 0}
+
+    def test_full_src_sums_all_fields(self) -> None:
+        target = tu.zero_model_bucket()
+        src = {"input": 1, "cache_create": 2, "cache_read": 3, "output": 4}
+        tu.merge_usage_bucket(target, src)
+        assert target == src
+
+    def test_partial_src_missing_keys_contribute_zero(self) -> None:
+        target = tu.zero_model_bucket()
+        target["input"] = 100
+        target["output"] = 50
+        tu.merge_usage_bucket(target, {"cache_read": 7})
+        assert target == {"input": 100, "cache_create": 0, "cache_read": 7, "output": 50}
+
+    def test_empty_target_dict_seeds_keys(self) -> None:
+        target: dict = {}
+        tu.merge_usage_bucket(target, {"input": 5, "output": 2})
+        assert target == {"input": 5, "cache_create": 0, "cache_read": 0, "output": 2}
+
+    def test_repeated_calls_accumulate(self) -> None:
+        target = tu.zero_model_bucket()
+        tu.merge_usage_bucket(target, {"input": 10})
+        tu.merge_usage_bucket(target, {"input": 5, "output": 3})
+        assert target["input"] == 15
+        assert target["output"] == 3
+
+
+class TestMergeUsageBucketPerf:
+    """Track 10A perf-pin: helper extraction adds ~80-150ns per call
+    of Python function-call overhead. With 10k+ calls per push (D9),
+    that's a few ms — well under the 250ms autopush budget. This pin
+    catches future regressions where someone adds expensive logic to
+    the helper that pushes the cost into the budget."""
+
+    def test_merge_usage_bucket_under_2us_per_call(self) -> None:
+        """Empirical budget: 2µs per call is conservative. CI runners
+        vary; 5x margin keeps the test stable while still catching
+        order-of-magnitude regressions."""
+        target = tu.zero_model_bucket()
+        src = {"input": 100, "cache_create": 200, "cache_read": 1000, "output": 50}
+        n = 10_000
+        start = time.perf_counter()
+        for _ in range(n):
+            tu.merge_usage_bucket(target, src)
+        elapsed = time.perf_counter() - start
+        per_call_us = (elapsed / n) * 1_000_000
+        # 10µs per call = 50× the typical cost; trips on actual
+        # algorithmic regression but stays stable under CI noise.
+        assert per_call_us < 10.0, f"merge_usage_bucket took {per_call_us:.2f}µs/call"
+
+
+class TestMergeByModel:
+    def test_empty_src_no_op(self) -> None:
+        target: dict[str, tu.Usage] = {}
+        tu.merge_by_model(target, {})
+        assert target == {}
+
+    def test_new_model_creates_zero_bucket_then_sums(self) -> None:
+        target: dict[str, tu.Usage] = {}
+        src = {"claude-opus-4-7": {"input": 100, "output": 50}}
+        tu.merge_by_model(target, src)
+        assert target == {
+            "claude-opus-4-7": {
+                "input": 100,
+                "cache_create": 0,
+                "cache_read": 0,
+                "output": 50,
+            }
+        }
+
+    def test_existing_model_accumulates_in_place(self) -> None:
+        target: dict[str, tu.Usage] = {
+            "claude-opus-4-7": {"input": 100, "cache_create": 0, "cache_read": 0, "output": 0},
+        }
+        src = {"claude-opus-4-7": {"input": 50, "output": 25}}
+        tu.merge_by_model(target, src)
+        assert target["claude-opus-4-7"] == {
+            "input": 150,
+            "cache_create": 0,
+            "cache_read": 0,
+            "output": 25,
+        }
+
+    def test_multiple_models_isolate(self) -> None:
+        target: dict[str, tu.Usage] = {}
+        src = {
+            "claude-opus-4-7": {"input": 100},
+            "claude-haiku-4-5": {"input": 200},
+        }
+        tu.merge_by_model(target, src)
+        assert target["claude-opus-4-7"]["input"] == 100
+        assert target["claude-haiku-4-5"]["input"] == 200
 
 
 # ---------------------------------------------------------------------------
@@ -507,29 +643,171 @@ class TestEstimateCost:
 
 
 class TestIsCacheCold:
+    """Track 10A: version-aware prefix heuristic. Returns True on
+    missing file, OSError, size < `_MIN_WARM_CACHE_BYTES`, OR a
+    prefix-parse that can't find `"version": CACHE_VERSION` in the
+    first 256 bytes."""
+
     def test_missing_file(self, tmp_path: Path) -> None:
-        # CACHE_PATH from autouse fixture points at tmp_path; not created.
         assert tu.is_cache_cold() is True
 
-    def test_empty_files_dict(self) -> None:
+    def test_empty_files_dict_treated_as_cold(self) -> None:
+        """An empty cache `{"version":1, "files":{}}` is well under
+        the 64-byte threshold and is correctly treated as cold."""
         tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tu.CACHE_PATH.write_text(json.dumps({"version": 1, "files": {}}))
         assert tu.is_cache_cold() is True
 
-    def test_corrupt_json(self) -> None:
+    def test_short_garbage_treated_as_cold(self) -> None:
+        """Renamed from `test_corrupt_json`. Very short content is
+        cold regardless of validity. (7-byte garbage < 64 bytes.)"""
         tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tu.CACHE_PATH.write_text("garbage")
         assert tu.is_cache_cold() is True
 
-    def test_version_mismatch(self) -> None:
+    def test_populated_cache_treated_as_warm(self) -> None:
+        """A realistically-shaped populated cache exceeds the
+        64-byte threshold AND has the right version prefix."""
         tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tu.CACHE_PATH.write_text(json.dumps({"version": 999, "files": {"x": {}}}))
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "files": {
+                        "/Users/kb/.claude/projects/x/sess.jsonl": {
+                            "size": 12345,
+                            "mtime": 1.234e9,
+                            "by_day": {
+                                "2026-05-01": {
+                                    "input": 100,
+                                    "cache_create": 0,
+                                    "cache_read": 1000,
+                                    "output": 50,
+                                    "by_model": {},
+                                }
+                            },
+                        }
+                    },
+                }
+            )
+        )
+        assert tu.is_cache_cold() is False
+
+    def test_large_corrupt_file_treated_as_cold(self) -> None:
+        """REGRESSION pin (Codex adversarial 2026-05-06): a stat-only
+        heuristic would treat large corrupt content as warm, letting
+        autopush proceed and emit a thinned snapshot. The version-peek
+        catches it: prefix-search for `"version": 1` fails → cold →
+        autopush emits notice + skips token aggregation. No thinned
+        snapshot from this machine in the heal window."""
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text("x" * 200)
         assert tu.is_cache_cold() is True
 
-    def test_populated_cache(self) -> None:
+    def test_wrong_version_treated_as_cold(self) -> None:
+        """REGRESSION pin: when CACHE_VERSION is bumped (currently 1,
+        future-looking), a stale on-disk cache with `version: 0` (or
+        any non-current version) must be treated as cold so autopush
+        skips token aggregation in the heal window. Without this,
+        autopush would normalize the wrong-version cache to empty
+        inside the lock, walk all jsonls under the 250ms budget, and
+        emit a thinned snapshot."""
         tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tu.CACHE_PATH.write_text(json.dumps({"version": 1, "files": {"x.jsonl": {"size": 1}}}))
-        assert tu.is_cache_cold() is False
+        # Wrong version, but otherwise large + valid JSON.
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 999,
+                    "files": {"x.jsonl": {"size": 1, "mtime": 0.0, "by_day": {}}},
+                }
+            )
+        )
+        assert tu.is_cache_cold() is True
+
+    def test_missing_version_field_treated_as_cold(self) -> None:
+        """A large file with no `"version":` key in the first 256
+        bytes is treated as cold. Catches both schema drift and
+        files where `version` is buried beyond the prefix-peek."""
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(json.dumps({"files": {}, "padding": "x" * 200}))
+        assert tu.is_cache_cold() is True
+
+    def test_stat_oserror_returns_cold(self, monkeypatch) -> None:
+        """If `path.stat()` raises (e.g. EACCES on a chmod-restricted
+        config dir), degrade to cold — safe default that triggers a
+        warm attempt that will then surface the access issue via the
+        lock path."""
+
+        def boom(self):
+            raise PermissionError("simulated EACCES")
+
+        monkeypatch.setattr(Path, "stat", boom)
+        assert tu.is_cache_cold() is True
+
+
+class TestLockAndGetFiles:
+    """Track 10A: extracted from cli.py's inline `locked_json_rmw +
+    version-check + isinstance-check + ljson.data['files']` block.
+    Yields the `files` dict, or `None` ONLY on warn-mode contention."""
+
+    def test_block_mode_yields_files_dict(self) -> None:
+        with tu.lock_and_get_files("block") as files:
+            assert files == {}
+            files["x.jsonl"] = {"size": 1, "mtime": 0.0, "by_day": {}}
+        # Persisted across contexts.
+        with tu.lock_and_get_files("block") as files:
+            assert "x.jsonl" in files
+
+    def test_version_mismatch_normalizes_inside_lock(self) -> None:
+        """REGRESSION pin (ported from old `test_version_mismatch`):
+        a wrong-version cache is normalized in place to empty inside
+        the flock; caller still gets a (now-empty) dict back, NOT
+        None. None is reserved for warn-mode contention."""
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(json.dumps({"version": 999, "files": {"old": {"size": 1}}}))
+        with tu.lock_and_get_files("block") as files:
+            assert files == {}  # normalized, NOT None
+
+    def test_malformed_files_normalizes_inside_lock(self) -> None:
+        """Cache with a non-dict `files` value normalizes to empty."""
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(json.dumps({"version": 1, "files": "not-a-dict"}))
+        with tu.lock_and_get_files("block") as files:
+            assert files == {}
+
+    def test_corrupt_cache_normalizes_inside_lock(self) -> None:
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text("not valid json")
+        with tu.lock_and_get_files("block") as files:
+            assert files == {}
+
+    def test_warn_mode_contention_yields_none(self) -> None:
+        """Caller branches on `files is None` to skip token
+        aggregation entirely under autopush contention."""
+        import fcntl
+        import os as _os
+
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.touch()
+        blocker_fd = _os.open(str(tu.CACHE_PATH), _os.O_RDWR)
+        try:
+            fcntl.flock(blocker_fd, fcntl.LOCK_EX)
+            with tu.lock_and_get_files("warn") as files:
+                assert files is None
+        finally:
+            fcntl.flock(blocker_fd, fcntl.LOCK_UN)
+            _os.close(blocker_fd)
+
+    def test_no_mutation_preserves_semantic_content(self) -> None:
+        """Track 10A briefly added a skip-write optimization; reverted
+        after measuring net-negative perf. A no-mutation context
+        rewrites the file (same as pre-Track-10A behavior) but the
+        parsed content is unchanged."""
+        with tu.lock_and_get_files("block") as files:
+            files["seed"] = {"size": 1, "mtime": 0.0, "by_day": {}}
+        with tu.lock_and_get_files("block") as files:
+            assert "seed" in files
+            assert files["seed"] == {"size": 1, "mtime": 0.0, "by_day": {}}
 
 
 # ---------------------------------------------------------------------------

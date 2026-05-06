@@ -44,9 +44,10 @@ import os
 import re
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Literal, TypedDict
+from typing import Any, Iterable, Iterator, Literal, TypedDict
 
 from mind_meld.lockedjson import locked_json_rmw
 
@@ -56,6 +57,21 @@ from mind_meld.lockedjson import locked_json_rmw
 
 CACHE_PATH = Path.home() / ".config" / "mind-meld" / "session-tokens.json"
 CACHE_VERSION = 1
+
+# Schema fields that bucket-merge helpers walk and zero-bucket factories
+# initialize. Adding a 5th token field (e.g. `cache_anthropic`) requires
+# updating this tuple AND the `Usage`/`DayBucket` TypedDicts below; the
+# helpers and factories pick up the change automatically. Keep frozen as
+# a tuple so future contributors can't mutate it at runtime.
+TOKEN_FIELDS: tuple[str, ...] = ("input", "cache_create", "cache_read", "output")
+
+# Lower bound on a populated cache file's serialized size. An empty cache
+# `{"version": 1, "files": {}}` rendered with `sort_keys=True, indent=2`
+# is 32 bytes; even a single-entry populated cache exceeds 64. The stat
+# heuristic in `is_cache_cold` treats files at or below this threshold
+# as cold without parsing JSON. Documented constant so future schema
+# additions revisit the threshold deliberately.
+_MIN_WARM_CACHE_BYTES = 64
 
 # Hard cap on by_day buckets retained per cache entry. Trim every push
 # regardless of whether the underlying jsonl is still living, so long-
@@ -177,6 +193,53 @@ _DATE_SUFFIX = re.compile(r"-\d{8}$")
 """Strip a trailing 8-digit YYYYMMDD date suffix from a model id.
 Confirmed against real subagent jsonls on this Mac
 (``claude-haiku-4-5-20251001`` → ``claude-haiku-4-5``)."""
+
+
+def zero_model_bucket() -> Usage:
+    """Return a fresh zero-valued ``Usage`` (per-model bucket — no
+    ``by_model`` nesting). Used at every "create empty per-model entry"
+    site across token_usage, events, and aggregator."""
+    return {k: 0 for k in TOKEN_FIELDS}  # type: ignore[return-value]
+
+
+def zero_day_bucket() -> DayBucket:
+    """Return a fresh zero-valued ``DayBucket`` (per-day bucket — includes
+    empty ``by_model`` map). Day buckets carry the per-model breakdown;
+    model buckets do not. Used at every "create empty per-day entry"
+    site."""
+    bucket: DayBucket = {k: 0 for k in TOKEN_FIELDS}  # type: ignore[assignment]
+    bucket["by_model"] = {}
+    return bucket
+
+
+def merge_usage_bucket(target: dict[str, Any], src: dict[str, Any]) -> None:
+    """Sum ``TOKEN_FIELDS`` from ``src`` into ``target`` in place.
+
+    Both dicts are treated as ``Usage``-shaped (or ``DayBucket``-shaped —
+    the helper only touches the four flat fields, never ``by_model``).
+    Missing keys in ``src`` contribute 0; missing keys in ``target`` are
+    seeded to 0 then summed.
+
+    NOT trust-boundary safe: assumes ``src`` values are int-coerced
+    upstream (parse_usage handles peer-controlled jsonl input via
+    ``_coerce_int``). The aggregator side keeps its bespoke loop with
+    ``_safe_int`` because it walks peer-controlled events directly."""
+    for k in TOKEN_FIELDS:
+        target[k] = target.get(k, 0) + src.get(k, 0)
+
+
+def merge_by_model(
+    target_by_model: dict[str, Usage],
+    src_by_model: dict[str, Usage],
+) -> None:
+    """Merge ``src_by_model`` into ``target_by_model`` in place.
+
+    For each model in src, ``setdefault(zero_model_bucket())`` then
+    delegates to ``merge_usage_bucket``. Same trust-boundary caveat as
+    ``merge_usage_bucket`` — for trusted local data only."""
+    for model, mbucket in src_by_model.items():
+        mtarget = target_by_model.setdefault(model, zero_model_bucket())
+        merge_usage_bucket(mtarget, mbucket)
 
 
 def _normalize_model_id(s: str) -> str:
@@ -337,18 +400,12 @@ def _extract_day(raw_ts: Any) -> str | None:
 
 
 def _accumulate(by_day: dict[str, DayBucket], day: str, usage: Usage, model: str) -> None:
-    bucket = by_day.setdefault(
-        day,
-        {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0, "by_model": {}},
-    )
-    for k in ("input", "cache_create", "cache_read", "output"):
-        bucket[k] = bucket.get(k, 0) + usage.get(k, 0)
-    by_model = bucket.setdefault("by_model", {})
-    model_bucket = by_model.setdefault(
-        model, {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0}
-    )
-    for k in ("input", "cache_create", "cache_read", "output"):
-        model_bucket[k] = model_bucket.get(k, 0) + usage.get(k, 0)
+    bucket = by_day.setdefault(day, zero_day_bucket())
+    merge_usage_bucket(bucket, usage)
+    # zero_day_bucket() guarantees `by_model` is present; existing
+    # buckets were created the same way. No setdefault needed.
+    model_bucket = bucket["by_model"].setdefault(model, zero_model_bucket())
+    merge_usage_bucket(model_bucket, usage)
 
 
 def _trim_by_day(by_day: dict[str, DayBucket], max_days: int) -> dict[str, DayBucket]:
@@ -480,24 +537,13 @@ def slice_window(
     """
     since_d = since.astimezone(timezone.utc).date().isoformat()
     until_d = until.astimezone(timezone.utc).date().isoformat()
-    out: DayBucket = {
-        "input": 0,
-        "cache_create": 0,
-        "cache_read": 0,
-        "output": 0,
-        "by_model": {},
-    }
+    out: DayBucket = zero_day_bucket()
     for day_key, bucket in by_day.items():
         if not (since_d <= day_key <= until_d):
             continue
-        for k in ("input", "cache_create", "cache_read", "output"):
-            out[k] = out.get(k, 0) + bucket.get(k, 0)
-        for model, mbucket in (bucket.get("by_model") or {}).items():
-            mout = out.setdefault("by_model", {}).setdefault(
-                model, {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0}
-            )
-            for k in ("input", "cache_create", "cache_read", "output"):
-                mout[k] = mout.get(k, 0) + mbucket.get(k, 0)
+        merge_usage_bucket(out, bucket)
+        # zero_day_bucket() guarantees `by_model` is present.
+        merge_by_model(out["by_model"], bucket.get("by_model") or {})
     return out
 
 
@@ -534,12 +580,7 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
                 sys.stderr.write(f"mm: notice: unknown model in pricing: {safe_str(model)}\n")
                 _WARNED_UNKNOWN_MODELS.add(model)
             continue
-        cost = (
-            usage.get("input", 0) * prices["input"]
-            + usage.get("cache_create", 0) * prices["cache_create"]
-            + usage.get("cache_read", 0) * prices["cache_read"]
-            + usage.get("output", 0) * prices["output"]
-        ) / 1_000_000.0
+        cost = sum(usage.get(k, 0) * prices[k] for k in TOKEN_FIELDS) / 1_000_000.0
         per_model[model] = cost
         total += cost
     return total, per_model
@@ -553,11 +594,96 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
 CacheMode = Literal["block", "warn"]
 
 
+@contextmanager
+def lock_and_get_files(on_contention: CacheMode) -> Iterator[dict[str, Any] | None]:
+    """Open the token cache under flock and yield the ``files`` dict
+    (or ``None`` on warn-mode contention).
+
+    Replaces the ``locked_json_rmw + version-check + isinstance-check +
+    ljson.data['files']`` boilerplate at every cache call site (cli.py's
+    ``_run_events_tail`` / ``_run_events_backfill``,
+    ``warm_token_cache_inline``). Owner of cache-shape invariants is
+    this module, not the caller.
+
+    ``None`` semantics: yielded ONLY for ``on_contention="warn"`` after
+    retry budget exhaustion. Version mismatch and malformed ``files``
+    dict are normalized in place to empty INSIDE the lock — the caller
+    still gets a (now-empty) dict back, NOT None. This is load-bearing:
+    callers branch on ``files is None`` to mean "couldn't get the lock,
+    skip token aggregation," NOT "cache was empty/corrupt."
+
+    Block mode never yields None (the flock blocks until acquired).
+    Raise mode propagates ``LockContended`` to the caller; we don't
+    catch it here.
+
+    Inherits ``skip_unchanged_write=True`` from ``locked_json_rmw``'s
+    default — no-op contexts skip the disk write."""
+    with locked_json_rmw(
+        CACHE_PATH,
+        default_factory=_empty_cache,
+        on_contention=on_contention,
+        contention_warning="token cache contended; skipping token aggregation",
+    ) as ljson:
+        if not ljson.is_locked:
+            yield None
+            return
+        # Normalize cache shape under the lock. The version-check + files
+        # isinstance check used to live inline at every caller site; lift
+        # both here so the cache-shape invariant has one owner.
+        if ljson.data.get("version") != CACHE_VERSION:
+            ljson.data.clear()
+            ljson.data.update(_empty_cache())
+        if not isinstance(ljson.data.get("files"), dict):
+            ljson.data["files"] = {}
+        yield ljson.data["files"]
+
+
 def is_cache_cold() -> bool:
-    """Return True if the cache file is missing or its ``files`` dict is
-    empty. Used by autopush to gate token-walk skip + by interactive mm
-    push to detect the warm-needed state."""
-    if not CACHE_PATH.exists():
+    """Return True if the cache file is missing, too small, corrupt,
+    wrong-version, or has an empty ``files`` dict.
+
+    Used by ``_decide_token_walk_policy`` to gate the cold-cache warm
+    path. Cost: ~µs on missing/small files (early stat shortcut) and
+    ~1.5ms on a populated 320KB cache (full ``json.loads`` parse, same
+    cost as the pre-Track-10A baseline).
+
+    Returns True when:
+      * the cache file does not exist, OR
+      * ``stat()`` raises ``OSError`` (e.g. EACCES on chmod-restricted
+        ``~/.config/mind-meld/``) — degrade to "cold," safe default
+        that triggers a warm attempt, OR
+      * the file size is below ``_MIN_WARM_CACHE_BYTES`` (64) — even
+        the empty-cache JSON exceeds this, so smaller is always cold,
+        OR
+      * read or JSON parse fails (corrupt content / bad UTF-8 /
+        non-dict top-level), OR
+      * the parsed ``"version"`` field doesn't match
+        ``CACHE_VERSION``, OR
+      * the parsed ``"files"`` field is missing, non-dict, or empty.
+
+    Returns False only when the file is structurally valid AND has
+    matching version AND has a non-empty files dict.
+
+    Why structural parsing: Track 10A briefly tried a regex byte-scan
+    optimization (~6× faster) but Codex adversarial review caught two
+    correctness bugs: (1) a corrupt cache with the substring
+    ``"version": 1`` would scan as warm, and (2) a wrong-version cache
+    with a nested ``"version"`` field would also scan as warm. Both
+    re-enable the thinned-snapshot autopush path the cold-cache gate
+    is supposed to prevent. ``json.loads`` is the only sound approach.
+
+    Race tolerance: this read is unlocked. Between the writer's
+    ``ftruncate(0)`` and the subsequent ``write(payload)`` of a real
+    update, an unlocked read could observe size 0 or partial bytes. We
+    treat that as cold; the caller then attempts warm, blocks on the
+    writer's flock, and eventually walks the freshly-written cache.
+    Idempotent."""
+    try:
+        st = CACHE_PATH.stat()
+    except OSError:
+        # FileNotFoundError is a subclass of OSError; both → cold.
+        return True
+    if st.st_size < _MIN_WARM_CACHE_BYTES:
         return True
     try:
         raw = CACHE_PATH.read_text(encoding="utf-8")
@@ -593,17 +719,11 @@ def warm_token_cache_inline(
     deadline = time.monotonic() + deadline_s
     walked = 0
     skipped = 0
-    with locked_json_rmw(
-        CACHE_PATH,
-        default_factory=_empty_cache,
-        on_contention="block",
-    ) as ljson:
-        if not ljson.is_locked:
+    with lock_and_get_files("block") as files:
+        if files is None:
+            # Block mode never yields None in practice (flock blocks until
+            # acquired). Defensive zero return preserves the prior contract.
             return 0, 0
-        cache = _normalize_cache(ljson.data)
-        ljson.data.clear()
-        ljson.data.update(cache)
-        files = ljson.data["files"]
         for claude_dir in claude_dirs:
             projects_root = claude_dir / "projects"
             if not projects_root.is_dir():
@@ -721,13 +841,19 @@ __all__ = [
     "PRICING",
     "PRICING_LAST_UPDATED",
     "SUBSCRIPTION_CAVEAT",
+    "TOKEN_FIELDS",
     "Usage",
     "estimate_cost",
     "gc_cache_entries",
     "get_or_compute",
     "is_cache_cold",
+    "lock_and_get_files",
+    "merge_by_model",
+    "merge_usage_bucket",
     "parse_usage",
     "slice_window",
     "walk_jsonl_token_buckets",
     "warm_token_cache_inline",
+    "zero_day_bucket",
+    "zero_model_bucket",
 ]
