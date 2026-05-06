@@ -1,9 +1,9 @@
 """Fleet-aware retro aggregator (Group 8 / Track 8A).
 
-Reads mm-owned event JSONLs from every fleet device, gstack analytics on the
-rendering machine, and produces a glanceable markdown retro mirroring the
-gstack ``/retro`` shape. Imported as ``mind_meld.skills.retro_fleet.aggregator``;
-the public CLI surface is ``mm retro-fleet <window>`` (typer wrapper in
+Reads mm-owned event JSONLs from every fleet device and produces a
+glanceable markdown retro mirroring the gstack ``/retro`` shape.
+Imported as ``mind_meld.skills.retro_fleet.aggregator``; the public CLI
+surface is ``mm retro-fleet <window>`` (typer wrapper in
 ``cli.py:retro_fleet_cmd``). Direct ``python -m
 mind_meld.skills.retro_fleet.aggregator <window>`` works from a development
 checkout but is not what the SKILL.md or documented invocations use — pipx
@@ -14,10 +14,9 @@ Inputs (all tolerant of missing / corrupt / unknown-field files):
 * ``$MM_EVENTS_DIR`` (or ``~/.local/share/mind-meld/events``) — fleet events
   written by ``_run_events_tail`` on every push. v=2 sessions snapshots are
   full inventory (Group 8); v=1 are delta-semantic relics from pre-v0.11.0
-  peers (surfaced in the Notes section, not summed into totals).
-* ``~/.gstack/analytics/skill-usage.jsonl`` — gstack-owned, schema-dependency
-  is load-bearing per the design doc; reader degrades to "Skills section
-  omitted" on absence and tolerates unknown fields.
+  peers (surfaced in the Notes section, not summed into totals). v=2
+  snapshots from v0.11.27+ peers carry ``skills_by_day`` per project;
+  earlier v=2 peers omit it (surfaced as ``pre_skills_peers``).
 * ``mm devices --format=json`` (subprocess) — for the "N of M known machines"
   header AND the phantom-event filter (see ``aggregate``). Failure degrades
   to all-events-counted with a "known-fleet count unavailable" note.
@@ -28,7 +27,12 @@ Aggregation rules:
   repo for top-N.
 * Sessions: pick LATEST v=2 snapshot per ``(device, source_root, claude_dir)``;
   sum across tuples. v=1 snapshots are NOT summed.
-* Skills: as-rendered on this machine; locked-output breadcrumb says so.
+* Skills: walk the same latest-per-tuple set; merge each project's
+  ``skills_by_day`` into a fleet-wide rollup, sliced to the retro window.
+  Pre-v0.11.27 mm peers (``skills_by_day`` key absent on snapshot rows)
+  are flagged into ``pre_skills_peers``; peers with the key present but
+  empty (``{}``) are NOT flagged — empty signals "no Skill usage", not
+  "peer doesn't emit" (D4 from /plan-eng-review 2026-05-06).
 * mm-push: count by (device).
 * Phantom-event filter: when ``mm devices --format=json`` succeeds, intersect
   event-producing IDs with the registered fleet so de-registered or test-
@@ -38,6 +42,13 @@ Aggregation rules:
 Visible-failure contract: data-quality and diagnostic asides are
 consolidated into the tail Notes section so the user sees them in one place
 rather than scattered across each section's body.
+
+Pre-v0.11.27 the Skills section read ``~/.gstack/analytics/skill-usage.jsonl``
+locally and rendered "this machine only". That source was hostage to gstack's
+analytics writer (which silently broke for the user 2026-04-26..2026-05-06)
+and never aggregated across machines. Replaced by Claude Code session jsonls
+which Claude Code writes as a side effect of running the Skill tool — same
+data, fleet-wide, no separate writer to break.
 """
 
 from __future__ import annotations
@@ -71,8 +82,6 @@ DEFAULT_EVENTS_DIR = Path("~/.local/share/mind-meld/events").expanduser()
 ``config.py:_bootstrap_mm_events_path`` materializes on first ``get_sources()``
 call."""
 
-GSTACK_ANALYTICS_DIR = Path("~/.gstack/analytics").expanduser()
-
 V2_SCHEMA_VERSION = 2
 """sessions-snapshot schema version that the aggregator treats as full
 inventory. v=1 is delta-semantic and excluded from sessions totals — see
@@ -85,11 +94,6 @@ deferred to v2."""
 
 TOP_N_REPOS = 5
 TOP_N_SKILLS = 10
-
-JSON_STREAM_MAX_BYTES = 50 * 1024 * 1024
-"""Cap on the foreign-format reader's whole-file slurp. Mirrors mm's default
-``max_file_size``. A runaway gstack analytics file beyond this is treated as
-unparseable rather than slurped into memory — the breadcrumb still surfaces."""
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +149,20 @@ class PushesAggregate:
 class SkillsAggregate:
     invocations: int = 0
     by_skill: dict[str, int] = field(default_factory=dict)
-    available: bool = True  # False when ~/.gstack/analytics/skill-usage.jsonl is absent
+    # ``available`` flips False ONLY when no peer's snapshot in the window
+    # carries a ``skills_by_day`` key (every project on every device omits
+    # the field — the fleet has not yet rolled to v0.11.27+ on any
+    # contributing machine). Renderer emits "Skills section omitted" in
+    # that state instead of "0 invocations". v0.11.27+ semantic:
+    # "available=False" is mid-rollout-with-zero-uptake, NOT "tool
+    # missing" as it was pre-v0.11.27.
+    available: bool = True
+    # Devices whose snapshot rows are missing the ``skills_by_day`` key
+    # entirely (pre-v0.11.27 mm peers). KEY-ABSENT-vs-EMPTY-DICT is the
+    # discriminator (D4 from /plan-eng-review 2026-05-06): empty dict
+    # means "this project has sessions but no Skill blocks" — a content
+    # signal, not a version signal — and does NOT flag the device.
+    pre_skills_peers: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -164,13 +181,12 @@ class FleetState:
     unregistered_event_devices: int = 0
 
 
-# Skip-counter category keys. Kept as constants so call-sites stay
-# consistent and `format_retro` can map each category to a specific
-# breadcrumb message. "events" covers mm-owned event JSONLs (real data
-# quality signal); "skill_usage" covers gstack-owned analytics files
-# (foreign data, format may diverge from JSONL).
+# Skip-counter category key. Kept as a constant so call-sites stay
+# consistent and `format_retro` can map to a specific breadcrumb
+# message. "events" covers mm-owned event JSONLs (real data quality
+# signal). The pre-v0.11.27 ``skill_usage`` category was retired with
+# the gstack-analytics reader.
 SKIP_CATEGORY_EVENTS = "events"
-SKIP_CATEGORY_SKILL_USAGE = "skill_usage"
 
 
 @dataclass
@@ -183,19 +199,15 @@ class RetroData:
     pushes: PushesAggregate = field(default_factory=PushesAggregate)
     skills: SkillsAggregate = field(default_factory=SkillsAggregate)
     fleet: FleetState = field(default_factory=FleetState)
-    # Per-category skip counters. Discriminates mm-owned event parse errors
-    # (real data quality signal) from gstack-owned analytics format issues
-    # (foreign file format, gstack's bug to fix). format_retro renders one
-    # breadcrumb per non-zero entry, naming the affected file.
+    # Per-category skip counters. Today only ``events`` (mm-owned event
+    # parse errors). Pre-v0.11.27 also tracked ``skill_usage`` (gstack
+    # analytics format issues) — retired with the gstack reader.
+    # ``format_retro`` renders one breadcrumb per non-zero entry.
     skipped_per_source: dict[str, int] = field(default_factory=dict)
     # Backwards-compat summed view. Equals sum(skipped_per_source.values()).
     # Pre-existing tests assert on this field; new tests should drill into
     # skipped_per_source to verify category-specific behavior.
     skipped_lines: int = 0
-    # Actual path used for the foreign-format skill-usage reader — threaded
-    # into the breadcrumb so a custom skill_usage_path renders honestly
-    # instead of always pointing at ~/.gstack/analytics/...
-    skill_usage_path: Path | None = None
     window_exceeds_retention: bool = False  # TODO#2 visible-failure breadcrumb
 
 
@@ -239,58 +251,6 @@ def _iter_jsonl(path: Path, *, skip_counter: dict[str, int], category: str) -> I
             yield obj
 
 
-def _iter_json_stream(path: Path, *, skip_counter: dict[str, int], category: str) -> Iterator[dict]:
-    """Yield JSON objects from a file that may be JSONL or multi-line JSON.
-
-    Used for gstack-owned analytics files where the on-disk format isn't
-    fully under mm's control. Reads the whole file as text, then walks it
-    with ``json.JSONDecoder.raw_decode`` — handles single-line-per-object
-    (canonical JSONL) AND pretty-printed objects spanning multiple lines.
-    On a malformed chunk, advances to the next newline and retries (so a
-    single broken record doesn't poison the rest of the file).
-
-    Each parseable dict is yielded; non-dict values, malformed chunks,
-    and file-open failures bump ``skip_counter[category]``. Never raises.
-
-    Files larger than ``JSON_STREAM_MAX_BYTES`` bump the skip counter and
-    return without slurping — protects against a runaway analytics file
-    spiking aggregator memory.
-    """
-    try:
-        if path.stat().st_size > JSON_STREAM_MAX_BYTES:
-            _bump(skip_counter, category)
-            return
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        _bump(skip_counter, category)
-        return
-    decoder = json.JSONDecoder()
-    pos = 0
-    n = len(text)
-    while pos < n:
-        while pos < n and text[pos].isspace():
-            pos += 1
-        if pos >= n:
-            break
-        try:
-            obj, end = decoder.raw_decode(text, pos)
-        except json.JSONDecodeError:
-            # Skip the unparseable chunk. Advance to the next newline so
-            # one bad record doesn't suppress the rest of the file. If no
-            # newline remains, the rest of the file is unrecoverable.
-            nl = text.find("\n", pos)
-            _bump(skip_counter, category)
-            if nl == -1:
-                return
-            pos = nl + 1
-            continue
-        if isinstance(obj, dict):
-            yield obj
-        else:
-            _bump(skip_counter, category)
-        pos = end
-
-
 def _read_events(events_dir: Path, *, skip_counter: dict[str, int]) -> Iterator[dict]:
     """Iterate every line of every ``*.jsonl`` under ``events_dir``.
 
@@ -308,16 +268,6 @@ def _read_events(events_dir: Path, *, skip_counter: dict[str, int]) -> Iterator[
         return
     for f in files:
         yield from _iter_jsonl(f, skip_counter=skip_counter, category=SKIP_CATEGORY_EVENTS)
-
-
-def _read_skill_usage(path: Path, *, skip_counter: dict[str, int]) -> tuple[bool, list[dict]]:
-    """Return (available, events). available=False when the file is absent
-    (no gstack on this machine — section omitted from output)."""
-    if not path.is_file():
-        return False, []
-    return True, list(
-        _iter_json_stream(path, skip_counter=skip_counter, category=SKIP_CATEGORY_SKILL_USAGE)
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -480,12 +430,18 @@ def aggregate_sessions(
     *,
     since: datetime,
     until: datetime,
-) -> SessionsAggregate:
+) -> tuple[SessionsAggregate, SkillsAggregate]:
     """Pick the LATEST v=2 sessions-snapshot per (device, source_root,
     claude_dir) within the window, then filter to projects whose
     ``last_session_at`` falls inside the window — sum across that filtered
     set. v=1 snapshots flag the device as pre-v2 but contribute zero to
     totals.
+
+    Returns ``(SessionsAggregate, SkillsAggregate)`` since both views are
+    derived from the same per-project iteration: token / session counts
+    on the sessions side, ``skills_by_day`` rollup on the skills side.
+    Splitting the iteration would double the work for no benefit (D5 from
+    /plan-eng-review 2026-05-06).
 
     Three-tuple key (Group 8 hotfix). Pre-fix the key was ``(device,
     claude_dir)`` where ``claude_dir`` is the encoded directory NAME. Two
@@ -519,6 +475,12 @@ def aggregate_sessions(
     boundaries but stops the silent all-time-data-in-7-day-retro corruption.
     """
     out = SessionsAggregate()
+    # ``available`` flips True the moment any project carries the
+    # ``skills_by_day`` key (regardless of whether the dict is empty);
+    # stays False when EVERY contributing project lacks the field
+    # (whole-fleet pre-v0.11.27). Renderer uses this to switch between
+    # "Skills section omitted" and the rendered counts.
+    skills = SkillsAggregate(available=False)
     # latest[(device, source_root, claude_dir)] = (ts_dt, project_dict)
     latest: dict[tuple[str, str, str], tuple[datetime, dict]] = {}
     for ev in events:
@@ -616,7 +578,54 @@ def aggregate_sessions(
             # cold (autopush gate skipped the token walk this push). Same
             # user-visible signal: "tokens incomplete: device X."
             out.pre_token_peers.add(device)
-    return out
+
+        # Skill aggregation (v0.11.27+). KEY-ABSENT-vs-EMPTY-DICT is the
+        # discriminator (D4 from /plan-eng-review 2026-05-06). Absent
+        # ⇒ peer on pre-v0.11.27 mm; empty ⇒ "no Skill usage in window"
+        # which is a content signal, not a version signal.
+        if "skills_by_day" not in proj:
+            skills.pre_skills_peers.add(device)
+        else:
+            skills.available = True  # at least one project ships the field
+            skills_by_day = proj["skills_by_day"]
+            if isinstance(skills_by_day, dict):
+                _merge_skill_window(skills, skills_by_day, since=since, until=until)
+
+    return out, skills
+
+
+def _merge_skill_window(
+    out: SkillsAggregate,
+    skills_by_day: dict,
+    *,
+    since: datetime,
+    until: datetime,
+) -> None:
+    """Sum the day buckets whose YYYY-MM-DD key falls in [since, until]
+    into ``out``'s skill fields. Honest "skills invoked THIS WINDOW"
+    semantics — mirrors ``_merge_token_window``.
+
+    Tolerant of every shape: non-string day keys, non-dict buckets, non-
+    string skill names, non-int counts (coerced via ``_safe_int``).
+    Skill name sanitization happens at RENDER time, not here — raw bytes
+    must match across machines for fleet aggregation to be deterministic
+    (the same trust-boundary placement as ``tokens_by_model`` / model id
+    sanitization)."""
+    since_d = since.astimezone(timezone.utc).date().isoformat()
+    until_d = until.astimezone(timezone.utc).date().isoformat()
+    for day_key, bucket in skills_by_day.items():
+        if not isinstance(day_key, str) or not (since_d <= day_key <= until_d):
+            continue
+        if not isinstance(bucket, dict):
+            continue
+        for skill, count in bucket.items():
+            if not isinstance(skill, str) or not skill:
+                continue
+            n = _safe_int(count)
+            if n <= 0:
+                continue
+            out.invocations += n
+            out.by_skill[skill] = out.by_skill.get(skill, 0) + n
 
 
 def _merge_token_window(
@@ -705,29 +714,12 @@ def aggregate_pushes(
 
 
 # ---------------------------------------------------------------------------
-# Skills aggregation — gstack analytics, single machine view.
+# Skills aggregation — see ``aggregate_sessions``: skills come from the
+# same per-project iteration. v0.11.27+ removed the standalone
+# ``aggregate_skills`` reader (was: gstack analytics file, this-machine-
+# only). The fleet-wide source is each peer's ``skills_by_day`` field
+# on the v=2 sessions-snapshot event.
 # ---------------------------------------------------------------------------
-
-
-def aggregate_skills(
-    available: bool,
-    events: Iterable[dict],
-    *,
-    since: datetime,
-    until: datetime,
-) -> SkillsAggregate:
-    out = SkillsAggregate(available=available)
-    if not available:
-        return out
-    for ev in events:
-        if not _within_window(ev.get("ts"), since, until):
-            continue
-        skill = ev.get("skill")
-        if not isinstance(skill, str) or not skill:
-            continue
-        out.invocations += 1
-        out.by_skill[skill] = out.by_skill.get(skill, 0) + 1
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -827,7 +819,6 @@ def aggregate(
     events_dir: Path,
     window_days: int,
     author_emails: frozenset[str] | None,
-    skill_usage_path: Path,
     now: datetime | None = None,
 ) -> RetroData:
     """Read every input source, aggregate per the locked rules, return the
@@ -850,13 +841,12 @@ def aggregate(
     until = now or datetime.now(timezone.utc)
     since = until - timedelta(days=window_days)
 
-    # Per-category skip counters. Discriminates mm-owned event parse errors
-    # from gstack-owned analytics format issues so the tail breadcrumb can
-    # name the affected file instead of conflating them under one count.
+    # Per-category skip counters. Today only ``events`` (mm-owned event
+    # parse errors). The pre-v0.11.27 ``skill_usage`` category was
+    # retired with the gstack-analytics reader.
     skip_counter: dict[str, int] = {}
 
     events = list(_read_events(events_dir, skip_counter=skip_counter))
-    skill_avail, skill_events = _read_skill_usage(skill_usage_path, skip_counter=skip_counter)
 
     # Fleet-wide trust set (v0.11.17): union every peer's ``local_emails``
     # field across all mm-push events on disk, then OR-in the running
@@ -869,9 +859,8 @@ def aggregate(
         effective_emails = frozenset(author_emails | fleet_emails)
 
     git = aggregate_git(events, since=since, until=until, author_emails=effective_emails)
-    sessions = aggregate_sessions(events, since=since, until=until)
+    sessions, skills = aggregate_sessions(events, since=since, until=until)
     pushes = aggregate_pushes(events, since=since, until=until)
-    skills = aggregate_skills(skill_avail, skill_events, since=since, until=until)
 
     devices_known, devices_known_list = get_known_devices()
 
@@ -922,7 +911,6 @@ def aggregate(
         ),
         skipped_per_source=dict(skip_counter),
         skipped_lines=sum(skip_counter.values()),
-        skill_usage_path=skill_usage_path,
         window_exceeds_retention=window_days > EVENTS_RETENTION_DAYS,
     )
 
@@ -1209,17 +1197,24 @@ def format_retro(data: RetroData) -> str:
         _render_token_block(lines, data.sessions)
     lines.append("")
 
-    # Skills used (this machine only).
-    lines.append(f"## Skills used ({data.skills.invocations} invocations) — *this machine only*")
+    # Skills used — fleet-wide as of v0.11.27 (was: this-machine-only via
+    # gstack analytics file). Sanitize each skill name at render time —
+    # peer-controlled string crossing the trust boundary into LLM-consumed
+    # markdown. Same defense-in-depth as model-name sanitization in the
+    # token block.
+    lines.append(f"## Skills used ({data.skills.invocations} invocations)")
     if not data.skills.available:
-        lines.append("- *gstack analytics not found on this machine — section omitted.*")
+        lines.append(
+            "- *No fleet device has shipped skill data yet — section omitted "
+            "(upgrade peers to v0.11.27+ for fleet-wide skill counts).*"
+        )
     elif data.skills.invocations == 0:
         lines.append("- No skill invocations captured.")
     else:
         top = sorted(data.skills.by_skill.items(), key=lambda kv: kv[1], reverse=True)[
             :TOP_N_SKILLS
         ]
-        formatted = ", ".join(f"/{s} ({n})" for s, n in top)
+        formatted = ", ".join(f"/{_safe_short(s)} ({n})" for s, n in top)
         lines.append(f"- {formatted}")
     lines.append("")
 
@@ -1247,6 +1242,12 @@ def format_retro(data: RetroData) -> str:
             f"cache — upgrade and/or run `mm push` on those machines for accurate "
             f"token totals."
         )
+    if data.skills.pre_skills_peers:
+        n_skills = len(data.skills.pre_skills_peers)
+        notes.append(
+            f"Skills incomplete: {n_skills} peer(s) on pre-v0.11.27 — upgrade for "
+            f"accurate skill totals."
+        )
     # Unpriced-model breadcrumb. Models present in the fleet's
     # ``tokens_by_model`` but missing from the pricing table contribute to
     # the displayed token totals (they're real API traffic) but are skipped
@@ -1270,16 +1271,10 @@ def format_retro(data: RetroData) -> str:
             f"mm: notice: stderr breadcrumbs."
         )
     n_events = data.skipped_per_source.get(SKIP_CATEGORY_EVENTS, 0)
-    n_skill = data.skipped_per_source.get(SKIP_CATEGORY_SKILL_USAGE, 0)
     if n_events:
         notes.append(
             f"{n_events} event(s) skipped due to parse errors in mm event log. "
             f"Output may be incomplete."
-        )
-    if n_skill:
-        skill_label = str(data.skill_usage_path) if data.skill_usage_path else "skill-usage.jsonl"
-        notes.append(
-            f"{n_skill} record(s) skipped in {skill_label} (gstack file format issue, not mm)."
         )
     # Backward-compat fallback for foreign callers that set skipped_lines
     # without populating skipped_per_source. aggregate() always populates
@@ -1424,7 +1419,6 @@ def main(argv: list[str] | None = None) -> int:
         events_dir=events_dir,
         window_days=args.window,
         author_emails=author_emails,
-        skill_usage_path=GSTACK_ANALYTICS_DIR / "skill-usage.jsonl",
     )
     sys.stdout.write(format_retro(data))
     return 0

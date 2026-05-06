@@ -201,6 +201,37 @@ is emitted explicitly when the running machine has no configured
 identities, distinguishable on the wire from "pre-v0.11.17 peer with
 no field at all."
 
+**`SessionMetadata.skills_by_day` schema is `dict[str, dict[str, int]]`
+(additive on v=2, total=False, no schema bump).** Same additive-field
+precedent as `tokens_by_day` (v0.11.14) and `local_emails` (v0.11.17).
+Walked from each Claude Code session jsonl's assistant `tool_use` blocks
+where `name == "Skill"`. Subagent invocations attribute to the parent
+project's bucket (mirrors token attribution).
+
+**KEY-ABSENT vs EMPTY-DICT discriminator (v0.11.27).** The
+aggregator's `pre_skills_peers` flag uses `"skills_by_day" not in proj`,
+NOT `proj.get("skills_by_day")` falsy-check. **Critical difference vs.
+`pre_token_peers`:** every session generates tokens, so the existing
+token check (missing OR empty AND sessions > 0) is correct. Skills are
+different — a session can legitimately invoke zero skills, so an empty
+`{}` is a content signal ("no skills used in window"), not a version
+signal. Conflating the two would surface "Skills incomplete" on every
+retro for users who don't lean on skills. `events.py:_scan_one_project`
+ALWAYS sets `meta["skills_by_day"]` (possibly to `{}`) when
+`token_cache_files` is provided, so the absence-test on the wire is
+reliable. Pinned by `test_skills_by_day_empty_dict_when_no_skill_blocks`
+and `test_d4_empty_skills_dict_does_not_flag_pre_skills_peer`.
+
+**Cache shape upgrade gate (D2 from /plan-eng-review 2026-05-06).**
+`token_usage.get_or_compute` checks `"skills_by_day" in entry` on the
+size/mtime cache hit — pre-v0.11.27 entries match size/mtime but lack
+the field, so they fall through to a fresh walk. NOT a `CACHE_VERSION`
+bump (would invalidate token data fleet-wide unnecessarily). One-time
+post-upgrade re-walk gated by the existing 5s warm budget. Token data
+is preserved byte-identical because `walk_jsonl_buckets` re-derives
+both views from the same source. Pinned by
+`test_d2_old_entry_without_skills_field_triggers_rewalk`.
+
 **Cache file mode 0600 (lockedjson contract).** Identity data isn't
 secret but is per-user. Mirrors `token_usage` and `upgrade-state`
 cache permissions. Tests pin via `os.stat(...).st_mode & 0o777`.

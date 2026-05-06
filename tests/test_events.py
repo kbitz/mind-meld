@@ -951,3 +951,141 @@ class TestTokenAggregationHook:
         )
         # No sessions (no parent jsonls) → no project rendered.
         assert out[0]["projects"] == []
+
+
+class TestSkillsAggregationHook:
+    """Pin events.py's wiring of skill detection (v0.11.27 fleet-skill plan,
+    tests #8 / #9 / #10 from /plan-eng-review 2026-05-06).
+
+    Same parent-project attribution as tokens. KEY-PRESENT-VALUE-EMPTY is
+    the discriminator the aggregator's mixed-fleet flag relies on.
+    """
+
+    def _write_session_jsonl_with_skills(self, path, *, skills, msg_id="m1"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = [
+            {
+                "type": "tool_use",
+                "id": f"toolu_{i}",
+                "name": "Skill",
+                "input": {"skill": s, "args": ""},
+            }
+            for i, s in enumerate(skills)
+        ]
+        path.write_text(
+            json.dumps(
+                {
+                    "message": {
+                        "id": msg_id,
+                        "role": "assistant",
+                        "model": "claude-opus-4-7",
+                        "content": content,
+                        "usage": {
+                            "input_tokens": 1,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "output_tokens": 1,
+                        },
+                    },
+                    "timestamp": "2026-05-01T12:00:00.000Z",
+                }
+            )
+            + "\n"
+        )
+
+    def _write_session_jsonl_no_skills(self, path, msg_id="m1"):
+        """A normal token-only assistant message — no Skill blocks."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "message": {
+                        "id": msg_id,
+                        "role": "assistant",
+                        "model": "claude-opus-4-7",
+                        "usage": {
+                            "input_tokens": 100,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "output_tokens": 50,
+                        },
+                    },
+                    "timestamp": "2026-05-01T12:00:00.000Z",
+                }
+            )
+            + "\n"
+        )
+
+    def test_skills_by_day_populated_when_blocks_present(self, tmp_path):
+        """Plan test #8: parent jsonl has 2 Skill blocks → meta has
+        ``skills_by_day`` populated."""
+        proj = tmp_path / "projects" / "-tmp-proj"
+        proj.mkdir(parents=True)
+        self._write_session_jsonl_with_skills(proj / "session.jsonl", skills=["ship", "review"])
+        cache_files: dict = {}
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            token_cache_files=cache_files,
+        )
+        meta = out[0]["projects"][0]
+        assert "skills_by_day" in meta
+        assert meta["skills_by_day"] == {"2026-05-01": {"ship": 1, "review": 1}}
+
+    def test_skills_by_day_empty_dict_when_no_skill_blocks(self, tmp_path):
+        """Plan test #9 (D4 correctness gate): project with sessions but no
+        Skill blocks emits ``skills_by_day == {}`` — KEY PRESENT, value
+        empty. The aggregator's mixed-fleet flag uses ``"skills_by_day"
+        not in proj`` to discriminate pre-v0.11.27 peers from no-skill-
+        activity sessions; this test pins that discriminator."""
+        proj = tmp_path / "projects" / "-tmp-proj"
+        proj.mkdir(parents=True)
+        self._write_session_jsonl_no_skills(proj / "session.jsonl")
+        cache_files: dict = {}
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            token_cache_files=cache_files,
+        )
+        meta = out[0]["projects"][0]
+        assert "skills_by_day" in meta  # KEY PRESENT
+        assert meta["skills_by_day"] == {}  # VALUE EMPTY
+
+    def test_subagent_skill_attribution_to_parent_project(self, tmp_path):
+        """Plan test #10 (D5#3): parent jsonl has 2 Skill blocks; subagent
+        jsonl at ``<encoded>/<uuid>/subagents/agent-X.jsonl`` has 1 Skill
+        block. ``_scan_one_project`` must attribute all 3 invocations to
+        the parent project's ``skills_by_day`` (mirrors token attribution
+        rule). Refactor footgun gate: if a future structural change in
+        ``_aggregate_jsonl_views_for_project`` breaks subagent attribution
+        for skills, this test fails."""
+        proj = tmp_path / "projects" / "-tmp-proj"
+        proj.mkdir(parents=True)
+        # Parent: 2 Skill blocks, 1 message.
+        self._write_session_jsonl_with_skills(
+            proj / "parent-session.jsonl",
+            skills=["ship", "plan-eng-review"],
+            msg_id="parent_m1",
+        )
+        # Subagent: 1 Skill block, different message.id (must not dedup
+        # against parent).
+        sub_dir = proj / "parent-uuid" / "subagents"
+        sub_dir.mkdir(parents=True)
+        self._write_session_jsonl_with_skills(
+            sub_dir / "agent-X.jsonl",
+            skills=["review"],
+            msg_id="sub_m1",
+        )
+        cache_files: dict = {}
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            token_cache_files=cache_files,
+        )
+        meta = out[0]["projects"][0]
+        # All 3 invocations attributed to the parent project's bucket.
+        assert meta["skills_by_day"] == {
+            "2026-05-01": {"ship": 1, "plan-eng-review": 1, "review": 1}
+        }
+        # Sessions count is parent-only (subagent doesn't bump).
+        assert meta["sessions"] == 1

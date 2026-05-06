@@ -76,6 +76,13 @@ omitted when there is nothing to surface):
 - `Sessions count incomplete: N peer(s) on pre-v0.11.0` — those peers still
   emit v=1 sessions snapshots (delta semantics). Their session totals are
   honestly omitted instead of double-counted.
+- `Tokens incomplete: N peer(s) on pre-v0.11.14 OR with cold token cache` —
+  those peers' v=2 snapshots omit ``tokens_by_day``. Run `mm push` on the
+  named peers to rebuild the cache.
+- `Skills incomplete: N peer(s) on pre-v0.11.27` — those peers' v=2
+  snapshots omit ``skills_by_day``. Upgrade and `mm push` to repopulate.
+  *(Distinct from "no skills used this window" — empty-dict rows from
+  v0.11.27+ peers do NOT trigger this.)*
 - `N event(s) skipped due to parse errors in mm event log.` — torn JSONL
   lines were skipped. Output is partial.
 - `Requested Nd window exceeds the 90-day events retention.` — user asked
@@ -109,12 +116,10 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
 - It does not include sessions from machines that haven't yet upgraded to mm
   v0.11.0+ (those peers emit pre-v=2 snapshots). The Notes section names
   which peers need to upgrade.
-- It does not aggregate `~/.gstack/analytics/` data across the fleet. Skill
-  invocation counts are read locally only — the section is labeled "this
-  machine only".
-- It does not currently measure Claude Code token usage. Adding it is a
-  known follow-up — would require summing `message.usage` from each session
-  jsonl into a v=3 sessions-snapshot field, with a per-file sidecar cache
-  to stay under the events-tail wall-clock budget.
+- It does not include skill counts from machines on pre-v0.11.27 (those peers'
+  sessions-snapshot rows omit ``skills_by_day``). The Notes section names
+  which peers need to upgrade. Cross-machine skill counts come from each
+  peer's Claude Code session jsonls (the same source it walks for tokens) —
+  not from gstack analytics.
 - It does not save the output to a file. `> /tmp/retro.md` is the v1 save
   story. A `--save` flag is deferred to v2.

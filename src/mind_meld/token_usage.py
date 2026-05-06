@@ -1,12 +1,25 @@
-"""Per-jsonl Claude Code token-usage measurement for fleet-aware retro.
+"""Per-jsonl Claude Code token-usage + skill-invocation measurement for
+fleet-aware retro.
 
 Walks ``~/.claude/projects/<encoded>/<uuid>.jsonl`` (parent sessions) and
-``<uuid>/subagents/agent-*.jsonl`` (subagent invocations), summing
-``message.usage`` from each assistant message into per-day buckets keyed
-by the message's ``timestamp`` field. Per-jsonl cache at
-``~/.config/mind-meld/session-tokens.json`` (flock-guarded via
-``mind_meld.lockedjson``) skips re-walks when ``size`` and ``mtime``
-haven't drifted.
+``<uuid>/subagents/agent-*.jsonl`` (subagent invocations), producing two
+views in ONE I/O pass:
+
+  1. Token usage: sum ``message.usage`` from each assistant message into
+     per-day buckets keyed by ``timestamp``. Per-model breakdown nested
+     under ``by_model``.
+  2. Skill invocations: detect each assistant ``tool_use`` block with
+     ``name == "Skill"``, count by ``input.skill`` per day. Subagent skill
+     invocations roll into the parent project's bucket via the same
+     attribution rule used for tokens.
+
+Per-jsonl cache at ``~/.config/mind-meld/session-tokens.json`` (flock-
+guarded via ``mind_meld.lockedjson``) skips re-walks when ``size`` and
+``mtime`` haven't drifted. v0.11.27+ entries carry both ``by_day`` and
+``skills_by_day`` fields. Pre-v0.11.27 entries lack ``skills_by_day``;
+the shape-upgrade gate in ``get_or_compute`` re-walks any such entry
+once to populate both views (D2 from /plan-eng-review 2026-05-06).
+Token data is preserved unchanged on the rebuild.
 
 Pricing dict is module-level. ``PRICING_LAST_UPDATED`` flags refresh
 cadence — if more than 6 months stale, verify against Anthropic's pricing
@@ -177,12 +190,20 @@ class DayBucket(TypedDict, total=False):
     by_model: dict[str, Usage]
 
 
+SkillBuckets = dict[str, dict[str, int]]
+"""Per-day skill invocation counts: ``{YYYY-MM-DD: {skill_name: count}}``.
+Bounded by ``MAX_BY_DAY_DAYS``. Skill names are stored verbatim (the raw
+bytes from peer jsonls); sanitization happens at render time so cross-
+machine aggregation matches byte-for-byte."""
+
+
 class CacheEntry(TypedDict, total=False):
     """One per-jsonl entry in session-tokens.json."""
 
     size: int
     mtime: float
     by_day: dict[str, DayBucket]
+    skills_by_day: SkillBuckets
 
 
 # ---------------------------------------------------------------------------
@@ -304,24 +325,46 @@ def _coerce_int(v: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def walk_jsonl_token_buckets(path: Path) -> dict[str, DayBucket]:
-    """Walk a single jsonl, sum per-message ``usage`` into per-day buckets.
+def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
+    """Walk a single jsonl in ONE I/O pass, producing both views:
 
-    Returns a dict keyed by ``YYYY-MM-DD`` (UTC), capped at the most recent
-    ``MAX_BY_DAY_DAYS`` days. Day bucket has top-level totals plus a
-    ``by_model`` map.
+      - Token by_day: ``{YYYY-MM-DD: DayBucket}`` summed from
+        ``message.usage`` on assistant messages.
+      - Skill skills_by_day: ``{YYYY-MM-DD: {skill_name: count}}`` from
+        each assistant ``tool_use`` block with ``name == "Skill"``.
 
-    Skips:
+    Both views capped to the most recent ``MAX_BY_DAY_DAYS`` days.
+
+    Token dedup is by ``message.id`` — Claude Code logs each model
+    iteration as a separate jsonl line under the same ``message.id``,
+    and the ``usage`` field on each iteration is the SAME cumulative
+    total. Walking each iteration would double-count tokens.
+
+    Skill dedup is by ``tool_use.id`` (independently of message dedup).
+    Each iteration of an assistant message produces DIFFERENT content
+    blocks: the first iteration may be text-only, the second may carry
+    the Skill tool_use block. They share ``message.id``, so deduping
+    skills by message.id would drop the second iteration entirely
+    (the bug we caught at smoke-test time on real Claude Code data).
+    Tool-use ids are Anthropic's ``toolu_*`` format and unique across
+    the session.
+
+    Skips (both views):
       - non-JSON lines (``json.JSONDecodeError``)
       - non-assistant messages
-      - duplicate ``message.id`` UUIDs (retries / compaction artifacts)
       - messages without a parseable ``timestamp``
 
-    Returns ``{}`` on any I/O failure — caller treats as cache miss for
-    next push.
+    Skill detection ignores blocks where ``input`` is not a dict, or
+    ``input.skill`` is not a non-empty string. Tool_use blocks for
+    other tools (Edit, Bash, etc.) are not counted.
+
+    Returns ``({}, {})`` on any I/O failure — caller treats as cache
+    miss for next push.
     """
     by_day: dict[str, DayBucket] = {}
-    seen_ids: set[str] = set()
+    skills_by_day: SkillBuckets = {}
+    seen_msg_ids: set[str] = set()
+    seen_tool_ids: set[str] = set()
     path_str = str(path)
     try:
         with open(path, encoding="utf-8") as fp:
@@ -342,17 +385,103 @@ def walk_jsonl_token_buckets(path: Path) -> dict[str, DayBucket]:
                 if parsed is None:
                     continue
                 usage, model, msg_id = parsed
-                if msg_id is not None:
-                    if msg_id in seen_ids:
-                        continue
-                    seen_ids.add(msg_id)
                 day = _extract_day(obj.get("timestamp"))
                 if day is None:
                     continue
-                _accumulate(by_day, day, usage, model)
+                # Token side: dedup by message.id (each iteration carries
+                # the same cumulative usage; counting twice would double).
+                if msg_id is None or msg_id not in seen_msg_ids:
+                    if msg_id is not None:
+                        seen_msg_ids.add(msg_id)
+                    _accumulate(by_day, day, usage, model)
+                # Skill side: dedup by tool_use.id (each iteration may
+                # contribute DIFFERENT tool_use blocks under the same
+                # message.id; deduping by message.id loses them).
+                _accumulate_skills(skills_by_day, day, msg, seen_tool_ids)
     except OSError:
-        return {}
-    return _trim_by_day(by_day, MAX_BY_DAY_DAYS)
+        return {}, {}
+    return _trim_by_day(by_day, MAX_BY_DAY_DAYS), _trim_skills_by_day(
+        skills_by_day, MAX_BY_DAY_DAYS
+    )
+
+
+def walk_jsonl_token_buckets(path: Path) -> dict[str, DayBucket]:
+    """Backwards-compat shim for callers that only want the token view.
+
+    Pre-v0.11.27 this was the canonical walker. Now ``walk_jsonl_buckets``
+    is canonical and returns both views; this shim drops the skill view.
+    Tests + external callers that pre-date the skill view continue to
+    work unchanged. New code should call ``walk_jsonl_buckets`` directly.
+    """
+    by_day, _ = walk_jsonl_buckets(path)
+    return by_day
+
+
+def _accumulate_skills(
+    skills_by_day: SkillBuckets,
+    day: str,
+    msg: Any,
+    seen_tool_ids: set[str],
+) -> None:
+    """Walk an assistant ``message.content`` list for ``tool_use`` blocks
+    where ``name == "Skill"`` and bump ``skills_by_day[day][skill_name]``.
+
+    Dedup by ``tool_use.id`` (Anthropic ``toolu_*`` format) — each
+    iteration of an assistant message may emit different content blocks
+    under the same ``message.id``, so message-id dedup drops legitimate
+    skill calls. Tool-use ids are unique per call; deduping by them
+    handles both the streaming-iteration case (different tool_use ids
+    per iteration → all counted) and the rare retry case (same tool_use
+    id → counted once).
+
+    Tolerant of every shape:
+      - non-dict message → skip
+      - non-list content → skip
+      - non-dict block → skip
+      - block.type != "tool_use" → skip (ignore, no error)
+      - block.name != "Skill" → skip (other tools, not counted)
+      - block.id missing/non-string → still count, just no dedup possible
+        (degrade to over-count rather than under-count if the id format
+        ever changes)
+      - input not a dict, input.skill non-string or empty → skip silently
+    """
+    if not isinstance(msg, dict):
+        return
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return
+    bucket = skills_by_day.setdefault(day, {})
+    for blk in content:
+        if not isinstance(blk, dict):
+            continue
+        if blk.get("type") != "tool_use" or blk.get("name") != "Skill":
+            continue
+        inp = blk.get("input")
+        if not isinstance(inp, dict):
+            continue
+        skill = inp.get("skill")
+        if not isinstance(skill, str) or not skill:
+            continue
+        tool_id = blk.get("id")
+        if isinstance(tool_id, str) and tool_id:
+            if tool_id in seen_tool_ids:
+                continue
+            seen_tool_ids.add(tool_id)
+        bucket[skill] = bucket.get(skill, 0) + 1
+
+
+def _trim_skills_by_day(skills_by_day: SkillBuckets, max_days: int) -> SkillBuckets:
+    """Cap skills_by_day to the most recent ``max_days`` keys.
+
+    Iso-8601 dates lex-sort identically to date-sort; safe without parsing.
+    Empty per-day buckets (set up by ``_accumulate_skills`` for days with
+    assistant messages but no Skill blocks) are dropped — empty maps are
+    noise both in the cache and in the rendered output."""
+    pruned = {k: v for k, v in skills_by_day.items() if v}
+    if len(pruned) <= max_days:
+        return pruned
+    keep_keys = sorted(pruned.keys(), reverse=True)[:max_days]
+    return {k: pruned[k] for k in keep_keys}
 
 
 def _iter_bounded_lines(fp, path_str: str) -> Iterable[str]:
@@ -455,15 +584,21 @@ def get_or_compute(
     cache_files: dict[str, Any],
     *,
     deadline_monotonic: float | None = None,
-) -> dict[str, DayBucket]:
-    """Return ``by_day`` for ``path``, hitting the cache when possible.
+) -> tuple[dict[str, DayBucket], SkillBuckets]:
+    """Return ``(by_day, skills_by_day)`` for ``path``, hitting the cache
+    when possible.
 
     Mutates ``cache_files`` in place: on a miss, the new entry is stored.
     Caller passes the ``files`` sub-dict of the locked cache; the helper's
     one job is to populate it consistently.
 
     Cache hit semantics: same ``size`` AND same ``mtime`` (within 1µs)
-    → reuse cached ``by_day``.
+    AND ``skills_by_day`` field present → reuse cached views. The
+    field-presence requirement is the v0.11.27 shape-upgrade gate (D2
+    from /plan-eng-review 2026-05-06): pre-v0.11.27 cache entries lack
+    the field; we re-walk those once to populate both views in one I/O
+    pass. Token data is preserved across the rebuild because
+    ``walk_jsonl_buckets`` re-derives both from the same source.
 
     Concurrent append safety: stat once, walk, stat again. If size or
     mtime drifted during the walk, treat as a miss and DO NOT persist
@@ -472,7 +607,9 @@ def get_or_compute(
 
     Deadline: if ``deadline_monotonic`` is set and we hit it BEFORE
     starting the walk, return whatever's cached (or empty) without
-    touching the cache.
+    touching the cache. Pre-v0.11.27 entries (no skills field) return
+    cached tokens + ``{}`` skills under deadline pressure — first
+    push under budget completes the upgrade.
     """
     if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
         # Out of budget — return cached value if present, else empty.
@@ -480,43 +617,63 @@ def get_or_compute(
         existing = cache_files.get(key)
         if isinstance(existing, dict):
             by_day = existing.get("by_day")
-            if isinstance(by_day, dict):
-                return by_day
-        return {}
+            sk = existing.get("skills_by_day")
+            return (
+                by_day if isinstance(by_day, dict) else {},
+                sk if isinstance(sk, dict) else {},
+            )
+        return {}, {}
 
     key = _resolve_path(path)
     try:
         st_pre = path.stat()
     except OSError:
-        return {}
+        return {}, {}
     size_pre = st_pre.st_size
     mtime_pre = st_pre.st_mtime
 
     existing = cache_files.get(key)
     if isinstance(existing, dict):
-        if existing.get("size") == size_pre and existing.get("mtime") == mtime_pre:
+        # D2 shape-upgrade gate: ``"skills_by_day" in existing`` is the
+        # version discriminator. Pre-v0.11.27 entries match size/mtime
+        # but lack the field → fall through to walk. Token data on
+        # those entries is identical to what the walk re-derives.
+        if (
+            existing.get("size") == size_pre
+            and existing.get("mtime") == mtime_pre
+            and "skills_by_day" in existing
+        ):
             by_day = existing.get("by_day")
-            if isinstance(by_day, dict):
+            sk = existing.get("skills_by_day")
+            if isinstance(by_day, dict) and isinstance(sk, dict):
                 # Trim again on read: prevents unbounded growth in long
                 # sessions whose cache entry was written before the cap
                 # logic existed (forward-defense).
-                return _trim_by_day(by_day, MAX_BY_DAY_DAYS)
+                return (
+                    _trim_by_day(by_day, MAX_BY_DAY_DAYS),
+                    _trim_skills_by_day(sk, MAX_BY_DAY_DAYS),
+                )
 
     # Miss: walk + maybe persist.
-    by_day = walk_jsonl_token_buckets(path)
+    by_day, skills_by_day = walk_jsonl_buckets(path)
 
     # Re-stat: detect concurrent append. If drift, skip persistence.
     try:
         st_post = path.stat()
     except OSError:
-        return by_day
+        return by_day, skills_by_day
     if st_post.st_size != size_pre or st_post.st_mtime != mtime_pre:
         # File grew or was rewritten while we walked. Don't trust this
         # entry; let the next push re-walk a stable file.
-        return by_day
+        return by_day, skills_by_day
 
-    cache_files[key] = {"size": size_pre, "mtime": mtime_pre, "by_day": by_day}
-    return by_day
+    cache_files[key] = {
+        "size": size_pre,
+        "mtime": mtime_pre,
+        "by_day": by_day,
+        "skills_by_day": skills_by_day,
+    }
+    return by_day, skills_by_day
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +998,7 @@ __all__ = [
     "PRICING",
     "PRICING_LAST_UPDATED",
     "SUBSCRIPTION_CAVEAT",
+    "SkillBuckets",
     "TOKEN_FIELDS",
     "Usage",
     "estimate_cost",
@@ -852,6 +1010,7 @@ __all__ = [
     "merge_usage_bucket",
     "parse_usage",
     "slice_window",
+    "walk_jsonl_buckets",
     "walk_jsonl_token_buckets",
     "warm_token_cache_inline",
     "zero_day_bucket",
