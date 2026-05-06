@@ -91,6 +91,14 @@ def locked_json_rmw(
     cannot observe a torn write. We do NOT use a temp-file-rename pattern
     because the flock already provides the atomicity guarantee, and the
     rename pattern would invalidate other holders' fd-keyed locks.
+
+    Track 10A note (/plan-eng-review 2026-05-06): a `skip_unchanged_write`
+    optimization was added then reverted. Empirical measurement on the
+    real 356KB session-tokens cache showed sha256(json.dumps(...)) twice
+    per context cost ~3.3ms, exceeding the ~2.0ms cost of an always-write.
+    `_write_json` doesn't fsync — `os.write` to the kernel buffer is
+    fast — so the dump dominates and hashing twice was net-negative.
+    Always-write is the right design.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, mode)
