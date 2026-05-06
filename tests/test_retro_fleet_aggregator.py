@@ -1824,6 +1824,185 @@ class TestTokenBlockRender:
         assert "Tokens incomplete: 1 peer(s)" in out
 
 
+class TestSyntheticAndUnpricedTokens:
+    """v0.11.22: displayed token totals share the cost-estimate basis.
+
+    Synthetic tool-execution turns are excluded from both totals and
+    cost. Unpriced models stay in the displayed total but are surfaced
+    in Notes so the cost line is honestly an under-estimate."""
+
+    def _make_sessions_event(self, *, tokens_by_day):
+        return {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": "2026-05-01T12:00:00+00:00",
+            "device": "dev-a",
+            "projects": [
+                {
+                    "claude_dir": "-tmp-proj",
+                    "source_root": "/Users/kb/.claude",
+                    "sessions": 1,
+                    "total_kb": 100,
+                    "last_session_at": "2026-05-01T12:00:00+00:00",
+                    "tokens_by_day": tokens_by_day,
+                }
+            ],
+        }
+
+    def test_synthetic_excluded_from_top_level_totals(self):
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        ev = self._make_sessions_event(
+            tokens_by_day={
+                "2026-05-01": {
+                    "input": 0,  # top-level intentionally wrong to prove we
+                    "cache_create": 0,  # derive totals from by_model now
+                    "cache_read": 0,
+                    "output": 0,
+                    "by_model": {
+                        "claude-sonnet-4-6": {
+                            "input": 100,
+                            "cache_create": 0,
+                            "cache_read": 1000,
+                            "output": 50,
+                        },
+                        "<synthetic>": {
+                            "input": 999_999,
+                            "cache_create": 0,
+                            "cache_read": 999_999,
+                            "output": 999_999,
+                        },
+                    },
+                }
+            }
+        )
+        result = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 29, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        # Synthetic must NOT contribute to the displayed totals — they
+        # represent Claude Code's internal tool-execution turns that don't
+        # bill against the API.
+        assert result.tokens_input == 100
+        assert result.tokens_cache_read == 1000
+        assert result.tokens_output == 50
+        # tokens_by_model still retains synthetic so the per-render filter
+        # at format_retro can see it (and so cost/unpriced summaries can
+        # operate on the full set).
+        assert "<synthetic>" in result.tokens_by_model
+        assert result.tokens_by_model["<synthetic>"]["input"] == 999_999
+
+    def test_unpriced_model_note_surfaces_in_render(self):
+        from mind_meld.skills.retro_fleet.aggregator import (
+            RetroData,
+            SessionsAggregate,
+            format_retro,
+        )
+
+        data = RetroData(
+            window_days=7,
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+        data.sessions = SessionsAggregate(
+            total_sessions=3,
+            projects=1,
+            tokens_input=4_000_000,
+            tokens_cache_read=50_000_000,
+            tokens_output=100_000,
+            tokens_by_model={
+                "claude-sonnet-4-6": {
+                    "input": 4_000_000,
+                    "cache_create": 0,
+                    "cache_read": 50_000_000,
+                    "output": 100_000,
+                },
+                # Hypothetical older / newer model not in PRICING.
+                "claude-sonnet-3-7": {
+                    "input": 1_000_000,
+                    "cache_create": 0,
+                    "cache_read": 5_000_000,
+                    "output": 50_000,
+                },
+            },
+        )
+        out = format_retro(data)
+        # The note names the volume + model count and explains the cost
+        # gap.  Compact-format token count surfaces (6.0M from input + cr
+        # + output of the unpriced sonnet-3-7 entry).
+        assert "unpriced" in out
+        assert "1 unpriced model(s)" in out
+        assert "excluded from cost estimate" in out
+
+    def test_no_unpriced_note_when_all_models_priced(self):
+        from mind_meld.skills.retro_fleet.aggregator import (
+            RetroData,
+            SessionsAggregate,
+            format_retro,
+        )
+
+        data = RetroData(
+            window_days=7,
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+        data.sessions = SessionsAggregate(
+            total_sessions=3,
+            projects=1,
+            tokens_input=4_000_000,
+            tokens_cache_read=50_000_000,
+            tokens_output=100_000,
+            tokens_by_model={
+                "claude-sonnet-4-6": {
+                    "input": 4_000_000,
+                    "cache_create": 0,
+                    "cache_read": 50_000_000,
+                    "output": 100_000,
+                },
+            },
+        )
+        out = format_retro(data)
+        assert "unpriced" not in out
+
+    def test_synthetic_alone_does_not_trigger_unpriced_note(self):
+        """Synthetic is cost-excluded by design, not unpriced. A fleet whose
+        only non-priced model is ``<synthetic>`` must NOT surface an
+        unpriced-model note."""
+        from mind_meld.skills.retro_fleet.aggregator import (
+            RetroData,
+            SessionsAggregate,
+            format_retro,
+        )
+
+        data = RetroData(
+            window_days=7,
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+        data.sessions = SessionsAggregate(
+            total_sessions=1,
+            projects=1,
+            tokens_input=100,
+            tokens_by_model={
+                "claude-sonnet-4-6": {
+                    "input": 100,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                },
+                "<synthetic>": {
+                    "input": 999,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                },
+            },
+        )
+        out = format_retro(data)
+        assert "unpriced" not in out
+
+
 class TestShortenRepoUrl:
     """Render-only compression of long canonical URLs."""
 
