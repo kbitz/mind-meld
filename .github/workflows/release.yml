@@ -1,21 +1,23 @@
 name: Release
 
-# Auto-tag, auto-create-Release, and auto-append-PROGRESS on push to main
-# whenever pyproject.toml's version (or its CHANGELOG entry) changes.
+# Auto-tag and auto-create-Release on push to main whenever
+# pyproject.toml's version (or its CHANGELOG entry) changes.
 #
-# Why this exists: prior to 2026-05-05, tag creation was a manual step at
-# merge time and got skipped (orphaning v0.11.23 in pyproject), GitHub
-# Releases needed periodic bulk backfills (24 missing entries by then),
-# and PROGRESS.md drifted 19 rows behind. This workflow eliminates all
-# three drift modes by making tag + release + progress-row a single
-# automatic consequence of merging a version bump.
+# Why this exists: prior to 2026-05-05, tag creation was a manual step
+# at merge time and got skipped (orphaning v0.11.23 in pyproject) and
+# GitHub Releases needed periodic bulk backfills (24 missing entries by
+# then). This workflow eliminates both drift modes by making tag +
+# release a single automatic consequence of merging a version bump.
+#
+# PROGRESS.md row is NOT auto-appended: branch protection on main
+# requires PRs, and a workflow trying to `git push` a chore commit
+# directly is rejected by the ruleset (see v0.11.24 and v0.11.25 release
+# runs for the failure mode). The convention is: include the PROGRESS
+# row in the same PR as the pyproject + CHANGELOG bump. /ship should
+# do this; manual fallback otherwise.
 #
 # Idempotency: each step checks if its target already exists and no-ops
 # if so, so re-runs after a partial-failure are safe.
-#
-# Loop avoidance: the workflow's PROGRESS.md commit only touches
-# docs/PROGRESS.md, which is NOT in the paths filter, so the workflow
-# does not re-trigger itself.
 
 on:
   push:
@@ -115,47 +117,11 @@ jobs:
             --title "$tag" \
             --notes-file "${{ steps.notes.outputs.notes_file }}"
 
-      - name: Append PROGRESS.md row
+      - name: Verify PROGRESS.md row exists
         run: |
           version="${{ steps.ver.outputs.version }}"
-          date="${{ steps.notes.outputs.date }}"
-          if grep -qE "^\| $version " docs/PROGRESS.md; then
-            echo "PROGRESS.md already has v$version row; skipping"
-            exit 0
+          if ! grep -qE "^\| $version " docs/PROGRESS.md; then
+            echo "::warning::docs/PROGRESS.md is missing a row for v$version. Add it in a follow-up PR — workflow cannot push to main under branch protection."
+          else
+            echo "PROGRESS.md row for v$version present."
           fi
-          # Lead paragraph: from version header to first ### or next ## [
-          lead=$(awk -v ver="$version" '
-            $0 ~ "^## \\[" ver "\\]" { flag = 1; next }
-            flag && (/^## \[/ || /^### /) { exit }
-            flag { print }
-          ' CHANGELOG.md | tr '\n' ' ' | sed -E 's/  +/ /g; s/^ //; s/ $//; s/\|/\\|/g')
-          if [ -z "$lead" ]; then
-            echo "::error::Could not extract lead paragraph for v$version"
-            exit 1
-          fi
-          row="| $version | $date | $lead |"
-          # Insert row directly after the table separator line
-          # (which is the unique fixed-width `|---|---|---|` divider).
-          marker='|---------|----------|----------|'
-          if ! grep -qF "$marker" docs/PROGRESS.md; then
-            echo "::error::PROGRESS.md table separator not found; cannot append"
-            exit 1
-          fi
-          tmp=$(mktemp)
-          while IFS= read -r line; do
-            printf '%s\n' "$line" >> "$tmp"
-            if [ "$line" = "$marker" ]; then
-              printf '%s\n' "$row" >> "$tmp"
-            fi
-          done < docs/PROGRESS.md
-          mv "$tmp" docs/PROGRESS.md
-          echo "Appended PROGRESS row for v$version"
-          if git diff --quiet docs/PROGRESS.md; then
-            echo "PROGRESS.md unchanged after append (race with concurrent edit?); skipping commit"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/PROGRESS.md
-          git commit -m "chore(progress): append v$version row [skip ci]"
-          git push
