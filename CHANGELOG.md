@@ -2,6 +2,56 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.24] - 2026-05-06
+
+**Internal hygiene refactor: Track 10A — token-usage DRY + perf polish.**
+Pure refactor; no user-visible behavior change. Consolidates the four
+token-bucket merge sites (`token_usage._accumulate`, `slice_window`,
+`events._aggregate_tokens_for_project`, `aggregator._merge_token_window`)
+behind shared `merge_usage_bucket` / `merge_by_model` helpers + a
+`TOKEN_FIELDS` constant + `zero_day_bucket` / `zero_model_bucket`
+factories — all now public on `mind_meld.token_usage`. Adding a 5th
+token field is a one-line change to the constant. Aggregator keeps its
+bespoke filtered loop with `_safe_int` hardening intact, preserving the
+peer-controlled-events trust boundary.
+
+`_run_events_tail` and `_run_events_backfill` collapse from inline
+`locked_json_rmw + version-check + isinstance-check` blocks to a single
+`with token_usage.lock_and_get_files(mode) as files:` call. The new
+context manager owns cache-shape invariants in one place; `None` yield
+signals warn-mode contention.
+
+`is_cache_cold` now short-circuits on `stat.st_size < 64` before
+parsing, saving the read+parse cost on missing or near-empty caches.
+The structural `json.loads` + `version`/`files` check stays — Codex
+adversarial review caught two correctness regressions in earlier
+optimization attempts (regex byte-scan substring match, nested-version
+collision); the structural parse is the only sound approach.
+
+A skip-unchanged-write optimization on `lockedjson.locked_json_rmw`
+was prototyped and reverted: empirical measurement showed the
+`sha256(json.dumps(...))` snapshot cost ~3.3ms per context, exceeding
+the ~2.0ms cost of an always-write since `_write_json` doesn't fsync.
+
+### Changed
+
+- Extracted `TOKEN_FIELDS`, `merge_usage_bucket`, `merge_by_model`,
+  `zero_day_bucket`, `zero_model_bucket`, `lock_and_get_files` as
+  public API on `mind_meld.token_usage`.
+- Refactored `_accumulate`, `slice_window`,
+  `events._aggregate_tokens_for_project`, and the cli's
+  `_run_events_tail` / `_run_events_backfill` / `warm_token_cache_inline`
+  to use the shared helpers.
+- Aggregator adopts the new constants but keeps its bespoke loop +
+  `_safe_int` hardening on peer-controlled events.
+
+### Added
+
+- 30+ new tests: TOKEN_FIELDS schema-stability pin, helper unit tests,
+  fleet-retro determinism golden + totals fixtures, `_safe_int`
+  retention regression pin, version-mismatch and corrupt-cache pins
+  in `is_cache_cold`, perf-pin benchmark for `merge_usage_bucket`.
+
 ## [0.11.23] - 2026-05-06
 
 **Auto-pin iCloud storage on `mm init`.** Fresh Macs no longer wait for
