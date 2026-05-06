@@ -2,6 +2,12 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.26] - 2026-05-06
+
+**Release workflow fix: drop dead PROGRESS auto-append; backfill v0.11.24 + v0.11.25 rows.** The v0.11.24+ release workflow's "Append PROGRESS.md row" step was rejected by branch protection on every release where the row wasn't already in the PR — the workflow tried to `git push` a chore commit directly to `main`, but the ruleset requires PRs. v0.11.23 only "succeeded" because the row was pre-added in PR #74 and the script's idempotent skip exited 0 before reaching the push. v0.11.24 and v0.11.25 both hit the wall and shipped tagged + released but without their PROGRESS rows.
+
+The step was architecturally incompatible with branch protection — a workflow pushing to a protected branch is broken by definition. Removed entirely. Replaced with a tail "Verify PROGRESS.md row exists" check that emits a `::warning::` (not a failure) when the row is missing, so future releases ship cleanly even on a missed row. Convention is now documented in CLAUDE.md: **the PROGRESS row goes in the same PR as the pyproject + CHANGELOG bump.** This PR backfills both missing rows (v0.11.24 internal hygiene refactor; v0.11.25 commit streak counter) using the same lead-paragraph extraction the workflow used.
+
 ## [0.11.25] - 2026-05-06
 
 **Commit streak counter in fleet retro.** Adds a one-line "N-day commit
