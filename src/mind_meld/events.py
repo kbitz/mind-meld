@@ -865,19 +865,10 @@ def _aggregate_tokens_for_project(
             deadline_monotonic=deadline_monotonic,
         )
         for day, bucket in by_day.items():
-            target = merged.setdefault(
-                day,
-                {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0, "by_model": {}},
-            )
-            for k in ("input", "cache_create", "cache_read", "output"):
-                target[k] = target.get(k, 0) + bucket.get(k, 0)
-            for model, mbucket in (bucket.get("by_model") or {}).items():
-                mtarget = target.setdefault("by_model", {}).setdefault(
-                    model,
-                    {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
-                )
-                for k in ("input", "cache_create", "cache_read", "output"):
-                    mtarget[k] = mtarget.get(k, 0) + mbucket.get(k, 0)
+            target = merged.setdefault(day, token_usage.zero_day_bucket())
+            token_usage.merge_usage_bucket(target, bucket)
+            # zero_day_bucket() guarantees `by_model` is present.
+            token_usage.merge_by_model(target["by_model"], bucket.get("by_model") or {})
     return merged
 
 
