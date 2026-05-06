@@ -104,6 +104,11 @@ class GitAggregate:
     additions: int = 0
     deletions: int = 0
     repos_by_count: dict[str, int] = field(default_factory=dict)
+    # Consecutive local-day commit streak ending at (or one day before)
+    # ``until``. Computed from the FULL events buffer regardless of the
+    # retro window — a 7d retro on a 30-day streak shows 30. Capped in
+    # practice by the 90d events retention.
+    streak_days: int = 0
 
 
 @dataclass
@@ -365,9 +370,16 @@ def aggregate_git(
     apply the window + author filter, return totals.
 
     ``author_emails`` may be empty/None to disable the filter.
+
+    Streak collection runs in the same loop but bypasses the window filter
+    so the rendered streak reflects current state, not the retro window.
+    Author filter still applies — a third-party PR-merge commit shouldn't
+    keep the user's personal streak alive.
     """
     canonicalize = _import_canonicalize()
     seen_keys: set[tuple[str, str]] = set()
+    streak_seen: set[tuple[str, str]] = set()
+    streak_days_set: set[str] = set()
     out = GitAggregate()
     for ev in events:
         if ev.get("type") != "git-snapshot":
@@ -389,13 +401,24 @@ def aggregate_git(
                 sha = c.get("sha")
                 if not isinstance(sha, str) or not sha:
                     continue
-                if not _within_window(c.get("date"), since, until):
+                commit_dt = _parse_iso(c.get("date"))
+                if commit_dt is None:
                     continue
                 if author_emails:
                     ae = c.get("author_email")
                     if not isinstance(ae, str) or ae.lower() not in author_emails:
                         continue
                 key = (remote, sha)
+
+                # Streak: collect unique commit-days across the entire
+                # events buffer, deduped fleet-wide via (remote, sha).
+                if key not in streak_seen:
+                    streak_seen.add(key)
+                    streak_days_set.add(_local_day_iso(commit_dt))
+
+                # Windowed totals.
+                if not (since <= commit_dt <= until):
+                    continue
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
@@ -404,7 +427,32 @@ def aggregate_git(
                 out.deletions += _safe_int(c.get("del"))
                 if remote:
                     out.repos_by_count[remote] = out.repos_by_count.get(remote, 0) + 1
+    out.streak_days = _compute_streak(streak_days_set, until)
     return out
+
+
+def _local_day_iso(dt: datetime) -> str:
+    """``YYYY-MM-DD`` in the system's local timezone. Used for streak day
+    keys so a late-night commit shows up "today" instead of leaking into
+    "tomorrow" via UTC drift."""
+    return dt.astimezone().date().isoformat()
+
+
+def _compute_streak(commit_days: set[str], until: datetime) -> int:
+    """Consecutive local days ending at or just before ``until`` with at
+    least one commit. GitHub-style grace day: if today has no commits but
+    yesterday does, start counting from yesterday so an in-progress day
+    doesn't break the streak."""
+    if not commit_days:
+        return 0
+    cursor = until.astimezone().date()
+    if cursor.isoformat() not in commit_days:
+        cursor = cursor - timedelta(days=1)
+    streak = 0
+    while cursor.isoformat() in commit_days:
+        streak += 1
+        cursor = cursor - timedelta(days=1)
+    return streak
 
 
 def _safe_int(x: object) -> int:
@@ -1125,6 +1173,8 @@ def format_retro(data: RetroData) -> str:
         f"(deduped across machines)"
     )
     lines.append(f"- +{data.git.additions:,} / -{data.git.deletions:,} LOC")
+    if data.git.streak_days > 0:
+        lines.append(f"- {data.git.streak_days}-day commit streak")
     if data.git.repos_by_count:
         top_repos = sorted(data.git.repos_by_count.items(), key=lambda kv: kv[1], reverse=True)[
             :TOP_N_REPOS

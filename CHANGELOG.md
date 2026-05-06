@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.25] - 2026-05-06
+
+**Commit streak counter in fleet retro.** Adds a one-line "N-day commit
+streak" to the `## Code shipped` section of `mm retro-fleet`, computed
+fleet-wide from the events buffer. Streak counts consecutive local-day
+stretches ending at (or one day before) the retro window's end with at
+least one author-matched commit. Deduped across machines via
+`(canonical_remote_url, sha)` so a commit captured by two devices counts
+once. Window-independent — a 7d retro on a 30-day streak shows 30
+(capped only by the 90-day events retention).
+
+GitHub-style grace day: if today has no commits but yesterday does, the
+streak still counts (an in-progress workday doesn't break it). The
+author filter applies — a third-party PR-merge commit on a quiet day
+won't keep your personal streak alive. Hides cleanly when the streak is
+zero. Day keys use the system's local timezone so a late-night commit
+shows up "today" instead of leaking into "tomorrow" via UTC drift.
+
 ## [0.11.24] - 2026-05-06
 
 **Internal hygiene refactor: Track 10A — token-usage DRY + perf polish.**

@@ -548,6 +548,189 @@ class TestGitAggregation:
 
 
 # ---------------------------------------------------------------------------
+# T3.5 — Commit streak counter.
+#
+# Streak = consecutive local-day stretch ending at (or one day before) `until`
+# with at least one author-matched commit. Window-independent so a 7d retro
+# on a 30d streak shows 30 (capped by the 90d events retention).
+# ---------------------------------------------------------------------------
+
+
+class TestCommitStreak:
+    def test_no_commits_zero_streak(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        data = _aggregate(events_dir)
+        assert data.git.streak_days == 0
+        out = aggregator.format_retro(data)
+        assert "commit streak" not in out  # hidden when zero
+
+    def test_single_day_today(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_git_event("dev-a", 0.0, [_commit("a", 0.0)])],
+        )
+        data = _aggregate(events_dir)
+        assert data.git.streak_days == 1
+        out = aggregator.format_retro(data)
+        assert "1-day commit streak" in out
+
+    def test_three_consecutive_days_ending_today(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event(
+                    "dev-a",
+                    0.0,
+                    [
+                        _commit("a", 0.0),
+                        _commit("b", 1.0),
+                        _commit("c", 2.0),
+                    ],
+                ),
+            ],
+        )
+        data = _aggregate(events_dir)
+        assert data.git.streak_days == 3
+        assert "3-day commit streak" in aggregator.format_retro(data)
+
+    def test_grace_day_today_empty_yesterday_counts(self, tmp_path):
+        """GitHub-style: today not yet committed but yesterday was. Streak
+        starts from yesterday so an in-progress day doesn't break it."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event(
+                    "dev-a",
+                    0.5,
+                    [
+                        _commit("a", 1.0),  # yesterday
+                        _commit("b", 2.0),  # day before
+                    ],
+                ),
+            ],
+        )
+        data = _aggregate(events_dir)
+        assert data.git.streak_days == 2
+
+    def test_two_day_gap_breaks_streak(self, tmp_path):
+        """No commit today AND no commit yesterday → streak = 0 even if a
+        long run preceded it."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event(
+                    "dev-a",
+                    3.0,
+                    [_commit("a", 3.0), _commit("b", 4.0), _commit("c", 5.0)],
+                ),
+            ],
+        )
+        data = _aggregate(events_dir)
+        assert data.git.streak_days == 0
+
+    def test_only_most_recent_run_counts(self, tmp_path):
+        """5-day run, then gap, then 3-day run ending today → streak = 3."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        recent = [_commit(f"r{i}", float(i)) for i in range(3)]  # 0,1,2 days ago
+        old = [_commit(f"o{i}", float(i)) for i in range(10, 15)]  # 10..14 days ago
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [_git_event("dev-a", 0.0, recent + old)],
+        )
+        data = _aggregate(events_dir, window_days=30)
+        assert data.git.streak_days == 3
+
+    def test_multiple_commits_same_day_count_once(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event(
+                    "dev-a",
+                    0.0,
+                    [_commit("a", 0.0), _commit("b", 0.1), _commit("c", 0.2)],
+                ),
+            ],
+        )
+        data = _aggregate(events_dir)
+        # Three commits, all "today" → 1 streak day.
+        assert data.git.streak_days == 1
+
+    def test_cross_device_same_sha_counts_once(self, tmp_path):
+        """Streak dedups across machines via (remote, sha) — two devices
+        capturing the same commit shouldn't multiply streak days."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        c = _commit("abc", 0.0)
+        _write_events(events_dir, "dev-a", "2026-04-28", [_git_event("dev-a", 0.0, [c])])
+        _write_events(events_dir, "dev-b", "2026-04-28", [_git_event("dev-b", 0.0, [c])])
+        data = _aggregate(events_dir)
+        assert data.git.streak_days == 1
+
+    def test_streak_outlasts_retro_window(self, tmp_path):
+        """7d retro on a 14-day streak shows 14 — streak is window-independent
+        (capped only by events retention)."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        commits = [_commit(f"s{i}", float(i)) for i in range(14)]  # 0..13 days ago
+        _write_events(events_dir, "dev-a", "2026-04-28", [_git_event("dev-a", 0.0, commits)])
+        data = _aggregate(events_dir, window_days=7)
+        assert data.git.streak_days == 14
+        # Windowed commit count is still bounded by the 7d retro.
+        assert data.git.commits <= 8
+
+    def test_streak_respects_author_filter(self, tmp_path):
+        """A bot's daily commit shouldn't keep the user's streak alive."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-28",
+            [
+                _git_event(
+                    "dev-a",
+                    0.0,
+                    [
+                        _commit("u0", 0.0, author_email="kb@example.com"),
+                        # 1, 2, 3 days ago: only bot — gap from kb's
+                        # perspective.
+                        _commit("b1", 1.0, author_email="bot@noreply.com"),
+                        _commit("b2", 2.0, author_email="bot@noreply.com"),
+                        _commit("b3", 3.0, author_email="bot@noreply.com"),
+                    ],
+                ),
+            ],
+        )
+        data = _aggregate(events_dir, author_emails=frozenset({"kb@example.com"}))
+        # Only the user's "today" commit; yesterday belongs to the bot.
+        assert data.git.streak_days == 1
+
+
+# ---------------------------------------------------------------------------
 # T4 — Visible-failure breadcrumbs (TODO#1, TODO#2).
 # ---------------------------------------------------------------------------
 
