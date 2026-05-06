@@ -2,8 +2,12 @@
 
 Reads mm-owned event JSONLs from every fleet device, gstack analytics on the
 rendering machine, and produces a glanceable markdown retro mirroring the
-gstack ``/retro`` shape. Imported as ``mind_meld.skills.retro_fleet.aggregator``
-or invoked as ``python -m mind_meld.skills.retro_fleet.aggregator <window>``.
+gstack ``/retro`` shape. Imported as ``mind_meld.skills.retro_fleet.aggregator``;
+the public CLI surface is ``mm retro-fleet <window>`` (typer wrapper in
+``cli.py:retro_fleet_cmd``). Direct ``python -m
+mind_meld.skills.retro_fleet.aggregator <window>`` works from a development
+checkout but is not what the SKILL.md or documented invocations use — pipx
+installs put mind_meld in an isolated venv that bare ``python`` can't reach.
 
 Inputs (all tolerant of missing / corrupt / unknown-field files):
 

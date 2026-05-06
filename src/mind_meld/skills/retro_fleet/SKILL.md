@@ -45,14 +45,17 @@ Run this command and capture the output. Substitute `<window>` with what the
 user asked for (`7d`, `30d`, `90d`, etc. — days only).
 
 ```bash
-python -m mind_meld.skills.retro_fleet.aggregator <window>
+mm retro-fleet <window>
 ```
 
 Default window is `7d` if the user did not specify.
 
-If `mm` is not installed in the venv that's on `$PATH`, the command exits
-non-zero with a clear error. Do not retry — surface the error and tell the
-user to verify their mm install (`pipx list | grep mind-meld`).
+If `mm` is not on `$PATH`, the command fails with `command not found`. Do
+not retry — surface the error and tell the user to verify their mm install
+(`pipx list | grep mind-meld`). Do NOT fall back to
+`python -m mind_meld.skills.retro_fleet.aggregator`: on most macOS systems
+`python` is not on PATH (only `python3` is), and pipx-installed mm lives in
+an isolated venv that nothing outside it can import.
 
 ## Step 2: present the output
 
@@ -86,7 +89,7 @@ By default the aggregator filters commits to those authored by `git config
 mm config.toml. To render ALL fleet commits without a filter, run:
 
 ```bash
-python -m mind_meld.skills.retro_fleet.aggregator <window> --no-author-filter
+mm retro-fleet <window> --no-author-filter
 ```
 
 ## Custom events directory
@@ -95,7 +98,7 @@ Power users with a custom `path` on the `mm-events` sync source can override
 the aggregator's events directory via env var:
 
 ```bash
-MM_EVENTS_DIR=/path/to/events python -m mind_meld.skills.retro_fleet.aggregator <window>
+MM_EVENTS_DIR=/path/to/events mm retro-fleet <window>
 ```
 
 The aggregator's default is `~/.local/share/mind-meld/events/`.

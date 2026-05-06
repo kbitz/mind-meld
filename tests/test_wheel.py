@@ -60,16 +60,16 @@ def test_retro_fleet_skill_md_ships_in_wheel():
 
 
 def test_retro_fleet_aggregator_ships_in_wheel():
-    """Pin the aggregator's wheel inclusion so SKILL.md's
-    ``python -m mind_meld.skills.retro_fleet.aggregator`` invocation can
-    actually find the module on installed systems."""
+    """Pin the aggregator's wheel inclusion so the ``mm retro-fleet`` typer
+    wrapper (cli.py:retro_fleet_cmd) can lazy-import
+    ``mind_meld.skills.retro_fleet.aggregator.main`` on installed systems."""
     aggregator = importlib.resources.files("mind_meld") / "skills" / "retro_fleet" / "aggregator.py"
     assert aggregator.is_file()
 
 
 def test_retro_fleet_module_is_importable():
-    """End-to-end pin: the dotted import path that SKILL.md tells Claude
-    Code to use MUST resolve. Catches missing __init__.py / packaging
+    """End-to-end pin: the dotted import path that ``mm retro-fleet``
+    forwards into MUST resolve. Catches missing __init__.py / packaging
     misconfig before users would."""
     import mind_meld.skills.retro_fleet  # noqa: F401
     from mind_meld.skills.retro_fleet import aggregator  # noqa: F401

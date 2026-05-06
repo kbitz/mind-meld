@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.11.22] - 2026-05-05
+## [0.11.23] - 2026-05-05
 
 **Token totals in `retro-fleet` now share the cost-estimate basis,
 and unpriced-model volume is surfaced in Notes.** Prior versions summed
@@ -42,6 +42,53 @@ missing volume.
   Notes line is the at-rest record in the rendered retro. Pinned by
   three cases in the same test class (renders, hidden-when-clean,
   synthetic-alone-doesn't-trigger).
+
+## [0.11.22] - 2026-05-05
+
+**Fix: `mm retro-fleet` CLI subcommand replaces the `python -m
+mind_meld.skills.retro_fleet.aggregator` invocation in SKILL.md.** Real
+fleet feedback on v0.11.21: the documented `python -m ...` form failed on
+macOS systems where only `python3` is on PATH (no `python`), forcing the
+user to fall back to invoking the pipx venv's interpreter directly. Switching
+SKILL.md to `python3 -m ...` would only paper over the symptom — the
+dominant install path is `pipx install mind-meld`, which puts mind_meld in
+`~/.local/pipx/venvs/mind-meld/` where neither `python` nor `python3` can
+import it. The aggregator's own subprocess invocation already recognized
+this and uses `sys.executable -m mind_meld.cli` (aggregator.py:680). This
+release applies the same insight in the other direction: route through the
+`mm` console-script (always on PATH wherever mm is installed).
+
+### Added
+
+- **`mm retro-fleet [window]` typer subcommand (cli.py:retro_fleet_cmd).**
+  Thin shim that lazy-imports `mind_meld.skills.retro_fleet.aggregator.main`,
+  forwards the positional `window` arg (default `"7d"`) and the
+  `--no-author-filter` flag, and propagates the aggregator's exit code via
+  `typer.Exit`. The aggregator's `argparse`-based `main()` is unchanged —
+  direct `python -m mind_meld.skills.retro_fleet.aggregator` still works
+  from a development checkout, it's just no longer the public surface.
+  Listed in `mm --help` (matches the `autopull` / `autopush` / `install-skills`
+  precedent of leaving "designed for Claude Code" commands discoverable for
+  debugging and direct power-user use). Pinned by
+  `tests/test_retro_fleet_cli.py::TestRetroFleetCommand` (default 7d,
+  explicit window, `--no-author-filter` forwarding, exit-code propagation,
+  --help discoverability).
+
+### Changed
+
+- **SKILL.md (retro-fleet) tells Claude Code to invoke `mm retro-fleet
+  <window>`.** All three documented invocations updated (default,
+  `--no-author-filter`, `MM_EVENTS_DIR=...` override). The error-handling
+  guidance now says: do NOT fall back to `python -m
+  mind_meld.skills.retro_fleet.aggregator` — explains the `python` vs
+  `python3` PATH inconsistency and the pipx-venv isolation that hide
+  mind_meld from any other interpreter.
+
+- **CLAUDE.md / docs/invariants/events-retro.md.** Source-layout entry,
+  `Commands:` line, and invariants pointer table all reflect the new
+  `mm retro-fleet` route. New invariants block "mm retro-fleet [window]
+  typer wrapper (load-bearing, v0.11.22)" documents the routing rationale
+  so a future contributor doesn't reintroduce the `python -m` form.
 
 ## [0.11.21] - 2026-05-04
 
