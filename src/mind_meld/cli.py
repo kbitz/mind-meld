@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -2185,6 +2186,64 @@ def _register_and_save(
         )
 
 
+_ICLOUD_DRIVE_ROOT = Path("~/Library/Mobile Documents/com~apple~CloudDocs").expanduser()
+
+
+def _auto_pin_storage_for_icloud(storage_path: Path) -> None:
+    """Auto-pin an iCloud Drive storage path so future pulls don't block on
+    iCloud File Provider materialization.
+
+    Runs ``brctl download <storage_path>`` (Apple's iCloud File Provider CLI,
+    /usr/bin/brctl). brctl is non-destructive, idempotent, and async — it
+    queues the request and returns immediately while iCloud materializes
+    files in the background. On any error (brctl missing, timeout, non-zero
+    exit) falls back to a one-line Finder tip.
+
+    Silent for non-iCloud storage paths: the slow-pull case only exists when
+    blobs go cold via the iCloud File Provider; a regular local folder
+    doesn't need pinning.
+
+    Called once at init success. If iCloud later evicts blobs (storage
+    pressure), the user can re-pin manually via the same command. We do NOT
+    re-run on every push/pull — that would be invasive overhead for an
+    onboarding nudge.
+    """
+    try:
+        is_icloud = storage_path.resolve(strict=False).is_relative_to(_ICLOUD_DRIVE_ROOT)
+    except (OSError, ValueError):
+        is_icloud = False
+
+    if not is_icloud:
+        return
+
+    try:
+        result = subprocess.run(
+            ["brctl", "download", str(storage_path)],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            console.print(
+                "  [dim]Storage pinned for fast pulls "
+                "(iCloud will keep blobs resident on this Mac).[/dim]"
+            )
+            return
+    except (
+        FileNotFoundError,
+        OSError,
+        ValueError,
+        subprocess.TimeoutExpired,
+        subprocess.SubprocessError,
+    ):
+        pass
+
+    console.print(
+        "  [dim]Tip: keep blobs resident for fast pulls. In Finder, "
+        f'right-click "{storage_path}" › Keep Downloaded.[/dim]'
+    )
+
+
 @app.command()
 def init() -> None:
     """Initialize Mind Meld: generate device ID, configure iCloud storage, set passphrase.
@@ -2327,6 +2386,12 @@ def init() -> None:
     _run_events_backfill(config, resolved_sources, device_id)
 
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
+
+    # Track 9A: auto-pin iCloud storage so the user's first pull (and every
+    # subsequent pull) reads resident blobs instead of blocking on iCloud
+    # File Provider materialization. Best-effort; falls back to a Finder
+    # right-click tip on any error. Silent for non-iCloud storage paths.
+    _auto_pin_storage_for_icloud(full_path)
 
 
 # ── push ──────────────────────────────────────────────────────────────
