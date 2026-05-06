@@ -21,7 +21,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 ## Source Layout
 src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events,safety,conflictdiff,lockedjson,token_usage,identity}.py
 src/mind_meld/storage/{local,keys}.py
-src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). SKILL.md invokes the aggregator via `python -m mind_meld.skills.retro_fleet.aggregator`. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
+src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). SKILL.md invokes the aggregator via `mm retro-fleet <window>` (typer wrapper at `cli.py:retro_fleet_cmd`, v0.11.22) — NOT `python -m mind_meld.skills.retro_fleet.aggregator`, because pipx installs hide mind_meld from any interpreter outside the pipx venv and macOS systems often only have `python3` (not `python`) on PATH. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
 
 `safety.py` (v0.11.1) — peer-controlled string sanitization (`safe_str`, `safe_text`, `strip_terminal_escapes`); cli.py re-exports for backwards compat. New tests should import from `mind_meld.safety` directly. See `docs/invariants/init-devices.md`.
 
@@ -48,7 +48,7 @@ The PYTEST_CURRENT_TEST guard on `crypto.store_passphrase_in_keyring` (v0.11.11)
 GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool — multi-OS + multi-Python matrix is theater for this project). Runs ruff check + ruff format --check + pytest + wheel build + `mm --version` smoke. Asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). pip cache keyed on `pyproject.toml`. No `paths:` filter — every PR runs CI (avoids the branch-protection pending-forever footgun for path-skipped required checks).
 
 ## Commands
-mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills
+mm --version | init | push | pull | status | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet
 
 Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 2 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--conflicts` (also reap `.sync-conflict-*` files older than 30 days).
@@ -73,7 +73,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
 | `cli.py:_run_events_tail` / `_run_events_backfill` | `docs/invariants/events-retro.md` |
-| `cli.py:_ensure_retro_skill_link` / `_skill_link_check_due` / `install_skills_cmd` | `docs/invariants/events-retro.md` |
+| `cli.py:_ensure_retro_skill_link` / `_skill_link_check_due` / `install_skills_cmd` / `retro_fleet_cmd` | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `_devices_json_cmd` / `EVENTS_RETENTION_DAYS` / `_gc_old_event_files` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
 | `skills/retro_fleet/aggregator.py` | `docs/invariants/events-retro.md` |
