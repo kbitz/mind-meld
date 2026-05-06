@@ -2,6 +2,51 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.23] - 2026-05-06
+
+**Auto-pin iCloud storage on `mm init`.** Fresh Macs no longer wait for
+iCloud File Provider materialization on the first `mm pull`. Init now
+calls `brctl download <storage_path>` (Apple's iCloud File Provider
+CLI) once at the end of registration, asking iCloud to keep storage
+blobs resident locally. brctl is non-destructive, idempotent, and
+async — it queues the request and returns immediately while iCloud
+materializes files in the background. Surfaces a one-line `Storage
+pinned for fast pulls.` confirmation on success; falls back silently
+to a Finder right-click tip on any error (brctl missing, timeout,
+non-zero exit, non-iCloud storage path).
+
+Track 9A originally bundled this with a 150-line parallelization of
+`_download_and_apply` for a measured 7.3× speedup on a fresh-Mac
+1449-blob iCloud-cold pull. Dogfooding showed the parallelization
+solved a problem the auto-pin prevents at the source — once the
+storage folder is pinned, sequential reads are already fast (<5s on
+the same workload). /plan-eng-review reduced scope to the auto-pin;
+parallel-fetch is preserved in `docs/ROADMAP.md` Future with a clear
+revisit trigger (sustained slow pull AFTER auto-pin, OR 10k+ blob
+fleet with user-visible memory pressure).
+
+### Added
+- `mm init` auto-pins iCloud storage via `brctl download` so first
+  pull on a fresh Mac reads resident blobs instead of blocking on
+  iCloud materialization (`src/mind_meld/cli.py`,
+  `_auto_pin_storage_for_icloud` helper at the end of `init()`).
+- README "Fast pulls (auto-pin)" section documenting the auto-pin
+  behavior, the `brctl evict` undo path, and the non-iCloud-path
+  silent-skip case.
+- 6 new tests in `tests/test_init_auto_pin.py`: brctl success path,
+  non-iCloud skip, brctl missing (FileNotFoundError),
+  TimeoutExpired, non-zero exit, init-wiring smoke test.
+
+### Changed
+- `docs/ROADMAP.md` Track 9A renamed to "Auto-pin storage on init"
+  (1 task, ~30 min CC, low risk). Parallel-fetch task moved to
+  Future with revisit trigger and architecture notes from D1 (in-
+  order outcomes preservation) and D2 (submit-all-upfront pattern
+  mirroring `events.py:walk_git_projects`).
+- Group 10's serialization-after-Group-9 dependency note removed —
+  Track 10A's `_run_events_tail` / `_run_events_backfill` edits no
+  longer collide with Track 9A (different cli.py regions).
+
 ## [0.11.22.1] - 2026-05-05
 
 **Roadmap reassessment.** Docs-only ship: drained 5 inbox items from
