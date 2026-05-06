@@ -87,7 +87,6 @@ from mind_meld.errors import (
     MindMeldError,
     StorageError,
 )
-from mind_meld.lockedjson import locked_json_rmw
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -2810,25 +2809,12 @@ def _run_events_tail(
             # Step 2: hold the token cache flock across the walk so
             # walk_session_metadata's per-file mutations to files dict are
             # captured atomically. "warn" mode under autopush degrades
-            # gracefully on contention (can't get the lock → no token
+            # gracefully on contention (`files is None`, no token
             # aggregation this push); "block" under interactive (user is
-            # waiting anyway).
+            # waiting anyway). Cache-shape invariants (version + files
+            # isinstance) are owned by token_usage.lock_and_get_files.
             mode = "warn" if quiet else "block"
-            with locked_json_rmw(
-                token_usage.CACHE_PATH,
-                default_factory=lambda: {"version": token_usage.CACHE_VERSION, "files": {}},
-                on_contention=mode,
-                contention_warning="token cache contended; skipping token aggregation",
-            ) as ljson:
-                if not ljson.is_locked:
-                    files_dict = None
-                else:
-                    if ljson.data.get("version") != token_usage.CACHE_VERSION:
-                        ljson.data.clear()
-                        ljson.data.update({"version": token_usage.CACHE_VERSION, "files": {}})
-                    if not isinstance(ljson.data.get("files"), dict):
-                        ljson.data["files"] = {}
-                    files_dict = ljson.data["files"]
+            with token_usage.lock_and_get_files(mode) as files_dict:
                 for claude_dir in claude_paths:
                     for row in events.walk_session_metadata(
                         claude_dir,
@@ -2950,19 +2936,10 @@ def _run_events_backfill(
         agg_projects: list[dict] = []
         # Hold the token cache lock across the walk so per-jsonl mutations
         # persist as part of the same R/M/W. Init is interactive, so use
-        # blocking mode.
+        # blocking mode. Cache-shape invariants are owned by
+        # token_usage.lock_and_get_files.
         if claude_paths:
-            with locked_json_rmw(
-                token_usage.CACHE_PATH,
-                default_factory=lambda: {"version": token_usage.CACHE_VERSION, "files": {}},
-                on_contention="block",
-            ) as ljson:
-                if ljson.data.get("version") != token_usage.CACHE_VERSION:
-                    ljson.data.clear()
-                    ljson.data.update({"version": token_usage.CACHE_VERSION, "files": {}})
-                if not isinstance(ljson.data.get("files"), dict):
-                    ljson.data["files"] = {}
-                files_dict = ljson.data["files"]
+            with token_usage.lock_and_get_files("block") as files_dict:
                 for claude_dir in claude_paths:
                     for row in events.walk_session_metadata(
                         claude_dir,
