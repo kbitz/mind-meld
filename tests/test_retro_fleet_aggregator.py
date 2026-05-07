@@ -1934,7 +1934,10 @@ class TestTokenBlockRender:
         assert "Tokens this window:" not in out
         assert "Cache hit ratio:" not in out
         # But the section is still present with sessions count.
-        assert "5 sessions across 1 projects" in out
+        assert "5 sessions" in out
+        # Projects-count line dropped (worktrees + Conductor workspaces
+        # inflated it) — repo count under Code shipped covers the signal.
+        assert "across 1 projects" not in out
 
     def test_pre_token_peers_breadcrumb_in_notes(self):
         from mind_meld.skills.retro_fleet.aggregator import format_retro
