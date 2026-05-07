@@ -2,6 +2,35 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.28] - 2026-05-06
+
+**`/retro-fleet` skill auto-syncs the fleet before aggregating.** Pre-fix, the
+skill ran `mm retro-fleet <window>` against whatever events were already on
+local disk — peer activity since the last `mm autopull` was invisible to the
+retro, and today's local commits / sessions / skill counts hadn't landed in
+the events JSONL yet because `_run_events_tail` only fires on push. Result:
+"I just pushed from the other Mac, why isn't it in the retro" and "I made
+3 commits today, the streak counter says 0."
+
+`SKILL.md` now adds a Step 1 that runs `mm autopush` (refreshes today's local
+events file with current commits/sessions/skills) followed by `mm autopull`
+(collects what other Macs have pushed since last sync) before invoking the
+aggregator in Step 2. Both commands are silent, never prompt, and exit
+gracefully on errors or when mm isn't initialized — safe to run
+unconditionally per the v0.8.1 contract. The old Step 1 (aggregator) becomes
+Step 2; the old Step 2 (present output) becomes Step 3.
+
+**CLI behavior unchanged.** `mm retro-fleet` and `retro_fleet_cmd` in
+`cli.py` are deliberately untouched — scripted exports
+(`mm retro-fleet 30d > /tmp/retro.md`) stay fast and deterministic. Only the
+skill (the LLM judgment layer) does the autopush/autopull wrap, and the user
+can skip it by saying "stale retro" or "offline retro" or by having just run
+`mm push` and `mm pull` manually.
+
+**No code changes.** `src/mind_meld/skills/retro_fleet/SKILL.md` only.
+`tests/test_wheel.py` only checks SKILL.md *exists* in the wheel; content is
+intentionally not pinned.
+
 ## [0.11.27] - 2026-05-06
 
 **Fleet-wide skill-invocation counts via Claude Code session jsonls.**

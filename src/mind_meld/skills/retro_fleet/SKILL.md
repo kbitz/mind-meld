@@ -39,7 +39,26 @@ by `(canonical_remote_url, sha)`, sum sessions across `(device, source_root, cla
 tuples (latest-snapshot-wins per tuple — the v=2 schema is full inventory),
 and render a markdown retro.
 
-## Step 1: invoke the aggregator
+## Step 1: refresh fleet state
+
+Push first, then pull. `_run_events_tail` only fires on push, so today's
+local commits, session tokens, and skill counts aren't in the events JSONL
+until `mm push` writes them — without this, the retro is missing the
+running machine's most recent activity. `mm autopull` then collects what
+other Macs have pushed since the last sync.
+
+Both commands are silent, never prompt, and exit gracefully on errors or
+when mm isn't initialized — safe to run unconditionally.
+
+```bash
+mm autopush
+mm autopull
+```
+
+Skip this step only if the user explicitly asks for a "stale" or "offline"
+retro, or if they just ran `mm push` and `mm pull` themselves.
+
+## Step 2: invoke the aggregator
 
 Run this command and capture the output. Substitute `<window>` with what the
 user asked for (`7d`, `30d`, `90d`, etc. — days only).
@@ -57,7 +76,7 @@ not retry — surface the error and tell the user to verify their mm install
 `python` is not on PATH (only `python3` is), and pipx-installed mm lives in
 an isolated venv that nothing outside it can import.
 
-## Step 2: present the output
+## Step 3: present the output
 
 The aggregator writes complete markdown to stdout. Show it to the user
 verbatim. The output is paste-ready for iMessage, Slack, or email — no
