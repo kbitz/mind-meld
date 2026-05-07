@@ -80,3 +80,44 @@ class TestRetroFleetCommand:
         result = self._runner().invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "retro-fleet" in result.output
+
+    def test_theme_and_noteworthy_forwarded(self, monkeypatch):
+        """v0.12.0 — second-pass card flags forward verbatim through the
+        typer wrapper. Pin: ``--theme`` repeats, ``--noteworthy``,
+        ``--name``, and ``--no-save`` all reach the aggregator argv."""
+        from mind_meld.cli import app
+
+        captured: dict = {}
+
+        def _fake_main(argv):
+            captured["argv"] = list(argv)
+            return 0
+
+        monkeypatch.setattr("mind_meld.skills.retro_fleet.aggregator.main", _fake_main)
+        result = self._runner().invoke(
+            app,
+            [
+                "retro-fleet",
+                "7d",
+                "--theme",
+                "alpha",
+                "--theme",
+                "beta",
+                "--noteworthy",
+                "shipped",
+                "--name",
+                "kb",
+                "--no-save",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        argv = captured["argv"]
+        # Flags forward in the same shape the aggregator's argparse expects.
+        assert "--theme" in argv
+        assert "alpha" in argv
+        assert "beta" in argv
+        assert "--noteworthy" in argv
+        assert "shipped" in argv
+        assert "--name" in argv
+        assert "kb" in argv
+        assert "--no-save" in argv
