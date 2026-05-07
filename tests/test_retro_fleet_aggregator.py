@@ -3064,3 +3064,581 @@ class TestFleetSkillsAggregation:
         data = _aggregate(events_dir)
         out = aggregator.format_retro(data)
         assert "this machine only" not in out
+
+
+# ---------------------------------------------------------------------------
+# v0.12.0 — commit-type mix, hourly distribution, bursts, ship-of-the-week,
+# weekly buckets, snapshot persistence, two-pass card.
+# ---------------------------------------------------------------------------
+
+
+def _agg_git_only(commits: list[dict], window_days: int = 7) -> aggregator.GitAggregate:
+    """Run ``aggregate_git`` against a single synthetic event (no fleet
+    machinery) to keep tests focused on the per-commit derivations."""
+    return aggregator.aggregate_git(
+        [_git_event("dev-a", 0, commits)],
+        since=NOW - timedelta(days=window_days),
+        until=NOW,
+        author_emails=frozenset({"kb@example.com"}),
+        window_days=window_days,
+    )
+
+
+class TestCommitTypeMix:
+    def test_conventional_prefixes_bucket(self):
+        commits = [
+            _commit("a" * 7, 1, subject="feat: add thing"),
+            _commit("b" * 7, 1, subject="fix: bug"),
+            _commit("c" * 7, 1, subject="fix(scope): another bug"),
+            _commit("d" * 7, 1, subject="docs: readme"),
+            _commit("e" * 7, 1, subject="chore: bump"),
+            _commit("f" * 7, 1, subject="just a sentence"),
+        ]
+        out = _agg_git_only(commits)
+        assert out.commit_types.total == 6
+        assert out.commit_types.counts["feat"] == 1
+        assert out.commit_types.counts["fix"] == 2  # bare + scoped both classify as fix
+        assert out.commit_types.counts["docs"] == 1
+        assert out.commit_types.counts["chore"] == 1
+        assert out.commit_types.counts["other"] == 1
+
+    def test_breaking_change_marker_normalizes(self):
+        out = _agg_git_only([_commit("a" * 7, 1, subject="feat!: breaking")])
+        assert out.commit_types.counts.get("feat") == 1
+
+    def test_render_emits_mix_line(self):
+        out = _agg_git_only(
+            [
+                _commit("a" * 7, 1, subject="feat: x"),
+                _commit("b" * 7, 1, subject="fix: y"),
+            ]
+        )
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = out
+        markdown = aggregator.format_retro(data)
+        assert "Mix:" in markdown
+        assert "feat 1" in markdown
+
+
+class TestHourlyDistribution:
+    def test_local_hour_bucketing(self):
+        # Use a fixed UTC timestamp; the aggregator converts to local hour.
+        commits = [
+            _commit("a" * 7, 0.5),
+            _commit("b" * 7, 0.5),
+            _commit("c" * 7, 1.5),
+        ]
+        out = _agg_git_only(commits)
+        # Total of all hourly buckets equals the deduped commit count.
+        assert sum(out.hourly.values()) == out.commits
+        assert out.commits == 3
+
+    def test_render_omits_section_when_empty(self):
+        out = aggregator.GitAggregate(commits=0)
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = out
+        markdown = aggregator.format_retro(data)
+        assert "Peak hours" not in markdown
+
+
+class TestCommitBursts:
+    def test_single_commit_micro_burst(self):
+        out = _agg_git_only([_commit("a" * 7, 1)])
+        assert out.bursts.burst_count == 1
+        assert out.bursts.micro == 1
+        assert out.bursts.deep == 0
+
+    def test_45min_gap_splits_burst(self):
+        # Two commits 60 min apart → 2 bursts.
+        from datetime import timedelta as _td
+
+        cs = [
+            _commit("a" * 7, 1.0),
+            _commit("b" * 7, (NOW - (NOW - _td(days=1) - _td(minutes=60))).total_seconds() / 86400),
+        ]
+        out = _agg_git_only(cs)
+        assert out.bursts.burst_count == 2
+
+    def test_close_commits_form_one_burst(self):
+        # Two commits 10 min apart → 1 burst.
+        from datetime import timedelta as _td
+
+        cs = [
+            _commit("a" * 7, 1.0),
+            _commit("b" * 7, (NOW - (NOW - _td(days=1) - _td(minutes=10))).total_seconds() / 86400),
+        ]
+        out = _agg_git_only(cs)
+        assert out.bursts.burst_count == 1
+
+
+class TestShipOfWeek:
+    def test_picks_largest_by_loc(self):
+        cs = [
+            _commit("a" * 7, 1, subject="small", add=10, dlt=2),
+            _commit("b" * 7, 1, subject="huge: refactor world", add=5000, dlt=300),
+            _commit("c" * 7, 1, subject="medium", add=200, dlt=20),
+        ]
+        out = _agg_git_only(cs)
+        assert out.ship.has_data is True
+        assert out.ship.sha == "bbbbbbb"
+        assert out.ship.additions == 5000
+        assert out.ship.deletions == 300
+        assert "huge" in out.ship.subject
+
+    def test_ship_subject_punctuation_preserved_in_render(self):
+        cs = [
+            _commit(
+                "a" * 7, 1, subject="feat(cli): add /retro-fleet --theme flag", add=999, dlt=10
+            ),
+        ]
+        out = _agg_git_only(cs)
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = out
+        markdown = aggregator.format_retro(data)
+        # _safe_prose preserves these where _safe_short would mangle them.
+        assert "feat(cli): add /retro-fleet --theme flag" in markdown
+
+    def test_no_ship_when_zero_commits(self):
+        out = _agg_git_only([])
+        assert out.ship.has_data is False
+        assert out.ship.subject == ""
+
+
+class TestWeeklyBuckets:
+    def test_buckets_emitted_for_14d_window(self):
+        cs = [
+            _commit("a" * 7, 1, add=100, dlt=10),  # this week
+            _commit("b" * 7, 8, add=50, dlt=5),  # last week
+        ]
+        out = aggregator.aggregate_git(
+            [_git_event("dev-a", 0, cs)],
+            since=NOW - timedelta(days=14),
+            until=NOW,
+            author_emails=frozenset({"kb@example.com"}),
+            window_days=14,
+        )
+        assert len(out.weekly) == 2
+        # Sorted oldest -> newest.
+        assert out.weekly[0].week_start <= out.weekly[1].week_start
+
+    def test_buckets_skipped_for_7d_window(self):
+        cs = [_commit("a" * 7, 1, add=100, dlt=10)]
+        out = _agg_git_only(cs, window_days=7)
+        assert out.weekly == []
+
+    def test_active_days_counted_per_bucket(self):
+        # Three commits same week, two distinct days.
+        cs = [
+            _commit("a" * 7, 1.0, add=10, dlt=1),
+            _commit("b" * 7, 1.5, add=10, dlt=1),
+            _commit("c" * 7, 2.0, add=10, dlt=1),
+        ]
+        out = aggregator.aggregate_git(
+            [_git_event("dev-a", 0, cs)],
+            since=NOW - timedelta(days=14),
+            until=NOW,
+            author_emails=frozenset({"kb@example.com"}),
+            window_days=14,
+        )
+        assert len(out.weekly) >= 1
+        total_active = sum(b.active_days for b in out.weekly)
+        assert total_active >= 2
+
+
+class TestSnapshotPersistence:
+    def test_save_and_load_roundtrip(self, tmp_path):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = aggregator.GitAggregate(commits=42, additions=1000, deletions=200)
+        path = aggregator._save_snapshot(data, tmp_path)
+        assert path is not None
+        assert path.exists()
+        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
+        assert prior is not None
+        assert prior["window_days"] == 7
+        assert prior["metrics"]["commits"] == 42
+
+    def test_load_skips_window_mismatch(self, tmp_path):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        aggregator._save_snapshot(data, tmp_path)
+        prior = aggregator._load_prior_snapshot(tmp_path, window_days=30)
+        assert prior is None
+
+    def test_load_picks_most_recent_matching(self, tmp_path):
+        # Save two snapshots; loader returns the most recent.
+        d1 = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        d1.git = aggregator.GitAggregate(commits=10)
+        path1 = aggregator._save_snapshot(d1, tmp_path)
+        # Force ascending filename order to simulate sequence.
+        path1.rename(tmp_path / "2026-05-01-1.json")
+
+        d2 = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        d2.git = aggregator.GitAggregate(commits=99)
+        path2 = aggregator._save_snapshot(d2, tmp_path)
+        path2.rename(tmp_path / "2026-05-07-1.json")
+
+        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
+        assert prior is not None
+        assert prior["metrics"]["commits"] == 99
+
+    def test_corrupt_snapshot_skipped(self, tmp_path):
+        (tmp_path / "2026-05-07-1.json").write_text("{ not json")
+        d = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        d.git = aggregator.GitAggregate(commits=10)
+        path = aggregator._save_snapshot(d, tmp_path)
+        # Save still succeeds; load skips the corrupt file and finds ours.
+        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
+        assert prior is not None
+        assert path is not None
+
+    def test_compute_prior_delta_from_dict(self):
+        prior = {
+            "window_days": 7,
+            "until": "2026-05-01T00:00:00+00:00",
+            "metrics": {
+                "commits": 10,
+                "additions": 100,
+                "deletions": 20,
+                "streak_days": 5,
+                "sessions": 50,
+                "tokens_total": 1000,
+                "push_events": 3,
+            },
+        }
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = aggregator.GitAggregate(commits=15, additions=200, deletions=30, streak_days=12)
+        delta = aggregator._compute_prior_delta(data, prior)
+        assert delta.has_prior is True
+        assert delta.commits == 5
+        assert delta.additions == 100
+        assert delta.streak_days == 7
+
+    def test_compute_prior_delta_handles_none(self):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        delta = aggregator._compute_prior_delta(data, None)
+        assert delta.has_prior is False
+
+    def test_render_skips_section_when_no_changes(self):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.prior = aggregator.PriorRetroDelta(has_prior=True, prior_date="2026-05-01")
+        markdown = aggregator.format_retro(data)
+        assert "Trends vs last retro" not in markdown
+        assert "No metric changed" not in markdown
+
+
+class TestAsciiCard:
+    def _baseline(self) -> aggregator.RetroData:
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = aggregator.GitAggregate(
+            commits=42,
+            additions=1000,
+            deletions=200,
+            repos_by_count={"github.com/kb/mm": 30, "github.com/kb/bolt": 12},
+            streak_days=37,
+        )
+        # Simulate two-machine fleet for the card.
+        data.fleet.devices_in_events = {"dev-a", "dev-b"}
+        return data
+
+    def test_card_rendered_when_themes_supplied(self):
+        data = self._baseline()
+        out = aggregator.format_retro(
+            data,
+            name="kb",
+            themes=["theme one", "theme two"],
+            noteworthy="something noteworthy",
+        )
+        assert "╔" in out
+        assert "╝" in out
+        assert "kb · " in out
+        assert "NOTEWORTHY" in out
+        assert "TOP WORK" in out
+        assert "theme one" in out
+
+    def test_card_lines_pad_to_fixed_width(self):
+        data = self._baseline()
+        out = aggregator.format_retro(
+            data,
+            name="kb",
+            themes=["short", "longer theme line", "x"],
+            noteworthy="medium length",
+        )
+        card_lines = [line for line in out.splitlines() if line.startswith("║")]
+        assert card_lines, "card not present"
+        # Every interior card line is exactly CARD_WIDTH chars wide.
+        widths = {len(line) for line in card_lines}
+        assert widths == {aggregator.CARD_WIDTH}, f"variable widths: {widths}"
+
+    def test_card_truncates_overlong_theme(self):
+        data = self._baseline()
+        long_theme = "x" * 200
+        out = aggregator.format_retro(data, themes=[long_theme], noteworthy="ok")
+        # The truncated line still has the right border.
+        for line in out.splitlines():
+            if line.startswith("║"):
+                assert line.endswith("║")
+        assert "…" in out  # truncation marker present
+
+    def test_no_card_without_inputs(self):
+        data = self._baseline()
+        out = aggregator.format_retro(data)
+        assert "╔" not in out
+        # First-pass output includes the themes-prompt sidecar instead.
+        assert "MM_THEMES_PROMPT" in out
+
+    def test_themes_prompt_omitted_on_second_pass(self):
+        data = self._baseline()
+        out = aggregator.format_retro(data, themes=["a"], noteworthy="b", name="kb")
+        assert "MM_THEMES_PROMPT" not in out
+
+    def test_card_strips_terminal_escapes_from_llm_inputs(self):
+        data = self._baseline()
+        # Hostile theme tries to inject ANSI red.
+        out = aggregator.format_retro(
+            data,
+            themes=["\x1b[31mevil\x1b[0m"],
+            noteworthy="\x1b[1mbold\x1b[0m",
+        )
+        assert "\x1b" not in out
+
+
+class TestThemesPrompt:
+    def test_first_pass_includes_json_payload(self, tmp_path):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.git = aggregator.GitAggregate(
+            commits=5,
+            additions=100,
+            deletions=10,
+            repos_by_count={"github.com/kb/foo": 3},
+        )
+        data.git.ship = aggregator.ShipOfWeek(
+            repo="github.com/kb/foo",
+            sha="abc1234",
+            subject="feat: ship it",
+            additions=99,
+            deletions=1,
+            has_data=True,
+        )
+        out = aggregator.format_retro(data)
+        assert "MM_THEMES_PROMPT" in out
+        # JSON block parses cleanly.
+        block = out.split("```json", 1)[1].split("```", 1)[0]
+        payload = json.loads(block)
+        assert payload["commits"] == 5
+        assert payload["ship"]["subject"] == "feat: ship it"
+        assert payload["top_repos"] == ["github.com/kb/foo"]
+
+    def test_long_repo_url_shortened_in_prompt(self):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        long_url = "git.example.com/org/team/" + "x" * 80 + "/repo"
+        data.git = aggregator.GitAggregate(
+            commits=1,
+            additions=1,
+            deletions=0,
+            repos_by_count={long_url: 1},
+        )
+        out = aggregator.format_retro(data)
+        # The original UUID-shaped middle segment must NOT survive into
+        # the JSON sidecar — same defang-then-shorten as the body.
+        assert "x" * 80 not in out
+
+
+class TestMainCliFlags:
+    def test_no_save_flag_skips_snapshot(self, tmp_path, monkeypatch, capsys):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        retros_dir = tmp_path / "retros"
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+        monkeypatch.setenv("MM_RETROS_DIR", str(retros_dir))
+        monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset(), raising=True)
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+        rc = aggregator.main(["7d", "--no-save"])
+        assert rc == 0
+        # No snapshot dir should have been created (no save attempted).
+        assert not retros_dir.exists() or list(retros_dir.glob("*.json")) == []
+
+    def test_theme_args_render_card(self, tmp_path, monkeypatch, capsys):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+        monkeypatch.setenv("MM_RETROS_DIR", str(tmp_path / "retros"))
+        monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset(), raising=True)
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+        rc = aggregator.main(
+            [
+                "7d",
+                "--name",
+                "kb",
+                "--noteworthy",
+                "did things",
+                "--theme",
+                "alpha",
+                "--theme",
+                "beta",
+                "--no-save",
+            ]
+        )
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "╔" in out
+        assert "kb · " in out
+        assert "alpha" in out
+        assert "MM_THEMES_PROMPT" not in out
+
+    def test_first_pass_writes_snapshot(self, tmp_path, monkeypatch):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        retros_dir = tmp_path / "retros"
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+        monkeypatch.setenv("MM_RETROS_DIR", str(retros_dir))
+        monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset(), raising=True)
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+        rc = aggregator.main(["7d"])
+        assert rc == 0
+        snapshots = list(retros_dir.glob("*.json"))
+        assert len(snapshots) == 1
+
+
+class TestSafeProseHardening:
+    """v0.12.0 review-gate fixes — peer-controlled prose strings get
+    BiDi + line-separator stripping AND a 4 KiB length cap before regex
+    sanitization. Pre-fix, ``_PROSE_CTRL_RE`` only stripped ASCII
+    C0/DEL, leaving U+202E (RTL override) and U+2028 (line separator)
+    free to flip downstream rendered text or smuggle line breaks past
+    the single-line bullet contract."""
+
+    def test_strips_rtl_override(self):
+        out = aggregator._safe_prose("feat: ‮inject")
+        assert "‮" not in out
+
+    def test_strips_line_separators(self):
+        for ch in ("", " ", " "):
+            out = aggregator._safe_prose(f"a{ch}b")
+            assert ch not in out
+
+    def test_strips_bidi_isolates(self):
+        for ch in ("‪", "‫", "‬", "‭", "⁦", "⁧", "⁨", "⁩"):
+            out = aggregator._safe_prose(f"x{ch}y")
+            assert ch not in out
+
+    def test_caps_long_input_at_4kib(self):
+        # Pathological 50KiB peer subject doesn't burn CPU on regex.
+        s = "a" * 50_000
+        out = aggregator._safe_prose(s)
+        assert len(out) <= aggregator._PROSE_LEN_CAP
+
+    def test_normal_punctuation_preserved(self):
+        out = aggregator._safe_prose("feat(cli): /retro --theme — fix #194")
+        assert out == "feat(cli): /retro --theme — fix #194"
+
+    def test_classify_subject_caps_input(self):
+        # 1MB subject doesn't burn CPU on .lower()/.strip()/regex —
+        # classifier only inspects the prefix anyway.
+        long = "feat: " + "x" * 1_000_000
+        assert aggregator._classify_commit_subject(long) == "feat"
+
+
+class TestSnapshotRaceSafety:
+    """v0.12.0 review-gate fixes — snapshot save uses O_EXCL so two
+    concurrent retros can't silently overwrite each other on the same
+    sequence number; load + prune sort by parsed (date, seq) tuple so
+    seq=10+ doesn't lex-shadow seq=9."""
+
+    def test_filename_format_zero_padded(self, tmp_path):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        path = aggregator._save_snapshot(data, tmp_path)
+        assert path is not None
+        assert aggregator._SNAPSHOT_FILENAME_RE.match(path.name) is not None
+        assert path.name.endswith("-001.json")
+
+    def test_seq_advances_on_collision(self, tmp_path):
+        # Pre-create a file with seq=001 then save; new save must pick
+        # a fresh seq instead of overwriting.
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        today = NOW.astimezone().date().isoformat()
+        squat = tmp_path / f"{today}-001.json"
+        squat.write_text('{"window_days": 7, "metrics": {"commits": 999}}')
+        path = aggregator._save_snapshot(data, tmp_path)
+        assert path is not None
+        # Squatter file is untouched; new save took seq 002.
+        assert "999" in squat.read_text()
+        assert path.name.endswith("-002.json")
+
+    def test_load_returns_seq_ten_not_seq_nine(self, tmp_path):
+        # Pre-fix bug: lex sort with reverse=True puts -9.json BEFORE
+        # -10.json so loader returned seq=9 as "most recent."
+        # With zero-pad + tuple sort, -010 sorts after -009 correctly.
+        today = NOW.astimezone().date().isoformat()
+        for seq, commits in [(9, 9), (10, 10)]:
+            (tmp_path / f"{today}-{seq:03d}.json").write_text(
+                json.dumps(
+                    {
+                        "window_days": 7,
+                        "until": NOW.isoformat(),
+                        "metrics": {"commits": commits},
+                    }
+                )
+            )
+        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
+        assert prior is not None
+        assert prior["metrics"]["commits"] == 10
+
+    def test_load_caps_oversized_files(self, tmp_path):
+        today = NOW.astimezone().date().isoformat()
+        big = tmp_path / f"{today}-001.json"
+        big.write_text("[" + "0," * 1_000_000 + "0]")
+        good = tmp_path / f"{today}-002.json"
+        good.write_text('{"window_days": 7, "metrics": {"commits": 7}}')
+        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
+        assert prior is not None
+        assert prior["metrics"]["commits"] == 7
+
+
+class TestRenderHardening:
+    """v0.12.0 review-gate fixes — card caps theme count at MAX_THEMES,
+    aggregator window arg refuses pathological values, header date uses
+    local timezone consistently with the card."""
+
+    def test_card_caps_themes_at_max(self):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        out = aggregator.format_retro(
+            data, themes=[f"theme {i}" for i in range(50)], noteworthy="ok"
+        )
+        bullet_lines = [line for line in out.splitlines() if line.startswith("║") and "•" in line]
+        assert len(bullet_lines) == aggregator.MAX_THEMES
+
+    def test_window_rejects_overflow(self):
+        with pytest.raises(Exception):
+            aggregator._parse_window("1000000000d")
+
+    def test_window_accepts_max(self):
+        assert (
+            aggregator._parse_window(f"{aggregator._MAX_WINDOW_DAYS}d")
+            == aggregator._MAX_WINDOW_DAYS
+        )
+
+    def test_header_date_matches_card_local_tz(self):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.fleet.devices_in_events = {"dev-a"}
+        local_until = NOW.astimezone().date().isoformat()
+        local_since = (NOW - timedelta(days=7)).astimezone().date().isoformat()
+        out = aggregator.format_retro(data, themes=["x"], noteworthy="y", name="kb")
+        assert f"# Retro: {local_since} → {local_until}" in out
+
+
+class TestSnapshotPruning:
+    def test_old_snapshots_reaped(self, tmp_path):
+        # Year-old snapshot file (filename date) — should be pruned.
+        old_date = (datetime.now(timezone.utc) - timedelta(days=400)).date().isoformat()
+        old = tmp_path / f"{old_date}-001.json"
+        old.write_text('{"window_days": 7, "metrics": {}}')
+        recent = tmp_path / "2026-05-07-001.json"
+        recent.write_text('{"window_days": 7, "metrics": {}}')
+        aggregator._prune_old_snapshots(tmp_path)
+        assert not old.exists()
+        assert recent.exists()
+
+    def test_unparseable_filenames_left_alone(self, tmp_path):
+        weird = tmp_path / "not-a-date-file.json"
+        weird.write_text("{}")
+        aggregator._prune_old_snapshots(tmp_path)
+        assert weird.exists()
