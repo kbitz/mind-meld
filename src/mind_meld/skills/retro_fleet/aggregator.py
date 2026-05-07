@@ -1184,14 +1184,20 @@ def format_retro(data: RetroData) -> str:
     if data.sessions.total_sessions == 0 and not data.sessions.pre_v2_peers:
         lines.append("- No Claude Code sessions captured in this window.")
     else:
-        lines.append(
-            f"- {data.sessions.total_sessions} sessions across {data.sessions.projects} projects"
-        )
+        # Projects-count was misleading: Claude Code keys session storage by
+        # encoded cwd, so each Conductor workspace and git worktree counts as
+        # a distinct "project" even though they trace back to ~10 real repos.
+        # The repo count under "Code shipped" already covers the useful
+        # signal; surface ephemeral as an inline qualifier on sessions
+        # instead of a Notes aside.
         if data.sessions.ephemeral_sessions:
-            notes.append(
-                f"{data.sessions.ephemeral_sessions} of those sessions are in ephemeral "
-                f"Conductor workspaces."
+            lines.append(
+                f"- {data.sessions.total_sessions} sessions, "
+                f"{data.sessions.ephemeral_sessions} of which are in ephemeral "
+                f"Conductor workspaces"
             )
+        else:
+            lines.append(f"- {data.sessions.total_sessions} sessions")
         # Token block — only renders when fleet has any token data. Hides
         # cleanly on a fresh fleet so empty zeros don't pollute output.
         _render_token_block(lines, data.sessions)
