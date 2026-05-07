@@ -2,6 +2,17 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.29] - 2026-05-07
+
+**`mm retro-fleet` drops the misleading "across N projects" stat; ephemeral-workspace count moves inline with sessions.** User feedback: a 7d retro reported "171 sessions across 89 projects" against a fleet that has only ever worked on ~10 real repos. Root cause: Claude Code keys session storage by encoded cwd (`~/.claude/projects/-Users-kb-conductor-workspaces-mind-meld-pangyo-v1/`), so every Conductor workspace and git worktree gets its own dir on disk and the aggregator's `(device, source_root, claude_dir)` tuple counted each as a distinct project. The number was correct as "unique session-storage paths" but useless as "projects." The repo count under `## Code shipped` already covers the meaningful signal — it dedups by canonical git remote URL.
+
+`format_retro` now renders one of:
+
+- `- 171 sessions, 83 of which are in ephemeral Conductor workspaces` (when any sessions are ephemeral)
+- `- 171 sessions` (when none are ephemeral)
+
+The Notes section no longer carries the "X of those sessions are in ephemeral Conductor workspaces" aside — folded into the inline qualifier so the user reads it once at point-of-use. `data.sessions.projects` is still computed and exposed on the dataclass for any external consumer; just unrendered. Pinned by `tests/test_retro_fleet_aggregator.py::TestTokenRender::test_render_hidden_when_no_tokens` (asserts `5 sessions` present, `across 1 projects` absent).
+
 ## [0.11.28] - 2026-05-06
 
 **`/retro-fleet` skill auto-syncs the fleet before aggregating.** Pre-fix, the
