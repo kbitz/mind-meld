@@ -2,6 +2,56 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.0] - 2026-05-07
+
+**`/retro-fleet` borrows the gstack `/retro` shape: ASCII screenshot card, commit-type mix, peak hours, commit bursts, ship-of-the-window, week-over-week deltas, snapshot persistence, and an LLM-driven praise/level-up/focus narrative.** Pre-fix, the skill rendered a flat "stats and notes" markdown body and told the LLM to paste it verbatim — which left the gstack-style judgment layer (themes, ship of the week, narrative) entirely on the table. The aggregator now does the deterministic work and the SKILL.md hands off the narrative pieces to the LLM with a tone block opinionated enough to keep the output specific instead of fluffy.
+
+The card is rendered through a **two-pass CLI flow**. Pass 1 (`mm retro-fleet 7d`) emits the markdown body plus a `MM_THEMES_PROMPT` JSON sidecar; the LLM reads it, synthesizes a noteworthy line + 3 themes, then re-invokes with `mm retro-fleet 7d --theme A --theme B --theme C --noteworthy "..." --name kb --no-save`. Pass 2 re-renders with a pixel-aligned ASCII card pinned at the top:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  kb · 2026-04-30 → 2026-05-07                                ║
+╠══════════════════════════════════════════════════════════════╣
+║  118 commits · 8 repos · 3 machines                          ║
+║  +31k / -11k LOC · 37-day streak                             ║
+║                                                              ║
+║  NOTEWORTHY                                                  ║
+║  Shipped fleet-wide skill counts (mm v0.11.27)               ║
+║                                                              ║
+║  TOP WORK                                                    ║
+║  • Fleet retro polish + token usage rollup                   ║
+║  • Locked-JSON contention primitive extraction               ║
+║  • Release workflow auto-tag                                 ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+The two-pass split is load-bearing: LLM-padded right borders drift by a char or two often enough to ruin screenshots. Routing the card through Python's deterministic padding (`CARD_WIDTH = 64`, `_render_ascii_card`) solves it without making the card content dumber. `--no-save` on the second pass prevents a duplicate snapshot write.
+
+**Aggregator additions in the same single-pass loop.** `aggregate_git` now also collects:
+
+- **Commit-type mix.** `_classify_commit_subject` matches `^([a-z]+)(?:\([^)]*\))?!?:` so `fix(cli):` and `feat!:` normalize to bare keywords. Renders as `Mix: feat 12 (40%) · fix 8 (27%) · ...`.
+- **Hourly distribution.** Local-time histogram, top-5 peak rows shown with bar visualization.
+- **Commit bursts.** 45-min-gap clustering into deep / medium / micro buckets. Named "bursts" not "sessions" intentionally — the heuristic counts commit clusters, not cognitive flow, and a real coding session that stops for lunch / debugging without commits will fragment into multiple bursts. Honest framing avoids collision with Claude Code "sessions" we already count.
+- **Ship of the window.** Single highest-LOC commit (max `add+del`); subject preserved through `_safe_prose` so `feat(cli): /retro --foo` renders with punctuation intact instead of getting bucketed by `_safe_short`'s tight whitelist.
+- **Week-over-week buckets.** Monday-anchored 7-day buckets when `window_days >= 14`. Markdown table with per-bucket commits, +/- LOC, and active-day counts.
+
+**Snapshot persistence + trends-vs-last-retro deltas.** The aggregator writes a JSON snapshot to `~/.local/share/mind-meld/retros/YYYY-MM-DD-N.json` (mode 0o700, local-only, NOT synced) after every save-enabled run. On subsequent runs, the most recent matching-window prior loads via `_load_prior_snapshot` and renders as a `## Trends vs last retro` section — only when something actually changed (no stranded "no metric changed" bullet on identical retros). Snapshots reap by filename date at 365 days. The `MM_RETROS_DIR` env hook mirrors `MM_EVENTS_DIR` for power-user override and test isolation.
+
+**`_safe_prose` (new).** A prose-friendly defang pass — strips terminal escapes + Rich markup + C0 controls but preserves printable punctuation (colons, slashes, hashes, em-dashes). Used for commit subjects (peer-controlled) and LLM-supplied theme/noteworthy/name lines where readability matters and the existing `_safe_short` whitelist would over-mangle. The trust boundary stays the same; the bucketing just stops mangling readable prose.
+
+**SKILL.md updates** include the two-pass flow, theme synthesis instructions (one-line noteworthy + three themes ≤55 chars each, lead with the verb, name the artifact not the commit), and the praise / level-up / focus paragraph contract for the conversation-side narrative — anchored in actual commits, framed as investment-advice not criticism, with the gstack tone block (specific, earned, no coddling) carried over.
+
+**Pre-landing review hardening (49 total new tests, 14 from review-gate).** The /ship pre-landing review caught several issues addressed in this same release rather than deferred:
+
+- **Snapshot race + lex-sort bug.** `_save_snapshot` now uses `O_CREAT|O_EXCL` and bumps the sequence number on collision, so two concurrent retros can't silently overwrite each other on the same `seq=N+1`. Filename format moves from `YYYY-MM-DD-N.json` to `YYYY-MM-DD-NNN.json` (3-digit zero-pad) AND `_load_prior_snapshot` now sorts by parsed `(date, seq)` tuple instead of lexical filename. Pre-fix, lex-sort with `reverse=True` ordered `-9.json` AFTER `-10.json`, so once a single day produced 10+ retros the loader returned a stale snapshot as "most recent."
+- **BiDi smuggling defense.** `_PROSE_CTRL_RE` now strips Unicode line/paragraph separators (U+2028/2029), NEL (U+0085), and the BiDi formatting characters U+202A–U+202E + U+2066–U+2069. Previously, a peer commit subject containing U+202E (RIGHT-TO-LEFT OVERRIDE) would flip downstream rendered text in iMessage / Slack / terminals — exactly the kind of trust-boundary leak the ASCII card flow widens.
+- **Length caps on peer-controlled prose.** `_safe_prose` truncates input at 4 KiB before regex sanitization; `_classify_commit_subject` only inspects the first 256 chars. Defends against a peer planting a 10 MB commit subject that would otherwise burn CPU on every retro render. `_load_prior_snapshot` skips files >1 MiB before parse.
+- **Theme count cap.** `_render_ascii_card` caps theme bullets at `MAX_THEMES = 3`. SKILL.md asks the LLM for "up to 3"; the renderer now enforces it so a misbehaving caller passing 50 `--theme` flags can't blow up the card height.
+- **Window arg cap.** `_parse_window` rejects values >`_MAX_WINDOW_DAYS` (3650 = 10 years) so `mm retro-fleet 1000000000d` exits with a clean usage error instead of crashing on `timedelta` `OverflowError`.
+- **Header date timezone consistency.** The markdown header now uses `astimezone().date()` to match the card's local-time framing. Pre-fix, the header showed the naive UTC date, which diverged from the card by a day near UTC boundaries.
+
+49 total new tests cover everything above plus the original v0.12.0 surface: commit-type classification, burst gap heuristic, ship-of-the-window selection, weekly bucketing, snapshot roundtrip + window-mismatch + corruption tolerance, prior-delta computation, ASCII card padding (every line exact-width), truncation, terminal-escape defense across LLM inputs, themes-prompt JSON sanitization, and the second-pass `--no-save` short-circuit. The autouse `_isolate_retros_dir` conftest fixture redirects `MM_RETROS_DIR` to a per-test tmp dir, mirroring the existing events-dir / identity-cache isolation pattern.
+
 ## [0.11.30] - 2026-05-07
 
 **Sync `~/.gstack-extend/` alongside `~/.gstack/`.** mind-meld already syncs
