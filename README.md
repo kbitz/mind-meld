@@ -160,6 +160,12 @@ Supplying `sync.sources` replaces the defaults wholesale — copy the full list,
 - `mm sources` — show the configured source list with their `Enabled` state and file counts.
 - `mm pull --source gstack` — pull only the gstack source (skip Claude).
 
+### Syncing gstack-extend
+
+If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source — sibling of the `gstack` treatment above. The whitelist walker is scoped to `projects/` only; per-machine bookkeeping at the root (`config`, `just-upgraded-from`, `update-snoozed`) is excluded by construction. Anything `gstack-extend` skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` rides this same source so cross-machine resume keeps working as the gstack-extend feature surface grows.
+
+Existing installs see this as a `New source available: gstack-extend` hint on next `mm status`. Opt in with `mm enable-source gstack-extend` or dismiss with `mm disable-source gstack-extend` — same shape as every other source toggle.
+
 ## Disabling sources per machine
 
 `config.toml` lives at `~/.config/mind-meld/` and is never synced — making it the natural home for per-device preferences. To turn off a source on one machine without affecting the others:

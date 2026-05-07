@@ -199,6 +199,17 @@ class TestDefaultSources:
         assert not fnmatch.fnmatch("analytics/skill-usage.jsonl", glob)
         assert not fnmatch.fnmatch("analytics/eureka.jsonl", glob)
 
+    def test_gstack_extend_source_present(self):
+        assert any(s["name"] == "gstack-extend" and s["type"] == "generic" for s in DEFAULT_SOURCES)
+
+    def test_gstack_extend_include_dirs_scoped_to_projects(self):
+        """`projects/` is the forward-compat slot for gstack-extend per-project state.
+        Excluding the rest of `~/.gstack-extend/` by construction keeps per-machine
+        bookkeeping (`config`, `just-upgraded-from`, `update-snoozed`) out of sync."""
+        ext = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack-extend")
+        assert ext["include_dirs"] == ["projects"]
+        assert ext["include_files"] == []
+
 
 class TestExcludePatternsValidation:
     """5C: _validate_sources accepts and validates the new
@@ -463,6 +474,48 @@ class TestGetSources:
         names = [s["name"] for s in sources]
         assert "claude" in names
         assert "gstack" in names
+
+    def test_no_auto_detect_gstack_extend_with_explicit_sources(self, tmp_path, monkeypatch):
+        """When explicit sync.sources are defined, gstack-extend auto-detection must NOT fire."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        gstack_extend_dir = tmp_path / ".gstack-extend"
+        gstack_extend_dir.mkdir()
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "max_file_size": 52_428_800,
+            "sources": [
+                {"name": "claude", "path": str(claude_dir), "type": "claude"},
+            ],
+        }
+        sources = get_sources(config)
+        names = [s["name"] for s in sources]
+        assert "gstack-extend" not in names
+
+    def test_auto_detects_gstack_extend_with_claude_dir_fallback(self, tmp_path, monkeypatch):
+        """When using claude_dir fallback and ~/.gstack-extend exists, it gets auto-detected."""
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        ext_dir = tmp_path / ".gstack-extend"
+        ext_dir.mkdir()
+        # walk_generic_source tolerates a missing projects/ subdir, but the
+        # source-path-existence filter requires the base path itself to exist.
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "claude_dir": str(claude_dir),
+            "max_file_size": 52_428_800,
+        }
+        sources = get_sources(config)
+        names = [s["name"] for s in sources]
+        assert "claude" in names
+        assert "gstack-extend" in names
 
     def test_validates_source_configs(self):
         """Missing required fields in a source should raise ConfigError."""

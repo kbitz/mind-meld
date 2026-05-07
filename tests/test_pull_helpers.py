@@ -1656,12 +1656,12 @@ class TestPromptSources:
         assert DEFAULT_SOURCES[0]["path"] == "~/.claude"
 
     def test_claude_only(self, monkeypatch) -> None:
-        """User answers Y for claude and n for gstack. mm-events is
+        """User answers Y for claude and n for gstack / gstack-extend. mm-events is
         mm-internal infrastructure and auto-includes without prompting,
         so it appears in the result list alongside claude."""
         from mind_meld import cli as cli_module
 
-        responses = iter([True, False])  # Y claude, n gstack
+        responses = iter([True, False, False])  # Y claude, n gstack, n gstack-extend
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["claude", "mm-events"]
@@ -1672,7 +1672,7 @@ class TestPromptSources:
         auto-includes without prompting (mm-internal infrastructure)."""
         from mind_meld import cli as cli_module
 
-        responses = iter([False, True])  # n claude, Y gstack
+        responses = iter([False, True, False])  # n claude, Y gstack, n gstack-extend
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["mm-events", "gstack"]
