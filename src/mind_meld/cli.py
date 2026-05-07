@@ -5622,6 +5622,30 @@ def retro_fleet_cmd(
         "--no-author-filter",
         help="Disable author-email filter; render ALL fleet commits.",
     ),
+    theme: list[str] = typer.Option(
+        [],
+        "--theme",
+        help=(
+            "TOP WORK theme line for the ASCII card (pass up to 3 times). "
+            "Supplied by the retro-fleet skill on the second pass."
+        ),
+    ),
+    noteworthy: str = typer.Option(
+        "",
+        "--noteworthy",
+        help="NOTEWORTHY line for the ASCII card. Supplied by the skill.",
+    ),
+    name: str = typer.Option(
+        "", "--name", help="Optional name in the ASCII card header (e.g. 'kb')."
+    ),
+    no_save: bool = typer.Option(
+        False,
+        "--no-save",
+        help=(
+            "Skip writing the snapshot at ~/.local/share/mind-meld/retros/. "
+            "Used by the skill on the second pass to avoid double-writes."
+        ),
+    ),
 ) -> None:
     """Render fleet retrospective markdown to stdout.
 
@@ -5629,6 +5653,15 @@ def retro_fleet_cmd(
     use is fine for scripted exports (``mm retro-fleet 30d > /tmp/retro.md``)
     but loses the LLM judgment layer (natural-language window parsing,
     error-translation) the skill provides.
+
+    Two-pass shape (v0.12.0+):
+    * Pass 1 — ``mm retro-fleet 7d`` emits the full markdown body plus a
+      ``MM_THEMES_PROMPT`` JSON sidecar at the bottom. Skill reads the
+      sidecar, synthesizes themes + noteworthy, then re-invokes.
+    * Pass 2 — ``mm retro-fleet 7d --theme A --theme B --theme C
+      --noteworthy "..." --name kb --no-save`` re-renders with a
+      pixel-aligned ASCII card up top and skips a duplicate snapshot
+      write.
 
     Thin wrapper around ``mind_meld.skills.retro_fleet.aggregator.main``.
     Routes through ``mm`` (guaranteed on PATH wherever mm is installed)
@@ -5643,6 +5676,14 @@ def retro_fleet_cmd(
     argv = [window]
     if no_author_filter:
         argv.append("--no-author-filter")
+    for t in theme:
+        argv.extend(["--theme", t])
+    if noteworthy:
+        argv.extend(["--noteworthy", noteworthy])
+    if name:
+        argv.extend(["--name", name])
+    if no_save:
+        argv.append("--no-save")
     raise typer.Exit(code=_aggregator_main(argv))
 
 

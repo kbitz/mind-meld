@@ -82,6 +82,18 @@ DEFAULT_EVENTS_DIR = Path("~/.local/share/mind-meld/events").expanduser()
 ``config.py:_bootstrap_mm_events_path`` materializes on first ``get_sources()``
 call."""
 
+DEFAULT_RETROS_DIR = Path("~/.local/share/mind-meld/retros").expanduser()
+"""Local-only snapshot directory. NOT synced — retros are deterministic
+across the fleet (post-v0.11.17 union filter), so a local cache suffices
+for "trends vs last retro" deltas without the complexity of cross-fleet
+snapshot reconciliation. Files: ``YYYY-MM-DD-N.json`` (sequence per day)."""
+
+RETROS_RETENTION_DAYS = 365
+"""Snapshot retention. Year-long ceiling — older snapshots aren't load-
+bearing for any current trend computation (only the most recent matching-
+window prior is consulted) but are preserved for the user's own forensic
+use. Pruned best-effort on each save."""
+
 V2_SCHEMA_VERSION = 2
 """sessions-snapshot schema version that the aggregator treats as full
 inventory. v=1 is delta-semantic and excluded from sessions totals — see
@@ -94,12 +106,83 @@ deferred to v2."""
 
 TOP_N_REPOS = 5
 TOP_N_SKILLS = 10
+TOP_N_HOURS = 5
+"""Hourly histogram peak rows shown in markdown. The full 24-row table is
+noise; the LLM gets enough signal from the top-N peaks to interpret
+when-they-code patterns."""
+
+CARD_WIDTH = 64
+"""ASCII card total width including borders. Sized so a typical
+``8 commits · 4 PRs · 2 repos · 2 machines`` line + a 50-char theme
+bullet fits without truncation. Card contents are padded to this width
+by ``_render_ascii_card`` so the right border aligns regardless of
+LLM-supplied content."""
+
+MAX_THEMES = 3
+"""Cap on TOP WORK theme bullets in the card. SKILL.md asks the LLM
+for "up to 3" — this enforces it at render time so a misbehaving caller
+can't blow up the card height."""
+
+CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
+"""Usable content width inside the card. Themes/noteworthy strings
+longer than this are truncated with an ellipsis suffix at render time."""
 
 
 # ---------------------------------------------------------------------------
 # Dataclasses — everything is structured so format_retro() can render
 # deterministically and tests can assert on per-section values.
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class CommitTypes:
+    """Conventional-commit prefix breakdown. Anything that doesn't match
+    a known prefix lands in ``other``. ``total`` mirrors ``GitAggregate.
+    commits`` (kept here so percent rendering stays self-contained)."""
+
+    counts: dict[str, int] = field(default_factory=dict)
+    total: int = 0
+
+
+@dataclass
+class CommitBursts:
+    """45-min-gap clustering of commit timestamps. Bursts are clusters of
+    commits separated by ≥45 minutes of inactivity; idleness mid-session
+    (lunch, deep think, code-reading without commits) splits one cognitive
+    session into two recorded bursts. Renamed from "sessions" to avoid
+    collision with Claude Code "sessions" we already count and to set
+    honest expectations: this counts commit clusters, not cognitive flow."""
+
+    burst_count: int = 0
+    deep: int = 0  # ≥50 min span
+    medium: int = 0  # 20-50 min span
+    micro: int = 0  # <20 min span (often one-shot commits)
+    avg_minutes: float = 0.0
+
+
+@dataclass
+class ShipOfWeek:
+    """Single highest-LOC commit in window. Purely deterministic — the
+    LLM picks up the data and synthesizes the surrounding narrative."""
+
+    repo: str = ""
+    sha: str = ""
+    subject: str = ""
+    additions: int = 0
+    deletions: int = 0
+    has_data: bool = False
+
+
+@dataclass
+class WeeklyBucket:
+    """One 7-day bucket inside a ≥14d window. ``week_start`` is the local
+    YYYY-MM-DD anchor (Monday-aligned)."""
+
+    week_start: str
+    commits: int = 0
+    additions: int = 0
+    deletions: int = 0
+    active_days: int = 0
 
 
 @dataclass
@@ -113,6 +196,16 @@ class GitAggregate:
     # retro window — a 7d retro on a 30-day streak shows 30. Capped in
     # practice by the 90d events retention.
     streak_days: int = 0
+    # Conventional-commit prefix mix.
+    commit_types: CommitTypes = field(default_factory=CommitTypes)
+    # 24-hour histogram in local time (key = hour 0..23).
+    hourly: dict[int, int] = field(default_factory=dict)
+    # Burst clustering — see CommitBursts docstring for noise caveat.
+    bursts: CommitBursts = field(default_factory=CommitBursts)
+    # Single biggest commit by (additions + deletions).
+    ship: ShipOfWeek = field(default_factory=ShipOfWeek)
+    # Empty unless window_days >= 14. Sorted oldest -> newest.
+    weekly: list[WeeklyBucket] = field(default_factory=list)
 
 
 @dataclass
@@ -190,6 +283,25 @@ SKIP_CATEGORY_EVENTS = "events"
 
 
 @dataclass
+class PriorRetroDelta:
+    """Compact deltas between this retro and the most recent prior snapshot
+    that ran with the same ``window_days``. Numbers are absolute deltas
+    (now - prior); negative values mean a metric dropped. ``has_prior``
+    flips True only when a matching snapshot was loaded — first-run retros
+    skip the section."""
+
+    has_prior: bool = False
+    prior_date: str = ""
+    commits: int = 0
+    additions: int = 0
+    deletions: int = 0
+    sessions: int = 0
+    tokens_total: int = 0
+    push_events: int = 0
+    streak_days: int = 0
+
+
+@dataclass
 class RetroData:
     window_days: int
     since: datetime
@@ -209,6 +321,10 @@ class RetroData:
     # skipped_per_source to verify category-specific behavior.
     skipped_lines: int = 0
     window_exceeds_retention: bool = False  # TODO#2 visible-failure breadcrumb
+    # Trend deltas vs most recent matching-window snapshot. Populated by
+    # ``main()`` from disk; unset (has_prior=False) for the first retro of
+    # a given window or when the snapshot dir doesn't exist yet.
+    prior: PriorRetroDelta = field(default_factory=PriorRetroDelta)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +416,109 @@ def _within_window(ts: object, since: datetime, until: datetime) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Conventional-commit prefixes we surface explicitly. Anything else
+# (including no prefix) lands in ``other``. Order matters: the prefix
+# ``feat!`` (breaking change) and scoped variants like ``fix(cli):``
+# both reduce to the bare keyword via ``_classify_commit_subject``.
+_COMMIT_TYPE_KEYWORDS: tuple[str, ...] = (
+    "feat",
+    "fix",
+    "refactor",
+    "test",
+    "chore",
+    "docs",
+    "perf",
+    "style",
+    "build",
+    "ci",
+    "revert",
+)
+
+
+_COMMIT_TYPE_RE = re.compile(r"^([a-z]+)(?:\([^)]*\))?!?:")
+
+
+_CLASSIFY_LEN_CAP = 256
+"""Conventional-commit prefixes live in the first ~30 chars of any
+realistic subject. Cap at 256 to defend against pathological peer
+subjects burning CPU on ``.lower()``/``.strip()``/regex over MB of
+text. The classifier only inspects the prefix anyway."""
+
+
+def _classify_commit_subject(subject: object) -> str:
+    """Return the conventional-commit keyword (``feat``/``fix``/...) or
+    ``other``. Tolerant of non-string / empty / unprefixed subjects.
+    Inspects only the first ``_CLASSIFY_LEN_CAP`` chars."""
+    if not isinstance(subject, str) or not subject:
+        return "other"
+    m = _COMMIT_TYPE_RE.match(subject[:_CLASSIFY_LEN_CAP].strip().lower())
+    if m is None:
+        return "other"
+    kw = m.group(1)
+    return kw if kw in _COMMIT_TYPE_KEYWORDS else "other"
+
+
+_BURST_GAP_MINUTES = 45
+"""Threshold for splitting commits into bursts. Industry-standard 45-min
+gap; smaller values over-split, larger values stitch lunch-then-resume
+back together. See gstack /retro for the precedent."""
+
+
+def _classify_burst_size(span_minutes: float) -> str:
+    """Bucket a burst's span into deep / medium / micro. Single-commit
+    bursts have span 0 and land in ``micro`` — these are typically
+    fire-and-forget commits (chore, version bump, hotfix)."""
+    if span_minutes >= 50:
+        return "deep"
+    if span_minutes >= 20:
+        return "medium"
+    return "micro"
+
+
+def _detect_bursts(commit_dts: list[datetime]) -> CommitBursts:
+    """45-min-gap clustering. ``commit_dts`` MUST be the windowed,
+    deduped, author-filtered set; the caller already applied those
+    filters before passing them in.
+
+    Honest framing: this counts commit clusters, not cognitive sessions.
+    A real coding session that stops for lunch / debugging without
+    commits / deep think will fragment into multiple bursts here. We
+    accept the noise rather than adding speculative session-stitching
+    heuristics; the LLM can interpret the number with that caveat in
+    mind via the SKILL.md tone block."""
+    out = CommitBursts()
+    if not commit_dts:
+        return out
+    sorted_dts = sorted(commit_dts)
+    burst_starts: list[datetime] = [sorted_dts[0]]
+    burst_ends: list[datetime] = [sorted_dts[0]]
+    gap = timedelta(minutes=_BURST_GAP_MINUTES)
+    for prev, cur in zip(sorted_dts, sorted_dts[1:]):
+        if cur - prev > gap:
+            burst_starts.append(cur)
+            burst_ends.append(cur)
+        else:
+            burst_ends[-1] = cur
+    spans_minutes = [(e - s).total_seconds() / 60 for s, e in zip(burst_starts, burst_ends)]
+    out.burst_count = len(spans_minutes)
+    for span in spans_minutes:
+        bucket = _classify_burst_size(span)
+        if bucket == "deep":
+            out.deep += 1
+        elif bucket == "medium":
+            out.medium += 1
+        else:
+            out.micro += 1
+    out.avg_minutes = sum(spans_minutes) / len(spans_minutes) if spans_minutes else 0.0
+    return out
+
+
+def _monday_of(d: datetime) -> str:
+    """Local Monday ISO date for the week containing ``d``."""
+    local = d.astimezone().date()
+    return (local - timedelta(days=local.weekday())).isoformat()
+
+
 def _import_canonicalize() -> "callable":
     """Lazy import so tests can run without the full mind_meld install if
     they monkeypatch this. The aggregator's contract is to use mm's own
@@ -315,6 +534,7 @@ def aggregate_git(
     since: datetime,
     until: datetime,
     author_emails: frozenset[str] | None,
+    window_days: int = 0,
 ) -> GitAggregate:
     """Walk git-snapshot events, dedup commits by ``(canonical, sha)``,
     apply the window + author filter, return totals.
@@ -325,12 +545,18 @@ def aggregate_git(
     so the rendered streak reflects current state, not the retro window.
     Author filter still applies — a third-party PR-merge commit shouldn't
     keep the user's personal streak alive.
+
+    ``window_days`` is consulted ONLY for whether to emit weekly buckets
+    (skipped when <14d); zero is fine for the typical 7d retro path.
     """
     canonicalize = _import_canonicalize()
     seen_keys: set[tuple[str, str]] = set()
     streak_seen: set[tuple[str, str]] = set()
     streak_days_set: set[str] = set()
     out = GitAggregate()
+    burst_dts: list[datetime] = []
+    weekly_by_start: dict[str, WeeklyBucket] = {}
+    weekly_active_days: dict[str, set[str]] = {}
     for ev in events:
         if ev.get("type") != "git-snapshot":
             continue
@@ -372,12 +598,55 @@ def aggregate_git(
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
+                add = _safe_int(c.get("add"))
+                dlt = _safe_int(c.get("del"))
                 out.commits += 1
-                out.additions += _safe_int(c.get("add"))
-                out.deletions += _safe_int(c.get("del"))
+                out.additions += add
+                out.deletions += dlt
                 if remote:
                     out.repos_by_count[remote] = out.repos_by_count.get(remote, 0) + 1
+
+                # Commit-type mix.
+                kw = _classify_commit_subject(c.get("subject"))
+                out.commit_types.counts[kw] = out.commit_types.counts.get(kw, 0) + 1
+                out.commit_types.total += 1
+
+                # Hourly distribution (local time).
+                local_hour = commit_dt.astimezone().hour
+                out.hourly[local_hour] = out.hourly.get(local_hour, 0) + 1
+
+                # Burst clustering input.
+                burst_dts.append(commit_dt)
+
+                # Ship of the week — biggest single commit by add+del.
+                size = add + dlt
+                ship = out.ship
+                if not ship.has_data or size > (ship.additions + ship.deletions):
+                    subject_raw = c.get("subject")
+                    out.ship = ShipOfWeek(
+                        repo=remote,
+                        sha=sha[:7] if isinstance(sha, str) else "",
+                        subject=subject_raw if isinstance(subject_raw, str) else "",
+                        additions=add,
+                        deletions=dlt,
+                        has_data=True,
+                    )
+
+                # Weekly bucket (only used when window_days >= 14).
+                if window_days >= 14:
+                    week_start = _monday_of(commit_dt)
+                    bucket = weekly_by_start.setdefault(week_start, WeeklyBucket(week_start))
+                    bucket.commits += 1
+                    bucket.additions += add
+                    bucket.deletions += dlt
+                    days_set = weekly_active_days.setdefault(week_start, set())
+                    days_set.add(_local_day_iso(commit_dt))
     out.streak_days = _compute_streak(streak_days_set, until)
+    out.bursts = _detect_bursts(burst_dts)
+    if window_days >= 14:
+        for week_start, bucket in weekly_by_start.items():
+            bucket.active_days = len(weekly_active_days.get(week_start, set()))
+        out.weekly = sorted(weekly_by_start.values(), key=lambda b: b.week_start)
     return out
 
 
@@ -858,7 +1127,13 @@ def aggregate(
         fleet_emails = aggregate_local_emails_from_events(events)
         effective_emails = frozenset(author_emails | fleet_emails)
 
-    git = aggregate_git(events, since=since, until=until, author_emails=effective_emails)
+    git = aggregate_git(
+        events,
+        since=since,
+        until=until,
+        author_emails=effective_emails,
+        window_days=window_days,
+    )
     sessions, skills = aggregate_sessions(events, since=since, until=until)
     pushes = aggregate_pushes(events, since=since, until=until)
 
@@ -1084,13 +1359,65 @@ def _short_model_name(model: str) -> str:
 
 def _safe_short(s: str) -> str:
     """Strip terminal escapes + Rich markup, then bucket to a conservative
-    char class for markdown safety."""
+    char class for markdown safety. Use for SHORT identifiers (skill
+    names, model names, sha) where conservative bucketing is fine.
+    For prose-shaped strings (commit subjects, LLM-supplied themes) use
+    ``_safe_prose`` instead — this whitelist mangles punctuation."""
     from mind_meld.safety import safe_str
 
     cleaned = safe_str(s) if isinstance(s, str) else ""
     # Whitelist: alphanumerics, dots, dashes, underscores, parens, spaces.
     # Anything else (newlines, backticks, angle brackets, pipes) becomes "_".
     return re.sub(r"[^A-Za-z0-9._\-() ]", "_", cleaned)
+
+
+_PROSE_CTRL_RE = re.compile(
+    # C0 controls + DEL.
+    r"[\x00-\x1f\x7f]"
+    # Unicode line/paragraph separators that markdown renderers may
+    # honor as line breaks (NEL, line-sep, paragraph-sep).
+    r"|[  ]"
+    # BiDi formatting characters: LRE/RLE/PDF/LRO/RLO/LRI/RLI/FSI/PDI.
+    # U+202E (RLO) is the canonical "reverse downstream rendering"
+    # smuggling vector — a peer commit subject containing RLO flips
+    # the visual order of subsequent text in pasted output (Slack,
+    # Telegram, terminals). Defang at trust-boundary entry.
+    r"|[‪-‮⁦-⁩]"
+)
+"""Strip C0 controls + DEL + Unicode line/paragraph separators + BiDi
+formatting characters after ``safe_str`` to defend against newline /
+tab / RTL-override smuggling that ``rich.markup.escape`` doesn't drop.
+Belt-and-braces for prose strings rendered into single-line markdown
+bullets."""
+
+_PROSE_LEN_CAP = 4096
+"""Cap commit subjects / LLM-supplied prose at 4 KiB before sanitization.
+A peer-planted 10 MB subject would otherwise burn CPU + RAM in the
+regex sub on every retro render. 4 KiB fits ~50 lines of typical commit
+subject — a conservative ceiling well above any realistic message."""
+
+
+def _safe_prose(s: str) -> str:
+    """Defang escapes + Rich markup but preserve prose punctuation
+    (colons, slashes, hashes, em-dashes). Use for commit subjects and
+    LLM-supplied theme / noteworthy lines where readability matters and
+    the conservative ``_safe_short`` whitelist would over-mangle.
+
+    Strips BiDi formatting (U+202E and friends) and Unicode line/
+    paragraph separators on top of ASCII C0/DEL — peer-controlled
+    subjects can otherwise flip downstream rendered text or smuggle
+    line breaks past the single-line bullet contract.
+
+    Length-capped at ``_PROSE_LEN_CAP`` before sanitization so a
+    pathologically long peer subject doesn't burn CPU on the regex."""
+    from mind_meld.safety import safe_str
+
+    if not isinstance(s, str):
+        return ""
+    if len(s) > _PROSE_LEN_CAP:
+        s = s[:_PROSE_LEN_CAP]
+    cleaned = safe_str(s)
+    return _PROSE_CTRL_RE.sub(" ", cleaned)
 
 
 def _safe_repo_url(s: str) -> str:
@@ -1112,27 +1439,298 @@ def _safe_repo_url(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9._\-/~]", "_", cleaned)
 
 
-def format_retro(data: RetroData) -> str:
+def _truncate(s: str, max_len: int) -> str:
+    """Truncate ``s`` to ``max_len`` characters, ending with ``…`` when
+    a cut occurs. Idempotent for already-short strings."""
+    if len(s) <= max_len:
+        return s
+    if max_len <= 1:
+        return "…"
+    return s[: max_len - 1] + "…"
+
+
+def _card_line(content: str) -> str:
+    """Pad ``content`` to the card's inner width and wrap with borders."""
+    safe = _truncate(content, CARD_INNER_WIDTH)
+    return f"║  {safe.ljust(CARD_INNER_WIDTH)}  ║"
+
+
+def _format_loc_short(n: int) -> str:
+    """Compact LOC formatting for the card. ``3247`` → ``3.2k``,
+    ``142_000`` → ``142k``. Plain digit string under 1000."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n // 1_000}k"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _render_ascii_card(
+    data: RetroData,
+    *,
+    name: str | None,
+    themes: list[str],
+    noteworthy: str,
+) -> list[str]:
+    """Render the screenshot-friendly ASCII card. Pure padding — every
+    line is forced to the same width so the right border aligns. LLM-
+    supplied strings (``themes``, ``noteworthy``, ``name``) are passed
+    through ``_safe_short`` to defang stray control chars and through
+    ``_truncate`` so an over-long entry doesn't blow the layout.
+
+    Returns the lines (without trailing newlines) so the caller can
+    interleave with the markdown body."""
+    horizontal = "═" * (CARD_WIDTH - 2)
+    out: list[str] = []
+    out.append(f"╔{horizontal}╗")
+
+    header_name = _safe_prose(name) if isinstance(name, str) and name else ""
+    header_date = (
+        f"{data.since.astimezone().date().isoformat()} → "
+        f"{data.until.astimezone().date().isoformat()}"
+    )
+    if header_name:
+        header = f"{header_name} · {header_date}"
+    else:
+        header = header_date
+    out.append(_card_line(header))
+    out.append(f"╠{horizontal}╣")
+
+    n_devices = len(data.fleet.devices_in_events)
+    machines_word = "machine" if n_devices == 1 else "machines"
+    out.append(
+        _card_line(
+            f"{data.git.commits} commits · "
+            f"{len(data.git.repos_by_count)} repos · "
+            f"{n_devices} {machines_word}"
+        )
+    )
+    streak_part = f" · {data.git.streak_days}-day streak" if data.git.streak_days > 0 else ""
+    out.append(
+        _card_line(
+            f"+{_format_loc_short(data.git.additions)} / "
+            f"-{_format_loc_short(data.git.deletions)} LOC{streak_part}"
+        )
+    )
+    out.append(_card_line(""))
+
+    if noteworthy:
+        out.append(_card_line("NOTEWORTHY"))
+        out.append(_card_line(_safe_prose(noteworthy)))
+        out.append(_card_line(""))
+
+    # Cap themes at MAX_THEMES — SKILL.md says "up to 3" but nothing
+    # else enforces it; a power user (or a misbehaving LLM) passing 50
+    # ``--theme`` flags would otherwise produce a 50-line card.
+    if themes:
+        out.append(_card_line("TOP WORK"))
+        for theme in themes[:MAX_THEMES]:
+            out.append(_card_line(f"• {_safe_prose(theme)}"))
+
+    out.append(f"╚{horizontal}╝")
+    return out
+
+
+def _render_commit_types(commit_types: CommitTypes) -> list[str]:
+    """Sorted-by-count commit-type breakdown, with percent. Shape:
+    ``feat 12 (40%) · fix 8 (27%) · ...``. Single-line so it doesn't
+    bloat the markdown."""
+    if commit_types.total <= 0 or not commit_types.counts:
+        return []
+    items = sorted(commit_types.counts.items(), key=lambda kv: kv[1], reverse=True)
+    parts = [f"{kw} {n} ({n / commit_types.total:.0%})" for kw, n in items if n > 0]
+    return [f"- Mix: {' · '.join(parts)}"] if parts else []
+
+
+def _render_hourly(hourly: dict[int, int]) -> list[str]:
+    """Top-N peak hours with simple bar. Renders nothing on empty input.
+    Hours rendered as zero-padded local-time HH:00."""
+    if not hourly:
+        return []
+    items = sorted(hourly.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N_HOURS]
+    if not items or items[0][1] == 0:
+        return []
+    peak_count = items[0][1]
+    lines = ["- Peak hours (local time):"]
+    for hour, n in sorted(items, key=lambda kv: kv[0]):
+        bar_width = max(1, int(round(20 * n / peak_count)))
+        lines.append(f"  - {hour:02d}:00  {n:>3}  {'█' * bar_width}")
+    return lines
+
+
+def _render_bursts(bursts: CommitBursts) -> list[str]:
+    """One-line burst summary. Honest framing: 'commit bursts' not
+    'sessions' — captures clusters separated by 45-min idleness."""
+    if bursts.burst_count <= 0:
+        return []
+    return [
+        f"- Commit bursts: {bursts.burst_count} "
+        f"(deep {bursts.deep} · medium {bursts.medium} · micro {bursts.micro}) "
+        f"· avg span {bursts.avg_minutes:.0f}min"
+    ]
+
+
+def _render_ship(ship: ShipOfWeek) -> list[str]:
+    """Single highest-LOC commit. Subject is sanitized at render time —
+    it crosses the trust boundary from peer-controlled events into
+    LLM-consumed markdown. Prose-friendly defang preserves punctuation
+    (``:`` / ``/`` / ``#``) that ``_safe_short`` would otherwise mangle."""
+    if not ship.has_data:
+        return []
+    repo = _shorten_repo_url(_safe_repo_url(ship.repo)) if ship.repo else ""
+    subject_safe = _safe_prose(ship.subject) if ship.subject else ""
+    repo_part = f" in {repo}" if repo else ""
+    sha_part = f" `{_safe_short(ship.sha)}`" if ship.sha else ""
+    return [
+        f"- Ship of the window:{sha_part}"
+        f" +{ship.additions:,} / -{ship.deletions:,} LOC{repo_part}"
+        f" — {subject_safe}"
+    ]
+
+
+def _render_weekly(weekly: list[WeeklyBucket]) -> list[str]:
+    """Week-over-week breakdown for ≥14d windows. Markdown table."""
+    if not weekly:
+        return []
+    lines = [
+        "- Week-over-week:",
+        "  | Week of    | Commits | +LOC    | -LOC   | Active days |",
+        "  |------------|--------:|--------:|-------:|------------:|",
+    ]
+    for b in weekly:
+        lines.append(
+            f"  | {b.week_start} | {b.commits:>7} | "
+            f"+{b.additions:>6,} | -{b.deletions:>5,} | {b.active_days:>11} |"
+        )
+    return lines
+
+
+def _render_prior_delta(prior: PriorRetroDelta) -> list[str]:
+    """Trends-vs-last-retro table. Skips when no prior snapshot exists."""
+    if not prior.has_prior:
+        return []
+    rows = [
+        ("Commits", prior.commits),
+        ("+LOC", prior.additions),
+        ("-LOC", prior.deletions),
+        ("Sessions", prior.sessions),
+        ("Tokens", prior.tokens_total),
+        ("Pushes", prior.push_events),
+        ("Streak", prior.streak_days),
+    ]
+    nonzero = [(label, delta) for label, delta in rows if delta != 0]
+    if not nonzero:
+        # No changes is the right answer — emitting "no metric changed"
+        # as a stranded bullet pollutes more than it informs. Skip the
+        # whole section and let the rest of the report stand on its own.
+        return []
+    lines = [f"## Trends vs last retro ({prior.prior_date or 'prior'})", ""]
+    for label, delta in nonzero:
+        arrow = "↑" if delta > 0 else "↓"
+        lines.append(f"- {label}: {arrow}{abs(delta):,}")
+    lines.append("")
+    return lines
+
+
+def _render_themes_prompt(data: RetroData) -> list[str]:
+    """Emit a fenced JSON block with the raw material the LLM needs to
+    synthesize themes + noteworthy line for the second-pass card.
+    Includes commit subjects keyed by repo and a few aggregate stats.
+
+    Kept at the END of the markdown so a casual reader can ignore it; the
+    SKILL.md instructs the LLM to read it, synthesize, and re-invoke
+    ``mm retro-fleet`` with ``--theme`` / ``--noteworthy`` flags. Block
+    is tagged with ``<!-- MM_THEMES_PROMPT -->`` so the SKILL.md can
+    locate it deterministically."""
+
+    # Repo URLs go through the same defang-then-shorten pipeline as the
+    # markdown body so a long-canonical URL doesn't survive into the
+    # JSON sidecar (would defeat the privacy-preserving compression in
+    # ``_shorten_repo_url``). Same trust-boundary rationale as the body.
+    def _safe_repo(r: str) -> str:
+        return _shorten_repo_url(_safe_repo_url(r)) if r else ""
+
+    payload = {
+        "window_days": data.window_days,
+        "since": data.since.astimezone().date().isoformat(),
+        "until": data.until.astimezone().date().isoformat(),
+        "commits": data.git.commits,
+        "additions": data.git.additions,
+        "deletions": data.git.deletions,
+        "top_repos": [
+            _safe_repo(r)
+            for r, _ in sorted(data.git.repos_by_count.items(), key=lambda kv: kv[1], reverse=True)[
+                :TOP_N_REPOS
+            ]
+        ],
+        "ship": (
+            {
+                "repo": _safe_repo(data.git.ship.repo),
+                "subject": _safe_prose(data.git.ship.subject),
+                "additions": data.git.ship.additions,
+                "deletions": data.git.ship.deletions,
+            }
+            if data.git.ship.has_data
+            else None
+        ),
+    }
+    return [
+        "<!-- MM_THEMES_PROMPT -->",
+        "```json",
+        json.dumps(payload, indent=2),
+        "```",
+    ]
+
+
+def format_retro(
+    data: RetroData,
+    *,
+    name: str | None = None,
+    themes: list[str] | None = None,
+    noteworthy: str = "",
+) -> str:
     """Render the markdown retro. Output is paste-ready for iMessage / email
     — single-message length when realistic data is present.
 
-    Section layout (post-v0.11.12 polish):
+    ``themes`` / ``noteworthy`` / ``name`` are LLM-supplied via the second
+    pass of the two-pass card flow. When any of them is non-empty/non-None
+    an ASCII screenshot card is rendered at the TOP of the output; without
+    them, the markdown body still includes a ``MM_THEMES_PROMPT`` block at
+    the END to feed the next pass. Pure markdown body (no card) is
+    rendered when the caller is a non-skill consumer (the test fixture
+    path that just wants data).
 
-    * Header — date range + activity-across-N-machines line. No inline notes.
-    * Code shipped — commits, LOC, top repos as a sub-bulleted list.
-    * Claude Code activity — sessions and project count only. Token usage
-      is a deferred follow-up.
-    * Skills used — this-machine-only invocation rollup.
+    Section layout (post-v0.12.0):
+
+    * (Optional) ASCII card with stats + NOTEWORTHY + TOP WORK themes.
+    * Header — date range + activity-across-N-machines line.
+    * Trends vs last retro — delta block when a prior snapshot exists.
+    * Code shipped — commits, LOC, top repos, commit-type mix, peak hours,
+      commit bursts, ship-of-the-window.
+    * Week-over-week — bucketed table when window_days >= 14.
+    * Claude Code activity — sessions and token block.
+    * Skills used — fleet-wide invocation rollup.
     * mm sync activity — push counts.
-    * Notes — every aside (fleet-incomplete, pre-v2 peers, parse errors,
-      retention, phantom-event count, ephemeral split, discovery errors)
-      consolidated. Section omitted entirely when there's nothing to note.
+    * Notes — every aside consolidated.
+    * MM_THEMES_PROMPT — JSON sidecar for LLM theme synthesis.
     """
     lines: list[str] = []
     notes: list[str] = []
 
+    themes_list = list(themes) if themes else []
+    has_card_input = bool(themes_list) or bool(noteworthy) or bool(name)
+    if has_card_input:
+        lines.extend(_render_ascii_card(data, name=name, themes=themes_list, noteworthy=noteworthy))
+        lines.append("")
+
+    # Header date matches the card's local-time framing — using
+    # ``data.since.date()`` directly returns the naive UTC date, which
+    # diverges from the card by a day near UTC boundaries.
     lines.append(
-        f"# Retro: {data.since.date().isoformat()} → {data.until.date().isoformat()} "
+        f"# Retro: {data.since.astimezone().date().isoformat()} → "
+        f"{data.until.astimezone().date().isoformat()} "
         f"({data.window_days}d)"
     )
     lines.append("")
@@ -1154,6 +1752,11 @@ def format_retro(data: RetroData) -> str:
         notes.append("Known-fleet count unavailable (`mm devices --format=json` failed).")
     lines.append("")
 
+    # Trends vs last retro (only when a matching-window snapshot exists).
+    delta_lines = _render_prior_delta(data.prior)
+    if delta_lines:
+        lines.extend(delta_lines)
+
     # Code shipped.
     lines.append("## Code shipped")
     lines.append(
@@ -1173,6 +1776,11 @@ def format_retro(data: RetroData) -> str:
             # ``[...]`` placeholder that the URL-safe whitelist would
             # otherwise bucket to ``_..._``.
             lines.append(f"  - {_shorten_repo_url(_safe_repo_url(r))} ({n})")
+    lines.extend(_render_commit_types(data.git.commit_types))
+    lines.extend(_render_hourly(data.git.hourly))
+    lines.extend(_render_bursts(data.git.bursts))
+    lines.extend(_render_ship(data.git.ship))
+    lines.extend(_render_weekly(data.git.weekly))
     lines.append("")
 
     # Claude Code activity. Per-user feedback v0.11.12: drop MB total,
@@ -1301,6 +1909,14 @@ def format_retro(data: RetroData) -> str:
             lines.append(f"- {n}")
         lines.append("")
 
+    # First-pass artifact for the two-pass card flow. Only rendered when
+    # the caller did NOT supply card content — a second-pass render
+    # (which carries themes/noteworthy/name) is the final shareable
+    # output and should not include the synthesis prompt block.
+    if not has_card_input:
+        lines.append("")
+        lines.extend(_render_themes_prompt(data))
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1315,6 +1931,230 @@ def _resolve_events_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return DEFAULT_EVENTS_DIR
+
+
+def _resolve_retros_dir() -> Path:
+    """``MM_RETROS_DIR`` env override (parallel to ``MM_EVENTS_DIR``);
+    falls back to default. Test isolation hook."""
+    override = os.environ.get("MM_RETROS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return DEFAULT_RETROS_DIR
+
+
+def _retro_to_snapshot(data: RetroData) -> dict:
+    """Serialize a ``RetroData`` to the JSON-on-disk shape. Stores ONLY
+    the fields needed for trend deltas — keeping the file small and
+    forward-compatible (a future field can be added without breaking
+    older readers, which simply ignore unknown keys)."""
+    return {
+        "schema_version": 1,
+        "window_days": data.window_days,
+        "since": data.since.isoformat(),
+        "until": data.until.isoformat(),
+        "metrics": {
+            "commits": data.git.commits,
+            "additions": data.git.additions,
+            "deletions": data.git.deletions,
+            "streak_days": data.git.streak_days,
+            "sessions": data.sessions.total_sessions,
+            "tokens_total": (
+                data.sessions.tokens_input
+                + data.sessions.tokens_cache_create
+                + data.sessions.tokens_cache_read
+                + data.sessions.tokens_output
+            ),
+            "push_events": data.pushes.push_events,
+        },
+    }
+
+
+_SNAPSHOT_FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(\d+)\.json$")
+"""Snapshot filename: ``YYYY-MM-DD-NNN.json``. Sequence is zero-padded to
+3 digits so lexical sort agrees with numeric sort up to 999 retros/day —
+``-002`` sorts before ``-010``, where the un-padded ``-2`` would sort
+after ``-10``. Pre-fix, ``_load_prior_snapshot`` returned the wrong
+"most recent" once a single day exceeded 9 retros."""
+
+_SNAPSHOT_SEQ_DIGITS = 3
+_SNAPSHOT_SEQ_MAX = 10**_SNAPSHOT_SEQ_DIGITS - 1  # 999
+
+
+def _save_snapshot(data: RetroData, retros_dir: Path) -> Path | None:
+    """Persist a JSON snapshot for trend deltas. Returns the saved path or
+    None on failure. Failure is forensic-only — emits a single
+    ``mm: notice:`` to stderr and returns; the retro render proceeds.
+
+    Race-safe: uses ``O_CREAT|O_EXCL`` so two concurrent runs picking the
+    same sequence number can't silently overwrite each other. On
+    collision the seq advances and we retry. Pre-fix, the
+    ``len(existing) + 1`` heuristic was a TOCTOU bug — both runs
+    computed the same seq and the second ``write_text`` clobbered the
+    first."""
+    try:
+        retros_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        sys.stderr.write(f"mm: notice: retro snapshot dir unwritable ({exc}); skipping save\n")
+        return None
+    today = data.until.astimezone().date().isoformat()
+    # Sequence number: pick max(existing seqs for today) + 1. Zero-padded
+    # to keep lex sort numerically correct.
+    try:
+        existing = list(retros_dir.glob(f"{today}-*.json"))
+    except OSError:
+        existing = []
+    max_seq = 0
+    for f in existing:
+        m = _SNAPSHOT_FILENAME_RE.match(f.name)
+        if m and m.group(1) == today:
+            try:
+                n = int(m.group(2))
+            except ValueError:
+                continue
+            if n > max_seq:
+                max_seq = n
+    payload = json.dumps(_retro_to_snapshot(data), indent=2) + "\n"
+    seq = max_seq + 1
+    path: Path | None = None
+    while seq <= _SNAPSHOT_SEQ_MAX:
+        candidate = retros_dir / f"{today}-{seq:0{_SNAPSHOT_SEQ_DIGITS}d}.json"
+        try:
+            # O_EXCL: race-safe; raises FileExistsError if another writer
+            # took this seq first. Bump seq and retry.
+            with open(
+                candidate,
+                "x",
+                encoding="utf-8",
+            ) as f:
+                f.write(payload)
+            path = candidate
+            break
+        except FileExistsError:
+            seq += 1
+            continue
+        except OSError as exc:
+            sys.stderr.write(f"mm: notice: retro snapshot write failed ({exc}); skipping\n")
+            return None
+    if path is None:
+        sys.stderr.write(
+            f"mm: notice: retro snapshot seq exhausted for {today} "
+            f"(>{_SNAPSHOT_SEQ_MAX} retros in one day); skipping save\n"
+        )
+        return None
+    _prune_old_snapshots(retros_dir)
+    return path
+
+
+def _prune_old_snapshots(retros_dir: Path) -> None:
+    """Best-effort prune of snapshots older than ``RETROS_RETENTION_DAYS``.
+    Reaped by FILENAME date (the date is intrinsic, mtime is not — same
+    rationale as ``_gc_old_event_files``). Silent on every failure.
+    Filenames not matching the canonical shape are left alone."""
+    try:
+        files = list(retros_dir.glob("*.json"))
+    except OSError:
+        return
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETROS_RETENTION_DAYS)).date()
+    for f in files:
+        m = _SNAPSHOT_FILENAME_RE.match(f.name)
+        if m is None:
+            continue
+        try:
+            file_date = datetime.fromisoformat(m.group(1)).date()
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            try:
+                f.unlink()
+            except OSError:
+                continue
+
+
+_SNAPSHOT_MAX_BYTES = 1_000_000
+"""Cap individual snapshot file reads at 1 MiB. A typical snapshot is
+<1 KiB; a 1 MB file would already be 1000× normal. Defends against a
+corrupt / fs-recovery / planted file from blowing up memory before
+``json.loads`` even fails."""
+
+
+def _load_prior_snapshot(retros_dir: Path, window_days: int) -> dict | None:
+    """Return the most recent snapshot dict whose ``window_days`` matches.
+    None when no matching snapshot exists or directory missing.
+    Tolerant of corrupt JSON / unreadable files (skipped).
+
+    Sorts by parsed ``(date, seq)`` tuple, NOT by lexical filename.
+    Pre-fix, ``sorted(..., reverse=True)`` ordered ``-9.json`` AFTER
+    ``-10.json`` (because lex sort puts longer strings first in
+    reverse), so once a single day produced 10+ retros, "most recent"
+    returned a stale snapshot. Filenames now zero-pad to 3 digits at
+    write time AND the loader parses+sorts by tuple — both layers of
+    defense."""
+    if not retros_dir.is_dir():
+        return None
+    try:
+        files = list(retros_dir.glob("*.json"))
+    except OSError:
+        return None
+    parsed: list[tuple[str, int, Path]] = []
+    for f in files:
+        m = _SNAPSHOT_FILENAME_RE.match(f.name)
+        if m is None:
+            continue
+        try:
+            seq = int(m.group(2))
+        except ValueError:
+            continue
+        parsed.append((m.group(1), seq, f))
+    # Newest first by (date, seq) — both numeric / lex-stable.
+    parsed.sort(reverse=True)
+    for _date, _seq, f in parsed:
+        try:
+            if f.stat().st_size > _SNAPSHOT_MAX_BYTES:
+                continue
+            obj = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("window_days") != window_days:
+            continue
+        return obj
+    return None
+
+
+def _compute_prior_delta(data: RetroData, prior: dict | None) -> PriorRetroDelta:
+    """Build a ``PriorRetroDelta`` from a snapshot dict. Tolerant of missing
+    fields (treated as zero) so a v1 snapshot read by a future v2 renderer
+    degrades cleanly."""
+    if prior is None:
+        return PriorRetroDelta()
+    metrics = prior.get("metrics", {}) if isinstance(prior, dict) else {}
+    if not isinstance(metrics, dict):
+        return PriorRetroDelta()
+    until_raw = prior.get("until") if isinstance(prior, dict) else None
+    prior_date = ""
+    if isinstance(until_raw, str):
+        try:
+            prior_date = datetime.fromisoformat(until_raw.replace("Z", "+00:00")).date().isoformat()
+        except ValueError:
+            prior_date = ""
+    now_tokens = (
+        data.sessions.tokens_input
+        + data.sessions.tokens_cache_create
+        + data.sessions.tokens_cache_read
+        + data.sessions.tokens_output
+    )
+    return PriorRetroDelta(
+        has_prior=True,
+        prior_date=prior_date,
+        commits=data.git.commits - _safe_int(metrics.get("commits")),
+        additions=data.git.additions - _safe_int(metrics.get("additions")),
+        deletions=data.git.deletions - _safe_int(metrics.get("deletions")),
+        sessions=data.sessions.total_sessions - _safe_int(metrics.get("sessions")),
+        tokens_total=now_tokens - _safe_int(metrics.get("tokens_total")),
+        push_events=data.pushes.push_events - _safe_int(metrics.get("push_events")),
+        streak_days=data.git.streak_days - _safe_int(metrics.get("streak_days")),
+    )
 
 
 def _read_mm_events_config_path() -> Path | None:
@@ -1385,6 +2225,12 @@ def _emit_custom_path_notice_if_due(events_dir: Path) -> None:
     )
 
 
+_MAX_WINDOW_DAYS = 3650
+"""10-year ceiling on the window. Well above the 90-day events retention
+that bounds real data; defends ``timedelta(days=...)`` against
+``OverflowError`` on absurd input like ``1000000000d``."""
+
+
 def _parse_window(s: str) -> int:
     m = WINDOW_PATTERN.match(s)
     if m is None:
@@ -1394,6 +2240,10 @@ def _parse_window(s: str) -> int:
     n = int(m.group(1))
     if n <= 0:
         raise argparse.ArgumentTypeError(f"window must be positive; got {n}")
+    if n > _MAX_WINDOW_DAYS:
+        raise argparse.ArgumentTypeError(
+            f"window must be ≤ {_MAX_WINDOW_DAYS}d (10 years); got {n}d"
+        )
     return n
 
 
@@ -1412,6 +2262,33 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Disable author email filtering (renders ALL fleet commits).",
     )
+    parser.add_argument(
+        "--theme",
+        action="append",
+        default=[],
+        help=(
+            "LLM-supplied TOP WORK theme line for the ASCII card. Pass "
+            "up to three times. Triggers second-pass card rendering."
+        ),
+    )
+    parser.add_argument(
+        "--noteworthy",
+        default="",
+        help="LLM-supplied NOTEWORTHY line for the ASCII card.",
+    )
+    parser.add_argument(
+        "--name",
+        default="",
+        help="Optional name shown in the ASCII card header (e.g. 'kb').",
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help=(
+            "Skip writing a snapshot to ~/.local/share/mind-meld/retros/. "
+            "Useful for the second pass (the first pass already saved)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     events_dir = _resolve_events_dir()
@@ -1426,7 +2303,28 @@ def main(argv: list[str] | None = None) -> int:
         window_days=args.window,
         author_emails=author_emails,
     )
-    sys.stdout.write(format_retro(data))
+
+    # Trend deltas vs the most recent matching-window snapshot. Loading
+    # before saving so today's snapshot doesn't compare against itself.
+    retros_dir = _resolve_retros_dir()
+    prior = _load_prior_snapshot(retros_dir, args.window)
+    data.prior = _compute_prior_delta(data, prior)
+
+    # Persist a snapshot for next time. Skipped on the second pass so a
+    # single retro session doesn't write twice (the first-pass save is
+    # the canonical record for trend deltas).
+    has_card_input = bool(args.theme) or bool(args.noteworthy) or bool(args.name)
+    if not args.no_save and not has_card_input:
+        _save_snapshot(data, retros_dir)
+
+    sys.stdout.write(
+        format_retro(
+            data,
+            name=args.name or None,
+            themes=list(args.theme),
+            noteworthy=args.noteworthy,
+        )
+    )
     return 0
 
 

@@ -24,7 +24,8 @@ allowed-tools:
 # /retro-fleet
 
 Fleet-wide engineering retrospective for users of [mind-meld](https://github.com/kbitz/mind-meld).
-Stitches activity from every Mac in the fleet into one accurate picture.
+Stitches activity from every Mac in the fleet into one accurate picture, and
+hands you a screenshot-quality ASCII card up front for sharing.
 
 ## How it works
 
@@ -33,11 +34,20 @@ mind-meld's `_run_events_tail` writes per-device daily JSONL files at
 Three event types: `mm-push`, `git-snapshot`, `sessions-snapshot`. Files
 sync fleet-wide via the `mm-events` source.
 
-This skill runs the aggregator that ships with mm
-(`mind_meld.skills.retro_fleet.aggregator`) to read those files, dedup commits
-by `(canonical_remote_url, sha)`, sum sessions across `(device, source_root, claude_dir)`
-tuples (latest-snapshot-wins per tuple — the v=2 schema is full inventory),
-and render a markdown retro.
+This skill orchestrates a **two-pass flow**:
+
+1. **Pass 1** — call the aggregator. It dedups commits, sums sessions /
+   tokens / skills, and renders the markdown body. The bottom of the
+   output carries an `MM_THEMES_PROMPT` JSON block: raw material for you
+   to synthesize the card's NOTEWORTHY line + 3 TOP WORK themes.
+2. **Pass 2** — call the aggregator again with `--theme` / `--noteworthy`
+   / `--name` flags. Python re-renders with a pixel-aligned ASCII card
+   pinned at the top of the output.
+
+This split is load-bearing. LLM-padded right borders drift by a char or
+two often enough to look janky in screenshots; routing the card through
+Python's deterministic padding solves it without making the card content
+dumber.
 
 ## Step 1: refresh fleet state
 
@@ -58,7 +68,7 @@ mm autopull
 Skip this step only if the user explicitly asks for a "stale" or "offline"
 retro, or if they just ran `mm push` and `mm pull` themselves.
 
-## Step 2: invoke the aggregator
+## Step 2: first-pass aggregation
 
 Run this command and capture the output. Substitute `<window>` with what the
 user asked for (`7d`, `30d`, `90d`, etc. — days only).
@@ -76,15 +86,77 @@ not retry — surface the error and tell the user to verify their mm install
 `python` is not on PATH (only `python3` is), and pipx-installed mm lives in
 an isolated venv that nothing outside it can import.
 
-## Step 3: present the output
+## Step 3: synthesize themes + noteworthy
 
-The aggregator writes complete markdown to stdout. Show it to the user
-verbatim. The output is paste-ready for iMessage, Slack, or email — no
-post-processing required.
+The first-pass output ends with a fenced JSON block tagged
+`<!-- MM_THEMES_PROMPT -->`. Read it. The payload includes top repos by
+commit count, the ship-of-the-window commit, and aggregate window stats —
+plus the surrounding markdown body shows the commit-type mix, peak hours,
+commit bursts, and per-skill counts.
 
-The aggregator's output may include a `## Notes` section at the end
-consolidating any of these data-quality / diagnostic lines (the section is
-omitted when there is nothing to surface):
+Synthesize:
+
+- **NOTEWORTHY** — one line, ≤55 chars. The single biggest thing
+  shipped this window. Lead with the verb; name the artifact, not the
+  commit. "Shipped fleet-wide skill counts (mm v0.11.27)" not
+  "v0.11.27 fix(retro): track skills_by_day".
+- **TOP WORK** — three bullets, each ≤55 chars. Themes, not individual
+  commits. Synthesize commit messages into a few cohesive narratives
+  (e.g., "Fleet retro polish + token rollup" covers six related
+  commits). Lead with the verb. No leading bullets / dashes — Python
+  adds the bullet glyph in the card.
+
+Keep them tight. The card has a fixed width and Python truncates with
+`…` when content overflows; aim short on purpose.
+
+## Step 4: second-pass card render
+
+Call the aggregator again with the synthesized strings, `--name` set to
+the user's identifier (use `git config --global user.email` to derive a
+short handle when the user hasn't said one explicitly), and `--no-save`
+so the snapshot isn't double-written.
+
+```bash
+mm retro-fleet <window> \
+  --name <handle> \
+  --noteworthy "<your noteworthy line>" \
+  --theme "<theme 1>" \
+  --theme "<theme 2>" \
+  --theme "<theme 3>" \
+  --no-save
+```
+
+Show the output verbatim. The ASCII card sits at the top, paste-ready for
+iMessage / Slack / email. The full markdown body follows for readers who
+want the deeper data.
+
+## Step 5: write the praise / level-up / focus narrative
+
+The card is the shareable artifact. The conversation is where the
+narrative lives. After showing the second-pass output, append in the
+chat (NOT to the card) three short paragraphs:
+
+- **Praise (one specific thing).** Anchor in actual commits or stats
+  from the body. Not "great work" — say exactly what was good. "Six
+  commits restructured the lockedjson contract without breaking the
+  flock contention semantics — that's textbook refactor discipline."
+- **Level-up (one specific thing).** Frame as investment, not
+  criticism. "Test ratio held at ~25% this window; lifting it past 40%
+  before the next major refactor would cushion regressions."
+- **Focus next window (one specific thing).** Forward-looking and
+  actionable. "Land the snapshot pruning hook so the retros dir
+  doesn't grow unbounded as you settle into weekly retros."
+
+Match the **tone block**: specific, earned, no coddling. Praise should
+feel like something you'd actually say in a 1:1; growth suggestions
+should feel like investment advice. Skip generic compliments. If the
+data doesn't support a confident take, say so and skip the section
+rather than fluffing.
+
+## Notes section in aggregator output
+
+The body's `## Notes` section consolidates these data-quality lines (the
+section is omitted when there is nothing to surface):
 
 - `Fleet incomplete: N registered device(s) haven't pushed events in this
   window.` — activity may be incomplete from those peers.
@@ -107,6 +179,15 @@ omitted when there is nothing to surface):
 - `Requested Nd window exceeds the 90-day events retention.` — user asked
   for a window longer than `EVENTS_RETENTION_DAYS`. Older days are reaped
   by `mm gc` and not in the data.
+
+## Trends vs last retro
+
+The aggregator persists a JSON snapshot to
+`~/.local/share/mind-meld/retros/YYYY-MM-DD-N.json` after every save-
+enabled run. On subsequent runs with the same window, deltas vs the most
+recent matching snapshot render as a `## Trends vs last retro` block —
+when something changed. No section is rendered for first runs or
+zero-delta runs.
 
 ## Author email filtering
 
@@ -140,5 +221,5 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
   which peers need to upgrade. Cross-machine skill counts come from each
   peer's Claude Code session jsonls (the same source it walks for tokens) —
   not from gstack analytics.
-- It does not save the output to a file. `> /tmp/retro.md` is the v1 save
-  story. A `--save` flag is deferred to v2.
+- It does not save the user-facing output to a file. `> /tmp/retro.md` is
+  the v1 save story. A `--save` flag is deferred to v2.
