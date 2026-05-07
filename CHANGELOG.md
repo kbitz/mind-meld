@@ -2,6 +2,10 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.1] - 2026-05-07
+
+**`/retro-fleet` skill output now renders inline instead of getting buried in a collapsed bash tool result.** Pre-fix, Step 4 of `SKILL.md` said "show the output verbatim" — interpretive guidance that left the agent with the bash tool result alone, which Claude Code collapses behind Ctrl-O. The user had to dig for the screenshot-ready ASCII card on every retro. SKILL.md now explicitly directs the agent to paste stdout into the assistant message, split into two pieces so both render correctly: the ASCII card (` ╔═══╗ ` through ` ╚═══╝ `) inside a fenced ` ```text ` block to preserve box-drawing alignment, and the markdown body that follows pasted unwrapped so headers and lists render. Doc-only change — no aggregator, CLI, or test changes. Ships fleet-wide once peers `mm autopull` and the bundled `~/.claude/skills/retro-fleet/SKILL.md` symlink resolves to the new version.
+
 ## [0.12.0] - 2026-05-07
 
 **`/retro-fleet` borrows the gstack `/retro` shape: ASCII screenshot card, commit-type mix, peak hours, commit bursts, ship-of-the-window, week-over-week deltas, snapshot persistence, and an LLM-driven praise/level-up/focus narrative.** Pre-fix, the skill rendered a flat "stats and notes" markdown body and told the LLM to paste it verbatim — which left the gstack-style judgment layer (themes, ship of the week, narrative) entirely on the table. The aggregator now does the deterministic work and the SKILL.md hands off the narrative pieces to the LLM with a tone block opinionated enough to keep the output specific instead of fluffy.

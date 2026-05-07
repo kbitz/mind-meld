@@ -126,9 +126,22 @@ mm retro-fleet <window> \
   --no-save
 ```
 
-Show the output verbatim. The ASCII card sits at the top, paste-ready for
-iMessage / Slack / email. The full markdown body follows for readers who
-want the deeper data.
+**Echo the output as your assistant message text — do NOT rely on the
+bash tool result alone.** Claude Code collapses bash output behind
+Ctrl-O, so just running the command leaves the card buried. Paste
+stdout directly into your reply, split into two pieces so both render
+correctly:
+
+1. The ASCII card (lines from `╔═══╗` through `╚═══╝` inclusive) goes
+   inside a fenced code block tagged ` ```text `. The card uses
+   box-drawing chars + space padding for alignment, which markdown
+   collapses outside a code fence.
+2. The markdown body that follows the card pastes inline, unwrapped,
+   so headers and lists render normally.
+
+Then continue with Step 5 in the same message. The card is paste-ready
+for iMessage / Slack / email; the body is for readers who want the
+deeper data.
 
 ## Step 5: write the praise / level-up / focus narrative
 
