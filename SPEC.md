@@ -338,6 +338,7 @@ mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N
                             # query the per-file pull/push history log
 mm retro-fleet [WINDOW] [--no-author-filter]
                             # render fleet retrospective markdown to stdout (default 7d). Public CLI surface for the /retro-fleet Claude Code skill; safe to invoke directly for scripted exports.
+                            # Skill-internal second-pass flags (v0.12.0+): --theme TEXT (≤3x), --noteworthy TEXT, --name TEXT, --no-save — supplied by the /retro-fleet skill on its second pass to render the pixel-aligned ASCII card up top. Direct CLI users typically don't pass these.
 ```
 
 ### Global Flags
