@@ -2,6 +2,43 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.11.30] - 2026-05-07
+
+**Sync `~/.gstack-extend/` alongside `~/.gstack/`.** mind-meld already syncs
+`~/.gstack/projects/<slug>/checkpoints/*.md` so `/context-restore` can pick
+up where another Mac left off — but `gstack-extend` skills (pair-review,
+test-plan, full-review) live in their own `~/.gstack-extend/` tree, which
+was never synced. Resuming a `pair-review` session on a second Mac was
+therefore impossible: the checkpoint markdown survived, but the
+session-state machine (`session.yaml`, group progress, parked-bug ledger)
+didn't follow.
+
+This release adds `gstack-extend` as a default sync source mirroring the
+`gstack` treatment: same auto-detect-on-`~/.gstack-extend/`-existence
+behavior, same opt-in path for upgraders via `mm enable-source
+gstack-extend`, same per-machine off-switch via `mm disable-source
+gstack-extend`. The whitelist walker is scoped to `projects/` so
+gstack-extend's per-machine root files (`config`, `just-upgraded-from`,
+`update-snoozed`) are excluded by construction — only forward-compat
+per-project state syncs.
+
+**New installs:** `mm init` prompts Y/n for `gstack-extend` after `gstack`,
+default Y when `~/.gstack-extend/` exists on disk.
+
+**Existing installs:** `mm status` surfaces the standard "New source
+available: gstack-extend" hint via the seen-sources mechanism. Run
+`mm enable-source gstack-extend` to opt in or `mm disable-source
+gstack-extend` to dismiss.
+
+**Caveat (gstack-extend-side gap, not solved here).** This sync source
+covers anything gstack-extend writes to `~/.gstack-extend/projects/`. As
+of writing, `pair-review` still persists session state to
+`<workspace>/.context/pair-review/` (workspace-local, ephemeral under
+Conductor). Closing the resume-loop fully requires a parallel change in
+gstack-extend to mirror gstack's `~/.gstack/projects/<slug>/checkpoints/`
+layout — that lives in the gstack-extend repo, not here. Once it ships,
+no further mind-meld change is needed.
+
 ## [0.11.29] - 2026-05-07
 
 **`mm retro-fleet` drops the misleading "across N projects" stat; ephemeral-workspace count moves inline with sessions.** User feedback: a 7d retro reported "171 sessions across 89 projects" against a fleet that has only ever worked on ~10 real repos. Root cause: Claude Code keys session storage by encoded cwd (`~/.claude/projects/-Users-kb-conductor-workspaces-mind-meld-pangyo-v1/`), so every Conductor workspace and git worktree gets its own dir on disk and the aggregator's `(device, source_root, claude_dir)` tuple counted each as a distinct project. The number was correct as "unique session-storage paths" but useless as "projects." The repo count under `## Code shipped` already covers the meaningful signal — it dedups by canonical git remote URL.

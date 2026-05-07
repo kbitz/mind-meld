@@ -98,6 +98,22 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             "analytics/.last-sync-*",
         ],
     },
+    {
+        # Sibling of the gstack source for gstack-extend's persistent state.
+        # `projects/` is the forward-compat slot for any per-project state
+        # gstack-extend skills want to survive across Macs (mirrors gstack's
+        # `~/.gstack/projects/<slug>/checkpoints/` shape). Today gstack-extend
+        # only writes per-machine bookkeeping at `~/.gstack-extend/` root
+        # (`config`, `just-upgraded-from`, `update-snoozed`) — those stay
+        # excluded by construction since walk_generic_source only walks
+        # listed include_dirs / include_files.
+        "name": "gstack-extend",
+        "path": "~/.gstack-extend",
+        "type": "generic",
+        "include_dirs": ["projects"],
+        "include_files": [],
+        "exclude_patterns": [],
+    },
 ]
 
 
@@ -304,6 +320,21 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     **default_gstack,
                     "path": str(Path(default_gstack["path"]).expanduser()),
+                }
+            )
+
+    # Same auto-detect pattern for gstack-extend's per-project state slot.
+    gstack_extend_path = Path.home() / ".gstack-extend"
+    has_gstack_extend = any(s["name"] == "gstack-extend" for s in sources)
+    if not explicit_sources and gstack_extend_path.exists() and not has_gstack_extend:
+        default_gstack_extend = next(
+            (s for s in DEFAULT_SOURCES if s["name"] == "gstack-extend"), None
+        )
+        if default_gstack_extend:
+            sources.append(
+                {
+                    **default_gstack_extend,
+                    "path": str(Path(default_gstack_extend["path"]).expanduser()),
                 }
             )
 
