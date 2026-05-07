@@ -80,7 +80,8 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:_ensure_retro_skill_link` / `_skill_link_check_due` / `install_skills_cmd` / `retro_fleet_cmd` | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `_devices_json_cmd` / `EVENTS_RETENTION_DAYS` / `_gc_old_event_files` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
-| `skills/retro_fleet/aggregator.py` | `docs/invariants/events-retro.md` |
+| `skills/retro_fleet/aggregator.py` (incl. `_render_ascii_card` / `_save_snapshot` / `_load_prior_snapshot` / `_classify_commit_subject` / `_detect_bursts` / `_safe_prose`) | `docs/invariants/events-retro.md` |
+| `skills/retro_fleet/SKILL.md` (two-pass card flow) | `docs/invariants/events-retro.md` |
 | `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |
 | `upgrade.py` / `cli.py` upgrade hook seams / `pullhistory.py:append_self_upgrade` | `docs/invariants/auto-upgrade.md` |
 | `pyproject.toml` version bump / tagging | `docs/invariants/auto-upgrade.md` |
