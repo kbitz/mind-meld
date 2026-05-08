@@ -3544,11 +3544,13 @@ class TestTrack7BEventsTail:
             f"push must succeed even when events tail crashes; output={result.output!r}"
         )
 
-    def test_events_tail_iron_rule_fires_on_no_content_push(self, tmp_path, monkeypatch):
-        """IRON RULE: events tail fires on EVERY push attempt past the
-        no-sources guard, including the no-content-diff branch. Pre-Track
-        7B, no-content pushes never advanced the cursor — the head-position
-        wiring fixes that."""
+    def test_events_tail_skips_on_no_content_push(self, tmp_path, monkeypatch):
+        """v0.12.2 substantive-change gate: events tail does NOT fire on a
+        truly empty push (no user-source diffs, no corrupt-manifest recovery).
+        Pre-v0.12.2 the tail fired at HEAD of _push_core unconditionally —
+        empty pushes wrote a phantom mm-push row, mutated the mm-events
+        file, and reported "1 file uploaded" forever. The cursor stays
+        accurate because no-op pushes never advanced it anyway."""
         storage_dir = tmp_path / "storage"
         claude_a = tmp_path / "machine_a" / ".claude"
         self._seed_claude(claude_a)
@@ -3564,15 +3566,27 @@ class TestTrack7BEventsTail:
         first = self._events_files(self._events_dir(tmp_path))
         assert len(first) == 1
         first_rows = self._read_events(first[0])
+        first_mtime = first[0].stat().st_mtime_ns
 
-        # Second push immediately: nothing changed in claude_a → no-content
-        # diff path. Events file must still gain a fresh mm-push row.
+        # Second push: nothing changed in claude_a → empty push. Events
+        # file must NOT gain a new row; mtime must NOT advance; the file
+        # must remain the only events file.
         assert runner.invoke(app, ["push"]).exit_code == 0
         second_rows = self._read_events(first[0])
-        assert len(second_rows) > len(first_rows), (
-            "events tail did not fire on no-content push (IRON RULE regression)"
+        assert len(second_rows) == len(first_rows), (
+            f"empty push wrote a phantom event row (was {len(first_rows)}, now {len(second_rows)})"
         )
-        assert second_rows[-1]["type"] == "mm-push"
+        assert first[0].stat().st_mtime_ns == first_mtime, (
+            "empty push touched the events file mtime"
+        )
+        assert self._events_files(self._events_dir(tmp_path)) == first
+
+        # Third push WITH a real change: events tail must fire again.
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "new.md").write_text("new content")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        third_rows = self._read_events(first[0])
+        assert len(third_rows) > len(second_rows), "events tail did not fire on a substantive push"
+        assert third_rows[-1]["type"] == "mm-push"
 
     def test_events_tail_filters_mm_events_from_sources_field(self, tmp_path, monkeypatch):
         """Codex C7: mm-events source name MUST NOT appear in the

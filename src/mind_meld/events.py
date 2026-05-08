@@ -19,10 +19,14 @@ SAME push. (Pre-Track-7B prototypes ran a true tail-position write that
 required next-push lag; the production wiring eliminated that lag — see
 CLAUDE.md "Events tail in _push_core" for the locked invariants.)
 
-Trust boundary. Track 7B's `_push_core` wiring MUST run the events tail on
-EVERY push attempt, including no-content-diff early returns. Without it,
-machines that push regularly but rarely change content silently never
-advance their cursor and never appear in fleet retros.
+Trust boundary. The events tail runs on every push that uploads bytes
+(v0.12.2 substantive-change gate). Truly empty `mm push` invocations —
+no user-source diffs, no corrupt-manifest recovery — skip the tail and
+return "Nothing to push" without writing a row. Pre-v0.12.2 the tail
+fired at the HEAD of `_push_core` unconditionally, which made every
+empty push report a phantom "1 file uploaded" (the events file itself)
+and ship that row to peers; the gate eliminates that churn while
+keeping the cursor accurate (no-op pushes never advanced it anyway).
 
 Init-time backfill. cli.py's `_run_events_backfill` runs at the end of
 `mm init` and writes a 30-day git-snapshot + full sessions-snapshot, but

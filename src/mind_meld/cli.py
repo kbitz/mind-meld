@@ -3026,12 +3026,6 @@ def _push_core(
             console.print(f"[yellow]Warning:[/yellow] {msg}")
         return None
 
-    # Track 7B head-position events tail. MUST run on every push attempt
-    # past this point (events.py:19-22 trust boundary), BEFORE
-    # build_manifest_v2 so this push's events file lands on disk in time
-    # to be uploaded same push. See `_run_events_tail` for invariants.
-    _run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
-
     skipped: list[tuple[str, str]] = []
 
     def on_skip(path: str, reason: str) -> None:
@@ -3039,6 +3033,14 @@ def _push_core(
         if verbose and not quiet:
             console.print(f"  [dim]skipped: {safe_str(path)} ({safe_str(reason)})[/dim]")
 
+    # Build local manifest BEFORE the events tail. The substantive-change
+    # gate below decides whether to write a new mm-push event row at all \u2014
+    # without this, every empty `mm push` would write an event, mutate the
+    # mm-events file, and report "1 file uploaded" forever (the phantom-
+    # change-on-empty-push regression). The events tail's pre-v0.12.2
+    # trust boundary "MUST run on every push attempt" is relaxed to "MUST
+    # run on every push that uploads bytes" \u2014 the cursor stays accurate
+    # because no-op pushes don't advance it (see events.py).
     if not quiet:
         console.print("[bold]Building manifest...[/bold]")
     local_manifest = build_manifest_v2(device_id, device_name, sources, max_file_size, on_skip)
@@ -3089,16 +3091,50 @@ def _push_core(
     tombstones = generate_tombstones(local_manifest, remote_manifest, device_id)
     local_manifest["tombstones"] = tombstones
 
-    # Diff and upload per-source
-    total_bytes = 0
-    total_new = 0
-    total_modified = 0
-    total_deleted = 0
-
     # Only the REAL remote manifest drives the diff (avoid re-uploading every
     # file just because we're recovering from corruption via the sidecar).
     real_remote = fetch.manifest if fetch.is_ok else None
     remote_sources = real_remote.get("sources", {}) if real_remote else {}
+
+    # Substantive-change gate (v0.12.2). Run BEFORE the events tail so
+    # truly empty pushes don't write an mm-push event row that becomes
+    # the only "change" pushed. Counts ANY source diff (user OR mm-events
+    # \u2014 the latter catches an un-flushed prior push that wrote an event
+    # but failed mid-upload). Pre-v0.12.2: events tail fired at HEAD of
+    # _push_core unconditionally, so every `mm push` reported at least
+    # the events-file modification.
+    recovering_from_corrupt = fetch.status == "corrupt"
+    has_substantive = any(
+        True
+        for _, _, _, _ in iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True)
+    )
+    if not has_substantive and not recovering_from_corrupt:
+        if not quiet:
+            console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
+        return None
+
+    # OK, this push will upload bytes. Run the events tail now to capture
+    # the cursor + git/sessions snapshots, then re-walk mm-events to fold
+    # the just-written event row into local_manifest. dry_run still gates
+    # the tail's own writes; the re-walk reads existing on-disk state.
+    _run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
+    if not dry_run:
+        mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
+        if mm_internal_cfgs:
+            events_manifest = build_manifest_v2(
+                device_id, device_name, mm_internal_cfgs, max_file_size
+            )
+            local_manifest["sources"].update(events_manifest["sources"])
+            # mm-events file count may have rolled (new daily file); regenerate.
+            local_manifest["tombstones"] = generate_tombstones(
+                local_manifest, remote_manifest, device_id
+            )
+
+    # Diff and upload per-source.
+    total_bytes = 0
+    total_new = 0
+    total_modified = 0
+    total_deleted = 0
 
     for src_name, src_data, _remote_src, diff in iter_source_diffs(
         local_manifest, remote_sources, skip_unchanged=True
@@ -3134,17 +3170,6 @@ def _push_core(
             elapsed = time.time() - start
             console.print("\n[bold]Dry run complete.[/bold]")
             console.print(f"  Completed in {elapsed:.1f}s")
-        return None
-
-    # If the remote manifest was corrupt and we recovered via sidecar/peers,
-    # we MUST rewrite the remote manifest to heal the corruption - even when
-    # local file diffs are zero. Otherwise the corrupt manifest stays in
-    # place and recovered tombstones never propagate.
-    recovering_from_corrupt = fetch.status == "corrupt"
-
-    if not (total_new or total_modified or total_deleted) and not recovering_from_corrupt:
-        if not quiet:
-            console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
         return None
 
     # Upload manifest (includes tombstones)
