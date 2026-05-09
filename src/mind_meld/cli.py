@@ -1324,11 +1324,53 @@ def _prompt_conflict_choice(
 #   canonical because we never overwrite it. Returns "failed" on error.
 
 
+_MTIME_RESTORE_MAX_SKEW_SECONDS = 60.0
+
+
+def _restore_mtime_best_effort(path: Path, mtime_iso: str | None) -> None:
+    """Stamp `path` with mtime/atime from a manifest ISO-8601 timestamp.
+
+    Best-effort: silently no-ops on None/empty input, an unparseable or
+    wrong-typed value, or any filesystem error. Mtime is metadata; the
+    load-bearing contract is that the file's bytes match the remote \u2014
+    `os.utime` failing on iCloud-restored placeholders or networked
+    filesystems must not abort the pull.
+
+    Future-clamp (load-bearing). Cap the applied mtime at
+    ``now + _MTIME_RESTORE_MAX_SKEW_SECONDS`` so a peer with a bad clock
+    (or a passphrase-holding attacker minting a manifest dated in 2099)
+    can't poison this device's local mtime into a permanent
+    `local_mtime > remote_mtime` skip at `_apply_incoming_file`'s mtime
+    gate. Without this clamp, one bad pull would silently lock the
+    victim out of all future legitimate updates to that path.
+
+    Why we restore at all: pre-fix, every pulled file landed with
+    `st_mtime = now-of-pull`, breaking any downstream consumer that uses
+    mtime to order content (e.g. gstack skill preambles' `ls -t` recency
+    scan over `~/.gstack/projects/*/checkpoints/`). The mtime mm captures
+    on push is the original source mtime; restoring it on pull preserves
+    cross-machine ordering even when locally-authored and remotely-pulled
+    files are interleaved on the same disk.
+    """
+    if not mtime_iso:
+        return
+    try:
+        ts = mtime_from_manifest(mtime_iso).timestamp()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return
+    ts = min(ts, time.time() + _MTIME_RESTORE_MAX_SKEW_SECONDS)
+    try:
+        os.utime(path, (ts, ts))
+    except (OSError, OverflowError):
+        return
+
+
 def _apply_write(
     local_path: Path,
     rel_path: str,
     plain_data: bytes,
     verbose: bool = False,
+    remote_mtime_iso: str | None = None,
 ) -> ApplyOutcome:
     """[W] local has no copy \u2014 atomic_write remote to canonical."""
     try:
@@ -1338,6 +1380,7 @@ def _apply_write(
     except (OSError, StorageError) as e:
         console.print(f"  [red]write failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}")
         return "failed"
+    _restore_mtime_best_effort(local_path, remote_mtime_iso)
     if verbose:
         console.print(f"  [green]\u2193[/green] {safe_str(rel_path)}")
     return "written"
@@ -1421,6 +1464,7 @@ def _apply_conflict(
     plain_data: bytes,
     remote_device_id: str,
     verbose: bool = False,
+    remote_mtime_iso: str | None = None,
 ) -> ApplyOutcome:
     """[C] conflict path (v0.9.2 INVERTED): keep local at canonical,
     route remote bytes to .sync-conflict-*.
@@ -1517,6 +1561,7 @@ def _apply_conflict(
             f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
         )
         return "failed"
+    _restore_mtime_best_effort(conflict_path, remote_mtime_iso)
 
     if verbose:
         console.print(
@@ -1543,9 +1588,16 @@ def _apply_incoming_file(
     or rollback).
     """
     local_path.parent.mkdir(parents=True, exist_ok=True)
+    remote_mtime_iso = remote_info.get("mtime")
 
     if not local_path.exists():
-        return _apply_write(local_path, rel_path, plain_data, verbose=verbose)
+        return _apply_write(
+            local_path,
+            rel_path,
+            plain_data,
+            verbose=verbose,
+            remote_mtime_iso=remote_mtime_iso,
+        )
 
     # Re-read local state. Precomputed snapshot can be stale if the user
     # edited the file after _pull_core built its diff.
@@ -1562,7 +1614,7 @@ def _apply_incoming_file(
         return _apply_merge(local_path, rel_path, plain_data, verbose=verbose)
 
     # [S] local is newer. Keep local at canonical path \u2014 next push propagates it.
-    remote_mtime_str = remote_info.get("mtime")
+    remote_mtime_str = remote_mtime_iso
     local_mtime: datetime | None = None
     remote_mtime: datetime | None = None
     try:
@@ -1619,6 +1671,7 @@ def _apply_incoming_file(
                     f"  [red]write failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}"
                 )
                 return "failed"
+            _restore_mtime_best_effort(local_path, remote_mtime_iso)
             if verbose:
                 console.print(
                     f"  [yellow]\u2193[/yellow] {safe_str(rel_path)} (remote kept by user)"
@@ -1645,7 +1698,14 @@ def _apply_incoming_file(
             raise typer.Abort()
         # choice == "keep-both" -> fall through to _apply_conflict
 
-    return _apply_conflict(local_path, rel_path, plain_data, remote_device_id, verbose=verbose)
+    return _apply_conflict(
+        local_path,
+        rel_path,
+        plain_data,
+        remote_device_id,
+        verbose=verbose,
+        remote_mtime_iso=remote_mtime_iso,
+    )
 
 
 def _download_and_apply(
