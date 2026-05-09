@@ -8,6 +8,7 @@ landed as "Track 2A" (v0.8.7) when cli.py was decomposed.
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -30,6 +31,7 @@ from mind_meld.cli import (
     _prompt_sources,
     _pull_one_source,
     _register_and_save,
+    _restore_mtime_best_effort,
     _select_devices,
     _UnknownSourceWarning,
 )
@@ -73,6 +75,54 @@ class TestApplyWrite:
         local = tmp_path / "x.md"
         outcome = _apply_write(local, "x.md", b"data")
         assert outcome == "failed"
+
+    def test_restores_remote_mtime(self, tmp_path: Path) -> None:
+        """Pulled file's mtime matches the manifest, not the time of pull.
+
+        Pre-fix, atomic_write_bytes stamped st_mtime = now-of-pull,
+        which broke any consumer that uses mtime for recency ordering
+        (gstack skill preambles' `ls -t` over checkpoints/, ceo-plans/).
+        """
+        local = tmp_path / "doc.md"
+        # An mtime well in the past so we can tell it apart from "now".
+        remote_mtime = datetime(2026, 1, 15, 12, 30, 45, tzinfo=timezone.utc)
+
+        outcome = _apply_write(
+            local,
+            "doc.md",
+            b"data",
+            remote_mtime_iso=remote_mtime.isoformat(),
+        )
+
+        assert outcome == "written"
+        actual = datetime.fromtimestamp(local.stat().st_mtime, tz=timezone.utc)
+        # Allow sub-second drift from filesystem timestamp resolution
+        # (HFS+ rounds to 1s; APFS keeps nanoseconds but utime/stat may lose them).
+        assert abs((actual - remote_mtime).total_seconds()) < 1.0
+
+    def test_no_mtime_in_manifest_leaves_now(self, tmp_path: Path) -> None:
+        """Manifests without mtime (defensive — older blobs, future schema)
+        fall through cleanly: file is written, mtime stays at NOW."""
+        local = tmp_path / "doc.md"
+        before = datetime.now(timezone.utc)
+
+        outcome = _apply_write(local, "doc.md", b"data", remote_mtime_iso=None)
+
+        assert outcome == "written"
+        actual = datetime.fromtimestamp(local.stat().st_mtime, tz=timezone.utc)
+        # Should be ~now, not 1970-01-01 or any other parse-fail sentinel.
+        assert (actual - before).total_seconds() < 5.0
+
+    def test_unparseable_mtime_does_not_fail_write(self, tmp_path: Path) -> None:
+        """Best-effort contract: a malformed peer-supplied mtime must not
+        abort the file write or raise. The file is on disk; mtime is just
+        metadata and falls back to NOW."""
+        local = tmp_path / "doc.md"
+
+        outcome = _apply_write(local, "doc.md", b"data", remote_mtime_iso="not-a-date")
+
+        assert outcome == "written"
+        assert local.read_bytes() == b"data"
 
 
 # ── _apply_merge ─────────────────────────────────────────────────────
@@ -183,6 +233,109 @@ class TestApplyConflict:
         assert local.read_bytes() == b"local"
         # No sidecar was written.
         assert not any(p.name.startswith("doc.sync-conflict-") for p in tmp_path.iterdir())
+
+    def test_sidecar_mtime_matches_remote(self, tmp_path: Path) -> None:
+        """The sidecar holds the surprising remote bytes — and it should
+        carry the remote's authorship time, not the time of pull. Lets
+        users sort sidecars by when the conflicting content was authored."""
+        local = tmp_path / "doc.md"
+        local.write_bytes(b"local")
+        remote_mtime = datetime(2026, 1, 15, 12, 30, 45, tzinfo=timezone.utc)
+
+        outcome = _apply_conflict(
+            local,
+            "doc.md",
+            b"remote",
+            "devAAAA1234",
+            remote_mtime_iso=remote_mtime.isoformat(),
+        )
+
+        assert outcome == "conflicted"
+        sidecars = [p for p in tmp_path.iterdir() if "sync-conflict" in p.name]
+        assert len(sidecars) == 1
+        actual = datetime.fromtimestamp(sidecars[0].stat().st_mtime, tz=timezone.utc)
+        assert abs((actual - remote_mtime).total_seconds()) < 1.0
+
+
+class TestApplyMergeKeepsNowMtime:
+    """Merge produces locally-authored content (line-union of local +
+    remote). Its mtime must NOT be backdated to remote's mtime — peers
+    pulling next would see local_mtime <= their remote_mtime and skip
+    the merged result, losing the union content fleet-wide."""
+
+    def test_merge_does_not_inherit_remote_mtime(self, tmp_path: Path) -> None:
+        local = tmp_path / "notes.jsonl"
+        local.write_bytes(b'{"a":1}\n')
+        before = datetime.now(timezone.utc)
+
+        outcome = _apply_merge(local, "notes.jsonl", b'{"a":1}\n{"b":2}\n')
+
+        assert outcome == "merged"
+        actual = datetime.fromtimestamp(local.stat().st_mtime, tz=timezone.utc)
+        # Merged file's mtime is ~now, not some manifest-supplied past time.
+        assert (actual - before).total_seconds() < 5.0
+
+
+class TestRestoreMtimeBestEffort:
+    def test_none_is_noop(self, tmp_path: Path) -> None:
+        path = tmp_path / "f.md"
+        path.write_bytes(b"x")
+        before = path.stat().st_mtime
+        _restore_mtime_best_effort(path, None)
+        assert path.stat().st_mtime == before
+
+    def test_empty_string_is_noop(self, tmp_path: Path) -> None:
+        path = tmp_path / "f.md"
+        path.write_bytes(b"x")
+        before = path.stat().st_mtime
+        _restore_mtime_best_effort(path, "")
+        assert path.stat().st_mtime == before
+
+    def test_unparseable_is_swallowed(self, tmp_path: Path) -> None:
+        path = tmp_path / "f.md"
+        path.write_bytes(b"x")
+        # Must not raise.
+        _restore_mtime_best_effort(path, "not-a-date")
+
+    def test_missing_file_is_swallowed(self, tmp_path: Path) -> None:
+        # Path doesn't exist — os.utime raises FileNotFoundError. Helper
+        # contract is best-effort; failure must not propagate.
+        ghost = tmp_path / "does-not-exist.md"
+        _restore_mtime_best_effort(ghost, "2026-01-15T12:30:45+00:00")
+
+    def test_future_dated_mtime_clamped_to_now(self, tmp_path: Path) -> None:
+        """A peer with a bad clock (or a passphrase-holding attacker)
+        could mint a manifest with mtime far in the future. Without the
+        clamp, the victim's `local_mtime > remote_mtime` skip would
+        silently block all subsequent legitimate updates to that path.
+
+        Verify the applied mtime is capped at ~now, not the future date.
+        """
+        from datetime import datetime, timezone
+
+        path = tmp_path / "f.md"
+        path.write_bytes(b"x")
+        far_future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+        _restore_mtime_best_effort(path, far_future.isoformat())
+        after = time.time()
+
+        actual = path.stat().st_mtime
+        # Must be within the clamp window: at most after + 60s skew tolerance.
+        assert actual <= after + 61.0
+        # Must NOT be the year-2099 timestamp.
+        assert actual < far_future.timestamp() - 86400  # off by at least a day
+
+    def test_non_string_mtime_is_swallowed(self, tmp_path: Path) -> None:
+        """A peer manifest with `mtime: 1234` (int instead of str)
+        raises TypeError from datetime.fromisoformat. The helper must
+        catch it — pre-fix this would propagate and abort the pull
+        with a partial write already on disk."""
+        path = tmp_path / "f.md"
+        path.write_bytes(b"x")
+        # Must not raise. type-ignore because we're deliberately violating
+        # the str | None contract to simulate a malformed manifest.
+        _restore_mtime_best_effort(path, 1234)  # type: ignore[arg-type]
 
 
 # ── _select_devices ──────────────────────────────────────────────────
