@@ -183,10 +183,12 @@ section is omitted when there is nothing to surface):
 - `Tokens incomplete: N peer(s) on pre-v0.11.14 OR with cold token cache` —
   those peers' v=2 snapshots omit ``tokens_by_day``. Run `mm push` on the
   named peers to rebuild the cache.
-- `Skills incomplete: N peer(s) on pre-v0.11.27` — those peers' v=2
-  snapshots omit ``skills_by_day``. Upgrade and `mm push` to repopulate.
-  *(Distinct from "no skills used this window" — empty-dict rows from
-  v0.11.27+ peers do NOT trigger this.)*
+- `Skills incomplete: N peer(s) on pre-v0.11.27 OR with cold token cache` —
+  those peers' v=2 snapshots omit ``skills_by_day``. Run `mm push` on the
+  named peers (warms the token cache and re-emits the field), or upgrade
+  if they're on pre-v0.11.27. *(Distinct from "no skills used this
+  window" — empty-dict rows from v0.11.27+ warm-cache peers do NOT
+  trigger this.)*
 - `N event(s) skipped due to parse errors in mm event log.` — torn JSONL
   lines were skipped. Output is partial.
 - `Requested Nd window exceeds the 90-day events retention.` — user asked
@@ -229,10 +231,14 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
 - It does not include sessions from machines that haven't yet upgraded to mm
   v0.11.0+ (those peers emit pre-v=2 snapshots). The Notes section names
   which peers need to upgrade.
-- It does not include skill counts from machines on pre-v0.11.27 (those peers'
-  sessions-snapshot rows omit ``skills_by_day``). The Notes section names
-  which peers need to upgrade. Cross-machine skill counts come from each
-  peer's Claude Code session jsonls (the same source it walks for tokens) —
-  not from gstack analytics.
+- It does not include skill counts from machines whose latest snapshot
+  in the window omits ``skills_by_day`` — either pre-v0.11.27 peers
+  (code never emits the field) OR v0.11.27+ peers whose most recent push
+  ran with a cold token cache under the autopush gate (skill walk
+  skipped, field absent). The Notes section names them; running `mm push`
+  interactively on those machines warms the cache and emits the field on
+  the next push. Cross-machine skill counts come from each peer's Claude
+  Code session jsonls (the same source it walks for tokens) — not from
+  gstack analytics.
 - It does not save the user-facing output to a file. `> /tmp/retro.md` is
   the v1 save story. A `--save` flag is deferred to v2.

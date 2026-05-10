@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.12.4] - 2026-05-10
+## [0.12.5] - 2026-05-10
 
 **Track 11A from `docs/ROADMAP.md` Group 11 — token-cache invariant ownership consolidation.** Closes two pre-existing gaps: tests outside `test_token_usage.py` no longer pollute the user's real `~/.config/mind-meld/session-tokens.json`, and `gc_cache_entries` now routes through the `lock_and_get_files` wrapper so the version-check + files-isinstance-check normalization lives in ONE place — the docstring's "single owner of cache-shape invariants" claim is now literally true.
 
@@ -15,6 +15,18 @@ All notable changes to Mind Meld will be documented in this file.
 **Test coverage.** 5 new pinning tests in `TestGcCacheEntries`: `test_reaps_entry_not_a_dict`, `test_reaps_entry_with_missing_by_day`, `test_reaps_entry_with_empty_by_day`, `test_strips_unknown_top_level_keys_on_gc` (regression pin for the cross-model HIGH), `test_wrong_version_cache_normalized_to_empty`. Each asserts on-disk JSON state after gc, not just the `reaped` return value — the in-place mutation contract of `lock_and_get_files` (yields the `files` sub-dict, not the cache root) makes return-value-only assertions miss the regression class where `keep` is built but never persisted. All 1527 tests pass; pre-flight (pytest twice on a clean machine) confirmed identical output across runs.
 
 **Two follow-ups deferred to `docs/TODOS.md`** (deliberately out-of-scope per the eng-review): (1) `gc_cache_entries`'s `int(max_age_s / 86400)` floor doesn't validate `max_age_s=0` (effectively reaps everything) or fractional-day inputs; (2) a direct positive cache-isolation test that stat-snapshots the real `~/.config/mind-meld/session-tokens.json` before/after the suite would be a stronger regression pin than the chosen "pytest twice" pre-flight.
+
+## [0.12.4] - 2026-05-10
+
+**`mm retro-fleet` "Skills incomplete" breadcrumb now admits cold-cache push as a second cause, mirroring `pre_token_peers`'s "OR with cold token cache" phrasing.** Pre-fix, the notes line read `"Skills incomplete: N peer(s) on pre-v0.11.27 — upgrade for accurate skill totals."` — accurate when every flagged peer was actually pre-v0.11.27, but a v0.11.27+ peer that pushed via the cold-cache code path (`cli.py:2886-2894` autopush gate skipping the token walk, or warn-mode flock contention yielding `files_dict=None`) emitted a sessions-snapshot whose project rows omit `skills_by_day` AND got falsely labeled "pre-v0.11.27" by that same breadcrumb. The wire genuinely can't distinguish "pre-v0.11.27 peer" from "v0.11.27+ peer with skipped walk" — both ship the field absent. The new text says both populations explicitly so the user can run `mm push` interactively (warms the cache, re-emits the field next push) on the named peer instead of chasing a non-existent upgrade.
+
+**Track 11B as originally written was rejected during /plan-eng-review 2026-05-10.** ROADMAP Track 11B proposed a 3-LOC fix in `events.py:_scan_one_project`: drop the `if token_cache_files is not None:` gate so cold-cache snapshots emit `meta["skills_by_day"] = {}` (KEY-PRESENT-VALUE-EMPTY) instead of omitting the key entirely. **Codex outside-voice review caught:** the aggregator picks the LATEST sessions snapshot per `(device, source_root, claude_dir)` at `aggregator.py:830`. With the always-set fix, a v0.11.27+ device that pushes warm at T1 (populated `skills_by_day`) and then cold at T2 (synthetic `{}`) silently overwrites the T1 data, AND `aggregator.py:858` (`skills.available = True`) flips on so the renderer confidently shows "0 skills" instead of any "Skills incomplete" notice. The visible-misclassification bug becomes invisible-data-erasure — net regression. Cosmetic-only fix (this release) admits the wire ambiguity in the breadcrumb instead.
+
+**Aggregator change scope.** Only `src/mind_meld/skills/retro_fleet/aggregator.py` — the `notes.append(...)` block at `:1862-1865`, the comment block at `:851-866` documenting the discriminator semantic, the `pre_skills_peers` field docstring on `SkillsAggregate` at `:253-265`, and the top-of-file aggregation rules at `:30-37`. `events.py:_scan_one_project` is deliberately untouched — the existing absent-on-cold behavior is the data-correct semantic. `pre_skills_peers` field name kept as-is for stability; semantic drift documented.
+
+**Test coverage.** New `tests/test_retro_fleet_aggregator.py::TestFleetSkillsAggregation::test_skills_incomplete_breadcrumb_admits_cold_cache_ambiguity` pins the new wording — asserts `format_retro` output contains both `"pre-v0.11.27"` AND `"cold token cache"` AND `"mm push"` (recovery action). Existing `test_d4_empty_skills_dict_does_not_flag_pre_skills_peer`, `test_skills_by_day_empty_dict_when_no_skill_blocks`, `test_mixed_fleet_pre_skills_peers_flagged_correctly`, and `test_no_token_cache_means_no_tokens_field` stay green — flag behavior is unchanged; only the rendered text moves.
+
+**Future option captured in `TODOS.md`.** The proper architectural fix — explicit `skills_walk_complete: bool` field on `SessionMetadata` (additive, total=False, no schema bump), aggregator preserves last-populated-skills per device-project, three-state discriminator — is filed as deferred work. Re-evaluate when pre-v0.11.27 peers age out and cold-cache-push disambiguation becomes operationally valuable.
 
 ## [0.12.3] - 2026-05-09
 

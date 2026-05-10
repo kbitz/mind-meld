@@ -252,19 +252,52 @@ Walked from each Claude Code session jsonl's assistant `tool_use` blocks
 where `name == "Skill"`. Subagent invocations attribute to the parent
 project's bucket (mirrors token attribution).
 
-**KEY-ABSENT vs EMPTY-DICT discriminator (v0.11.27).** The
-aggregator's `pre_skills_peers` flag uses `"skills_by_day" not in proj`,
-NOT `proj.get("skills_by_day")` falsy-check. **Critical difference vs.
+**KEY-ABSENT vs EMPTY-DICT discriminator (v0.11.27, semantic widened
+v0.12.4 post-/plan-eng-review 2026-05-10).** The aggregator's
+`pre_skills_peers` flag uses `"skills_by_day" not in proj`, NOT
+`proj.get("skills_by_day")` falsy-check. **Critical difference vs.
 `pre_token_peers`:** every session generates tokens, so the existing
 token check (missing OR empty AND sessions > 0) is correct. Skills are
 different — a session can legitimately invoke zero skills, so an empty
 `{}` is a content signal ("no skills used in window"), not a version
 signal. Conflating the two would surface "Skills incomplete" on every
-retro for users who don't lean on skills. `events.py:_scan_one_project`
-ALWAYS sets `meta["skills_by_day"]` (possibly to `{}`) when
-`token_cache_files` is provided, so the absence-test on the wire is
-reliable. Pinned by `test_skills_by_day_empty_dict_when_no_skill_blocks`
-and `test_d4_empty_skills_dict_does_not_flag_pre_skills_peer`.
+retro for users who don't lean on skills.
+
+**Two populations land in `pre_skills_peers`:** (1) pre-v0.11.27 mm
+peers whose code never emits the field, and (2) v0.11.27+ peers whose
+skill walk was skipped this push because `events.py:_scan_one_project`
+ran with `token_cache_files=None` (cold token cache + autopush gate at
+`cli.py:2886-2894`, or warn-mode flock contention where
+`lock_and_get_files("warn")` yields `None`). The wire genuinely can't
+distinguish the two — both ship the field absent. The rendered Notes
+breadcrumb at `aggregator.py:1862-1864` mirrors `pre_token_peers`'s
+"OR with cold token cache" phrasing to admit the ambiguity honestly.
+
+**Why not "always set `meta['skills_by_day'] = {}`" (rejected fix,
+post-/plan-eng-review 2026-05-10).** A surface-cleaner alternative
+would be to drop the `if token_cache_files is not None:` gate at
+`events.py:_scan_one_project` and emit `skills_by_day = {}` on every
+snapshot.
+**Codex outside-voice review caught:** the aggregator picks the LATEST
+sessions snapshot per `(device, source_root, claude_dir)` at
+`aggregator.py:830`. With the always-set fix, a v0.11.27+ device that
+pushes warm at T1 (populated `skills_by_day`) and then cold at T2
+(synthetic `{}`) has its T1 skill data silently overwritten by T2's
+empty dict, AND `aggregator.py:858` (`skills.available = True`) flips
+on so the renderer confidently shows "0 skills" instead of the
+existing "Skills incomplete" notice. Net regression — visible-
+misclassification turned into invisible-data-erasure. Keeping the
+absent/empty asymmetry plus the honest breadcrumb text is the correct
+tradeoff while pre-v0.11.27 peers age out of the fleet. The longer-
+term proper fix (explicit `skills_walk_complete: bool` schema field
+that lets the aggregator preserve last-populated-skills) is captured
+in `TODOS.md` for future revisit if disambiguation becomes
+operationally valuable.
+
+Pinned by `test_skills_by_day_empty_dict_when_no_skill_blocks`,
+`test_d4_empty_skills_dict_does_not_flag_pre_skills_peer`, and
+`test_skills_incomplete_breadcrumb_admits_cold_cache_ambiguity`
+(v0.12.4).
 
 **Cache shape upgrade gate (D2 from /plan-eng-review 2026-05-06).**
 `token_usage.get_or_compute` checks `"skills_by_day" in entry` on the
