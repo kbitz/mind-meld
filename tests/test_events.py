@@ -884,6 +884,15 @@ class TestTokenAggregationHook:
         )
 
     def test_no_token_cache_means_no_tokens_field(self, tmp_path):
+        """v0.12.4 invariant (regression pin): cold-cache path
+        (`token_cache_files=None`) must omit BOTH `tokens_by_day` AND
+        `skills_by_day`. The `skills_by_day` absence is load-bearing —
+        the rejected Track 11B Option B fix (drop the gate, always set
+        `meta["skills_by_day"] = {}`) would let latest-snapshot-wins at
+        `aggregator.aggregate_sessions` silently overwrite a warm T1
+        snapshot's populated skills with a cold T2 synthetic `{}`. See
+        docs/invariants/events-retro.md "Why not always set" section.
+        """
         proj = tmp_path / "projects" / "-tmp-proj"
         proj.mkdir(parents=True)
         self._write_session_jsonl(proj / "session.jsonl")
@@ -894,6 +903,7 @@ class TestTokenAggregationHook:
         )
         meta = out[0]["projects"][0]
         assert "tokens_by_day" not in meta
+        assert "skills_by_day" not in meta
 
     def test_token_cache_populates_tokens_by_day(self, tmp_path):
         proj = tmp_path / "projects" / "-tmp-proj"

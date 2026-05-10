@@ -29,10 +29,13 @@ Aggregation rules:
   sum across tuples. v=1 snapshots are NOT summed.
 * Skills: walk the same latest-per-tuple set; merge each project's
   ``skills_by_day`` into a fleet-wide rollup, sliced to the retro window.
-  Pre-v0.11.27 mm peers (``skills_by_day`` key absent on snapshot rows)
-  are flagged into ``pre_skills_peers``; peers with the key present but
-  empty (``{}``) are NOT flagged — empty signals "no Skill usage", not
-  "peer doesn't emit" (D4 from /plan-eng-review 2026-05-06).
+  Devices whose latest snapshot omits the key (``skills_by_day`` absent)
+  flag into ``pre_skills_peers`` — covers both pre-v0.11.27 mm peers AND
+  v0.11.27+ peers whose skill walk was skipped this push (cold token
+  cache + autopush, or warn-mode flock contention). Peers with the key
+  present but empty (``{}``) are NOT flagged — empty signals "no Skill
+  usage in window", a content signal, not a version signal (D4 from
+  /plan-eng-review 2026-05-06; semantic widened 2026-05-10).
 * mm-push: count by (device).
 * Phantom-event filter: when ``mm devices --format=json`` succeeds, intersect
   event-producing IDs with the registered fleet so de-registered or test-
@@ -244,17 +247,27 @@ class SkillsAggregate:
     by_skill: dict[str, int] = field(default_factory=dict)
     # ``available`` flips False ONLY when no peer's snapshot in the window
     # carries a ``skills_by_day`` key (every project on every device omits
-    # the field — the fleet has not yet rolled to v0.11.27+ on any
-    # contributing machine). Renderer emits "Skills section omitted" in
-    # that state instead of "0 invocations". v0.11.27+ semantic:
-    # "available=False" is mid-rollout-with-zero-uptake, NOT "tool
-    # missing" as it was pre-v0.11.27.
+    # the field). Two ways that can happen: (1) whole-fleet pre-v0.11.27,
+    # or (2) whole-fleet cold-cache push (every contributing peer's most
+    # recent push ran with token_cache_files=None and skipped the skill
+    # walk). Renderer emits "Skills section omitted" in either state
+    # instead of "0 invocations". v0.11.27+ semantic: "available=False"
+    # is mid-rollout-with-zero-uptake or whole-fleet-incomplete, NOT
+    # "tool missing" as it was pre-v0.11.27.
     available: bool = True
     # Devices whose snapshot rows are missing the ``skills_by_day`` key
-    # entirely (pre-v0.11.27 mm peers). KEY-ABSENT-vs-EMPTY-DICT is the
-    # discriminator (D4 from /plan-eng-review 2026-05-06): empty dict
-    # means "this project has sessions but no Skill blocks" — a content
-    # signal, not a version signal — and does NOT flag the device.
+    # entirely. Two populations end up here: (1) pre-v0.11.27 mm peers
+    # whose code never emits the field, and (2) v0.11.27+ peers whose
+    # skill walk was skipped this push (cold token cache + autopush
+    # gate, or warn-mode flock contention). KEY-ABSENT-vs-EMPTY-DICT is
+    # the discriminator (D4 from /plan-eng-review 2026-05-06): empty
+    # dict means "this project has sessions but no Skill blocks" — a
+    # content signal, not a version signal — and does NOT flag the
+    # device. The wire can't tell apart the two populations the
+    # breadcrumb names (both ship the key absent), so the rendered
+    # Notes text covers both cases honestly. Field name kept as
+    # ``pre_skills_peers`` for stability — semantic drift documented
+    # here.
     pre_skills_peers: set[str] = field(default_factory=set)
 
 
@@ -849,9 +862,20 @@ def aggregate_sessions(
             out.pre_token_peers.add(device)
 
         # Skill aggregation (v0.11.27+). KEY-ABSENT-vs-EMPTY-DICT is the
-        # discriminator (D4 from /plan-eng-review 2026-05-06). Absent
-        # ⇒ peer on pre-v0.11.27 mm; empty ⇒ "no Skill usage in window"
-        # which is a content signal, not a version signal.
+        # discriminator (D4 from /plan-eng-review 2026-05-06). Absent ⇒
+        # peer on pre-v0.11.27 mm OR v0.11.27+ peer whose skill walk was
+        # skipped this push (cold token cache + autopush gate, or warn-
+        # mode flock contention — both leave `token_cache_files=None` at
+        # `events.py:_scan_one_project`). Empty ⇒ "no Skill usage in
+        # window" — a content signal, not a version signal. The
+        # breadcrumb text mirrors the `pre_token_peers` "OR with cold
+        # token cache" phrasing because the wire genuinely can't
+        # distinguish the two — a skipped walk and a pre-v0.11.27 peer
+        # both ship the field absent. Resolved post-/plan-eng-review
+        # 2026-05-10 in favor of admitting the ambiguity over
+        # introducing latest-snapshot-wins data erasure (the alternative
+        # "always set {}" fix would silently overwrite populated skill
+        # data when warm-then-cold push ordering happens).
         if "skills_by_day" not in proj:
             skills.pre_skills_peers.add(device)
         else:
@@ -1859,8 +1883,9 @@ def format_retro(
     if data.skills.pre_skills_peers:
         n_skills = len(data.skills.pre_skills_peers)
         notes.append(
-            f"Skills incomplete: {n_skills} peer(s) on pre-v0.11.27 — upgrade for "
-            f"accurate skill totals."
+            f"Skills incomplete: {n_skills} peer(s) on pre-v0.11.27 OR with cold token "
+            f"cache — upgrade and/or run `mm push` on those machines for accurate "
+            f"skill totals."
         )
     # Unpriced-model breadcrumb. Models present in the fleet's
     # ``tokens_by_model`` but missing from the pricing table contribute to
