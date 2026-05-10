@@ -557,18 +557,6 @@ def _empty_cache() -> dict[str, Any]:
     return {"version": CACHE_VERSION, "files": {}}
 
 
-def _normalize_cache(parsed: dict[str, Any]) -> dict[str, Any]:
-    """Coerce parsed cache to canonical shape. Version mismatch → ignore +
-    rebuild from empty (forensic file; cheap to rebuild). ``files`` not
-    a dict → empty."""
-    if parsed.get("version") != CACHE_VERSION:
-        return _empty_cache()
-    files = parsed.get("files")
-    if not isinstance(files, dict):
-        return _empty_cache()
-    return {"version": CACHE_VERSION, "files": files}
-
-
 def _resolve_path(path: Path) -> str:
     """Cache key for a jsonl: ``str(Path.resolve())`` to normalize APFS
     case, symlinks, and conductor workspace path drift. Falls back to
@@ -759,8 +747,8 @@ def lock_and_get_files(on_contention: CacheMode) -> Iterator[dict[str, Any] | No
     Replaces the ``locked_json_rmw + version-check + isinstance-check +
     ljson.data['files']`` boilerplate at every cache call site (cli.py's
     ``_run_events_tail`` / ``_run_events_backfill``,
-    ``warm_token_cache_inline``). Owner of cache-shape invariants is
-    this module, not the caller.
+    ``warm_token_cache_inline``, ``gc_cache_entries``). Owner of cache-
+    shape invariants is this module, not the caller.
 
     ``None`` semantics: yielded ONLY for ``on_contention="warn"`` after
     retry budget exhaustion. Version mismatch and malformed ``files``
@@ -790,6 +778,18 @@ def lock_and_get_files(on_contention: CacheMode) -> Iterator[dict[str, Any] | No
         if ljson.data.get("version") != CACHE_VERSION:
             ljson.data.clear()
             ljson.data.update(_empty_cache())
+        else:
+            # Strict canonical-root shape: drop unknown top-level keys.
+            # The v1 schema defines exactly two top-level keys, ``version``
+            # and ``files``. Pre-v0.12.4 ``gc_cache_entries`` did this via
+            # ``ljson.data.clear() + update({"version": ..., "files": ...})``
+            # at the end of every gc pass; lifting that root-sanitization
+            # into the wrapper closes the gap where a current-version cache
+            # with extra top-level junk (e.g. ``"padding": "<huge>"``) would
+            # otherwise survive every read AND every gc forever.
+            extras = [k for k in ljson.data if k not in ("version", "files")]
+            for k in extras:
+                del ljson.data[k]
         if not isinstance(ljson.data.get("files"), dict):
             ljson.data["files"] = {}
         yield ljson.data["files"]
@@ -941,19 +941,23 @@ def gc_cache_entries(*, max_age_s: float = 90 * 24 * 3600) -> int:
 
     Returns the number of entries reaped. Called from ``mm gc`` (cli
     side wires this in).
+
+    Routes through ``lock_and_get_files`` so the version-check + ``files``-
+    isinstance-check normalization lives in ONE place. ``mm gc`` is a
+    user-invoked maintenance command — ``"block"`` mode is the right
+    choice (wait for contention rather than skip cleanup); a future
+    contributor copy-pasting from ``_run_events_tail``'s ``"warn"`` mode
+    would silently make ``mm gc`` a no-op under contention.
     """
     cutoff_iso = (datetime.now(timezone.utc).date()).isoformat()
     # max_age_s converted to days for the by_day comparison.
     max_days = int(max_age_s / 86400)
     reaped = 0
-    with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:
-        if not ljson.is_locked:
-            return 0
-        cache = _normalize_cache(ljson.data)
-        files = cache["files"]
-        if not isinstance(files, dict):
-            ljson.data.clear()
-            ljson.data.update(_empty_cache())
+    # block: mm gc waits for contention by design (see docstring above).
+    with lock_and_get_files("block") as files:
+        if files is None:
+            # Block mode never yields None in practice (flock blocks until
+            # acquired). Defensive zero return preserves the prior contract.
             return 0
         keep: dict[str, Any] = {}
         for key, entry in files.items():
@@ -972,9 +976,12 @@ def gc_cache_entries(*, max_age_s: float = 90 * 24 * 3600) -> int:
                 reaped += 1
                 continue
             keep[key] = entry
-        cache["files"] = keep
-        ljson.data.clear()
-        ljson.data.update(cache)
+        # In-place mutation: lock_and_get_files yields the `files` sub-dict,
+        # not the cache root. Replacing via assignment would not persist —
+        # the wrapper writes back ljson.data, of which `files` is a
+        # reference. clear()+update() preserves the reference identity.
+        files.clear()
+        files.update(keep)
     return reaped
 
 
