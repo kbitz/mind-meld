@@ -164,10 +164,15 @@ class SessionMetadata(TypedDict, total=False):
     # tokens. Shape: ``{YYYY-MM-DD: {skill_name: count}}``. Subagent
     # invocations attribute to parent project bucket. KEY-PRESENT-VALUE-
     # EMPTY semantics are load-bearing: aggregator's mixed-fleet detector
-    # uses ``"skills_by_day" not in proj`` to flag pre-v0.11.27 peers.
-    # An empty dict means "this project had sessions but no Skill usage
-    # in the captured window" — distinct from "peer doesn't emit yet"
-    # (key absent). See docs/invariants/events-retro.md.
+    # uses ``"skills_by_day" not in proj`` to flag the union of pre-
+    # v0.11.27 peers AND v0.11.27+ peers whose skill walk was skipped
+    # this push (cold token cache + autopush, or warn-mode flock
+    # contention — both leave ``token_cache_files=None`` at
+    # ``_scan_one_project`` so the field stays absent on the wire). An
+    # empty dict means "this project had sessions but no Skill usage in
+    # the captured window" — a content signal, not a version signal.
+    # See docs/invariants/events-retro.md "Two populations" section
+    # (semantic widened v0.12.4 post-/plan-eng-review 2026-05-10).
     skills_by_day: dict[str, dict[str, int]]
 
 
@@ -800,12 +805,14 @@ def _scan_one_project(
     Skill aggregation (v0.11.27+): same walk also populates
     ``skills_by_day`` from each assistant ``tool_use`` block with
     ``name == "Skill"``. Subagent skill invocations roll into the
-    parent project's bucket via the same attribution rule. Empty
-    dict (project has sessions but no Skill blocks) is preserved as a
-    KEY-PRESENT-VALUE-EMPTY signal — the aggregator's mixed-fleet
-    detector relies on absent vs. empty to distinguish pre-v0.11.27
-    peers from no-skill-activity sessions (D4 from /plan-eng-review
-    2026-05-06)."""
+    parent project's bucket via the same attribution rule. Empty dict
+    (project has sessions but no Skill blocks) is preserved as a KEY-
+    PRESENT-VALUE-EMPTY signal — content, not version. KEY-ABSENT (the
+    branch below where ``token_cache_files is None``) covers two
+    populations: pre-v0.11.27 peers AND v0.11.27+ peers whose skill
+    walk was skipped this push. The aggregator's ``pre_skills_peers``
+    discriminator flags both. See docs/invariants/events-retro.md
+    (D4 from /plan-eng-review 2026-05-06; widened 2026-05-10)."""
     sessions = 0
     total_bytes = 0
     last_mtime = 0.0
@@ -852,9 +859,18 @@ def _scan_one_project(
             deadline_monotonic=deadline_monotonic,
         )
         meta["tokens_by_day"] = tokens_by_day
-        # KEY-PRESENT-VALUE-EMPTY is intentional (D4): aggregator
-        # discriminates pre-v0.11.27 peers from "no skills used" via
-        # ``"skills_by_day" not in proj``. Always set the key here.
+        # KEY-PRESENT-VALUE-EMPTY is the load-bearing D4 content
+        # signal: an empty dict here means "we walked, no Skill blocks
+        # found." When the gate above is False (cold token cache +
+        # autopush, or warn-mode flock contention), we deliberately
+        # leave the key absent — DO NOT add a synthetic ``meta[
+        # "skills_by_day"] = {}`` else branch. Latest-snapshot-wins at
+        # aggregator.py:aggregate_sessions would silently overwrite a
+        # warm T1 snapshot's populated skills with a cold T2 ``{}``.
+        # The aggregator's ``pre_skills_peers`` flags absent-on-wire
+        # for both pre-v0.11.27 and skipped-walk peers; breadcrumb at
+        # ``aggregator.py:format_retro`` admits the ambiguity. See
+        # docs/invariants/events-retro.md "Why not always set" section.
         meta["skills_by_day"] = skills_by_day
     return meta
 

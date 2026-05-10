@@ -2959,6 +2959,35 @@ class TestFleetSkillsAggregation:
         assert data.skills.invocations == 0
         assert data.skills.available is True  # field is present → fleet has rolled out
 
+    def test_skills_incomplete_breadcrumb_admits_cold_cache_ambiguity(self, tmp_path):
+        """Track 11B revised (Option C, v0.12.4): the rendered "Skills
+        incomplete" notes line names BOTH populations that land in
+        ``pre_skills_peers`` — pre-v0.11.27 mm peers (code never emits
+        the field) AND v0.11.27+ peers whose latest snapshot was emitted
+        from a cold-cache push (skill walk skipped, field absent on the
+        wire). The wire can't tell apart the two; the breadcrumb mirrors
+        the existing ``pre_token_peers`` "OR with cold token cache"
+        phrasing so the user sees both possibilities and the right
+        recovery (`mm push` interactively, or upgrade)."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        proj = _proj_without_skills_field(claude_dir="-tmp-x")
+        _write_events(events_dir, "dev-x", "2026-04-28", [_sessions_event("dev-x", 0.5, [proj])])
+        data = _aggregate(events_dir)
+        assert data.skills.pre_skills_peers == {"dev-x"}
+        out = aggregator.format_retro(data)
+        # Both populations named — "pre-v0.11.27" AND "cold token cache".
+        assert "Skills incomplete:" in out
+        assert "pre-v0.11.27" in out
+        assert "cold token cache" in out
+        # Recovery action named.
+        assert "mm push" in out
+        # Regression gate: pre-v0.12.4 tail must not reappear. A half-
+        # revert that re-introduces the old wording while keeping the
+        # new substrings would still pass the asserts above; this pins
+        # the absence of the deprecated phrasing.
+        assert "upgrade for accurate skill totals" not in out
+
     def test_d5_no_skills_this_window_zero_invocations_no_flag(self, tmp_path):
         """Plan test #13 (D5#4): peer has skills_by_day populated but
         every day-key falls outside [since, until] → 0 invocations,
