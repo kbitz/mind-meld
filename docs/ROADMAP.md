@@ -160,7 +160,9 @@ _touches: src/mind_meld/upgrade.py_
 
 ### Group 14: safe_str discipline drift on stderr exception sites
 
-Three sites format `{e}` directly without `safe_str(e)` discipline. Even though today's exceptions come from local subprocesses, the visible-failure contract says "always sanitize." events.py is part of the events-tail path that handles peer-rendered strings.
+_Depends on: Group 11, Group 13_
+
+Three sites format `{e}` directly without `safe_str(e)` discipline. Even though today's exceptions come from local subprocesses, the visible-failure contract says "always sanitize." events.py is part of the events-tail path that handles peer-rendered strings. Depends on Group 11 (events.py file collision) and Group 13 (cli.py file collision).
 
 #### Track 14A: safe_str hardening at three stderr sites
 _3 tasks . ~10 LOC . low risk . src/mind_meld/events.py + src/mind_meld/cli.py + src/mind_meld/config.py_
@@ -172,7 +174,9 @@ _touches: src/mind_meld/events.py, src/mind_meld/cli.py, src/mind_meld/config.py
 
 ### Group 15: Cold-cache wall-clock budget polish
 
-The events-tail's 250ms/500ms budget bounds git+sessions walks but several other slow synchronous calls run inside it. On cold caches the wall-clock can blow past 10s with a misleading "events tail budget exceeded" notice that is actually the identity gather.
+_Depends on: Group 11, Group 14_
+
+The events-tail's 250ms/500ms budget bounds git+sessions walks but several other slow synchronous calls run inside it. Depends on Group 11 (token_usage.py file collision) and Group 14 (cli.py file collision). On cold caches the wall-clock can blow past 10s with a misleading "events tail budget exceeded" notice that is actually the identity gather.
 
 #### Track 15A: Events-tail wall-clock budget collisions on cold caches
 _4 tasks . ~100 LOC . medium risk . src/mind_meld/cli.py + src/mind_meld/identity.py + src/mind_meld/token_usage.py_
@@ -196,9 +200,9 @@ _touches: src/mind_meld/identity.py_
 
 ### Group 17: Documentation drift around v0.11.17 identity extraction
 
-_Depends on: Group 14_
+_Depends on: Group 11, Group 14_
 
-The v0.11.17 split left stale doc references behind, and one parameter that was kept "for API stability" has accumulated `noqa: ARG001` that misleads readers. Depends on Group 14 (events.py file collision); Groups 15 and 16 are unrelated and can land in any order relative to this.
+The v0.11.17 split left stale doc references behind, and one parameter that was kept "for API stability" has accumulated `noqa: ARG001` that misleads readers. Depends on Group 11 + Group 14 (both touch events.py); Groups 15 and 16 are unrelated and can land in any order relative to this.
 
 #### Track 17A: Doc drift cleanup
 _3 tasks . ~10 LOC . low risk . docs/invariants/events-retro.md + src/mind_meld/skills/retro_fleet/aggregator.py + src/mind_meld/events.py_
