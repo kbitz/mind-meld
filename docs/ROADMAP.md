@@ -117,11 +117,11 @@ _touches: tests/conftest.py, src/mind_meld/token_usage.py_
 - **Add autouse `_isolate_token_cache` fixture** -- mirroring `_isolate_identity_cache` shape; redirects `token_usage.CACHE_PATH` to `tmp_path` and resets `_WARNED_UNKNOWN_MODELS`. Drop the redundant per-file fixture in `test_token_usage.py`. Closes the local-pytest-runs-pollute-real-cache gap. _tests/conftest.py + tests/test_token_usage.py, ~10 lines._ (XS)
 - **Refactor `gc_cache_entries` to use `lock_and_get_files`** -- routes the GC cache mutator through the wrapper extracted in v0.11.24 to consolidate cache-shape invariants. Restores the "single owner" claim in `lock_and_get_files`'s docstring. Verify keep/drop replacement of `cache["files"]` survives the refactor. _src/mind_meld/token_usage.py:938-978, ~30 lines._ (S)
 
-#### Track 11B: skills_by_day cold-cache D4 violation
-_1 task . ~3 LOC . low risk . src/mind_meld/events.py_
-_touches: src/mind_meld/events.py_
+#### Track 11B: skills_by_day cold-cache D4 violation (revised — Option C cosmetic-only, v0.12.4)
+_1 task . ~8 LOC source + tests + docs . low risk . src/mind_meld/skills/retro_fleet/aggregator.py_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py, SKILL.md, CLAUDE.md, events-retro.md, tests/test_retro_fleet_aggregator.py_
 
-- **Always set `meta["skills_by_day"] = {}` regardless of `token_cache_files`** -- drop the conditional gate in `_scan_one_project` that skips the assignment on cold cache. Restores the D4 discriminator (key-absent vs empty-dict) so v0.11.27+ devices on cold cache aren't misclassified as pre-v0.11.27 peers. _src/mind_meld/events.py:848-858, ~3 lines._ (XS)
+- **Honest "Skills incomplete" breadcrumb covers cold-cache push too** -- update the aggregator's notes line at `aggregator.py:1862-1864` to mirror `pre_token_peers`'s "pre-v0.11.X OR with cold token cache" phrasing. Original Track 11B wording (always set `meta["skills_by_day"] = {}` in `events.py:_scan_one_project`) was REJECTED post-/plan-eng-review 2026-05-10: codex outside-voice review caught that latest-snapshot-wins at `aggregator.py:830` would silently overwrite populated skill data with synthetic `{}` on warm-then-cold push ordering, turning a visible-misclassification bug into invisible-data-erasure. Cosmetic-only fix admits the wire ambiguity instead. Longer-term explicit `skills_walk_complete: bool` field deferred to TODOS.md. _Plan: ~/.gstack/projects/kbitz-mind-meld/kb-kbitz-skills-by-day-d4-fix-eng-review-plan-20260510-160000.md_ (XS)
 
 ### Group 12: events-tail/backfill consolidation
 
