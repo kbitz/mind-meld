@@ -64,15 +64,9 @@ def _write_jsonl(path: Path, entries: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cache path isolation
+# Cache path isolation lives in tests/conftest.py as the autouse
+# `_isolate_token_cache` fixture (covers all test files, not just this one).
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _isolate_token_cache(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(tu, "CACHE_PATH", tmp_path / "session-tokens.json")
-    # Reset the per-process unknown-model warning set.
-    monkeypatch.setattr(tu, "_WARNED_UNKNOWN_MODELS", set())
 
 
 # ---------------------------------------------------------------------------
@@ -894,6 +888,129 @@ class TestGcCacheEntries:
         tu.warm_token_cache_inline([claude_dir])
         reaped = tu.gc_cache_entries()
         assert reaped == 0
+
+    # The four tests below pin the explicit reap branches that were
+    # previously uncovered (entry not a dict, by_day missing/empty,
+    # wrong-version cache). Each asserts disk state in addition to the
+    # `reaped` return value: the gc_cache_entries refactor onto
+    # lock_and_get_files relies on in-place mutation of the yielded
+    # `files` dict; a regression where `keep` is built but never
+    # persisted would pass the return-value-only assertions.
+
+    @staticmethod
+    def _read_disk_cache() -> dict:
+        """Read the on-disk cache JSON, post-gc."""
+        return json.loads(tu.CACHE_PATH.read_text(encoding="utf-8"))
+
+    def test_reaps_entry_not_a_dict(self, tmp_path: Path) -> None:
+        # Hand-craft a cache where one entry is a non-dict (corruption).
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": tu.CACHE_VERSION,
+                    "files": {"corrupt-key": "not-a-dict"},
+                }
+            )
+        )
+        reaped = tu.gc_cache_entries()
+        assert reaped == 1
+        on_disk = self._read_disk_cache()
+        assert on_disk["version"] == tu.CACHE_VERSION
+        assert on_disk["files"] == {}
+
+    def test_reaps_entry_with_missing_by_day(self, tmp_path: Path) -> None:
+        # Real path on disk so the Path.exists() check passes; entry
+        # has no by_day field at all.
+        live = tmp_path / "live.jsonl"
+        live.touch()
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": tu.CACHE_VERSION,
+                    "files": {str(live): {"size": 0, "mtime": 0.0}},
+                }
+            )
+        )
+        reaped = tu.gc_cache_entries()
+        assert reaped == 1
+        assert self._read_disk_cache()["files"] == {}
+
+    def test_reaps_entry_with_empty_by_day(self, tmp_path: Path) -> None:
+        live = tmp_path / "live.jsonl"
+        live.touch()
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": tu.CACHE_VERSION,
+                    "files": {str(live): {"size": 0, "mtime": 0.0, "by_day": {}}},
+                }
+            )
+        )
+        reaped = tu.gc_cache_entries()
+        assert reaped == 1
+        assert self._read_disk_cache()["files"] == {}
+
+    def test_strips_unknown_top_level_keys_on_gc(self, tmp_path: Path) -> None:
+        # Regression pin (Codex/Claude cross-model HIGH on Track 11A
+        # review, 2026-05-10): pre-v0.12.4 gc_cache_entries did
+        # `ljson.data.clear() + update({version, files})` which silently
+        # stripped unknown top-level keys. The refactor onto
+        # lock_and_get_files lost this property until v0.12.4 lifted
+        # the root-sanitization into the wrapper. This test ensures
+        # `mm gc` heals a cache with bonus top-level keys.
+        live = tmp_path / "live.jsonl"
+        live.touch()
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": tu.CACHE_VERSION,
+                    "files": {
+                        str(live): {
+                            "size": 0,
+                            "mtime": 0.0,
+                            "by_day": {datetime.now(timezone.utc).date().isoformat(): {}},
+                        }
+                    },
+                    "padding": "x" * 1000,
+                    "future_field": {"nested": True},
+                }
+            )
+        )
+        tu.gc_cache_entries()
+        on_disk = self._read_disk_cache()
+        assert set(on_disk.keys()) == {"version", "files"}
+        assert on_disk["version"] == tu.CACHE_VERSION
+        # The live entry survives gc — only the bloat is stripped.
+        assert str(live) in on_disk["files"]
+
+    def test_wrong_version_cache_normalized_to_empty(self, tmp_path: Path) -> None:
+        # Wrong-version cache pre-populated with stale entries. After
+        # the refactor, lock_and_get_files clears the file shape to
+        # `{"version": CACHE_VERSION, "files": {}}` BEFORE gc sees it,
+        # so reaped == 0 (gc never iterates the old entries — they're
+        # already gone). Disk state asserts the post-normalization
+        # shape, which is the load-bearing observable.
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 999,
+                    "files": {
+                        "old-key-1": {"size": 1, "mtime": 1.0, "by_day": {"2020-01-01": {}}},
+                        "old-key-2": {"size": 2, "mtime": 2.0, "by_day": {"2020-01-02": {}}},
+                    },
+                }
+            )
+        )
+        reaped = tu.gc_cache_entries()
+        assert reaped == 0
+        on_disk = self._read_disk_cache()
+        assert on_disk["version"] == tu.CACHE_VERSION
+        assert on_disk["files"] == {}
 
 
 # ---------------------------------------------------------------------------

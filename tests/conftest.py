@@ -89,6 +89,35 @@ def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_token_cache(monkeypatch, tmp_path) -> None:
+    """Redirect ``mind_meld.token_usage.CACHE_PATH`` to a per-test path
+    and reset all per-process warning sets.
+
+    ``warm_token_cache_inline`` / ``gc_cache_entries`` /
+    ``lock_and_get_files`` all read/write
+    ``~/.config/mind-meld/session-tokens.json`` by default. Without
+    isolation, every test that drives ``mm push`` / ``_run_events_tail``
+    (test_integration, test_init_events_backfill, test_silent_failure_
+    contract, etc.) pollutes the user's real config dir AND inherits
+    whatever was cached there — non-deterministic.
+
+    Also resets the two ``warn-once`` per-process state sets so a test
+    that triggers a breadcrumb doesn't silently mute the same breadcrumb
+    in a later test:
+      - ``_WARNED_UNKNOWN_MODELS`` (estimate_cost path)
+      - ``_WARNED_OVERSIZE_PATHS`` (_iter_bounded_lines path)
+
+    Pattern mirrors ``_isolate_identity_cache``: lazy-import inside the
+    fixture body, single setattr per state.
+    """
+    from mind_meld import token_usage as _token_usage
+
+    monkeypatch.setattr(_token_usage, "CACHE_PATH", tmp_path / "session-tokens.json")
+    monkeypatch.setattr(_token_usage, "_WARNED_UNKNOWN_MODELS", set())
+    monkeypatch.setattr(_token_usage, "_WARNED_OVERSIZE_PATHS", set())
+
+
+@pytest.fixture(autouse=True)
 def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
     """Redirect pullhistory.HISTORY_DIR to a per-test path.
 
