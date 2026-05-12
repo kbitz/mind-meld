@@ -3658,3 +3658,344 @@ class TestTrack7BEventsTail:
         # Every row stamped with dev-a (no orphaned "" devices).
         for row in rows:
             assert row.get("device") == "dev-a", row
+
+
+class TestPushMtimeOnlyPropagation:
+    """v0.12.6: ``_push_core`` must republish the manifest when only mtimes
+    differ from the remote, NOT bail at the substantive-change gate.
+
+    Drives the resolve(local) cross-fleet propagation story: the resolve
+    helper bumps canonical's mtime without changing bytes, and the next
+    push must broadcast that mtime so peers see local-as-authoritative
+    on their next pull. Pre-fix, the v0.12.2 gate compared by sha256 only
+    via ``diff_files`` and the bumped-mtime decision stayed machine-local.
+    Caught by Codex's adversarial pass on the v0.12.6 PR.
+    """
+
+    def test_has_mtime_only_changes_detects_drift(self) -> None:
+        """Pure helper unit test: same sha256, different mtime -> True."""
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        local = {
+            "sources": {
+                "claude": {
+                    "files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}}
+                }
+            }
+        }
+        remote = {
+            "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-09T08:48:00+00:00"}}}
+        }
+        assert _has_mtime_only_changes_vs_remote(local, remote) is True
+
+    def test_has_mtime_only_changes_false_when_sha_differs(self) -> None:
+        """sha256 mismatch is caught by the existing diff_files gate, NOT
+        this helper -- avoid double-firing on real content changes."""
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        local = {
+            "sources": {
+                "claude": {
+                    "files": {"f.md": {"sha256": "new", "mtime": "2026-05-12T12:00:00+00:00"}}
+                }
+            }
+        }
+        remote = {
+            "claude": {"files": {"f.md": {"sha256": "old", "mtime": "2026-05-09T08:48:00+00:00"}}}
+        }
+        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+
+    def test_has_mtime_only_changes_false_when_file_only_local(self) -> None:
+        """New file (absent from remote) is caught by diff_files as `new` --
+        skip here to avoid double-counting."""
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        local = {
+            "sources": {
+                "claude": {
+                    "files": {"new.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}}
+                }
+            }
+        }
+        assert _has_mtime_only_changes_vs_remote(local, {}) is False
+
+    def test_has_mtime_only_changes_false_when_identical(self) -> None:
+        """Same sha + same mtime -> False (no work to do)."""
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        info = {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}
+        local = {"sources": {"claude": {"files": {"f.md": info}}}}
+        remote = {"claude": {"files": {"f.md": info}}}
+        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+
+    def test_has_mtime_only_changes_false_when_local_older(self) -> None:
+        """Codex P2 regression pin: forward-only invariant. Local mtime
+        OLDER than remote (e.g. after `git checkout` / file-restore / `touch
+        -t` to a past date) must NOT trigger a manifest republish.
+        Downgrading the manifest's recorded mtime is a silent-skip hazard:
+        a peer with different bytes and mtime between the old-remote and
+        the downgraded value would now hit `local_mtime > remote_mtime` on
+        pull and SKIP -- silently losing the conflict surface.
+        """
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        local = {
+            "sources": {
+                "claude": {
+                    "files": {"f.md": {"sha256": "abc", "mtime": "2026-05-09T08:48:00+00:00"}}
+                }
+            }
+        }
+        remote = {
+            "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}}}
+        }
+        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+
+    def test_has_mtime_only_changes_tolerates_malformed_mtime(self) -> None:
+        """Codex P2 (5th pass) regression pin: peer with `mtime: 1234` (int,
+        not string) or unparseable ISO must NOT crash the helper. Defensive
+        parse path returns False (treats as non-drifting) — better to under-
+        publish than crash `mm push`/`mm status` on a peer-controlled value."""
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        # Peer wrote an int instead of an ISO string. load_manifest doesn't
+        # type-check files[*].mtime, so this is reachable on the wire.
+        local = {
+            "sources": {
+                "claude": {
+                    "files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}}
+                }
+            }
+        }
+        remote_int = {"claude": {"files": {"f.md": {"sha256": "abc", "mtime": 1234}}}}
+        assert _has_mtime_only_changes_vs_remote(local, remote_int) is False
+
+        remote_bad = {"claude": {"files": {"f.md": {"sha256": "abc", "mtime": "not-a-date"}}}}
+        assert _has_mtime_only_changes_vs_remote(local, remote_bad) is False
+
+    def test_has_mtime_only_changes_normalizes_z_vs_offset(self) -> None:
+        """Codex P2 (5th pass): `2026-05-12T12:00:00Z` and
+        `2026-05-12T12:00:00+00:00` represent the same instant but lex-sort
+        differently. Parsed comparison must report no drift."""
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        local = {
+            "sources": {
+                "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00Z"}}}
+            }
+        }
+        remote = {
+            "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-12T12:00:00+00:00"}}}
+        }
+        assert _has_mtime_only_changes_vs_remote(local, remote) is False
+
+    def test_has_mtime_only_changes_respects_source_filter(self) -> None:
+        """Codex P3: source_filter scopes the walk. Drift in source `gstack`
+        must NOT trip when caller asks about `claude` only. Mirrors
+        ``iter_source_diffs``'s same-named arg so `mm status --source X`
+        doesn't surface metadata-pending hints from sources Y, Z.
+        """
+        from mind_meld.cli import _has_mtime_only_changes_vs_remote
+
+        local = {
+            "sources": {
+                "claude": {
+                    "files": {"f.md": {"sha256": "abc", "mtime": "2026-05-09T08:48:00+00:00"}}
+                },
+                "gstack": {
+                    "files": {"g.md": {"sha256": "xyz", "mtime": "2026-05-12T12:00:00+00:00"}}
+                },
+            }
+        }
+        remote = {
+            "claude": {"files": {"f.md": {"sha256": "abc", "mtime": "2026-05-09T08:48:00+00:00"}}},
+            "gstack": {"files": {"g.md": {"sha256": "xyz", "mtime": "2026-05-09T08:48:00+00:00"}}},
+        }
+        # gstack has forward drift; claude is in sync.
+        assert _has_mtime_only_changes_vs_remote(local, remote) is True
+        assert _has_mtime_only_changes_vs_remote(local, remote, source_filter="gstack") is True
+        assert _has_mtime_only_changes_vs_remote(local, remote, source_filter="claude") is False
+
+    def test_push_uploads_manifest_when_only_mtime_changed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """End-to-end regression pin for the Codex P1: after resolve(local)
+        bumps a file's mtime, the next push must upload the manifest even
+        though no blob bytes changed. Pre-fix, the substantive-change gate
+        bailed at 'Nothing to push' and the bumped mtime never reached
+        peer-visible storage.
+
+        Repro: push once (publish baseline manifest), bump a file's mtime
+        in place (no content change), push again, fetch the remote manifest,
+        assert the file's mtime is the bumped value not the original.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / "machine_a" / ".claude"
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        target = memory / "user_role.md"
+        target.write_text("---\nname: role\n---\nEng")
+
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_path,
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+        # Baseline push.
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        # Capture baseline manifest's mtime for the file.
+        from mind_meld.storage.keys import manifest_key
+
+        mkey = manifest_key("dev-a")
+        baseline_enc = backend.get(mkey)
+        baseline_manifest = load_manifest(decrypt(baseline_enc, PASSPHRASE, MEMORY_KB))
+        baseline_mtime = baseline_manifest["sources"]["claude"]["files"][
+            "projects/-Users-kb-myapp/memory/user_role.md"
+        ]["mtime"]
+
+        # Bump the file's mtime in place (simulates _bump_canonical_mtime_post_resolve).
+        # +120s is safely past the manifest's resolution and within future-clamp.
+        bumped_ts = target.stat().st_mtime + 120.0
+        os.utime(target, (bumped_ts, bumped_ts))
+
+        # Second push: no bytes changed, only mtime. Pre-fix: "Nothing to push".
+        # Post-fix: manifest uploads with bumped mtime.
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to push" not in result.output, (
+            f"push bailed on mtime-only change instead of refreshing the manifest:\n{result.output}"
+        )
+
+        # Verify remote manifest now carries the bumped mtime.
+        updated_enc = backend.get(mkey)
+        updated_manifest = load_manifest(decrypt(updated_enc, PASSPHRASE, MEMORY_KB))
+        updated_mtime = updated_manifest["sources"]["claude"]["files"][
+            "projects/-Users-kb-myapp/memory/user_role.md"
+        ]["mtime"]
+        assert updated_mtime != baseline_mtime, (
+            f"manifest mtime not refreshed: baseline={baseline_mtime} updated={updated_mtime}"
+        )
+
+    def test_push_still_bails_when_truly_nothing_changed(self, tmp_path: Path, monkeypatch) -> None:
+        """The mtime-only gate must NOT regress the v0.12.2 phantom-push fix:
+        a push with no content changes AND no mtime drift still bails at
+        the substantive-change gate. Without this assertion the new gate
+        could mask the original event-row-spam bug.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / "machine_a" / ".claude"
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "user_role.md").write_text("---\nname: role\n---\nEng")
+
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_path,
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        # Second push with truly nothing changed.
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        assert "Nothing to push" in result.output, (
+            f"empty push must still bail at the substantive-change gate:\n{result.output}"
+        )
+
+    def _setup_one_machine(self, tmp_path: Path, monkeypatch) -> tuple[Path, LocalBackend]:
+        """Setup helper for the status/dry-run mtime-only tests below."""
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / "machine_a" / ".claude"
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        target = memory / "user_role.md"
+        target.write_text("---\nname: role\n---\nEng")
+
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_path,
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        # Baseline push so subsequent mtime bumps register against a real remote.
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        return target, backend
+
+    def test_status_flags_pending_mtime_only_changes(self, tmp_path: Path, monkeypatch) -> None:
+        """Codex P2 regression pin: ``mm status`` must NOT print 'All sources
+        in sync' when the only pending work is a metadata-only manifest
+        republish. Pre-fix, the user would resolve(local), check status,
+        see 'in sync', and walk away — leaving the fleet divergent."""
+        target, _ = self._setup_one_machine(tmp_path, monkeypatch)
+
+        # Bump mtime in place (simulates _bump_canonical_mtime_post_resolve).
+        bumped_ts = target.stat().st_mtime + 120.0
+        os.utime(target, (bumped_ts, bumped_ts))
+
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "All sources in sync" not in result.output, (
+            f"status reported 'in sync' on a mtime-only divergence:\n{result.output}"
+        )
+        assert "Metadata-only changes pending" in result.output, (
+            f"status did not surface the mtime-only pending hint:\n{result.output}"
+        )
+
+    def test_dry_run_push_flags_pending_mtime_only_changes(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Codex P2: ``mm push --dry-run`` must announce the metadata-only
+        republish so users previewing a push see what will happen."""
+        target, _ = self._setup_one_machine(tmp_path, monkeypatch)
+
+        bumped_ts = target.stat().st_mtime + 120.0
+        os.utime(target, (bumped_ts, bumped_ts))
+
+        result = runner.invoke(app, ["push", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Would refresh manifest" in result.output, (
+            f"dry-run did not surface the metadata-only republish hint:\n{result.output}"
+        )

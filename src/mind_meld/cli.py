@@ -1365,6 +1365,36 @@ def _restore_mtime_best_effort(path: Path, mtime_iso: str | None) -> None:
         return
 
 
+def _bump_canonical_mtime_post_resolve(canonical: Path, peer_mtime: float) -> None:
+    """Stamp ``canonical`` with mtime strictly greater than ``peer_mtime``.
+
+    Called from ``_resolve_interactive_loop`` after the user picks (l)ocal
+    so the "I picked local" decision propagates across the fleet on the
+    next push. Without this bump, canonical's mtime stays at whatever
+    ``_apply_incoming_file``'s mtime gate just classified as <= peer's,
+    and the next pull from the same peer re-conflicts because the dedup
+    signal (existing sidecar) was just deleted by the resolve. The user
+    ends up in a resolve -> pull -> resolve -> pull loop indefinitely.
+
+    Future-clamp symmetry: cap at ``now + _MTIME_RESTORE_MAX_SKEW_SECONDS``
+    so downstream peers don't have to clamp our pushed mtime. The cap edge
+    case (peer's mtime already at the max clamp) leaves canonical's mtime
+    exactly equal to peer's; the cycle persists for one more pull but is
+    self-correcting on peer's next legitimate push.
+
+    Best-effort. ``os.utime`` failure on iCloud-restored placeholders or
+    networked filesystems must not fail the resolve action itself --
+    bumping is a propagation hint, not a correctness gate.
+    """
+    now = time.time()
+    target = max(now, peer_mtime + 1.0)
+    target = min(target, now + _MTIME_RESTORE_MAX_SKEW_SECONDS)
+    try:
+        os.utime(canonical, (target, target))
+    except (OSError, OverflowError):
+        return
+
+
 def _apply_write(
     local_path: Path,
     rel_path: str,
@@ -1657,6 +1687,15 @@ def _apply_incoming_file(
             # Post-inversion: canonical IS local, so "keep-canonical" =
             # "keep-local" — both work as user-facing labels. The internal
             # outcome stays "skipped" for back-compat with PullResult.
+            # Intentionally does NOT call _bump_canonical_mtime_post_resolve
+            # here -- mutating canonical's mtime mid-pull-walk would cause
+            # later peers' _apply_incoming_file calls for the same file to
+            # mis-classify on the `local_mtime > remote_mtime` gate, silently
+            # skipping peers whose mtime falls between original-local and
+            # the bumped value (Codex P2 4th pass). Users on inline prompt
+            # who want fleet propagation should use `mm resolve` (deferred).
+            # Filed as TODO: defer inline-bump until end of pull batch using
+            # max(peer_mtime) across all peers that conflicted on this path.
             if verbose:
                 console.print(f"  [dim]= {safe_str(rel_path)} (kept local by user)[/dim]")
             return "skipped"
@@ -3041,6 +3080,84 @@ def _run_events_backfill(
         sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")
 
 
+def _has_mtime_only_changes_vs_remote(
+    local_manifest: dict[str, Any],
+    remote_sources: dict[str, Any],
+    source_filter: str | None = None,
+) -> bool:
+    """True iff any file in `local_manifest` has identical sha256 but a
+    STRICTLY-NEWER mtime versus the same file in `remote_sources`.
+
+    Drives the manifest-republish leg of the resolve(local) fleet-propagation
+    fix (v0.12.6). The v0.12.2 substantive-change gate skips `mm push` when
+    no source has any `diff_files` change, and `diff_files` keys equality on
+    sha256 alone. That gate is correct for "no bytes changed AND no metadata
+    needs broadcasting" but wrong when the user just ran `mm resolve` and
+    picked (l)ocal -- ``_bump_canonical_mtime_post_resolve`` bumped the mtime
+    in-place, sha256 stayed the same, and the gate would silently swallow
+    the new mtime. Result: kb-ms breaks its local conflict loop but kb-mbp
+    never sees kb-ms's authoritative claim and the fleet stays divergent.
+
+    **Forward-only invariant (load-bearing, Codex P2 catch).** Trips only on
+    `local_mtime > remote_mtime`, NOT on `!=`. A push that downgrades the
+    manifest's recorded mtime is a silent-skip hazard: a peer holding
+    different bytes with a mtime between the old-remote and the downgraded
+    value would now hit `local_mtime > remote_mtime` and SKIP the pull
+    (where pre-downgrade it would have hit the conflict path). Downgrades
+    happen on benign operations like `git checkout` / file-restore /
+    `touch -t`, so the forward-only gate is required for correctness, not
+    just safety.
+
+    **Parse before compare (Codex P2 5th-pass catch).** ``load_manifest``
+    does NOT type-check ``files[*].mtime`` -- a peer with a wrong-typed
+    value (e.g. ``mtime: 1234``) or a non-canonical ISO spelling (``Z`` vs
+    ``+00:00``) would either crash on a raw ``>`` string compare or
+    lexically misorder otherwise-equal timestamps. Both sides parse through
+    ``mtime_from_manifest(...).timestamp()`` (same path
+    ``_restore_mtime_best_effort`` uses) and any parse failure on either
+    side returns "no drift on this file" -- conservative: better to under-
+    publish a metadata refresh than crash the gate.
+
+    Files present only in local (`remote_info is None`) are skipped here --
+    they're caught as `new` by the existing sha256 gate. Files with mismatched
+    sha256 are also skipped -- caught as `modified`. We only fire on the
+    intersection: same path, same content, strictly-newer local mtime.
+
+    ``source_filter`` (optional) scopes the walk to a single named source,
+    mirroring ``iter_source_diffs``'s same-named arg so callers like
+    ``mm status --source <name>`` don't surface metadata-pending hints from
+    other sources.
+    """
+    for src_name, src_data in local_manifest.get("sources", {}).items():
+        if source_filter is not None and src_name != source_filter:
+            continue
+        local_files = src_data.get("files", {})
+        remote_src = remote_sources.get(src_name, {})
+        remote_files = remote_src.get("files", {})
+        for rel_path, local_info in local_files.items():
+            remote_info = remote_files.get(rel_path)
+            if remote_info is None:
+                continue
+            if local_info.get("sha256") != remote_info.get("sha256"):
+                continue
+            local_mt = local_info.get("mtime")
+            remote_mt = remote_info.get("mtime")
+            if not local_mt or not remote_mt:
+                continue
+            try:
+                local_ts = mtime_from_manifest(local_mt).timestamp()
+                remote_ts = mtime_from_manifest(remote_mt).timestamp()
+            except (TypeError, ValueError, OverflowError, OSError):
+                # Malformed mtime on either side (peer wrote `mtime: 1234`
+                # int, or unparseable string). Conservative: treat as
+                # non-drifting so we don't republish a manifest with garbage
+                # the next push would just re-pull-and-skip.
+                continue
+            if local_ts > remote_ts:
+                return True
+    return False
+
+
 def _push_core(
     config: dict,
     passphrase: str,
@@ -3168,7 +3285,13 @@ def _push_core(
         True
         for _, _, _, _ in iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True)
     )
-    if not has_substantive and not recovering_from_corrupt:
+    # mtime-only republish leg (v0.12.6): sha256-equal files with drifted
+    # mtime must still trigger a manifest upload so peers see authoritative-
+    # local claims from `mm resolve` (l)ocal. See `_has_mtime_only_changes_vs_remote`.
+    has_mtime_only = (not has_substantive) and _has_mtime_only_changes_vs_remote(
+        local_manifest, remote_sources
+    )
+    if not has_substantive and not has_mtime_only and not recovering_from_corrupt:
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
         return None
@@ -3228,6 +3351,17 @@ def _push_core(
     if dry_run:
         if not quiet:
             elapsed = time.time() - start
+            if has_mtime_only and not (total_new or total_modified or total_deleted):
+                # Symmetric with the status command's metadata-only branch (v0.12.6).
+                # Without this, dry-run would print "Dry run complete" with zero
+                # per-source output and the user would miss that `mm push` would
+                # republish the manifest to propagate bumped mtimes. NOTE: dry-run
+                # counters stay zero (the per-source loop `continue`s before
+                # incrementing), so we can't honestly promise "no blobs" -- the
+                # events tail may still emit an mm-events row on the actual push.
+                console.print(
+                    "\n[bold]Would refresh manifest[/bold] (metadata-only changes pending)."
+                )
             console.print("\n[bold]Dry run complete.[/bold]")
             console.print(f"  Completed in {elapsed:.1f}s")
         return None
@@ -3236,6 +3370,8 @@ def _push_core(
     if not quiet:
         if recovering_from_corrupt and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Rewriting manifest to heal remote corruption...[/bold]")
+        elif has_mtime_only and not (total_new or total_modified or total_deleted):
+            console.print("\n[bold]Refreshing manifest (metadata-only changes)...[/bold]")
         else:
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     manifest_data = serialize_manifest(local_manifest)
@@ -4548,6 +4684,17 @@ def status(
         console.print("\n  [yellow]Overall pending push:[/yellow]")
         console.print(
             f"    + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted"
+        )
+    elif _has_mtime_only_changes_vs_remote(local_manifest, remote_sources, source_filter=source):
+        # Symmetric with _push_core's mtime-only republish gate (v0.12.6).
+        # Without this branch, status would print "All sources in sync"
+        # after `mm resolve (l)ocal` even though a push is needed to
+        # propagate the bumped mtime to peers. source_filter mirrors the
+        # iter_source_diffs filter above so `mm status --source X` doesn't
+        # surface metadata-pending hints from sources Y, Z.
+        console.print(
+            "\n  [yellow]Metadata-only changes pending[/yellow] "
+            "(run `mm push` to publish updated mtimes)."
         )
     elif not source:
         console.print("\n  [green]All sources in sync.[/green]")
@@ -6853,10 +7000,20 @@ def _resolve_interactive_loop(
         # delete the conflict file. (codex /review v0.9.0 — caught a real
         # silent-data-loss footgun the eng review missed.)
         if choice in ("l", "local"):
+            # Capture peer's mtime BEFORE the rename/unlink so we can bump
+            # canonical past it afterward -- see _bump_canonical_mtime_post_resolve
+            # for the load-bearing fleet-propagation rationale.
+            # Pre-inversion: canonical holds peer's bytes with peer's mtime.
+            # Post-inversion: sidecar holds peer's bytes with peer's restored mtime.
+            try:
+                peer_mtime = (canonical if is_pre_inversion else cpath).stat().st_mtime
+            except OSError:
+                peer_mtime = 0.0
             if is_pre_inversion:
                 # Pre-inversion: sidecar HOLDS local bytes — promote.
                 try:
                     cpath.rename(canonical)
+                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                     console.print(
                         f"  [green]kept local; promoted[/green] "
                         f"{safe_str(cpath.name)} -> {safe_str(canonical.name)}"
@@ -6869,6 +7026,7 @@ def _resolve_interactive_loop(
                 # Post-inversion: canonical IS local — drop the remote sidecar.
                 try:
                     cpath.unlink()
+                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                     console.print(
                         f"  [green]kept local; discarded remote[/green] {safe_str(cpath.name)}"
                     )
