@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1649,6 +1650,178 @@ class TestResolveInteractiveLoopNewBehavior:
         assert conflict1.read_bytes() == b"remote content\n"
         assert canonical2.read_bytes() == b"local2 content\n"
         assert conflict2.read_bytes() == b"remote2 content\n"
+
+
+class TestResolveLocalMtimeBump:
+    """``mm resolve`` picking (l)ocal MUST bump canonical's mtime past peer's.
+
+    Without the bump, the user's "I picked local" decision is silent: canonical
+    keeps its old (<= peer's) mtime, the next pull from the same peer re-hits
+    the conflict path (sidecar dedup signal was just deleted), and the user is
+    stuck in a resolve -> pull -> resolve -> pull loop. With the bump, the next
+    pull's mtime gate sees local_mtime > remote_mtime and skips, and the next
+    push broadcasts local-as-authoritative to other peers in the fleet so they
+    converge.
+
+    Pinned at the resolve seam (not the apply seam) because the bump is the
+    resolve decision propagating; the apply path is unchanged.
+    """
+
+    def test_post_inversion_local_bumps_canonical_mtime_past_sidecar(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Post-inversion (l)ocal: canonical stays, sidecar dropped. mtime
+        on canonical must end up strictly greater than the sidecar's mtime
+        so the next pull from this peer hits the mtime-skip branch."""
+        canonical = tmp_path / "f.md"
+        canonical.write_bytes(b"local content")
+        _set_mtime(canonical, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+        peer_mtime_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+        conflict = tmp_path / "f.sync-conflict-20260512-122031-3a6c7dc9.md"
+        conflict.write_bytes(b"remote content")
+        _set_mtime(conflict, peer_mtime_dt)
+
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert (resolved, failed) == (1, 0)
+        assert canonical.exists()
+        assert not conflict.exists()
+        assert canonical.stat().st_mtime > peer_mtime_dt.timestamp()
+
+    def test_pre_inversion_local_bumps_canonical_mtime_past_pre_inversion_remote(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Pre-inversion (l)ocal: sidecar (holds local bytes) renames onto
+        canonical (held remote bytes). Bump must read peer's mtime from the
+        ORIGINAL canonical before rename, then stamp the new canonical past
+        it. Without the bump, the renamed file inherits the pre-v0.9.2
+        sidecar's mtime (years-old) -- guaranteed older than any peer's,
+        so next pull always re-conflicts."""
+        canonical = tmp_path / "f.md"
+        canonical.write_bytes(b"old remote content")
+        peer_mtime_dt = datetime(2026, 4, 1, 9, 0, tzinfo=timezone.utc)
+        _set_mtime(canonical, peer_mtime_dt)
+
+        # v0- prefix marks pre-inversion: sidecar holds local bytes.
+        conflict = tmp_path / "f.sync-conflict-v0-20250101-120000-devA1234.md"
+        conflict.write_bytes(b"local content")
+        ancient = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+        _set_mtime(conflict, ancient)
+
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert (resolved, failed) == (1, 0)
+        assert canonical.read_bytes() == b"local content"
+        assert not conflict.exists()
+        # Bumped past peer's mtime AND past the pre-inversion sidecar's mtime.
+        assert canonical.stat().st_mtime > peer_mtime_dt.timestamp()
+        assert canonical.stat().st_mtime > ancient.timestamp()
+
+    def test_resolve_local_then_pull_same_peer_skips_instead_of_reconflicting(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """End-to-end loop closure: resolve(local) -> simulated next pull from
+        the same peer with unchanged bytes -> _apply_incoming_file returns
+        'skipped' (mtime gate), NOT 'conflicted'.
+
+        This is the regression pin for the resolve -> pull -> resolve -> pull
+        loop that the bump fixes. Pre-fix this assertion would fail with
+        outcome == 'conflicted'.
+        """
+        rel = "f.md"
+        canonical = tmp_path / rel
+        canonical.write_bytes(b"local content")
+        _set_mtime(canonical, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+        peer_mtime_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+        conflict = tmp_path / "f.sync-conflict-20260512-122031-devA1234.md"
+        conflict.write_bytes(b"remote content")
+        _set_mtime(conflict, peer_mtime_dt)
+
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+
+        # Peer pushes again with same bytes + same manifest mtime.
+        remote_sha = hashlib.sha256(b"remote content").hexdigest()
+        info = _remote_info(remote_sha, peer_mtime_dt)
+        outcome = _apply_incoming_file(
+            local_path=canonical,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+        assert outcome == "skipped"
+        # No new sidecar was created.
+        assert list(tmp_path.glob(f"*{CONFLICT_INFIX}*")) == []
+
+    def test_inline_pull_keep_local_does_not_mutate_canonical_mtime(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression pin (Codex P2 4th pass): the inline pull-time
+        `keep-canonical` branch must NOT bump canonical's mtime. Mutating
+        mid-pull-walk would cause later peers iterating the same file to
+        mis-classify on the mtime gate -- skipping a peer whose mtime falls
+        between original-local and the bump value, silently hiding that
+        peer's version. Users on `--conflict-mode prompt` who want fleet
+        propagation should use `mm resolve` (deferred) instead."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        original_mtime_dt = datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc)
+        _set_mtime(local, original_mtime_dt)
+        peer_mtime_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+        info = _remote_info(hashlib.sha256(b"remote content").hexdigest(), peer_mtime_dt)
+
+        from mind_meld import cli as cli_module
+
+        monkeypatch.setattr(
+            cli_module,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("keep-canonical", None),
+        )
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+        )
+        assert outcome == "skipped"
+        # Canonical's mtime must be unchanged from the original so later
+        # peers in the same pull walk see the same mtime gate result.
+        assert local.stat().st_mtime == pytest.approx(original_mtime_dt.timestamp())
+
+    def test_post_inversion_local_mtime_capped_at_now_plus_60s(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Future-clamp symmetry: if peer's sidecar mtime is way in the future
+        (e.g. set by a buggy/malicious peer that bypassed _restore_mtime_best_effort),
+        the bump must cap at now + 60s so downstream peers don't have to
+        clamp our pushed mtime. Mirrors the _restore_mtime_best_effort cap."""
+        canonical = tmp_path / "f.md"
+        canonical.write_bytes(b"local content")
+        _set_mtime(canonical, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+        conflict = tmp_path / "f.sync-conflict-20260512-122031-devA1234.md"
+        conflict.write_bytes(b"remote content")
+        # Sidecar mtime 1 hour in the future (far past the 60s clamp).
+        far_future = time.time() + 3600.0
+        os.utime(conflict, (far_future, far_future))
+
+        before = time.time()
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        after = time.time()
+
+        assert (resolved, failed) == (1, 0)
+        # Canonical's bumped mtime must be within [before, after + 60s].
+        canonical_mtime = canonical.stat().st_mtime
+        assert canonical_mtime <= after + 60.0
+        assert canonical_mtime >= before
 
 
 class TestParseConflictDeviceShort:
