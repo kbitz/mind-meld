@@ -135,6 +135,19 @@ ApplyOutcome = Literal[
     "unchanged",
     "failed",
 ]
+# Track 12A: the eligibility invariant for the deferred keep-canonical bump,
+# centralized at the _download_and_apply seam. A path is drain-eligible iff its
+# last outcome was the keep-canonical "skipped" (the RECORD case). Any outcome
+# in this set means a canonical-mutating decision (write, merge, sidecar) hit
+# disk successfully, so an earlier pending bump for that path is void — pop it.
+# Success-only by construction: _apply_incoming_file returns these ONLY on
+# successful canonical mutation (write/merge/sidecar); on failure it returns
+# "failed", which is intentionally absent here so the prior decision stands.
+# "skipped" / "unchanged" leave canonical untouched, so the prior decision
+# also stands.
+_CANONICAL_WRITE_OUTCOMES: frozenset[ApplyOutcome] = frozenset(
+    {"written", "merged", "merged-via-lcs", "conflicted"}
+)
 FetchStatus = Literal["ok", "missing", "corrupt"]
 CONFLICT_AGE_DAYS = 30
 # Track 7B (v0.10.3): per-device daily JSONL events files older than this
@@ -1395,6 +1408,100 @@ def _bump_canonical_mtime_post_resolve(canonical: Path, peer_mtime: float) -> No
         return
 
 
+# ── deferred inline keep-canonical mtime bump (Track 12A) ─────────────
+#
+#   _apply_incoming_file (per peer × source × file)
+#     keep-canonical → _record_inline_bump (canonical untouched)
+#     all other branches → return their outcome
+#                          │
+#   _download_and_apply: after every _apply_incoming_file call
+#     outcome in _CANONICAL_WRITE_OUTCOMES → _invalidate_inline_bump
+#       (success-only by construction: write/merge/sidecar outcomes are only
+#       returned on successful canonical mutation; "failed" / "skipped" /
+#       "unchanged" leave canonical untouched and don't invalidate)
+#                          │
+#   _pull_core: after the device loop, INSIDE the try block
+#     _drain_inline_bumps → _bump_canonical_mtime_post_resolve(path, mtime)
+#
+# Why deferred, not inline: bumping canonical's mtime mid-pull-walk makes a
+# LATER peer's _apply_incoming_file mis-classify on the `local_mtime >
+# remote_mtime` gate and silently skip — hiding a peer whose mtime falls
+# between original-local and the bump value (the v0.12.6 revert). Deferring
+# to end-of-batch means every peer is judged against the SAME original
+# baseline; the bump value (max over every keep-canonical peer for that
+# path) then beats all of them at once.
+#
+# Why invalidation lives at the _download_and_apply seam, not in
+# _apply_incoming_file's per-branch returns: ONE site keyed on the outcome
+# enum covers every canonical-mutating path uniformly — keep-remote, inline
+# merge, keep-both (the _apply_conflict sidecar), AND the _apply_write
+# branch that fires when canonical vanished mid-walk (user `rm`'d the file
+# while the blocking prompt waited). The per-branch approach missed
+# _apply_write entirely (would silently bump REMOTE bytes as locally-
+# authored) and was not success-only for keep-both (would pop on a sidecar
+# write failure even though canonical was still local). See
+# docs/invariants/conflicts.md.
+
+
+def _record_inline_bump(
+    pending: dict[Path, float] | None,
+    canonical: Path | None,
+    peer_mtime: float,
+) -> None:
+    """Record an inline ``keep-canonical`` decision for the end-of-batch drain.
+
+    No-op when ``pending`` is None (non-interactive pull) or ``canonical`` is
+    None (library / direct-call test callers). Keyed on the RESOLVED path so a
+    symlinked source root or path-spelling alias can't leave a stale entry that
+    a later write keyed under the resolved spelling fails to invalidate.
+    ``max`` so that when several peers conflict on the same file in one walk,
+    the bump beats every peer walked.
+    """
+    if pending is None or canonical is None:
+        return
+    pending[canonical] = max(pending.get(canonical, 0.0), peer_mtime)
+
+
+def _invalidate_inline_bump(
+    pending: dict[Path, float] | None,
+    canonical: Path | None,
+) -> None:
+    """Drop a pending inline bump because a later peer changed/left this file.
+
+    Called once at the ``_download_and_apply`` seam when ``_apply_incoming_file``
+    returns an outcome in ``_CANONICAL_WRITE_OUTCOMES`` (write / merge / merge-
+    via-lcs / conflicted). Success-only by construction: those outcomes are
+    only returned on successful canonical mutation; "failed" leaves canonical
+    pure local, so the prior keep-canonical decision still stands and the
+    bump is NOT popped. Same property for "skipped" (canonical untouched —
+    mtime-skip branch) and "unchanged" (sha match).
+
+    An earlier peer's keep-canonical bump is void once a later peer's decision
+    for the same file either overwrites canonical (bumping would broadcast the
+    later peer's bytes as locally-authored — the _apply_write file-vanished-
+    mid-walk hazard) or leaves it unresolved as a sidecar (bumping would
+    silently mtime-resolve a conflict the user explicitly left open).
+    """
+    if pending is None or canonical is None:
+        return
+    pending.pop(canonical, None)
+
+
+def _drain_inline_bumps(pending: dict[Path, float] | None) -> None:
+    """Apply every recorded inline ``keep-canonical`` bump at end-of-pull-batch.
+
+    Runs once in ``_pull_core`` AFTER every peer/source has been walked. No-op
+    when ``pending`` is None (non-interactive pull) or empty. Placed INSIDE
+    ``_pull_core``'s try block: a ``typer.Abort()`` from the inline ``(a)bort``
+    choice intentionally skips the drain — abort means "stop, I don't trust
+    this pull", so half-made decisions are not broadcast to the fleet.
+    """
+    if not pending:
+        return
+    for canonical, peer_mtime in pending.items():
+        _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
+
+
 def _apply_write(
     local_path: Path,
     rel_path: str,
@@ -1610,12 +1717,21 @@ def _apply_incoming_file(
     interactive_resolve: bool = False,
     verbose: bool = False,
     devices: list[dict[str, Any]] | None = None,
+    pending_inline_bumps: dict[Path, float] | None = None,
+    resolved_local: Path | None = None,
 ) -> ApplyOutcome:
     """Dispatch one decrypted remote file to the appropriate _apply_* helper.
 
     See the decision-tree comment above for branch semantics. The local file
     is never destroyed without a recoverable trail (either conflict copy
     or rollback).
+
+    ``pending_inline_bumps`` / ``resolved_local`` carry the Track 12A deferred
+    keep-canonical bump. In interactive pull, the keep-canonical branch RECORDS
+    into the dict; INVALIDATION is owned by ``_download_and_apply`` keyed on
+    the returned outcome (see ``_CANONICAL_WRITE_OUTCOMES``). Both default
+    None for non-interactive callers and direct-call tests — when either is
+    None the bump machinery is a no-op (today's behavior).
     """
     local_path.parent.mkdir(parents=True, exist_ok=True)
     remote_mtime_iso = remote_info.get("mtime")
@@ -1687,15 +1803,22 @@ def _apply_incoming_file(
             # Post-inversion: canonical IS local, so "keep-canonical" =
             # "keep-local" — both work as user-facing labels. The internal
             # outcome stays "skipped" for back-compat with PullResult.
-            # Intentionally does NOT call _bump_canonical_mtime_post_resolve
-            # here -- mutating canonical's mtime mid-pull-walk would cause
-            # later peers' _apply_incoming_file calls for the same file to
-            # mis-classify on the `local_mtime > remote_mtime` gate, silently
-            # skipping peers whose mtime falls between original-local and
-            # the bumped value (Codex P2 4th pass). Users on inline prompt
-            # who want fleet propagation should use `mm resolve` (deferred).
-            # Filed as TODO: defer inline-bump until end of pull batch using
-            # max(peer_mtime) across all peers that conflicted on this path.
+            #
+            # Track 12A: record the decision for the end-of-pull-batch drain
+            # instead of bumping canonical's mtime here. A mid-walk bump makes
+            # a LATER peer's _apply_incoming_file mis-classify on the
+            # `local_mtime > remote_mtime` gate and silently skip (the v0.12.6
+            # revert). Deferring means every peer is judged against the same
+            # original-local baseline; _drain_inline_bumps applies one bump
+            # past max(peer_mtime) after the whole pull. peer_mtime is None
+            # when the manifest mtime is missing/malformed (conflict path
+            # still fires) -- record 0.0, mirroring the resolve-side
+            # stat-failure degradation. NOTE: a peer with no parseable mtime
+            # never reaches the mtime gate at all, so the bump can't close the
+            # resolve->pull loop for THAT peer -- it still helps every
+            # mtime-bearing peer.
+            peer_ts = remote_mtime.timestamp() if remote_mtime else 0.0
+            _record_inline_bump(pending_inline_bumps, resolved_local, peer_ts)
             if verbose:
                 console.print(f"  [dim]= {safe_str(rel_path)} (kept local by user)[/dim]")
             return "skipped"
@@ -1735,7 +1858,9 @@ def _apply_incoming_file(
             return "merged-via-lcs"
         if choice == "abort":
             raise typer.Abort()
-        # choice == "keep-both" -> fall through to _apply_conflict
+        # choice == "keep-both" -> fall through to _apply_conflict, returns
+        # "conflicted" on success. _download_and_apply will invalidate any
+        # prior keep-canonical bump for this path on that outcome.
 
     return _apply_conflict(
         local_path,
@@ -1758,12 +1883,20 @@ def _download_and_apply(
     verbose: bool = False,
     quiet: bool = False,
     devices: list[dict[str, Any]] | None = None,
+    pending_inline_bumps: dict[Path, float] | None = None,
 ) -> tuple[int, dict[ApplyOutcome, list[str]]]:
     """Download blobs and dispatch each to _apply_incoming_file.
 
     Returns (encrypted_bytes_transferred, outcomes_by_path).
     outcomes_by_path groups rel_paths by outcome so callers can report
     per-outcome totals and write accurate sync logs.
+
+    ``pending_inline_bumps`` is the shared Track 12A accumulator. This function
+    owns the INVALIDATION half of the bump lifecycle: after every
+    ``_apply_incoming_file`` call, if the returned outcome is in
+    ``_CANONICAL_WRITE_OUTCOMES``, the corresponding entry is popped. RECORD
+    stays inside ``_apply_incoming_file``'s keep-canonical branch. Both halves
+    no-op when ``pending_inline_bumps`` is None (non-interactive pulls).
 
     Progress display (Track 5B Task 4):
       - quiet=True: silent. Autopull contract — no stdout/stderr noise.
@@ -1894,8 +2027,17 @@ def _download_and_apply(
                 interactive_resolve=interactive_resolve,
                 verbose=verbose and not quiet,
                 devices=devices,
+                pending_inline_bumps=pending_inline_bumps,
+                resolved_local=resolved_local,
             )
             outcomes[outcome].append(rel_path)
+            # Track 12A: centralized eligibility gate for the deferred
+            # keep-canonical bump. Any successful canonical mutation
+            # (write / merge / merge-via-lcs / conflicted-sidecar) voids a
+            # prior peer's pending keep-canonical decision for this resolved
+            # path. Success-only by construction — see _CANONICAL_WRITE_OUTCOMES.
+            if outcome in _CANONICAL_WRITE_OUTCOMES:
+                _invalidate_inline_bump(pending_inline_bumps, resolved_local)
             _advance()
     finally:
         # progress.stop() in its own try/except so a Rich render failure
@@ -3809,6 +3951,7 @@ def _pull_one_source(
     verbose_console: bool,
     quiet: bool = False,
     devices: list[dict[str, Any]] | None = None,
+    pending_inline_bumps: dict[Path, float] | None = None,
 ) -> _PerSourceResult:
     """Pull one source from one peer. Returns _PerSourceResult.
 
@@ -3875,6 +4018,7 @@ def _pull_one_source(
         verbose=verbose_console,
         quiet=quiet,
         devices=devices,
+        pending_inline_bumps=pending_inline_bumps,
     )
 
     touched_parents: set[Path] = set()
@@ -4190,6 +4334,12 @@ def _pull_core(
     my_device_id = config["device"]["id"]
     backend = get_backend(config)
 
+    # Track 12A: shared accumulator for inline keep-canonical decisions, drained
+    # once after the whole device loop. Only allocated in interactive (`prompt`)
+    # mode — non-interactive pulls (default keep-both, autopull) never populate
+    # it, so None keeps the bump machinery a no-op down the whole call chain.
+    pending_inline_bumps: dict[Path, float] | None = {} if interactive_resolve_flag else None
+
     # Track 5E gate: refuse pull if any peer is pre-v0.9.2 OR has a
     # corrupt device.json (we can't read its version). Runs BEFORE the
     # pre-inversion migration sweep so we don't accidentally migrate
@@ -4391,6 +4541,7 @@ def _pull_core(
                     verbose_console=(verbose and not quiet),
                     quiet=quiet,
                     devices=all_devices,
+                    pending_inline_bumps=pending_inline_bumps,
                 )
 
                 if dry_run and per_source.dry_run_diff is not None:
@@ -4490,6 +4641,14 @@ def _pull_core(
                         console.print(f"  [yellow]warning:[/yellow] {msg}")
 
         fsync_warnings = _fsync_touched_parents(touched_parents)
+
+        # Track 12A: end-of-pull-batch drain. Every peer has been walked, so
+        # the recorded bump value beats all of them at once. INSIDE the try:
+        # a typer.Abort() from the inline (a)bort choice propagates past this
+        # point straight to `finally`, intentionally skipping the drain —
+        # abort means the user does not trust this pull, so half-made
+        # keep-canonical decisions are not broadcast to the fleet.
+        _drain_inline_bumps(pending_inline_bumps)
     finally:
         # Even if an unexpected exception propagates from the loop above,
         # emit accumulated load-bearing warnings to stderr. The v0.8.1

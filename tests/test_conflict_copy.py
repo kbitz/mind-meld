@@ -1757,16 +1757,15 @@ class TestResolveLocalMtimeBump:
         # No new sidecar was created.
         assert list(tmp_path.glob(f"*{CONFLICT_INFIX}*")) == []
 
-    def test_inline_pull_keep_local_does_not_mutate_canonical_mtime(
+    def test_inline_keep_local_no_dict_records_nothing_and_no_mutation(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """Regression pin (Codex P2 4th pass): the inline pull-time
-        `keep-canonical` branch must NOT bump canonical's mtime. Mutating
-        mid-pull-walk would cause later peers iterating the same file to
-        mis-classify on the mtime gate -- skipping a peer whose mtime falls
-        between original-local and the bump value, silently hiding that
-        peer's version. Users on `--conflict-mode prompt` who want fleet
-        propagation should use `mm resolve` (deferred) instead."""
+        """Back-compat (Track 12A): `_apply_incoming_file` with
+        `pending_inline_bumps=None` (the non-interactive / direct-call-test
+        default) MUST neither record a bump nor mutate canonical's mtime.
+        The mid-walk no-mutation guarantee from the v0.12.6 revert still holds
+        at the apply seam — the bump moved entirely to `_pull_core`'s
+        end-of-batch drain."""
         rel = "f.md"
         local = tmp_path / rel
         local.write_bytes(b"local content")
@@ -1795,6 +1794,738 @@ class TestResolveLocalMtimeBump:
         # Canonical's mtime must be unchanged from the original so later
         # peers in the same pull walk see the same mtime gate result.
         assert local.stat().st_mtime == pytest.approx(original_mtime_dt.timestamp())
+
+    def test_inline_keep_local_records_bump_but_does_not_mutate_mid_walk(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Core of Track 12A: keep-canonical with a `pending_inline_bumps`
+        dict passed RECORDS the peer's mtime (keyed on the resolved path) but
+        leaves canonical's mtime untouched. The bump is deferred to the
+        end-of-batch drain so every later peer in the walk is judged against
+        the same original-local baseline."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        original_mtime_dt = datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc)
+        _set_mtime(local, original_mtime_dt)
+        peer_mtime_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+        info = _remote_info(hashlib.sha256(b"remote content").hexdigest(), peer_mtime_dt)
+
+        from mind_meld import cli as cli_module
+
+        monkeypatch.setattr(
+            cli_module,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("keep-canonical", None),
+        )
+
+        bumps: dict[Path, float] = {}
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert outcome == "skipped"
+        # Recorded under the resolved path, value == peer's mtime.
+        assert bumps == {local.resolve(): pytest.approx(peer_mtime_dt.timestamp())}
+        # Canonical's mtime is NOT mutated mid-walk.
+        assert local.stat().st_mtime == pytest.approx(original_mtime_dt.timestamp())
+
+    def test_inline_keep_local_records_zero_when_remote_mtime_missing(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Codex #7 / Issue 2: when the peer's manifest mtime is missing (or
+        malformed), the conflict path still fires but `remote_mtime` is None.
+        keep-canonical records `0.0` — mirroring the resolve-side
+        stat-failure degradation — so the drain still bumps to ~now. (Honest
+        limit: a peer with no parseable mtime never reaches the mtime gate, so
+        the bump can't close the loop for THAT peer — but recording 0.0 is
+        still the correct, non-crashing mechanical choice.)"""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        original_mtime_dt = datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc)
+        _set_mtime(local, original_mtime_dt)
+        # Manifest entry with NO mtime key.
+        info = {"sha256": hashlib.sha256(b"remote content").hexdigest(), "size": 0}
+
+        from mind_meld import cli as cli_module
+
+        monkeypatch.setattr(
+            cli_module,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("keep-canonical", None),
+        )
+
+        bumps: dict[Path, float] = {}
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert outcome == "skipped"
+        assert bumps == {local.resolve(): 0.0}
+
+    def test_inline_keep_local_two_peers_same_path_records_max(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Cross-peer max(): when two peers conflict on the same file in one
+        pull walk and the user picks keep-canonical for both, the dict holds
+        `max(peerA_mtime, peerB_mtime)` so the end-of-batch bump beats every
+        peer walked — regardless of walk order."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
+        older = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+        newer = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+
+        from mind_meld import cli as cli_module
+
+        monkeypatch.setattr(
+            cli_module,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("keep-canonical", None),
+        )
+
+        bumps: dict[Path, float] = {}
+        # Walk order: NEWER peer first, then OLDER — max() must still win.
+        for peer_dt, dev in ((newer, "devA1234"), (older, "devB5678")):
+            info = _remote_info(hashlib.sha256(b"remote content").hexdigest(), peer_dt)
+            _apply_incoming_file(
+                local_path=local,
+                rel_path=rel,
+                plain_data=b"remote content",
+                remote_info=info,
+                remote_device_id=dev,
+                interactive_resolve=True,
+                pending_inline_bumps=bumps,
+                resolved_local=local.resolve(),
+            )
+        assert bumps == {local.resolve(): pytest.approx(newer.timestamp())}
+
+    def test_drain_inline_bumps_bumps_canonical_past_peer_mtime(self, tmp_path: Path) -> None:
+        """`_drain_inline_bumps` stamps each recorded canonical with an mtime
+        strictly greater than the recorded peer mtime, and future-clamps at
+        now+60s (inherited from `_bump_canonical_mtime_post_resolve`)."""
+        from mind_meld.cli import _drain_inline_bumps
+
+        canonical = tmp_path / "f.md"
+        canonical.write_bytes(b"local content")
+        _set_mtime(canonical, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+        peer_mtime = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc).timestamp()
+
+        # Far-future peer mtime on a second file proves the clamp still applies.
+        future_file = tmp_path / "g.md"
+        future_file.write_bytes(b"local content")
+        _set_mtime(future_file, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+        far_future = time.time() + 3600.0
+
+        before = time.time()
+        _drain_inline_bumps({canonical: peer_mtime, future_file: far_future})
+        after = time.time()
+
+        assert canonical.stat().st_mtime > peer_mtime
+        # future_file clamped to [before, after + 60s].
+        assert before <= future_file.stat().st_mtime <= after + 60.0
+
+        # None / empty are no-ops (non-interactive pull).
+        _drain_inline_bumps(None)
+        _drain_inline_bumps({})
+
+    def test_inline_keep_remote_after_keep_local_pops_pending_bump(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression pin (Issue 1 / Codex #1): a later peer's keep-remote on
+        the same file invalidates an earlier peer's pending keep-canonical
+        bump. Without the pop, the end-of-batch drain would bump a file that
+        now holds the later peer's REMOTE bytes — broadcasting remote bytes as
+        locally-authored and silently mtime-skipping the first peer's future
+        divergence.
+
+        Post-restructure: _apply_incoming_file returns the write outcome and
+        _download_and_apply gates invalidation on it via _CANONICAL_WRITE_OUTCOMES.
+        This test exercises the real _apply_incoming_file plus the real gate
+        primitive — the integration is pinned separately by
+        test_download_and_apply_outcome_gate_invalidates_on_canonical_write."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
+        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+
+        from mind_meld import cli as cli_module
+
+        bumps: dict[Path, float] = {}
+
+        # Peer A: keep-canonical -> records.
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+        )
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote A",
+            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert local.resolve() in bumps
+
+        # Peer B: keep-remote -> writes canonical, pops the pending bump.
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
+        )
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote B",
+            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
+            remote_device_id="devB5678",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert outcome == "written"
+        assert local.read_bytes() == b"remote B"
+        # The contract: "written" is a canonical-mutating outcome; the gate
+        # in _download_and_apply pops on it.
+        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
+        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert bumps == {}
+
+    def test_inline_merge_after_keep_local_pops_pending_bump(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression pin (Issue 1 / Codex #1): a later peer's inline merge on
+        the same file invalidates an earlier pending keep-canonical bump —
+        canonical now holds merged bytes, so the bump is void."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
+        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+
+        from mind_meld import cli as cli_module
+
+        bumps: dict[Path, float] = {}
+
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+        )
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote A",
+            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert local.resolve() in bumps
+
+        # Peer B: merge -> writes merged bytes to canonical, pops the bump.
+        monkeypatch.setattr(
+            cli_module,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("merge", b"merged content"),
+        )
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote B",
+            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
+            remote_device_id="devB5678",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert outcome == "merged-via-lcs"
+        assert local.read_bytes() == b"merged content"
+        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
+        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert bumps == {}
+
+    def test_inline_keep_both_after_keep_local_pops_pending_bump(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression pin (T1-A / Codex #1): a later peer's keep-both on the
+        same file invalidates an earlier pending keep-canonical bump. keep-both
+        leaves the file UNRESOLVED (sidecar on disk); bumping canonical past
+        that peer would silently mtime-resolve a conflict the user explicitly
+        left open."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
+        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+
+        from mind_meld import cli as cli_module
+
+        bumps: dict[Path, float] = {}
+
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+        )
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote A",
+            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert local.resolve() in bumps
+
+        # Peer B: keep-both -> falls through to _apply_conflict, pops the bump.
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-both", None)
+        )
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote B",
+            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
+            remote_device_id="devB5678",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert outcome == "conflicted"
+        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
+        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert bumps == {}
+
+    def test_inline_failed_keep_remote_write_does_not_pop_pending_bump(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression pin (T1-A success-only / Codex #3): if keep-remote's
+        write FAILS, canonical is still local — the prior keep-canonical bump
+        must NOT be popped. The propagation decision stands; popping on a
+        failed write would silently drop it."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
+        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+
+        from mind_meld import cli as cli_module
+
+        bumps: dict[Path, float] = {}
+
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+        )
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote A",
+            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert local.resolve() in bumps
+
+        # Peer B: keep-remote, but the write blows up.
+        def boom(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
+        )
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote B",
+            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
+            remote_device_id="devB5678",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert outcome == "failed"
+        assert local.read_bytes() == b"local content"  # write failed, local kept
+        # "failed" is intentionally absent from the gate set; the gate would
+        # not pop on this outcome, so the prior keep-canonical decision stands.
+        assert outcome not in cli_module._CANONICAL_WRITE_OUTCOMES
+        assert bumps == {local.resolve(): pytest.approx(peer_dt.timestamp())}  # NOT popped
+
+    def test_inline_failed_merge_write_does_not_pop_pending_bump(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression pin (testing specialist finding): the merge branch has
+        the same success-only invalidation contract as keep-remote. If the
+        merge write fails, canonical is still pure local, the prior keep-
+        canonical decision stands, and the dict entry must be retained.
+
+        The gate test ("failed" not in _CANONICAL_WRITE_OUTCOMES) makes the
+        invariant explicit so a future refactor of the gate set can't silently
+        regress it."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
+        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+
+        from mind_meld import cli as cli_module
+
+        bumps: dict[Path, float] = {}
+
+        monkeypatch.setattr(
+            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+        )
+        _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote A",
+            remote_info=_remote_info(hashlib.sha256(b"remote A").hexdigest(), peer_dt),
+            remote_device_id="devA1234",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert local.resolve() in bumps
+
+        def boom(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
+        monkeypatch.setattr(
+            cli_module,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("merge", b"merged content"),
+        )
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote B",
+            remote_info=_remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt),
+            remote_device_id="devB5678",
+            interactive_resolve=True,
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        assert outcome == "failed"
+        assert local.read_bytes() == b"local content"
+        assert outcome not in cli_module._CANONICAL_WRITE_OUTCOMES
+        assert bumps == {local.resolve(): pytest.approx(peer_dt.timestamp())}
+
+    def test_apply_write_after_keep_local_pops_pending_bump(self, tmp_path: Path) -> None:
+        """Regression pin (Codex adversarial HIGH): peer A picks keep-canonical
+        on path P (records a bump). The canonical file is deleted before peer B
+        is walked (e.g., user `rm`'d it while the blocking prompt waited, or an
+        autopull race). Peer B's _apply_incoming_file hits the [W] branch
+        (`not local_path.exists()`) and _apply_write writes peer B's REMOTE
+        bytes to canonical, returning "written". Without invalidation on that
+        outcome, the end-of-batch drain would bump peer B's remote bytes as if
+        locally-authored — silent cross-fleet corruption. The outcome-based
+        gate at the _download_and_apply seam invalidates on "written" uniformly,
+        whether it came from keep-remote OR the file-vanished _apply_write path."""
+        rel = "f.md"
+        local = tmp_path / rel
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
+        peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
+        info = _remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt)
+
+        from mind_meld import cli as cli_module
+
+        bumps: dict[Path, float] = {local.resolve(): peer_dt.timestamp()}
+        # File vanishes between peer A's prompt and peer B's apply.
+        local.unlink()
+
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote B",
+            remote_info=info,
+            remote_device_id="devB5678",
+            pending_inline_bumps=bumps,
+            resolved_local=local.resolve(),
+        )
+        # _apply_write fired (local was missing).
+        assert outcome == "written"
+        assert local.read_bytes() == b"remote B"
+        # "written" is in the gate set regardless of which branch produced it.
+        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
+        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert bumps == {}
+
+    def test_pull_core_abort_skips_end_of_batch_drain(self, tmp_path: Path, monkeypatch) -> None:
+        """Regression pin (T2-A / Codex #6): a `typer.Abort()` raised during
+        the pull walk propagates past the end-of-batch drain (which lives
+        inside `_pull_core`'s try block). Recorded keep-canonical decisions
+        are NOT applied — abort means the user does not trust this pull, so
+        half-made decisions are not broadcast to the fleet."""
+        from mind_meld import cli as cli_module
+        from mind_meld.cli import ManifestFetch, _pull_core
+
+        (tmp_path / "storage").mkdir()
+        (tmp_path / "claude").mkdir()
+        canonical = tmp_path / "claude" / "test.md"
+        canonical.write_bytes(b"local content")
+        original_dt = datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc)
+        _set_mtime(canonical, original_dt)
+
+        config = {
+            "device": {"id": "selfdev"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "sources": [
+                    {
+                        "name": "claude",
+                        "type": "claude",
+                        "path": str(tmp_path / "claude"),
+                        "max_file_size": 1024,
+                    }
+                ]
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+
+        def fake_list_devices_warn(b):
+            return [
+                {"device_id": "selfdev", "device_name": "me"},
+                {"device_id": "peer", "device_name": "Peer"},
+            ]
+
+        def fake_fetch_remote_manifest(b, did, pp, mk):
+            if did == "peer":
+                return ManifestFetch(
+                    status="ok",
+                    manifest={
+                        "sources": {
+                            "claude": {
+                                "files": {
+                                    "test.md": {
+                                        "sha256": "differs",
+                                        "size": 5,
+                                        "mtime": "2026-05-09T08:48:00Z",
+                                    }
+                                }
+                            }
+                        },
+                        "tombstones": {},
+                    },
+                )
+            return ManifestFetch(status="missing")
+
+        def aborting_download_and_apply(b, bp, td, did, pp, mk, **kw):
+            # Simulate: user picked keep-canonical (records a bump), then
+            # aborted on the next file.
+            bumps = kw.get("pending_inline_bumps")
+            if bumps is not None:
+                bumps[canonical.resolve()] = datetime(
+                    2026, 5, 9, 8, 48, tzinfo=timezone.utc
+                ).timestamp()
+            raise typer.Abort()
+
+        monkeypatch.setattr(cli_module, "_list_devices_warn", fake_list_devices_warn)
+        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fake_fetch_remote_manifest)
+        monkeypatch.setattr(cli_module, "_download_and_apply", aborting_download_and_apply)
+        monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
+        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
+        monkeypatch.setattr(cli_module, "collect_tombstones", lambda *a, **kw: {})
+
+        with pytest.raises(typer.Abort):
+            _pull_core(
+                config=config,
+                passphrase="pp",
+                memory_kb=1024,
+                conflict_mode="prompt",
+            )
+        # Drain was skipped — canonical's mtime is untouched.
+        assert canonical.stat().st_mtime == pytest.approx(original_dt.timestamp())
+
+    def test_pull_core_drains_pending_bumps_after_device_loop(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """End-to-end (Test 5 integration): on a clean interactive pull,
+        `_pull_core` drains the shared `pending_inline_bumps` dict after the
+        device loop — canonical's mtime ends up bumped past the recorded peer
+        mtime."""
+        from mind_meld import cli as cli_module
+        from mind_meld.cli import ManifestFetch, _pull_core
+
+        (tmp_path / "storage").mkdir()
+        (tmp_path / "claude").mkdir()
+        canonical = tmp_path / "claude" / "test.md"
+        canonical.write_bytes(b"local content")
+        _set_mtime(canonical, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
+        peer_mtime = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc).timestamp()
+
+        config = {
+            "device": {"id": "selfdev"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "sources": [
+                    {
+                        "name": "claude",
+                        "type": "claude",
+                        "path": str(tmp_path / "claude"),
+                        "max_file_size": 1024,
+                    }
+                ]
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+
+        def fake_list_devices_warn(b):
+            return [
+                {"device_id": "selfdev", "device_name": "me"},
+                {"device_id": "peer", "device_name": "Peer"},
+            ]
+
+        def fake_fetch_remote_manifest(b, did, pp, mk):
+            if did == "peer":
+                return ManifestFetch(
+                    status="ok",
+                    manifest={
+                        "sources": {
+                            "claude": {
+                                "files": {
+                                    "test.md": {
+                                        "sha256": "differs",
+                                        "size": 5,
+                                        "mtime": "2026-05-09T08:48:00Z",
+                                    }
+                                }
+                            }
+                        },
+                        "tombstones": {},
+                    },
+                )
+            return ManifestFetch(status="missing")
+
+        def keep_local_download_and_apply(b, bp, td, did, pp, mk, **kw):
+            # Simulate keep-canonical: record the bump, don't touch canonical.
+            bumps = kw.get("pending_inline_bumps")
+            assert bumps is not None  # interactive pull -> dict is allocated
+            bumps[canonical.resolve()] = peer_mtime
+            return 0, {
+                "written": [],
+                "merged": [],
+                "merged-via-lcs": [],
+                "skipped": ["test.md"],
+                "conflicted": [],
+                "unchanged": [],
+                "failed": [],
+            }
+
+        monkeypatch.setattr(cli_module, "_list_devices_warn", fake_list_devices_warn)
+        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fake_fetch_remote_manifest)
+        monkeypatch.setattr(cli_module, "_download_and_apply", keep_local_download_and_apply)
+        monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
+        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
+        monkeypatch.setattr(cli_module, "collect_tombstones", lambda *a, **kw: {})
+        monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", lambda *a, **kw: None)
+
+        _pull_core(
+            config=config,
+            passphrase="pp",
+            memory_kb=1024,
+            conflict_mode="prompt",
+            quiet=True,
+        )
+        # Drain ran after the device loop — canonical bumped past the peer.
+        assert canonical.stat().st_mtime > peer_mtime
+
+    def test_download_and_apply_outcome_gate_invalidates_on_canonical_write(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Integration pin for the outcome-gated invalidation in
+        _download_and_apply (the seam that owns the eligibility invariant
+        post-restructure): when _apply_incoming_file returns an outcome in
+        _CANONICAL_WRITE_OUTCOMES, the corresponding entry in
+        pending_inline_bumps is popped. When it returns 'failed' or 'skipped',
+        the entry is retained. Drives the real _download_and_apply with a
+        MagicMock backend + monkeypatched decrypt + monkeypatched
+        _apply_incoming_file so the gate is exercised, not mocked."""
+        from unittest.mock import MagicMock
+
+        from mind_meld import cli as cli_module
+        from mind_meld.cli import _download_and_apply
+
+        rel = "f.md"
+        canonical = tmp_path / rel
+        canonical.write_bytes(b"local content")
+        resolved = canonical.resolve()
+        peer_mtime = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc).timestamp()
+        info = {
+            "sha256": hashlib.sha256(b"remote").hexdigest(),
+            "size": 6,
+            "mtime": "2026-05-09T08:48:00Z",
+        }
+
+        backend = MagicMock()
+        backend.get = MagicMock(return_value=b"encrypted-blob-bytes")
+        monkeypatch.setattr(cli_module, "decrypt", lambda enc, pp, mk: b"remote")
+
+        # Outcome "written" -> in the gate set -> pops.
+        bumps = {resolved: peer_mtime}
+        monkeypatch.setattr(cli_module, "_apply_incoming_file", lambda **kw: "written")
+        _download_and_apply(
+            backend,
+            tmp_path,
+            {rel: info},
+            "peerB",
+            "pp",
+            1024,
+            quiet=True,
+            pending_inline_bumps=bumps,
+        )
+        assert bumps == {}
+
+        # Outcome "failed" -> NOT in the gate set -> entry retained.
+        bumps = {resolved: peer_mtime}
+        monkeypatch.setattr(cli_module, "_apply_incoming_file", lambda **kw: "failed")
+        _download_and_apply(
+            backend,
+            tmp_path,
+            {rel: info},
+            "peerB",
+            "pp",
+            1024,
+            quiet=True,
+            pending_inline_bumps=bumps,
+        )
+        assert bumps == {resolved: peer_mtime}
+
+        # Outcome "skipped" -> NOT in the gate set -> entry retained
+        # (also the keep-canonical RECORD outcome — must not self-invalidate).
+        bumps = {resolved: peer_mtime}
+        monkeypatch.setattr(cli_module, "_apply_incoming_file", lambda **kw: "skipped")
+        _download_and_apply(
+            backend,
+            tmp_path,
+            {rel: info},
+            "peerB",
+            "pp",
+            1024,
+            quiet=True,
+            pending_inline_bumps=bumps,
+        )
+        assert bumps == {resolved: peer_mtime}
 
     def test_post_inversion_local_mtime_capped_at_now_plus_60s(
         self, tmp_path: Path, monkeypatch
