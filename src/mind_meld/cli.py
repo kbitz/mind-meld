@@ -7367,6 +7367,23 @@ def _resolve_interactive_loop(
             # bytes (from-<peer>-<ts>); pre-inversion v0- sidecar holds the
             # user's own local bytes (local-<ts>). `short` and
             # `is_pre_inversion` are already computed above for this hit.
+            #
+            # Post-inversion only: capture peer's mtime BEFORE the rename so
+            # we can bump canonical past it afterward. Without the bump, the
+            # local half of "keep both" fails to propagate -- canonical's
+            # mtime stays at its old value, the peer's manifest mtime is
+            # newer, and the origin peer's next pull mtime-gates this
+            # device's local bytes out. Same fleet-propagation rationale as
+            # (l)ocal -- promote means keep-both ACROSS the fleet, not just
+            # locally. Pre-inversion: canonical holds peer's bytes
+            # intentionally (the sidecar HAD local bytes); no bump needed.
+            if is_pre_inversion:
+                peer_mtime = 0.0
+            else:
+                try:
+                    peer_mtime = cpath.stat().st_mtime
+                except OSError:
+                    peer_mtime = 0.0
             target = _promote_target_path(canonical, is_pre_inversion, short)
             try:
                 target = _promote_conflict_file(cpath, target)
@@ -7374,6 +7391,8 @@ def _resolve_interactive_loop(
                 console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
                 failed += 1
             else:
+                if not is_pre_inversion and peer_mtime > 0.0:
+                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
                 console.print(
                     f"  [green]promoted[/green] {safe_str(cpath.name)} -> {safe_str(target.name)}"
                 )

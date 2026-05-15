@@ -2834,3 +2834,51 @@ class TestResolvePromote:
         canonical = tmp_path / "report.md"
         assert canonical.read_bytes() == b"orphan bytes"
         assert not conflict.exists()
+
+    def test_promote_post_inversion_bumps_canonical_mtime(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Post-inversion (p)romote must bump canonical's mtime past peer's --
+        otherwise the local half of "keep both" silently fails to propagate
+        across the fleet (origin peer's next pull mtime-gates it out). Same
+        load-bearing fleet-propagation contract as (l)ocal: see
+        _bump_canonical_mtime_post_resolve.
+        """
+        canonical, conflict = self._post_inversion_pair(tmp_path)
+        # Stamp canonical with an old mtime and peer-sidecar with a NEW one
+        # so the bug case is set up: without the bump, canonical mtime stays
+        # at the old value (the peer would mtime-skip it on next pull).
+        old_mtime = time.time() - 3600  # 1h ago
+        peer_mtime = time.time() - 60  # 1m ago
+        os.utime(canonical, (old_mtime, old_mtime))
+        os.utime(conflict, (peer_mtime, peer_mtime))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+        bumped = canonical.stat().st_mtime
+        assert bumped > peer_mtime, (
+            f"canonical mtime ({bumped}) must be > peer_mtime ({peer_mtime}) "
+            f"so the local half of keep-both propagates across the fleet"
+        )
+
+    def test_promote_pre_inversion_no_mtime_bump(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Pre-inversion (p)romote leaves canonical's mtime alone: canonical
+        holds peer's bytes (intentionally kept), the sidecar held local bytes
+        (now promoted to its own filename). Bumping canonical would lie about
+        when peer's bytes arrived.
+        """
+        canonical = tmp_path / "report.md"
+        canonical.write_bytes(b"remote report\n")
+        conflict = tmp_path / "report.sync-conflict-v0-20260101-100000-devA1234.md"
+        conflict.write_bytes(b"my local report\n")
+        peer_mtime = time.time() - 300  # 5m ago
+        os.utime(canonical, (peer_mtime, peer_mtime))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        after = canonical.stat().st_mtime
+        assert abs(after - peer_mtime) < 1.0, (
+            f"pre-inversion canonical mtime must NOT be bumped (was {peer_mtime}, "
+            f"now {after}) -- canonical holds peer's bytes intentionally"
+        )

@@ -4,6 +4,14 @@ Deferred work items. `/roadmap` organizes these into the execution plan.
 
 ## Inbox
 
+### [review] `_promote_target_will_sync` ignores `exclude_patterns`
+- **What:** `_promote_target_will_sync(src_cfg, target)` in `cli.py:6624` returns True if the promoted file lives inside one of the source's `_synced_scan_dirs`. But `walk_generic_source` (`manifest.py:435`) also applies `exclude_patterns` before recording files in the manifest. A target that sits in an included dir but matches an exclude glob (e.g. user configured `exclude_patterns: ["*.from-*"]`) would be reported as syncable here, the `mm: warning: ... will not sync` line would be suppressed, and the user would silently end up with a local-only "resolved" file.
+- **Why:** Codex /review 2026-05-15 (P2 finding on PR #97). The visible-failure contract says load-bearing warnings about sync degradation must surface — the helper's logic is too narrow to honor that contract in the exclude-pattern case.
+- **Pros of doing it:** Closes the silent failure mode. Aligns the helper with what the manifest walker actually does.
+- **Cons:** Re-implementing the manifest walker's pattern logic in a second site risks drift. Better shape: reuse the actual pattern check from `manifest.py` rather than duplicate. Low-priority because the failure surface (a user configuring an `exclude_patterns` that catches `*.from-*` / `*.local-*`) is rare in practice — default configs don't.
+- **Context:** Start at `cli.py:6624` (`_promote_target_will_sync`) and `manifest.py:_compile_excludes` / `_path_excluded` (or wherever the walker applies patterns). One option: thread the compiled exclude matcher through to the helper. Another: just call `walk_generic_source` with the target's parent dir and check if the target appears in the result.
+- **Depends on / blocked by:** None — independent cleanup.
+
 ### [plan-eng-review] Phase 2: similarity classifier + similarity-gated silent merge
 - **What:** Build the LCS-similarity classifier (`classify_divergence` in `merge.py` → `DivergenceResult` with a 4-state `DivergenceClass`: same_document / different_document / ambiguous / not_mergeable), its `conflictdiff.py` leaf primitives (`render_classification_summary`, `recommended_default_key`), an opt-in `Class` column on `mm conflicts`, and similarity-gated silent merge in `_apply_incoming_file` (`same_document` + `conflict_count == 0` → silent apply; everything else → conflict-copy). Full spec: the "Deferred to Phase 2" section of the design doc `~/.gstack/projects/kbitz-mind-meld/kb-kbitz-conflict-merge-design-design-20260514-200134.md`.
 - **Why:** The office-hours/eng-review chain shipped "Option 2" (footgun fix + `(p)romote`) and deliberately deferred the classifier — it is advisory-only until silent merge is its consumer, so building it now is premature abstraction. Phase 2 is when the classifier earns its keep: gating silent prose merge on the autopull path.
