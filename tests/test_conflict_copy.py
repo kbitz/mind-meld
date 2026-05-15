@@ -2861,9 +2861,7 @@ class TestResolvePromote:
             f"so the local half of keep-both propagates across the fleet"
         )
 
-    def test_promote_pre_inversion_no_mtime_bump(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_promote_pre_inversion_no_mtime_bump(self, tmp_path: Path, monkeypatch) -> None:
         """Pre-inversion (p)romote leaves canonical's mtime alone: canonical
         holds peer's bytes (intentionally kept), the sidecar held local bytes
         (now promoted to its own filename). Bumping canonical would lie about
