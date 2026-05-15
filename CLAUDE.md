@@ -71,7 +71,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
 | `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) / `_restore_mtime_best_effort` | `docs/invariants/sync.md` |
-| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_resolve_interactive_loop` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `_find_conflict_files` / `_bump_canonical_mtime_post_resolve` | `docs/invariants/conflicts.md` |
+| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_resolve_interactive_loop` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `_find_conflict_files` / `_bump_canonical_mtime_post_resolve` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
 | `cli.py:_record_inline_bump` / `_invalidate_inline_bump` / `_drain_inline_bumps` / `_CANONICAL_WRITE_OUTCOMES` / `pending_inline_bumps` plumbing through `_pull_core` / `_pull_one_source` / `_download_and_apply` (outcome-gated invalidation) | `docs/invariants/conflicts.md` |
 | `conflictdiff.py` / `merge.py:lcs_merge` / `manifest.py:parse_conflict_device_short` | `docs/invariants/conflicts.md` |
 | `cli.py:_register_and_save` / `_ensure_device_registered` / `init_cmd` / `_init_storage_guard` | `docs/invariants/init-devices.md` |

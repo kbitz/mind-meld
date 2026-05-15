@@ -36,6 +36,7 @@ def render_prompt(
     *,
     merge_available: bool = False,
     merge_conflicts: int = 0,
+    promote_available: bool = False,
     local_only_lines: int | None = None,
     remote_only_lines: int | None = None,
 ) -> str:
@@ -65,6 +66,12 @@ def render_prompt(
     annotates the (m) line so the user knows whether the merged
     candidate is clean or contains ``<<<<<<<`` markers they would have
     to resolve in a text editor afterward.
+
+    ``promote_available`` enables the ``(p)romote`` option line: keep
+    BOTH files by renaming the conflict sidecar to its own first-class
+    filename. Only the ``mm resolve`` walk passes ``promote_available=True``
+    -- the inline pull-time prompt does not (the sidecar is not on disk
+    yet at that site).
 
     ``local_only_lines`` / ``remote_only_lines`` are the count of unified-
     diff lines unique to each side (semantic, mode-corrected -- the caller
@@ -107,6 +114,11 @@ def render_prompt(
         lines.append(merge_line)
     lines.append(local_line)
     lines.append(remote_line)
+    if promote_available:
+        lines.append(
+            f"  (p)romote -> keep BOTH: give {conflict_name} its own filename, "
+            f"keep {canonical_name}"
+        )
     lines.append(
         "  (s)kip    -> leave both files on disk; run `mm resolve` later or delete manually"
     )
