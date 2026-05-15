@@ -1282,7 +1282,11 @@ def _prompt_conflict_choice(
             remote_only_lines=prompt_n,
         )
     )
-    prompt_default = "m" if (merge_available and merge_conflicts == 0) else "s"
+    # Default key is always (s)kip -- never (m)erge. A clean LCS merge of two
+    # genuinely-different documents has zero conflict markers, so defaulting
+    # Enter to (m) means one keystroke silently accepts a Frankenstein file.
+    # (m)erge stays a fully available choice; the user must type it.
+    prompt_default = "s"
     choice = typer.prompt("Choice", default=prompt_default, show_default=False).strip().lower()
 
     # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both"
@@ -6564,6 +6568,83 @@ def _canonical_for_conflict(conflict_path: Path) -> Path:
     return conflict_path.with_name(before + suffix)
 
 
+def _promote_target_path(
+    canonical: Path,
+    is_pre_inversion: bool,
+    peer_short: str | None,
+    now: datetime | None = None,
+) -> Path:
+    """Compute the collision-free target filename for promoting a conflict sidecar.
+
+    Per-mode naming -- the sidecar's bytes mean different things by inversion era:
+      * post-inversion sidecar HOLDS the peer's bytes -> ``<stem>.from-<peer>-<ts>.<ext>``
+      * pre-inversion (``v0-``) sidecar HOLDS the user's own LOCAL bytes ->
+        ``<stem>.local-<ts>.<ext>`` (naming it ``from-<peer>`` would lie about
+        provenance).
+
+    ``<ts>`` is not collision-proof at same-second granularity; if the computed
+    path already exists, append a 4-hex random suffix (same pattern as
+    ``conflict_filename``). This is a best-effort pre-check -- ``os.link`` in
+    ``_promote_conflict_file`` is the actual atomic no-clobber guarantee.
+    """
+    now = now or datetime.now(timezone.utc)
+    ts = now.strftime("%Y%m%d-%H%M%S")
+    stem = canonical.stem
+    suffix = canonical.suffix
+    if is_pre_inversion:
+        base_name = f"{stem}.local-{ts}"
+    else:
+        base_name = f"{stem}.from-{peer_short or 'unknown'}-{ts}"
+    target = canonical.with_name(f"{base_name}{suffix}")
+    if target.exists():
+        target = canonical.with_name(f"{base_name}-{secrets.token_hex(2)}{suffix}")
+    return target
+
+
+def _promote_conflict_file(cpath: Path, target: Path) -> Path:
+    """Rename a conflict sidecar to ``target`` with a no-clobber guarantee.
+
+    ``os.link`` raises ``FileExistsError`` atomically if ``target`` exists --
+    closing the TOCTOU window a plain ``Path.rename()`` (which silently
+    replaces the target on POSIX) would leave open. The promoted file is a
+    first-class user filename, so silent clobber is real data loss. On the
+    rare race, retry once with a fresh 4-hex suffix. Returns the actual path
+    written. Raises ``OSError`` on any other failure (caller counts it as
+    ``failed``).
+    """
+    try:
+        os.link(cpath, target)
+    except FileExistsError:
+        target = target.with_name(f"{target.stem}-{secrets.token_hex(2)}{target.suffix}")
+        os.link(cpath, target)
+    os.unlink(cpath)
+    return target
+
+
+def _promote_target_will_sync(src_cfg: dict, target: Path) -> bool:
+    """True if ``target`` falls within the source's recursively-synced surface.
+
+    A promoted file is a NEW filename, so it can only sync if it lives inside
+    one of the source's scanned directories (``_synced_scan_dirs``). An
+    ``include_files`` source matches only exact configured filenames -- a
+    promoted ``<stem>.from-...`` / ``<stem>.local-...`` name will never match
+    one, so promote under an ``include_files``-only source produces a file
+    that will not sync until the user adds it to config.
+    """
+    base_path = Path(src_cfg["path"]).expanduser().resolve()
+    try:
+        resolved_target = target.resolve()
+    except OSError:
+        return False
+    for scan_dir in _synced_scan_dirs(src_cfg, base_path):
+        try:
+            resolved_target.relative_to(scan_dir.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
 @app.command()
 def conflicts() -> None:
     """List .sync-conflict-* files across all synced sources.
@@ -6811,12 +6892,18 @@ def resolve(
     For each conflict: prints color LOCAL/REMOTE banners (with peer-name
     attribution when known), a 3-number divergence summary, the unified
     diff, then prompts:
-      (l)ocal / (r)emote / (s)kip [default] / (a)bort.
+      (l)ocal / (r)emote / (m)erge / (p)romote / (s)kip [default] / (a)bort.
 
     (l)ocal keeps your edits on this machine and discards the bytes from
     the other machine.
     (r)emote keeps the bytes from the other machine and discards your
     local edits on this conflict.
+    (m)erge accepts the LCS-merged result over canonical (offered only
+    when the content is text; never the default key -- you must type it).
+    (p)romote keeps BOTH: renames the .sync-conflict-* sidecar to its own
+    first-class filename so both versions survive as separate synced
+    files. Use this when the two files turned out to be different
+    documents that merely collided on a name.
     (s)kip leaves both files on disk; you can run `mm resolve` again
     later or delete the .sync-conflict-* file manually. Note: the next
     `mm pull` does NOT re-prompt unless remote changes again -- the
@@ -6863,7 +6950,8 @@ def resolve(
         # storage N times to attribute the REMOTE side, and iCloud cold-cache
         # reads can spike to multi-second per call.
         devices = list_devices(backend)
-        _, failed = _resolve_interactive_loop(hits, devices)
+        sources_by_name = {s["name"]: s for s in get_sources(config)}
+        _, failed = _resolve_interactive_loop(hits, devices, sources_by_name)
     finally:
         release_lock()
 
@@ -6878,6 +6966,7 @@ def resolve(
 def _resolve_interactive_loop(
     hits: list[tuple[str, Path, Path | None]],
     devices: list[dict[str, Any]] | None = None,
+    sources_by_name: dict[str, dict] | None = None,
 ) -> tuple[int, int]:
     """Walk each conflict and prompt for resolution. Extracted so `resolve`
     stays a thin wrapper around acquire/release lock boilerplate.
@@ -6888,6 +6977,11 @@ def _resolve_interactive_loop(
     ``None`` (or omit the arg) and get an "(unknown peer)" annotation.
     Cache hoisted at the loop entry so a multi-conflict walk doesn't N+1
     on iCloud cold-cache reads.
+
+    ``sources_by_name`` maps source name -> source config, used by the
+    ``(p)romote`` branch to warn when a promoted file would land outside the
+    source's sync surface (an ``include_files`` source). None disables the
+    warning -- unit tests that don't exercise promote can omit it.
 
     Returns (resolved, failed). `failed` covers per-conflict OSErrors
     (rename/unlink/read) that left the conflict file in place. `resolve`
@@ -6909,6 +7003,7 @@ def _resolve_interactive_loop(
     from mind_meld.merge import lcs_merge
 
     devices = devices or []
+    sources_by_name = sources_by_name or {}
     resolved = 0
     failed = 0
     for src_name, cpath, canonical in hits:
@@ -7117,11 +7212,17 @@ def _resolve_interactive_loop(
                 mode,
                 merge_available=merge_available,
                 merge_conflicts=max(merge_conflicts, 0),
+                promote_available=True,
                 local_only_lines=prompt_local_only,
                 remote_only_lines=prompt_remote_only,
             )
         )
-        prompt_default = "m" if (merge_available and merge_conflicts == 0) else "s"
+        # Default key is always (s)kip -- never (m)erge. See the matching
+        # comment in _prompt_conflict_choice: a clean LCS merge of two
+        # genuinely-different documents has zero markers, so Enter-defaulting
+        # to (m) is a one-keystroke silent-corruption footgun. (m)erge stays
+        # available; the user must type it.
+        prompt_default = "s"
         choice = (
             typer.prompt("  Choice", default=prompt_default, show_default=False).strip().lower()
         )
@@ -7260,6 +7361,53 @@ def _resolve_interactive_loop(
                         f"resolve in editor)"
                     )
                 resolved += 1
+        elif choice in ("p", "promote"):
+            # Keep BOTH: rename the sidecar to its own first-class filename.
+            # Per-mode naming -- post-inversion sidecar holds the peer's
+            # bytes (from-<peer>-<ts>); pre-inversion v0- sidecar holds the
+            # user's own local bytes (local-<ts>). `short` and
+            # `is_pre_inversion` are already computed above for this hit.
+            #
+            # Post-inversion only: capture peer's mtime BEFORE the rename so
+            # we can bump canonical past it afterward. Without the bump, the
+            # local half of "keep both" fails to propagate -- canonical's
+            # mtime stays at its old value, the peer's manifest mtime is
+            # newer, and the origin peer's next pull mtime-gates this
+            # device's local bytes out. Same fleet-propagation rationale as
+            # (l)ocal -- promote means keep-both ACROSS the fleet, not just
+            # locally. Pre-inversion: canonical holds peer's bytes
+            # intentionally (the sidecar HAD local bytes); no bump needed.
+            if is_pre_inversion:
+                peer_mtime = 0.0
+            else:
+                try:
+                    peer_mtime = cpath.stat().st_mtime
+                except OSError:
+                    peer_mtime = 0.0
+            target = _promote_target_path(canonical, is_pre_inversion, short)
+            try:
+                target = _promote_conflict_file(cpath, target)
+            except OSError as e:
+                console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
+                failed += 1
+            else:
+                if not is_pre_inversion and peer_mtime > 0.0:
+                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
+                console.print(
+                    f"  [green]promoted[/green] {safe_str(cpath.name)} -> {safe_str(target.name)}"
+                )
+                resolved += 1
+                # Warn if the promoted file landed outside the source's sync
+                # surface (an include_files source matches only exact configured
+                # names -- a from-/local- name will never be one of them).
+                src_cfg = sources_by_name.get(src_name)
+                if src_cfg is not None and not _promote_target_will_sync(src_cfg, target):
+                    print(
+                        f"mm: warning: {safe_str(target.name)} is under an "
+                        f"include_files source and will not sync until you add "
+                        f"it to config.",
+                        file=sys.stderr,
+                    )
         elif choice in ("a", "abort"):
             raise typer.Abort()
         else:

@@ -99,6 +99,34 @@ class TestRenderPrompt:
         assert "(m)erge" in out
         assert "promote v0-notes.sync-conflict-X.md" in out
 
+    def test_promote_option_absent_by_default(self) -> None:
+        out = render_prompt("notes.md", "notes.sync-conflict-X.md", "post_inversion")
+        assert "(p)romote" not in out
+
+    def test_promote_option_present_when_available(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            promote_available=True,
+        )
+        assert "(p)romote" in out
+        # Both filenames appear in the keep-BOTH copy.
+        assert "notes.sync-conflict-X.md" in out
+        assert "keep notes.md" in out
+
+    def test_promote_and_merge_both_render(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            merge_available=True,
+            merge_conflicts=0,
+            promote_available=True,
+        )
+        assert "(m)erge" in out
+        assert "(p)romote" in out
+
     def test_drop_counts_omitted_when_unset(self) -> None:
         out = render_prompt("notes.md", "notes.sync-conflict-X.md", "post_inversion")
         # Default behavior (binary content / no diff) -- no drop annotation.

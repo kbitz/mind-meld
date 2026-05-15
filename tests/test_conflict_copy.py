@@ -34,6 +34,9 @@ from mind_meld.cli import (
     _find_conflict_files,
     _gc_old_conflict_files,
     _predict_pull_outcome,
+    _promote_conflict_file,
+    _promote_target_path,
+    _prompt_conflict_choice,
     _resolve_interactive_loop,
     app,
     conflict_filename,
@@ -2602,4 +2605,278 @@ class TestParseConflictDeviceShort:
         assert (
             parse_conflict_device_short("notes.draft.sync-conflict-20260421-143055-devA1234.md")
             == "devA1234"
+        )
+
+
+# ── Component 1: never default Enter to (m)erge ──────────────────────
+
+
+class TestNeverDefaultToMerge:
+    """Component 1: the prompt default key is always (s)kip, never (m)erge,
+    even when the LCS merge would be clean. A clean merge of two genuinely
+    different documents has zero markers, so Enter-defaulting to (m) is a
+    one-keystroke silent-corruption footgun. (m)erge stays selectable when
+    the user types it.
+    """
+
+    @staticmethod
+    def _clean_merge_pair(tmp_path: Path) -> tuple[Path, Path]:
+        """Canonical + sidecar whose lcs_merge is CLEAN (purely additive)."""
+        canonical = tmp_path / "notes.md"
+        canonical.write_bytes(b"line one\nline two\n")
+        conflict = tmp_path / "notes.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"line one\nline two\nline three\n")
+        return canonical, conflict
+
+    def test_resolve_loop_default_is_skip_on_clean_merge(self, tmp_path: Path, monkeypatch) -> None:
+        canonical, conflict = self._clean_merge_pair(tmp_path)
+        captured: dict = {}
+
+        def fake_prompt(*a, **kw):
+            captured["default"] = kw.get("default")
+            return "s"
+
+        monkeypatch.setattr(typer, "prompt", fake_prompt)
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert captured["default"] == "s", (
+            "default key must be (s)kip even when the LCS merge is clean"
+        )
+
+    def test_prompt_conflict_choice_default_is_skip_on_clean_merge(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        local = tmp_path / "notes.md"
+        local.write_bytes(b"line one\nline two\n")
+        captured: dict = {}
+
+        def fake_prompt(*a, **kw):
+            captured["default"] = kw.get("default")
+            return "s"
+
+        monkeypatch.setattr(typer, "prompt", fake_prompt)
+        _prompt_conflict_choice("notes.md", local, b"line one\nline two\nline three\n")
+        assert captured["default"] == "s", (
+            "inline pull-time prompt default must be (s)kip even on a clean merge"
+        )
+
+    def test_merge_still_selectable_when_typed(self, tmp_path: Path, monkeypatch) -> None:
+        """Only the DEFAULT changed -- typing (m) still applies the clean merge."""
+        canonical, conflict = self._clean_merge_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert canonical.read_bytes() == b"line one\nline two\nline three\n"
+        assert not conflict.exists()
+
+
+# ── Component 2: (p)romote helpers ───────────────────────────────────
+
+
+class TestPromoteHelpers:
+    """Component 2: _promote_target_path (per-mode naming + collision) and
+    _promote_conflict_file (os.link no-clobber)."""
+
+    _NOW = datetime(2026, 5, 14, 21, 40, 20, tzinfo=timezone.utc)
+
+    def test_post_inversion_name_is_from_peer(self, tmp_path: Path) -> None:
+        canonical = tmp_path / "report.md"
+        target = _promote_target_path(canonical, False, "devA1234", now=self._NOW)
+        assert target.name == "report.from-devA1234-20260514-214020.md"
+
+    def test_pre_inversion_name_is_local(self, tmp_path: Path) -> None:
+        canonical = tmp_path / "report.md"
+        target = _promote_target_path(canonical, True, "devA1234", now=self._NOW)
+        assert target.name == "report.local-20260514-214020.md"
+        assert "from-" not in target.name, "pre-inversion sidecar holds LOCAL bytes"
+
+    def test_none_peer_short_falls_back_to_unknown(self, tmp_path: Path) -> None:
+        canonical = tmp_path / "report.md"
+        target = _promote_target_path(canonical, False, None, now=self._NOW)
+        assert target.name == "report.from-unknown-20260514-214020.md"
+
+    def test_collision_appends_hex(self, tmp_path: Path) -> None:
+        canonical = tmp_path / "report.md"
+        (tmp_path / "report.from-devA1234-20260514-214020.md").write_bytes(b"x")
+        target = _promote_target_path(canonical, False, "devA1234", now=self._NOW)
+        assert target.name != "report.from-devA1234-20260514-214020.md"
+        assert target.name.startswith("report.from-devA1234-20260514-214020-")
+        assert target.suffix == ".md"
+
+    def test_conflict_file_happy_path(self, tmp_path: Path) -> None:
+        src = tmp_path / "report.sync-conflict-X.md"
+        src.write_bytes(b"sidecar bytes")
+        target = tmp_path / "report.from-devA1234-ts.md"
+        actual = _promote_conflict_file(src, target)
+        assert actual == target
+        assert target.read_bytes() == b"sidecar bytes"
+        assert not src.exists(), "sidecar consumed by the promote"
+
+    def test_conflict_file_no_clobber(self, tmp_path: Path) -> None:
+        """os.link must NOT silently overwrite a pre-existing target -- a
+        promoted file is a first-class user filename, so clobber = data loss."""
+        src = tmp_path / "report.sync-conflict-X.md"
+        src.write_bytes(b"sidecar bytes")
+        target = tmp_path / "report.from-devA1234-ts.md"
+        target.write_bytes(b"PRE-EXISTING -- must not be clobbered")
+        actual = _promote_conflict_file(src, target)
+        assert actual != target, "must retry with a fresh suffix, not overwrite"
+        assert target.read_bytes() == b"PRE-EXISTING -- must not be clobbered"
+        assert actual.read_bytes() == b"sidecar bytes"
+        assert not src.exists()
+
+
+class TestResolvePromote:
+    """Component 2: (p)romote in the _resolve_interactive_loop canonical-exists
+    path -- keep BOTH files by renaming the sidecar to its own filename."""
+
+    @staticmethod
+    def _post_inversion_pair(tmp_path: Path) -> tuple[Path, Path]:
+        canonical = tmp_path / "report.md"
+        canonical.write_bytes(b"local report\n")
+        conflict = tmp_path / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"remote report\n")
+        return canonical, conflict
+
+    def test_promote_post_inversion(self, tmp_path: Path, monkeypatch) -> None:
+        canonical, conflict = self._post_inversion_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+        assert canonical.read_bytes() == b"local report\n", "canonical untouched"
+        assert not conflict.exists(), "sidecar renamed away"
+        promoted = list(tmp_path.glob("report.from-*"))
+        assert len(promoted) == 1
+        assert promoted[0].name.startswith("report.from-devA1234-")
+        assert promoted[0].suffix == ".md"
+        assert promoted[0].read_bytes() == b"remote report\n"
+
+    def test_promote_pre_inversion_names_local(self, tmp_path: Path, monkeypatch) -> None:
+        # v0- sidecar: pre-inversion -- canonical = remote, sidecar = LOCAL.
+        canonical = tmp_path / "report.md"
+        canonical.write_bytes(b"remote report\n")
+        conflict = tmp_path / "report.sync-conflict-v0-20260101-100000-devA1234.md"
+        conflict.write_bytes(b"my local report\n")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+        promoted = list(tmp_path.glob("report.local-*"))
+        assert len(promoted) == 1
+        assert "from-" not in promoted[0].name
+        assert promoted[0].read_bytes() == b"my local report\n"
+        assert canonical.read_bytes() == b"remote report\n"
+        assert not conflict.exists()
+
+    def test_promote_link_oserror_counts_failed(self, tmp_path: Path, monkeypatch) -> None:
+        canonical, conflict = self._post_inversion_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+
+        def boom(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "link", boom)
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (0, 1)
+        assert conflict.exists(), "sidecar left in place on failure"
+        assert canonical.exists()
+
+    def test_promote_include_files_source_warns(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """A promoted file under an include_files-only source falls outside the
+        sync surface -- promote succeeds but warns."""
+        src_root = tmp_path / "src"
+        src_root.mkdir()
+        canonical = src_root / "config.yaml"
+        canonical.write_bytes(b"local: 1\n")
+        conflict = src_root / "config.sync-conflict-20260421-143055-devA1234.yaml"
+        conflict.write_bytes(b"remote: 2\n")
+        src_cfg = {
+            "name": "s1",
+            "path": str(src_root),
+            "type": "generic",
+            "include_files": ["config.yaml"],
+            "include_dirs": [],
+        }
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        _resolve_interactive_loop([("s1", conflict, canonical)], None, {"s1": src_cfg})
+        err = capsys.readouterr().err
+        assert "will not sync" in err
+        assert "include_files" in err
+
+    def test_promote_include_dirs_source_no_warning(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A promoted file inside an include_dir DOES sync -- no warning."""
+        src_root = tmp_path / "src"
+        sub = src_root / "notes"
+        sub.mkdir(parents=True)
+        canonical = sub / "report.md"
+        canonical.write_bytes(b"local\n")
+        conflict = sub / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"remote\n")
+        src_cfg = {
+            "name": "s1",
+            "path": str(src_root),
+            "type": "generic",
+            "include_dirs": ["notes"],
+            "include_files": [],
+        }
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        _resolve_interactive_loop([("s1", conflict, canonical)], None, {"s1": src_cfg})
+        err = capsys.readouterr().err
+        assert "will not sync" not in err
+
+    def test_no_base_promote_still_renames_to_canonical(self, tmp_path: Path, monkeypatch) -> None:
+        """The pre-existing no-base (p)romote path is unchanged: when canonical
+        is gone, promote renames the sidecar to the canonical name."""
+        conflict = tmp_path / "report.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"orphan bytes")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert (resolved, failed) == (1, 0)
+        canonical = tmp_path / "report.md"
+        assert canonical.read_bytes() == b"orphan bytes"
+        assert not conflict.exists()
+
+    def test_promote_post_inversion_bumps_canonical_mtime(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Post-inversion (p)romote must bump canonical's mtime past peer's --
+        otherwise the local half of "keep both" silently fails to propagate
+        across the fleet (origin peer's next pull mtime-gates it out). Same
+        load-bearing fleet-propagation contract as (l)ocal: see
+        _bump_canonical_mtime_post_resolve.
+        """
+        canonical, conflict = self._post_inversion_pair(tmp_path)
+        # Stamp canonical with an old mtime and peer-sidecar with a NEW one
+        # so the bug case is set up: without the bump, canonical mtime stays
+        # at the old value (the peer would mtime-skip it on next pull).
+        old_mtime = time.time() - 3600  # 1h ago
+        peer_mtime = time.time() - 60  # 1m ago
+        os.utime(canonical, (old_mtime, old_mtime))
+        os.utime(conflict, (peer_mtime, peer_mtime))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert (resolved, failed) == (1, 0)
+        bumped = canonical.stat().st_mtime
+        assert bumped > peer_mtime, (
+            f"canonical mtime ({bumped}) must be > peer_mtime ({peer_mtime}) "
+            f"so the local half of keep-both propagates across the fleet"
+        )
+
+    def test_promote_pre_inversion_no_mtime_bump(self, tmp_path: Path, monkeypatch) -> None:
+        """Pre-inversion (p)romote leaves canonical's mtime alone: canonical
+        holds peer's bytes (intentionally kept), the sidecar held local bytes
+        (now promoted to its own filename). Bumping canonical would lie about
+        when peer's bytes arrived.
+        """
+        canonical = tmp_path / "report.md"
+        canonical.write_bytes(b"remote report\n")
+        conflict = tmp_path / "report.sync-conflict-v0-20260101-100000-devA1234.md"
+        conflict.write_bytes(b"my local report\n")
+        peer_mtime = time.time() - 300  # 5m ago
+        os.utime(canonical, (peer_mtime, peer_mtime))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        after = canonical.stat().st_mtime
+        assert abs(after - peer_mtime) < 1.0, (
+            f"pre-inversion canonical mtime must NOT be bumped (was {peer_mtime}, "
+            f"now {after}) -- canonical holds peer's bytes intentionally"
         )
