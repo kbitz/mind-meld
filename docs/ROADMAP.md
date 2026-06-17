@@ -90,7 +90,7 @@ _4 tasks . ~100 LOC . medium risk . src/mind_meld/cli.py + src/mind_meld/identit
 _touches: src/mind_meld/cli.py, src/mind_meld/identity.py, src/mind_meld/token_usage.py_
 
 - **Pass `allow_refresh=False` from autopush context** -- cold-cache autopush emits empty `local_emails: []`; next interactive push does the refresh. Aggregator's mixed-fleet code already tolerates pre-v0.11.17 peers with no field. _src/mind_meld/cli.py:2916-2923, ~15 lines._ (XS)
-- **Fix misleading "events tail budget exceeded" notice on cold-identity-cache pushes** -- move identity gather BEFORE the budget computation, OR exclude identity-gather wall-clock from the budget, OR document the false-positive. _src/mind_meld/cli.py:2916, ~10 lines._ (XS)
+- **Fix misleading "events tail budget exceeded" notice on cold-identity-cache pushes** -- ✅ SHIPPED v0.12.9 (took the "exclude identity-gather wall-clock from the budget" option: `walk_done` snapshot captured before the gather/write; `_run_events_backfill` mirrored). _src/mind_meld/cli.py, ~10 lines._ (XS)
 - **Add `_FULL_GATHER_BUDGET_S` overall deadline to `_do_full_gather`** -- per-step budgets compound to ~10s; add top-level (e.g. 8s) and short-circuit remaining sources when elapsed. Move `gh api user` BEFORE per-repo loop so slow gh doesn't starve per-repo budget. _src/mind_meld/identity.py:248-261, ~30 lines._ (S)
 - **Add per-jsonl deadline check inside `_aggregate_jsonl_views_for_project` merge loop** -- the per-project deadline only fires between projects; one large project can exceed budget. Either deadline-check the merge loop or reduce per-jsonl walk budget when cumulative time elapsed approaches deadline. _src/mind_meld/token_usage.py:879-908, ~20 lines._ (S)
 

@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.9] - 2026-06-17
+
+**The `events tail budget exceeded` notice is now scoped to the git+session walk it claims to measure — a cold identity-cache refresh no longer masquerades as a slow walk.** Implements the misleading-notice task from ROADMAP Group 16 / Track 16A.
+
+**The bug.** `_run_events_tail`'s wall-clock budget (`WALK_TIME_BUDGET_INTERACTIVE_MS` 500 / `WALK_TIME_BUDGET_AUTOPUSH_MS` 250) is plumbed as the deadline for `walk_git_projects` and `walk_session_metadata` — but the tail-position `time.monotonic() > deadline` check sat AFTER `identity.gather_local_identities(allow_refresh=True)` and `write_push_event`. The identity gather's cold path runs a synchronous refresh bounded by its OWN timeouts (`_GIT_GLOBAL_TIMEOUT_S` 2s + `_PER_REPO_BUDGET_S` 5s + `_GH_TIMEOUT_S` 3s ≈ up to 10s, 7d TTL). So on any push that triggered a cold identity refresh, the check fired `events tail budget exceeded` even though the actual git+session walk finished in ~200ms — two notices on the same push (`refreshing identity cache (one-off)` then `budget exceeded`), one true and one false.
+
+**The fix.** Snapshot `walk_done = time.monotonic()` the moment the session walk completes — before the identity gather and the event write — and compare `walk_done > deadline`. The budget now bounds, and the notice now reports on, the walk only. The identity gather announces itself separately and self-limits via its own timeouts, so the two concerns are orthogonal. `_run_events_backfill` carries the identical fix: its `walk_done` snapshot precedes the deliberate `refresh_identity_cache(force=True)` init warm, which ALWAYS runs and would otherwise trip `events backfill budget exceeded` on essentially every `mm init`. Budgets are unchanged — the walk genuinely fits in 500ms; the bug was the mismeasurement, not the threshold.
+
+**Scope.** Only the two deadline checks + their `walk_done` snapshots in `cli.py`. The other three Track 16A tasks (autopush `allow_refresh=False`, a `_FULL_GATHER_BUDGET_S` overall deadline in `identity._do_full_gather`, per-jsonl deadline checks in `token_usage`) remain open — they reduce how often / how long the cold gather runs; this change fixes the false signal regardless.
+
+**Test coverage.** New `tests/test_events_budget_scope.py` (4 tests): for both the tail and the backfill, a slow identity gather/refresh that outlasts the budget does NOT emit the notice (the regression pin), and a genuinely slow session walk still DOES (proving the check was narrowed, not removed). **Documentation.** `docs/invariants/events-retro.md` invariant 4 rewritten to mark the check walk-scoped and load-bearing; `_run_events_tail` docstring updated.
+
 ## [0.12.8] - 2026-05-14
 
 **Conflict prompts no longer default the Enter key to `(m)erge`, and `mm resolve` gains a `(p)romote` option that keeps BOTH divergent files.** Two changes from the /office-hours → /plan-eng-review design for conflict handling.
