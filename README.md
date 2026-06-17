@@ -12,6 +12,16 @@ pipx install git+https://github.com/kbitz/mind-meld.git
 
 Not on PyPI — install straight from GitHub.
 
+## Upgrading
+
+Run the command mm's auto-upgrade nudge prints — it pins to the released tag:
+
+```bash
+pipx install --force git+https://github.com/kbitz/mind-meld.git@vX.Y.Z
+```
+
+**`pipx upgrade mind-meld` will NOT move a tag-pinned install.** Once you've upgraded via the `--force …@<tag>` form above, pipx re-resolves that frozen `@vX.Y.Z` ref on every `pipx upgrade` and reports your current version as "latest" forever. Always use the `--force …@<tag>` command (the nudge gives you the exact one). The plain unpinned install at the top tracks `main`, so `pipx upgrade` works for that style — but the nudge pins you to the released tag.
+
 ## Quick Start
 
 ```bash
@@ -90,7 +100,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopush` builds a manifest of local memory/todos, diffs against the last push, and uploads only what changed.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr as a single `mm: warning: ...` line so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Autopull writes a `degraded` breadcrumb (separate from `success`) when any of four conditions fire during an otherwise-successful pull: fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases.
-- **Auto-upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag and emit a single `mm: notice: a newer mind-meld is available — run pipx install --force git+...@vX.Y.Z` line on stderr if you're behind. `mm` never invokes pipx itself; you run the printed command. Disable with `--no-check-version` for one invocation, or set `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml` to disable persistently. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the nudge fires before that, ideally making the refusal a backstop nobody hits.
+- **Auto-upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag and emit a single `mm: notice: a newer mind-meld is available — run pipx install --force git+...@vX.Y.Z` line on stderr if you're behind. `mm` never invokes pipx itself; you run the printed command — note that plain `pipx upgrade` will NOT move a tag-pinned install (it re-resolves the frozen `@vX.Y.Z`), so always use the printed `--force …@<tag>` form (see [Upgrading](#upgrading)). Disable with `--no-check-version` for one invocation, or set `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml` to disable persistently. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the nudge fires before that, ideally making the refusal a backstop nobody hits.
 
 ### Manual commands
 
