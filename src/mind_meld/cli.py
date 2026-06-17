@@ -3011,10 +3011,11 @@ def _run_events_tail(
     — branch-fragility-free, one-push-lag-free), dry_run no-op (preview
     contract), mm-events-resolved gate (covers fresh / migrated / un-
     migrated configs uniformly, Codex C1), and the autopush 250ms /
-    interactive 500ms wall-clock budget. The budget bounds — and the
-    "budget exceeded" notice reports on — the git+session WALK only; the
-    snapshot is taken before the self-bounded identity gather so a cold
-    7d-TTL identity refresh no longer masquerades as a slow walk (v0.12.9).
+    interactive 500ms wall-clock budget. The "budget exceeded" notice
+    reports on the session-metadata walk (the git walk self-bounds via its
+    own total_budget_ms); the snapshot is taken before the self-bounded
+    identity gather so a cold 7d-TTL identity refresh no longer masquerades
+    as a slow walk (v0.12.9).
 
     Forensic-only invariant: any failure in this block is swallowed and
     breadcrumbed via ``mm: notice:``. The push proceeds.
@@ -3080,13 +3081,14 @@ def _run_events_tail(
                     token_cache_files=None,
                 ):
                     agg_projects.extend(row.get("projects", []))
-        # Budget check covers the git+session WALK only — snapshot the clock
+        # Budget check covers the session-metadata WALK — snapshot the clock
         # HERE, before the self-bounded identity gather (≤10s worst case, 7d
-        # TTL) and the event write. Pre-v0.12.9 the check sat after
-        # gather_local_identities, so a cold identity refresh masqueraded as
-        # "events tail budget exceeded" even when the walk finished in ~200ms.
-        # The gather already announces itself via its own `refreshing identity
-        # cache (one-off)` notice. See docs/invariants/events-retro.md inv. 4.
+        # TTL) and the event write. (The git walk above self-bounds via its
+        # own total_budget_ms; this deadline was reset after it.) Pre-v0.12.9
+        # the check sat after gather_local_identities, so a cold identity
+        # refresh masqueraded as "events tail budget exceeded" even when the
+        # walk finished in ~200ms. The gather announces itself separately via
+        # `refreshing identity cache (one-off)`. See events-retro.md inv. 4.
         walk_done = time.monotonic()
         s_rows: list[dict] = []
         if claude_paths:
@@ -3204,8 +3206,9 @@ def _run_events_backfill(
                         token_cache_files=files_dict,
                     ):
                         agg_projects.extend(row.get("projects", []))
-        # Budget check covers the git+session WALK only (mirrors
-        # _run_events_tail) — snapshot the clock HERE, before the deliberate
+        # Budget check covers the session-metadata WALK (mirrors
+        # _run_events_tail; the git walk above self-bounds via total_budget_ms)
+        # — snapshot the clock HERE, before the deliberate
         # identity.refresh_identity_cache(force=True) warm below. That refresh
         # ALWAYS runs at init and can spend ~10s on a cold gather; counting it
         # against the walk budget made "events backfill budget exceeded" fire

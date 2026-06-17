@@ -61,7 +61,12 @@ class TestEventsTailBudgetScope:
 
         cli_module._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
 
-        assert "events tail budget exceeded" not in capsys.readouterr().err
+        err = capsys.readouterr().err
+        # Guard against the notice being absent for the WRONG reason: an early
+        # exception would divert to the `events tail failed` breadcrumb and
+        # also leave the budget notice absent. Assert the function ran clean.
+        assert "events tail failed" not in err
+        assert "events tail budget exceeded" not in err
 
     def test_slow_walk_still_trips_notice(self, tmp_path, monkeypatch, capsys):
         """The notice MUST still fire when the session walk genuinely overruns
@@ -110,7 +115,10 @@ class TestEventsBackfillBudgetScope:
 
         cli_module._run_events_backfill(config, sources, "dev-a")
 
-        assert "events backfill budget exceeded" not in capsys.readouterr().err
+        err = capsys.readouterr().err
+        # Same wrong-reason guard as the tail negative test (see above).
+        assert "events backfill failed" not in err
+        assert "events backfill budget exceeded" not in err
 
     def test_slow_walk_still_trips_notice(self, tmp_path, monkeypatch, capsys):
         """Backfill notice still fires on a genuine session-walk overrun."""
