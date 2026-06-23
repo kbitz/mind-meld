@@ -19,6 +19,7 @@ so the caller is responsible for pre-sanitizing.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from rich.text import Text
@@ -37,6 +38,8 @@ def render_prompt(
     merge_available: bool = False,
     merge_conflicts: int = 0,
     promote_available: bool = False,
+    newer_available: bool = False,
+    newer_desc: str = "",
     local_only_lines: int | None = None,
     remote_only_lines: int | None = None,
 ) -> str:
@@ -72,6 +75,15 @@ def render_prompt(
     filename. Only the ``mm resolve`` walk passes ``promote_available=True``
     -- the inline pull-time prompt does not (the sidecar is not on disk
     yet at that site).
+
+    ``newer_available`` enables the ``(n)ewer`` option line: keep whichever
+    side has the greater mtime. Only ``mm resolve`` passes
+    ``newer_available=True`` -- the inline pull-time prompt does NOT, because
+    ``_apply_incoming_file`` already skips before prompting when the local
+    file is newer, so "newer" there is always the remote side (= ``(r)``).
+    ``newer_desc`` is the caller-composed annotation (e.g. ``REMOTE, 2d
+    newer``) shown in parentheses so the user sees what the key will do.
+    The caller suppresses ``(n)ewer`` when either mtime is unreadable.
 
     ``local_only_lines`` / ``remote_only_lines`` are the count of unified-
     diff lines unique to each side (semantic, mode-corrected -- the caller
@@ -114,6 +126,9 @@ def render_prompt(
         lines.append(merge_line)
     lines.append(local_line)
     lines.append(remote_line)
+    if newer_available:
+        suffix = f" ({newer_desc})" if newer_desc else ""
+        lines.append(f"  (n)ewer   -> keep the more recently modified file{suffix}")
     if promote_available:
         lines.append(
             f"  (p)romote -> keep BOTH: give {conflict_name} its own filename, "
@@ -206,3 +221,104 @@ def count_divergent_lines(diff: list[str]) -> tuple[int, int, int]:
         elif line.startswith("+"):
             n += 1
     return (m, n, m + n)
+
+
+def format_ts(ts: float | None) -> str:
+    """Format an epoch timestamp as local ``YYYY-MM-DD HH:MM``.
+
+    Returns ``"unknown"`` for None or any unconvertible value (a corrupt
+    mtime, an overflowing year). Local time is intentional -- it matches
+    what the user sees in Finder and in their shell ``ls -l``.
+    """
+    if ts is None:
+        return "unknown"
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "unknown"
+
+
+def format_age_delta(seconds: float) -> str:
+    """Render an absolute duration as ``Nd`` / ``Nh`` / ``Nm`` / ``<1m``.
+
+    Extends the ``mm conflicts`` Age convention (``cli.py`` ``{days}d`` /
+    ``{hours}h``) with a minutes bucket so a sub-hour gap doesn't collapse
+    to a confusing ``0h``. Sign is ignored -- the caller already knows which
+    side is newer; this is just the magnitude.
+    """
+    seconds = abs(seconds)
+    days = int(seconds // 86400)
+    if days:
+        return f"{days}d"
+    hours = int(seconds // 3600)
+    if hours:
+        return f"{hours}h"
+    minutes = int(seconds // 60)
+    if minutes:
+        return f"{minutes}m"
+    return "<1m"
+
+
+def newer_side(
+    local_mtime: float | None, remote_mtime: float | None
+) -> Literal["local", "remote", "tie", "unknown"]:
+    """Classify which side is more recently modified.
+
+    ``"unknown"`` when either mtime is None (unreadable stat / missing
+    manifest mtime) -- the caller suppresses the ``(n)ewer`` shortcut in
+    that case. ``"tie"`` on an exact match -- the caller re-prompts rather
+    than guessing a side.
+    """
+    if local_mtime is None or remote_mtime is None:
+        return "unknown"
+    if local_mtime > remote_mtime:
+        return "local"
+    if remote_mtime > local_mtime:
+        return "remote"
+    return "tie"
+
+
+def render_time_line(fields: list[tuple[str, float | None]]) -> Text:
+    """Render one dim, indented line of labeled timestamps for a side.
+
+    ``fields`` is a list of ``(label, ts)`` pairs composed by the caller so
+    each call site controls which times are semantically real:
+      * local side:           ``[("modified", m), ("created", b)]``
+      * remote sidecar (resolve): ``[("modified", m), ("pulled", b)]``
+        -- the sidecar's birthtime is the local iCloud-drop time, NOT the
+        peer's real creation, so it is labeled ``pulled``, never ``created``.
+      * remote (inline pull):  ``[("modified", m)]`` -- not on disk, so no
+        birthtime exists.
+
+    All values are locally-formatted ASCII date strings via :func:`format_ts`;
+    no peer-controlled bytes flow through here (those stay in the banners).
+    """
+    text = Text("    ")
+    text.append(
+        "  ·  ".join(f"{label} {format_ts(ts)}" for label, ts in fields),
+        style="dim",
+    )
+    return text
+
+
+def render_verdict(local_mtime: float | None, remote_mtime: float | None) -> Text | None:
+    """Render the ``-> SIDE is newer by N`` recency verdict line.
+
+    Returns None when the verdict can't be computed (either mtime
+    unreadable) so the caller simply omits the line. The delta is computed
+    BETWEEN THE TWO FILES (not vs wall-clock) so it is deterministic in
+    tests and stable across runs. Recency is a heuristic, not correctness --
+    the copy says "newer", never "correct".
+    """
+    side = newer_side(local_mtime, remote_mtime)
+    if side == "unknown":
+        return None
+    text = Text("  ")
+    if side == "tie":
+        text.append("-> same modified time on both sides", style="yellow")
+        return text
+    delta = format_age_delta((local_mtime or 0.0) - (remote_mtime or 0.0))
+    winner = "LOCAL" if side == "local" else "REMOTE"
+    color = "red" if side == "local" else "green"
+    text.append(f"-> {winner} is newer by {delta}", style=f"bold {color}")
+    return text

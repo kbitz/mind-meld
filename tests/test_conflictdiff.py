@@ -17,8 +17,13 @@ from rich.console import Console
 
 from mind_meld.conflictdiff import (
     count_divergent_lines,
+    format_age_delta,
+    format_ts,
+    newer_side,
     render_banner,
     render_prompt,
+    render_time_line,
+    render_verdict,
 )
 
 
@@ -316,3 +321,123 @@ class TestCountDivergentLines:
         # precisely so this isn't misread as two independent edits.
         diff = ["@@ -1,1 +1,1 @@", "-foo", "+bar"]
         assert count_divergent_lines(diff) == (1, 1, 2)
+
+
+class TestNewerPromptOption:
+    def test_newer_absent_by_default(self) -> None:
+        out = render_prompt("notes.md", "notes.sync-conflict-X.md", "post_inversion")
+        assert "(n)ewer" not in out
+
+    def test_newer_present_with_desc(self) -> None:
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            newer_available=True,
+            newer_desc="REMOTE, 2d newer",
+        )
+        assert "(n)ewer" in out
+        assert "keep the more recently modified file" in out
+        assert "REMOTE, 2d newer" in out
+
+    def test_newer_present_without_desc_on_tie(self) -> None:
+        # A tie still offers (n)ewer (pressing it re-prompts) but carries no
+        # winner annotation -- the parenthetical is omitted entirely.
+        out = render_prompt(
+            "notes.md",
+            "notes.sync-conflict-X.md",
+            "post_inversion",
+            newer_available=True,
+            newer_desc="",
+        )
+        newer_line = next(line for line in out.splitlines() if "(n)ewer" in line)
+        assert "keep the more recently modified file" in newer_line
+        assert "(" not in newer_line.split("modified file", 1)[1]
+
+
+class TestFormatTs:
+    def test_none_is_unknown(self) -> None:
+        assert format_ts(None) == "unknown"
+
+    def test_valid_ts_matches_pattern(self) -> None:
+        import re
+
+        # 2026-01-02 03:04 local time for *some* tz -- assert shape, not value
+        # (tz-dependent), so the test is deterministic everywhere.
+        out = format_ts(1_700_000_000.0)
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", out)
+
+    def test_overflowing_ts_is_unknown(self) -> None:
+        assert format_ts(float("inf")) == "unknown"
+
+
+class TestFormatAgeDelta:
+    def test_days(self) -> None:
+        assert format_age_delta(2 * 86400 + 100) == "2d"
+
+    def test_hours(self) -> None:
+        assert format_age_delta(5 * 3600) == "5h"
+
+    def test_minutes(self) -> None:
+        assert format_age_delta(12 * 60) == "12m"
+
+    def test_sub_minute(self) -> None:
+        assert format_age_delta(30) == "<1m"
+
+    def test_sign_ignored(self) -> None:
+        # The caller already knows which side is newer; magnitude only.
+        assert format_age_delta(-(3 * 3600)) == "3h"
+
+
+class TestNewerSide:
+    def test_local_newer(self) -> None:
+        assert newer_side(100.0, 50.0) == "local"
+
+    def test_remote_newer(self) -> None:
+        assert newer_side(50.0, 100.0) == "remote"
+
+    def test_tie(self) -> None:
+        assert newer_side(50.0, 50.0) == "tie"
+
+    def test_unknown_when_local_none(self) -> None:
+        assert newer_side(None, 50.0) == "unknown"
+
+    def test_unknown_when_remote_none(self) -> None:
+        assert newer_side(50.0, None) == "unknown"
+
+
+class TestRenderTimeLine:
+    def test_unknown_for_none(self) -> None:
+        assert render_time_line([("modified", None)]).plain.strip() == "modified unknown"
+
+    def test_multiple_fields_joined(self) -> None:
+        line = render_time_line([("modified", 1_700_000_000.0), ("created", 1_700_000_000.0)]).plain
+        assert "modified " in line
+        assert "created " in line
+        assert "·" in line  # the field separator
+
+    def test_pulled_label_for_remote_sidecar(self) -> None:
+        # The remote sidecar uses "pulled", never "created" -- its birthtime
+        # is the local iCloud-drop time, not the peer's real creation.
+        line = render_time_line([("modified", 1_700_000_000.0), ("pulled", 1_700_000_000.0)]).plain
+        assert "pulled " in line
+        assert "created" not in line
+
+
+class TestRenderVerdict:
+    def test_local_newer(self) -> None:
+        assert "LOCAL is newer by" in render_verdict(200.0, 100.0).plain
+
+    def test_remote_newer(self) -> None:
+        assert "REMOTE is newer by" in render_verdict(100.0, 200.0).plain
+
+    def test_tie_says_same_time(self) -> None:
+        assert "same modified time" in render_verdict(100.0, 100.0).plain
+
+    def test_unknown_returns_none(self) -> None:
+        assert render_verdict(None, 100.0) is None
+        assert render_verdict(100.0, None) is None
+
+    def test_delta_is_file_vs_file_not_wallclock(self) -> None:
+        # 2-day gap between the two files regardless of "now" -- deterministic.
+        assert "by 2d" in render_verdict(2 * 86400 + 100.0, 0.0).plain
