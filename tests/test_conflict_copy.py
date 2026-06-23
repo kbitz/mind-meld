@@ -2880,3 +2880,141 @@ class TestResolvePromote:
             f"pre-inversion canonical mtime must NOT be bumped (was {peer_mtime}, "
             f"now {after}) -- canonical holds peer's bytes intentionally"
         )
+
+
+class TestResolveNewerShortcut:
+    """`(n)ewer` at the mm resolve prompt keeps whichever side has the greater
+    mtime by remapping to the existing (l)/(r) dispatch. Verified through the
+    dispatch (resulting file state), not just the rendered option line --
+    a happy-path-only test would miss an inversion data-loss bug (Codex eng
+    review #5/#6/#8). All four mapping cases are covered.
+    """
+
+    @staticmethod
+    def _post_inversion_pair(tmp_path: Path, local_mtime: float, remote_mtime: float):
+        # post-inversion: canonical = local bytes, sidecar = remote bytes.
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"local content")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"remote content")
+        os.utime(canonical, (local_mtime, local_mtime))
+        os.utime(conflict, (remote_mtime, remote_mtime))
+        return canonical, conflict
+
+    @staticmethod
+    def _pre_inversion_pair(tmp_path: Path, local_mtime: float, remote_mtime: float):
+        # pre-inversion (v0-): canonical = remote bytes, sidecar = local bytes.
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"remote content")
+        conflict = tmp_path / "user.sync-conflict-v0-20260101-100000-devA1234.md"
+        conflict.write_bytes(b"local content")
+        os.utime(conflict, (local_mtime, local_mtime))  # local side = sidecar
+        os.utime(canonical, (remote_mtime, remote_mtime))  # remote side = canonical
+        return canonical, conflict
+
+    def test_post_inversion_remote_newer_keeps_remote(self, tmp_path: Path, monkeypatch) -> None:
+        canonical, conflict = self._post_inversion_pair(tmp_path, 100.0, 200.0)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        # newer == remote → same as (r): sidecar promoted over canonical.
+        assert canonical.read_bytes() == b"remote content"
+        assert not conflict.exists()
+
+    def test_post_inversion_local_newer_keeps_local(self, tmp_path: Path, monkeypatch) -> None:
+        canonical, conflict = self._post_inversion_pair(tmp_path, 300.0, 100.0)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        # newer == local → same as (l): canonical kept, sidecar unlinked.
+        assert canonical.read_bytes() == b"local content"
+        assert not conflict.exists()
+
+    def test_pre_inversion_local_newer_promotes_sidecar(self, tmp_path: Path, monkeypatch) -> None:
+        canonical, conflict = self._pre_inversion_pair(tmp_path, 300.0, 100.0)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        # local newer; pre-inversion (l) promotes the v0- sidecar (local bytes).
+        assert canonical.read_bytes() == b"local content"
+        assert not conflict.exists()
+
+    def test_pre_inversion_remote_newer_keeps_canonical(self, tmp_path: Path, monkeypatch) -> None:
+        canonical, conflict = self._pre_inversion_pair(tmp_path, 100.0, 300.0)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        # remote newer; pre-inversion (r) drops the local sidecar, canonical stays.
+        assert canonical.read_bytes() == b"remote content"
+        assert not conflict.exists()
+
+    def test_tie_reprompts_then_skips(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        canonical, conflict = self._post_inversion_pair(tmp_path, 150.0, 150.0)
+        choices = iter(["n", "s"])  # tie 'n' must re-prompt, then skip
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(choices))
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        # Nothing changed: tie 'n' did not advance/guess; the follow-up 's' skipped.
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
+        assert "equal mtime" in capsys.readouterr().out
+
+    def test_unreadable_mtime_suppresses_and_reprompts(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        canonical, conflict = self._post_inversion_pair(tmp_path, 100.0, 200.0)
+        # Force both stats to fail so (n)ewer is unavailable / unknown.
+        monkeypatch.setattr("mind_meld.cli._stat_mtime_btime", lambda p: (None, None))
+        choices = iter(["n", "s"])
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(choices))
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        # Typed 'n' while suppressed re-prompts (does not advance), then skip.
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
+        assert "unavailable" in capsys.readouterr().out
+
+    def test_canonical_none_typed_n_stays_skip(self, tmp_path: Path, monkeypatch) -> None:
+        # The canonical-is-None prompt is promote/delete/skip -- it offers no
+        # (n)ewer, and typed 'n' must remain a skip/no-op (Codex eng #4).
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"remote orphan")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, None)])
+        assert conflict.exists()  # untouched
+        assert (resolved, failed) == (0, 0)
+
+
+class TestInlinePromptTimestamps:
+    """The inline `mm pull --conflict-mode prompt` site shows timestamps + a
+    recency verdict but offers NO (n)ewer: _apply_incoming_file already skips
+    before prompting when local is newer (cli.py mtime gate), so remote is
+    always newer-or-equal there and (n)ewer would just alias (r).
+    """
+
+    def test_shows_remote_modified_from_manifest_and_no_newer_option(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        local = tmp_path / "user.md"
+        local.write_bytes(b"local content")
+        os.utime(local, (100.0, 100.0))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        remote_mtime = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
+        choice, merged = _prompt_conflict_choice(
+            "user.md", local, b"remote content", remote_mtime=remote_mtime
+        )
+        out = capsys.readouterr().out
+        assert "modified" in out  # both sides render a modified line
+        assert "2026-06-" in out  # remote modified came from the manifest dt
+        assert "(n)ewer" not in out  # no shortcut at the inline site
+        assert choice == "keep-both"  # 's' → keep-both
+
+    def test_typed_n_inline_falls_to_keep_both_not_keep_remote(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        local = tmp_path / "user.md"
+        local.write_bytes(b"local content")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
+        choice, merged = _prompt_conflict_choice(
+            "user.md",
+            local,
+            b"remote content",
+            remote_mtime=datetime(2026, 6, 20, tzinfo=timezone.utc),
+        )
+        # No inline (n) branch → unrecognized → keep-both (skip), NOT keep-remote.
+        assert choice == "keep-both"
+        assert merged is None

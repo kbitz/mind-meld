@@ -1161,6 +1161,8 @@ def _prompt_conflict_choice(
     remote_data: bytes,
     peer_name: str | None = None,
     ambiguous_count: int = 0,
+    *,
+    remote_mtime: datetime | None = None,
 ) -> tuple[str, bytes | None]:
     """Prompt interactively for how to handle one conflict. Default skip.
 
@@ -1170,6 +1172,13 @@ def _prompt_conflict_choice(
     matching peers when the device-id prefix collides (>=2); zero otherwise.
     Both flow into the REMOTE banner so the user sees attribution at the
     moment of the choice.
+
+    ``remote_mtime`` is the peer's modified time from the manifest (the
+    remote file is not on disk at this site, so this is the only remote
+    timestamp available). Keyword-only and trailing so it never shifts the
+    positional ``peer_name`` / ``ambiguous_count`` binding at the call site.
+    Used for the display + recency verdict only -- there is no ``(n)ewer``
+    shortcut here (see the stat block below for why).
 
     Returns ``(choice, merged_bytes)``. Choice is one of:
     ``keep-canonical`` (= keep local), ``keep-remote``, ``merge``,
@@ -1185,8 +1194,21 @@ def _prompt_conflict_choice(
         count_divergent_lines,
         render_banner,
         render_prompt,
+        render_time_line,
+        render_verdict,
     )
     from mind_meld.merge import lcs_merge
+
+    # Stat local for the timestamp display. Best-effort: a failed stat just
+    # renders "unknown". The remote side has NO on-disk file at this inline
+    # site, so its created/birthtime is genuinely unavailable -- only the
+    # manifest's modified time (passed in as ``remote_mtime``) is shown.
+    # NOTE: no ``(n)ewer`` shortcut here -- _apply_incoming_file already
+    # skipped before prompting when local is newer (cli.py mtime gate), so
+    # at this prompt remote is always newer-or-equal and "(n)ewer" would be
+    # a redundant alias of (r). Display + verdict only.
+    local_mtime_ts, local_btime_ts = _stat_mtime_btime(local_path)
+    remote_mtime_ts = remote_mtime.timestamp() if remote_mtime is not None else None
 
     local_read_failed = False
     try:
@@ -1227,6 +1249,7 @@ def _prompt_conflict_choice(
 
     console.print(f"\n[bold yellow]Conflict:[/bold yellow] {safe_rel}")
     console.print(render_banner("local", local_path.name, None))
+    console.print(render_time_line([("modified", local_mtime_ts), ("created", local_btime_ts)]))
     console.print(
         render_banner(
             "remote",
@@ -1235,6 +1258,10 @@ def _prompt_conflict_choice(
             ambiguous_count=ambiguous_count,
         )
     )
+    console.print(render_time_line([("modified", remote_mtime_ts)]))
+    _verdict = render_verdict(local_mtime_ts, remote_mtime_ts)
+    if _verdict is not None:
+        console.print(_verdict)
 
     # Inline pull-time site is post_inversion only (see comment above):
     # diff is local -> remote, so m = local-only, n = remote-only directly.
@@ -1380,6 +1407,24 @@ def _restore_mtime_best_effort(path: Path, mtime_iso: str | None) -> None:
         os.utime(path, (ts, ts))
     except (OSError, OverflowError):
         return
+
+
+def _stat_mtime_btime(path: Path) -> tuple[float | None, float | None]:
+    """Best-effort ``(mtime, birthtime)`` epoch floats for the conflict-prompt
+    timestamp display. Shared by both prompt sites.
+
+    Returns ``(None, None)`` on any stat failure (iCloud placeholder, race,
+    permission) so the renderer shows "unknown" rather than crashing the
+    prompt. ``st_birthtime`` is present on macOS/APFS; ``getattr`` guards
+    against filesystems that lack it (returns None there). The caller decides
+    what the birthtime MEANS per side -- genuine "created" for the local
+    file, "pulled" (local iCloud-drop time) for a restored remote sidecar.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    return st.st_mtime, getattr(st, "st_birthtime", None)
 
 
 def _bump_canonical_mtime_post_resolve(canonical: Path, peer_mtime: float) -> None:
@@ -1801,7 +1846,12 @@ def _apply_incoming_file(
             elif count > 1:
                 ambiguous_count = count
         choice, merged_bytes = _prompt_conflict_choice(
-            rel_path, local_path, plain_data, peer_name, ambiguous_count
+            rel_path,
+            local_path,
+            plain_data,
+            peer_name,
+            ambiguous_count,
+            remote_mtime=remote_mtime,
         )
         if choice == "keep-canonical":
             # Post-inversion: canonical IS local, so "keep-canonical" =
@@ -7014,8 +7064,12 @@ def _resolve_interactive_loop(
 
     from mind_meld.conflictdiff import (
         count_divergent_lines,
+        format_age_delta,
+        newer_side,
         render_banner,
         render_prompt,
+        render_time_line,
+        render_verdict,
     )
     from mind_meld.manifest import (
         is_pre_inversion_conflict_filename,
@@ -7155,7 +7209,18 @@ def _resolve_interactive_loop(
         # which strips terminal escapes via safe_text before they reach the
         # terminal (closes the same trust boundary safe_str closes for
         # filenames).
+        # Timestamp display. Both files are on disk here, so stat both. The
+        # local side shows genuine created+modified; the remote sidecar shows
+        # modified (the peer's restored source mtime) + "pulled" (the local
+        # iCloud-drop birthtime -- NOT the peer's real creation, so it is
+        # never labeled "created"). local_*/remote_* track the LOCAL vs REMOTE
+        # sides consistently regardless of inversion mode, so the verdict and
+        # the (n)ewer shortcut stay correct for v0- files too.
+        local_mtime_ts, local_btime_ts = _stat_mtime_btime(local_path_for_banner)
+        remote_mtime_ts, remote_btime_ts = _stat_mtime_btime(remote_path_for_banner)
+
         console.print(render_banner("local", local_path_for_banner.name, None))
+        console.print(render_time_line([("modified", local_mtime_ts), ("created", local_btime_ts)]))
         console.print(
             render_banner(
                 "remote",
@@ -7164,6 +7229,12 @@ def _resolve_interactive_loop(
                 ambiguous_count=ambiguous_count,
             )
         )
+        console.print(
+            render_time_line([("modified", remote_mtime_ts), ("pulled", remote_btime_ts)])
+        )
+        _verdict = render_verdict(local_mtime_ts, remote_mtime_ts)
+        if _verdict is not None:
+            console.print(_verdict)
 
         diff = list(
             difflib.unified_diff(
@@ -7226,6 +7297,19 @@ def _resolve_interactive_loop(
         # doesn't claim "drops 0 lines" when we couldn't actually compare.
         prompt_local_only: int | None = local_only if diff else None
         prompt_remote_only: int | None = remote_only if diff else None
+        # (n)ewer is offered when BOTH mtimes are readable (incl. a tie --
+        # pressing it on a tie re-prompts, see the input loop below). It maps
+        # to the existing (l)/(r) dispatch, so the per-mode keep-local /
+        # keep-remote semantics (and the mtime bump) come for free. nside is
+        # in LOCAL/REMOTE terms (we stat'd the banner paths), correct for
+        # both inversion modes.
+        nside = newer_side(local_mtime_ts, remote_mtime_ts)
+        newer_available = nside != "unknown"
+        if nside in ("local", "remote"):
+            _delta = format_age_delta((local_mtime_ts or 0.0) - (remote_mtime_ts or 0.0))
+            newer_desc = f"{'LOCAL' if nside == 'local' else 'REMOTE'}, {_delta} newer"
+        else:
+            newer_desc = ""  # tie: shown without a winner annotation
         console.print(
             render_prompt(
                 safe_str(canonical.name),
@@ -7234,47 +7318,77 @@ def _resolve_interactive_loop(
                 merge_available=merge_available,
                 merge_conflicts=max(merge_conflicts, 0),
                 promote_available=True,
+                newer_available=newer_available,
+                newer_desc=newer_desc,
                 local_only_lines=prompt_local_only,
                 remote_only_lines=prompt_remote_only,
             )
         )
-        # Default key is always (s)kip -- never (m)erge. See the matching
-        # comment in _prompt_conflict_choice: a clean LCS merge of two
-        # genuinely-different documents has zero markers, so Enter-defaulting
-        # to (m) is a one-keystroke silent-corruption footgun. (m)erge stays
-        # available; the user must type it.
+        # Default key is always (s)kip -- never (m)erge or (n)ewer. A clean
+        # LCS merge of two genuinely-different documents has zero markers, and
+        # "more recently modified" is a heuristic, not correctness -- Enter
+        # must not silently accept either. The user types m / n to pick them.
         prompt_default = "s"
-        choice = (
-            typer.prompt("  Choice", default=prompt_default, show_default=False).strip().lower()
-        )
-
-        # Backward-compat (v0.9.0 BREAKING): old letters `c` / `f` are still
-        # rejected loudly. They encoded directional ambiguity post-inversion
-        # (real silent-data-loss risk -- "kept canonical" meant local OR
-        # remote depending on inversion era). Exact-match (not startswith):
-        # otherwise "cancel" / "continue" would trip the rejection.
-        if choice in ("c", "f"):
-            print(
-                "mm: error: input letters 'c' and 'f' are no longer accepted. "
-                "Use (l)ocal to keep your local edits or (r)emote to keep "
-                "the other machine's bytes. (Old labels removed in v0.9.0.)",
-                file=sys.stderr,
+        # Loop ONLY the input read. (n)ewer remaps to (l)/(r) here; a tie or an
+        # unreadable-mtime 'n' re-prompts rather than skipping (never advance
+        # the conflict on an action keystroke). Every other choice breaks out
+        # to the existing dispatch below UNCHANGED -- the dispatch owns the
+        # apply side-effects, and its `continue` advances the OUTER for-loop,
+        # so wrapping the dispatch here would re-prompt a partially-applied
+        # conflict (Codex eng review #3). Loop the parse, not the dispatch.
+        while True:
+            choice = (
+                typer.prompt("  Choice", default=prompt_default, show_default=False).strip().lower()
             )
-            raise typer.Exit(1)
 
-        # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both
-        # files; no change" which is exactly what `(s)kip` does today. No
-        # silent-data-loss risk in mapping it through; emit a notice once
-        # so users learn the new letter, then perform skip semantics.
-        # Exact-match: "back"/"browse"/"between" must NOT silently trip
-        # the alias.
-        if choice in ("b", "both"):
-            print(
-                "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward "
-                "(alias removed at 1.0).",
-                file=sys.stderr,
-            )
-            choice = "s"
+            # Backward-compat (v0.9.0 BREAKING): old letters `c` / `f` are still
+            # rejected loudly. They encoded directional ambiguity post-inversion
+            # (real silent-data-loss risk -- "kept canonical" meant local OR
+            # remote depending on inversion era). Exact-match (not startswith):
+            # otherwise "cancel" / "continue" would trip the rejection.
+            if choice in ("c", "f"):
+                print(
+                    "mm: error: input letters 'c' and 'f' are no longer accepted. "
+                    "Use (l)ocal to keep your local edits or (r)emote to keep "
+                    "the other machine's bytes. (Old labels removed in v0.9.0.)",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(1)
+
+            # (n)ewer: keep the more recently modified side. Remaps to the
+            # existing (l)/(r) letters so the per-mode apply + mtime bump are
+            # reused verbatim. Never guesses -- on a tie or when a mtime was
+            # unreadable (option suppressed) it re-prompts with a note rather
+            # than advancing the conflict.
+            if choice in ("n", "newer"):
+                if nside == "local":
+                    choice = "l"
+                elif nside == "remote":
+                    choice = "r"
+                elif nside == "tie":
+                    console.print("  [dim]equal mtime — choose manually[/dim]")
+                    continue
+                else:  # unknown -- (n)ewer was not offered
+                    console.print(
+                        "  [dim](n)ewer unavailable (timestamp unreadable); "
+                        "choose (l)/(r)/(s)[/dim]"
+                    )
+                    continue
+
+            # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both
+            # files; no change" which is exactly what `(s)kip` does today. No
+            # silent-data-loss risk in mapping it through; emit a notice once
+            # so users learn the new letter, then perform skip semantics.
+            # Exact-match: "back"/"browse"/"between" must NOT silently trip
+            # the alias.
+            if choice in ("b", "both"):
+                print(
+                    "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward "
+                    "(alias removed at 1.0).",
+                    file=sys.stderr,
+                )
+                choice = "s"
+            break
 
         # Exact-match dispatch (not startswith): "leave" / "lookup" must
         # not silently keep local; "retry" / "remove" must not silently

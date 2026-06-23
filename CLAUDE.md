@@ -25,7 +25,7 @@ src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 
 
 `safety.py` (v0.11.1) — peer-controlled string sanitization (`safe_str`, `safe_text`, `strip_terminal_escapes`); cli.py re-exports for backwards compat. New tests should import from `mind_meld.safety` directly. See `docs/invariants/init-devices.md`.
 
-`conflictdiff.py` (v0.11.1) — pure leaf primitives for the conflict prompts (`render_prompt`, `render_banner`, `count_divergent_lines`); site-level dispatch stays at each call site. See `docs/invariants/conflicts.md`.
+`conflictdiff.py` (v0.11.1, extended v0.12.10) — pure leaf primitives for the conflict prompts (`render_prompt`, `render_banner`, `count_divergent_lines`, plus v0.12.10 timestamp/recency: `format_ts`, `format_age_delta`, `newer_side`, `render_time_line`, `render_verdict`); site-level dispatch stays at each call site. The v0.12.10 `(n)ewer` shortcut is `mm resolve`-only and remaps to the existing `(l)`/`(r)` dispatch (NOT a new apply branch); the inline prompt is display+verdict only because `_apply_incoming_file` already skips when local is newer. See `docs/invariants/conflicts.md`.
 
 `lockedjson.py` (v0.11.14) — extracted single-file flock R/M/W primitive shared by `upgrade.py`, `token_usage.py`, and `identity.py` (v0.11.17). Three contention modes: `block` / `raise` / `warn`. Do NOT route new flock-guarded JSON caches through ad-hoc fcntl calls; extend `lockedjson` if the contract needs to grow. `devices-write.lock` stays ad-hoc — its multi-file lock-on-sibling shape doesn't fit the single-file R/M/W contract.
 
@@ -71,9 +71,9 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
 | `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) / `_restore_mtime_best_effort` | `docs/invariants/sync.md` |
-| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_resolve_interactive_loop` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `_find_conflict_files` / `_bump_canonical_mtime_post_resolve` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
+| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_resolve_interactive_loop` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `_find_conflict_files` / `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
 | `cli.py:_record_inline_bump` / `_invalidate_inline_bump` / `_drain_inline_bumps` / `_CANONICAL_WRITE_OUTCOMES` / `pending_inline_bumps` plumbing through `_pull_core` / `_pull_one_source` / `_download_and_apply` (outcome-gated invalidation) | `docs/invariants/conflicts.md` |
-| `conflictdiff.py` / `merge.py:lcs_merge` / `manifest.py:parse_conflict_device_short` | `docs/invariants/conflicts.md` |
+| `conflictdiff.py` (incl. `format_ts` / `format_age_delta` / `newer_side` / `render_time_line` / `render_verdict`) / `merge.py:lcs_merge` / `manifest.py:parse_conflict_device_short` | `docs/invariants/conflicts.md` |
 | `cli.py:_register_and_save` / `_ensure_device_registered` / `init_cmd` / `_init_storage_guard` | `docs/invariants/init-devices.md` |
 | `devices.py` / `storage/local.py:put_exclusive` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |

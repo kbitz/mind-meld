@@ -4,6 +4,14 @@ Deferred work items. `/roadmap` organizes these into the execution plan.
 
 ## Inbox
 
+### [plan-eng-review] Future-clamped peer mtime can mislead the `(n)ewer` recency verdict
+- **What:** The conflict-prompt recency verdict and the `mm resolve` `(n)ewer` shortcut (v0.12.10) key off modified time. A peer with a clock ahead of real time has its restored sidecar mtime capped at `now + 60s` by `_restore_mtime_best_effort`'s future-clamp (`cli.py`). In the rare case where a peer's true mtime is >60s in the future AND the local file is also future-dated, the clamp can flatten or invert the "which is newer" comparison, so the verdict / `(n)ewer` could point at the wrong side.
+- **Why:** `/plan-ceo-review` T2 + Codex CEO-pass #3 (2026-06-23). Chose to keep the verdict ADVISORY rather than detect/suppress on clamp: the real timestamps are visible to the user, `(n)ewer` never auto-commits a tie, and the clamp exists precisely to neutralize bad-clock peers. Clamp-detection is also only partially possible (the `mm resolve` site can't see the original manifest mtime). Logged so dogfood can surface a real case before adding complexity.
+- **Pros of doing it:** Closes the last "recency is wrong" corner if it ever bites in practice.
+- **Cons:** Adds branching to detect "was this clamped" (only feasible at the inline site, which doesn't even offer `(n)ewer`); over-engineering for a near-impossible clock-skew case. Recency is already framed as a heuristic, not correctness, in the UI copy.
+- **Context:** Same family as the existing "peers we never consciously resolved against can be mtime-skipped by the drain" watch-item. Start at `_restore_mtime_best_effort` (the clamp) + `conflictdiff.render_verdict` / `newer_side`. Revisit only if dogfood shows real misdirection.
+- **Depends on / blocked by:** None — informational watch-item.
+
 ### [review] `_promote_target_will_sync` ignores `exclude_patterns`
 - **What:** `_promote_target_will_sync(src_cfg, target)` in `cli.py:6624` returns True if the promoted file lives inside one of the source's `_synced_scan_dirs`. But `walk_generic_source` (`manifest.py:435`) also applies `exclude_patterns` before recording files in the manifest. A target that sits in an included dir but matches an exclude glob (e.g. user configured `exclude_patterns: ["*.from-*"]`) would be reported as syncable here, the `mm: warning: ... will not sync` line would be suppressed, and the user would silently end up with a local-only "resolved" file.
 - **Why:** Codex /review 2026-05-15 (P2 finding on PR #97). The visible-failure contract says load-bearing warnings about sync degradation must surface — the helper's logic is too narrow to honor that contract in the exclude-pattern case.
