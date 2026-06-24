@@ -117,6 +117,27 @@ jobs:
             --title "$tag" \
             --notes-file "${{ steps.notes.outputs.notes_file }}"
 
+      - name: Advance latest branch to released commit
+        # The `latest` branch is the moving ref that `pipx install …@latest`
+        # (and the auto-upgrade nudge) tracks, so `pipx upgrade mind-meld`
+        # actually advances. A git tag is frozen — pipx re-resolves the same
+        # `@vX.Y.Z` commit forever, which is the lock users hit. A branch ref
+        # re-resolves to its HEAD, so force-advancing `latest` to each tagged
+        # release commit is what makes upgrades land. `latest` only ever points
+        # at released commits, so installs never get untagged WIP off main.
+        #
+        # Runs AFTER tag + Release so a transient push hiccup on this convenience
+        # ref never delays the primary artifacts. Unconditional + force =
+        # idempotent: a re-run force-pushes the same commit, and the tag/Release
+        # steps above no-op via their existence checks. `latest` is NOT a
+        # protected branch, so the workflow token can push to it directly
+        # (unlike main). HEAD is this release's commit.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push origin "+HEAD:refs/heads/latest"
+          echo "Advanced latest -> $(git rev-parse HEAD) (${{ steps.ver.outputs.tag }})"
+
       - name: Verify PROGRESS.md row exists
         run: |
           version="${{ steps.ver.outputs.version }}"
