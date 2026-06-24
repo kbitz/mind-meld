@@ -54,7 +54,16 @@ CACHE_PATH = CACHE_DIR / "upgrade-state.json"
 # After 100 tags, the latest semver may not be on page 1 (GitHub /tags sort
 # is unspecified); revisit then. See plan §"Pagination" for analysis.
 TAGS_API_URL = "https://api.github.com/repos/kbitz/mind-meld/tags?per_page=100"
-INSTALL_CMD_TEMPLATE = "pipx install --force git+https://github.com/kbitz/mind-meld.git@{tag}"
+# Upgrade command tracks the moving `latest` branch (force-advanced to each
+# tagged release by .github/workflows/release.yml), NOT a frozen `@vX.Y.Z` tag.
+# A git `@<ref>` is a URL fragment, not a PEP508 version specifier, so pipx's
+# `parse_specifier_for_upgrade` keeps it verbatim on `pipx upgrade`: a tag ref
+# re-resolves to the same frozen commit forever (the historical lock — install
+# stuck on one version), while a branch ref re-resolves to its advancing HEAD.
+# The `--force` reinstall both lands the latest release AND rewrites a
+# previously tag-pinned install's recorded URL onto `@latest`, after which a
+# plain `pipx upgrade mind-meld` works. See docs/invariants/auto-upgrade.md.
+INSTALL_CMD = "pipx install --force git+https://github.com/kbitz/mind-meld.git@latest"
 
 DEFAULT_THROTTLE = timedelta(hours=24)
 DEFAULT_NUDGE_GAP = timedelta(hours=24)
@@ -320,8 +329,10 @@ def check_for_upgrade(
                 )
 
             # Upgrade available. Apply nudge gate: last_nudged_version != latest
-            # OR last_nudged_at + 24h past.
-            install_cmd = INSTALL_CMD_TEMPLATE.format(tag=f"v{cached_latest}")
+            # OR last_nudged_at + 24h past. The command is version-independent
+            # (tracks the `latest` branch); the target version lives in the
+            # nudge message text, not the command.
+            install_cmd = INSTALL_CMD
             last_nudged_version = ljson.data.get("last_nudged_version")
             last_nudged_at = _parse_iso(ljson.data.get("last_nudged_at"))
             version_changed = last_nudged_version != cached_latest
@@ -523,7 +534,7 @@ __all__ = [
     "CACHE_DIR",
     "CACHE_PATH",
     "DEV_BUILD_SENTINEL",
-    "INSTALL_CMD_TEMPLATE",
+    "INSTALL_CMD",
     "TAGS_API_URL",
     "UpgradeCheckResult",
     "check_for_upgrade",

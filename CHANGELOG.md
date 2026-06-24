@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.11] - 2026-06-23
+
+**`pipx upgrade mind-meld` now works — the auto-upgrade nudge and install instructions track a moving `latest` branch instead of pinning to a frozen `@vX.Y.Z` tag.** Previously, every upgrade left your install stuck: the nudge printed `pipx install --force git+...@vX.Y.Z`, which records that exact tag as pipx's `package_or_url`. Because a git `@<ref>` is a URL fragment (not a PEP508 version specifier), pipx's `parse_specifier_for_upgrade` keeps it verbatim, so `pipx upgrade` re-resolves the same frozen commit forever and reports your current version as "latest." Confirmed against pipx 1.14.1's own source. v0.12.10 (#99) only *documented* this footgun; this release removes it.
+
+**The fix.** A git tag never moves; a branch does. The release workflow now force-advances a `latest` branch to each tagged release commit (`.github/workflows/release.yml` "Advance latest branch" step), and the nudge/install commands target `@latest`. A branch ref re-resolves to its advancing HEAD on `pipx upgrade`, so upgrades land. `latest` only ever points at *released* commits — never untagged WIP that may sit on `main` — so it respects the "tag = release" discipline while still being a moving target.
+
+**One-time un-sticking.** The nudge command stays `pipx install --force git+...@latest`. The `--force` reinstall both lands the newest release AND rewrites a previously tag-pinned install's recorded URL onto `@latest`, after which plain `pipx upgrade mind-meld` works for good. If you're currently frozen on an old `@vX.Y.Z` pin, run that command once.
+
+**Scope.** `INSTALL_CMD` in `upgrade.py` is now a single version-independent constant (was a per-version `@{tag}` template); the target version lives only in the nudge message text. `mm status` surfacing flows through unchanged. README Install / Upgrading / second-Mac sections and the auto-upgrade-nudge bullet updated to `@latest`. New load-bearing section in `docs/invariants/auto-upgrade.md` pinning the branch-not-tag invariant. `tests/test_upgrade.py` asserts the command carries `@latest` and never a `@vX.Y.Z` pin.
+
 ## [0.12.10] - 2026-06-23
 
 **Conflict-resolution prompts now show created/modified timestamps for each side plus a recency verdict, and `mm resolve` gains an `(n)ewer` shortcut that keeps whichever file was modified more recently.** When two machines diverge on a file, you can now see when each version was created and last modified without leaving the terminal, and a `-> REMOTE is newer by 2d` verdict line states which side is more recent and by how much. In `mm resolve`, pressing `(n)` keeps the more recently modified side.

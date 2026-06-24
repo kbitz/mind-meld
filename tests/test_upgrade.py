@@ -165,7 +165,11 @@ class TestCheckHappy:
         assert result.state == "upgrade-available"
         assert result.local == "0.9.3"
         assert result.latest == "0.9.4"
-        assert result.install_cmd == upgrade.INSTALL_CMD_TEMPLATE.format(tag="v0.9.4")
+        # Command tracks the moving `latest` branch — version-independent, no
+        # `@vX.Y.Z` pin (the pin is what froze `pipx upgrade`).
+        assert result.install_cmd == upgrade.INSTALL_CMD
+        assert "@latest" in result.install_cmd
+        assert "@v0.9.4" not in result.install_cmd
         assert result.should_nudge is True
 
     def test_current_when_local_equals_latest(self, monkeypatch):
