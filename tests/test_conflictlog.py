@@ -17,9 +17,17 @@ class TestAppendDecision:
     def test_writes_wellformed_row(self, tmp_path, monkeypatch):
         monkeypatch.setattr(conflictlog, "LOG_DIR", tmp_path)
         ok = conflictlog.append_decision(
-            device="dev1", source="claude", rel_path="memory/x.md", site="resolve",
-            mode="post_inversion", choice="local", via="typed", outcome="resolved",
-            similarity=0.9, merge_conflicts=0, binary=False,
+            device="dev1",
+            source="claude",
+            rel_path="memory/x.md",
+            site="resolve",
+            mode="post_inversion",
+            choice="local",
+            via="typed",
+            outcome="resolved",
+            similarity=0.9,
+            merge_conflicts=0,
+            binary=False,
         )
         assert ok is True
         rows = list(conflictlog.read_records())

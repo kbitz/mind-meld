@@ -7416,8 +7416,10 @@ def _resolve_interactive_loop(
                     "site": "resolve",
                     "mode": "canonical_missing",
                     "choice": {
-                        "p": "promote", "promote": "promote",
-                        "d": "delete", "delete": "delete",
+                        "p": "promote",
+                        "promote": "promote",
+                        "d": "delete",
+                        "delete": "delete",
                     }.get(choice, "skip"),
                     "via": "typed",
                     "outcome": (
@@ -7898,10 +7900,14 @@ def _resolve_interactive_loop(
                 **_tele_feat,
                 "site": "resolve",
                 "choice": {
-                    "l": "local", "local": "local",
-                    "r": "remote", "remote": "remote",
-                    "m": "merge", "merge": "merge",
-                    "p": "promote", "promote": "promote",
+                    "l": "local",
+                    "local": "local",
+                    "r": "remote",
+                    "remote": "remote",
+                    "m": "merge",
+                    "merge": "merge",
+                    "p": "promote",
+                    "promote": "promote",
                 }.get(choice, "skip"),
                 "via": _via,
                 "outcome": (

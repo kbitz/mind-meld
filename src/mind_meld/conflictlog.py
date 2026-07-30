@@ -4,7 +4,8 @@ Collects a labeled dataset of real conflict resolutions -- the features a future
 auto-resolver would see at decision time, paired with the choice the user made --
 so the deferred Phase 2 similarity classifier can be validated on real mind-meld
 content before it gates any silent merge. See TODOS.md `[plan-eng-review]` Phase 2
-and the plan at `~/.gstack/projects/kbitz-mind-meld/kb-kbitz-conflict-resolution-log-design-20260730.md`.
+and the design doc `kb-kbitz-conflict-resolution-log-design-20260730.md` under
+`~/.gstack/projects/kbitz-mind-meld/`.
 
 DISPOSABLE. Rip out once Phase 2 thresholds are validated: delete this module,
 `grep -rn "CONFLICT-TELEMETRY"` and remove each call site + the
