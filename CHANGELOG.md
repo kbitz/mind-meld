@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.12] - 2026-07-30
+
+**Temporary conflict-decision telemetry to inform a future auto-resolver.** `mm resolve` now records each conflict resolution — the features a future auto-resolver would see (LCS similarity, merge-cleanliness, divergence line counts, recency) paired with the choice you actually made — to a local, best-effort JSONL at `~/.config/mind-meld/conflict-decisions.jsonl`. This is the labeled dataset the deferred Phase 2 similarity classifier was blocked on: validating its thresholds against real decisions is the prerequisite before it could ever gate a silent merge. Zero change to the pull/autopull hot path, and logging never raises into a resolution.
+
+**Backfill from existing sidecars.** A hidden, opt-in `mm conflict-log-backfill` seeds the dataset from the `.sync-conflict-*` files already on disk, quarantined as context (not training labels) since a surviving sidecar is an implicit skip. It holds the mm lock only for discovery, then releases it before reads so a slow iCloud placeholder materialization can't wedge background autopull/autopush.
+
+**Disposable by design.** Every call site carries a grep-able `# CONFLICT-TELEMETRY (temporary)` sentinel; the whole collector is scheduled for removal once the Phase 2 thresholds validate (tracked in `TODOS.md`). The log is local-only and never synced.
+
 ## [0.12.11] - 2026-06-23
 
 **`pipx upgrade mind-meld` now works — the auto-upgrade nudge and install instructions track a moving `latest` branch instead of pinning to a frozen `@vX.Y.Z` tag.** Previously, every upgrade left your install stuck: the nudge printed `pipx install --force git+...@vX.Y.Z`, which records that exact tag as pipx's `package_or_url`. Because a git `@<ref>` is a URL fragment (not a PEP508 version specifier), pipx's `parse_specifier_for_upgrade` keeps it verbatim, so `pipx upgrade` re-resolves the same frozen commit forever and reports your current version as "latest." Confirmed against pipx 1.14.1's own source. v0.12.10 (#99) only *documented* this footgun; this release removes it.
