@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,7 @@ from rich.table import Table
 
 from mind_meld import (
     __version__,
+    conflictlog,
     events,
     fsutil,
     identity,
@@ -7022,7 +7024,10 @@ def resolve(
         # reads can spike to multi-second per call.
         devices = list_devices(backend)
         sources_by_name = {s["name"]: s for s in get_sources(config)}
-        _, failed = _resolve_interactive_loop(hits, devices, sources_by_name)
+        # CONFLICT-TELEMETRY (temporary): device is THIS collector machine.
+        _, failed = _resolve_interactive_loop(
+            hits, devices, sources_by_name, device_id=config["device"]["id"]
+        )
     finally:
         release_lock()
 
@@ -7034,10 +7039,208 @@ def resolve(
         raise typer.Exit(1)
 
 
+@app.command(name="conflict-log-backfill", hidden=True)
+def conflict_log_backfill_cmd() -> None:
+    """CONFLICT-TELEMETRY (temporary): seed the conflict-decision log from the
+    .sync-conflict-* sidecars currently on disk.
+
+    Opt-in and hidden -- run once per Mac to bootstrap the dataset from
+    accumulated conflicts. Rows are QUARANTINED (site="backfill",
+    choice="deferred"): a surviving sidecar is an implicit skip, not a labeled
+    decision, so analysis treats these as context only, never training labels.
+
+    Runs UNDER the mm lockfile with the same migrate-pre-inversion discovery as
+    `mm resolve`, so it can't race an autopull's rename/unlink. Reading an
+    iCloud placeholder may block; a hung read is NOT rescued (best-effort
+    covers raises, not hangs). Re-running dedups against existing backfill rows.
+    """
+    from mind_meld.conflictdiff import newer_side
+    from mind_meld.manifest import parse_conflict_device_short
+
+    config = _get_config()
+    device_id = config["device"]["id"]
+
+    try:
+        acquire_lock()
+    except LockError as e:
+        _error(str(e))
+
+    written = 0
+    skipped = 0
+    hits: list[tuple[str, Path, Path | None]] = []
+    try:
+        hits = _find_conflict_files(config, migrate_pre_inversion=True)
+        sources_by_name = {s["name"]: s for s in get_sources(config)}
+        # Dedup only backfill rows -- resolve rows are real repeated human
+        # decisions and must never be suppressed. Key mirrors the schema.
+        seen = {
+            (r.get("source"), r.get("rel_path"), r.get("local_sha"), r.get("remote_sha"))
+            for r in conflictlog.read_records()
+            if r.get("site") == "backfill"
+        }
+        for src_name, cpath, canonical in hits:
+            base = {
+                "device": device_id,
+                "source": src_name,
+                "rel_path": _conflict_rel_path(sources_by_name, src_name, cpath),
+                "ext": (canonical or cpath).suffix.lstrip("."),
+                "peer_short": parse_conflict_device_short(cpath.name),
+            }
+            try:
+                cpath_bytes = cpath.read_bytes()
+            except OSError:
+                skipped += 1
+                continue
+
+            if canonical is None:
+                # No two-file pair; record identity + the sidecar's sha for dedup.
+                sha = hashlib.sha256(cpath_bytes).hexdigest()
+                key = (src_name, base["rel_path"], None, sha)
+                if key in seen:
+                    skipped += 1
+                    continue
+                ok = conflictlog.append_decision(
+                    **base,
+                    site="backfill",
+                    mode="canonical_missing",
+                    choice="deferred",
+                    via="backfill-implicit",
+                    outcome="deferred",
+                    remote_sha=sha,
+                )
+                if ok:
+                    written += 1
+                    seen.add(key)
+                else:
+                    skipped += 1
+                continue
+
+            try:
+                canonical_bytes = canonical.read_bytes()
+            except OSError:
+                skipped += 1
+                continue
+
+            # Semantic local/remote by inversion era (same mapping as resolve).
+            if is_pre_inversion_conflict_filename(cpath.name):
+                local_data, remote_data = cpath_bytes, canonical_bytes
+                local_path, remote_path, mode = cpath, canonical, "pre_inversion"
+            else:
+                local_data, remote_data = canonical_bytes, cpath_bytes
+                local_path, remote_path, mode = canonical, cpath, "post_inversion"
+
+            feat = _conflict_feature_dict(local_data, remote_data)
+            key = (src_name, base["rel_path"], feat["local_sha"], feat["remote_sha"])
+            if key in seen:
+                skipped += 1
+                continue
+            lmt, _ = _stat_mtime_btime(local_path)
+            rmt, _ = _stat_mtime_btime(remote_path)
+            ok = conflictlog.append_decision(
+                **base,
+                **feat,
+                site="backfill",
+                mode=mode,
+                choice="deferred",
+                via="backfill-implicit",
+                outcome="deferred",
+                local_mtime=lmt,
+                remote_mtime=rmt,
+                newer_side=newer_side(lmt, rmt),
+            )
+            if ok:
+                written += 1
+                seen.add(key)
+            else:
+                skipped += 1
+    finally:
+        release_lock()
+
+    console.print(
+        f"conflict-log-backfill: {written} written, {skipped} skipped "
+        f"({len(hits)} sidecars) -> {conflictlog.log_path()}"
+    )
+
+
+# CONFLICT-TELEMETRY (temporary): skip O(n*m) similarity/diff work above this
+# size so a pathological large conflict file can't stall a resolve/backfill.
+_MAX_FEATURE_BYTES = 512 * 1024
+
+
+def _conflict_feature_dict(local_data: bytes, remote_data: bytes) -> dict[str, Any]:
+    """CONFLICT-TELEMETRY (temporary): semantic feature snapshot for one conflict.
+
+    ``local_data`` is always the user's side and ``remote_data`` the peer's
+    (callers map inversion mode before calling), so ``local_only_lines`` /
+    ``remote_only_lines`` need no per-mode swap here. The classifier-candidate
+    features (similarity, merge_conflicts, divergence, line counts) are null for
+    binary input OR files over ``_MAX_FEATURE_BYTES``; sizes + content shas are
+    always recorded. Uses ``merge.similarity_ratio`` / ``lcs_merge`` so the
+    ``similarity`` metric matches what a future silarity-gated auto-resolver
+    would compute (dataset validity depends on that parity).
+    """
+    import difflib
+
+    from mind_meld.conflictdiff import count_divergent_lines
+    from mind_meld.merge import lcs_merge, similarity_ratio
+
+    feat: dict[str, Any] = {
+        "local_sha": hashlib.sha256(local_data).hexdigest(),
+        "remote_sha": hashlib.sha256(remote_data).hexdigest(),
+        "local_bytes": len(local_data),
+        "remote_bytes": len(remote_data),
+        "similarity": None,
+        "merge_conflicts": None,
+        "merge_available": False,
+        "local_only_lines": None,
+        "remote_only_lines": None,
+        "total_diff_lines": None,
+        "local_lines": None,
+        "remote_lines": None,
+        "binary": True,
+    }
+    _, merge_conflicts = lcs_merge(local_data, remote_data)
+    if merge_conflicts < 0:  # binary / non-UTF-8 (the -1 sentinel)
+        return feat
+    feat["binary"] = False
+    feat["merge_available"] = True
+    if max(len(local_data), len(remote_data)) > _MAX_FEATURE_BYTES:
+        return feat  # too large: skip similarity/diff, keep sizes + shas
+    local_text = local_data.decode("utf-8", "replace").splitlines()
+    remote_text = remote_data.decode("utf-8", "replace").splitlines()
+    diff = list(difflib.unified_diff(local_text, remote_text, lineterm="", n=3))
+    m, n, k = count_divergent_lines(diff)
+    feat["similarity"] = similarity_ratio(local_data, remote_data)
+    feat["merge_conflicts"] = merge_conflicts
+    feat["local_only_lines"] = m
+    feat["remote_only_lines"] = n
+    feat["total_diff_lines"] = k
+    feat["local_lines"] = len(local_text)
+    feat["remote_lines"] = len(remote_text)
+    return feat
+
+
+def _conflict_rel_path(sources_by_name: dict[str, dict], src_name: str, path: Path) -> str:
+    """CONFLICT-TELEMETRY (temporary): best-effort path-within-source for a row.
+
+    Falls back to the bare filename when the source base isn't resolvable, so a
+    logging call can never raise on a config/stat quirk.
+    """
+    src = sources_by_name.get(src_name) if sources_by_name else None
+    if src:
+        try:
+            base = Path(src["path"]).expanduser().resolve()
+            return str(path.resolve().relative_to(base))
+        except (OSError, ValueError, KeyError):
+            pass
+    return path.name
+
+
 def _resolve_interactive_loop(
     hits: list[tuple[str, Path, Path | None]],
     devices: list[dict[str, Any]] | None = None,
     sources_by_name: dict[str, dict] | None = None,
+    device_id: str | None = None,
 ) -> tuple[int, int]:
     """Walk each conflict and prompt for resolution. Extracted so `resolve`
     stays a thin wrapper around acquire/release lock boilerplate.
@@ -7086,6 +7289,16 @@ def _resolve_interactive_loop(
             f"\n[bold yellow]Conflict in {safe_str(src_name)}:[/bold yellow] {safe_str(cpath)}"
         )
 
+        # CONFLICT-TELEMETRY (temporary): identity fields shared by every row
+        # this conflict emits. peer_short is parsed from the sidecar filename.
+        _tele_base = {
+            "device": device_id,
+            "source": src_name,
+            "rel_path": _conflict_rel_path(sources_by_name, src_name, cpath),
+            "ext": (canonical or cpath).suffix.lstrip("."),
+            "peer_short": parse_conflict_device_short(cpath.name),
+        }
+
         if canonical is None:
             # Dual-mode preface by filename prefix. Pre-inversion (`v0-`)
             # files were produced when sidecar = local bytes; post-inversion
@@ -7115,6 +7328,8 @@ def _resolve_interactive_loop(
                 .strip()
                 .lower()
             )
+            # CONFLICT-TELEMETRY (temporary): snapshot to derive real outcome.
+            _r0, _f0 = resolved, failed
             # Exact-match dispatch (not startswith): "post"/"plan"/"description"
             # must not silently promote/delete. (codex /review v0.9.0)
             if choice in ("p", "promote"):
@@ -7138,6 +7353,22 @@ def _resolve_interactive_loop(
                     console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
                     failed += 1
             # else: skip (default)
+            # CONFLICT-TELEMETRY (temporary): canonical-missing decision. No
+            # two-file feature pair exists here, so features stay absent.
+            conflictlog.append_decision(
+                **_tele_base,
+                site="resolve",
+                mode="canonical_missing",
+                choice={"p": "promote", "promote": "promote", "d": "delete", "delete": "delete"}.get(
+                    choice, "skip"
+                ),
+                via="typed",
+                outcome=(
+                    "resolved"
+                    if resolved > _r0
+                    else ("failed" if failed > _f0 else "skipped")
+                ),
+            )
             continue
 
         # Dual-mode dispatch by filename prefix. `v0-` = pre-inversion
@@ -7324,6 +7555,22 @@ def _resolve_interactive_loop(
                 remote_only_lines=prompt_remote_only,
             )
         )
+        # CONFLICT-TELEMETRY (temporary): feature snapshot on the SEMANTIC
+        # local/remote bytes (local always the user's side). mtimes + newer_side
+        # come from the already-computed banner values. Built here (once both
+        # files are read) so every terminal dispatch site can log a full row.
+        if is_pre_inversion:
+            _local_data, _remote_data = cpath_bytes, canonical_bytes
+        else:
+            _local_data, _remote_data = canonical_bytes, cpath_bytes
+        _tele_feat = {
+            "mode": mode,
+            "local_mtime": local_mtime_ts,
+            "remote_mtime": remote_mtime_ts,
+            "newer_side": nside,
+            **_conflict_feature_dict(_local_data, _remote_data),
+        }
+
         # Default key is always (s)kip -- never (m)erge or (n)ewer. A clean
         # LCS merge of two genuinely-different documents has zero markers, and
         # "more recently modified" is a heuristic, not correctness -- Enter
@@ -7340,6 +7587,9 @@ def _resolve_interactive_loop(
             choice = (
                 typer.prompt("  Choice", default=prompt_default, show_default=False).strip().lower()
             )
+            # CONFLICT-TELEMETRY (temporary): remember the raw keystroke before
+            # the (n)ewer remap below so `via` can distinguish the shortcut.
+            raw_choice = choice
 
             # Backward-compat (v0.9.0 BREAKING): old letters `c` / `f` are still
             # rejected loudly. They encoded directional ambiguity post-inversion
@@ -7389,6 +7639,12 @@ def _resolve_interactive_loop(
                 )
                 choice = "s"
             break
+
+        # CONFLICT-TELEMETRY (temporary): via + outcome-snapshot for the row(s)
+        # this dispatch will emit. `via` reflects how the user picked, not the
+        # remapped letter; outcome is derived from the resolved/failed delta.
+        _via = "newer-shortcut" if raw_choice in ("n", "newer") else "typed"
+        _r0, _f0 = resolved, failed
 
         # Exact-match dispatch (not startswith): "leave" / "lookup" must
         # not silently keep local; "retry" / "remove" must not silently
@@ -7472,6 +7728,11 @@ def _resolve_interactive_loop(
                         f"{safe_str(e)}"
                     )
                     failed += 1
+                    # CONFLICT-TELEMETRY (temporary): merge chosen, write failed.
+                    conflictlog.append_decision(
+                        **_tele_base, **_tele_feat, site="resolve",
+                        choice="merge", via=_via, outcome="failed",
+                    )
                     continue
                 # Sidecar unlink is best-effort: canonical already holds the
                 # merged bytes, so a unlink failure is cosmetic. Stale
@@ -7550,6 +7811,26 @@ def _resolve_interactive_loop(
             # unrecognized input. Both files stay on disk; user can run
             # `mm resolve` later or delete the .sync-conflict-* manually.
             console.print("  [dim]skipped; both files left on disk[/dim]")
+
+        # CONFLICT-TELEMETRY (temporary): one row per canonical-exists decision
+        # that reached here (l/r/merge-success/promote/skip; abort raised out,
+        # merge-write-fail + read-fail logged/handled above). Outcome is the
+        # real post-apply result, not the typed choice.
+        conflictlog.append_decision(
+            **_tele_base,
+            **_tele_feat,
+            site="resolve",
+            choice={
+                "l": "local", "local": "local",
+                "r": "remote", "remote": "remote",
+                "m": "merge", "merge": "merge",
+                "p": "promote", "promote": "promote",
+            }.get(choice, "skip"),
+            via=_via,
+            outcome=(
+                "resolved" if resolved > _r0 else ("failed" if failed > _f0 else "skipped")
+            ),
+        )
 
     if failed:
         console.print(f"\n[bold]Resolved {resolved} of {len(hits)}; {failed} failed.[/bold]")
