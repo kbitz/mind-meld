@@ -89,6 +89,23 @@ def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_conflictlog(monkeypatch, tmp_path) -> None:
+    """Redirect ``mind_meld.conflictlog.LOG_DIR`` to a per-test path.
+
+    CONFLICT-TELEMETRY (temporary): the ``mm resolve`` walk now appends a
+    conflict-decision row via ``conflictlog.append_decision``, which writes
+    ``~/.config/mind-meld/conflict-decisions.jsonl`` by default. Without
+    isolation, every test that drives ``_resolve_interactive_loop``
+    (test_conflict_copy) would pollute the user's real config dir. ``LOG_DIR``
+    is module-level and read at call time inside ``log_path()``, so a single
+    ``setattr`` suffices. Remove this fixture when the telemetry is ripped out.
+    """
+    from mind_meld import conflictlog as _conflictlog
+
+    monkeypatch.setattr(_conflictlog, "LOG_DIR", tmp_path / "conflictlog")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_token_cache(monkeypatch, tmp_path) -> None:
     """Redirect ``mind_meld.token_usage.CACHE_PATH`` to a per-test path
     and reset all per-process warning sets.
