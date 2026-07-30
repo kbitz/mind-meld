@@ -7039,6 +7039,113 @@ def resolve(
         raise typer.Exit(1)
 
 
+def _backfill_conflict_log(
+    hits: list[tuple[str, Path, Path | None]],
+    sources_by_name: dict[str, dict],
+    device_id: str,
+) -> tuple[int, int, int, int]:
+    """CONFLICT-TELEMETRY (temporary): append quarantined backfill rows for the
+    already-discovered conflict ``hits``. Extracted from the command so it runs
+    OUTSIDE the mm lock (reads can block on iCloud) and is unit-testable without
+    config/lock/backend setup. Returns ``(written, deduped, read_failed,
+    write_failed)`` -- separate counters so the operator can tell "already had
+    it" from "couldn't read/write it".
+    """
+    from mind_meld.conflictdiff import newer_side
+    from mind_meld.manifest import parse_conflict_device_short
+
+    written = deduped = read_failed = write_failed = 0
+    # Dedup only backfill rows -- resolve rows are real repeated human decisions
+    # and must never be suppressed. Key mirrors the schema.
+    seen = {
+        (r.get("source"), r.get("rel_path"), r.get("local_sha"), r.get("remote_sha"))
+        for r in conflictlog.read_records()
+        if r.get("site") == "backfill"
+    }
+    for src_name, cpath, canonical in hits:
+        base = {
+            "device": device_id,
+            "source": src_name,
+            "rel_path": _conflict_rel_path(sources_by_name, src_name, cpath),
+            "ext": (canonical or cpath).suffix.lstrip("."),
+            "peer_short": parse_conflict_device_short(cpath.name),
+        }
+        try:
+            cpath_bytes = cpath.read_bytes()
+        except OSError:
+            read_failed += 1
+            continue
+
+        if canonical is None:
+            # No two-file pair; record identity + the sidecar's sha for dedup.
+            sha = hashlib.sha256(cpath_bytes).hexdigest()
+            key = (src_name, base["rel_path"], None, sha)
+            if key in seen:
+                deduped += 1
+                continue
+            # Pre-merge into one dict then spread once (never raises on a
+            # duplicate key, unlike f(**a, **b)); backfill needs the bool.
+            ok = conflictlog.append_decision(
+                **{
+                    **base,
+                    "site": "backfill",
+                    "mode": "canonical_missing",
+                    "choice": "deferred",
+                    "via": "backfill-implicit",
+                    "outcome": "deferred",
+                    "remote_sha": sha,
+                }
+            )
+            if ok:
+                written += 1
+                seen.add(key)
+            else:
+                write_failed += 1
+            continue
+
+        try:
+            canonical_bytes = canonical.read_bytes()
+        except OSError:
+            read_failed += 1
+            continue
+
+        # Semantic local/remote by inversion era (same mapping as resolve).
+        if is_pre_inversion_conflict_filename(cpath.name):
+            local_data, remote_data = cpath_bytes, canonical_bytes
+            local_path, remote_path, mode = cpath, canonical, "pre_inversion"
+        else:
+            local_data, remote_data = canonical_bytes, cpath_bytes
+            local_path, remote_path, mode = canonical, cpath, "post_inversion"
+
+        feat = _conflict_feature_dict(local_data, remote_data)
+        key = (src_name, base["rel_path"], feat["local_sha"], feat["remote_sha"])
+        if key in seen:
+            deduped += 1
+            continue
+        lmt, _ = _stat_mtime_btime(local_path)
+        rmt, _ = _stat_mtime_btime(remote_path)
+        ok = conflictlog.append_decision(
+            **{
+                **base,
+                **feat,
+                "site": "backfill",
+                "mode": mode,
+                "choice": "deferred",
+                "via": "backfill-implicit",
+                "outcome": "deferred",
+                "local_mtime": lmt,
+                "remote_mtime": rmt,
+                "newer_side": newer_side(lmt, rmt),
+            }
+        )
+        if ok:
+            written += 1
+            seen.add(key)
+        else:
+            write_failed += 1
+    return written, deduped, read_failed, write_failed
+
+
 @app.command(name="conflict-log-backfill", hidden=True)
 def conflict_log_backfill_cmd() -> None:
     """CONFLICT-TELEMETRY (temporary): seed the conflict-decision log from the
@@ -7049,115 +7156,35 @@ def conflict_log_backfill_cmd() -> None:
     choice="deferred"): a surviving sidecar is an implicit skip, not a labeled
     decision, so analysis treats these as context only, never training labels.
 
-    Runs UNDER the mm lockfile with the same migrate-pre-inversion discovery as
-    `mm resolve`, so it can't race an autopull's rename/unlink. Reading an
-    iCloud placeholder may block; a hung read is NOT rescued (best-effort
-    covers raises, not hangs). Re-running dedups against existing backfill rows.
+    SIDE EFFECT: discovery RENAMES pre-v0.9.2 sidecars to the `v0-` prefix
+    (idempotent, identical to `mm resolve`) so pre/post-inversion feature
+    semantics are recorded correctly. That rename runs UNDER the mm lockfile;
+    the lock is then RELEASED before any file reads, because reading an iCloud
+    placeholder can block on materialization and holding the lock across a hung
+    read would wedge autopull/autopush. Re-running dedups against existing
+    backfill rows. A hung read is NOT rescued (best-effort covers raises, not
+    hangs).
     """
-    from mind_meld.conflictdiff import newer_side
-    from mind_meld.manifest import parse_conflict_device_short
-
     config = _get_config()
     device_id = config["device"]["id"]
 
+    # Discover + migrate UNDER the lock, then release it before the reads.
     try:
         acquire_lock()
     except LockError as e:
         _error(str(e))
-
-    written = 0
-    skipped = 0
-    hits: list[tuple[str, Path, Path | None]] = []
     try:
         hits = _find_conflict_files(config, migrate_pre_inversion=True)
-        sources_by_name = {s["name"]: s for s in get_sources(config)}
-        # Dedup only backfill rows -- resolve rows are real repeated human
-        # decisions and must never be suppressed. Key mirrors the schema.
-        seen = {
-            (r.get("source"), r.get("rel_path"), r.get("local_sha"), r.get("remote_sha"))
-            for r in conflictlog.read_records()
-            if r.get("site") == "backfill"
-        }
-        for src_name, cpath, canonical in hits:
-            base = {
-                "device": device_id,
-                "source": src_name,
-                "rel_path": _conflict_rel_path(sources_by_name, src_name, cpath),
-                "ext": (canonical or cpath).suffix.lstrip("."),
-                "peer_short": parse_conflict_device_short(cpath.name),
-            }
-            try:
-                cpath_bytes = cpath.read_bytes()
-            except OSError:
-                skipped += 1
-                continue
-
-            if canonical is None:
-                # No two-file pair; record identity + the sidecar's sha for dedup.
-                sha = hashlib.sha256(cpath_bytes).hexdigest()
-                key = (src_name, base["rel_path"], None, sha)
-                if key in seen:
-                    skipped += 1
-                    continue
-                ok = conflictlog.append_decision(
-                    **base,
-                    site="backfill",
-                    mode="canonical_missing",
-                    choice="deferred",
-                    via="backfill-implicit",
-                    outcome="deferred",
-                    remote_sha=sha,
-                )
-                if ok:
-                    written += 1
-                    seen.add(key)
-                else:
-                    skipped += 1
-                continue
-
-            try:
-                canonical_bytes = canonical.read_bytes()
-            except OSError:
-                skipped += 1
-                continue
-
-            # Semantic local/remote by inversion era (same mapping as resolve).
-            if is_pre_inversion_conflict_filename(cpath.name):
-                local_data, remote_data = cpath_bytes, canonical_bytes
-                local_path, remote_path, mode = cpath, canonical, "pre_inversion"
-            else:
-                local_data, remote_data = canonical_bytes, cpath_bytes
-                local_path, remote_path, mode = canonical, cpath, "post_inversion"
-
-            feat = _conflict_feature_dict(local_data, remote_data)
-            key = (src_name, base["rel_path"], feat["local_sha"], feat["remote_sha"])
-            if key in seen:
-                skipped += 1
-                continue
-            lmt, _ = _stat_mtime_btime(local_path)
-            rmt, _ = _stat_mtime_btime(remote_path)
-            ok = conflictlog.append_decision(
-                **base,
-                **feat,
-                site="backfill",
-                mode=mode,
-                choice="deferred",
-                via="backfill-implicit",
-                outcome="deferred",
-                local_mtime=lmt,
-                remote_mtime=rmt,
-                newer_side=newer_side(lmt, rmt),
-            )
-            if ok:
-                written += 1
-                seen.add(key)
-            else:
-                skipped += 1
     finally:
         release_lock()
 
+    sources_by_name = {s["name"]: s for s in get_sources(config)}
+    written, deduped, read_failed, write_failed = _backfill_conflict_log(
+        hits, sources_by_name, device_id
+    )
     console.print(
-        f"conflict-log-backfill: {written} written, {skipped} skipped "
+        f"conflict-log-backfill: {written} written, {deduped} deduped, "
+        f"{read_failed} read-failed, {write_failed} write-failed "
         f"({len(hits)} sidecars) -> {conflictlog.log_path()}"
     )
 
@@ -7199,25 +7226,53 @@ def _conflict_feature_dict(local_data: bytes, remote_data: bytes) -> dict[str, A
         "remote_lines": None,
         "binary": True,
     }
-    _, merge_conflicts = lcs_merge(local_data, remote_data)
-    if merge_conflicts < 0:  # binary / non-UTF-8 (the -1 sentinel)
-        return feat
-    feat["binary"] = False
-    feat["merge_available"] = True
-    if max(len(local_data), len(remote_data)) > _MAX_FEATURE_BYTES:
-        return feat  # too large: skip similarity/diff, keep sizes + shas
-    local_text = local_data.decode("utf-8", "replace").splitlines()
-    remote_text = remote_data.decode("utf-8", "replace").splitlines()
-    diff = list(difflib.unified_diff(local_text, remote_text, lineterm="", n=3))
-    m, n, k = count_divergent_lines(diff)
-    feat["similarity"] = similarity_ratio(local_data, remote_data)
-    feat["merge_conflicts"] = merge_conflicts
-    feat["local_only_lines"] = m
-    feat["remote_only_lines"] = n
-    feat["total_diff_lines"] = k
-    feat["local_lines"] = len(local_text)
-    feat["remote_lines"] = len(remote_text)
+    # Bare except: telemetry must NEVER raise into the resolve/backfill caller
+    # (the D5 never-raises contract). The individual ops are safe today, but the
+    # guard makes the contract structural, not a property that a future edit to
+    # count_divergent_lines / lcs_merge could silently break. Partial feat (shas
+    # + sizes) is returned on any failure.
+    try:
+        # Size gate BEFORE lcs_merge so a pathological huge conflict file can't
+        # run the uncapped O(n*m) merge on the backfill path. Cheap NUL sniff
+        # stands in for the binary flag when we skip the full detection.
+        if max(len(local_data), len(remote_data)) > _MAX_FEATURE_BYTES:
+            binary = b"\x00" in local_data or b"\x00" in remote_data
+            feat["binary"] = binary
+            feat["merge_available"] = not binary
+            return feat
+        _, merge_conflicts = lcs_merge(local_data, remote_data)
+        if merge_conflicts < 0:  # binary / non-UTF-8 (the -1 sentinel)
+            return feat  # binary stays True
+        feat["binary"] = False
+        feat["merge_available"] = True
+        local_text = local_data.decode("utf-8", "replace").splitlines()
+        remote_text = remote_data.decode("utf-8", "replace").splitlines()
+        diff = list(difflib.unified_diff(local_text, remote_text, lineterm="", n=3))
+        m, n, k = count_divergent_lines(diff)
+        feat["similarity"] = similarity_ratio(local_data, remote_data)
+        feat["merge_conflicts"] = merge_conflicts
+        feat["local_only_lines"] = m
+        feat["remote_only_lines"] = n
+        feat["total_diff_lines"] = k
+        feat["local_lines"] = len(local_text)
+        feat["remote_lines"] = len(remote_text)
+    except Exception:
+        pass
     return feat
+
+
+def _emit_conflict_decision(row: dict[str, Any]) -> None:
+    """CONFLICT-TELEMETRY (temporary): single guarded emit point for resolve-site
+    rows. Takes an already-merged ``row`` dict (built with ``{**a, **b}`` which is
+    last-wins and never raises on a duplicate key) and spreads it ONCE, so the
+    ``f(**a, **b)`` duplicate-keyword ``TypeError`` -- which binds at the call
+    site BEFORE ``append_decision``'s own guard runs -- can't escape into the
+    resolve walk. Swallows everything: telemetry must never break a resolution.
+    """
+    try:
+        conflictlog.append_decision(**row)
+    except Exception:
+        pass
 
 
 def _conflict_rel_path(sources_by_name: dict[str, dict], src_name: str, path: Path) -> str:
@@ -7355,19 +7410,20 @@ def _resolve_interactive_loop(
             # else: skip (default)
             # CONFLICT-TELEMETRY (temporary): canonical-missing decision. No
             # two-file feature pair exists here, so features stay absent.
-            conflictlog.append_decision(
-                **_tele_base,
-                site="resolve",
-                mode="canonical_missing",
-                choice={"p": "promote", "promote": "promote", "d": "delete", "delete": "delete"}.get(
-                    choice, "skip"
-                ),
-                via="typed",
-                outcome=(
-                    "resolved"
-                    if resolved > _r0
-                    else ("failed" if failed > _f0 else "skipped")
-                ),
+            _emit_conflict_decision(
+                {
+                    **_tele_base,
+                    "site": "resolve",
+                    "mode": "canonical_missing",
+                    "choice": {
+                        "p": "promote", "promote": "promote",
+                        "d": "delete", "delete": "delete",
+                    }.get(choice, "skip"),
+                    "via": "typed",
+                    "outcome": (
+                        "resolved" if resolved > _r0 else ("failed" if failed > _f0 else "skipped")
+                    ),
+                }
             )
             continue
 
@@ -7719,6 +7775,20 @@ def _resolve_interactive_loop(
                     "  [dim]merge unavailable for this file; "
                     "skipped (both files left on disk)[/dim]"
                 )
+                # CONFLICT-TELEMETRY (temporary): (m) typed but binary -> nothing
+                # merged. Record as skip (the effective on-disk action) with a
+                # distinct outcome so a naive choice=="merge" filter stays clean.
+                _emit_conflict_decision(
+                    {
+                        **_tele_base,
+                        **_tele_feat,
+                        "site": "resolve",
+                        "choice": "skip",
+                        "via": _via,
+                        "outcome": "merge-unavailable",
+                    }
+                )
+                continue
             else:
                 try:
                     fsutil.atomic_write_bytes(canonical, merged_bytes, fsync=False)
@@ -7729,9 +7799,15 @@ def _resolve_interactive_loop(
                     )
                     failed += 1
                     # CONFLICT-TELEMETRY (temporary): merge chosen, write failed.
-                    conflictlog.append_decision(
-                        **_tele_base, **_tele_feat, site="resolve",
-                        choice="merge", via=_via, outcome="failed",
+                    _emit_conflict_decision(
+                        {
+                            **_tele_base,
+                            **_tele_feat,
+                            "site": "resolve",
+                            "choice": "merge",
+                            "via": _via,
+                            "outcome": "failed",
+                        }
                     )
                     continue
                 # Sidecar unlink is best-effort: canonical already holds the
@@ -7814,22 +7890,24 @@ def _resolve_interactive_loop(
 
         # CONFLICT-TELEMETRY (temporary): one row per canonical-exists decision
         # that reached here (l/r/merge-success/promote/skip; abort raised out,
-        # merge-write-fail + read-fail logged/handled above). Outcome is the
-        # real post-apply result, not the typed choice.
-        conflictlog.append_decision(
-            **_tele_base,
-            **_tele_feat,
-            site="resolve",
-            choice={
-                "l": "local", "local": "local",
-                "r": "remote", "remote": "remote",
-                "m": "merge", "merge": "merge",
-                "p": "promote", "promote": "promote",
-            }.get(choice, "skip"),
-            via=_via,
-            outcome=(
-                "resolved" if resolved > _r0 else ("failed" if failed > _f0 else "skipped")
-            ),
+        # merge-write-fail + merge-unavailable + read-fail logged/handled above).
+        # Outcome is the real post-apply result, not the typed choice.
+        _emit_conflict_decision(
+            {
+                **_tele_base,
+                **_tele_feat,
+                "site": "resolve",
+                "choice": {
+                    "l": "local", "local": "local",
+                    "r": "remote", "remote": "remote",
+                    "m": "merge", "merge": "merge",
+                    "p": "promote", "promote": "promote",
+                }.get(choice, "skip"),
+                "via": _via,
+                "outcome": (
+                    "resolved" if resolved > _r0 else ("failed" if failed > _f0 else "skipped")
+                ),
+            }
         )
 
     if failed:

@@ -7,6 +7,8 @@ the `mm resolve` walk and a raise there would break a user's resolution.
 
 import difflib
 
+import pytest
+
 from mind_meld import conflictlog
 from mind_meld.merge import lcs_merge, similarity_ratio
 
@@ -173,3 +175,171 @@ class TestResolveHookEmitsRow:
         assert row["choice"] == "skip"
         assert row["outcome"] == "skipped"
         assert "similarity" not in row  # no two-file pair → features absent
+
+    def test_merge_write_failure_emits_exactly_one_row(self, tmp_path, monkeypatch):
+        import typer
+
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"a\nb\n")  # local
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"a\nb\nc\n")  # remote (additive → clean merge, (m) offered)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("mind_meld.fsutil.atomic_write_bytes", _boom)
+        resolved, failed = _resolve_interactive_loop([("s1", conflict, canonical)], device_id="d")
+
+        assert (resolved, failed) == (0, 1)
+        rows = list(conflictlog.read_records())
+        assert len(rows) == 1  # exactly one row despite the early continue
+        assert rows[0]["choice"] == "merge"
+        assert rows[0]["outcome"] == "failed"
+
+    def test_abort_emits_zero_rows(self, tmp_path, monkeypatch):
+        import typer
+
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"local content")
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"remote content")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "a")
+
+        with pytest.raises(typer.Abort):
+            _resolve_interactive_loop([("s1", conflict, canonical)], device_id="d")
+        assert list(conflictlog.read_records()) == []  # abort = no decision logged
+
+    def test_merge_unavailable_records_skip(self, tmp_path, monkeypatch):
+        import typer
+
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "user.bin"
+        canonical.write_bytes(b"a\x00b")  # NUL → binary → (m) unavailable
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.bin"
+        conflict.write_bytes(b"c\x00d")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)], device_id="d")
+
+        row = list(conflictlog.read_records())[0]
+        assert row["choice"] == "skip"  # nothing merged → clean choice=="merge" filter
+        assert row["outcome"] == "merge-unavailable"
+        assert row["binary"] is True
+
+    def test_newer_shortcut_records_via(self, tmp_path, monkeypatch):
+        import os
+
+        import typer
+
+        from mind_meld.cli import _resolve_interactive_loop
+
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"alpha\n")  # post-inversion: canonical = local
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(b"beta\n")
+        # Make LOCAL (canonical) newer so (n)ewer maps to (l)ocal.
+        os.utime(conflict, (1_600_000_000, 1_600_000_000))
+        os.utime(canonical, (1_600_000_900, 1_600_000_900))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)], device_id="d")
+
+        row = list(conflictlog.read_records())[0]
+        assert row["via"] == "newer-shortcut"
+        assert row["choice"] == "local"
+        assert row["newer_side"] == "local"
+
+    def test_pre_inversion_local_sha_is_sidecar(self, tmp_path, monkeypatch):
+        import hashlib
+
+        import typer
+
+        from mind_meld.cli import _resolve_interactive_loop
+
+        # Pre-inversion (v0-) sidecar HOLDS the user's local bytes; canonical
+        # holds the peer/remote bytes.
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"remote-era-bytes\n")
+        conflict = tmp_path / "user.sync-conflict-v0-20260101-100000-devA1234.md"
+        local_bytes = b"my-local-bytes\n"
+        conflict.write_bytes(local_bytes)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)], device_id="d")
+
+        row = list(conflictlog.read_records())[0]
+        assert row["mode"] == "pre_inversion"
+        # semantic local = the sidecar's bytes in pre-inversion mode
+        assert row["local_sha"] == hashlib.sha256(local_bytes).hexdigest()
+        assert row["choice"] == "local"
+
+
+class TestBackfill:
+    """The hidden `mm conflict-log-backfill` core loop. conftest isolates LOG_DIR."""
+
+    @staticmethod
+    def _pair(tmp_path, stem, local_bytes, remote_bytes):
+        canonical = tmp_path / f"{stem}.md"
+        canonical.write_bytes(local_bytes)
+        sidecar = tmp_path / f"{stem}.sync-conflict-20260421-143055-devA1234.md"
+        sidecar.write_bytes(remote_bytes)
+        return canonical, sidecar
+
+    def test_happy_path_writes_quarantined_rows(self, tmp_path):
+        from mind_meld.cli import _backfill_conflict_log
+
+        c1, s1 = self._pair(tmp_path, "one", b"a\nb\n", b"a\nX\n")
+        c2, s2 = self._pair(tmp_path, "two", b"p\nq\n", b"p\nZ\n")
+        hits = [("src", s1, c1), ("src", s2, c2)]
+
+        written, deduped, read_failed, write_failed = _backfill_conflict_log(hits, {}, "dev")
+
+        assert (written, deduped, read_failed, write_failed) == (2, 0, 0, 0)
+        rows = list(conflictlog.read_records())
+        assert len(rows) == 2
+        assert all(r["site"] == "backfill" for r in rows)
+        assert all(r["choice"] == "deferred" for r in rows)
+        assert all(r["mode"] == "post_inversion" for r in rows)
+        assert all(r["similarity"] is not None for r in rows)
+
+    def test_rerun_dedups(self, tmp_path):
+        from mind_meld.cli import _backfill_conflict_log
+
+        c1, s1 = self._pair(tmp_path, "one", b"a\nb\n", b"a\nX\n")
+        hits = [("src", s1, c1)]
+
+        assert _backfill_conflict_log(hits, {}, "dev") == (1, 0, 0, 0)
+        # Second run: same bytes → deduped, no new rows.
+        assert _backfill_conflict_log(hits, {}, "dev") == (0, 1, 0, 0)
+        assert len(list(conflictlog.read_records())) == 1
+
+    def test_read_failure_counted(self, tmp_path):
+        from mind_meld.cli import _backfill_conflict_log
+
+        ghost = tmp_path / "gone.sync-conflict-20260421-143055-devA1234.md"
+        hits = [("src", ghost, tmp_path / "gone.md")]
+        assert _backfill_conflict_log(hits, {}, "dev") == (0, 0, 1, 0)
+
+    def test_canonical_missing_row(self, tmp_path):
+        from mind_meld.cli import _backfill_conflict_log
+
+        sidecar = tmp_path / "orphan.sync-conflict-20260421-143055-devA1234.md"
+        sidecar.write_bytes(b"orphan bytes")
+        written, deduped, read_failed, write_failed = _backfill_conflict_log(
+            [("src", sidecar, None)], {}, "dev"
+        )
+        assert (written, deduped, read_failed, write_failed) == (1, 0, 0, 0)
+        assert list(conflictlog.read_records())[0]["mode"] == "canonical_missing"
+
+    def test_write_failure_counted(self, tmp_path, monkeypatch):
+        from mind_meld.cli import _backfill_conflict_log
+
+        c1, s1 = self._pair(tmp_path, "one", b"a\nb\n", b"a\nX\n")
+        monkeypatch.setattr(conflictlog, "append_decision", lambda **kw: False)
+        assert _backfill_conflict_log([("src", s1, c1)], {}, "dev") == (0, 0, 0, 1)
