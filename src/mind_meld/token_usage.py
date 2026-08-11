@@ -21,10 +21,16 @@ the shape-upgrade gate in ``get_or_compute`` re-walks any such entry
 once to populate both views (D2 from /plan-eng-review 2026-05-06).
 Token data is preserved unchanged on the rebuild.
 
-Pricing dict is module-level. ``PRICING_LAST_UPDATED`` flags refresh
-cadence — if more than 6 months stale, verify against Anthropic's pricing
-page before trusting cost numbers. Unknown models count toward token
-totals but are excluded from cost (the renderer surfaces this fact).
+Pricing is module-level and resolved through ``resolve_prices`` — the
+single predicate for "is this model priced, and at what rates." Exact
+model IDs win; anything else falls back to its FAMILY tier so a model
+released after this table was written still prices in the right
+ballpark instead of silently costing $0. Only genuinely unparseable IDs
+stay unpriced; they count toward token totals but are excluded from cost
+(the renderer surfaces this fact). ``PRICING_LAST_UPDATED`` is rendered
+onto the retro card so a human can judge staleness — mm has no network
+by design, so the table can never self-update and stale is the steady
+state, not the exception.
 
 Subagent attribution: tokens contributed to the parent session's
 ``claude_dir``. Subagent walks do NOT bump ``sessions``, ``total_kb``, or
@@ -115,45 +121,105 @@ aggregator's render side reference this string."""
 # Pricing (per-million-token rates in USD, list price)
 # ---------------------------------------------------------------------------
 
-PRICING_LAST_UPDATED = "2026-05-01"
-"""Date this pricing dict was last verified against Anthropic's public
-pricing page. If more than ~6 months old, refresh before trusting cost
-numbers — pricing for subsequent generations may have shifted."""
+PRICING_LAST_UPDATED = "2026-08-11"
+"""Date the rates below were last verified against Anthropic's public
+pricing page. Rendered onto the retro card (aggregator's caveat line) so
+the reader can judge staleness themselves. Deliberately NOT a threshold:
+mm has no network by design, so this table cannot self-update and a
+"warn after N months" rule would be a verdict the code has not earned.
+The v0.12.13 miss was three months inside a six-month window."""
 
+# Cache read/write multipliers. Anthropic prices both as fixed multiples
+# of a model's input rate, uniformly across every tier — a cache read at
+# 0.1x input, a cache write at 1.25x (5-minute TTL) or 2x (1-hour TTL).
+# Both verified against the published pricing table on
+# PRICING_LAST_UPDATED.
+#
+# On the write multiplier specifically: Claude Code writes at
+# the 1h TTL by default (sessions dropped to 5m only under usage
+# overage); a sample of local session jsonls measured 83% of
+# cache_create tokens at 1h. The synced wire format carries ONE
+# ``cache_create`` total with no TTL split, so 2x is the closest
+# available approximation — it overstates the 5m slice by 0.75x
+# (~+3.5% of a typical window's total) where the old 1.25x understated
+# the whole line by ~11%. Exact per-TTL pricing needs a wire-format
+# change; see TODOS.md.
+_CACHE_WRITE_MULT = 2.0
+_CACHE_READ_MULT = 0.1
+
+
+def _tier(input_rate: float, output_rate: float) -> dict[str, float]:
+    """Build a full four-field rate card from the two published rates.
+
+    Anthropic publishes input and output per-MTok; cache read and cache
+    write are fixed multiples of input. Deriving them here means a new
+    model is two numbers, not four, and the multiples can never drift
+    apart between entries."""
+    return {
+        "input": input_rate,
+        "cache_read": input_rate * _CACHE_READ_MULT,
+        "cache_create": input_rate * _CACHE_WRITE_MULT,
+        "output": output_rate,
+    }
+
+
+# Per-model rate OVERRIDES (per-million-token, USD, list price). Checked
+# FIRST by ``resolve_prices``; ``MODEL_FAMILY_TIERS`` below is the normal
+# path. Only add an entry here when a model's rates genuinely DIFFER from
+# its family tier.
+#
+# Entries here must GENUINELY differ from their family tier. A duplicate
+# would recreate the multi-site drift this release removes (an Opus rate
+# change needing N identical edits, one forgotten, some models silently
+# on the old rate) — `test_pricing_holds_no_redundant_entries` fails the
+# build on one.
+#
+# The Opus family is NOT rate-uniform across generations: 4.0 and 4.1
+# billed $15/$75, and the tier dropped to $5/$25 at 4.5. Without these
+# overrides a `claude-opus-4-1` record resolves to the modern tier and
+# prices 3x LOW under a confident `~` — where before v0.12.13 it was
+# unpriced and raised a loud `>=` plus a Notes line. That is a downgrade
+# in signal, not an upgrade, and it is reachable: Opus 4.1 retired
+# 2026-08-05 and `MAX_BY_DAY_DAYS` keeps 90 days of history.
+# (Caught by the /review adversarial pass; the claim that retired models
+# never appear in live data was asserted, not checked.)
+#
+# Claude 3-era ids need no entry: `claude-3-opus-20240229` normalizes to
+# `claude-3-opus`, whose segment 1 is "3" — not a family — so it stays
+# unpriced and surfaces honestly.
 PRICING: dict[str, dict[str, float]] = {
-    # Sonnet family — confirmed in real session jsonls on this Mac.
-    "claude-sonnet-4-6": {
-        "input": 3.0,
-        "cache_read": 0.30,
-        "cache_create": 3.75,
-        "output": 15.0,
-    },
-    # Opus family — confirmed via subagent + parent jsonl scans.
-    "claude-opus-4-7": {
-        "input": 15.0,
-        "cache_read": 1.50,
-        "cache_create": 18.75,
-        "output": 75.0,
-    },
-    "claude-opus-4-6": {
-        "input": 15.0,
-        "cache_read": 1.50,
-        "cache_create": 18.75,
-        "output": 75.0,
-    },
-    "claude-opus-4-5": {
-        "input": 15.0,
-        "cache_read": 1.50,
-        "cache_create": 18.75,
-        "output": 75.0,
-    },
-    # Haiku family — fast subagent default.
-    "claude-haiku-4-5": {
-        "input": 1.0,
-        "cache_read": 0.10,
-        "cache_create": 1.25,
-        "output": 5.0,
-    },
+    "claude-opus-4-1": _tier(15.0, 75.0),
+    "claude-opus-4-0": _tier(15.0, 75.0),
+}
+
+# Family-tier fallback. Keyed on the FAMILY segment of a
+# ``claude-<family>-<version>`` id. A model released after this table was
+# written resolves to its family's current-generation rates rather than
+# silently costing nothing.
+#
+# Known inaccuracy, accepted deliberately: tiers reflect CURRENT-
+# generation rates, so a retired model would be priced wrong (Opus 3 was
+# $15/$75, not $5/$25). That's fine because retired models don't appear
+# in live session data, and being ~3x wrong on a model nobody runs beats
+# being infinitely wrong on the model everybody runs.
+#
+# SOURCE OF THE NUMBERS (input/output per MTok, list price), all verified
+# against Anthropic's published pricing table on PRICING_LAST_UPDATED.
+# Recording the provenance is the point: the bug being fixed here was a
+# rate nobody had ever re-checked, so a tier with no citation is the same
+# failure waiting to recur.
+#   fable / mythos  $10 / $50   (Claude Fable 5, Claude Mythos 5)
+#   opus            $5  / $25   (Opus 5, 4.8, 4.7, 4.6, 4.5 — NOT 4.1/4.0,
+#                                which billed $15/$75; see PRICING above)
+#   sonnet          $3  / $15   (Sonnet 5 list; its $2/$10 introductory
+#                                rate through 2026-08-31 is not list price)
+#   haiku           $1  / $5    (Haiku 4.5)
+MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
+    "fable": _tier(10.0, 50.0),
+    "mythos": _tier(10.0, 50.0),
+    "opus": _tier(5.0, 25.0),
+    "sonnet": _tier(3.0, 15.0),
+    "haiku": _tier(1.0, 5.0),
 }
 
 # Models we deliberately count tokens for but exclude from cost. Today
@@ -161,9 +227,12 @@ PRICING: dict[str, dict[str, float]] = {
 # tool-execution turns.
 COST_EXCLUDED_MODELS: frozenset[str] = frozenset({"<synthetic>"})
 
-# Models we've already warned about as "unknown — present in jsonls but
-# missing from PRICING." One-shot per process to avoid spamming repeat
-# pushes. Reset on interpreter exit; next mm invocation re-warns once.
+# Models we've already warned about as "unknown" — meaning unresolvable
+# by ``resolve_prices``, i.e. absent from BOTH ``PRICING`` and
+# ``MODEL_FAMILY_TIERS``. A model merely missing from ``PRICING`` but
+# covered by its family tier is priced normally and never warned about.
+# One-shot per process to avoid spamming repeat pushes. Reset on
+# interpreter exit; next mm invocation re-warns once.
 _WARNED_UNKNOWN_MODELS: set[str] = set()
 
 
@@ -276,6 +345,77 @@ def _normalize_model_id(s: str) -> str:
     if not isinstance(s, str) or not s:
         return s
     return _DATE_SUFFIX.sub("", s)
+
+
+def model_family(s: str) -> str | None:
+    """Extract the family segment from a ``claude-<family>-<version>`` id.
+
+    Returns the family (``"opus"``, ``"sonnet"``, ...) only for ids that
+    parse structurally AND name a family in ``MODEL_FAMILY_TIERS``.
+    Returns ``None`` for everything else, including ``<synthetic>``.
+
+    NOT a priced-predicate. ``model_family(m) is not None`` looks like
+    one and is subtly wrong — it disagrees with ``resolve_prices`` for
+    any id carried by a ``PRICING`` override rather than a family tier.
+    ``resolve_prices`` is the only correct answer to "is this priced";
+    see Invariant 1 in ``docs/invariants/events-retro.md``. This is
+    exported because ``aggregator._short_model_name`` needs the family
+    allowlist for RENDERING (so token_usage stays the single owner of
+    what a family is), not to make pricing decisions.
+
+    TRUST BOUNDARY — this reads structure out of a peer-controlled
+    string. Model ids cross the sync boundary (peer's Claude Code jsonl
+    -> mm-events -> this machine's aggregator), and as of v0.12.13 they
+    drive a *pricing* decision rather than display alone. The match is
+    therefore POSITIONAL against a literal allowlist, never a substring
+    test: a substring match would let a planted ``claude-haiku-opus-4-5``
+    bill at Opus rates. Mirrors the validate-at-construction convention
+    in ``storage/keys.py``.
+
+    A future id scheme that doesn't fit ``claude-<family>-...`` degrades
+    to unpriced (surfaced in the retro's Notes line), which is the safe
+    direction — silence is what v0.12.13 was fixing.
+    """
+    if not isinstance(s, str) or not s:
+        return None
+    parts = s.split("-")
+    if len(parts) < 3 or parts[0] != "claude":
+        return None
+    # Segment 2 must be non-empty: a truncated id like "claude-opus-"
+    # splits to ["claude", "opus", ""], which would otherwise satisfy the
+    # length check and bill garbage at full Opus rates instead of
+    # degrading to unpriced.
+    if not parts[2]:
+        return None
+    family = parts[1]
+    return family if family in MODEL_FAMILY_TIERS else None
+
+
+def resolve_prices(model: str) -> dict[str, float] | None:
+    """Return the per-MTok rate card for ``model``, or ``None`` if unpriced.
+
+    THE single predicate for "is this model priced." Both consumers go
+    through it — ``estimate_cost`` for the rates, the aggregator's
+    ``_unpriced_token_summary`` for the ``is None`` count — so the cost
+    line and the "N unpriced model(s)" Notes line can never disagree.
+    Two independent ``model in PRICING`` tests are what made that
+    contradiction possible before v0.12.13; do NOT reintroduce one.
+
+    Resolution order: ``COST_EXCLUDED_MODELS`` (``<synthetic>``) is not
+    this function's concern and is filtered by the caller; exact
+    ``PRICING`` entry wins; else the family tier; else ``None``.
+
+    Returns a COPY. The rate cards are module-level and shared; handing
+    out the live dict lets one careless caller mutate pricing for the
+    whole process.
+    """
+    prices = PRICING.get(model)
+    if prices is not None:
+        return dict(prices)
+    family = model_family(model)
+    if family is None:
+        return None
+    return dict(MODEL_FAMILY_TIERS[family])
 
 
 def parse_usage(message: Any) -> tuple[Usage, str, str | None] | None:
@@ -700,21 +840,25 @@ def slice_window(
 def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, float]]:
     """Compute total cost + per-model split from a ``by_model`` dict.
 
-    Returns ``(total_usd, per_model_usd)``. Unknown models contribute to
-    raw token counts elsewhere but DO NOT contribute here — they're
-    excluded from cost. Same for ``COST_EXCLUDED_MODELS`` (today only
+    Returns ``(total_usd, per_model_usd)``. Rates come from
+    ``resolve_prices`` (exact id, else family tier). Models that resolve
+    to neither contribute to raw token counts elsewhere but DO NOT
+    contribute here. Same for ``COST_EXCLUDED_MODELS`` (today only
     ``<synthetic>``).
 
     Unknown-model breadcrumb: emit one ``mm: notice:`` per process per
     unknown model. Caller-facing text mirrors the existing
-    ``upgrade.py`` notice prefix.
+    ``upgrade.py`` notice prefix. NOTE this breadcrumb is not sufficient
+    on its own — it went to stderr for four unpriced models across the
+    whole v0.12.x line and nobody saw it. The load-bearing signal is the
+    aggregator's Notes line plus the ``>=`` prefix on the cost line.
     """
     total = 0.0
     per_model: dict[str, float] = {}
     for model, usage in (tokens_by_model or {}).items():
         if model in COST_EXCLUDED_MODELS:
             continue
-        prices = PRICING.get(model)
+        prices = resolve_prices(model)
         if prices is None:
             if model not in _WARNED_UNKNOWN_MODELS:
                 # Sanitize the model name before logging — strings come from
@@ -1002,6 +1146,7 @@ __all__ = [
     "DEFAULT_WARM_BUDGET_S",
     "DayBucket",
     "MAX_BY_DAY_DAYS",
+    "MODEL_FAMILY_TIERS",
     "PRICING",
     "PRICING_LAST_UPDATED",
     "SUBSCRIPTION_CAVEAT",
@@ -1015,7 +1160,9 @@ __all__ = [
     "lock_and_get_files",
     "merge_by_model",
     "merge_usage_bucket",
+    "model_family",
     "parse_usage",
+    "resolve_prices",
     "slice_window",
     "walk_jsonl_buckets",
     "walk_jsonl_token_buckets",

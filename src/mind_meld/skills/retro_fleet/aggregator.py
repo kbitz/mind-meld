@@ -687,15 +687,34 @@ def _compute_streak(commit_days: set[str], until: datetime) -> int:
     return streak
 
 
+# Ceiling for peer-reported token counts. 2**53 is the largest integer a
+# float64 represents exactly, which is the real constraint: estimate_cost
+# multiplies these by a float rate. A peer-planted 4000-digit integer
+# survives json.loads fine and then raises OverflowError ("int too large to
+# convert to float") deep inside the cost sum, killing `mm retro-fleet`
+# with a traceback. No genuine window comes within nine orders of magnitude
+# of this, so clamping costs nothing real.
+_MAX_SAFE_TOKENS = 2**53
+
+
 def _safe_int(x: object) -> int:
-    """Tolerant int conversion — returns 0 on any non-integer input."""
+    """Tolerant int conversion — returns 0 on any non-integer input, and
+    clamps to ``[0, _MAX_SAFE_TOKENS]``.
+
+    Peer-controlled: every token field from a synced event flows through
+    here. Two clamps matter, both trust-boundary rather than cosmetic.
+    Negatives become 0 — a negative token count is nonsense, and left
+    alone it subtracts from the fleet's cost total, letting one bad peer
+    shrink or entirely suppress the rendered cost line. Values above
+    ``_MAX_SAFE_TOKENS`` are capped so the float multiply in
+    ``token_usage.estimate_cost`` cannot raise OverflowError."""
     if isinstance(x, bool):
         return 0  # bool is int in Python; we don't want True → 1 silently
     if isinstance(x, int):
-        return x
+        return max(0, min(x, _MAX_SAFE_TOKENS))
     if isinstance(x, str):
         try:
-            return int(x)
+            return max(0, min(int(x), _MAX_SAFE_TOKENS))
         except ValueError:
             return 0
     return 0
@@ -1280,11 +1299,17 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
 
       - Tokens this window: 12.4M in / 87.3M cache_read / 142k out
       - Cache hit ratio:    87%
-      - Estimated cost:     ~$24.10 (Sonnet $18, Opus $6)
-      - Per-model:          Sonnet, Opus
-      - *Cost estimates do not account for subscription plan pricing.*
+      - Estimated cost:     ~$2,410 (Sonnet $1,800, Opus $610)
+      - Per-model:          Sonnet 4.6, Opus 5
+      - *List pricing last verified 2026-08-11. Cost estimates do not
+        account for subscription plan pricing.*
+
+    The cost figure is prefixed ``>=`` instead of ``~`` whenever any
+    model in the window resolved to no price at all — the number is then
+    a floor, not an estimate, and saying ``~`` would repeat the
+    v0.12.13 failure of printing a confident total over incomplete data.
     """
-    from mind_meld.token_usage import SUBSCRIPTION_CAVEAT, estimate_cost
+    from mind_meld.token_usage import PRICING_LAST_UPDATED, SUBSCRIPTION_CAVEAT, estimate_cost
 
     total_in = sessions.tokens_input
     total_cc = sessions.tokens_cache_create
@@ -1308,16 +1333,27 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
         lines.append(f"- Cache hit ratio:    {hit_ratio:.0%}")
 
     total_cost, per_model_cost = estimate_cost(sessions.tokens_by_model)
+    # Any unpriced volume makes the figure a lower bound, not an estimate.
+    unpriced_tokens, _ = _unpriced_token_summary(sessions.tokens_by_model)
     if total_cost > 0:
         # Sort per-model by cost descending; render compact "Sonnet $X, Opus $Y".
         per_model_sorted = sorted(per_model_cost.items(), key=lambda kv: kv[1], reverse=True)
         per_model_str = ", ".join(
             f"{_short_model_name(m)} ${c:,.0f}" for m, c in per_model_sorted if c >= 1.0
         )
-        cost_line = f"- Estimated cost:     ~${total_cost:,.2f}"
+        marker = ">=" if unpriced_tokens > 0 else "~"
+        cost_line = f"- Estimated cost:     {marker}{_format_usd(total_cost)}"
         if per_model_str:
             cost_line += f" ({per_model_str})"
         lines.append(cost_line)
+    elif unpriced_tokens > 0:
+        # Nothing resolved. Staying silent here reads as "no cost data"
+        # when the truth is "we could not price ANY of it" — and it is
+        # reachable today: a fleet running Claude Code through Bedrock
+        # sends ids like `us.anthropic.claude-opus-4-5-v1:0`, which fail
+        # the `claude-` prefix check, so every model goes unpriced and the
+        # cost line would vanish entirely. Say so instead.
+        lines.append("- Estimated cost:     unavailable — no model in this window could be priced")
 
     # Per-model session-name breadcrumb (which model families were active).
     # Filter out <synthetic> — Claude Code internal turns aren't a user-
@@ -1327,24 +1363,47 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
         short_names = ", ".join(_short_model_name(m) for m in active_models)
         lines.append(f"- Per-model:          {short_names}")
 
-    lines.append(f"- *{SUBSCRIPTION_CAVEAT}*")
+    lines.append(f"- *List pricing last verified {PRICING_LAST_UPDATED}. {SUBSCRIPTION_CAVEAT}*")
+
+
+def _format_usd(amount: float) -> str:
+    """Render a USD estimate without false precision.
+
+    Cents on a four-figure number that already disclaims subscription
+    pricing is noise pretending to be rigor — the v0.12.13 card read
+    ``~$3.37`` for a window the corrected table prices at ~$11,015.
+    Whole dollars from $100 up; cents below, where they still carry
+    information.
+
+    The per-model breakdown on the same line does NOT route through
+    here: it is always whole-dollar (``${c:,.0f}``) because the
+    ``c >= 1.0`` filter already drops anything where cents would
+    matter, and a compact "(Opus 4.8 $5,490, Opus 5 $4,265)" summary
+    reads worse with them. Deliberate, not an oversight."""
+    # Branch on the ROUNDED value, not the raw one: 99.996 formats as
+    # "$100.00" under the cents branch, so an unrounded test would print
+    # two different shapes for the same displayed dollar amount.
+    if abs(round(amount, 2)) >= 100:
+        return f"${amount:,.0f}"
+    return f"${amount:,.2f}"
 
 
 def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple[int, int]:
-    """Return ``(total_tokens, model_count)`` for models present in the fleet
-    data but absent from ``PRICING`` and not in ``COST_EXCLUDED_MODELS``.
+    """Return ``(total_tokens, model_count)`` for models the pricing table
+    cannot resolve at all, excluding ``COST_EXCLUDED_MODELS``.
 
-    Same semantics as ``estimate_cost``'s skip path — if a model isn't
-    priced, its tokens still count toward displayed totals but contribute
-    zero to cost. Surfaced as a Notes line so the cost line is honestly
-    flagged as a lower bound when older or unrecognized model ids show up
-    in jsonls."""
-    from mind_meld.token_usage import COST_EXCLUDED_MODELS, PRICING, TOKEN_FIELDS
+    Shares ``resolve_prices`` with ``estimate_cost`` rather than
+    re-testing ``model in PRICING``. That duplication is exactly what
+    would make the cost line and this Notes line contradict each other
+    once family-tier fallback landed: the cost line would price
+    ``claude-opus-6`` while this line still called it unpriced. One
+    predicate, one answer — see ``token_usage.resolve_prices``."""
+    from mind_meld.token_usage import COST_EXCLUDED_MODELS, TOKEN_FIELDS, resolve_prices
 
     total = 0
     n = 0
     for model, mbucket in (tokens_by_model or {}).items():
-        if model in PRICING or model in COST_EXCLUDED_MODELS:
+        if model in COST_EXCLUDED_MODELS or resolve_prices(model) is not None:
             continue
         if not isinstance(mbucket, dict):
             continue
@@ -1356,7 +1415,13 @@ def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple
 
 def _short_model_name(model: str) -> str:
     """Compact model id for render — ``claude-opus-4-7`` → ``Opus 4.7``,
-    ``claude-sonnet-4-6`` → ``Sonnet 4.6``, ``<synthetic>`` → ``synthetic``.
+    ``claude-opus-5`` → ``Opus 5``, ``<synthetic>`` → ``synthetic``.
+
+    Handles BOTH id shapes. The pre-v0.12.13 version required 4
+    dash-segments, so the entire Claude 5 family (``claude-opus-5``,
+    ``claude-sonnet-5``, ``claude-fable-5`` — three segments) fell
+    through to the raw string and rendered next to a prettified
+    ``Opus 4.8`` on the same line.
 
     Unknown shapes are sanitized via ``safety.safe_str`` before render —
     ``model`` strings cross the sync boundary (peer's Claude Code jsonl →
@@ -1370,29 +1435,50 @@ def _short_model_name(model: str) -> str:
         return ""
     if model == "<synthetic>":
         return "synthetic"
+    # Gate on the SAME family allowlist the pricing side uses, so
+    # token_usage owns "what counts as a family" and this module owns only
+    # presentation. Without the gate, relaxing the segment count to 3
+    # mangles legacy ids: `claude-3-opus-20240229` normalizes to
+    # `claude-3-opus` and rendered as "3 opus", `claude-3-5-sonnet` as
+    # "3 5.sonnet". Anything unrecognized falls through to the raw
+    # (defanged) string, which is the honest rendering.
+    from mind_meld.token_usage import model_family
+
     parts = model.split("-")
-    if len(parts) >= 4 and parts[0] == "claude":
+    if len(parts) >= 3 and parts[0] == "claude" and model_family(model) is not None:
         # Family/version both come from the peer-controlled string but
         # are bucketed into known character classes by the split — still
         # defang via safe_str to defend against future schema drift.
+        # Version is parts[2:4] joined by ".", which yields "4.7" for a
+        # 4-segment id and "5" for a 3-segment one without branching.
         family = _safe_short(parts[1].capitalize())
         version = _safe_short(".".join(parts[2:4]))
         return f"{family} {version}"
     return _safe_short(model)
 
 
+_SHORT_LEN_CAP = 128
+"""Length ceiling for short identifiers. Mirrors ``_PROSE_LEN_CAP`` for the
+same reason: these strings are peer-controlled and land in rendered
+markdown and the ASCII card, which then goes into an LLM context. A
+multi-megabyte model id is escape-stripped and whitelist-bucketed but was
+otherwise emitted verbatim. No real skill name, model id, or sha comes
+close to 128."""
+
+
 def _safe_short(s: str) -> str:
-    """Strip terminal escapes + Rich markup, then bucket to a conservative
-    char class for markdown safety. Use for SHORT identifiers (skill
-    names, model names, sha) where conservative bucketing is fine.
-    For prose-shaped strings (commit subjects, LLM-supplied themes) use
-    ``_safe_prose`` instead — this whitelist mangles punctuation."""
+    """Strip terminal escapes + Rich markup, bucket to a conservative
+    char class for markdown safety, then truncate to ``_SHORT_LEN_CAP``.
+    Use for SHORT identifiers (skill names, model names, sha) where
+    conservative bucketing is fine. For prose-shaped strings (commit
+    subjects, LLM-supplied themes) use ``_safe_prose`` instead — this
+    whitelist mangles punctuation."""
     from mind_meld.safety import safe_str
 
     cleaned = safe_str(s) if isinstance(s, str) else ""
     # Whitelist: alphanumerics, dots, dashes, underscores, parens, spaces.
     # Anything else (newlines, backticks, angle brackets, pipes) becomes "_".
-    return re.sub(r"[^A-Za-z0-9._\-() ]", "_", cleaned)
+    return re.sub(r"[^A-Za-z0-9._\-() ]", "_", cleaned)[:_SHORT_LEN_CAP]
 
 
 _PROSE_CTRL_RE = re.compile(

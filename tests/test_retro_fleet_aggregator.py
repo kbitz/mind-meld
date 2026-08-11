@@ -2042,8 +2042,11 @@ class TestSyntheticAndUnpricedTokens:
                     "cache_read": 50_000_000,
                     "output": 100_000,
                 },
-                # Hypothetical older / newer model not in PRICING.
-                "claude-sonnet-3-7": {
+                # Unresolvable id: "future" is not a known family, so it
+                # survives family-tier fallback and stays genuinely
+                # unpriced.  (Pre-v0.12.13 this fixture used
+                # claude-sonnet-3-7, which family-tier now prices.)
+                "claude-future-9-9": {
                     "input": 1_000_000,
                     "cache_create": 0,
                     "cache_read": 5_000_000,
@@ -2054,7 +2057,7 @@ class TestSyntheticAndUnpricedTokens:
         out = format_retro(data)
         # The note names the volume + model count and explains the cost
         # gap.  Compact-format token count surfaces (6.0M from input + cr
-        # + output of the unpriced sonnet-3-7 entry).
+        # + output of the unpriced claude-future-9-9 entry).
         assert "unpriced" in out
         assert "1 unpriced model(s)" in out
         assert "excluded from cost estimate" in out
@@ -2125,6 +2128,294 @@ class TestSyntheticAndUnpricedTokens:
         )
         out = format_retro(data)
         assert "unpriced" not in out
+
+
+class TestCostLineHonesty:
+    """v0.12.13. The card printed ``~$3.37`` for a window the corrected
+    table prices at ~$11,015 — the entire Claude 5 family resolved to no
+    price at all and silently costed $0. These pin the properties that
+    make that impossible to repeat quietly."""
+
+    def _data(self, tokens_by_model):
+        """Top-level totals are derived from ``by_model`` rather than
+        hand-set: ``_render_token_block`` hides the whole block when they
+        sum to zero, so a fixture that omits them makes every assertion
+        pass vacuously."""
+        from mind_meld.skills.retro_fleet.aggregator import RetroData, SessionsAggregate
+
+        def _sum(field):
+            return sum(b.get(field, 0) for b in tokens_by_model.values())
+
+        data = RetroData(
+            window_days=7,
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        )
+        data.sessions = SessionsAggregate(
+            total_sessions=3,
+            projects=1,
+            tokens_input=_sum("input"),
+            tokens_cache_create=_sum("cache_create"),
+            tokens_cache_read=_sum("cache_read"),
+            tokens_output=_sum("output"),
+            tokens_by_model=tokens_by_model,
+        )
+        return data
+
+    def test_cost_line_and_notes_line_never_contradict(self):
+        """REGRESSION (IRON RULE). Before v0.12.13 the cost path and the
+        unpriced-Notes path each ran their own ``model in PRICING`` test.
+        Family-tier fallback landing in only one of them would make the
+        card price a model on one line and call it unpriced two lines
+        later. Both now share ``resolve_prices``."""
+        from mind_meld.skills.retro_fleet.aggregator import (
+            _unpriced_token_summary,
+            format_retro,
+        )
+        from mind_meld.token_usage import estimate_cost
+
+        by_model = {
+            # Not in PRICING; resolves via family tier.
+            "claude-opus-6": {
+                "input": 1_000_000,
+                "cache_create": 0,
+                "cache_read": 0,
+                "output": 0,
+            },
+        }
+        _, per_model = estimate_cost(by_model)
+        unpriced_tokens, unpriced_models = _unpriced_token_summary(by_model)
+
+        # Priced by one path => must NOT be counted unpriced by the other.
+        assert "claude-opus-6" in per_model
+        assert unpriced_models == 0
+        assert unpriced_tokens == 0
+        out = format_retro(self._data(by_model))
+        assert "unpriced" not in out
+
+    def test_unpriced_volume_downgrades_estimate_to_lower_bound(self):
+        """A confident ``~`` over incomplete data is the v0.12.13 bug.
+        Any unresolvable model flips the marker to ``>=``."""
+        from mind_meld.skills.retro_fleet.aggregator import format_retro
+
+        out = format_retro(
+            self._data(
+                {
+                    "claude-opus-5": {
+                        "input": 40_000_000,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    },
+                    "claude-future-9-9": {
+                        "input": 1_000_000,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    },
+                }
+            )
+        )
+        assert "Estimated cost:     >=$200" in out
+        assert "1 unpriced model(s)" in out
+
+    def test_fully_priced_window_keeps_tilde_and_drops_cents(self):
+        from mind_meld.skills.retro_fleet.aggregator import format_retro
+
+        out = format_retro(
+            self._data(
+                {
+                    "claude-opus-5": {
+                        "input": 40_000_000,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    },
+                }
+            )
+        )
+        assert "Estimated cost:     ~$200" in out
+        assert "~$200.00" not in out
+        assert "unpriced" not in out
+
+    def test_all_models_unpriced_says_so_explicitly(self):
+        """When nothing resolves, total_cost is 0. Dropping the cost line
+        entirely reads as "no cost data" when the truth is "we could not
+        price ANY of it" — so the line says that instead of vanishing."""
+        from mind_meld.skills.retro_fleet.aggregator import format_retro
+
+        out = format_retro(
+            self._data(
+                {
+                    "claude-future-9-9": {
+                        "input": 40_000_000,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    },
+                }
+            )
+        )
+        assert "Estimated cost:     unavailable" in out
+        assert "1 unpriced model(s)" in out
+        assert "40.0M tokens" in out
+
+    def test_bedrock_style_ids_are_unpriced_not_silent(self):
+        """A fleet running Claude Code through Bedrock sends ids like
+        `us.anthropic.claude-opus-4-5-v1:0`, which fail the `claude-`
+        prefix check. Every model goes unpriced — the card must say so
+        rather than omit the cost line."""
+        from mind_meld.skills.retro_fleet.aggregator import format_retro
+
+        out = format_retro(
+            self._data(
+                {
+                    "us.anthropic.claude-opus-4-5-v1:0": {
+                        "input": 1_000_000_000,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    },
+                }
+            )
+        )
+        assert "Estimated cost:     unavailable" in out
+        assert "1 unpriced model(s)" in out
+
+    def test_caveat_carries_verification_date(self):
+        """mm has no network, so the table cannot self-update. The card
+        shows when rates were last checked instead of asserting a
+        freshness verdict it cannot earn."""
+        from mind_meld.skills.retro_fleet.aggregator import format_retro
+        from mind_meld.token_usage import PRICING_LAST_UPDATED
+
+        out = format_retro(
+            self._data(
+                {
+                    "claude-opus-5": {
+                        "input": 1_000_000,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    },
+                }
+            )
+        )
+        assert f"List pricing last verified {PRICING_LAST_UPDATED}" in out
+
+
+class TestShortModelName:
+    """v0.12.13: the 4-segment requirement left every 3-segment Claude 5
+    id rendering raw next to prettified 4-segment names."""
+
+    @pytest.mark.parametrize(
+        "model,expected",
+        [
+            ("claude-opus-5", "Opus 5"),
+            ("claude-sonnet-5", "Sonnet 5"),
+            ("claude-fable-5", "Fable 5"),
+            ("claude-opus-4-8", "Opus 4.8"),
+            ("claude-sonnet-4-6", "Sonnet 4.6"),
+            ("claude-haiku-4-5", "Haiku 4.5"),
+            ("<synthetic>", "synthetic"),
+        ],
+    )
+    def test_renders_both_id_shapes(self, model, expected):
+        from mind_meld.skills.retro_fleet.aggregator import _short_model_name
+
+        assert _short_model_name(model) == expected
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-3-opus",  # from claude-3-opus-20240229 after normalize
+            "claude-3-haiku",
+            "claude-3-5-sonnet",
+            "claude-2-1",
+        ],
+    )
+    def test_legacy_id_shapes_are_not_mangled(self, model):
+        """REGRESSION. Relaxing the segment count from >=4 to >=3 without a
+        family gate rendered `claude-3-opus` as "3 opus" and
+        `claude-3-5-sonnet` as "3 5.sonnet" — the version segment was read
+        as a family. These ids are reachable: _normalize_model_id strips
+        the -YYYYMMDD suffix, so claude-3-opus-20240229 arrives 3-segment.
+        Unrecognized families must fall through to the raw string."""
+        from mind_meld.skills.retro_fleet.aggregator import _short_model_name
+
+        assert _short_model_name(model) == model
+
+    def test_peer_controlled_escape_is_defanged(self):
+        from mind_meld.skills.retro_fleet.aggregator import _short_model_name
+
+        out = _short_model_name("claude-opus-5\x1b[2J")
+        assert "\x1b" not in out
+
+    def test_absurdly_long_id_is_truncated(self):
+        """Peer-controlled ids land in rendered markdown and the ASCII card,
+        which then goes into an LLM context. _safe_prose caps length for
+        exactly this reason; _safe_short had no cap."""
+        from mind_meld.skills.retro_fleet.aggregator import _SHORT_LEN_CAP, _short_model_name
+
+        assert len(_short_model_name("claude-" + "z" * 500_000)) <= _SHORT_LEN_CAP
+
+
+class TestFormatUsd:
+    @pytest.mark.parametrize(
+        "amount,expected",
+        [
+            (0.0, "$0.00"),
+            (3.37, "$3.37"),
+            (99.99, "$99.99"),
+            # Rounds to 100.00, so it takes the whole-dollar branch —
+            # otherwise the same displayed amount prints two ways.
+            (99.996, "$100"),
+            (100.0, "$100"),
+            (1234.5, "$1,234"),
+            (11015.0, "$11,015"),
+        ],
+    )
+    def test_threshold(self, amount, expected):
+        from mind_meld.skills.retro_fleet.aggregator import _format_usd
+
+        assert _format_usd(amount) == expected
+
+
+class TestPeerTokenClamping:
+    """Token counts arrive from peer machines; `_safe_int` is the trust
+    boundary every one of them crosses."""
+
+    def test_absurd_int_cannot_overflow_the_cost_multiply(self):
+        """A 400-digit integer survives json.loads, and estimate_cost
+        multiplies token counts by a float rate — unclamped that raises
+        OverflowError deep inside the sum and kills `mm retro-fleet` with a
+        traceback. Family-tier fallback widened the reachable id set from 5
+        hardcoded ids to any claude-<family>-*."""
+        from mind_meld.skills.retro_fleet.aggregator import _MAX_SAFE_TOKENS, _safe_int
+        from mind_meld.token_usage import estimate_cost
+
+        clamped = _safe_int(10**400)
+        assert clamped == _MAX_SAFE_TOKENS
+        total, _ = estimate_cost(
+            {
+                "claude-opus-5": {
+                    "input": clamped,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                }
+            }
+        )
+        assert total > 0  # the point is that this does not raise
+
+    def test_negative_counts_clamp_to_zero(self):
+        """Left alone a negative count subtracts from the fleet total, so
+        one bad peer could shrink the cost line or push it to zero and
+        suppress it entirely."""
+        from mind_meld.skills.retro_fleet.aggregator import _safe_int
+
+        assert _safe_int(-999_999) == 0
+        assert _safe_int("-42") == 0
 
 
 class TestTrack10ASafeIntRetention:

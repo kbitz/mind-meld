@@ -587,6 +587,8 @@ class TestEstimateCost:
                 "cache_read": 0,
                 "output": 0,
             },
+            # "future" is not a known family, so this stays unresolvable
+            # even with family-tier fallback in play.
             "claude-future-9-9": {
                 "input": 1_000_000,
                 "cache_create": 0,
@@ -595,8 +597,8 @@ class TestEstimateCost:
             },
         }
         total, per_model = tu.estimate_cost(by_model)
-        # Only Opus 4.7 contributes: 1M * $15 = $15.
-        assert total == pytest.approx(15.0)
+        # Only Opus 4.7 contributes: 1M * $5 = $5.
+        assert total == pytest.approx(5.0)
         assert "claude-future-9-9" not in per_model
         captured = capsys.readouterr()
         assert "unknown model in pricing: claude-future-9-9" in captured.err
@@ -629,6 +631,168 @@ class TestEstimateCost:
         total, per_model = tu.estimate_cost({})
         assert total == 0.0
         assert per_model == {}
+
+    def test_claude_5_family_priced(self) -> None:
+        """v0.12.13 regression: the entire Claude 5 family resolved to no
+        price, so a fleet running Opus 5 / Fable 5 / Sonnet 5 costed $0 and
+        the card printed ~$3.37 for a window the corrected table prices at
+        ~$11,015."""
+        by_model = {
+            m: {"input": 1_000_000, "cache_create": 0, "cache_read": 0, "output": 0}
+            for m in ("claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-opus-4-8")
+        }
+        total, per_model = tu.estimate_cost(by_model)
+        assert per_model["claude-opus-5"] == pytest.approx(5.0)
+        assert per_model["claude-opus-4-8"] == pytest.approx(5.0)
+        assert per_model["claude-sonnet-5"] == pytest.approx(3.0)
+        assert per_model["claude-fable-5"] == pytest.approx(10.0)
+        assert total == pytest.approx(23.0)
+
+    def test_cache_write_priced_at_1h_ttl(self) -> None:
+        """Cache writes bill at 2x input (1h TTL), not 1.25x (5m). Claude
+        Code defaults to the 1h TTL; the old 1.25x understated every
+        window carrying cache_create volume."""
+        by_model = {
+            "claude-opus-5": {
+                "input": 0,
+                "cache_create": 1_000_000,
+                "cache_read": 1_000_000,
+                "output": 0,
+            }
+        }
+        total, _ = tu.estimate_cost(by_model)
+        # 1M * ($5 * 2.0) + 1M * ($5 * 0.1) = $10.50
+        assert total == pytest.approx(10.50)
+
+
+# ---------------------------------------------------------------------------
+# model_family / resolve_prices  (v0.12.13)
+# ---------------------------------------------------------------------------
+
+
+class TestModelFamily:
+    @pytest.mark.parametrize(
+        "model,expected",
+        [
+            ("claude-opus-5", "opus"),
+            ("claude-opus-4-8", "opus"),
+            ("claude-sonnet-5", "sonnet"),
+            ("claude-fable-5", "fable"),
+            ("claude-mythos-5", "mythos"),
+            ("claude-haiku-4-5", "haiku"),
+        ],
+    )
+    def test_known_families(self, model: str, expected: str) -> None:
+        assert tu.model_family(model) == expected
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "<synthetic>",
+            "",
+            "claude",
+            "claude-opus",  # only 2 segments
+            "claude-future-9-9",  # unknown family
+            "gpt-4-turbo",  # not a claude id
+            "opus-5",  # missing vendor prefix
+        ],
+    )
+    def test_non_families_return_none(self, model: str) -> None:
+        assert tu.model_family(model) is None
+
+    def test_positional_match_not_substring(self) -> None:
+        """TRUST BOUNDARY: model ids are peer-controlled and now drive a
+        pricing decision. A substring test would bill this at Opus rates;
+        the positional match reads position 1 ("haiku") and stops."""
+        assert tu.model_family("claude-haiku-opus-4-5") == "haiku"
+        assert tu.resolve_prices("claude-haiku-opus-4-5")["input"] == pytest.approx(1.0)
+
+    def test_non_string_input(self) -> None:
+        assert tu.model_family(None) is None  # type: ignore[arg-type]
+        assert tu.model_family(123) is None  # type: ignore[arg-type]
+
+
+class TestResolvePrices:
+    def test_exact_entry_overrides_family_by_value(self, monkeypatch) -> None:
+        """Precedence pinned by VALUE, not object identity. PRICING ships
+        empty (every current model prices at its family rate), so this
+        injects a synthetic override whose rates genuinely differ —
+        otherwise a resolution-order regression would be undetectable."""
+        monkeypatch.setitem(tu.PRICING, "claude-opus-9", tu._tier(99.0, 999.0))
+        assert tu.resolve_prices("claude-opus-9")["input"] == pytest.approx(99.0)
+        # A sibling in the same family still takes the tier.
+        assert tu.resolve_prices("claude-opus-8")["input"] == pytest.approx(5.0)
+
+    def test_pricing_holds_no_redundant_entries(self) -> None:
+        """PRICING is an OVERRIDE table. An entry identical to its family
+        tier is pure duplication and recreates the multi-site drift this
+        release exists to remove: an Opus rate change would need N
+        identical edits plus the tier, and missing one prices some models
+        at the old rate silently."""
+        for model, card in tu.PRICING.items():
+            family = tu.model_family(model)
+            if family is None:
+                continue
+            assert card != tu.MODEL_FAMILY_TIERS[family], (
+                f"{model} duplicates its family tier — delete it and let "
+                f"MODEL_FAMILY_TIERS['{family}'] carry it."
+            )
+
+    def test_pre_4_5_opus_overrides_the_modern_tier(self) -> None:
+        """The Opus family is NOT rate-uniform across generations: 4.0/4.1
+        billed $15/$75, the tier dropped to $5/$25 at 4.5. Without the
+        override these resolve to the modern tier and price 3x LOW under a
+        confident `~`, where pre-v0.12.13 they were unpriced and raised a
+        loud `>=`. Reachable — Opus 4.1 retired 2026-08-05 and by_day
+        history runs 90 days."""
+        for model in ("claude-opus-4-1", "claude-opus-4-0"):
+            prices = tu.resolve_prices(model)
+            assert prices["input"] == pytest.approx(15.0), model
+            assert prices["output"] == pytest.approx(75.0), model
+        # The generation the tier actually describes is unaffected.
+        assert tu.resolve_prices("claude-opus-4-5")["input"] == pytest.approx(5.0)
+
+    def test_truncated_id_does_not_bill(self) -> None:
+        """`claude-opus-` splits to ["claude","opus",""] — length 3 with a
+        recognized family, so it would satisfy a naive check and bill
+        garbage at full Opus rates instead of degrading to unpriced."""
+        assert tu.model_family("claude-opus-") is None
+        assert tu.resolve_prices("claude-opus-") is None
+
+    def test_returned_card_is_a_copy(self) -> None:
+        """Rate cards are module-level and shared; handing out the live
+        dict lets one caller corrupt pricing process-wide."""
+        card = tu.resolve_prices("claude-opus-5")
+        card["input"] = 999.0
+        assert tu.resolve_prices("claude-opus-5")["input"] == pytest.approx(5.0)
+
+    def test_retired_model_prices_at_current_family_tier(self) -> None:
+        """The inaccuracy accepted in review, pinned so it can't silently
+        change. Retired models resolve at CURRENT-generation family rates
+        (Claude 3 Opus really billed $15/$75, not $5/$25). Tolerable only
+        because retired models don't appear in live session data — see
+        Invariant 2 in docs/invariants/events-retro.md."""
+        assert tu.resolve_prices("claude-sonnet-3-7")["input"] == pytest.approx(3.0)
+        assert tu.resolve_prices("claude-opus-3-0")["input"] == pytest.approx(5.0)
+
+    def test_family_fallback_for_unlisted_model(self) -> None:
+        """The whole point: a model released after this table was written
+        prices in the right ballpark instead of silently costing $0."""
+        assert "claude-opus-6" not in tu.PRICING
+        prices = tu.resolve_prices("claude-opus-6")
+        assert prices is not None
+        assert prices["input"] == pytest.approx(5.0)
+        assert prices["output"] == pytest.approx(25.0)
+
+    def test_unparseable_stays_unpriced(self) -> None:
+        assert tu.resolve_prices("claude-future-9-9") is None
+        assert tu.resolve_prices("<synthetic>") is None
+
+    def test_every_rate_card_has_all_token_fields(self) -> None:
+        """estimate_cost indexes prices[k] for k in TOKEN_FIELDS — a rate
+        card missing a field is a KeyError at render time."""
+        for card in (*tu.PRICING.values(), *tu.MODEL_FAMILY_TIERS.values()):
+            assert set(card) == set(tu.TOKEN_FIELDS)
 
 
 # ---------------------------------------------------------------------------

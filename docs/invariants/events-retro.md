@@ -346,3 +346,142 @@ JSON formatter alongside the Rich Table renderer. Schema (stable contract for th
 ```
 
 Empty fleet returns `[]`. Sorted alphabetically by `device_id` for cross-platform stability (`list_devices` filesystem iteration is FS-dependent on Linux ext4 vs macOS APFS — without the sort, two peers walking the same fleet could produce different orderings). Plain `print(json.dumps(...))` — Rich injects styling that breaks the JSON contract. Pinned by `tests/test_devices_json.py`.
+
+## Cost estimation — one predicate, honest degradation (load-bearing, v0.12.13)
+
+**Read before touching `token_usage.PRICING`, `MODEL_FAMILY_TIERS`,
+`resolve_prices`, `model_family`, `estimate_cost`, or the aggregator's
+`_render_token_block` / `_unpriced_token_summary` / `_short_model_name`.**
+
+**What went wrong.** The v0.12.12 card reported `~$3.37` for a 60-day
+window whose real list cost was `~$11,015` — understated ~3,000x. Two
+independent defects, which is why neither was caught by the other:
+
+1. The entire Claude 5 family (`claude-opus-5`, `claude-sonnet-5`,
+   `claude-fable-5`) plus `claude-opus-4-8` were absent from `PRICING`,
+   and `estimate_cost` skipped unknown models silently. Only the Haiku
+   subagent traffic was priced — that `$3` *was* the whole basis.
+2. `claude-opus-4-7` / `-4-6` / `-4-5` were listed at `$15/$75`, which
+   are Opus **4.1** rates. Those models are `$5/$25`. Not staleness — a
+   wrong value from day one, never validated.
+
+The two errors push in opposite directions, so whether the card was over
+or under depended entirely on the window's model mix. A window heavy on
+4.7 over-reported; one heavy on Claude 5 under-reported by orders of
+magnitude. That is worse than being consistently wrong.
+
+**Invariant 1 — `resolve_prices` is the ONLY predicate for "is this model
+priced."** Both consumers go through it: `estimate_cost` for the rates,
+`aggregator._unpriced_token_summary` for the `is None` count. Before
+v0.12.13 each ran its own `model in PRICING` test. That duplication is
+benign only while the answer is a plain dict lookup — the moment
+family-tier fallback landed in one of them, the cost line would price
+`claude-opus-6` while the Notes line two rows down still called it
+unpriced. Do NOT reintroduce a second membership test. This is the same
+failure shape v0.11.23 already fixed once, when top-level token totals
+and `estimate_cost` computed the same basis independently and drifted.
+
+**Invariant 2 — family-tier fallback, and the inaccuracy it accepts.**
+Exact `PRICING` entry wins; otherwise the family segment resolves against
+`MODEL_FAMILY_TIERS`; only genuinely unparseable ids stay unpriced. This
+exists because the failure that actually happens is a model *launch*, not
+a rate change. The accepted cost: tiers carry CURRENT-generation rates, so
+a retired model prices wrong (Opus 3 was `$15/$75`, would resolve to
+`$5/$25`). Acceptable because retired models don't appear in live session
+data, and being ~3x wrong on a model nobody runs beats being infinitely
+wrong on the model everybody runs. Do not "fix" this by adding retired
+models to `PRICING` unless they actually show up in fleet data. Pinned by
+`test_retired_model_prices_at_current_family_tier`.
+
+**`PRICING` is an OVERRIDE table and ships EMPTY.** Every current model
+prices at its family's rate, so a per-model entry would be duplication
+that recreates the multi-site drift this release removed: an Opus rate
+change would need five identical edits plus the tier, and missing one
+would silently price some models at the old rate. Two independent
+reviewers flagged the first draft (which listed all six) for exactly
+this. Add an entry ONLY when a model permanently departs from its tier;
+`test_pricing_holds_no_redundant_entries` fails the build if an entry
+duplicates its family. (Claude Sonnet 5's introductory `$2/$10` through
+2026-08-31 is *not* such a case — mm reports list price.)
+
+**Invariant 3 — `model_family` matches POSITIONALLY against a literal
+allowlist, never by substring.** Model ids are peer-controlled (peer's
+Claude Code jsonl → mm-events → this machine's aggregator) and as of
+v0.12.13 they drive a pricing decision, not just display. A substring
+test would bill a planted `claude-haiku-opus-4-5` at Opus rates. This
+mirrors `storage/keys.py`, which validates components at construction
+rather than trusting shape. Pinned by
+`test_token_usage.py::TestModelFamily::test_positional_match_not_substring`.
+An id scheme that stops fitting `claude-<family>-...` degrades to
+unpriced, which is the safe direction — silence is what this fixed.
+
+**Invariant 4 — never print a confident total over incomplete data.** Any
+unresolvable model in the window flips the cost line's prefix from `~` to
+`>=`. The stderr breadcrumb in `estimate_cost` is NOT sufficient on its
+own: it fired for four unpriced models across the whole v0.12.x line and
+nobody saw it. The load-bearing signals are the rendered ones — the `>=`
+marker and the Notes line.
+
+**Invariant 5 — `PRICING_LAST_UPDATED` is a fact on the card, not a
+threshold.** mm has no network by design (CLAUDE.md: "No API server"), so
+this table can never self-update and **stale is the steady state, not the
+exception**. The old docstring said "refresh if more than ~6 months old";
+nothing read it, and it would not have helped — the table was three
+months into that window while wrong about four models. The date now
+renders in the caveat line so a human can judge. Do NOT reintroduce a
+"warn after N months" rule: it is a verdict the code cannot earn, and it
+is the count-based-threshold anti-pattern this project has rejected
+before.
+
+**Invariant 6 — `_short_model_name` handles BOTH id shapes, gated on the
+family allowlist.** The pre-v0.12.13 version required 4 dash-segments, so
+every 3-segment Claude 5 id (`claude-opus-5`) fell through to the raw
+string and rendered beside a prettified `Opus 4.8` on the same line.
+`parts[2:4]` joined by `"."` yields `4.7` for a 4-segment id and `5` for a
+3-segment one with no branch.
+
+Relaxing the count to `>= 3` is NOT sufficient on its own, and the first
+draft shipped that bug: legacy ids put the version where the family
+belongs, so `claude-3-opus` rendered as `3 opus` and `claude-3-5-sonnet`
+as `3 5.sonnet`. Those ids are reachable — `_normalize_model_id` strips
+the `-YYYYMMDD` suffix, so `claude-3-opus-20240229` arrives 3-segment.
+The prettify branch therefore also requires `token_usage.model_family(m)
+is not None`, which keeps token_usage the single owner of "what is a
+family" (this module owns presentation only) and makes anything
+unrecognized fall through to the raw defanged string. Pinned by
+`test_legacy_id_shapes_are_not_mangled`.
+
+**`model_family` is exported for RENDERING, and is not a priced-
+predicate.** `model_family(m) is not None` reads like one and is subtly
+wrong — it disagrees with `resolve_prices` for any id carried by a
+`PRICING` override. Invariant 1 still stands: `resolve_prices` is the
+only correct answer to "is this priced."
+
+**Known approximation (deliberate).** `_CACHE_WRITE_MULT` is `2.0` (the
+1h-TTL rate). Anthropic bills 1.25x for 5m and 2x for 1h; the synced wire
+format carries one `cache_create` total with no TTL split. Measured on a
+24-file local sample: 83% of cache-write tokens were 1h. So 2x overstates
+by ~+3.5% of a window's total where 1.25x understated by ~11%. The exact
+split IS available in the jsonl
+(`message.usage.cache_creation.ephemeral_{5m,1h}_input_tokens`) but
+reading it is a wire-format change with a mixed-fleet discriminator —
+tracked in `TODOS.md`, deliberately out of v0.12.13's scope.
+
+**Peer token counts are clamped at the trust boundary.**
+`aggregator._safe_int` bounds every synced token field to
+`[0, _MAX_SAFE_TOKENS]` (`2**53`, the largest float64-exact integer).
+Two distinct failures motivate it, both widened by family-tier fallback
+because the reachable id set grew from five hardcoded ids to any
+`claude-<family>-*`. A 400-digit integer survives `json.loads` and then
+raises `OverflowError: int too large to convert to float` inside
+`estimate_cost`'s multiply — nothing between there and
+`cli.retro_fleet_cmd` catches it, so `mm retro-fleet` dies with a
+traceback. And a negative count silently subtracts from the fleet total,
+letting one bad peer shrink the cost line or push it to zero and
+suppress it entirely. Do not relax these clamps to "preserve" peer
+values; a token count outside this range is already garbage. Pinned by
+`TestPeerTokenClamping`.
+
+**Not fleet-skewed.** Pricing is applied locally at render time, from
+`tokens_by_model` carried over the wire. Fixing the local table fixes the
+card immediately, even with other machines on older mm. No peer migration.
