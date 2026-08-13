@@ -913,15 +913,8 @@ def _aggregate_jsonl_views_for_project(
             token_cache_files,
             deadline_monotonic=deadline_monotonic,
         )
-        for day, bucket in by_day.items():
-            target = merged_tokens.setdefault(day, token_usage.zero_day_bucket())
-            token_usage.merge_usage_bucket(target, bucket)
-            # zero_day_bucket() guarantees `by_model` is present.
-            token_usage.merge_by_model(target["by_model"], bucket.get("by_model") or {})
-        for day, sbucket in skills_by_day.items():
-            day_tgt = merged_skills.setdefault(day, {})
-            for skill, count in sbucket.items():
-                day_tgt[skill] = day_tgt.get(skill, 0) + count
+        token_usage.merge_token_days(merged_tokens, by_day)
+        token_usage.merge_skill_days(merged_skills, skills_by_day)
     return merged_tokens, merged_skills
 
 

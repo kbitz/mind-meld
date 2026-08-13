@@ -21,6 +21,16 @@ the shape-upgrade gate in ``get_or_compute`` re-walks any such entry
 once to populate both views (D2 from /plan-eng-review 2026-05-06).
 Token data is preserved unchanged on the rebuild.
 
+Incremental resume (v0.12.15): a cache MISS no longer implies a full
+re-parse. Session jsonls are append-only and routinely reach 10 MB, so
+re-reading one end-to-end because it grew by a few hundred bytes made
+the events tail cost O(total bytes on disk) — the real cause of the
+recurring ``mm: notice: events tail budget exceeded``. Entries carry
+``offset`` (resume point), ``head`` (fingerprint proving the file is
+still the same file) and ``tail_msg_ids`` (cross-boundary dedup seed);
+``_resume_plan`` gates their use and falls back to a full walk on any
+doubt. A warm walk is now O(bytes appended since the last push).
+
 Pricing is module-level and resolved through ``resolve_prices`` — the
 single predicate for "is this model priced, and at what rates." Exact
 model IDs win; anything else falls back to its FAMILY tier so a model
@@ -58,6 +68,8 @@ append.
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
@@ -66,7 +78,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Literal, TypedDict
+from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict
 
 from mind_meld.lockedjson import locked_json_rmw
 
@@ -104,8 +116,77 @@ MAX_BY_DAY_DAYS = 90
 # below the 64 MiB cache-file read cap.
 MAX_JSONL_LINE_BYTES = 16 * 1024 * 1024
 
+# Chunk size for draining past an oversize line. Small enough that the
+# drain never rivals MAX_JSONL_LINE_BYTES in resident memory.
+_DRAIN_CHUNK_BYTES = 1024 * 1024
+
 # Per-process state for the line-size warn-once breadcrumb.
 _WARNED_OVERSIZE_PATHS: set[str] = set()
+
+# --- Incremental resume (v0.12.15) ----------------------------------------
+# Claude Code session jsonls are append-only and routinely reach 10 MB.
+# Re-parsing one end-to-end because it grew by 200 bytes made the events
+# tail O(total bytes on disk) and was the real cause of the recurring
+# `mm: notice: events tail budget exceeded`. Cache entries carry a resume
+# offset so a warm walk is O(bytes appended since the last push).
+
+_HEAD_PROBE_BYTES = 4096
+"""Upper bound on the head window hashed to prove the file on disk is
+still the one that produced a cache entry's ``offset``. A pure
+size-grew check can't tell an append from a rewrite that happens to be
+longer. Claude Code's first line carries sessionId + cwd + timestamp,
+so 4 KiB is comfortably discriminating; the cost is one extra read per
+cache miss.
+
+The ACTUAL window is ``head_probe_len(offset)`` and is persisted per
+entry as ``head_len`` — see that function for why a fixed window is
+wrong for short files.
+
+This is a forensic cache — a false match costs a wrong retro number,
+not data. It bounds identity, not integrity: a rewrite that preserves
+the probed prefix and lands at or above the cached size still passes,
+and the ordinary size+mtime cache hit never consults the probe at all.
+That is accepted, not overlooked."""
+
+TAIL_MSG_ID_LOOKBACK = 8
+"""How many trailing assistant ``message.id`` values a cache entry
+carries forward to seed the next segment's dedup set.
+
+No line is ever parsed by two segments, so the ONLY cross-boundary
+double-count risk is a message whose repeated iterations straddle the
+resume point (iterations 1-2 in this push, 3-4 in the next; each
+iteration re-states the same cumulative usage).
+
+The bound is MEASURED, not guessed. Across 358 live session jsonls:
+26,989 assistant lines repeat an already-seen ``message.id``, and ZERO
+of those repeats are separated by even one other distinct id — every
+repeated run is strictly contiguous. A lookback of 1 would therefore
+suffice today; 8 is 8x headroom, costs ~320 bytes per cache entry, and
+``_carry_tail_ids`` keeps the window in recency order so a re-seen id
+can't be evicted while its message is still in flight.
+
+Residual risk, stated rather than engineered away: a duplicate id
+separated by more than 8 distinct messages (a compaction artifact or
+retry pattern not present in any measured file) over-counts that one
+message's usage once. Bounded, forensic, and self-healing on the next
+full walk."""
+
+_MAX_TAIL_MSG_ID_LEN = 128
+"""Length cap on a carried-forward ``message.id``.
+
+``message.id`` is read out of a jsonl and a single line may be up to
+``MAX_JSONL_LINE_BYTES``. Without a cap, eight near-16 MiB ids would
+serialize into a cache larger than ``lockedjson``'s 64 MiB read
+ceiling — every later read then sees oversized JSON, resets the cache,
+and the fleet pays a cold walk on every push, permanently. Real
+Anthropic ids measure 36 chars, so 128 is generous.
+
+Over-long ids are DROPPED from the seed rather than truncated:
+truncation could alias two distinct ids into one and silently
+under-count. Dropping degrades to the pre-existing over-count-once
+behaviour for that one message. Mirrors the peer-controlled-string
+clamping convention in ``safety.py`` and the aggregator's
+``_safe_short``."""
 
 # Time-budget knobs (mirror events.py's interactive/autopush split).
 DEFAULT_WARM_BUDGET_S = 5.0
@@ -310,12 +391,25 @@ def merge_usage_bucket(target: dict[str, Any], src: dict[str, Any]) -> None:
     Missing keys in ``src`` contribute 0; missing keys in ``target`` are
     seeded to 0 then summed.
 
-    NOT trust-boundary safe: assumes ``src`` values are int-coerced
-    upstream (parse_usage handles peer-controlled jsonl input via
-    ``_coerce_int``). The aggregator side keeps its bespoke loop with
-    ``_safe_int`` because it walks peer-controlled events directly."""
+    NOT trust-boundary safe for MAGNITUDE: assumes ``src`` values are
+    int-coerced upstream (parse_usage handles peer-controlled jsonl input
+    via ``_coerce_int``). The aggregator side keeps its bespoke loop with
+    ``_safe_int`` because it walks peer-controlled events directly.
+
+    It IS defensive about TYPE, because v0.12.15 made the on-disk cache a
+    merge SOURCE (the incremental resume path) rather than only a return
+    value. A single non-int value in one cached bucket would otherwise
+    raise ``TypeError`` out of ``get_or_compute``, which ``_run_events_tail``
+    catches as `events tail failed` on EVERY push while the poisoned entry
+    survives — a permanent outage from one bad key. Non-ints contribute 0."""
     for k in TOKEN_FIELDS:
-        target[k] = target.get(k, 0) + src.get(k, 0)
+        base = target.get(k, 0)
+        add = src.get(k, 0)
+        if not isinstance(base, int) or isinstance(base, bool):
+            base = 0
+        if not isinstance(add, int) or isinstance(add, bool):
+            add = 0
+        target[k] = base + add
 
 
 def merge_by_model(
@@ -326,10 +420,60 @@ def merge_by_model(
 
     For each model in src, ``setdefault(zero_model_bucket())`` then
     delegates to ``merge_usage_bucket``. Same trust-boundary caveat as
-    ``merge_usage_bucket`` — for trusted local data only."""
+    ``merge_usage_bucket`` — for trusted local data only. Non-dict model
+    buckets are skipped for the same reason as ``merge_token_days``: a
+    malformed cache entry must not raise through the events tail."""
     for model, mbucket in src_by_model.items():
+        if not isinstance(mbucket, dict):
+            continue
         mtarget = target_by_model.setdefault(model, zero_model_bucket())
         merge_usage_bucket(mtarget, mbucket)
+
+
+def merge_token_days(
+    target: dict[str, DayBucket],
+    src: dict[str, Any],
+) -> None:
+    """Merge a whole ``{YYYY-MM-DD: DayBucket}`` map into ``target`` in place.
+
+    The day-level counterpart to ``merge_usage_bucket`` / ``merge_by_model``,
+    which work on a SINGLE bucket. Every caller that merges two per-day maps
+    was hand-rolling the same three lines; the v0.12.15 incremental-resume
+    merge in ``get_or_compute`` would have been the fifth copy. See the
+    ``mirrored-predicate-drifts-when-one-side-gains-logic`` pitfall — this
+    module has already shipped that bug twice.
+
+    Same VALUE trust-boundary caveat as ``merge_usage_bucket`` (ints are
+    assumed coerced upstream), but SHAPE is handled defensively: a
+    non-dict day bucket is skipped rather than raising. Both callers read
+    from the on-disk cache, and a single malformed entry raising here
+    would take down the whole events tail on EVERY push while the
+    poisoned entry survives — a permanent outage from one bad key."""
+    for day, bucket in src.items():
+        if not isinstance(bucket, dict):
+            continue
+        day_target = target.setdefault(day, zero_day_bucket())
+        merge_usage_bucket(day_target, bucket)
+        # zero_day_bucket() guarantees `by_model` is present.
+        by_model = bucket.get("by_model")
+        if isinstance(by_model, dict):
+            merge_by_model(day_target["by_model"], by_model)
+
+
+def merge_skill_days(target: SkillBuckets, src: SkillBuckets) -> None:
+    """Merge a whole ``{YYYY-MM-DD: {skill: count}}`` map into ``target``
+    in place. The skills-side counterpart to ``merge_token_days`` — before
+    v0.12.15 the skills half had no helper at all and was hand-rolled at
+    every site. Same defensive-shape rule: malformed buckets are skipped,
+    never raised."""
+    for day, sbucket in src.items():
+        if not isinstance(sbucket, dict):
+            continue
+        day_target = target.setdefault(day, {})
+        for skill, count in sbucket.items():
+            if not isinstance(count, int) or isinstance(count, bool):
+                continue
+            day_target[skill] = day_target.get(skill, 0) + count
 
 
 def _normalize_model_id(s: str) -> str:
@@ -465,20 +609,59 @@ def _coerce_int(v: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
-    """Walk a single jsonl in ONE I/O pass, producing both views:
+class JsonlSegment(NamedTuple):
+    """One contiguous byte range of a jsonl, parsed into both views.
+
+    ``end_offset`` is the byte offset one past the last COMPLETE line
+    consumed — a partially-written trailing line is left unparsed and
+    unaccounted for, so the next walk re-reads it once it has settled.
+
+    ``tail_msg_ids`` carries the trailing ``message.id`` values forward
+    so the next segment can dedup a message whose iterations straddle
+    the boundary. See ``TAIL_MSG_ID_LOOKBACK``.
+
+    ``ok`` is False when the read failed outright (``OSError`` on open).
+    Callers MUST NOT persist a cache entry built from a failed read: the
+    stat calls that bracket the walk would still agree, so the entry
+    would record the file's CURRENT size/mtime against buckets that
+    never saw its current bytes — a permanent cache hit that silently
+    stops accounting for the session forever.
+    """
+
+    by_day: dict[str, DayBucket]
+    skills_by_day: SkillBuckets
+    end_offset: int
+    tail_msg_ids: tuple[str, ...]
+    ok: bool = True
+
+
+def walk_jsonl_segment(
+    path: Path,
+    *,
+    start_offset: int = 0,
+    seed_msg_ids: Iterable[str] = (),
+) -> JsonlSegment:
+    """Parse ``path`` from ``start_offset`` to EOF in ONE I/O pass,
+    producing both views:
 
       - Token by_day: ``{YYYY-MM-DD: DayBucket}`` summed from
         ``message.usage`` on assistant messages.
       - Skill skills_by_day: ``{YYYY-MM-DD: {skill_name: count}}`` from
         each assistant ``tool_use`` block with ``name == "Skill"``.
 
-    Both views capped to the most recent ``MAX_BY_DAY_DAYS`` days.
+    Buckets are returned UNTRIMMED — the caller trims after merging with
+    any cached prefix, so a day that falls out of the ``MAX_BY_DAY_DAYS``
+    window can't be resurrected half-populated. ``walk_jsonl_buckets`` is
+    the trimming full-file shim over this function.
 
     Token dedup is by ``message.id`` — Claude Code logs each model
     iteration as a separate jsonl line under the same ``message.id``,
     and the ``usage`` field on each iteration is the SAME cumulative
-    total. Walking each iteration would double-count tokens.
+    total. Walking each iteration would double-count tokens. On a
+    resumed walk the dedup set is seeded from ``seed_msg_ids`` (the
+    prior segment's ``tail_msg_ids``) — no line is ever parsed twice,
+    but a message whose ITERATIONS straddle the boundary would
+    otherwise be counted once per segment.
 
     Skill dedup is by ``tool_use.id`` (independently of message dedup).
     Each iteration of an assistant message produces DIFFERENT content
@@ -489,8 +672,19 @@ def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
     Tool-use ids are Anthropic's ``toolu_*`` format and unique across
     the session.
 
+    Tool ids get NO cross-segment seed, and that is a measured call, not
+    a proof. Re-reading is not the risk (no line is read by two
+    segments); a genuine RETRY re-emitting the same ``tool_use.id`` on a
+    LATER line is, and such a retry split across a resume boundary would
+    count twice incrementally where a full walk counts once. Across 358
+    live session jsonls there are ZERO duplicate ``tool_use.id`` values,
+    so the seed would be pure cache weight for a case that does not
+    occur. If duplicates ever show up, seed these the same way
+    ``tail_msg_ids`` seeds the token side.
+
     Skips (both views):
-      - non-JSON lines (``json.JSONDecodeError``)
+      - non-JSON and non-UTF-8 lines (both surface as ``ValueError``
+        from ``json.loads`` on bytes)
       - non-assistant messages
       - messages without a parseable ``timestamp``
 
@@ -498,23 +692,37 @@ def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
     ``input.skill`` is not a non-empty string. Tool_use blocks for
     other tools (Edit, Bash, etc.) are not counted.
 
-    Returns ``({}, {})`` on any I/O failure — caller treats as cache
-    miss for next push.
+    On I/O failure returns an empty segment pinned at ``start_offset``
+    so the caller advances nothing.
     """
     by_day: dict[str, DayBucket] = {}
     skills_by_day: SkillBuckets = {}
-    seen_msg_ids: set[str] = set()
+    seed = tuple(seed_msg_ids)
+    seen_msg_ids: set[str] = set(seed)
     seen_tool_ids: set[str] = set()
+    recent_msg_ids: list[str] = []
     path_str = str(path)
+    offset = start_offset
     try:
-        with open(path, encoding="utf-8") as fp:
-            for line in _iter_bounded_lines(fp, path_str):
-                stripped = line.strip()
+        # Binary mode: `tell()`-free arithmetic on real byte offsets (a
+        # text-mode `tell()` cookie is opaque and not comparable against
+        # `st_size`), a genuinely byte-bounded line cap, and per-line
+        # tolerance for invalid UTF-8 — under text mode a single bad
+        # byte raised UnicodeDecodeError out through the whole events
+        # tail. `json.loads` accepts bytes directly.
+        with open(path, "rb") as fp:
+            if start_offset:
+                fp.seek(start_offset)
+            for raw, end in _iter_bounded_lines(fp, path_str, start_offset):
+                offset = end
+                stripped = raw.strip()
                 if not stripped:
                     continue
                 try:
                     obj = json.loads(stripped)
-                except json.JSONDecodeError:
+                except ValueError:
+                    # JSONDecodeError (malformed) and UnicodeDecodeError
+                    # (invalid utf-8) are both ValueError subclasses.
                     continue
                 if not isinstance(obj, dict):
                     continue
@@ -538,10 +746,58 @@ def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
                 # contribute DIFFERENT tool_use blocks under the same
                 # message.id; deduping by message.id loses them).
                 _accumulate_skills(skills_by_day, day, msg, seen_tool_ids)
+                if msg_id is not None and msg_id not in recent_msg_ids:
+                    recent_msg_ids.append(msg_id)
     except OSError:
-        return {}, {}
-    return _trim_by_day(by_day, MAX_BY_DAY_DAYS), _trim_skills_by_day(
-        skills_by_day, MAX_BY_DAY_DAYS
+        return JsonlSegment({}, {}, start_offset, seed, ok=False)
+    return JsonlSegment(by_day, skills_by_day, offset, _carry_tail_ids(seed, recent_msg_ids))
+
+
+def _carry_tail_ids(seed: tuple[str, ...], seen: list[str]) -> tuple[str, ...]:
+    """Merge the prior segment's tail ids with this segment's, keeping the
+    ``TAIL_MSG_ID_LOOKBACK`` most-recently-seen in recency order.
+
+    An id already in the seed is MOVED to the end rather than left where
+    it was. Recency is the whole point of the window: an id we just saw
+    again is one whose message may still be mid-flight, and leaving it at
+    its stale position lets the tail trim evict exactly the id most likely
+    to straddle the next boundary.
+
+    The seed is preserved when this segment parsed no assistant messages
+    at all (an append of pure user turns), so a quiet push can't drop the
+    straddle guard for the message that is still mid-flight.
+
+    Ids longer than ``_MAX_TAIL_MSG_ID_LEN`` are dropped — see that
+    constant for why a jsonl-sourced string must be length-bounded before
+    it reaches the cache file.
+
+    The result is ALWAYS unique, enforced here rather than assumed of the
+    caller. ``_resume_plan`` rejects any entry whose ``tail_msg_ids``
+    contain a duplicate, so emitting one is equivalent to disabling resume
+    for that file — permanently, silently, and on exactly the
+    actively-streaming sessions this feature exists to speed up."""
+
+    def _dedup(ids: Iterable[str]) -> list[str]:
+        out: list[str] = []
+        for mid in ids:
+            if len(mid) <= _MAX_TAIL_MSG_ID_LEN and mid not in out:
+                out.append(mid)
+        return out
+
+    fresh = _dedup(seen)
+    # Seed entries re-seen this segment are dropped from their stale
+    # position and inherit the recency of `fresh` below.
+    carried = [mid for mid in _dedup(seed) if mid not in fresh]
+    return tuple((carried + fresh)[-TAIL_MSG_ID_LOOKBACK:])
+
+
+def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
+    """Full-file walk returning both trimmed views. Thin shim over
+    ``walk_jsonl_segment`` — the canonical parser. Returns ``({}, {})``
+    on any I/O failure."""
+    seg = walk_jsonl_segment(path)
+    return _trim_by_day(seg.by_day, MAX_BY_DAY_DAYS), _trim_skills_by_day(
+        seg.skills_by_day, MAX_BY_DAY_DAYS
     )
 
 
@@ -624,33 +880,80 @@ def _trim_skills_by_day(skills_by_day: SkillBuckets, max_days: int) -> SkillBuck
     return {k: pruned[k] for k in keep_keys}
 
 
-def _iter_bounded_lines(fp, path_str: str) -> Iterable[str]:
-    """Yield each line from ``fp`` capped at ``MAX_JSONL_LINE_BYTES`` chars.
+def _iter_bounded_lines(fp, path_str: str, start_offset: int) -> Iterable[tuple[bytes, int]]:
+    """Yield ``(line_bytes, end_offset)`` for each COMPLETE line in the
+    binary stream ``fp``, capped at ``MAX_JSONL_LINE_BYTES`` per line.
+    A skipped oversize line is yielded as ``b""`` so the caller's offset
+    still advances past it.
 
-    ``fp.readline(N)`` reads at most N characters before returning, so a
+    ``end_offset`` is an absolute byte offset one past the line's
+    terminating newline, so the caller can persist a resume point.
+
+    ``fp.readline(N)`` reads at most N bytes before returning, so a
     pathological line with no embedded newline can NEVER pull more than
     ``MAX_JSONL_LINE_BYTES`` into memory before we make the keep/skip
     decision. (Codex outside-voice review caught the prior `for line in
     fp:` form: it lets Python extend its buffer until newline-or-EOF, so
     a single multi-GB line could OOM the whole walk.)
 
+    A trailing chunk with no newline is a PARTIAL line — Claude Code was
+    mid-write. It is neither yielded nor counted toward ``end_offset``,
+    so the next walk re-reads it from the start once it has settled.
+    That is what makes the resume point safe to persist.
+
     When an oversize line is detected, drain forward to the next newline
     in bounded chunks and emit a one-shot ``mm: notice:`` for the file
     path so the user can investigate."""
     cap = MAX_JSONL_LINE_BYTES
+    pos = start_offset
     while True:
-        chunk = fp.readline(cap + 1)
+        chunk = fp.readline(cap)
         if not chunk:
             return
-        if len(chunk) > cap:
-            if path_str not in _WARNED_OVERSIZE_PATHS:
-                sys.stderr.write(f"mm: notice: token walker skipping oversize line in {path_str}\n")
-                _WARNED_OVERSIZE_PATHS.add(path_str)
-            # Drain the rest of this oversize line in bounded chunks.
-            while chunk and not chunk.endswith("\n"):
-                chunk = fp.readline(cap + 1)
+        if chunk.endswith(b"\n"):
+            pos += len(chunk)
+            yield chunk, pos
             continue
-        yield chunk
+        if len(chunk) < cap:
+            # Short read with no newline == EOF mid-line. Partial write;
+            # stop without advancing past it.
+            return
+        if path_str not in _WARNED_OVERSIZE_PATHS:
+            sys.stderr.write(f"mm: notice: token walker skipping oversize line in {path_str}\n")
+            _WARNED_OVERSIZE_PATHS.add(path_str)
+        drained = _drain_to_newline(fp)
+        if drained is None:
+            # EOF inside an oversize line — still a partial write.
+            return
+        pos += len(chunk) + drained
+        # Yield the skipped line as EMPTY rather than swallowing it: the
+        # caller advances its resume offset on every yield, and the parse
+        # loop already skips blank lines. Without this a TRAILING oversize
+        # line would pin the offset behind itself forever, re-draining the
+        # same megabytes on every push.
+        yield b"", pos
+
+
+def _drain_to_newline(fp) -> int | None:
+    """Consume bytes from the binary stream up to and including the next
+    newline, in bounded chunks. Returns the number of bytes consumed, or
+    ``None`` if EOF arrived first (nothing is consumed past EOF).
+
+    Over-read is rewound so the stream is positioned exactly one byte
+    past the newline — the caller's offset arithmetic depends on it."""
+    consumed = 0
+    while True:
+        chunk = fp.read(_DRAIN_CHUNK_BYTES)
+        if not chunk:
+            return None
+        nl = chunk.find(b"\n")
+        if nl == -1:
+            consumed += len(chunk)
+            continue
+        over = len(chunk) - (nl + 1)
+        if over:
+            fp.seek(-over, os.SEEK_CUR)
+        return consumed + nl + 1
 
 
 def _extract_day(raw_ts: Any) -> str | None:
@@ -782,8 +1085,39 @@ def get_or_compute(
                     _trim_skills_by_day(sk, MAX_BY_DAY_DAYS),
                 )
 
-    # Miss: walk + maybe persist.
-    by_day, skills_by_day = walk_jsonl_buckets(path)
+    # Miss. Resume from the cached offset when the file merely GREW;
+    # fall back to a full walk otherwise.
+    resume = _resume_plan(path, existing, size_pre)
+    if resume is None:
+        seg = walk_jsonl_segment(path)
+        by_day, skills_by_day = seg.by_day, seg.skills_by_day
+    else:
+        seg = walk_jsonl_segment(
+            path,
+            start_offset=resume.offset,
+            seed_msg_ids=resume.tail_msg_ids,
+        )
+        by_day, skills_by_day = resume.by_day, resume.skills_by_day
+        merge_token_days(by_day, seg.by_day)
+        merge_skill_days(skills_by_day, seg.skills_by_day)
+
+    by_day = _trim_by_day(by_day, MAX_BY_DAY_DAYS)
+    skills_by_day = _trim_skills_by_day(skills_by_day, MAX_BY_DAY_DAYS)
+
+    # Read failed outright. The stats below would still agree, so
+    # persisting here would pin the CURRENT size/mtime to buckets that
+    # never saw the current bytes — a permanent hit that silently stops
+    # counting this session. Return what we have, persist nothing.
+    if not seg.ok:
+        return by_day, skills_by_day
+
+    # Fingerprint BEFORE the stability stat, so the pre/post stat pair
+    # BRACKETS the probe read. Reading it after the stat leaves a window
+    # in which the file is replaced and we persist the old buckets under
+    # the REPLACEMENT's fingerprint — an entry that then licenses a
+    # resume into a file none of its buckets ever saw.
+    probe_len = head_probe_len(seg.end_offset)
+    head = head_fingerprint(path, probe_len)
 
     # Re-stat: detect concurrent append. If drift, skip persistence.
     try:
@@ -792,16 +1126,147 @@ def get_or_compute(
         return by_day, skills_by_day
     if st_post.st_size != size_pre or st_post.st_mtime != mtime_pre:
         # File grew or was rewritten while we walked. Don't trust this
-        # entry; let the next push re-walk a stable file.
+        # entry; let the next push re-walk a stable file. `resume` holds
+        # COPIES of the cached buckets, so the surviving entry is
+        # untouched and its offset still points at settled bytes.
         return by_day, skills_by_day
 
-    cache_files[key] = {
+    entry: dict[str, Any] = {
         "size": size_pre,
         "mtime": mtime_pre,
         "by_day": by_day,
         "skills_by_day": skills_by_day,
     }
+    # Resume fields are best-effort: without a readable head fingerprint
+    # we can't prove a later file is the same file, so persist the legacy
+    # shape and let the next miss walk in full. The probe was recomputed
+    # against the NEW offset even on a resume — the window grows with the
+    # accounted region until it reaches _HEAD_PROBE_BYTES.
+    if head is not None:
+        entry["offset"] = seg.end_offset
+        entry["head"] = head
+        entry["head_len"] = probe_len
+        entry["tail_msg_ids"] = list(seg.tail_msg_ids)
+    cache_files[key] = entry
     return by_day, skills_by_day
+
+
+class _ResumePlan(NamedTuple):
+    offset: int
+    tail_msg_ids: tuple[str, ...]
+    head: str
+    by_day: dict[str, DayBucket]
+    skills_by_day: SkillBuckets
+
+
+def _resume_plan(path: Path, existing: Any, size_now: int) -> _ResumePlan | None:
+    """Decide whether ``existing`` licenses an incremental walk of ``path``.
+
+    Returns ``None`` — meaning "walk the whole file" — unless EVERY
+    condition holds:
+
+    * the entry carries the v0.12.15 resume fields (``offset`` + ``head``).
+      Pre-v0.12.15 entries lack them and upgrade shape naturally on their
+      next miss; deliberately NOT a ``CACHE_VERSION`` bump, which would
+      throw away every peer's token history (same reasoning as the D2
+      shape gate above);
+    * the file did not SHRINK and the offset lands inside BOTH the
+      recorded size and the current one — a truncation or rewrite
+      invalidates every byte we've accounted for, and an offset past the
+      size it was recorded against is a corrupt entry that would skip
+      bytes no bucket has ever seen;
+    * the head fingerprint still matches — catches a same-or-larger
+      rewrite that a size check alone would read as an append;
+    * the cached buckets are well-formed dicts;
+    * ``tail_msg_ids`` is a well-formed list of strings. A malformed one
+      is treated as a corrupt entry, NOT as an empty seed — silently
+      degrading to no seed is what would double-count the straddling
+      message this field exists to protect.
+
+    The returned buckets are deep COPIES. Merging into the live cached
+    dicts would mutate the entry even on the concurrent-append path that
+    deliberately declines to persist.
+    """
+    if not isinstance(existing, dict):
+        return None
+    offset = existing.get("offset")
+    prev_size = existing.get("size")
+    head = existing.get("head")
+    head_len = existing.get("head_len")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        return None
+    if not isinstance(prev_size, int) or isinstance(prev_size, bool):
+        return None
+    if not isinstance(head, str) or not head:
+        return None
+    # head_len must be EXACTLY what persistence would have written. A
+    # merely-in-range check (0 < head_len <= offset) lets a corrupted
+    # entry shrink the probe to one byte and make identity checking
+    # meaningless — the check would still "pass" while proving nothing.
+    if not isinstance(head_len, int) or isinstance(head_len, bool):
+        return None
+    if head_len <= 0 or head_len != head_probe_len(offset):
+        return None
+    if size_now < prev_size or offset > size_now or offset > prev_size:
+        return None
+    by_day = existing.get("by_day")
+    skills_by_day = existing.get("skills_by_day")
+    if not isinstance(by_day, dict) or not isinstance(skills_by_day, dict):
+        return None
+    # tail_msg_ids must match the CANONICAL persisted shape exactly:
+    # at most TAIL_MSG_ID_LOOKBACK unique strings, each within the length
+    # cap. Silently filtering an over-long or duplicated id here would
+    # contradict this function's whole contract ("malformed → full walk")
+    # and quietly hand back a weaker seed than the entry claims.
+    raw_ids = existing.get("tail_msg_ids")
+    if not isinstance(raw_ids, list) or len(raw_ids) > TAIL_MSG_ID_LOOKBACK:
+        return None
+    if not all(isinstance(x, str) and 0 < len(x) <= _MAX_TAIL_MSG_ID_LEN for x in raw_ids):
+        return None
+    if len(set(raw_ids)) != len(raw_ids):
+        return None
+    tail_ids = tuple(raw_ids)
+    if head_fingerprint(path, head_len) != head:
+        return None
+    return _ResumePlan(
+        offset=offset,
+        tail_msg_ids=tail_ids,
+        head=head,
+        by_day=copy.deepcopy(by_day),
+        skills_by_day=copy.deepcopy(skills_by_day),
+    )
+
+
+def head_probe_len(offset: int) -> int:
+    """How many head bytes to fingerprint for an entry resuming at
+    ``offset``.
+
+    MUST NOT exceed ``offset``. Hashing a fixed 4 KiB window looks
+    simpler but is wrong for any file shorter than the window: the read
+    returns "whole file", so every append changes the digest and the
+    entry never resumes — it silently degrades to a full walk forever.
+    Clamping to ``offset`` keeps the probe inside bytes already
+    accounted for, which are stable under append by definition."""
+    return min(_HEAD_PROBE_BYTES, max(offset, 0))
+
+
+def head_fingerprint(path: Path, probe_len: int) -> str | None:
+    """Hex digest of the first ``probe_len`` bytes of ``path``, or
+    ``None`` if it can't be read (or fewer bytes are present than
+    claimed — a file that shrank is not the file we fingerprinted).
+
+    Truncated to 16 hex chars: this identifies a file across pushes, it
+    does not authenticate one."""
+    if probe_len <= 0:
+        return None
+    try:
+        with open(path, "rb") as fp:
+            head = fp.read(probe_len)
+    except OSError:
+        return None
+    if len(head) != probe_len:
+        return None
+    return hashlib.sha256(head).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -1151,20 +1616,27 @@ __all__ = [
     "PRICING_LAST_UPDATED",
     "SUBSCRIPTION_CAVEAT",
     "SkillBuckets",
+    "TAIL_MSG_ID_LOOKBACK",
     "TOKEN_FIELDS",
     "Usage",
+    "JsonlSegment",
     "estimate_cost",
     "gc_cache_entries",
     "get_or_compute",
+    "head_fingerprint",
+    "head_probe_len",
     "is_cache_cold",
     "lock_and_get_files",
     "merge_by_model",
+    "merge_skill_days",
+    "merge_token_days",
     "merge_usage_bucket",
     "model_family",
     "parse_usage",
     "resolve_prices",
     "slice_window",
     "walk_jsonl_buckets",
+    "walk_jsonl_segment",
     "walk_jsonl_token_buckets",
     "warm_token_cache_inline",
     "zero_day_bucket",
