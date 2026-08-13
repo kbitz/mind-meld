@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.14] - 2026-08-13
+
+### Added
+
+- Sync Codex and OpenCode customization alongside Claude Code: durable rules, skills, plugins, commands, agents, modes, and tools follow your fleet without copying credentials, session databases, logs, tool output, or whole-file settings that may contain secrets.
+- Install and self-heal the bundled `/retro-fleet` skill for Codex and OpenCode as well as Claude Code, including OpenCode-only setups with Claude compatibility disabled.
+- Document the shared `mm autopull` / `mm autopush` lifecycle so every agent contributes to the gstack and event context behind fleet retrospectives.
+
+### Changed
+
+- Existing installations can opt into the new sources with `mm enable-source codex` and `mm enable-source opencode`; fresh installs offer both during setup.
+
 ## [0.12.13] - 2026-08-11
 
 **`retro-fleet` was understating cost by ~3,000x — a 60-day window that really cost ~$11,015 at list price rendered as `~$3.37`.** Two independent defects that masked each other. First, the entire Claude 5 family (`claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`) and `claude-opus-4-8` were missing from the pricing table, and unknown models were skipped in silence — so only leftover Haiku subagent traffic got priced, and that `$3` was the *whole* basis. Second, `claude-opus-4-7` / `-4-6` / `-4-5` carried `$15/$75`, which are Opus **4.1** rates; those models are `$5/$25`. The two errors push opposite ways, so whether a card over- or under-reported depended entirely on its model mix — worse than being consistently wrong, because one window looks plausible and the next is off by orders of magnitude.

@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mind-meld"
-version = "0.12.13"
-description = "Sync Claude Code sessions and AI developer context across machines via iCloud Drive"
+version = "0.12.14"
+description = "Sync AI coding-agent context across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Karl Bitz" }]
-keywords = ["claude", "sync", "cli", "encryption", "icloud"]
+keywords = ["claude", "codex", "opencode", "sync", "cli", "encryption", "icloud"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
