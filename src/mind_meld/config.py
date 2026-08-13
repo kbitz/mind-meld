@@ -24,6 +24,8 @@ LOCK_PATH = CONFIG_DIR / "mind-meld.lock"
 DEFAULT_MAX_FILE_SIZE = 52_428_800  # 50MB
 DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = "~/.claude"
+DEFAULT_CODEX_DIR = "~/.codex"
+DEFAULT_OPENCODE_DIR = "~/.config/opencode"
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
 )
@@ -112,6 +114,30 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "type": "generic",
         "include_dirs": ["projects"],
         "include_files": [],
+        "exclude_patterns": [],
+    },
+    {
+        # Codex config.toml can embed MCP/provider environment variables, so
+        # syncing it wholesale would leak credentials. Sync only instructions,
+        # reusable skills, and locally-installed plugins by default.
+        "name": "codex",
+        "path": DEFAULT_CODEX_DIR,
+        "type": "generic",
+        "include_dirs": ["skills", "plugins"],
+        "include_files": ["AGENTS.md"],
+        "exclude_patterns": [],
+    },
+    {
+        # OpenCode config JSON can embed provider/MCP credentials. Its rules,
+        # skills, commands, plugins, and agents are safe to sync by default;
+        # the whole-file config stays local until mm supports field filtering.
+        "name": "opencode",
+        "path": DEFAULT_OPENCODE_DIR,
+        "type": "generic",
+        "include_dirs": ["agents", "commands", "modes", "plugins", "skills", "tools"],
+        "include_files": [
+            "AGENTS.md",
+        ],
         "exclude_patterns": [],
     },
 ]
@@ -277,8 +303,8 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     2. config["sync"]["claude_dir"] wrapped as a single claude source
     3. DEFAULT_SOURCES
 
-    Auto-detection: if ~/.gstack/ exists on disk but no gstack source is
-    in the resolved list, append the default gstack source.
+    Auto-detection: if a known agent directory exists on disk but its source
+    is absent from a legacy (non-explicit) config, append that default source.
 
     Finally, filter to sources whose path actually exists on disk.
     """
@@ -337,6 +363,20 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
                     "path": str(Path(default_gstack_extend["path"]).expanduser()),
                 }
             )
+
+    # Keep legacy configs on the same agent-parity path as fresh installs.
+    # Explicit `sync.sources` is intentional user curation, so it remains an
+    # opt-in surface (via `mm enable-source codex` / `opencode`).
+    if not explicit_sources:
+        for source_name, source_path in (
+            ("codex", Path.home() / ".codex"),
+            ("opencode", Path.home() / ".config" / "opencode"),
+        ):
+            if source_path.exists() and not any(s["name"] == source_name for s in sources):
+                default_source = get_default_source(source_name)
+                if default_source:
+                    default_source["path"] = str(Path(default_source["path"]).expanduser())
+                    sources.append(default_source)
 
     _validate_sources(sources)
 

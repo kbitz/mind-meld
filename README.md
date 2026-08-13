@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Sync Claude Code memory, todos, and gstack context across Macs via iCloud Drive. End-to-end encrypted. Supports multiple sync sources.
+Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, and OpenCode.
 
 ## Install
 
@@ -108,6 +108,35 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr as a single `mm: warning: ...` line so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Autopull writes a `degraded` breadcrumb (separate from `success`) when any of four conditions fire during an otherwise-successful pull: fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases.
 - **Auto-upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag and emit a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr if you're behind. `mm` never invokes pipx itself; you run the printed command. The command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which plain `pipx upgrade mind-meld` works (see [Upgrading](#upgrading)). Disable with `--no-check-version` for one invocation, or set `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml` to disable persistently. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the nudge fires before that, ideally making the refusal a backstop nobody hits.
 
+## Codex and OpenCode Integration
+
+Mind Meld treats Codex and OpenCode as first-class peers of Claude Code:
+
+- `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`.
+- `opencode` syncs `~/.config/opencode/` customizations: rules, agents, commands, modes, plugins, skills, and tools.
+- Account credentials, session databases, logs, tool output, and whole-file `config.toml` / `opencode.json{,c}` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
+- The bundled `/retro-fleet` skill installs for Claude Code, Codex, and OpenCode when you run `mm init`, `mm push`, or `mm install-skills`. OpenCode's Claude compatibility remains useful for existing gstack skills, but its own skill link works even when compatibility is disabled.
+
+Fresh installs are asked about the `codex` and `opencode` sources during `mm init`. Existing installations remain opt-in:
+
+```bash
+mm enable-source codex
+mm enable-source opencode
+```
+
+Then give each agent the same lifecycle contract. For Codex, add this to `~/.codex/AGENTS.md` (or merge it into your existing global guidance):
+
+```markdown
+# Mind Meld
+
+At the start of each conversation, run `mm autopull`.
+At the end of each completed task or conversation, run `mm autopush`.
+
+If either command has output, summarize it for the user. If it is silent, continue silently.
+```
+
+OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immediately when Claude compatibility is enabled. If you use `OPENCODE_DISABLE_CLAUDE_CODE*` or have `~/.config/opencode/AGENTS.md`, put the same block there. This makes every agent feed the same gstack and `mm-events` history used by `retro-fleet`; Claude-only session and token breakdowns remain explicitly labeled as Claude-only.
+
 ### Manual commands
 
 | Command | Description |
@@ -128,7 +157,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. |
-| `mm install-skills` | Force-install (or repair) the `~/.claude/skills/retro-fleet` symlink. The push-time self-heal handles this automatically; this is the explicit knob for fresh-machine setup or post-cleanup recovery. |
+| `mm install-skills` | Force-install (or repair) the `retro-fleet` skill symlink for Claude Code, Codex, and OpenCode. The push-time self-heal handles this automatically; this is the explicit knob for fresh-machine setup or post-cleanup recovery. |
 
 ### Syncing gstack
 
@@ -195,10 +224,10 @@ The on/off state lives in `[sync].disabled_sources = ["gstack"]`. Disabling does
 
 `mm sources` shows the toggle state as an `Enabled` column. `mm status` calls out disabled sources in a one-line breadcrumb so future-you doesn't forget gstack is off and re-debug "why isn't this syncing".
 
-**Forward-compat for not-yet-shipped sources.** When `mm` adds a new source to its defaults (e.g. codex in a future release), upgraders don't get auto-enrolled — `mm status` surfaces a one-shot `New source available: codex. Run mm enable-source codex to sync.` hint. To pre-disable a name before it ships:
+**Forward-compat for not-yet-shipped sources.** When `mm` adds a new source to its defaults, upgraders don't get auto-enrolled — `mm status` surfaces a one-shot enable hint. To pre-disable a name before it ships:
 
 ```bash
-mm disable-source codex --force   # accepts unknown names for forward-compat
+mm disable-source future-agent --force   # accepts unknown names for forward-compat
 ```
 
 `mm reconfigure-sources` re-runs the picker against your current config + new defaults, in case you want to revisit every choice at once.

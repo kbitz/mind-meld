@@ -2144,8 +2144,8 @@ class TestAutoCommands:
         monkeypatch.setattr(cli_mod, "store_passphrase_in_keyring", boom)
 
         # Inputs match TestInitFlow pattern: storage, device name, passphrase,
-        # confirm passphrase, then source prompts (Y claude, n gstack, n gstack-extend).
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\n"
+        # confirm passphrase, then source prompts (Y claude, all others n).
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         # Init should complete despite the keyring write failure.
         assert result.exit_code == 0, result.output
@@ -2757,9 +2757,9 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # Inputs: storage path, device name, passphrase, confirm passphrase,
-        # then per-source prompts (claude Y, gstack n, gstack-extend n) — we
+        # then per-source prompts (claude Y, all others n) — we
         # need at least one source enabled for init to succeed.
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "bootstrapped" in result.output
@@ -2795,8 +2795,8 @@ class TestInitFlow:
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
 
-        # Decline claude, gstack, and gstack-extend.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\n"
+        # Decline every user-facing source.
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code != 0, result.output
         assert "no sync sources enabled" in result.output
@@ -2817,13 +2817,13 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # First attempt: refuse all, leaves mm-crypto-init orphan.
-        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\n"
+        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\nn\nn\n"
         result1 = runner.invoke(app, ["init"], input=stdin1)
         assert result1.exit_code != 0
 
         # Second attempt: same passphrase, accept claude. Takes the
         # second-device path against the orphaned bootstrap.
-        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\nn\n"
+        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\nn\nn\nn\n"
         result2 = runner.invoke(app, ["init"], input=stdin2)
         assert result2.exit_code == 0, result2.output
         assert "Verified passphrase against existing mm-crypto-init" in result2.output
@@ -2841,8 +2841,8 @@ class TestInitFlow:
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
 
-        # Decline claude, accept gstack, decline gstack-extend.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\n"
+        # Decline claude, accept gstack, decline the other sources.
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -2865,7 +2865,7 @@ class TestInitFlow:
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -2908,8 +2908,8 @@ class TestInitFlow:
         bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
 
         # Second-device init: only 1 passphrase prompt (single, no confirm),
-        # then per-source prompts (claude Y, gstack n, gstack-extend n).
-        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\n"
+        # then per-source prompts (claude Y, all others n).
+        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
@@ -3015,8 +3015,8 @@ class TestInitTwoTierGuard:
         backend.put("data/oldpeer/decafbad.enc", b"stub-blob")
 
         # Inputs: storage path, orphan-confirm y, device name, passphrase,
-        # per-source (claude Y, gstack n, gstack-extend n).
-        stdin = f"{storage}\ny\nMac B\npw-shared\nY\nn\nn\n"
+        # per-source (claude Y, all others n).
+        stdin = f"{storage}\ny\nMac B\npw-shared\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # existing_device_id is None (no prior config in this test), so the
@@ -3088,8 +3088,8 @@ class TestInitTwoTierGuard:
 
         # After BRICK, init continues on the first-device path:
         # device name, passphrase, confirm passphrase, per-source
-        # (claude Y, gstack n, gstack-extend n).
-        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nY\nn\nn\n"
+        # (claude Y, all others n).
+        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # New mm-crypto-init bootstrapped.
@@ -3103,7 +3103,7 @@ class TestInitTwoTierGuard:
 
         self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # No orphan or BRICK output polluted the happy path.
@@ -3128,7 +3128,7 @@ class TestInitTwoTierGuard:
             json.dumps({"device_id": "stale", "device_name": "stale-dev"}).encode(),
         )
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         # BRICK did NOT fire (no typed token consumed from stdin).
         assert result.exit_code == 0, result.output

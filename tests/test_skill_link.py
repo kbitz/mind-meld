@@ -46,6 +46,20 @@ def target(_isolate_paths):
 
 
 @pytest.fixture
+def codex_target(_isolate_paths):
+    skills_dir = _isolate_paths / ".codex" / "skills"
+    skills_dir.mkdir(parents=True)
+    return skills_dir / "retro-fleet"
+
+
+@pytest.fixture
+def opencode_target(_isolate_paths):
+    skills_dir = _isolate_paths / ".config" / "opencode" / "skills"
+    skills_dir.mkdir(parents=True)
+    return skills_dir / "retro-fleet"
+
+
+@pytest.fixture
 def config_dir(_isolate_paths):
     return _isolate_paths / ".config" / "mind-meld"
 
@@ -74,6 +88,44 @@ class TestTargetAbsent:
         # Success marker touched.
         marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
+
+    def test_creates_codex_symlink_when_target_absent(self, codex_target, skill_src, config_dir):
+        cli_module._ensure_codex_retro_skill_link()
+        assert codex_target.is_symlink()
+        assert codex_target.resolve() == skill_src.resolve()
+        marker = config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}"
+        assert marker.exists()
+
+    def test_creates_opencode_symlink_when_target_absent(
+        self, opencode_target, skill_src, config_dir
+    ):
+        cli_module._ensure_opencode_retro_skill_link()
+        assert opencode_target.is_symlink()
+        assert opencode_target.resolve() == skill_src.resolve()
+        marker = config_dir / f".{cli_module._OPENCODE_SKILL_LINK_SUCCESS_MARKER}"
+        assert marker.exists()
+
+    @pytest.mark.parametrize("agent_root", [".claude", ".codex", ".config/opencode"])
+    def test_creates_missing_skills_directory_when_agent_is_installed(
+        self, _isolate_paths, skill_src, agent_root
+    ):
+        import shutil
+
+        skills_dir = _isolate_paths / agent_root / "skills"
+        if skills_dir.exists():
+            shutil.rmtree(skills_dir)
+        skills_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        target = skills_dir / "retro-fleet"
+        if agent_root == ".claude":
+            cli_module._ensure_retro_skill_link()
+        elif agent_root == ".codex":
+            cli_module._ensure_codex_retro_skill_link()
+        else:
+            cli_module._ensure_opencode_retro_skill_link()
+
+        assert target.is_symlink()
+        assert target.resolve() == skill_src.resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +285,42 @@ class TestSymlinkToError:
 class TestSkillLinkCheckDue:
     def test_no_marker_means_check_due(self, config_dir):
         assert cli_module._skill_link_check_due() is True
+
+    def test_codex_fresh_marker_with_correct_link_means_not_due(
+        self, codex_target, skill_src, config_dir
+    ):
+        codex_target.symlink_to(skill_src)
+        marker = config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}"
+        marker.touch()
+        assert cli_module._codex_skill_link_check_due() is False
+
+    def test_combined_gate_repairs_codex_when_claude_is_healthy(
+        self, target, codex_target, skill_src, config_dir
+    ):
+        """A fresh Claude marker must not suppress an independently stale Codex link."""
+        target.symlink_to(skill_src)
+        codex_target.symlink_to(skill_src)
+        (config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}").touch()
+        (config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}").touch()
+        assert cli_module._skill_links_check_due() is False
+
+        codex_target.unlink()
+        assert cli_module._skill_links_check_due() is True
+
+    def test_combined_gate_repairs_opencode_when_other_agents_are_healthy(
+        self, target, codex_target, opencode_target, skill_src, config_dir
+    ):
+        """Fresh Claude/Codex markers must not suppress stale OpenCode repair."""
+        target.symlink_to(skill_src)
+        codex_target.symlink_to(skill_src)
+        opencode_target.symlink_to(skill_src)
+        (config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}").touch()
+        (config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}").touch()
+        (config_dir / f".{cli_module._OPENCODE_SKILL_LINK_SUCCESS_MARKER}").touch()
+        assert cli_module._skill_links_check_due() is False
+
+        opencode_target.unlink()
+        assert cli_module._skill_links_check_due() is True
 
     def test_fresh_marker_with_correct_link_means_not_due(self, target, skill_src, config_dir):
         """Steady state: marker fresh AND link points at our source → skip.
@@ -402,7 +490,68 @@ class TestInstallSkillsCommand:
         shutil.rmtree(_isolate_paths / ".claude")
         result = self._runner().invoke(app, ["install-skills"])
         assert result.exit_code == 1
-        assert "does not exist" in result.output or "does not exist" in (result.stderr or "")
+        assert "no Claude Code, Codex, or OpenCode skills directory exists" in result.output
+
+    def test_installs_when_only_codex_skills_dir_exists(
+        self, target, codex_target, skill_src, _isolate_paths
+    ):
+        import shutil
+
+        from mind_meld.cli import app
+
+        shutil.rmtree(_isolate_paths / ".claude")
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert not target.exists()
+        assert codex_target.is_symlink()
+        assert codex_target.resolve() == skill_src.resolve()
+        assert str(codex_target) in result.output
+
+    def test_installs_when_only_opencode_skills_dir_exists(
+        self, target, codex_target, opencode_target, skill_src, _isolate_paths
+    ):
+        import shutil
+
+        from mind_meld.cli import app
+
+        shutil.rmtree(_isolate_paths / ".claude")
+        shutil.rmtree(_isolate_paths / ".codex")
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert not target.exists()
+        assert not codex_target.exists()
+        assert opencode_target.is_symlink()
+        assert opencode_target.resolve() == skill_src.resolve()
+        assert str(opencode_target) in result.output
+
+    def test_installs_when_opencode_root_exists_without_skills_directory(
+        self, target, codex_target, opencode_target, skill_src, _isolate_paths
+    ):
+        import shutil
+
+        from mind_meld.cli import app
+
+        shutil.rmtree(_isolate_paths / ".claude")
+        shutil.rmtree(_isolate_paths / ".codex")
+        shutil.rmtree(opencode_target.parent)
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert not target.exists()
+        assert not codex_target.exists()
+        assert opencode_target.is_symlink()
+        assert opencode_target.resolve() == skill_src.resolve()
+
+    def test_reports_conflict_without_undoing_codex_install(self, target, codex_target, skill_src):
+        from mind_meld.cli import app
+
+        target.write_text("user's own retro-fleet")
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 1
+        assert target.read_text() == "user's own retro-fleet"
+        assert codex_target.is_symlink()
+        assert codex_target.resolve() == skill_src.resolve()
+        assert str(codex_target) in result.output
+        assert str(target) in result.output
 
     def test_bypasses_ttl_gate(self, target, skill_src, config_dir):
         """The CLI command runs the installer regardless of the 24h-TTL
@@ -415,3 +564,25 @@ class TestInstallSkillsCommand:
         result = self._runner().invoke(app, ["install-skills"])
         assert result.exit_code == 0, result.output
         assert target.is_symlink()
+
+
+class TestPushSkillLinkWiring:
+    def test_push_uses_combined_gate_and_plural_installer(self, monkeypatch):
+        """Push self-heals both agents before its no-sources early return."""
+        calls: list[bool] = []
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "sync": {"max_file_size": 1024},
+        }
+        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(cli_module, "_skill_links_check_due", lambda: True)
+        monkeypatch.setattr(
+            cli_module,
+            "_ensure_retro_skill_links",
+            lambda *, dry_run: calls.append(dry_run),
+        )
+        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+
+        assert cli_module._push_core(config, "pw", 1024) is None
+        assert calls == [False]

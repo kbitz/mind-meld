@@ -210,6 +210,25 @@ class TestDefaultSources:
         assert ext["include_dirs"] == ["projects"]
         assert ext["include_files"] == []
 
+    def test_codex_source_syncs_only_durable_customization(self):
+        codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        assert codex["type"] == "generic"
+        assert codex["include_dirs"] == ["skills", "plugins"]
+        assert codex["include_files"] == ["AGENTS.md"]
+
+    def test_opencode_source_syncs_customization_not_session_state(self):
+        opencode = next(s for s in DEFAULT_SOURCES if s["name"] == "opencode")
+        assert opencode["type"] == "generic"
+        assert opencode["include_dirs"] == [
+            "agents",
+            "commands",
+            "modes",
+            "plugins",
+            "skills",
+            "tools",
+        ]
+        assert opencode["include_files"] == ["AGENTS.md"]
+
 
 class TestExcludePatternsValidation:
     """5C: _validate_sources accepts and validates the new
@@ -516,6 +535,26 @@ class TestGetSources:
         names = [s["name"] for s in sources]
         assert "claude" in names
         assert "gstack-extend" in names
+
+    def test_auto_detects_codex_and_opencode_with_claude_dir_fallback(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (tmp_path / ".codex").mkdir()
+        opencode_dir = tmp_path / ".config" / "opencode"
+        opencode_dir.mkdir(parents=True)
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "claude_dir": str(claude_dir),
+            "max_file_size": 52_428_800,
+        }
+
+        names = [source["name"] for source in get_sources(config)]
+        assert "codex" in names
+        assert "opencode" in names
 
     def test_validates_source_configs(self):
         """Missing required fields in a source should raise ConfigError."""

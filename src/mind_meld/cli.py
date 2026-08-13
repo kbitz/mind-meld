@@ -169,6 +169,10 @@ SKILL_LINK_TTL_SECONDS = 24 * 60 * 60
 _SKILL_LINK_NAME = "retro-fleet"
 _SKILL_LINK_SUCCESS_MARKER = "skill-link-checked"
 _SKILL_LINK_CONFLICT_MARKER = "skill-link-conflict"
+_CODEX_SKILL_LINK_SUCCESS_MARKER = "codex-skill-link-checked"
+_CODEX_SKILL_LINK_CONFLICT_MARKER = "codex-skill-link-conflict"
+_OPENCODE_SKILL_LINK_SUCCESS_MARKER = "opencode-skill-link-checked"
+_OPENCODE_SKILL_LINK_CONFLICT_MARKER = "opencode-skill-link-conflict"
 
 # Track 5E (v0.9.2 BREAKING): minimum peer version required for safe pull.
 # v0.9.2 inverted the conflict-direction semantics — a peer running an
@@ -2671,7 +2675,7 @@ def init() -> None:
     # (no 24h gate here — first-install pass should always try). Idempotent
     # if the user already has a correct symlink. Conflicts emit a one-line
     # notice; failures are forensic-only.
-    _ensure_retro_skill_link(dry_run=False)
+    _ensure_retro_skill_links(dry_run=False)
 
     # Init-time event backfill (v0.11.8). Captures the past 30 days of git
     # commits + a full sessions inventory so retro-fleet works immediately
@@ -2821,17 +2825,72 @@ def _ensure_retro_skill_link(*, dry_run: bool = False) -> None:
     try/except (TODO#3 critical-gap fix: EACCES on the marker dir must
     fail-open so push doesn't crash).
     """
+    _ensure_retro_skill_link_at(
+        Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME,
+        success_marker=_SKILL_LINK_SUCCESS_MARKER,
+        conflict_marker=_SKILL_LINK_CONFLICT_MARKER,
+        dry_run=dry_run,
+    )
+
+
+def _ensure_codex_retro_skill_link(*, dry_run: bool = False) -> None:
+    """Install the bundled retro-fleet skill for Codex when it is present."""
+    _ensure_retro_skill_link_at(
+        Path("~/.codex/skills").expanduser() / _SKILL_LINK_NAME,
+        success_marker=_CODEX_SKILL_LINK_SUCCESS_MARKER,
+        conflict_marker=_CODEX_SKILL_LINK_CONFLICT_MARKER,
+        dry_run=dry_run,
+    )
+
+
+def _ensure_opencode_retro_skill_link(*, dry_run: bool = False) -> None:
+    """Install the bundled retro-fleet skill for OpenCode when it is present."""
+    _ensure_retro_skill_link_at(
+        Path("~/.config/opencode/skills").expanduser() / _SKILL_LINK_NAME,
+        success_marker=_OPENCODE_SKILL_LINK_SUCCESS_MARKER,
+        conflict_marker=_OPENCODE_SKILL_LINK_CONFLICT_MARKER,
+        dry_run=dry_run,
+    )
+
+
+def _ensure_retro_skill_links(*, dry_run: bool = False) -> None:
+    """Best-effort install for every supported global skill directory."""
+    _ensure_retro_skill_link(dry_run=dry_run)
+    _ensure_codex_retro_skill_link(dry_run=dry_run)
+    _ensure_opencode_retro_skill_link(dry_run=dry_run)
+
+
+def _ensure_retro_skill_link_at(
+    target: Path,
+    *,
+    success_marker: str,
+    conflict_marker: str,
+    dry_run: bool = False,
+) -> None:
+    """Install the bundled skill at one agent-specific target.
+
+    Claude Code, Codex, and OpenCode discover the same Agent Skills format
+    from different global directories. Keeping target-specific markers separate
+    means a missing installation of one agent never suppresses another's repair.
+    """
     if dry_run:
         return
 
-    target = Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME
     skills_dir = target.parent
-    if not skills_dir.exists():
-        # Silent skip — no Claude Code installed on this machine. Touching
-        # the success marker would suppress retries if the user installs
-        # Claude Code later in the day; leave it alone so the 24h check
-        # naturally re-evaluates after sync.
+    agent_dir = skills_dir.parent
+    if not agent_dir.exists():
+        # Silent skip — the agent is not installed. Touching the success marker
+        # would suppress retries if the user installs it later in the day.
         return
+    if not skills_dir.exists():
+        try:
+            skills_dir.mkdir(mode=0o700)
+        except OSError as e:
+            sys.stderr.write(
+                f"mm: notice: retro-fleet skills directory setup failed: "
+                f"{type(e).__name__}: {safe_str(e)}\n"
+            )
+            return
 
     try:
         skill_src = _resolve_retro_skill_src()
@@ -2860,18 +2919,18 @@ def _ensure_retro_skill_link(*, dry_run: bool = False) -> None:
     elif target.is_symlink() and target.exists():
         try:
             if target.resolve() == skill_src.resolve():
-                _touch_marker(_SKILL_LINK_SUCCESS_MARKER)
+                _touch_marker(success_marker)
                 return
         except OSError:
             # resolve() can raise on a path with permission issues — fall
             # through to the conflict-skip branch.
             pass
         # Wrong target — user's own symlink elsewhere. Conflict-skip.
-        _emit_conflict_notice(target)
+        _emit_conflict_notice(target, conflict_marker=conflict_marker)
         return
     # Branch 3: a real file or directory at the target → conflict-skip.
     elif target.exists():
-        _emit_conflict_notice(target)
+        _emit_conflict_notice(target, conflict_marker=conflict_marker)
         return
 
     # Branch 4: target is absent (or just unlinked from dangling branch above).
@@ -2886,7 +2945,7 @@ def _ensure_retro_skill_link(*, dry_run: bool = False) -> None:
             f"{type(e).__name__}: {safe_str(e)}\n"
         )
         return
-    _touch_marker(_SKILL_LINK_SUCCESS_MARKER)
+    _touch_marker(success_marker)
 
 
 def _resolve_retro_skill_src() -> Path:
@@ -2902,17 +2961,19 @@ def _resolve_retro_skill_src() -> Path:
     return Path(str(importlib.resources.files("mind_meld") / "skills" / "retro_fleet"))
 
 
-def _emit_conflict_notice(target: Path) -> None:
+def _emit_conflict_notice(
+    target: Path, *, conflict_marker: str = _SKILL_LINK_CONFLICT_MARKER
+) -> None:
     """Notice once per 24h — gated by the conflict marker. Cross-model #3
     from /plan-eng-review: per-push spam on a deliberate conflict is
     hostile; the gate suppresses repeats."""
-    if _marker_is_fresh(_SKILL_LINK_CONFLICT_MARKER):
+    if _marker_is_fresh(conflict_marker):
         return
     sys.stderr.write(
         f"mm: notice: skill at {safe_str(str(target))} exists; not replacing "
         f"(remove the file to take mm's retro-fleet skill)\n"
     )
-    _touch_marker(_SKILL_LINK_CONFLICT_MARKER)
+    _touch_marker(conflict_marker)
 
 
 def _marker_is_fresh(name: str) -> bool:
@@ -2969,9 +3030,45 @@ def _skill_link_check_due() -> bool:
     True) so the installer runs and emits its own notice. The conflict
     marker is consulted separately by ``_emit_conflict_notice``.
     """
-    if not _marker_is_fresh(_SKILL_LINK_SUCCESS_MARKER):
+    return _skill_link_check_due_at(
+        Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME,
+        success_marker=_SKILL_LINK_SUCCESS_MARKER,
+    )
+
+
+def _codex_skill_link_check_due() -> bool:
+    """Return whether Codex's retro-fleet skill needs a self-heal attempt."""
+    target = Path("~/.codex/skills").expanduser() / _SKILL_LINK_NAME
+    if not target.parent.exists():
+        return False
+    return _skill_link_check_due_at(
+        target,
+        success_marker=_CODEX_SKILL_LINK_SUCCESS_MARKER,
+    )
+
+
+def _opencode_skill_link_check_due() -> bool:
+    """Return whether OpenCode's retro-fleet skill needs a self-heal attempt."""
+    target = Path("~/.config/opencode/skills").expanduser() / _SKILL_LINK_NAME
+    if not target.parent.exists():
+        return False
+    return _skill_link_check_due_at(
+        target,
+        success_marker=_OPENCODE_SKILL_LINK_SUCCESS_MARKER,
+    )
+
+
+def _skill_links_check_due() -> bool:
+    """Return whether any supported agent's retro-fleet link has drifted."""
+    return (
+        _skill_link_check_due() or _codex_skill_link_check_due() or _opencode_skill_link_check_due()
+    )
+
+
+def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
+    """Target-specific implementation of the 24-hour skill-link drift gate."""
+    if not _marker_is_fresh(success_marker):
         return True
-    target = Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME
     try:
         if not target.is_symlink():
             return True
@@ -3405,8 +3502,8 @@ def _push_core(
     # 24h-TTL — the marker stat is the entire hot-path cost on the steady-
     # state push (~1 syscall). dry_run gates the install too (preview
     # contract; mirrors _ensure_device_registered).
-    if not dry_run and _skill_link_check_due():
-        _ensure_retro_skill_link(dry_run=False)
+    if not dry_run and _skill_links_check_due():
+        _ensure_retro_skill_links(dry_run=False)
 
     # Build local manifest (v2 with sources)
     sources = get_sources(config)
@@ -6023,7 +6120,7 @@ def migrate_config(
 
 @app.command(name="install-skills")
 def install_skills_cmd() -> None:
-    """Install (or re-install) the retro-fleet Claude Code skill symlink.
+    """Install (or re-install) retro-fleet for Claude Code, Codex, and OpenCode.
 
     Force-runs the same self-heal that ``mm init`` and ``mm push`` invoke
     automatically, bypassing the steady-state TTL gate. Intended for:
@@ -6037,11 +6134,16 @@ def install_skills_cmd() -> None:
     contents of ``~/.local/pipx/venvs/mind-meld/`` in place, so the link
     auto-updates on every ``pipx upgrade mind-meld``.
     """
-    target = Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME
-    skills_dir = target.parent
-    if not skills_dir.exists():
+    targets = (
+        Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME,
+        Path("~/.codex/skills").expanduser() / _SKILL_LINK_NAME,
+        Path("~/.config/opencode/skills").expanduser() / _SKILL_LINK_NAME,
+    )
+    available_targets = tuple(target for target in targets if target.parent.parent.exists())
+    if not available_targets:
         typer.echo(
-            f"mm: error: {skills_dir} does not exist; install Claude Code first",
+            "mm: error: no Claude Code, Codex, or OpenCode skills directory exists; "
+            "install an agent first",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -6055,23 +6157,34 @@ def install_skills_cmd() -> None:
         )
         raise typer.Exit(code=1) from e
 
-    _ensure_retro_skill_link(dry_run=False)
+    _ensure_retro_skill_links(dry_run=False)
 
-    if target.is_symlink() and target.exists():
-        try:
-            if target.resolve() == skill_src.resolve():
-                typer.echo(f"Installed: {target} -> {skill_src}")
-                return
-        except OSError:
-            pass
+    installed: list[Path] = []
+    conflicts: list[Path] = []
+    for target in available_targets:
+        if target.is_symlink() and target.exists():
+            try:
+                if target.resolve() == skill_src.resolve():
+                    installed.append(target)
+                    continue
+            except OSError:
+                pass
+        if target.exists() or target.is_symlink():
+            conflicts.append(target)
 
-    if target.exists() or target.is_symlink():
+    if installed:
+        for target in installed:
+            typer.echo(f"Installed: {target} -> {skill_src}")
+        if not conflicts:
+            return
+
+    for target in conflicts:
         typer.echo(
             f"mm: error: {target} exists and is not mm's symlink; "
             f"remove it and re-run (mm's source is {skill_src})",
             err=True,
         )
-    else:
+    if not conflicts:
         typer.echo(
             "mm: error: install did not complete (see stderr above for details)",
             err=True,

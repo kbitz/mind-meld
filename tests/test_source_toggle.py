@@ -27,7 +27,7 @@ from mind_meld.cli import (
     _validate_source_name,
     app,
 )
-from mind_meld.config import save_config
+from mind_meld.config import get_default_source, save_config
 from mind_meld.errors import ConfigError
 
 runner = CliRunner()
@@ -76,14 +76,14 @@ class TestValidateSourceName:
 
     def test_unknown_name_strict_raises(self):
         cfg = {"sync": {"sources": []}}
-        with pytest.raises(ConfigError, match="unknown source 'codex'"):
-            _validate_source_name("codex", cfg, force=False)
+        with pytest.raises(ConfigError, match="unknown source 'future-agent'"):
+            _validate_source_name("future-agent", cfg, force=False)
 
     def test_unknown_name_force_warns_and_passes(self, capsys):
         cfg = {"sync": {"sources": []}}
-        _validate_source_name("codex", cfg, force=True)
+        _validate_source_name("future-agent", cfg, force=True)
         captured = capsys.readouterr()
-        assert "codex" in captured.err
+        assert "future-agent" in captured.err
         assert "--force" in captured.err
 
     def test_closest_match_hint_in_error(self):
@@ -259,6 +259,27 @@ class TestEnableSource:
             on_disk = tomllib.load(f)
         names = [s["name"] for s in on_disk["sync"]["sources"]]
         assert "gstack" in names
+
+    @pytest.mark.parametrize("source_name", ["codex", "opencode"])
+    def test_appends_exact_agent_default_for_explicit_legacy_config(
+        self, cfg, isolated_seen_sources, source_name
+    ):
+        """Enabling a newly shipped agent source must add its curated scope.
+
+        Existing installations use explicit source lists, so this is the
+        compatibility path that turns `mm enable-source` into real syncing.
+        Pin the whole default entry: broadening it could sync credentials or
+        session state, while narrowing it would lose agent configuration.
+        """
+        result = runner.invoke(app, ["enable-source", source_name])
+        assert result.exit_code == 0, result.output
+
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        added = next(s for s in on_disk["sync"]["sources"] if s["name"] == source_name)
+        assert added == get_default_source(source_name)
 
 
 # ── mm sources display ────────────────────────────────────────────────
