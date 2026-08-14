@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups/Tracks are volatile and re-thought on each /roadmap run. A Group is a wave of PRs that lands together — Tracks within a Group must be set-disjoint on `_touches:_` footprints.
 
-Originating sources for the upcoming plan: 2026-05-10 `/full-review` (carry-over of unshipped Groups) + 3 inbox Tracks drained 2026-05-14 + carried-over Future bullets accumulated through v0.12.6.
+Originating sources for the upcoming plan: 2026-08-14 fleet model-mix design + leftover unshipped polish from the May/June plan (most deferred to Future). Track 12A closed as shipped (v0.12.7).
 
 ---
 
@@ -14,171 +14,144 @@ Originating sources for the upcoming plan: 2026-05-10 `/full-review` (carry-over
 
 ## Current Plan
 
-Carry-over of the unshipped /full-review Groups (Group 11 shipped as v0.12.4–v0.12.5, so its dependency edges collapse to "shipped") plus 3 new Tracks drained from the inbox 2026-05-14. The cli.py serial chain 12 → 13 → 14 → 15 → 16 is unavoidable file-collision serialization; Group 17 and Group 18 hang off it. Group 12 (the v0.12.6 inline-mtime-bump follow-up) was pulled to the head of the chain at the user's request.
+The fleet model-mix card (tokens + pull-request counts per host family) is the committed upcoming work. Groups 13, 14, and 15 are file-disjoint and start in parallel. Group 15 is the old tail/backfill consolidation, kept here so the host walk is grafted once.
 
-### Group 12: inline keep-canonical mtime bump (v0.12.6 follow-up)
+### Phase 2: Fleet model mix
+
+**End-state:** The retro-fleet card shows Claude / Codex / Grok by token volume and by pull-request count, fleet-wide, with mixed-fleet honesty.
+**Groups:** 13, 14, 15, 16, 17
+
+Card rows are host families (not SKUs). OpenCode classifies by model id, not as its own row. Claude tokens stay on the existing `sessions-snapshot`. Codex / Grok Build / OpenCode land in a new `host-usage-snapshot` event. Pull-request identity is unique `#N` from git-snapshot subjects (this fleet's `/ship` squash convention). Host attribution is same-day session ∩ repo, with `unknown` / `mixed` when the signal is weak.
+
+#### Group 13: Card + pull-request totals from existing data
 
 _Depends on: none_
 
-`mm pull --conflict-mode prompt` choosing (l)ocal returns `"skipped"` without bumping canonical's mtime — asymmetric with `mm resolve` (which v0.12.6 fixed). Touches cli.py, so it heads the cli.py serial chain.
+User-visible first slice. No new walkers, no wire change. Claude tokens already on the wire roll up by family; every extracted `#N` starts as `unknown`.
 
-#### Track 12A: defer inline keep-canonical mtime bump to end-of-pull-batch
-_1 task . ~20 LOC + 2 tests . medium risk . src/mind_meld/cli.py_
+##### Track 13A: ASCII card MODELS block + subject pull-request parser
+_4 tasks . ~180 LOC . medium risk . aggregator + skill + tests_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
+
+- **`extract_pr_numbers(subject)`** -- parse `\(#(\d+)\)`, bare `#(\d+)`, and `Merge pull request #(\d+)`. Dedup by number across remotes in-window. Pin this repo's squash-subject shape (`feat: … (#105)`). _aggregator.py, ~25 lines + tests._ (S)
+- **`host_family(model)` in aggregator** -- `claude-*` → claude; `gpt-*` / `o1` / `o3` / `o4-*` / `*codex*` → codex; `grok-*` → grok; else other. OpenCode-hosted `claude-*` counts as claude. Track 17A will switch this import to `host_usage` once that module exists. _aggregator.py, ~20 lines + table tests._ (S)
+- **Card + stats line** -- commits, pull-request total, repos, machines. MODELS section rolls Claude `tokens_by_model` by family; hide a host row at 0 tokens and 0 pull requests. `CARD_WIDTH` 64 pin stays green. Rename markdown `## Claude Code activity` → `## Model mix`. _aggregator.py + SKILL.md, ~80 lines._ (M)
+- **GitAggregate fields** -- `prs: int`, `prs_by_host: dict[str, int]` (all `unknown` until Track 17A). Snapshot `metrics` grows `prs` additively. _aggregator.py, ~20 lines._ (XS)
+
+#### Group 14: Host session walkers + isolated cache
+
+_Depends on: none_
+
+Parallel with Group 13. New module, new cache file. Must not touch `session-tokens.json` (`is_cache_cold` is global and load-bearing).
+
+##### Track 14A: Codex / Grok / OpenCode parsers behind `host_usage.py`
+_5 tasks . ~350 LOC (50% headroom for review-induced expansion) . high risk . new module + fixtures_
+_touches: src/mind_meld/host_usage.py, tests/test_host_usage.py, tests/fixtures/host_sessions/_
+
+- **`host_family` + DayBucket mapping** -- same classifier as 13A, owned here as the long-run source of truth. Map each host's usage fields onto `TOKEN_FIELDS` (`input` / `cache_create` / `cache_read` / `output`). Reasoning tokens fold into `output`, documented. _host_usage.py, ~40 lines._ (S)
+- **Codex walker** -- `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Last `event_msg.payload.type == "token_count"` `total_token_usage` per file is the session total (cumulative stream — summing every event is the bug we must not ship). Model from `turn_context.payload.model`. Incremental by size/mtime. _host_usage.py + redacted fixture, ~80 lines._ (M)
+- **Grok Build walker** -- `~/.grok/sessions/<cwd>/<id>/updates.jsonl` `sessionUpdate: "turn_completed"` only. Ignore `_meta.totalTokens` (context-window size, not billed usage). Skip in-progress sessions with no completed turns. Model from `summary.current_model_id` / `usage.modelUsage`. _host_usage.py + fixture, ~70 lines._ (M)
+- **OpenCode walker** -- `~/.local/share/opencode/opencode.db` read-only + busy timeout. Missing or locked DB skips that host, does not raise. Classify by `modelID`, not by app name. _host_usage.py, ~60 lines._ (S)
+- **Isolated cache** -- `~/.config/mind-meld/host-tokens.json` via `lockedjson`. Deadline gate at start of each session file / SQL query. Cold+autopush skip is a CLI policy (Track 16A), not this module. _host_usage.py + tests, ~50 lines._ (S)
+
+#### Group 15: Events-tail / backfill consolidation
+
+_Depends on: none_
+
+Carry-over of the load-bearing /full-review item (old Track 13A). Lands before the host-usage wire so the new walk is grafted once, not onto both copies.
+
+##### Track 15A: `_capture_events_snapshot` + tail integration polish
+_4 tasks . ~150 LOC . medium risk . src/mind_meld/cli.py_
 _touches: src/mind_meld/cli.py_
 
-- **Defer inline `keep-canonical` mtime bump to end-of-pull-batch** -- track inline keep-canonical decisions in a `pending_inline_bumps: dict[Path, float]` plumbed through `_apply_incoming_file` → `_download_and_apply` → `_pull_core`; at end of pull (after all peer walks complete) apply `_bump_canonical_mtime_post_resolve(path, max_peer_mtime)` once per file. Beats every peer walked, doesn't pollute mid-walk decisions (mid-walk bump caused a worse regression — later peers silently mtime-skip). Flip `tests/test_conflict_copy.py::TestResolveLocalMtimeBump::test_inline_pull_keep_local_does_not_mutate_canonical_mtime` once batching lands. _src/mind_meld/cli.py: ~20 LOC plumbing + 2 tests._ _Source: [codex-review 2026-05-12] v0.12.6 PR 4th-pass P2._ (S)
+- **Extract `_capture_events_snapshot(...)` helper** -- pull out the 90% shared structure between `_run_events_tail` and `_run_events_backfill` (gate, deadline math, claude_paths walk, agg_projects, s_rows). Both call sites assemble own write-list. OR fold backfill behavior into `mode={"tail","backfill"}` on a single function. _cli.py, ~80 lines reducible._ (M)
+- **Lift token-cache `files_dict` resolution above the duplicated walk loop** -- the two branches under `if do_token_walk` differ only by one arg. Use `nullcontext(None)` to drop ~10 duplicated lines. _cli.py, ~10 lines._ (XS)
+- **Substantive-change gate timing** -- gate sees pre-tail manifest; on UTC midnight rollover with zero source changes, no daily mm-push row lands. Verify whether monitoring/retro depends on a daily heartbeat row; either lift gate when cursor >24h stale OR document that no-op pushes don't advance the cursor. _cli.py, investigative._ (S)
+- **Make `_run_events_tail` return a bool; gate source re-walk on it** -- skip the post-tail re-walk when tail didn't write (or threw). Confirm cost is below noise via wall-clock measurement before adding the signal. _cli.py, ~10 lines._ (XS)
 
-### Group 13: events-tail/backfill consolidation
+#### Group 16: `host-usage-snapshot` on the wire
 
-_Depends on: Group 12_
+_Depends on: Group 14, Group 15_
 
-Single-Track Group. The 90% structural duplication between `_run_events_tail` and `_run_events_backfill` is the load-bearing finding from /full-review.
+New event type, additive on `v=2`, no `EVENTS_SCHEMA_VERSION` bump. D4: skip emits nothing (absence); walked-and-empty emits the row with `token_sources` present.
 
-#### Track 13A: events-tail/backfill consolidation + push integration
-_4 tasks . ~150 LOC (sized at 50% headroom for review-induced expansion) . medium risk . src/mind_meld/cli.py_
-_touches: src/mind_meld/cli.py_
+##### Track 16A: Emit host-usage-snapshot from tail and backfill
+_5 tasks . ~220 LOC . medium risk . events + cli + invariants_
+_touches: src/mind_meld/events.py, src/mind_meld/cli.py, docs/invariants/events-retro.md, tests/test_events.py, tests/test_init_events_backfill.py_
 
-- **Extract `_capture_events_snapshot(...)` helper** -- pull out the 90% shared structure between `_run_events_tail` and `_run_events_backfill` (gate, deadline math, claude_paths walk, agg_projects, s_rows). Both call sites assemble own write-list. OR fold backfill behavior into `mode={"tail","backfill"}` parameter on a single function. _src/mind_meld/cli.py:2814-3041, ~80 lines reducible._ (M)
-- **Lift token-cache `files_dict` resolution above the duplicated walk loop** -- the two branches under `if do_token_walk` differ only by one arg; loop body is byte-identical. Use `nullcontext(None)` pattern to drop ~10 duplicated lines. _src/mind_meld/cli.py:2877-2894, ~10 lines._ (XS)
-- **Substantive-change gate timing** -- gate sees pre-tail manifest; on UTC midnight rollover with zero source changes, no daily mm-push row lands. Verify whether monitoring/retro depends on a daily heartbeat row; either lift gate when cursor >24h stale OR document that no-op pushes don't advance the cursor. _src/mind_meld/cli.py:3104-3174, investigative._ (S)
-- **Make `_run_events_tail` return a bool; gate source re-walk on it** -- skip the post-tail re-walk when tail didn't write (or threw). Confirm cost is below noise via wall-clock measurement before adding the signal. _src/mind_meld/cli.py:3180-3191, ~10 lines._ (XS)
+- **TypedDict + writer** -- `HostUsageSnapshot` (`token_sources`, `hosts[family].tokens_by_day`, `hosts[family].active_days`). `active_days` values are canonical remotes, never raw home paths. _events.py, ~40 lines._ (S)
+- **Tail / backfill policy** -- after Claude `walk_done` snapshot (do not move it — v0.12.9), reset a fresh host deadline. Mirror `_decide_token_walk_policy` against `host-tokens.json`. Cold+autopush → no row. `dry_run` → no-op. Forensic `try/except`. Init backfill writes the snapshot (still no mm-push row). _cli.py, ~80 lines._ (M)
+- **`active_days` at emit** -- cwd → canonical remote via existing git helpers; drop cwd-only sessions from attribution, keep their tokens. _events.py or host_usage.py call from cli, ~30 lines._ (S)
+- **D4 pins** -- skip does not emit; warm-then-cold does not write an empty row that would latest-wins-wipe a prior snapshot. Aggregator fallback to last present snapshot per device is Track 17A, but the emit side must not create the wipe. _tests/test_events.py, ~40 lines._ (S)
+- **Invariant doc** -- host-usage-snapshot, cache isolation, Codex cumulative, Grok `turn_completed`, budget reset, D4 skip. Pointer row in CLAUDE.md is a `/ship` docs follow-through, not this Track. _docs/invariants/events-retro.md, ~30 lines._ (XS)
 
-### Group 14: cli.py micro-cleanups
+#### Group 17: Aggregator merge + pull-request attribution
 
-_Depends on: Group 13_
+_Depends on: Group 13, Group 16_
 
-The necessary cli.py polish items from /full-review that can't run in parallel with Group 13's cli.py refactor. Track 14B isolates the upgrade.py dead-fsutil delete so it can land alongside.
+Lights up Codex / Grok card rows after one fleet push. Claude cost line stays isolated so unpriced GPT/Grok volume does not flip it to `>=`.
 
-#### Track 14A: cli.py polish — helper reuse + dup lookups + dead local imports + marker convention
-_5 tasks . ~50 LOC . low risk . src/mind_meld/cli.py_
-_touches: src/mind_meld/cli.py_
+##### Track 17A: Host token merge, attribution heuristic, mixed-fleet breadcrumb
+_5 tasks . ~200 LOC . medium risk . aggregator + skill + tests_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, docs/invariants/events-retro.md, tests/test_retro_fleet_aggregator.py_
 
-- **Replace `_download_and_apply` outcomes literal with `_empty_outcomes()`** -- helper exists at line 3647; literal at 1745 is direct duplication. _src/mind_meld/cli.py:1745-1753, ~8 lines._ (XS)
-- **Delete redundant local re-imports of `json/secrets/datetime/hashlib`** -- 8 sites; all already imported at module scope. Verify no name shadowing was intended before deleting. _src/mind_meld/cli.py:4432, 4580, 4722, 5922, 7094, 7163, 6344-6345, 880, ~12 lines._ (XS)
-- **Extract `_resolve_mm_events_dir(sources) -> Path | None` helper** -- `mm_events_src` lookup duplicated at three sites; `events_dir = Path(mm_events_src["path"]).expanduser() / "events"` also duplicated. _src/mind_meld/cli.py:2837, 2958, 6980, ~15 lines._ (XS)
-- **Have `_ensure_retro_skill_link` return a status enum; drop `install_skills_cmd` post-check** -- post-check duplicates ~15 lines of state-machine logic that already exists inside the helper's five-branch state machine. _src/mind_meld/cli.py:5675-5696, ~15 lines._ (XS)
-- **Skill-link marker filename convention** -- `.skill-link-checked` / `.skill-link-conflict` mix dot-prefix in non-dot config dir. Either drop the leading dot (consistent with siblings) OR move markers into a `markers/` subdir. _src/mind_meld/cli.py:2557-2706, ~5 lines._ (XS)
-
-#### Track 14B: upgrade.py dead `fsutil` import
-_1 task . ~3 LOC . low risk . src/mind_meld/upgrade.py_
-_touches: src/mind_meld/upgrade.py_
-
-- **Delete dead `fsutil` import + `_ = fsutil` rebinding** -- comment "kept available for future atomic-write needs" admits no current use; YAGNI. _src/mind_meld/upgrade.py:46, 539-541, ~3 lines._ (XS)
-
-### Group 15: safe_str discipline drift on stderr exception sites
-
-_Depends on: Group 14_
-
-Three sites format `{e}` directly without `safe_str(e)` discipline. Even though today's exceptions come from local subprocesses, the visible-failure contract says "always sanitize." events.py is part of the events-tail path that handles peer-rendered strings.
-
-#### Track 15A: safe_str hardening at three stderr sites
-_3 tasks . ~10 LOC . low risk . src/mind_meld/events.py + src/mind_meld/cli.py + src/mind_meld/config.py_
-_touches: src/mind_meld/events.py, src/mind_meld/cli.py, src/mind_meld/config.py_
-
-- **Wrap `walk_git_projects` failure breadcrumb `{e}` with `safe_str`** -- import `safe_str` from `mind_meld.safety`; cli.py:2931 et al. all use this discipline. _src/mind_meld/events.py:562-565, ~3 lines._ (XS)
-- **Switch `_ensure_device_registered` to plain `print(..., file=sys.stderr)` + `safe_str(e)`** -- Rich `stderr_console.print(...)` interprets `[red]…[/red]` markup; embedded `{e}` is not safe_str-defended. _src/mind_meld/cli.py:2548-2553, ~5 lines._ (XS)
-- **Wrap `_bootstrap_mm_events_path` `{e}` with `safe_str`** -- bring in line with the surrounding contract. _src/mind_meld/config.py:400-407, ~3 lines._ (XS)
-
-### Group 16: Cold-cache wall-clock budget polish
-
-_Depends on: Group 15_
-
-The events-tail's 250ms/500ms budget bounds git+sessions walks but several other slow synchronous calls run inside it. On cold caches the wall-clock can blow past 10s with a misleading "events tail budget exceeded" notice that is actually the identity gather.
-
-#### Track 16A: Events-tail wall-clock budget collisions on cold caches
-_4 tasks . ~100 LOC . medium risk . src/mind_meld/cli.py + src/mind_meld/identity.py + src/mind_meld/token_usage.py_
-_touches: src/mind_meld/cli.py, src/mind_meld/identity.py, src/mind_meld/token_usage.py_
-
-- **Pass `allow_refresh=False` from autopush context** -- cold-cache autopush emits empty `local_emails: []`; next interactive push does the refresh. Aggregator's mixed-fleet code already tolerates pre-v0.11.17 peers with no field. _src/mind_meld/cli.py:2916-2923, ~15 lines._ (XS)
-- **Fix misleading "events tail budget exceeded" notice on cold-identity-cache pushes** -- ✅ SHIPPED v0.12.9 (took the "exclude identity-gather wall-clock from the budget" option: `walk_done` snapshot captured before the gather/write; `_run_events_backfill` mirrored). _src/mind_meld/cli.py, ~10 lines._ (XS)
-- **Add `_FULL_GATHER_BUDGET_S` overall deadline to `_do_full_gather`** -- per-step budgets compound to ~10s; add top-level (e.g. 8s) and short-circuit remaining sources when elapsed. Move `gh api user` BEFORE per-repo loop so slow gh doesn't starve per-repo budget. _src/mind_meld/identity.py:248-261, ~30 lines._ (S)
-- **Add per-jsonl deadline check inside `_aggregate_jsonl_views_for_project` merge loop** -- the per-project deadline only fires between projects; one large project can exceed budget. Either deadline-check the merge loop or reduce per-jsonl walk budget when cumulative time elapsed approaches deadline. _src/mind_meld/token_usage.py:879-908, ~20 lines._ (S)
-
-### Group 17: Post-chain DRY + token-cache test hardening
-
-_Depends on: Group 16_
-
-identity.py micro-DRY (collides with Group 16's identity.py edits) plus the two token-cache test follow-ups drained from the inbox — gc_cache_entries input validation (collides with Group 16's token_usage.py edits) and the positive cache-isolation test (footprint is tests/ only, parallel-safe; co-located here on theme). All three Track footprints are disjoint.
-
-#### Track 17A: identity.py micro-DRY
-_2 tasks . ~30 LOC . low risk . src/mind_meld/identity.py_
-_touches: src/mind_meld/identity.py_
-
-- **Replace `_persist_or_yield_concurrent` and `_persist_force` with one `_persist(emails, *, force: bool)` helper** -- 90% identical; only the "use theirs if fresh" check differs. Saves ~15 lines. _src/mind_meld/identity.py:169-203, ~15 lines._ (S)
-- **Have `_do_full_gather` load config once and pass dict to both gather helpers** -- `_gather_per_repo_emails` and `_gather_config_author_emails` independently load config; net 2x load per refresh. _src/mind_meld/identity.py:292-301, 333-340, ~10 lines._ (XS)
-
-#### Track 17B: gc_cache_entries input validation
-_1 task . ~10 LOC test . low risk . src/mind_meld/token_usage.py_
-_touches: src/mind_meld/token_usage.py_
-
-- **Validate `max_age_s=0` / fractional-day semantics** -- `int(max_age_s / 86400)` silently floors fractional days; `max_age_s=0` effectively reaps every entry. Pre-existing untested behavior. Add explicit tests for `max_age_s=0` (reap-all) and `max_age_s=43200` (12h floors to 0 days), then either pin current behavior or guard the input. _src/mind_meld/token_usage.py:938-947, ~10 LOC test._ _Source: [eng-review] Codex outside-voice on Track 11A review 2026-05-10; was blocked on 11A, now unblocked._ (XS)
-
-#### Track 17C: direct cache-isolation positive test
-_1 task . ~15 LOC . low risk . tests/conftest.py + tests/test_isolation_guard.py (new)_
-_touches: tests/conftest.py, tests/test_isolation_guard.py_
-
-- **Add direct cache-isolation positive test** -- autouse `_isolate_token_cache` (shipped in Track 11A) relies on runtime monkeypatch but has no positive test asserting the real `~/.config/mind-meld/session-tokens.json` was never touched during a pytest run. Stat-snapshot the real path before suite start; assert mtime unchanged after (or use a HOME/XDG_CONFIG_HOME trap). Stronger pin than the chosen "pytest twice output identical" pre-flight. _tests/conftest.py + new tests/test_isolation_guard.py, ~15 LOC._ _Source: [eng-review] Codex outside-voice on Track 11A review 2026-05-10; was blocked on 11A, now unblocked._ (XS)
-
-### Group 18: Documentation drift around v0.11.17 identity extraction
-
-_Depends on: Group 15_
-
-The v0.11.17 split left stale doc references behind, and one parameter kept "for API stability" has accumulated `noqa: ARG001` that misleads readers. Depends on Group 15 (events.py file collision).
-
-#### Track 18A: Doc drift cleanup
-_3 tasks . ~10 LOC . low risk . docs/invariants/events-retro.md + src/mind_meld/skills/retro_fleet/aggregator.py + src/mind_meld/events.py_
-_touches: docs/invariants/events-retro.md, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/events.py_
-
-- **Update events-retro.md dead-name list** -- references `aggregator._read_config_author_emails` / `_per_repo_user_emails` / `_gh_noreply_email` (none exist post-v0.11.17). Rename to current `identity.py` symbols OR remove parenthetical entirely. _docs/invariants/events-retro.md:286, ~3 lines._ (XS)
-- **Rename docstring reference at `aggregator.py:2164`** -- `_read_mm_events_config_path` docstring references nonexistent `_read_config_author_emails`. _src/mind_meld/skills/retro_fleet/aggregator.py:2164, ~3 lines._ (XS)
-- **Either remove or rename `walk_session_metadata` `since` parameter** -- kept "for API stability" with `# noqa: ARG001`; misleading. Subtraction-first: remove (callers stop computing for sessions walk). OR rename to `_unused_since` per the v=3-future-defense comment. _src/mind_meld/events.py:700-771, ~5 lines._ (XS)
+- **Latest host snapshot per device** -- fall back to the most recent present `host-usage-snapshot` when the newest push omitted the row. Pin warm-then-cold does not show empty hosts. _aggregator.py, ~40 lines._ (S)
+- **Sibling token map** -- `host_tokens_by_model` so `estimate_cost` still runs only on Claude. Roll up both maps via `host_family` imported from `host_usage`. _aggregator.py, ~30 lines._ (S)
+- **Attribution** -- for each unique `#N`, `pr_day` = max commit date, `pr_repo` = canonical remote. Hosts whose `active_days[pr_day]` contains that remote (Claude: project-day in `tokens_by_day` mapped to the same remote) are candidates. 0 → `unknown`, 1 → that family, 2+ → `mixed`. Notes line names the heuristic. _aggregator.py, ~50 lines._ (M)
+- **`pre_host_peers`** -- key-absence of any host-usage-snapshot for a v=2 device. Notes: `Host mix incomplete: N peer(s) on pre-host-usage mm OR with cold host-token cache`. Empty `hosts` with `token_sources` present is not flagged. _aggregator.py + SKILL.md, ~25 lines._ (S)
+- **Card fill-in + snapshot metrics** -- Codex/Grok/unknown/mixed rows; persist per-host token totals additively on the v1 snapshot. Width pins. _aggregator.py + tests, ~40 lines._ (S)
 
 ### Execution Map
 
 Adjacency list:
 ```
-- Group 12 ← {}
-- Group 13 ← {12}
-- Group 14 ← {13}
-- Group 15 ← {14}
-- Group 16 ← {15}
-- Group 17 ← {16}
-- Group 18 ← {15}
+- Group 13 ← {}
+- Group 14 ← {}
+- Group 15 ← {}
+- Group 16 ← {14, 15}
+- Group 17 ← {13, 16}
 ```
 
 Track detail per group:
 ```
-Group 12: inline keep-canonical mtime bump
-  +-- Track 12A ........... ~S . 1 task
-
-Group 13: events-tail/backfill consolidation
+Group 13: Card + pull-request totals
   +-- Track 13A ........... ~M . 4 tasks
 
-Group 14: cli.py micro-cleanups
-  +-- Track 14A ........... ~S . 5 tasks
-  +-- Track 14B ........... ~XS . 1 task
+Group 14: Host session walkers
+  +-- Track 14A ........... ~L . 5 tasks
 
-Group 15: safe_str discipline drift
-  +-- Track 15A ........... ~XS . 3 tasks
+Group 15: Events-tail / backfill consolidation
+  +-- Track 15A ........... ~M . 4 tasks
 
-Group 16: Cold-cache wall-clock budget polish
-  +-- Track 16A ........... ~M . 4 tasks
+Group 16: host-usage-snapshot wire
+  +-- Track 16A ........... ~M . 5 tasks
 
-Group 17: Post-chain DRY + token-cache test hardening
-  +-- Track 17A ........... ~S . 2 tasks
-  +-- Track 17B ........... ~XS . 1 task
-  +-- Track 17C ........... ~XS . 1 task
-
-Group 18: Doc drift around v0.11.17 identity extraction
-  +-- Track 18A ........... ~XS . 3 tasks
+Group 17: Aggregator merge + attribution
+  +-- Track 17A ........... ~M . 5 tasks
 ```
 
-**Total: 0 phases . 7 groups . 9 tracks . 26 tasks remaining.**
+**Total: 1 phase . 5 groups . 5 tracks remaining.**
 
 ---
 
 ## Future
 
+- **cli.py micro-cleanups (old 14A/14B)** — `_empty_outcomes` reuse, dead local re-imports, `_resolve_mm_events_dir`, skill-link status enum, marker filename convention, dead `upgrade.py` `fsutil` import. _Source: /full-review 2026-05-10._
+- **safe_str hardening at three stderr sites (old 15A)** — `walk_git_projects`, `_ensure_device_registered`, `_bootstrap_mm_events_path`. _Source: /full-review._
+- **Cold-cache budget leftovers (old 16A remainder)** — `allow_refresh=False` on autopush; `_FULL_GATHER_BUDGET_S` on identity gather; per-jsonl deadline in the token merge loop. The misleading budget-notice half shipped in v0.12.9. _Source: /full-review + v0.12.9._
+- **identity.py micro-DRY + token-cache test pins (old 17A/B/C)** — unify `_persist`; load config once in `_do_full_gather`; `gc_cache_entries` `max_age_s=0`; positive cache-isolation test. _Source: Track 11A eng-review._
+- **v0.11.17 doc-drift cleanup (old 18A)** — events-retro dead-name list; aggregator docstring; `walk_session_metadata(since)` unused param. _Source: /full-review._
+- **Incremental-resume accepted divergences** — tool_use id not seeded across segments; final line without trailing newline never counted. Evidence-triggered only (census). _Source: [review] inbox._
+- **Rip out CONFLICT-TELEMETRY collector** — after Phase 2 bands validate (≥25 real decisions or 60 days). _Source: [plan-eng-review] inbox._
+- **Future-clamped peer mtime can mislead `(n)ewer`** — advisory watch. _Source: [plan-eng-review] inbox._
+- **`_promote_target_will_sync` ignores `exclude_patterns`** — rare exclude-glob miss. _Source: [review] PR #97._
+- **Phase 2 similarity classifier + silent merge** — blocked on collector data. _Source: [plan-eng-review] inbox._
+- **Peers we never resolved against can be mtime-skipped by the drain** — watch now that 12A shipped. _Source: [plan-eng-review] inbox._
+- **Abort transactionality** — pre-existing torn-state. _Source: [review] inbox._
+- **Price cache writes per-TTL (5m vs 1h)** — wire-format change; competes with host-usage on `token_usage.py`. _Source: [plan-eng-review] inbox._
+- **`test_gc_events.py` touches the real mind-meld.lock** — flake against autopush. _Source: [review] inbox._
+- **Model-id variant suffixes alias onto base model** — no real variant ids in census. _Source: [review] inbox._
+- **No sanity ceiling on rendered cost figure** — presentation-layer. _Source: [review] inbox._
 - **Parallel blob fetch in `_download_and_apply`** — wrap per-file `backend.get(bkey)` in `concurrent.futures.ThreadPoolExecutor(max_workers=8)` + `as_completed` (mirror `events.py:walk_git_projects`'s shape). Submit-all-upfront pattern (D2): all N futures live in the executor at once with peak memory ≈ N × avg_enc_blob_size (~70MB on the measured 1449-blob workload, ~500MB at 10k blobs). Measured 7.3× speedup (509ms → 143ms per blob) on a fresh-Mac iCloud-cold pull. _Source: /plan-eng-review 2026-05-06. Deferred because Track 9A's auto-pin prevents the slow-pull case at source. Parallelization only helps users on a non-iCloud storage path or those whose auto-pin was revoked. Revisit on user-reported sustained slow pull (>30s) AFTER auto-pin OR fleet hits 10k+ blobs._
 
 - **Selective sync (`sync.include` / `sync.exclude`)** — per-project filtering so users with dozens of Claude projects can sync just the 2-3 they actively use across machines. _Source: triage. Deferred because no user demand signal yet; revisit on first support case from someone with dozens of projects._
@@ -301,3 +274,9 @@ The two `necessary` correctness fixes from /full-review 2026-05-10. Loose Group 
 
 - Track 11A — _shipped (v0.12.5): token-cache invariant ownership consolidation — autouse `_isolate_token_cache` fixture + `gc_cache_entries` routed through `lock_and_get_files`. Cross-model HIGH (unknown-top-level-key-stripping regression) caught and fixed during /review. 5 new pinning tests._
 - Track 11B — _shipped (v0.12.4): cosmetic-only "Skills incomplete" breadcrumb admits cold-cache push as a second cause. Original Option B (3-LOC `events.py` fix) rejected during /plan-eng-review — would cause latest-snapshot-wins data erasure on warm-then-cold push ordering._
+
+### Group 12: inline keep-canonical mtime bump ✓ Shipped (v0.12.7)
+
+Deferred the inline `keep-canonical` mtime bump to end-of-pull-batch so `mm pull --conflict-mode prompt` choosing (l)ocal propagates across the fleet without mid-walk later-peer skip.
+
+- Track 12A — _shipped (v0.12.7): `pending_inline_bumps` drained after all peer walks. 13 tests in `TestResolveLocalMtimeBump`._
