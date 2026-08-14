@@ -309,6 +309,190 @@ is preserved byte-identical because `walk_jsonl_buckets` re-derives
 both views from the same source. Pinned by
 `test_d2_old_entry_without_skills_field_triggers_rewalk`.
 
+**Incremental resume (v0.12.15) — read before touching
+`token_usage.walk_jsonl_segment`, `_iter_bounded_lines`,
+`_drain_to_newline`, `_resume_plan`, `head_fingerprint`, or
+`TAIL_MSG_ID_LOOKBACK`.**
+
+A cache miss no longer means a full re-parse. Session jsonls are
+append-only and routinely exceed 10 MB, so re-reading one end to end
+because it grew by 300 KB made the events tail cost O(total bytes on
+disk). Measured on a 107-project Mac: 56 MB across the eight largest
+sessions cost 218 ms to re-walk for 1.7 MB of actual new data; the
+resumed walk costs 9 ms. That gap is what produced the recurring
+`mm: notice: events tail budget exceeded` — the notice was a symptom,
+and raising `WALK_TIME_BUDGET_*` would have treated the symptom.
+
+Five properties are load-bearing. Break any one and the retro silently
+reports wrong token counts:
+
+1. **The resume offset only ever advances past COMPLETE lines.** A
+   trailing chunk with no newline is Claude Code mid-write:
+   `_iter_bounded_lines` neither yields it nor counts it, so the next
+   walk re-reads it whole. This is the entire basis for persisting an
+   offset at all. A skipped OVERSIZE line is yielded as `b""` rather
+   than swallowed — the caller advances its offset on every yield, and
+   the parse loop already skips blanks. Without that, a trailing
+   oversize line pins the offset behind itself forever and re-drains
+   the same megabytes every push. Pinned by
+   `test_partial_trailing_line_deferred_then_counted_once` and
+   `test_resume_after_oversize_line_keeps_offset_aligned`.
+
+2. **`tail_msg_ids` is the only cross-segment dedup state, and its
+   bound is MEASURED.** No line is read by two segments. Message ids
+   still need a seed: Claude Code writes one line per model iteration
+   under a SHARED `message.id`, each restating the same cumulative
+   usage, so a resume point landing between two iterations makes an
+   unseeded second segment count the message again.
+
+   The measurement that sets the bound (re-run it before changing
+   `TAIL_MSG_ID_LOOKBACK`): across 358 live session jsonls, **26,989**
+   assistant lines repeat an already-seen `message.id`, and **zero** of
+   those repeats are separated by even one other distinct id. Every
+   repeated run is strictly contiguous, so a lookback of 1 suffices
+   today and 8 is headroom. `_carry_tail_ids` keeps the window in
+   RECENCY order — a re-seen id moves to the end — so the trim can't
+   evict the id whose message is still in flight. It also preserves the
+   prior seed when a segment parses no assistant messages at all, so an
+   append of pure user turns can't drop the guard.
+
+   Tool_use ids deliberately get NO seed. The risk is real but
+   unobserved: a retry re-emitting the same `tool_use.id` on a LATER
+   line, split across a resume boundary, counts twice incrementally
+   where a full walk counts once. The same corpus has **zero**
+   duplicate `tool_use.id` values, so the seed would be pure cache
+   weight. If duplicates ever appear, seed them exactly like
+   `tail_msg_ids`. Pinned by
+   `test_straddling_message_iterations_not_double_counted`,
+   `test_tail_ids_survive_append_with_no_assistant_messages`, and
+   `TestCarryTailIds::test_reseen_id_moves_to_the_end`.
+
+   `_MAX_TAIL_MSG_ID_LEN = 128` caps a carried id. `message.id` is
+   peer-controlled jsonl input and a line may reach
+   `MAX_JSONL_LINE_BYTES`; eight huge ids would serialize a cache past
+   `lockedjson`'s 64 MiB read ceiling, after which every read resets
+   the cache and the fleet pays a cold walk on every push, forever.
+   Over-long ids are DROPPED, never truncated — truncation could alias
+   two distinct ids and silently under-count. Real ids measure 36
+   chars. Pinned by `test_oversize_id_is_dropped_not_truncated`.
+
+3. **`head_fingerprint` is not optional, and its window must not
+   exceed `offset`.** Size-grew alone cannot distinguish an append from
+   a rewrite that lands at or above the cached size.
+
+   The window is `head_probe_len(offset) = min(_HEAD_PROBE_BYTES,
+   offset)`, persisted per entry as `head_len`. A FIXED 4 KiB window is
+   wrong and was a real bug caught pre-merge: for any file shorter than
+   the window the read returns "whole file", so every append changes
+   the digest, `_resume_plan` rejects, and the entry silently degrades
+   to a full walk forever — correct output, none of the speedup, no
+   error anywhere. Clamping to `offset` keeps the probe inside bytes
+   already accounted for, which are stable under append by definition.
+   `head_fingerprint` also returns `None` on a short read: fewer bytes
+   present than the probe claims means the file shrank. Pinned by
+   `test_short_file_still_resumes_across_appends` and
+   `test_probe_len_never_exceeds_offset`.
+
+   The probe read MUST sit between the pre-walk and post-walk stats, so
+   the stat pair brackets it. Reading the fingerprint after the final
+   stat leaves a window in which the file is replaced and the old
+   buckets get persisted under the REPLACEMENT's fingerprint — an entry
+   that later licenses a resume into a file none of its buckets ever
+   saw. Pinned by
+   `test_fingerprint_read_is_bracketed_by_the_stability_stat`.
+
+   `_resume_plan` falls back to a full walk on any doubt, and it
+   validates the CANONICAL persisted shape rather than a merely-plausible
+   one: shrink, offset past EOF, offset past the size it was RECORDED
+   against (bytes no bucket ever saw), `head_len != head_probe_len(offset)`
+   (an in-range-but-shrunk probe would still "pass" while proving
+   nothing), malformed buckets, and a `tail_msg_ids` that isn't at most
+   `TAIL_MSG_ID_LOOKBACK` unique non-empty strings within the length cap.
+   That last one is deliberately a rejection rather than a silent filter
+   or an empty-seed degradation: quietly handing back a weaker seed than
+   the entry claims is exactly what double-counts the straddling message
+   the field exists to protect. When the fingerprint can't be read at all,
+   `get_or_compute` persists the LEGACY entry shape (no `offset`)
+   rather than an offset it cannot later validate. The rejection matrix
+   is pinned by `TestResumePlanRejection`, which carries a
+   positive-control case (`test_valid_entry_does_resume`) so the matrix
+   can't quietly degenerate into "always full walk" — that control is
+   what caught the fixed-window bug above.
+
+   What the probe does NOT do, accepted rather than overlooked: it
+   bounds identity, not integrity. A rewrite preserving the probed
+   prefix and landing at or above the cached size still passes, and the
+   ordinary size+mtime cache hit never consults it. This is a forensic
+   cache; a false match costs a wrong retro number, not data.
+
+4. **`_resume_plan` returns deep COPIES of the cached buckets, and a
+   failed read persists nothing.** The concurrent-append path
+   deliberately declines to persist; merging into the live cached dicts
+   would leave the surviving entry double-counted anyway.
+   `JsonlSegment.ok` is False when the read failed outright — the stat
+   calls bracketing the walk would still AGREE in that case, so
+   persisting would pin the file's current size/mtime to buckets that
+   never saw its current bytes, making it a permanent cache hit that
+   silently stops accounting for the session. Pinned by
+   `test_concurrent_append_leaves_cached_entry_untouched` and
+   `TestReadFailureDoesNotPersist`.
+
+   Merging goes through `token_usage.merge_token_days` /
+   `merge_skill_days`, NOT hand-rolled loops. `events.py`'s
+   `_aggregate_jsonl_views_for_project` does the identical merge and
+   was the second copy; the incremental merge would have been the
+   fifth site CLAUDE.md claims are "consolidated". This module has
+   already shipped the
+   `mirrored-predicate-drifts-when-one-side-gains-logic` bug twice
+   (v0.11.23, v0.12.13). Pinned by
+   `test_events_aggregator_uses_the_shared_helpers`, which fails the
+   build if `events.py` regrows a local copy.
+
+   Those helpers are VALUE-trusting but SHAPE-defensive: ints are
+   assumed coerced upstream, while a non-dict day / model / skill bucket
+   is skipped rather than raised. Both callers read from the on-disk
+   cache, and a single malformed entry raising mid-merge would take down
+   the whole events tail on EVERY push while the poisoned entry survives
+   — a permanent outage from one bad key. Pinned by
+   `test_malformed_nested_buckets_are_skipped_not_raised`.
+
+5. **Pre-v0.12.15 entries are NOT force-re-walked.** Same reasoning as
+   the D2 gate above: absence of `offset`/`head` is the version
+   discriminator, and such an entry still HITS on matching size/mtime.
+   It upgrades shape on its next real miss, so upgrade day costs one
+   ordinary walk per actively-appended file — not a fleet-wide
+   re-parse storm. Deliberately not a `CACHE_VERSION` bump. Pinned by
+   `test_pre_v0_12_14_entry_hits_cache_without_rewalk`.
+
+The walker reads in BINARY mode. Three reasons, all load-bearing: a
+text-mode `tell()` cookie is opaque and not comparable against
+`st_size`; `MAX_JSONL_LINE_BYTES` becomes a genuine byte cap rather
+than a character cap; and `json.loads` on bytes raises `ValueError`
+for both malformed JSON and invalid UTF-8, so one bad byte is skipped
+as a line instead of raising `UnicodeDecodeError` out through the
+whole events tail (a latent crash before v0.12.15). Pinned by
+`test_invalid_utf8_line_is_skipped_not_fatal`.
+
+Equivalence is the acceptance bar, not speed: `walk_jsonl_buckets` is
+now a trimming shim over `walk_jsonl_segment`, and any change here
+must keep merged-incremental output identical to a single full walk.
+Verified pre-merge across 358 live session jsonls at four split points
+each (1,432 cases, including mid-line cuts) and against the pre-change
+walker over the same corpus — 7,848,746,853 tokens, zero drift.
+
+One known, measured-absent divergence from a full walk: a final line
+with NO trailing newline is treated as a partial write, so it is not
+counted and the offset does not advance past it. If such a file is
+never appended to again, that last line stays uncounted. The old
+text-mode walker counted it. Under-counting one line is the safer
+failure than the double-count the alternative invites, and the same
+358-file corpus shows zero drift, so no live file hits it. Binary mode
+likewise no longer splits on a lone `\r`; Claude Code writes `\n`.
+
+Cold-cache walks are unaffected in shape (still O(total bytes)) and
+remain owned by `_decide_token_walk_policy` + the 5s
+`warm_token_cache_inline` budget.
+
 **Cache file mode 0600 (lockedjson contract).** Identity data isn't
 secret but is per-user. Mirrors `token_usage` and `upgrade-state`
 cache permissions. Tests pin via `os.stat(...).st_mode & 0o777`.
