@@ -2,6 +2,12 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.19] - 2026-08-15
+
+### Changed
+
+- The fleet retro aggregator now makes its event, token-usage, and safety dependencies explicit at module load, while retaining its tolerant optional-config probe.
+
 ## [0.12.18] - 2026-08-15
 
 ### Removed
