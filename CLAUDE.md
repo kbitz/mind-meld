@@ -3,6 +3,9 @@
 ## Project
 Mind Meld (mm) — CLI tool for syncing ~/.claude session data and ~/.gstack context across Macs via iCloud Drive. Supports multiple configurable sync sources.
 
+<!-- roadmap:parallelism_cap=8 -->
+Raised from the default 4 on 2026-08-14: work runs in parallel Conductor workspaces, so more Tracks can be genuinely in flight than a single-branch workflow assumes.
+
 ## Stack
 Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 

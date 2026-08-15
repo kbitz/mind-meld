@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups/Tracks are volatile and re-thought on each /roadmap run. A Group is a wave of PRs that lands together — Tracks within a Group must be set-disjoint on `_touches:_` footprints.
 
-Originating sources for the upcoming plan: 2026-08-14 fleet model-mix design + leftover unshipped polish from the May/June plan (most deferred to Future). Track 12A closed as shipped (v0.12.7).
+Originating sources for the upcoming plan: `/full-review` 2026-08-14 (50 findings across 8 clusters, two of them live regressions on shipped features) + the fleet model-mix design from earlier the same day. The fleet-model-mix Groups renumber because the two hotfixes take 13 and 14, and because the audit's SIZE check forced the old Tracks 14A (450 LOC) and 17A (350 LOC) to split.
 
 ---
 
@@ -14,91 +14,246 @@ Originating sources for the upcoming plan: 2026-08-14 fleet model-mix design + l
 
 ## Current Plan
 
-The fleet model-mix card (tokens + pull-request counts per host family) is the committed upcoming work. Groups 13, 14, and 15 are file-disjoint and start in parallel. Group 15 is the old tail/backfill consolidation, kept here so the host walk is grafted once.
+Two hotfixes ship first — both are regressions on shipped behavior, not deferred scope. Then the plan attacks the thing that has been forcing every recent plan into a single-file queue: `cli.py` is 8,673 lines, 52% of the package, and seven of the sweep's Tracks wanted to touch it. Extracting four cohesive modules out of it converts that serial chain into a genuinely parallel Group, and only after that does the docs re-anchor run — decomposition invalidates every path citation anyway, so re-anchoring first would be wasted work.
+
+#### Group 13: Hotfix: the events tail dies on one bad byte
+
+_Depends on: none_
+
+`_read_cwd_from_latest_jsonl` reads text-mode and catches only `OSError`, so one invalid UTF-8 byte in any session jsonl raises `UnicodeDecodeError` past `_scan_one_project`, past `walk_session_metadata`, into `_run_events_tail`'s forensic wrapper — and the entire events tail is silently lost on every push until that file ages out. Reproduced. This is the exact bug class v0.12.15 fixed in `walk_jsonl_segment`; the fix reached one of the two readers of the same corpus. Every downstream Group reads that pipeline, so it gets fixed before more is built on it.
+
+##### Track 13A: Binary-mode session reads + honest truncation signalling
+_5 tasks . ~180 LOC . medium-high risk . events.py hot path_
+_touches: src/mind_meld/events.py, src/mind_meld/conflictlog.py, tests/test_events.py, tests/test_conflictlog.py, tests/test_retro_fleet_aggregator.py, docs/invariants/events-retro.md_
+
+- **Binary-mode `_read_cwd_from_latest_jsonl`, and give it the deadline** -- mirror `walk_jsonl_segment`'s binary read; widen the guard to `(OSError, ValueError)`. While rewriting it, take the deadline parameter it has always needed: this helper iterates EVERY jsonl in the project dir line-by-line until it finds a `cwd`, so worst case (no `cwd` anywhere) it reads all session bytes despite the caller's wall-clock budget — the docstring's "deterministic os.scandir" claim is wrong. _Prior learning `walk_session_metadata-cwd-fallback-perf` (9/10, 2026-04-28); same function, so fix both in one pass rather than reopening this hot path twice._ _events.py, ~45 lines._ (S)
+- **Sweep the sibling text-mode readers** -- `events._last_mm_push_ts` and `conflictlog.read_records` share the text-mode/`OSError`-only shape; fix in the same pass so the third reader doesn't bite next quarter. _events.py + conflictlog.py, ~20 lines._ (XS)
+- **Omit `skills_by_day` — and ONLY `skills_by_day` — on a deadline-truncated project** -- today `_scan_one_project` writes `skills_by_day = {}`, and the D4 discriminator reads key-present-empty as the content signal "no Skill usage", so a truncated autopush renders a confident "0 skill invocations". Absence is already the breadcrumb; use it. **Do not extend this to `tokens_by_day`**: `get_or_compute` still returns *cached* buckets past the deadline, so a truncated project is usually partial rather than empty, and dropping the key would discard real tokens and silently deflate the retro's USD line. The token side needs nothing anyway — `aggregator.py` already treats missing and empty identically there, so only the skills key is a genuine key-absence discriminator. Do NOT add a `skills_walk_complete` wire field — Future already holds that rejected design. _events.py, ~30 lines._ (S)
+- **While we're in this file: two dead-code items** -- both narrow types in `except (CancelledError, FuturesTimeoutError, Exception)` are `Exception` subclasses, and `walk_git_projects`' future-result block is written twice with drifting except clauses. Riding along beats a second PR against the same hot path. _events.py, ~40 lines._ (S)
+- **Regression pins + invariant doc** -- three pins, not one: (a) a bad byte survives on all three readers, including `conflictlog.read_records`, whose ~30 existing assertions in `test_conflictlog.py` must stay green; (b) deadline exhaustion actually short-circuits the cwd scan (the perf half of task 1 is otherwise unpinned); (c) a deadline-truncated walk surfaces as `pre_skills_peers` end-to-end — that value is computed aggregator-side by key-absence, so the pin lands in `test_retro_fleet_aggregator.py`, not `test_events.py`. Document deadline exhaustion as the third `pre_skills_peers` population (the doc currently enumerates exactly two). _tests + events-retro.md, ~90 lines._ (S)
+
+#### Group 14: Hotfix: codex/opencode sources push what they cannot pull
+
+_Depends on: none_
+
+v0.12.14 added `codex` / `opencode` default sources with `AGENTS.md` in `include_files` — the exact file host-config tooling symlinks. The walker follows the symlink and pushes; the escape guard resolves outside `base_path` and rejects it on **every** pull, forever, counting it in `outcomes["failed"]` and tripping the autopull `total_failed` warning. Reproduced end-to-end. Compounding it, `atomic_write_bytes`' `os.replace` acts on the link rather than the target, so a locally-symlinked synced path is silently replaced by a regular file — and mm's own skill installer plants symlinks in `~/.codex/skills`, which is now inside the sync surface.
+
+##### Track 14A: Symlink policy on both the push and apply paths
+_4 tasks . ~150 LOC . high risk . push walker + pull apply path_
+_touches: src/mind_meld/manifest.py, src/mind_meld/cli.py, src/mind_meld/config.py, docs/invariants/sync.md, tests/test_manifest.py, tests/test_config.py, tests/test_pull_helpers.py_
+
+- **Stop publishing symlinked entries — but NOT via a bare walker skip** -- subtraction-first is still right (never publish a file the apply path structurally cannot write), and a symlink carve-out in the escape guard is still wrong (it would weaken the v0.11.21 traversal defense). **The naive fix is a data-loss bug.** Dropping paths from `walk_generic_source` drops them from the new local manifest while they remain in the prior remote manifest, so `generate_tombstones` mints a deletion tombstone for every one. `TOMBSTONE_TTL_DAYS = 30`, `collect_tombstones` aggregates fleet-wide, and `is_tombstoned` filters the download set at `cli.py:4081` / `:4179` with no outcome recorded — so the suppression is silent and lasts a month. Measured on this Mac: 57 symlinked dirs under `~/.codex/skills`, 56 under `~/.config/opencode/skills`, plus a symlinked `~/.codex/AGENTS.md`. Any peer holding a *real* file at one of those paths has its edits blocked fleet-wide. Route the exclusion through `exclude_patterns` instead, which is tombstone-safe precisely because `_push_core` runs `_filter_excluded_paths` over the remote manifest first (`cli.py:3581`) — or, if the walker must own it, add the mirror-image consumer-boundary filter over `prior_manifest` before `generate_tombstones`. _manifest.py + cli.py, ~45 lines._ (S)
+- **`_apply_incoming_file` refuses on a local symlink** -- record it as `skipped` with a single breadcrumb, **not** as `conflicted`. A conflict outcome writes a fresh timestamped `.sync-conflict-*` via `_apply_conflict` on every pull, and a symlinked path never stops being a symlink — so `conflicted` would deposit a new sidecar into `~/.codex` forever. Covers the dangling-symlink case too, where `exists()` reports absent and `_apply_write` fires. _cli.py, ~30 lines._ (S)
+- **Narrow the new sources' include surface — via `exclude_patterns`, not `include_dirs`** -- the generated trees are written per-machine by `bin/apply` and gstack `./setup --host auto`. These two options are **not** interchangeable: `exclude_patterns` is covered by the tombstone-suppression invariant (`docs/invariants/sync.md`), while shrinking `include_dirs` has no consumer-boundary filter and so reproduces the mass-tombstone bug above for every file under a removed tree. Use `exclude_patterns`. Note codex's `include_dirs` is `["skills", "plugins"]` (not `commands`/`agents` — that is opencode). _config.py, ~20 lines._ (S)
+- **Regression pins + the invariant doc** -- four pins. Symlinked `AGENTS.md` never enters the manifest (`test_manifest.py`); a local symlink survives a pull that would have clobbered it (`test_pull_helpers.py`); the narrowed source still includes hand-authored files while excluding the generated trees (`test_config.py` — `DEFAULT_SOURCES` is a routed invariant surface with no coverage today); and, load-bearing, **a push that stops publishing symlinked paths mints ZERO tombstones for them** (`test_manifest.py`). Also fix `docs/invariants/sync.md`, which currently asserts the escape guard's false-positive risk is bounded because "symlinks resolve consistently on both sides" — v0.12.14 falsified that for a symlinked file inside a non-symlinked root, which is this whole Group. _tests + sync.md, ~110 lines._ (M)
+
+### Phase 3: cli.py decomposition + correctness sweep
+
+**End-state:** `cli.py` is no longer a 8,673-line bottleneck that serializes every plan; the seams v0.12.14 and v0.12.15 left behind are closed; the test suite stops writing to the developer's real agent config dirs; and the invariant docs route to code that exists.
+**Groups:** 15, 16, 17, 18
+
+#### Group 15: Disjoint cleanups that never touch cli.py
+
+_Depends on: none_
+
+Three genuinely parallel Tracks, deliberately scoped to files nothing else in flight owns, so they can land while the hotfixes are in review. Pure deletion — nothing here is additive.
+
+##### Track 15A: token_usage dead type + shim-over-a-shim
+_2 tasks . ~100 LOC . low risk . token_usage.py_
+_touches: src/mind_meld/token_usage.py, tests/test_token_usage.py_
+
+- **`CacheEntry` is both dead and wrong** -- zero references anywhere, and it omits the v0.12.15 `offset` / `head` / `head_len` / `tail_msg_ids` keys `get_or_compute` actually writes, so `_resume_plan`'s isinstance gauntlet is the only surviving documentation of the on-disk shape. Delete it, or correct it and annotate the entry `get_or_compute` builds so it cannot drift again. _token_usage.py, ~30 lines._ (S)
+- **Delete `walk_jsonl_token_buckets`** -- a "backwards-compat shim" for a single-repo CLI with no external consumers; every remaining caller is in the test file, and it is now a shim over a shim. Both this and `CacheEntry` are listed in `token_usage.__all__`, so each deletion is a two-line change — "zero references" is true of call sites, not of the export list. _token_usage.py + tests, ~50 lines._ (S)
+
+##### Track 15B: Dead constants beside their call-time resolvers
+_2 tasks . ~50 LOC . low risk . three small modules_
+_touches: src/mind_meld/pullhistory.py, src/mind_meld/seen_sources.py, src/mind_meld/upgrade.py_
+
+- **`HISTORY_PATH` and `SEEN_PATH`** -- zero references, and each sits beside the call-time resolver its isolation fixture depends on; a future caller picking the import-time-frozen one silently breaks `_isolate_pullhistory`. Also check whether `_rotated_path()` can stop being production code that exists only for tests. _2 modules, ~30 lines._ (S)
+- **`upgrade.py`'s `_ = fsutil` keeper** -- a dead import, plus a statement whose only job is defeating ruff F401, plus a comment explaining why the dead code is there, for a feature (D14) never revisited. _upgrade.py, ~10 lines._ (XS)
+
+##### Track 15C: Aggregator import hygiene
+_2 tasks . ~50 LOC . low risk . aggregator.py_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py_
+
+- **Hoist eight function-local imports** -- three import overlapping names (`COST_EXCLUDED_MODELS` twice, `safe_str` three times). Keep only a genuine cycle-breaker, with a comment saying which cycle. _aggregator.py, ~35 lines._ (S)
+- **Delete `_import_canonicalize`** -- its stated rationale ("tests can run without the full mind_meld install") died when the module started importing `mind_meld.identity` at top level; it runs on every `aggregate_git` call and its return annotation is the string literal `"callable"`. Check for monkeypatching first. _aggregator.py, ~15 lines._ (XS)
+
+#### Group 16: Break cli.py into cohesive modules
+
+_Depends on: Group 14_
+
+The unblocker. `cli.py` is 8,673 lines — 44% of the 19,697-line package, and just over half of it once the `skills/retro_fleet` subtree is set aside — and the audit's collision rule is file-granular, so every Track that touches it is forbidden from co-Grouping with every other Track that touches it. That single fact is what turned the previous regeneration into fourteen one-Track Groups. Four extractions convert the queue into Group 17's five-way parallel wave.
+
+Sequenced after Group 14 because that hotfix edits the apply path; everything else waits for this Group so there is exactly one rebase, not four.
+
+##### Track 16A: Extract four modules from cli.py
+_5 tasks . ~250 LOC review surface (~2,400 lines moved) . medium risk . mechanical movement_
+_touches: src/mind_meld/cli.py, src/mind_meld/skilllink.py, src/mind_meld/eventstail.py, src/mind_meld/resolveflow.py, src/mind_meld/gcreap.py, tests/test_skill_link.py, tests/test_init_events_backfill.py, tests/test_conflict_copy.py_
+
+Sizing note: the raw diff is ~2,400 lines, but it is *pure movement* — no logic changes, no behavior changes. The review question is "did anything other than imports change?", which is why the effort labels reflect review burden rather than diff volume.
+
+**Verification, and why the obvious mechanisms do not work here.** `git diff --find-renames` detects whole-blob renames; `cli.py` survives this Track with ~6,200 lines, so rename detection reports nothing and proves nothing. Use `git diff --color-moved=zebra --color-moved-ws=allow-indentation-change`, plus a scripted byte-equality check that pulls each moved function's text from the base revision (`git show origin/main:src/mind_meld/cli.py`) and compares it against the new module.
+
+"Full suite green with no test edits" is worse than useless as a gate — it is actively misleading. ~15 test sites monkeypatch `mind_meld.cli.<name>` for functions this Track moves (`_resolve_retro_skill_src` at `test_skill_link.py:74,392`; `_skill_links_check_due` at `:579`; `_ensure_retro_skill_links` at `test_init_events_backfill.py:234,286`; `_run_events_backfill` at `:231`; `_find_conflict_files` and `_decide_token_walk_policy` elsewhere). Once the real function lives in a new module and `cli` merely re-exports the name, each patch rebinds a dead alias while production resolves its own module global — and the test still passes. Two of those are **no-op stubs for the skill installer**, so a silently-dead patch means `mm init` tests run the real installer against the developer's real `HOME`, reintroducing in this Group precisely the leak Track 17A exists to close.
+
+- **`skilllink.py`** -- the retro-fleet installer family, starting at `_ensure_retro_skill_link` (currently ~L2798-3084): the six `_ensure_*` / `_*_check_due` wrappers, marker constants, `_emit_conflict_notice`, `_resolve_retro_skill_src`, `_config_dir`. ~285 lines. **Do NOT pull in `_ensure_device_registered` (L2749).** It sits immediately above the family and looks adjacent, but it is Track 5D device self-heal, it belongs to the init-devices invariant surface, and `docs/invariants/init-devices.md` routes on its name. _(S)_
+- **`eventstail.py`** -- `_enabled_claude_paths`, `_decide_token_walk_policy`, `_run_events_tail`, `_run_events_backfill` (currently ~L3085-3398). ~310 lines. _(S)_
+- **`resolveflow.py`** -- conflict discovery and resolution (currently ~L6462-6832 and ~L7155-8038): `_find_conflict_files`, `_migrate_pre_inversion_conflict`, the `_promote_*` family through `_promote_target_will_sync`, `_resolve_interactive_loop`, and the CONFLICT-TELEMETRY helpers that will be deleted wholesale at the rip-out. ~1,250 lines. The `@app.command()` shells (`conflicts`, `resolve`, `recover`, `conflict-log-backfill`) stay in `cli.py`. _(S)_
+- **`gcreap.py`** -- `_gc_token_cache`, `_sweep_local_tmp_files`, `_gc_old_event_files`, `_gc_old_conflict_files` (currently ~L5478-5560 and ~L8039-8132). ~180 lines. _(S)_
+- **Wire, re-point the monkeypatches, verify** -- `@app.command()` shells stay in `cli.py`; update imports and keep every public name re-exported from `cli` for external callers. Then audit every `monkeypatch.setattr(cli_module, ...)` / `monkeypatch.setattr("mind_meld.cli.X", ...)` site and re-point it at the new owning module — a re-export keeps them *passing* while they patch nothing. Add a pin that fails if an `mm init` / `mm push` test ever reaches the real skill installer, so a dead stub can never again go unnoticed. _cli.py + tests, ~140 lines._ (S)
+
+#### Group 17: Five-way parallel sweep across the new modules
+
+**Gated on Group 16.** Every Track below names a module that does not exist until the decomposition lands — `skilllink.py`, `gcreap.py`, `resolveflow.py`, `eventstail.py`. Do not start these against the pre-split `cli.py`. Everything here was a separate serialized Group before the decomposition; post-split each Track owns a different file, so this is one wave of five PRs.
+
+##### Track 17A: Skill installer correctness + test isolation
+_5 tasks . ~180 LOC . medium risk . skilllink.py + conftest_
+_touches: src/mind_meld/skilllink.py, tests/conftest.py, tests/test_skill_link.py_
+
+- **One existence predicate across all gates** -- the three self-heal gates use three pre-checks and none matches the installer they gate. Install Codex after mm is already healthy for Claude and you get no link until the Claude success marker ages past `SKILL_LINK_TTL_SECONDS` (24h), because `_skill_links_check_due` is an `OR` across the three gates — so the real symptom is a **≤24h delay, not a permanent failure**. (Two /full-review agents both called this permanent; the adversarial pass caught that they were wrong. The fix is unchanged; the priority is lower.) Align on `agent_dir.exists()`, which `install_skills_cmd` already uses. _skilllink.py, ~40 lines._ (S)
+- **Table-driven targets** -- replace six near-identical wrappers, six marker constants, and seven hardcoded path sites with one `_SKILL_TARGETS` tuple, so a fourth agent is a row not three functions. _skilllink.py, ~60 lines reducible._ (S)
+- **Third bucket + non-zero exit on partial install** -- a target whose `symlink_to` raised lands in neither `installed` nor `conflicts` and one success returns 0; pre-v0.12.14 the single-target form always hit `Exit(1)`. Add `not_installed`, flatten the four-conditional tail. _skilllink.py, ~35 lines._ (S)
+- **`_isolate_skill_links` autouse fixture** -- the installer mkdirs and symlinks into three real user dirs; `pytest` on a dev Mac mutates the developer's real `~/.codex` and `~/.config/opencode` (reproduced). Two traps. **Do NOT swap `_config_dir()` for `config.CONFIG_DIR`**: `_config_dir()` is `Path("~/.config/mind-meld").expanduser()`, re-resolved per call, while `CONFIG_DIR` is `Path.home() / ...` frozen at import — and `CONFIG_PATH`/`LOCK_PATH` derive from it at import, so one setattr does not move them. That is the same import-time-freeze hazard Track 15B is deleting two constants for. **And do NOT implement the fixture as a suite-wide `monkeypatch.setenv("HOME", ...)`**: `importlib.metadata.version("mind-meld")` resolves from the HOME-derived user site-packages, so a moved HOME degrades `__version__` to `0.0.0+dev` and trips `_check_fleet_version_or_refuse` — 12 tests in `test_integration.py` fail. Patch the three target-path resolvers and the marker dir directly. While here, fold in `test_gc_events.py`'s real-lock exposure — conftest's `_redirect_lock` is a plain helper, not autouse, which is why that test grabs the developer's real `mind-meld.lock`. _tests/conftest.py, ~45 lines._ (S)
+- **Composition test + `exist_ok` + per-target notices** -- pin the gate×installer composition `test_skill_link.py` currently misses; add `parents=True, exist_ok=True` to the one mkdir of 22 without it; interpolate `safe_str(str(target))` into the three failure notices that don't say which agent failed. _skilllink.py + tests, ~40 lines._ (S)
+
+##### Track 17B: Make every gc reaper honest
+_3 tasks . ~100 LOC . low risk . gcreap.py_
+_touches: src/mind_meld/gcreap.py, tests/test_gc_events.py_
+
+- **Collapse the two conflict/event reapers onto one loop** -- `_gc_old_conflict_files` only increments `reaped` inside `if not dry_run:`, so `--conflicts --dry-run` always reports "would reap 0"; its ~90%-identical mirror has the `else` branch. Collapse rather than patch the increment so the next divergence can't happen. _gcreap.py, ~50 lines reducible._ (S)
+- **`_gc_token_cache` honors `--dry-run`** -- it prints "dry-run; skipping" and reports nothing while every sibling prints `would delete (age Nd): <path>`; its own comment promises the opposite. The reap predicate is pure, so a read-only pass is cheap. _gcreap.py, ~30 lines._ (S)
+- **Assert the reaper counts — all three** -- the dry-run test discarded the return value, which is why the always-zero count shipped; do not repeat it for the other two. Pin the conflict-reaper dry-run count, a regression pin that the event-reaper count is unchanged by the collapse, and a first-ever `_gc_token_cache` dry-run test (it currently has **zero** references under `tests/`). Co-locate all three in `test_gc_events.py` alongside the mirror reaper the collapse merges with, rather than leaving them split across two files. _tests, ~45 lines._ (S)
+
+##### Track 17C: Conflict-prompt rendering DRY
+_3 tasks . ~100 LOC . low risk . resolveflow.py + conflictdiff.py_
+_touches: src/mind_meld/resolveflow.py, src/mind_meld/conflictdiff.py, tests/test_conflictdiff.py, tests/test_conflict_copy.py_
+
+- **Move diff colouring into `conflictdiff.render_diff_lines(diff, cap)`** -- the loop is duplicated verbatim across both prompt sites with silently drifted caps (60 vs 80). This is the leaf-rendering shape the module exists for; the site-level dispatch CLAUDE.md protects is the choice logic, not the colouring. _conflictdiff.py + resolveflow.py, ~40 lines._ (S)
+- **Resolve the `b`/`both` alias** -- copy-pasted into both prompts, both comments say "removed at 1.0". Decide: delete now, or one shared `_normalize_conflict_choice`. _resolveflow.py, ~20 lines._ (S)
+- **Drop the pointless `else`** -- `if not merge_available: ... continue` followed by an `else:` wrapping 40 lines that only adds an indentation level. _resolveflow.py, ~10 lines._ (XS)
+- **Pin the new primitive, and settle the alias** -- every other `conflictdiff` leaf (`render_prompt`, `render_banner`, `count_divergent_lines`) is individually pinned, so `render_diff_lines` ships with a table test including the unified cap. The `b`/`both` alias is already pinned twice in `test_conflict_copy.py` (~:1112 and ~:1132); deleting it is a user-visible keystroke removal, so either update both pins or delete them deliberately and say so in the CHANGELOG. _tests, ~40 lines._ (S)
+
+##### Track 17D: Events-tail consolidation + budget the root discovery
+_4 tasks . ~250 LOC . medium risk . eventstail.py_
+_touches: src/mind_meld/eventstail.py, tests/test_events_budget_scope.py_
+
+- **Extract `_capture_events_snapshot(...)`** -- pull out the 90% shared structure between `_run_events_tail` and `_run_events_backfill` (gate, deadline math, claude_paths walk, agg_projects, s_rows). The in-code comment admits the deadline-refresh bug was fixed twice, once per copy. _eventstail.py, ~80 lines reducible._ (M)
+- **Lift token-cache `files_dict` above the duplicated walk loop** -- the two branches under `if do_token_walk` differ only by one arg; `nullcontext(None)` drops ~10 duplicated lines. _eventstail.py, ~10 lines._ (XS)
+- **Budget the root discovery, and stop paying for it twice** -- `discover_git_roots` runs with no wall-clock budget (~107 serial `git rev-parse` spawns on the measured Mac), is invisible to the budget notice because `deadline` is reset after it, and runs a second time from `identity._gather_per_repo_emails` on a cold cache. Memoize first — that alone halves the cold path — but make the memo **call-scoped** (threaded through `_capture_events_snapshot`), not a module-level cache. A module global here is strictly worse than the `_WARNED_UNKNOWN_MODELS` set conftest already resets in `_isolate_token_cache`: the first test to populate it would freeze the git-root list for the whole process and make `test_events*.py` ordering-dependent. If it must be module-level, ship the autouse reset in the same PR. Also delete the dead `deadline` assignment at the head of both walkers, and surface or drop `warm_token_cache_inline`'s discarded `(walked, skipped)` counts. _eventstail.py, ~50 lines._ (S)
+- **Substantive-change gate timing** -- the gate sees the pre-tail manifest; on UTC midnight rollover with zero source changes, no daily mm-push row lands. Verify whether monitoring depends on a daily heartbeat row; either lift the gate when the cursor is >24h stale OR document that no-op pushes don't advance it. _eventstail.py, investigative._ (S)
+
+##### Track 17E: What's left in cli.py
+_5 tasks . ~250 LOC . low-medium risk . cli.py_
+_touches: src/mind_meld/cli.py, src/mind_meld/events.py, src/mind_meld/config.py, tests/test_silent_failure_contract.py, tests/test_safe_str.py_
+
+The `safe_str` sweep reaches two sites outside `cli.py`, so the footprint includes `events.py` and `config.py`. Neither collides inside Group 17 (17A–17D own `skilllink`/`gcreap`/`resolveflow`/`eventstail`), but note Track 13A also edits `events.walk_git_projects` — Group 13 is a hotfix and lands first, so this Track rebases onto it.
+
+- **`safe_str` the two missed peer-controlled print sites** -- `status` prints peer `device_name`/`device_id` raw into a Rich console (which interprets markup and passes escapes through), and `_print_pull_summary` emits `device_name`, `src_name` and `rel_path` unsanitized 30 lines below blocks in the same function that sanitize them. Fold in the three stderr sites promoted here out of Future while the sweep is open: `events.walk_git_projects`, `cli._ensure_device_registered`, `config._bootstrap_mm_events_path`. _cli.py + events.py + config.py, ~30 lines._ (S)
+- **Interactive counterpart of `_auto_command_setup`** -- four commands repeat the config/passphrase/lock preamble; the auto pair was migrated, the interactive half never was. _cli.py, ~60 lines reducible._ (S)
+- **`_auto_command_tail(verb, refused_outcome)`** -- the `autopull`/`autopush` except-tails differ by one verb and one breadcrumb label; verify `test_silent_failure_contract.py` doesn't pin them separately. Also collapse the `enable_source`/`disable_source` 7-line preamble. _cli.py, ~45 lines._ (S)
+- **Thirteen function-local re-imports** -- nine shadowing module-scope `hashlib`/`json`/`secrets`/`datetime`, four re-importing the conflict-filename helpers. Ruff F811 cannot see function-local shadowing, so they survive lint indefinitely. Also rename the `sidecar` loop variable that shadows the module, and call `_empty_outcomes()` at its only caller. _cli.py, ~45 lines._ (S)
+- **Two small correctness collapses, both pinned** -- `_push_core` walks `iter_source_diffs` twice per push, once only to compute `has_substantive`; the events re-walk runs between the two calls, so pin that `has_substantive` still flips correctly on a single walk rather than just "confirming" it by eye. `_bootstrap_or_verify_crypto`'s lost-race branch reimplements line-for-line the fall-through its own comment claims it takes. Escape-injection pins for the task-1 sites go in `test_safe_str.py`, mirroring its existing banner tests for peer-controlled `filename` / `device_name`. _cli.py + tests, ~70 lines._ (S)
+
+#### Group 18: Docs drift + invariant re-anchor
+
+Runs last in the sweep on purpose: the decomposition moves nearly every cited symbol, so re-anchoring before Group 16 would be work done twice.
+
+##### Track 18A: Make the routing table land on code that exists
+_4 tasks . ~150 LOC . low risk . docs only_
+_touches: CLAUDE.md, docs/invariants/events-retro.md, docs/invariants/sync.md, docs/invariants/conflicts.md, docs/PROGRESS.md_
+
+- **Re-anchor the pointer table on the post-decomposition modules** -- every routing row currently names `cli.py:<function>`; after Group 16 the owning module is `skilllink.py` / `eventstail.py` / `resolveflow.py` / `gcreap.py`. Rewrite the table and add the Source Layout entries for the four new modules. _CLAUDE.md, ~50 lines._ (S)
+- **Replace line-number citations with function-name citations** -- every pinned line has drifted (`aggregator.py:1862`→~1969, `830`→~814, `cli.py:2886`→3094, `5688`→7407, `1115`→1164, sync.md's `1581`→1834), and the decomposition invalidates the rest. The routing table already uses function names successfully; finish the job so the next refactor doesn't re-break it. _CLAUDE.md + invariants, ~40 lines._ (S)
+- **Regenerate the skill-installer invariant section, document the new sources and `fsutil`** -- the section still describes one target, two markers, one check-due function, and a "skills-dir-absent → silent skip" branch that v0.12.14 replaced with dir creation. Nothing anywhere mentions the `codex`/`opencode` `DEFAULT_SOURCES` entries despite `config.py:DEFAULT_SOURCES` being a routed invariant surface, and the Source Layout omits `fsutil.py` — the only module missing — despite it owning the flock-append/atomic-write conventions four modules route through. _events-retro.md + CLAUDE.md, ~45 lines._ (S)
+- **Backfill the v0.12.12 PROGRESS row** -- the table jumps 0.12.13 → 0.12.11. Third occurrence after v0.11.24 and v0.11.27, which CLAUDE.md already names, so note whether a `pull_request`-triggered check is the durable fix. _docs/PROGRESS.md, ~15 lines._ (XS)
 
 ### Phase 2: Fleet model mix
 
 **End-state:** The retro-fleet card shows Claude / Codex / Grok by token volume and by pull-request count, fleet-wide, with mixed-fleet honesty.
-**Groups:** 13, 14, 15, 16, 17
+**Groups:** 19, 20, 21, 22, 23, 24
 
 Card rows are host families (not SKUs). OpenCode classifies by model id, not as its own row. Claude tokens stay on the existing `sessions-snapshot`. Codex / Grok Build / OpenCode land in a new `host-usage-snapshot` event. Pull-request identity is unique `#N` from git-snapshot subjects (this fleet's `/ship` squash convention). Host attribution is same-day session ∩ repo, with `unknown` / `mixed` when the signal is weak.
 
-#### Group 13: Card + pull-request totals from existing data
+#### Group 19: Card + pull-request totals from existing data
 
-_Depends on: none_
+_Depends on: Group 15_
 
-User-visible first slice. No new walkers, no wire change. Claude tokens already on the wire roll up by family; every extracted `#N` starts as `unknown`.
+User-visible first slice. No new walkers, no wire change. Sequenced after Group 15 only because Track 15C touches the same file.
 
-##### Track 13A: ASCII card MODELS block + subject pull-request parser
+##### Track 19A: ASCII card MODELS block + subject pull-request parser
 _4 tasks . ~180 LOC . medium risk . aggregator + skill + tests_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
 
 - **`extract_pr_numbers(subject)`** -- parse `\(#(\d+)\)`, bare `#(\d+)`, and `Merge pull request #(\d+)`. Dedup by number across remotes in-window. Pin this repo's squash-subject shape (`feat: … (#105)`). _aggregator.py, ~25 lines + tests._ (S)
-- **`host_family(model)` in aggregator** -- `claude-*` → claude; `gpt-*` / `o1` / `o3` / `o4-*` / `*codex*` → codex; `grok-*` → grok; else other. OpenCode-hosted `claude-*` counts as claude. Track 17A will switch this import to `host_usage` once that module exists. _aggregator.py, ~20 lines + table tests._ (S)
+- **`host_family(model)` in aggregator** -- `claude-*` → claude; `gpt-*` / `o1` / `o3` / `o4-*` / `*codex*` → codex; `grok-*` → grok; else other. OpenCode-hosted `claude-*` counts as claude. Track 23A will switch this import to `host_usage` once that module exists. _aggregator.py, ~20 lines + table tests._ (S)
 - **Card + stats line** -- commits, pull-request total, repos, machines. MODELS section rolls Claude `tokens_by_model` by family; hide a host row at 0 tokens and 0 pull requests. `CARD_WIDTH` 64 pin stays green. Rename markdown `## Claude Code activity` → `## Model mix`. _aggregator.py + SKILL.md, ~80 lines._ (M)
-- **GitAggregate fields** -- `prs: int`, `prs_by_host: dict[str, int]` (all `unknown` until Track 17A). Snapshot `metrics` grows `prs` additively. _aggregator.py, ~20 lines._ (XS)
+- **GitAggregate fields** -- `prs: int`, `prs_by_host: dict[str, int]` (all `unknown` until Track 24A). Snapshot `metrics` grows `prs` additively. _aggregator.py, ~20 lines._ (XS)
 
-#### Group 14: Host session walkers + isolated cache
+#### Group 20: Codex walker + isolated host-token cache
 
 _Depends on: none_
 
-Parallel with Group 13. New module, new cache file. Must not touch `session-tokens.json` (`is_cache_cold` is global and load-bearing).
+Fully independent of everything above — a new module and a new cache file. Starts immediately, in parallel with the hotfixes. Must not touch `session-tokens.json` (`is_cache_cold` is global and load-bearing).
 
-##### Track 14A: Codex / Grok / OpenCode parsers behind `host_usage.py`
-_5 tasks . ~350 LOC (50% headroom for review-induced expansion) . high risk . new module + fixtures_
+##### Track 20A: `host_usage.py` foundation + Codex walker
+_3 tasks . ~170 LOC . high risk . new module + fixtures_
 _touches: src/mind_meld/host_usage.py, tests/test_host_usage.py, tests/fixtures/host_sessions/_
 
-- **`host_family` + DayBucket mapping** -- same classifier as 13A, owned here as the long-run source of truth. Map each host's usage fields onto `TOKEN_FIELDS` (`input` / `cache_create` / `cache_read` / `output`). Reasoning tokens fold into `output`, documented. _host_usage.py, ~40 lines._ (S)
+- **`host_family` + DayBucket mapping** -- same classifier as 19A, owned here as the long-run source of truth. Map each host's usage fields onto `TOKEN_FIELDS` (`input` / `cache_create` / `cache_read` / `output`). Reasoning tokens fold into `output`, documented. _host_usage.py, ~40 lines._ (S)
 - **Codex walker** -- `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Last `event_msg.payload.type == "token_count"` `total_token_usage` per file is the session total (cumulative stream — summing every event is the bug we must not ship). Model from `turn_context.payload.model`. Incremental by size/mtime. _host_usage.py + redacted fixture, ~80 lines._ (M)
+- **Isolated cache** -- `~/.config/mind-meld/host-tokens.json` via `lockedjson`. Deadline gate at the start of each session file. Cold+autopush skip is a CLI policy (Track 22A), not this module. _host_usage.py + tests, ~50 lines._ (S)
+
+#### Group 21: Grok Build + OpenCode walkers
+
+Second half of the walker work, split out because the old single Track was 450 LOC and each parser has substantial unique surface and its own fixture.
+
+##### Track 21A: Grok Build and OpenCode session parsers
+_2 tasks . ~130 LOC . high risk . host_usage + fixtures_
+_touches: src/mind_meld/host_usage.py, tests/test_host_usage.py, tests/fixtures/host_sessions/_
+
 - **Grok Build walker** -- `~/.grok/sessions/<cwd>/<id>/updates.jsonl` `sessionUpdate: "turn_completed"` only. Ignore `_meta.totalTokens` (context-window size, not billed usage). Skip in-progress sessions with no completed turns. Model from `summary.current_model_id` / `usage.modelUsage`. _host_usage.py + fixture, ~70 lines._ (M)
 - **OpenCode walker** -- `~/.local/share/opencode/opencode.db` read-only + busy timeout. Missing or locked DB skips that host, does not raise. Classify by `modelID`, not by app name. _host_usage.py, ~60 lines._ (S)
-- **Isolated cache** -- `~/.config/mind-meld/host-tokens.json` via `lockedjson`. Deadline gate at start of each session file / SQL query. Cold+autopush skip is a CLI policy (Track 16A), not this module. _host_usage.py + tests, ~50 lines._ (S)
 
-#### Group 15: Events-tail / backfill consolidation
+#### Group 22: `host-usage-snapshot` on the wire
 
-_Depends on: none_
+_Depends on: Group 17, Group 21_
 
-Carry-over of the load-bearing /full-review item (old Track 13A). Lands before the host-usage wire so the new walk is grafted once, not onto both copies.
+New event type, additive on `v=2`, no `EVENTS_SCHEMA_VERSION` bump. D4: skip emits nothing (absence); walked-and-empty emits the row with `token_sources` present. Waits on Group 17 so the new walk grafts onto the consolidated `eventstail.py`, not onto two copies.
 
-##### Track 15A: `_capture_events_snapshot` + tail integration polish
-_4 tasks . ~150 LOC . medium risk . src/mind_meld/cli.py_
-_touches: src/mind_meld/cli.py_
-
-- **Extract `_capture_events_snapshot(...)` helper** -- pull out the 90% shared structure between `_run_events_tail` and `_run_events_backfill` (gate, deadline math, claude_paths walk, agg_projects, s_rows). Both call sites assemble own write-list. OR fold backfill behavior into `mode={"tail","backfill"}` on a single function. _cli.py, ~80 lines reducible._ (M)
-- **Lift token-cache `files_dict` resolution above the duplicated walk loop** -- the two branches under `if do_token_walk` differ only by one arg. Use `nullcontext(None)` to drop ~10 duplicated lines. _cli.py, ~10 lines._ (XS)
-- **Substantive-change gate timing** -- gate sees pre-tail manifest; on UTC midnight rollover with zero source changes, no daily mm-push row lands. Verify whether monitoring/retro depends on a daily heartbeat row; either lift gate when cursor >24h stale OR document that no-op pushes don't advance the cursor. _cli.py, investigative._ (S)
-- **Make `_run_events_tail` return a bool; gate source re-walk on it** -- skip the post-tail re-walk when tail didn't write (or threw). Confirm cost is below noise via wall-clock measurement before adding the signal. _cli.py, ~10 lines._ (XS)
-
-#### Group 16: `host-usage-snapshot` on the wire
-
-_Depends on: Group 14, Group 15_
-
-New event type, additive on `v=2`, no `EVENTS_SCHEMA_VERSION` bump. D4: skip emits nothing (absence); walked-and-empty emits the row with `token_sources` present.
-
-##### Track 16A: Emit host-usage-snapshot from tail and backfill
-_5 tasks . ~220 LOC . medium risk . events + cli + invariants_
-_touches: src/mind_meld/events.py, src/mind_meld/cli.py, docs/invariants/events-retro.md, tests/test_events.py, tests/test_init_events_backfill.py_
+##### Track 22A: Emit host-usage-snapshot from tail and backfill
+_5 tasks . ~220 LOC . medium risk . events + eventstail + invariants_
+_touches: src/mind_meld/events.py, src/mind_meld/eventstail.py, docs/invariants/events-retro.md, tests/test_events.py, tests/test_init_events_backfill.py_
 
 - **TypedDict + writer** -- `HostUsageSnapshot` (`token_sources`, `hosts[family].tokens_by_day`, `hosts[family].active_days`). `active_days` values are canonical remotes, never raw home paths. _events.py, ~40 lines._ (S)
-- **Tail / backfill policy** -- after Claude `walk_done` snapshot (do not move it — v0.12.9), reset a fresh host deadline. Mirror `_decide_token_walk_policy` against `host-tokens.json`. Cold+autopush → no row. `dry_run` → no-op. Forensic `try/except`. Init backfill writes the snapshot (still no mm-push row). _cli.py, ~80 lines._ (M)
-- **`active_days` at emit** -- cwd → canonical remote via existing git helpers; drop cwd-only sessions from attribution, keep their tokens. _events.py or host_usage.py call from cli, ~30 lines._ (S)
-- **D4 pins** -- skip does not emit; warm-then-cold does not write an empty row that would latest-wins-wipe a prior snapshot. Aggregator fallback to last present snapshot per device is Track 17A, but the emit side must not create the wipe. _tests/test_events.py, ~40 lines._ (S)
-- **Invariant doc** -- host-usage-snapshot, cache isolation, Codex cumulative, Grok `turn_completed`, budget reset, D4 skip. Pointer row in CLAUDE.md is a `/ship` docs follow-through, not this Track. _docs/invariants/events-retro.md, ~30 lines._ (XS)
+- **Tail / backfill policy** -- after the Claude `walk_done` snapshot (do not move it — v0.12.9), reset a fresh host deadline. Mirror `_decide_token_walk_policy` against `host-tokens.json`. Cold+autopush → no row. `dry_run` → no-op. Forensic `try/except`. Init backfill writes the snapshot (still no mm-push row). _eventstail.py, ~80 lines._ (M)
+- **`active_days` at emit** -- cwd → canonical remote via existing git helpers; drop cwd-only sessions from attribution, keep their tokens. _events.py, ~30 lines._ (S)
+- **D4 pins** -- skip does not emit; warm-then-cold does not write an empty row that would latest-wins-wipe a prior snapshot. Aggregator fallback to the last present snapshot per device is Track 23A, but the emit side must not create the wipe. _tests/test_events.py, ~40 lines._ (S)
+- **Invariant doc** -- host-usage-snapshot, cache isolation, Codex cumulative, Grok `turn_completed`, budget reset, D4 skip. _docs/invariants/events-retro.md, ~30 lines._ (XS)
 
-#### Group 17: Aggregator merge + pull-request attribution
+#### Group 23: Aggregator host-token merge
 
-_Depends on: Group 13, Group 16_
+_Depends on: Group 19, Group 22_
 
 Lights up Codex / Grok card rows after one fleet push. Claude cost line stays isolated so unpriced GPT/Grok volume does not flip it to `>=`.
 
-##### Track 17A: Host token merge, attribution heuristic, mixed-fleet breadcrumb
-_5 tasks . ~200 LOC . medium risk . aggregator + skill + tests_
-_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, docs/invariants/events-retro.md, tests/test_retro_fleet_aggregator.py_
+##### Track 23A: Latest snapshot per device, sibling token map, mixed-fleet breadcrumb
+_3 tasks . ~95 LOC . medium risk . aggregator + skill + tests_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
 
-- **Latest host snapshot per device** -- fall back to the most recent present `host-usage-snapshot` when the newest push omitted the row. Pin warm-then-cold does not show empty hosts. _aggregator.py, ~40 lines._ (S)
+- **Latest host snapshot per device** -- fall back to the most recent present `host-usage-snapshot` when the newest push omitted the row. Pin that warm-then-cold does not show empty hosts. _aggregator.py, ~40 lines._ (S)
 - **Sibling token map** -- `host_tokens_by_model` so `estimate_cost` still runs only on Claude. Roll up both maps via `host_family` imported from `host_usage`. _aggregator.py, ~30 lines._ (S)
-- **Attribution** -- for each unique `#N`, `pr_day` = max commit date, `pr_repo` = canonical remote. Hosts whose `active_days[pr_day]` contains that remote (Claude: project-day in `tokens_by_day` mapped to the same remote) are candidates. 0 → `unknown`, 1 → that family, 2+ → `mixed`. Notes line names the heuristic. _aggregator.py, ~50 lines._ (M)
-- **`pre_host_peers`** -- key-absence of any host-usage-snapshot for a v=2 device. Notes: `Host mix incomplete: N peer(s) on pre-host-usage mm OR with cold host-token cache`. Empty `hosts` with `token_sources` present is not flagged. _aggregator.py + SKILL.md, ~25 lines._ (S)
+- **`pre_host_peers`** -- key-absence of any host-usage-snapshot for a `v=2` device. Notes: `Host mix incomplete: N peer(s) on pre-host-usage mm OR with cold host-token cache`. Empty `hosts` with `token_sources` present is not flagged. _aggregator.py + SKILL.md, ~25 lines._ (S)
+
+#### Group 24: Pull-request attribution + card fill-in
+
+Final slice.
+
+##### Track 24A: Attribution heuristic, host rows, snapshot metrics
+_2 tasks . ~90 LOC . medium risk . aggregator + tests_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py, docs/invariants/events-retro.md, tests/test_retro_fleet_aggregator.py_
+
+- **Attribution** -- for each unique `#N`, `pr_day` = max commit date, `pr_repo` = canonical remote. Hosts whose `active_days[pr_day]` contains that remote (Claude: project-day in `tokens_by_day` mapped to the same remote) are candidates. 0 → `unknown`, 1 → that family, 2+ → `mixed`. Notes line names the heuristic. _aggregator.py, ~50 lines._ (S)
 - **Card fill-in + snapshot metrics** -- Codex/Grok/unknown/mixed rows; persist per-host token totals additively on the v1 snapshot. Width pins. _aggregator.py + tests, ~40 lines._ (S)
 
 ### Execution Map
@@ -108,51 +263,87 @@ Adjacency list:
 - Group 13 ← {}
 - Group 14 ← {}
 - Group 15 ← {}
-- Group 16 ← {14, 15}
-- Group 17 ← {13, 16}
+- Group 16 ← {14}
+- Group 17 ← {16}
+- Group 18 ← {17}
+- Group 19 ← {15}
+- Group 20 ← {}
+- Group 21 ← {20}
+- Group 22 ← {17,21}
+- Group 23 ← {19,22}
+- Group 24 ← {23}
 ```
 
 Track detail per group:
 ```
-Group 13: Card + pull-request totals
-  +-- Track 13A ........... ~M . 4 tasks
+Group 13: Hotfix: events tail dies on one bad byte
+  +-- Track 13A ........... ~M . 5 tasks
 
-Group 14: Host session walkers
-  +-- Track 14A ........... ~L . 5 tasks
+Group 14: Hotfix: codex/opencode push what they cannot pull
+  +-- Track 14A ........... ~M . 4 tasks
 
-Group 15: Events-tail / backfill consolidation
-  +-- Track 15A ........... ~M . 4 tasks
+Group 15: Disjoint cleanups that never touch cli.py
+  +-- Track 15A ........... ~S . 2 tasks
+  +-- Track 15B ........... ~S . 2 tasks
+  +-- Track 15C ........... ~S . 2 tasks
 
-Group 16: host-usage-snapshot wire
+Group 16: Break cli.py into cohesive modules
   +-- Track 16A ........... ~M . 5 tasks
 
-Group 17: Aggregator merge + attribution
+Group 17: Five-way parallel sweep across the new modules
   +-- Track 17A ........... ~M . 5 tasks
+  +-- Track 17B ........... ~S . 3 tasks
+  +-- Track 17C ........... ~S . 3 tasks
+  +-- Track 17D ........... ~M . 4 tasks
+  +-- Track 17E ........... ~M . 5 tasks
+
+Group 18: Docs drift + invariant re-anchor
+  +-- Track 18A ........... ~S . 4 tasks
+
+Group 19: Card + pull-request totals
+  +-- Track 19A ........... ~M . 4 tasks
+
+Group 20: Codex walker + isolated cache
+  +-- Track 20A ........... ~M . 3 tasks
+
+Group 21: Grok + OpenCode walkers
+  +-- Track 21A ........... ~M . 2 tasks
+
+Group 22: host-usage-snapshot wire
+  +-- Track 22A ........... ~M . 5 tasks
+
+Group 23: Aggregator host merge
+  +-- Track 23A ........... ~S . 3 tasks
+
+Group 24: Pull-request attribution + card
+  +-- Track 24A ........... ~S . 2 tasks
 ```
 
-**Total: 1 phase . 5 groups . 5 tracks remaining.**
+**Total: 2 phases . 12 groups . 18 tracks remaining.**
 
 ---
 
 ## Future
 
-- **cli.py micro-cleanups (old 14A/14B)** — `_empty_outcomes` reuse, dead local re-imports, `_resolve_mm_events_dir`, skill-link status enum, marker filename convention, dead `upgrade.py` `fsutil` import. _Source: /full-review 2026-05-10._
-- **safe_str hardening at three stderr sites (old 15A)** — `walk_git_projects`, `_ensure_device_registered`, `_bootstrap_mm_events_path`. _Source: /full-review._
-- **Cold-cache budget leftovers (old 16A remainder)** — `allow_refresh=False` on autopush; `_FULL_GATHER_BUDGET_S` on identity gather; per-jsonl deadline in the token merge loop. The misleading budget-notice half shipped in v0.12.9. _Source: /full-review + v0.12.9._
+- **cli.py micro-cleanups (old 14A/14B)** — `_resolve_mm_events_dir`, skill-link status enum, marker filename convention. _Source: /full-review 2026-05-10. Reduced: `_empty_outcomes` reuse and the dead local re-imports were promoted into Track 17E; the `upgrade.py` `fsutil` import into Track 15B._
+- **`_resolve_interactive_loop` decomposition** — 630 lines / 74 branch nodes, the largest function in the repo; four separable phases plus interleaved telemetry. _Source: /full-review 2026-08-14. Deferred on a real dependency, not a punt: the CONFLICT-TELEMETRY row construction is woven through it and disappears on its own at the rip-out, so doing this now means doing it twice. Trigger: after the collector is removed._
+- **`merge.similarity_ratio` shares `lcs_merge`'s split preamble** — the docstring hand-enforces "MUST match exactly" where a shared helper would make drift impossible. _Source: /full-review 2026-08-14. Same trigger — the function is scheduled to die with the collector, so deleting it later is cheaper than extracting a helper now._
+- **Two-machine test bootstrap duplicated across two modules** — `tests/test_pull_result.py` and `tests/test_silent_failure_contract.py` carry the same 12-line block; conftest already owns the single-machine `_setup_real_config`. _Source: /full-review 2026-08-14._
+- **Cold-cache budget leftovers (old 16A remainder)** — `allow_refresh=False` on autopush; `_FULL_GATHER_BUDGET_S` on identity gather; per-jsonl deadline in the token merge loop. _Source: /full-review + v0.12.9. The unbudgeted `discover_git_roots` half was promoted into Track 17D._
 - **identity.py micro-DRY + token-cache test pins (old 17A/B/C)** — unify `_persist`; load config once in `_do_full_gather`; `gc_cache_entries` `max_age_s=0`; positive cache-isolation test. _Source: Track 11A eng-review._
 - **v0.11.17 doc-drift cleanup (old 18A)** — events-retro dead-name list; aggregator docstring; `walk_session_metadata(since)` unused param. _Source: /full-review._
-- **Incremental-resume accepted divergences** — tool_use id not seeded across segments; final line without trailing newline never counted. Evidence-triggered only (census). _Source: [review] inbox._
-- **Rip out CONFLICT-TELEMETRY collector** — after Phase 2 bands validate (≥25 real decisions or 60 days). _Source: [plan-eng-review] inbox._
-- **Future-clamped peer mtime can mislead `(n)ewer`** — advisory watch. _Source: [plan-eng-review] inbox._
-- **`_promote_target_will_sync` ignores `exclude_patterns`** — rare exclude-glob miss. _Source: [review] PR #97._
-- **Phase 2 similarity classifier + silent merge** — blocked on collector data. _Source: [plan-eng-review] inbox._
-- **Peers we never resolved against can be mtime-skipped by the drain** — watch now that 12A shipped. _Source: [plan-eng-review] inbox._
-- **Abort transactionality** — pre-existing torn-state. _Source: [review] inbox._
-- **Price cache writes per-TTL (5m vs 1h)** — wire-format change; competes with host-usage on `token_usage.py`. _Source: [plan-eng-review] inbox._
-- **`test_gc_events.py` touches the real mind-meld.lock** — flake against autopush. _Source: [review] inbox._
-- **Model-id variant suffixes alias onto base model** — no real variant ids in census. _Source: [review] inbox._
-- **No sanity ceiling on rendered cost figure** — presentation-layer. _Source: [review] inbox._
-- **Parallel blob fetch in `_download_and_apply`** — wrap per-file `backend.get(bkey)` in `concurrent.futures.ThreadPoolExecutor(max_workers=8)` + `as_completed` (mirror `events.py:walk_git_projects`'s shape). Submit-all-upfront pattern (D2): all N futures live in the executor at once with peak memory ≈ N × avg_enc_blob_size (~70MB on the measured 1449-blob workload, ~500MB at 10k blobs). Measured 7.3× speedup (509ms → 143ms per blob) on a fresh-Mac iCloud-cold pull. _Source: /plan-eng-review 2026-05-06. Deferred because Track 9A's auto-pin prevents the slow-pull case at source. Parallelization only helps users on a non-iCloud storage path or those whose auto-pin was revoked. Revisit on user-reported sustained slow pull (>30s) AFTER auto-pin OR fleet hits 10k+ blobs._
+- **Incremental-resume accepted divergences** — tool_use id not seeded across segments; final line without trailing newline never counted. Evidence-triggered only (census). _Verified 2026-08-14: `seen_tool_ids` still initialises empty at `token_usage.py:702`; both divergences stand. Source: [review] inbox._
+- **Rip out CONFLICT-TELEMETRY collector** — after Phase 2 bands validate (≥25 real decisions or 60 days). _Verified 2026-08-14: the collector shipped v0.12.12 on 2026-07-30 (15 days ago) and `~/.config/mind-meld/conflict-decisions.jsonl` does not exist on this Mac — **zero decisions collected**. The ≥25-decision trigger is not tracking; only the 60-day bar (~2026-09-28) will fire, and it will fire with no dataset. Worth deciding then whether the similarity classifier below should be killed rather than deferred. Source: [plan-eng-review] inbox._
+- **Future-clamped peer mtime can mislead `(n)ewer`** — advisory watch. _Verified 2026-08-14: the `_restore_mtime_best_effort` clamp is intact. Source: [plan-eng-review] inbox._
+- **`_promote_target_will_sync` ignores `exclude_patterns`** — rare exclude-glob miss. _Verified 2026-08-14: still present in `cli.py` as `_promote_target_will_sync` (the inbox cited a line number that had already drifted — the citation-drift fix is Track 18A). Note Group 16 moves this function into `resolveflow.py`. Source: [review] PR #97._
+- **Phase 2 similarity classifier + silent merge** — blocked on collector data. _Verified 2026-08-14: no `classify_divergence` / `DivergenceClass` anywhere in src. See the collector note above — the blocking dataset is not materialising. Source: [plan-eng-review] inbox._
+- **Peers we never resolved against can be mtime-skipped by the drain** — watch now that 12A shipped. _Verified 2026-08-14: drain machinery present at `cli.py:1545`. Source: [plan-eng-review] inbox._
+- **Abort transactionality** — pre-existing torn-state. _Verified 2026-08-14: `typer.Abort()` still propagates out of `_pull_core`'s try block. Source: [review] inbox._
+- **Price cache writes per-TTL (5m vs 1h)** — wire-format change; competes with host-usage on `token_usage.py`. _Verified 2026-08-14: `_CACHE_WRITE_MULT = 2.0` is still a single constant and `parse_usage` still reads only `cache_creation_input_tokens`. Source: [plan-eng-review] inbox._
+- **`test_gc_events.py` touches the real mind-meld.lock** — flake against autopush. _Verified 2026-08-14: the test still runs `CliRunner` without conftest's `_redirect_lock`, which is a plain helper rather than an autouse fixture. Pairs naturally with Track 17A's `_isolate_skill_links` work, whose last task already carries the reciprocal pointer. Source: [review] inbox._
+- **Model-id variant suffixes alias onto base model** — no real variant ids in census. _Verified 2026-08-14: `parts[2:4]` at `aggregator.py:1455`, `parts[1]` at `token_usage.py:534`. Source: [review] inbox._
+- **No sanity ceiling on rendered cost figure** — presentation-layer. _Verified 2026-08-14: `_MAX_SAFE_TOKENS` clamps per field, nothing bounds the rendered total. Source: [review] inbox._
+- **Parallel blob fetch in `_download_and_apply`** — wrap per-file `backend.get(bkey)` in `concurrent.futures.ThreadPoolExecutor(max_workers=8)` + `as_completed` (mirror `events.py:walk_git_projects`'s shape). Submit-all-upfront pattern (D2): all N futures live in the executor at once with peak memory ≈ N × avg_enc_blob_size (~70MB on the measured 1449-blob workload, ~500MB at 10k blobs). Measured 7.3× speedup (509ms → 143ms per blob) on a fresh-Mac iCloud-cold pull. _Source: /plan-eng-review 2026-05-06. Deferred because Track 9A's auto-pin prevents the slow-pull case at source. Revisit on user-reported sustained slow pull (>30s) AFTER auto-pin OR fleet hits 10k+ blobs._
 
 - **Selective sync (`sync.include` / `sync.exclude`)** — per-project filtering so users with dozens of Claude projects can sync just the 2-3 they actively use across machines. _Source: triage. Deferred because no user demand signal yet; revisit on first support case from someone with dozens of projects._
 
@@ -180,7 +371,7 @@ Group 17: Aggregator merge + attribution
 
 - **`[retro].deny_emails` subtractive override** — fleet-wide author-email trust set (v0.11.17 `identity.py`) is additive only via union of every peer's `local_emails`. To remove an email (stolen credential, wrong-account commit, deprecated alias) the user must wait for the 90-day events retention to age it out. Add `[retro].deny_emails: list[str]` config knob; aggregator subtracts the denylist after the additive union. Symmetric with the existing `[retro].author_emails` additive knob. _Source: /plan-eng-review (defer-tagged). Deferred — symmetric design ready when demand surfaces (credential leak, account hygiene)._
 
-- **Skills-walk-complete signal as explicit schema field** — add `skills_walk_complete: bool` on the v=2 sessions-snapshot project metadata (additive, total=False, no schema bump); aggregator picks the latest snapshot per `(device, source_root, claude_dir)` where `skills_walk_complete=True` for skills aggregation, falls back to flagging `skills_incomplete_peers` when no completed walk exists in window. Three-state discriminator (pre-v0.11.27 / complete / skipped) replaces v0.12.4's cosmetic-only breadcrumb. _Source: /plan-eng-review 2026-05-10 (deferred from Track 11B Option B). Re-evaluate when pre-v0.11.27 peers age out and cold-cache-push disambiguation becomes operationally valuable. Do NOT reintroduce the rejected 3-LOC `events.py:_scan_one_project` fix (dropping `if token_cache_files is not None:`) — it causes latest-snapshot-wins data erasure on warm-then-cold push ordering. See CHANGELOG v0.12.4 and `docs/invariants/events-retro.md`._
+- **Skills-walk-complete signal as explicit schema field** — add `skills_walk_complete: bool` on the v=2 sessions-snapshot project metadata (additive, total=False, no schema bump); aggregator picks the latest snapshot per `(device, source_root, claude_dir)` where `skills_walk_complete=True` for skills aggregation, falls back to flagging `skills_incomplete_peers` when no completed walk exists in window. Three-state discriminator (pre-v0.11.27 / complete / skipped) replaces v0.12.4's cosmetic-only breadcrumb. _Source: /plan-eng-review 2026-05-10 (deferred from Track 11B Option B). Track 13A takes the cheaper absence-based path for the deadline case, which may retire this entirely. Do NOT reintroduce the rejected 3-LOC `events.py:_scan_one_project` fix (dropping `if token_cache_files is not None:`) — it causes latest-snapshot-wins data erasure on warm-then-cold push ordering. See CHANGELOG v0.12.4 and `docs/invariants/events-retro.md`._
 
 ## Shipped
 
