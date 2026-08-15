@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from mind_meld import cli as cli_module
 from mind_meld import config as config_module
 from mind_meld import crypto as crypto_module
+from mind_meld import events as _mm_events
 from mind_meld import fsutil, synclog
 from mind_meld.cli import app
 from mind_meld.config import save_config
@@ -3537,7 +3538,7 @@ class TestTrack7BEventsTail:
         def _boom(_config):
             raise RuntimeError("synthetic walk failure")
 
-        monkeypatch.setattr(cli_module.events, "discover_git_roots", _boom)
+        monkeypatch.setattr(_mm_events, "discover_git_roots", _boom)
 
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, (

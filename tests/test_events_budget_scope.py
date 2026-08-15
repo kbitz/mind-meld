@@ -12,7 +12,10 @@ from __future__ import annotations
 import time
 from contextlib import contextmanager
 
-from mind_meld import cli as cli_module
+from mind_meld import events as _mm_events
+from mind_meld import events_tail
+from mind_meld import identity as _mm_identity
+from mind_meld import token_usage as _mm_token_usage
 
 
 def _make_sources(events_root, claude_dir=None) -> list[dict]:
@@ -33,9 +36,9 @@ def _make_sources(events_root, claude_dir=None) -> list[dict]:
 
 def _stub_fast_walks(monkeypatch):
     """git discovery + git walk return instantly with nothing."""
-    monkeypatch.setattr(cli_module.events, "discover_git_roots", lambda _c: ([], []))
+    monkeypatch.setattr(_mm_events, "discover_git_roots", lambda _c: ([], []))
     monkeypatch.setattr(
-        cli_module.events,
+        _mm_events,
         "walk_git_projects",
         lambda roots, since, total_budget_ms: [],
     )
@@ -57,9 +60,9 @@ class TestEventsTailBudgetScope:
             time.sleep(0.7)
             return []
 
-        monkeypatch.setattr(cli_module.identity, "gather_local_identities", slow_gather)
+        monkeypatch.setattr(_mm_identity, "gather_local_identities", slow_gather)
 
-        cli_module._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
+        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
 
         err = capsys.readouterr().err
         # Guard against the notice being absent for the WRONG reason: an early
@@ -78,11 +81,11 @@ class TestEventsTailBudgetScope:
         config = {"sync": {"sources": sources}}
 
         _stub_fast_walks(monkeypatch)
-        monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
+        monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
         # else-branch (no flock); identity gather instant so only the walk is slow.
-        monkeypatch.setattr(cli_module, "_decide_token_walk_policy", lambda paths, *, quiet: False)
+        monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda paths, *, quiet: False)
         monkeypatch.setattr(
-            cli_module.identity, "gather_local_identities", lambda *, allow_refresh=True: []
+            _mm_identity, "gather_local_identities", lambda *, allow_refresh=True: []
         )
 
         def slow_walk(claude_dir, **kwargs):
@@ -90,9 +93,9 @@ class TestEventsTailBudgetScope:
             return
             yield  # pragma: no cover — makes this a generator
 
-        monkeypatch.setattr(cli_module.events, "walk_session_metadata", slow_walk)
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", slow_walk)
 
-        cli_module._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
+        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
 
         assert "events tail budget exceeded" in capsys.readouterr().err
 
@@ -111,9 +114,9 @@ class TestEventsBackfillBudgetScope:
             time.sleep(0.7)  # > 500ms backfill budget
             return []
 
-        monkeypatch.setattr(cli_module.identity, "refresh_identity_cache", slow_refresh)
+        monkeypatch.setattr(_mm_identity, "refresh_identity_cache", slow_refresh)
 
-        cli_module._run_events_backfill(config, sources, "dev-a")
+        events_tail._run_events_backfill(config, sources, "dev-a")
 
         err = capsys.readouterr().err
         # Same wrong-reason guard as the tail negative test (see above).
@@ -129,25 +132,23 @@ class TestEventsBackfillBudgetScope:
         config = {"sync": {"sources": sources}}
 
         _stub_fast_walks(monkeypatch)
-        monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
-        monkeypatch.setattr(cli_module.token_usage, "warm_token_cache_inline", lambda paths: None)
-        monkeypatch.setattr(
-            cli_module.identity, "refresh_identity_cache", lambda *, force=False: []
-        )
+        monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
+        monkeypatch.setattr(_mm_token_usage, "warm_token_cache_inline", lambda paths: None)
+        monkeypatch.setattr(_mm_identity, "refresh_identity_cache", lambda *, force=False: [])
 
         @contextmanager
         def fake_lock(mode):
             yield {}
 
-        monkeypatch.setattr(cli_module.token_usage, "lock_and_get_files", fake_lock)
+        monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_lock)
 
         def slow_walk(claude_dir, **kwargs):
             time.sleep(0.12)
             return
             yield  # pragma: no cover
 
-        monkeypatch.setattr(cli_module.events, "walk_session_metadata", slow_walk)
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", slow_walk)
 
-        cli_module._run_events_backfill(config, sources, "dev-a")
+        events_tail._run_events_backfill(config, sources, "dev-a")
 
         assert "events backfill budget exceeded" in capsys.readouterr().err

@@ -18,6 +18,8 @@ import pytest
 from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
+from mind_meld import events as _mm_events
+from mind_meld import token_usage as _mm_token_usage
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
@@ -1042,7 +1044,7 @@ def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkey
 
     iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
     token_usage.warm_token_cache_inline([claude_root])
-    monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
+    monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1145,7 +1147,7 @@ def test_autopush_breadcrumb_degraded_when_token_cache_is_locked(tmp_path, monke
     def _contended(_mode):
         yield None  # what warn-mode contention actually hands back
 
-    monkeypatch.setattr(cli_module.token_usage, "lock_and_get_files", _contended)
+    monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", _contended)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1164,7 +1166,7 @@ def test_autopush_breadcrumb_joins_multiple_degradations(tmp_path, monkeypatch):
     contain `; `, or the joined detail becomes ambiguous to split.
     """
     iso, _claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
+    monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1289,7 +1291,7 @@ def test_autopush_breadcrumb_degraded_when_events_tail_fails(tmp_path, monkeypat
     def _boom(*_a, **_kw):
         raise RuntimeError("synthetic tail failure")
 
-    monkeypatch.setattr(cli_module.events, "discover_git_roots", _boom)
+    monkeypatch.setattr(_mm_events, "discover_git_roots", _boom)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)

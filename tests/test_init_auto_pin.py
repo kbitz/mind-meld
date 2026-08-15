@@ -175,7 +175,7 @@ class TestInitWiring:
             "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
         )
         monkeypatch.setattr(
-            "mind_meld.cli._run_events_backfill",
+            "mind_meld.events_tail._run_events_backfill",
             lambda config, sources, device_id: None,
         )
 
