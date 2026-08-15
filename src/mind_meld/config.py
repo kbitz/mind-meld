@@ -125,7 +125,10 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "type": "generic",
         "include_dirs": ["skills", "plugins"],
         "include_files": ["AGENTS.md"],
-        "exclude_patterns": [],
+        # Generated host links are per-machine routing, not portable skill
+        # content. Keep user-authored skills in scope; the walker also rejects
+        # every symlink as defense in depth for explicit legacy configs.
+        "exclude_patterns": ["skills/gstack-*", "skills/log-work/*", "skills/retro-fleet/*"],
     },
     {
         # OpenCode config JSON can embed provider/MCP credentials. Its rules,
@@ -138,7 +141,7 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "include_files": [
             "AGENTS.md",
         ],
-        "exclude_patterns": [],
+        "exclude_patterns": ["skills/gstack-*", "skills/log-work/*", "skills/retro-fleet/*"],
     },
 ]
 

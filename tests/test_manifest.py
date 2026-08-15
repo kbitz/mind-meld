@@ -611,15 +611,12 @@ class TestWalkGenericSourceDedup:
         assert "projects/a.md" in files
         assert "config.yaml" in files
 
-    def test_symlink_to_already_walked_file_dedupes(self, tmp_path):
-        """A symlink within include_dirs pointing at a real file already
-        walked elsewhere produces one entry, not two — same inode.
+    def test_symlink_to_already_walked_file_is_not_published(self, tmp_path):
+        """A symlink is local routing, never a manifest entry.
 
-        Determinism: the rel-key kept is the lexicographically-first
-        relative path. Without the sort in walk_generic_source, rglob
-        iteration order is FS-dependent and two peers could pick
-        different rel keys for the same inode, generating phantom
-        add/delete churn in fleet sync.
+        The real file remains eligible even though the symlink sorts before
+        it. Publishing the alias would make another machine write through or
+        replace a local link during pull.
         """
         base = tmp_path / "src"
         base.mkdir()
@@ -637,8 +634,68 @@ class TestWalkGenericSourceDedup:
         files = walk_generic_source(config)
         rels = [k for k in files if k.endswith((".md",))]
         assert len(rels) == 1
-        # Lex-first: 'projects/alias.md' < 'projects/real.md'.
-        assert rels[0] == "projects/alias.md"
+        assert rels[0] == "projects/real.md"
+
+    def test_symlinked_include_file_is_not_published(self, tmp_path):
+        base = tmp_path / "src"
+        base.mkdir()
+        target = tmp_path / "managed-agents.md"
+        target.write_text("managed")
+        (base / "AGENTS.md").symlink_to(target)
+
+        files = walk_generic_source(
+            {"path": str(base), "include_dirs": [], "include_files": ["AGENTS.md"]}
+        )
+
+        assert files == {}
+
+    def test_symlinked_include_directory_is_not_walked(self, tmp_path):
+        base = tmp_path / "src"
+        base.mkdir()
+        managed = tmp_path / "managed-skills"
+        managed.mkdir()
+        (managed / "SKILL.md").write_text("managed")
+        (base / "skills").symlink_to(managed, target_is_directory=True)
+
+        files = walk_generic_source(
+            {"path": str(base), "include_dirs": ["skills"], "include_files": []}
+        )
+
+        assert files == {}
+
+    def test_symlink_omission_does_not_mint_a_tombstone(self, tmp_path):
+        """The push consumer filter preserves a peer's real-file entry.
+
+        This models an existing explicit source configuration, before its
+        default exclude globs have been migrated.
+        """
+        from mind_meld.cli import _filter_symlinked_paths
+
+        base = tmp_path / "codex"
+        base.mkdir()
+        target = tmp_path / "managed-agents.md"
+        target.write_text("managed")
+        (base / "AGENTS.md").symlink_to(target)
+        remote = {
+            "sources": {"codex": {"files": {"AGENTS.md": {"sha256": "a"}}}},
+            "tombstones": {
+                "codex:AGENTS.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
+                "codex:real.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
+                "legacy.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
+            },
+        }
+
+        filtered = _filter_symlinked_paths(
+            remote, [{"name": "codex", "path": str(base), "type": "generic"}]
+        )
+        tombstones = generate_tombstones({"sources": {"codex": {"files": {}}}}, filtered, "me")
+
+        assert "codex:AGENTS.md" not in tombstones
+        assert "codex:real.md" in tombstones
+        assert "legacy.md" in tombstones
+        assert "codex:AGENTS.md" not in filtered["tombstones"]
+        assert "codex:real.md" in filtered["tombstones"]
+        assert "legacy.md" in filtered["tombstones"]
 
 
 class TestWalkSource:

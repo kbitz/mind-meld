@@ -790,7 +790,7 @@ def test_error_writes_to_stderr_not_stdout(tmp_path, monkeypatch):
     assert "Error:" not in (r.stdout or "")
 
 
-def test_error_preserves_rich_formatting_on_stderr():
+def test_error_preserves_rich_formatting_on_stderr(monkeypatch):
     """Rich Console(stderr=True) still emits color codes when attached to
     a real terminal; the forced-terminal option proves the formatting
     pipeline still runs (color bytes in the captured stream).
@@ -802,6 +802,10 @@ def test_error_preserves_rich_formatting_on_stderr():
 
     from rich.console import Console
 
+    # The test explicitly verifies ANSI output. The host's NO_COLOR choice is
+    # correct for normal CLI output but would otherwise override Rich's forced
+    # terminal setup and turn this into an environment-dependent assertion.
+    monkeypatch.delenv("NO_COLOR", raising=False)
     buf = io.StringIO()
     c = Console(file=buf, stderr=True, force_terminal=True, color_system="truecolor")
     c.print("[red]Error:[/red] it blew up")

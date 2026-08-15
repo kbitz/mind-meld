@@ -215,6 +215,11 @@ class TestDefaultSources:
         assert codex["type"] == "generic"
         assert codex["include_dirs"] == ["skills", "plugins"]
         assert codex["include_files"] == ["AGENTS.md"]
+        assert codex["exclude_patterns"] == [
+            "skills/gstack-*",
+            "skills/log-work/*",
+            "skills/retro-fleet/*",
+        ]
 
     def test_opencode_source_syncs_customization_not_session_state(self):
         opencode = next(s for s in DEFAULT_SOURCES if s["name"] == "opencode")
@@ -228,6 +233,20 @@ class TestDefaultSources:
             "tools",
         ]
         assert opencode["include_files"] == ["AGENTS.md"]
+        assert opencode["exclude_patterns"] == [
+            "skills/gstack-*",
+            "skills/log-work/*",
+            "skills/retro-fleet/*",
+        ]
+
+    def test_generated_skill_excludes_preserve_hand_authored_skills(self):
+        import fnmatch
+
+        codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        patterns = codex["exclude_patterns"]
+        assert any(fnmatch.fnmatch("skills/gstack-review/SKILL.md", p) for p in patterns)
+        assert any(fnmatch.fnmatch("skills/retro-fleet/SKILL.md", p) for p in patterns)
+        assert not any(fnmatch.fnmatch("skills/my-team-tool/SKILL.md", p) for p in patterns)
 
 
 class TestExcludePatternsValidation:

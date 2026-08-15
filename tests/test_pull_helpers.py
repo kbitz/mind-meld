@@ -2285,3 +2285,123 @@ class TestDownloadAndApplyPathTraversalGuard:
         assert (base / good_rel).read_bytes() == b"good-bytes"
         assert outcomes["written"] == [good_rel]
         assert outcomes["failed"] == []
+
+    @pytest.mark.parametrize("dangling", [False, True])
+    def test_preserves_local_symlink_destination(
+        self, tmp_path, monkeypatch, dangling: bool
+    ) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
+        base = tmp_path / "src"
+        base.mkdir()
+        target = tmp_path / "managed-agents.md"
+        if not dangling:
+            target.write_text("managed")
+        local_link = base / "AGENTS.md"
+        local_link.symlink_to(target)
+
+        _, outcomes = _download_and_apply(
+            backend,
+            base,
+            {"AGENTS.md": _info(_sha(b"peer-bytes"))},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+
+        assert local_link.is_symlink()
+        assert outcomes["skipped"] == ["AGENTS.md"]
+        assert outcomes["failed"] == []
+        assert not target.exists() if dangling else target.read_text() == "managed"
+
+    def test_preserves_symlinked_parent_below_source_root(self, tmp_path, monkeypatch) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
+        base = tmp_path / "src"
+        base.mkdir()
+        managed = tmp_path / "managed-skills"
+        managed.mkdir()
+        (base / "skills").symlink_to(managed, target_is_directory=True)
+
+        _, outcomes = _download_and_apply(
+            backend,
+            base,
+            {"skills/tool/SKILL.md": _info(_sha(b"peer-bytes"))},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+
+        assert (base / "skills").is_symlink()
+        assert not (managed / "tool" / "SKILL.md").exists()
+        assert outcomes["skipped"] == ["skills/tool/SKILL.md"]
+
+    def test_allows_a_symlinked_source_root(self, tmp_path, monkeypatch) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
+        actual_base = tmp_path / "actual-src"
+        actual_base.mkdir()
+        base_link = tmp_path / "source-link"
+        base_link.symlink_to(actual_base, target_is_directory=True)
+
+        _, outcomes = _download_and_apply(
+            backend,
+            base_link,
+            {"skills/tool/SKILL.md": _info(_sha(b"peer-bytes"))},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+
+        assert (actual_base / "skills" / "tool" / "SKILL.md").read_bytes() == b"peer-bytes"
+        assert outcomes["written"] == ["skills/tool/SKILL.md"]
+
+    def test_direct_apply_preserves_leaf_symlink(self, tmp_path) -> None:
+        from mind_meld.cli import _apply_incoming_file
+
+        target = tmp_path / "managed-agents.md"
+        target.write_text("managed")
+        local_link = tmp_path / "AGENTS.md"
+        local_link.symlink_to(target)
+
+        outcome = _apply_incoming_file(
+            local_link,
+            "AGENTS.md",
+            b"peer-bytes",
+            _info(_sha(b"peer-bytes")),
+            "peerA",
+        )
+
+        assert outcome == "skipped"
+        assert local_link.is_symlink()
+        assert target.read_text() == "managed"
+
+    def test_non_quiet_symlink_skip_emits_one_breadcrumb(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
+        base = tmp_path / "src"
+        base.mkdir()
+        target = tmp_path / "managed-agents.md"
+        target.write_text("managed")
+        (base / "AGENTS.md").symlink_to(target)
+
+        _download_and_apply(
+            backend,
+            base,
+            {"AGENTS.md": _info(_sha(b"peer-bytes"))},
+            "peerA",
+            "pp",
+            1024,
+        )
+
+        output = capsys.readouterr().out
+        assert output.count("skipped (local symlink preserved)") == 1
