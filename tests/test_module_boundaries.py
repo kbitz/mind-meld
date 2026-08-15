@@ -27,6 +27,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
 EXTRACTED = [
     "consoles",
     "conflictmtime",
+    "skill_link",
 ]
 
 LEAVES = ["consoles", "conflictmtime", "safety", "conflictdiff", "fsutil"]
@@ -207,6 +208,37 @@ def test_future_clamp_constant_has_one_owner() -> None:
         and "_MTIME_RESTORE_MAX_SKEW_SECONDS = " in p.read_text(encoding="utf-8")
     ]
     assert others == [], f"constant redefined in {others}"
+
+
+# ---------------------------------------------------------------------------
+# T8 — the test suite must never reach the real skill installer.
+# ---------------------------------------------------------------------------
+
+
+def test_real_home_guard_fires(tmp_path: Path) -> None:
+    """The installer refuses to touch the developer's real HOME under pytest.
+
+    Non-vacuousness matters here: when this guard was added, **67 tests** were
+    reaching the real ``~/.claude/skills`` / ``~/.codex/skills`` /
+    ``~/.config/opencode/skills``. They all pass now because conftest's
+    ``_isolate_skill_links`` redirects the roots. If that fixture ever stops
+    working, this guard is what turns a silent mutation of the developer's
+    machine back into a failing test.
+    """
+    from mind_meld import skill_link
+
+    with pytest.raises(AssertionError, match="real skill installer"):
+        skill_link._refuse_real_home_under_pytest(Path("~/.claude/skills/retro-fleet").expanduser())
+
+    # A redirected target is fine -- the guard is about location, not shape.
+    skill_link._refuse_real_home_under_pytest(tmp_path / "agents" / "claude" / "retro-fleet")
+
+
+def test_skill_roots_are_redirected_for_this_test() -> None:
+    """conftest's autouse fixture is actually in effect (not silently skipped)."""
+    from mind_meld import skill_link
+
+    assert all(not r.startswith("~") for r in skill_link.SKILL_ROOTS), skill_link.SKILL_ROOTS
 
 
 # ---------------------------------------------------------------------------

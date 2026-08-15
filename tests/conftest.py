@@ -12,6 +12,8 @@ their test body and then re-configure.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from mind_meld import crypto
@@ -86,6 +88,44 @@ def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
     from mind_meld import identity as _identity
 
     monkeypatch.setattr(_identity, "CACHE_PATH", tmp_path / "identity-cache.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_links(monkeypatch, tmp_path, request) -> None:
+    """Redirect the retro-fleet skill installer's three targets to a tmp path.
+
+    The installer mkdirs and symlinks into ``~/.claude/skills``,
+    ``~/.codex/skills`` and ``~/.config/opencode/skills``, and touches marker
+    files in ``~/.config/mind-meld``. Every test that drove ``_push_core`` past
+    its TTL gate, or ``init``, without stubbing the installer was mutating the
+    developer's REAL agent config dirs. Measured when Track 16A added
+    ``skill_link._refuse_real_home_under_pytest``: **67 tests** were reaching
+    them. This is a pre-existing leak the extraction merely made visible.
+
+    Redirects the roots rather than moving ``$HOME``. A suite-wide
+    ``monkeypatch.setenv("HOME", ...)`` looks simpler and is a trap:
+    ``importlib.metadata.version("mind-meld")`` resolves from the HOME-derived
+    user site-packages, so a moved HOME degrades ``__version__`` to
+    ``0.0.0+dev``, which trips ``_check_fleet_version_or_refuse`` and fails a
+    dozen tests in ``test_integration.py``.
+
+    ``test_skill_link.py`` owns its own ``_isolate_paths`` fixture (it moves
+    HOME deliberately, because it is testing the installer's real path
+    resolution), so this one steps aside there to avoid fighting it.
+    """
+    if request.node.fspath.basename == "test_skill_link.py":
+        return
+
+    from mind_meld import skill_link as _skill_link
+
+    roots = tuple(str(tmp_path / "agents" / name) for name in ("claude", "codex", "opencode"))
+    for root in roots:
+        # Create the AGENT dir (the skills dir's parent) but not the skills dir
+        # itself, mirroring a real install: the installer's `agent_dir.exists()`
+        # pre-check is what decides whether that agent is present at all.
+        (tmp_path / "agents" / Path(root).name).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_skill_link, "SKILL_ROOTS", roots)
+    monkeypatch.setattr(_skill_link, "_marker_dir", lambda: tmp_path / "skill-markers")
 
 
 @pytest.fixture(autouse=True)

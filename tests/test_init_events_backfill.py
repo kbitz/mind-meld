@@ -231,7 +231,9 @@ class TestInitWiring:
         monkeypatch.setattr("mind_meld.cli._run_events_backfill", stub_backfill)
         # Stub the skill link installer too — irrelevant to this test and
         # avoids touching ~/.claude.
-        monkeypatch.setattr("mind_meld.cli._ensure_retro_skill_links", lambda dry_run=False: None)
+        monkeypatch.setattr(
+            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+        )
 
         storage = tmp_path / "icloud"
         # storage path, device name, passphrase x2, claude=Y, all other sources=n
@@ -283,7 +285,9 @@ class TestEventsDirIsolation:
         cfg_path = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
-        monkeypatch.setattr("mind_meld.cli._ensure_retro_skill_links", lambda dry_run=False: None)
+        monkeypatch.setattr(
+            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+        )
 
         # Snapshot the real events dir pre-init so we can compare.
         real_dir = Path.home() / ".local" / "share" / "mind-meld" / "events"

@@ -26,6 +26,7 @@ import time
 import pytest
 
 from mind_meld import cli as cli_module
+from mind_meld import skill_link
 
 
 @pytest.fixture(autouse=True)
@@ -71,7 +72,7 @@ def skill_src(_isolate_paths, monkeypatch):
     src.mkdir(parents=True)
     (src / "SKILL.md").write_text("# retro-fleet")
     (src / "aggregator.py").write_text("# aggregator")
-    monkeypatch.setattr(cli_module, "_resolve_retro_skill_src", lambda: src)
+    monkeypatch.setattr(skill_link, "_resolve_retro_skill_src", lambda: src)
     return src
 
 
@@ -82,27 +83,27 @@ def skill_src(_isolate_paths, monkeypatch):
 
 class TestTargetAbsent:
     def test_creates_symlink_when_target_absent(self, target, skill_src, config_dir):
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
         assert target.is_symlink()
         assert target.resolve() == skill_src.resolve()
         # Success marker touched.
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
 
     def test_creates_codex_symlink_when_target_absent(self, codex_target, skill_src, config_dir):
-        cli_module._ensure_codex_retro_skill_link()
+        skill_link._ensure_codex_retro_skill_link()
         assert codex_target.is_symlink()
         assert codex_target.resolve() == skill_src.resolve()
-        marker = config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
 
     def test_creates_opencode_symlink_when_target_absent(
         self, opencode_target, skill_src, config_dir
     ):
-        cli_module._ensure_opencode_retro_skill_link()
+        skill_link._ensure_opencode_retro_skill_link()
         assert opencode_target.is_symlink()
         assert opencode_target.resolve() == skill_src.resolve()
-        marker = config_dir / f".{cli_module._OPENCODE_SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
 
     @pytest.mark.parametrize("agent_root", [".claude", ".codex", ".config/opencode"])
@@ -118,11 +119,11 @@ class TestTargetAbsent:
 
         target = skills_dir / "retro-fleet"
         if agent_root == ".claude":
-            cli_module._ensure_retro_skill_link()
+            skill_link._ensure_retro_skill_link()
         elif agent_root == ".codex":
-            cli_module._ensure_codex_retro_skill_link()
+            skill_link._ensure_codex_retro_skill_link()
         else:
-            cli_module._ensure_opencode_retro_skill_link()
+            skill_link._ensure_opencode_retro_skill_link()
 
         assert target.is_symlink()
         assert target.resolve() == skill_src.resolve()
@@ -136,12 +137,12 @@ class TestTargetAbsent:
 class TestTargetCorrect:
     def test_correct_symlink_is_noop(self, target, skill_src, config_dir):
         target.symlink_to(skill_src)
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
         # Symlink unchanged.
         assert target.is_symlink()
         assert target.resolve() == skill_src.resolve()
         # Success marker touched.
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
 
 
@@ -174,7 +175,7 @@ class TestDanglingSymlink:
         assert not target.exists()  # dangling
 
         # Self-heal must replace it pointing at the live source.
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
 
         assert target.is_symlink()
         assert target.exists()  # No longer dangling.
@@ -189,12 +190,12 @@ class TestDanglingSymlink:
 class TestConflictSkip:
     def test_real_file_at_target_not_clobbered(self, target, skill_src, config_dir, capsys):
         target.write_text("user's own retro-fleet skill")
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
         # File untouched.
         assert target.read_text() == "user's own retro-fleet skill"
         assert not target.is_symlink()
         # Conflict marker touched (per cross-model #3 two-marker gate).
-        conflict_marker = config_dir / f".{cli_module._SKILL_LINK_CONFLICT_MARKER}"
+        conflict_marker = config_dir / f".{skill_link._SKILL_LINK_CONFLICT_MARKER}"
         assert conflict_marker.exists()
         # Notice emitted.
         captured = capsys.readouterr()
@@ -206,7 +207,7 @@ class TestConflictSkip:
         their_dir = _isolate_paths / "their-skill"
         their_dir.mkdir()
         target.symlink_to(their_dir)
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
         # Symlink unchanged.
         assert target.resolve() == their_dir.resolve()
         captured = capsys.readouterr()
@@ -217,11 +218,11 @@ class TestConflictSkip:
         gate suppresses the notice within 24h."""
         target.write_text("user's file")
         # First call — emits notice + touches conflict marker.
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
         first = capsys.readouterr()
         assert "mm: notice:" in first.err
         # Second call within the TTL → marker is fresh, no notice.
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
         second = capsys.readouterr()
         assert second.err == ""
 
@@ -240,11 +241,11 @@ class TestNoClaudeCode:
         import shutil
 
         shutil.rmtree(_isolate_paths / ".claude")
-        cli_module._ensure_retro_skill_link()
+        skill_link._ensure_retro_skill_link()
         captured = capsys.readouterr()
         assert captured.err == ""
         # No marker touched — next call still due.
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         assert not marker.exists()
 
 
@@ -269,12 +270,12 @@ class TestSymlinkToError:
             return original_symlink_to(self, target_path, target_is_directory)
 
         monkeypatch.setattr(pathlib.Path, "symlink_to", fake_symlink_to)
-        cli_module._ensure_retro_skill_link()  # Must not raise.
+        skill_link._ensure_retro_skill_link()  # Must not raise.
         captured = capsys.readouterr()
         assert "mm: notice:" in captured.err
         assert "PermissionError" in captured.err
         # Neither marker touched (transient failure → next push retries).
-        assert not (config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}").exists()
+        assert not (config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -284,15 +285,15 @@ class TestSymlinkToError:
 
 class TestSkillLinkCheckDue:
     def test_no_marker_means_check_due(self, config_dir):
-        assert cli_module._skill_link_check_due() is True
+        assert skill_link._skill_link_check_due() is True
 
     def test_codex_fresh_marker_with_correct_link_means_not_due(
         self, codex_target, skill_src, config_dir
     ):
         codex_target.symlink_to(skill_src)
-        marker = config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        assert cli_module._codex_skill_link_check_due() is False
+        assert skill_link._codex_skill_link_check_due() is False
 
     def test_combined_gate_repairs_codex_when_claude_is_healthy(
         self, target, codex_target, skill_src, config_dir
@@ -300,12 +301,12 @@ class TestSkillLinkCheckDue:
         """A fresh Claude marker must not suppress an independently stale Codex link."""
         target.symlink_to(skill_src)
         codex_target.symlink_to(skill_src)
-        (config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}").touch()
-        (config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}").touch()
-        assert cli_module._skill_links_check_due() is False
+        (config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}").touch()
+        (config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}").touch()
+        assert skill_link._skill_links_check_due() is False
 
         codex_target.unlink()
-        assert cli_module._skill_links_check_due() is True
+        assert skill_link._skill_links_check_due() is True
 
     def test_combined_gate_repairs_opencode_when_other_agents_are_healthy(
         self, target, codex_target, opencode_target, skill_src, config_dir
@@ -314,39 +315,39 @@ class TestSkillLinkCheckDue:
         target.symlink_to(skill_src)
         codex_target.symlink_to(skill_src)
         opencode_target.symlink_to(skill_src)
-        (config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}").touch()
-        (config_dir / f".{cli_module._CODEX_SKILL_LINK_SUCCESS_MARKER}").touch()
-        (config_dir / f".{cli_module._OPENCODE_SKILL_LINK_SUCCESS_MARKER}").touch()
-        assert cli_module._skill_links_check_due() is False
+        (config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}").touch()
+        (config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}").touch()
+        (config_dir / f".{skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER}").touch()
+        assert skill_link._skill_links_check_due() is False
 
         opencode_target.unlink()
-        assert cli_module._skill_links_check_due() is True
+        assert skill_link._skill_links_check_due() is True
 
     def test_fresh_marker_with_correct_link_means_not_due(self, target, skill_src, config_dir):
         """Steady state: marker fresh AND link points at our source → skip.
         Both conditions are required post-drift-check."""
         target.symlink_to(skill_src)
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        assert cli_module._skill_link_check_due() is False
+        assert skill_link._skill_link_check_due() is False
 
     def test_stale_marker_means_due(self, target, skill_src, config_dir):
         target.symlink_to(skill_src)
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
         old = time.time() - (25 * 3600)
         os.utime(marker, (old, old))
-        assert cli_module._skill_link_check_due() is True
+        assert skill_link._skill_link_check_due() is True
 
     def test_fresh_marker_but_link_missing_means_due(self, skill_src, config_dir):
         """REGRESSION pin for the post-cleanup-recovery bug: marker got
         touched on a previous push but the link was later removed by hand
         (e.g. user cleaning up an old workspace path). Pre-fix the fresh
         marker silently suppressed self-heal for 24h."""
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
         # No symlink at target. Drift check must trip.
-        assert cli_module._skill_link_check_due() is True
+        assert skill_link._skill_link_check_due() is True
 
     def test_fresh_marker_but_link_dangling_means_due(
         self, target, skill_src, _isolate_paths, config_dir
@@ -360,9 +361,9 @@ class TestSkillLinkCheckDue:
         import shutil
 
         shutil.rmtree(deleted_target.parent.parent)
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        assert cli_module._skill_link_check_due() is True
+        assert skill_link._skill_link_check_due() is True
 
     def test_fresh_marker_but_link_wrong_target_means_due(
         self, target, skill_src, _isolate_paths, config_dir
@@ -372,9 +373,9 @@ class TestSkillLinkCheckDue:
         their_dir = _isolate_paths / "their-skill"
         their_dir.mkdir()
         target.symlink_to(their_dir)
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        assert cli_module._skill_link_check_due() is True
+        assert skill_link._skill_link_check_due() is True
 
     def test_drift_check_resolver_failure_fails_open(self, target, config_dir, monkeypatch):
         """If ``_resolve_retro_skill_src`` raises during the drift check,
@@ -383,20 +384,20 @@ class TestSkillLinkCheckDue:
         target_dir = target.parent / "anything"
         target_dir.mkdir()
         target.symlink_to(target_dir)
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
 
         def boom():
             raise RuntimeError("resolver simulated failure")
 
-        monkeypatch.setattr(cli_module, "_resolve_retro_skill_src", boom)
-        assert cli_module._skill_link_check_due() is True
+        monkeypatch.setattr(skill_link, "_resolve_retro_skill_src", boom)
+        assert skill_link._skill_link_check_due() is True
 
     def test_marker_stat_failure_fails_open(self, config_dir, monkeypatch):
         """TODO#3 critical-gap fix: EACCES / EIO on the marker dir must
         fail-open (treat as if no marker — re-run installer). Pre-fix the
         bare os.stat would crash push."""
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
 
         from pathlib import Path
@@ -409,7 +410,7 @@ class TestSkillLinkCheckDue:
             return original_stat(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "stat", fake_stat)
-        assert cli_module._skill_link_check_due() is True
+        assert skill_link._skill_link_check_due() is True
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +421,9 @@ class TestSkillLinkCheckDue:
 class TestDryRun:
     def test_dry_run_is_noop(self, target, skill_src, config_dir):
         """`mm push --dry-run` must NOT mutate the symlink or the marker."""
-        cli_module._ensure_retro_skill_link(dry_run=True)
+        skill_link._ensure_retro_skill_link(dry_run=True)
         assert not target.exists()
-        assert not (config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}").exists()
+        assert not (config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +559,7 @@ class TestInstallSkillsCommand:
         marker. The gate only governs the implicit self-heal in push."""
         from mind_meld.cli import app
 
-        marker = config_dir / f".{cli_module._SKILL_LINK_SUCCESS_MARKER}"
+        marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()  # fresh — would suppress push-time self-heal
         # Link is still missing; the command must create it anyway.
         result = self._runner().invoke(app, ["install-skills"])
@@ -576,9 +577,9 @@ class TestPushSkillLinkWiring:
         }
         monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
         monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(cli_module, "_skill_links_check_due", lambda: True)
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda: True)
         monkeypatch.setattr(
-            cli_module,
+            skill_link,
             "_ensure_retro_skill_links",
             lambda *, dry_run: calls.append(dry_run),
         )

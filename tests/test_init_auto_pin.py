@@ -171,7 +171,9 @@ class TestInitWiring:
         cfg_path = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
-        monkeypatch.setattr("mind_meld.cli._ensure_retro_skill_links", lambda dry_run=False: None)
+        monkeypatch.setattr(
+            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+        )
         monkeypatch.setattr(
             "mind_meld.cli._run_events_backfill",
             lambda config, sources, device_id: None,
