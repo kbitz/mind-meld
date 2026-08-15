@@ -67,9 +67,13 @@ read that snapshot. `mm push` is safe here: `_maybe_prompt_migration`
 short-circuits to a stderr warning on a non-TTY, which is what a skill Bash
 call is.
 
-Both commands are silent enough for this, never prompt in this context, and
-exit gracefully on errors or when mm isn't initialized — safe to run
-unconditionally.
+The two commands do NOT have the same failure contract, so don't treat a
+non-zero exit as fatal here. `mm autopull` exits 0 on every error path,
+including when mm isn't initialized. `mm push` exits 1 on missing config, an
+unavailable passphrase, or a lock held by a concurrent autopush hook — all
+routine, none of them a reason to abandon the retro. Run both, ignore a
+non-zero exit from `mm push`, and continue to Step 2 with whatever state
+exists on disk.
 
 ```bash
 mm push

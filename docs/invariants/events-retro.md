@@ -53,7 +53,18 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
 
 **Tolerant binary reads across every jsonl reader on the push path (load-bearing, v0.12.16).** `_read_cwd_from_latest_jsonl`, `_last_mm_push_ts`, `token_usage.is_cache_cold`, and `pullhistory._yield_lines` all read BINARY and tolerate a bad line rather than a bad file. Text mode decodes in ~8 KB **chunks**, not per line, and `UnicodeDecodeError` is a `ValueError` — NOT an `OSError` — so the `except OSError` these functions carried never caught it and one invalid byte took down the entire events tail on every push. (Chunked decoding is also why a `cwd` on line 1 did not protect against a bad byte on line 2; measured, it raises at 2 lines apart and returns cleanly at 80 KB apart.) `json.loads` accepts bytes, and both malformed JSON and invalid UTF-8 surface as `ValueError`, so the guard is `except ValueError: continue` per line. Two traps:
 
-- **Do NOT port a reader to `open(path, "rb")` + `for line in fp:`.** That reproduces the OOM `token_usage.iter_bounded_lines` exists to prevent — Python extends its buffer to newline-or-EOF, so one pathological multi-GB line kills the push. The session-jsonl reader goes through `iter_bounded_lines` (public since v0.12.16 precisely because it has a second consumer); its `label` kwarg names the calling site in the oversize notice, so do not hardcode "token walker" back into it.
+- **A reader whose bytes can come from a peer MUST be bounded, not merely tolerant.** `open(path, "rb")` + `for line in fp:` lets Python extend its buffer to newline-or-EOF, so one pathological line kills the push — the OOM `token_usage.iter_bounded_lines` exists to prevent. Which readers need it follows from where the bytes originate, so the rule is per-corpus, not blanket:
+
+  | Reader | Corpus | Bounded? |
+  |---|---|---|
+  | `_read_cwd_from_latest_jsonl` | Claude Code session jsonls | **Yes** — `iter_bounded_lines` |
+  | `_last_mm_push_ts` | `mm-events` daily files, **synced**, peer bytes arrive via the pull apply path | **Yes** — `iter_bounded_lines` |
+  | `token_usage.is_cache_cold` | local token cache | N/A — whole-file `read_bytes` behind an `st_size` gate, no line iteration |
+  | `pullhistory._yield_lines` | `~/.config/mind-meld/pull-history.jsonl` | No, and that is fine — the config dir is **never synced** and the file is written only by `pullhistory.append`. Tolerant reading is the requirement here; bounding would buy nothing and would import `token_usage` into a forensic-log reader for no gain. |
+
+  `iter_bounded_lines` is public since v0.12.16 precisely because it grew consumers outside `token_usage`. Its `label` kwarg names a call site in the oversize notice, so do not hardcode "token walker" back into it — but note the notice is deduped by PATH ONLY, so when two sites read the same file the label shown is whichever reached it first.
+
+- **One-shot readers MUST pass `yield_final_partial=True`.** `iter_bounded_lines` defaults to discarding a trailing chunk with no newline, because for `walk_jsonl_segment` that is a partial write to re-read on the next push. A one-shot reader has no next push: the default silently drops a complete-but-unterminated final record. Caught by Codex adversarial review during `/review`, after the first fix had already landed — porting the cwd reader without the flag made it return `None` for a session whose only line was not newline-terminated yet, where the old text-mode reader returned the cwd. Pinned by `test_unterminated_final_line_is_still_read`.
 - **`_last_mm_push_ts` returning `None` is NOT a benign fallback.** It rewinds the cursor to `now - INITIAL_CURSOR_LOOKBACK_DAYS` and re-walks 30 days of git history on every subsequent push, forever. Its pin asserts the timestamp comes back, not merely that nothing raised.
 
 `conflictlog.read_records` is deliberately NOT in this set: local-only, never synced, written by `conflictlog.py` with `json.dumps` default `ensure_ascii=True` (pure ASCII), and the module is TEMPORARY with a scheduled rip-out.
@@ -323,7 +334,7 @@ both views from the same source. Pinned by
 `test_d2_old_entry_without_skills_field_triggers_rewalk`.
 
 **Incremental resume (v0.12.15) — read before touching
-`token_usage.walk_jsonl_segment`, `_iter_bounded_lines`,
+`token_usage.walk_jsonl_segment`, `iter_bounded_lines`,
 `_drain_to_newline`, `_resume_plan`, `head_fingerprint`, or
 `TAIL_MSG_ID_LOOKBACK`.**
 
@@ -341,7 +352,9 @@ reports wrong token counts:
 
 1. **The resume offset only ever advances past COMPLETE lines.** A
    trailing chunk with no newline is Claude Code mid-write:
-   `_iter_bounded_lines` neither yields it nor counts it, so the next
+   `iter_bounded_lines` neither yields it nor counts it (unless the
+   caller passes `yield_final_partial=True`, which only one-shot readers
+   do), so the next
    walk re-reads it whole. This is the entire basis for persisting an
    offset at all. A skipped OVERSIZE line is yielded as `b""` rather
    than swallowed — the caller advances its offset on every yield, and

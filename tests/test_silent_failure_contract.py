@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -931,6 +932,190 @@ def test_autopush_breadcrumb_no_sources_distinguishes_from_success(tmp_path, mon
     crumb = iso / "last-autorun.json"
     assert crumb.exists()
     assert json.loads(crumb.read_text())["outcome"] == "no-sources"
+
+
+def _setup_events_tail_config(tmp_path, monkeypatch):
+    """Config with BOTH a claude source (so the tail has projects to walk)
+    and an mm-events source (so the tail doesn't no-op). Returns
+    (sidecar_dir, claude_root).
+
+    Two details the degradation pins depend on:
+
+    * A real session jsonl with `message.usage` is written, not just the
+      `memory/role.md` that `_populate_claude` makes. Without token data
+      `warm_token_cache_inline` produces a cache under
+      `_MIN_WARM_CACHE_BYTES` (64), so `is_cache_cold()` stays True and the
+      "healthy" control pin can never reach `success`.
+    * `upgrade.last_transition_seen` is forced to None. A version bump in
+      the same process makes `_decide_token_walk_policy` take policy 3
+      (warm silently, return True) even on a cold autopush, which masks the
+      cold-cache branch entirely. Steady state is transition-free, so None
+      is the honest default for these tests.
+    """
+    storage_dir = tmp_path / "storage"
+    config_path = tmp_path / "config.toml"
+    src = tmp_path / "claude"
+    _populate_claude(src)
+    sess = src / "projects" / "-Users-kb-myapp"
+    sess.mkdir(parents=True, exist_ok=True)
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (sess / "session.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": day,
+                    "message": {
+                        "id": f"msg_{i}",
+                        "model": "claude-sonnet-4-5",
+                        "role": "assistant",
+                        "usage": {"input_tokens": 100, "output_tokens": 50},
+                    },
+                }
+            )
+            for i in range(12)
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(cli_module.upgrade, "last_transition_seen", lambda: None)
+    save_config(
+        {
+            "device": {"id": "dev-deg", "name": "Deg"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "type": "claude", "path": str(src)},
+                    {
+                        "name": "mm-events",
+                        "type": "generic",
+                        "path": str(tmp_path / "mm-events"),
+                        "include_dirs": ["events"],
+                        "exclude_patterns": [],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        config_path,
+    )
+    (tmp_path / "mm-events" / "events").mkdir(parents=True)
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-deg", "Deg")
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    _redirect_lock(monkeypatch, tmp_path)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    return iso, src
+
+
+def test_autopush_breadcrumb_success_when_events_tail_is_healthy(tmp_path, monkeypatch):
+    """CONTROL PIN for the `degraded` breadcrumb.
+
+    Without this, `degraded` could become autopush's constant output and CI
+    would stay green — conftest's `_isolate_token_cache` hands every test a
+    fresh COLD cache, so the cold-cache degradation fires by default unless
+    the test warms it. A signal that is always on is not a signal. This pin
+    is what makes the sibling `degraded` tests meaningful.
+    """
+    from mind_meld import token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    assert token_usage.is_cache_cold() is False, "warm failed; the control pin proves nothing"
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "success", payload
+
+
+def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkeypatch):
+    """Second of the three degradation sites. Previously unpinned, so the
+    whole budget-exceeded phrase could be deleted without a failure."""
+    from mind_meld import token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "degraded", payload
+    assert "budget" in payload.get("detail", "")
+
+
+def test_autopush_breadcrumb_degraded_when_token_cache_cold(tmp_path, monkeypatch):
+    """Third degradation site. The cache is cold by default under conftest
+    isolation, so this is the no-warm counterpart of the control pin."""
+    iso, _claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "degraded", payload
+    assert "tokens and skills are missing" in payload.get("detail", "")
+
+
+def test_autopush_no_claude_source_is_not_a_degradation(tmp_path, monkeypatch):
+    """`_decide_token_walk_policy` returns False for FOUR reasons, and one of
+    them is `not claude_paths` — a config shape, not a failure.
+
+    Reproduced during /review before the guard existed: a gstack-only or
+    codex-only machine wrote `degraded` on EVERY autopush, blaming a token
+    cache that was not the cause. That is the exact class of misleading
+    signal this release exists to remove, so it must not be reintroduced by
+    the fix for it.
+    """
+    storage_dir = tmp_path / "storage"
+    config_path = tmp_path / "config.toml"
+    gstack = tmp_path / "gstack"
+    (gstack / "projects").mkdir(parents=True)
+    (gstack / "projects" / "state.yaml").write_text("active: true")
+    save_config(
+        {
+            "device": {"id": "dev-nc", "name": "NoClaude"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "type": "generic",
+                        "path": str(gstack),
+                        "include_dirs": ["projects"],
+                        "exclude_patterns": [],
+                    },
+                    {
+                        "name": "mm-events",
+                        "type": "generic",
+                        "path": str(tmp_path / "mm-events"),
+                        "include_dirs": ["events"],
+                        "exclude_patterns": [],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        config_path,
+    )
+    (tmp_path / "mm-events" / "events").mkdir(parents=True)
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-nc", "NoClaude")
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    _redirect_lock(monkeypatch, tmp_path)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "success", (
+        f"no claude source is a config shape, not a degradation: {payload}"
+    )
 
 
 def test_autopush_breadcrumb_degraded_when_events_tail_fails(tmp_path, monkeypatch):

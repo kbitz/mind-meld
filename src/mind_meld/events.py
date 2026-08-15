@@ -458,7 +458,16 @@ def _read_cwd_from_latest_jsonl(proj_dir: Path) -> str | None:
         try:
             with open(jl, "rb") as f:
                 for raw, _end in token_usage.iter_bounded_lines(
-                    f, str(jl), 0, label="session cwd reader"
+                    f,
+                    str(jl),
+                    0,
+                    label="session cwd reader",
+                    # One-shot read: no resume point, so a final record with
+                    # no trailing newline is DATA, not a partial write. The
+                    # default (False) discards it and would silently return
+                    # None for a session whose only line isn't terminated
+                    # yet — a regression against the old text-mode reader.
+                    yield_final_partial=True,
                 ):
                     stripped = raw.strip()
                     if not stripped:
@@ -1012,10 +1021,15 @@ def _last_mm_push_ts(path: Path) -> datetime | None:
     line, or None if no such line exists. Reads forward (small daily files),
     keeping last-match semantics so the most recent push wins.
 
-    BINARY mode (v0.12.16), same rationale as
+    BINARY and BOUNDED (v0.12.16), same rationale as
     ``_read_cwd_from_latest_jsonl``. This file lives under the SYNCED
     mm-events source, so its bytes can arrive via the pull apply path and
-    ``merge.merge_jsonl`` rather than only from this device's own writer.
+    ``merge.merge_jsonl`` rather than only from this device's own writer —
+    which is exactly why it goes through ``token_usage.iter_bounded_lines``
+    rather than a bare ``for raw in f``. The latter lets Python extend its
+    buffer to newline-or-EOF, so one oversized line from a corrupt or
+    hostile peer file would be slurped whole on every push.
+
     Returning ``None`` here is NOT a benign fallback: it rewinds the cursor
     to ``now - INITIAL_CURSOR_LOOKBACK_DAYS`` and re-walks 30 days of git
     history on every subsequent push, forever. Per-line tolerance keeps a
@@ -1023,7 +1037,13 @@ def _last_mm_push_ts(path: Path) -> datetime | None:
     last: datetime | None = None
     try:
         with open(path, "rb") as f:
-            for raw in f:
+            for raw, _end in token_usage.iter_bounded_lines(
+                f,
+                str(path),
+                0,
+                label="events cursor reader",
+                yield_final_partial=True,  # one-shot read, see the cwd reader
+            ):
                 stripped = raw.strip()
                 if not stripped:
                     continue

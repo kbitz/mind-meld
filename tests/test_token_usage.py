@@ -841,6 +841,19 @@ class TestIsCacheCold:
         )
         assert tu.is_cache_cold() is True
 
+    def test_bom_prefixed_cache_treated_as_cold(self) -> None:
+        """`is_cache_cold` must agree with the reader that actually loads
+        this file. `json.loads` on BYTES accepts a utf-8 BOM (and utf-16/32);
+        `lockedjson` decodes strict utf-8 and rejects them as corrupt. Pre-fix
+        the two disagreed: a BOM cache reported WARM, so the inline warm was
+        skipped, then the real read reset it as corrupt — no token data AND
+        no warm cache. Caught by Codex adversarial review during /review.
+        """
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": tu.CACHE_VERSION, "files": {"/a/b.jsonl": {"size": 1}}}
+        tu.CACHE_PATH.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode() + b" " * 200)
+        assert tu.is_cache_cold() is True
+
     def test_populated_cache_treated_as_warm(self) -> None:
         """A realistically-shaped populated cache exceeds the
         64-byte threshold AND has the right version prefix."""

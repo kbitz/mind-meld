@@ -3236,6 +3236,18 @@ def _run_events_tail(
             # isinstance) are owned by token_usage.lock_and_get_files.
             mode = "warn" if quiet else "block"
             with token_usage.lock_and_get_files(mode) as files_dict:
+                if files_dict is None:
+                    # Warn-mode contention. `do_token_walk` stays True, so
+                    # the gate below cannot see this — but the user-visible
+                    # outcome is IDENTICAL to the cold-cache case: every
+                    # project ships without tokens_by_day or skills_by_day,
+                    # and latest-snapshot-wins then replaces the prior
+                    # complete data with it. Caught by Codex + the
+                    # maintainability specialist during /review; the
+                    # invariant this function documents says every
+                    # degradation MUST reach the returned list, and this
+                    # one previously reached only a stderr warning.
+                    degradations.append("token cache was locked, so tokens and skills are missing")
                 for claude_dir in claude_paths:
                     for row in events.walk_session_metadata(
                         claude_dir,
@@ -3298,8 +3310,18 @@ def _run_events_tail(
         if walk_done > deadline:
             sys.stderr.write("mm: notice: events tail budget exceeded\n")
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
-        if not do_token_walk:
-            degradations.append("token cache cold; tokens and skills omitted this push")
+        # `claude_paths` gate is load-bearing: `_decide_token_walk_policy`
+        # ALSO returns False when there is no enabled claude source at all
+        # (`if not claude_paths: return False`). That is a config shape, not
+        # a degradation — a gstack-only or codex-only machine has no tokens
+        # or skills to collect, and reporting it would pin `mm status` at
+        # `degraded` forever while blaming a cache that isn't the cause.
+        # Reproduced during /review before this guard existed. The remaining
+        # False causes (cold cache on autopush, cache stat/parse OSError,
+        # inline warm raised) all mean the same thing to the user: this
+        # push published no token or skill data.
+        if claude_paths and not do_token_walk:
+            degradations.append("token walk skipped, so tokens and skills are missing")
     except Exception as e:
         sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
         degradations.append(f"events tail failed ({type(e).__name__})")
@@ -5282,7 +5304,13 @@ def diag(
         console.print(f"  outcome:    {br.get('outcome')}")
         console.print(f"  timestamp:  {br.get('timestamp')}")
         if br.get("detail"):
-            console.print(f"  detail:     {br.get('detail')}")
+            # safe_str at the render site covers every producer at once:
+            # sibling `_write_autorun_breadcrumb(verb, "failed"/"config-error",
+            # str(e))` calls can carry peer-derived text (device names, source
+            # names, rel_paths from a peer manifest) into this field, and Rich
+            # interprets markup in an f-string. The v0.12.16 degradation
+            # strings are all literals, but the field is shared.
+            console.print(f"  detail:     {safe_str(str(br.get('detail')))}")
 
 
 # ── devices ───────────────────────────────────────────────────────────

@@ -638,6 +638,14 @@ class TestWalkSessionMetadata:
             + json.dumps({"cwd": "/tmp/real/path", "type": "user"}).encode()
             + b"\n"
         )
+        # Assert the reader CONTINUED PAST the bad byte and found the cwd.
+        # "no exception + 1 project" is not enough: mutation-tested during
+        # /review by swapping the per-line `continue` for a per-file `break`
+        # (i.e. abandon the file on first bad byte) — all 84 events tests
+        # still passed. Per-line tolerance is the contract; pin the value.
+        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/real/path", (
+            "reader abandoned the file on the bad byte instead of skipping one line"
+        )
         out = events.walk_session_metadata(
             tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
         )
@@ -695,7 +703,31 @@ class TestWalkSessionMetadata:
         assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/after/oversize"
         err = capsys.readouterr().err
         assert "skipping oversize line" in err, "bounded reader not in the cwd read path"
+        # The notice is deduped by PATH only, so in production the label is
+        # whichever site reached the file first. Here conftest's
+        # `_isolate_token_cache` resets `_WARNED_OVERSIZE_PATHS` per test and
+        # only this reader runs, so the label is deterministic.
         assert "session cwd reader" in err, "oversize notice misattributes the call site"
+
+    def test_unterminated_final_line_is_still_read(self, tmp_path):
+        """v0.12.16 REGRESSION PIN: a complete record with no trailing
+        newline must still be parsed by this one-shot reader.
+
+        `iter_bounded_lines` defaults to treating a trailing chunk with no
+        newline as a PARTIAL WRITE and discarding it — correct for
+        `walk_jsonl_segment`, which persists a resume offset and re-reads it
+        next push. This reader has no next push. Porting it to the shared
+        primitive without `yield_final_partial=True` made it return None for
+        a session whose only line wasn't newline-terminated yet, where the
+        old text-mode reader returned the cwd. Caught by Codex adversarial
+        review during /review, after the first fix had already landed.
+        """
+        proj = tmp_path / "projects" / "-tmp-unterminated"
+        proj.mkdir(parents=True)
+        (proj / "session.jsonl").write_bytes(
+            json.dumps({"cwd": "/tmp/mid/write", "type": "user"}).encode()  # no \n
+        )
+        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/mid/write"
 
     def test_source_root_field_emitted(self, tmp_path):
         """Group 8 hotfix #4: every emitted SessionMetadata carries a
@@ -747,6 +779,41 @@ class TestLastPushTs:
         assert ts == datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc), (
             "bad byte rewound the cursor instead of skipping one line"
         )
+
+    def test_oversize_line_is_bounded(self, tmp_path, monkeypatch, capsys):
+        """The cursor reader goes through `iter_bounded_lines` too.
+
+        These files live under the SYNCED mm-events source, so their bytes
+        can arrive from a peer via the pull apply path. A bare
+        `for raw in f` would let one oversized line be slurped whole on
+        every push.
+
+        Assert the NOTICE, not just the returned timestamp. The unbounded
+        reader also returns the right timestamp — it slurps the giant line,
+        fails `json.loads` on it, and moves on — so a value-only assertion
+        passes either way. Verified: that weaker form passed against the
+        unbounded implementation. The notice is emitted only from the
+        bounded primitive, so it is the observable that proves the bound.
+        """
+        from mind_meld import token_usage
+
+        monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 512)
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        day = datetime.now(timezone.utc).date().isoformat()
+        (events_dir / f"dev-a-{day}.jsonl").write_bytes(
+            b'{"junk":"'
+            + (b"x" * 4096)
+            + b'"}\n'
+            + json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
+            + b"\n"
+        )
+        assert events.last_push_ts(events_dir, "dev-a") == datetime(
+            2026, 8, 14, 12, 0, tzinfo=timezone.utc
+        )
+        err = capsys.readouterr().err
+        assert "skipping oversize line" in err, "cursor reader is not bounded"
+        assert "events cursor reader" in err
 
     def test_first_run_returns_now_minus_30d(self, tmp_path):
         ts = events.last_push_ts(tmp_path / "events", "dev-a")
