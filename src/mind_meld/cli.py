@@ -641,6 +641,67 @@ def _filter_excluded_paths(manifest: dict, exclude_map: dict[str, list[str]]) ->
     return out
 
 
+def _has_symlinked_component(path: Path, base_path: Path) -> bool:
+    """Whether ``path`` traverses a symlink below its source root.
+
+    A symlinked source root is legitimate: it is the user's chosen location
+    for the whole source. Any link below that root is local routing and must
+    neither be published nor followed while applying a peer's bytes.
+    """
+    try:
+        relative = path.relative_to(base_path)
+    except ValueError:
+        return True
+
+    component = base_path
+    for part in relative.parts:
+        component /= part
+        if component.is_symlink():
+            return True
+    return False
+
+
+def _filter_symlinked_paths(manifest: dict, sources: list[dict[str, Any]]) -> dict:
+    """Remove locally-symlinked paths from a prior manifest before tombstones.
+
+    ``walk_generic_source`` deliberately omits symlinks. Filtering the prior
+    manifest at this consumer boundary prevents that omission from minting a
+    fleet-wide deletion tombstone, including for pre-migration explicit source
+    configurations that do not yet carry the new default exclude globs.
+    """
+    source_roots = {
+        source["name"]: Path(source["path"]).expanduser()
+        for source in sources
+        if source.get("type") == "generic" and source.get("name") and source.get("path")
+    }
+    if not source_roots:
+        return manifest
+
+    def _symlinked(source_name: str, rel_path: str) -> bool:
+        base_path = source_roots.get(source_name)
+        return base_path is not None and _has_symlinked_component(base_path / rel_path, base_path)
+
+    out = dict(manifest)
+    out["sources"] = {
+        source_name: {
+            **source_data,
+            "files": {
+                rel_path: info
+                for rel_path, info in source_data.get("files", {}).items()
+                if not _symlinked(source_name, rel_path)
+            },
+        }
+        for source_name, source_data in manifest.get("sources", {}).items()
+    }
+
+    out["tombstones"] = {
+        key: info
+        for key, info in manifest.get("tombstones", {}).items()
+        if not (isinstance(key, str) and ":" in key and _symlinked(*key.split(":", 1)))
+    }
+    return out
+
+
 def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     """Return a shallow copy of `manifest` with disabled-source entries stripped.
 
@@ -1797,6 +1858,15 @@ def _apply_incoming_file(
     None for non-interactive callers and direct-call tests — when either is
     None the bump machinery is a no-op (today's behavior).
     """
+    # Direct callers bypass _download_and_apply's component check, so protect
+    # a leaf symlink here before mkdir or atomic_write can replace it.
+    if local_path.is_symlink():
+        if verbose:
+            console.print(
+                f"  [yellow]skipped (local symlink preserved):[/yellow] {safe_str(rel_path)}"
+            )
+        return "skipped"
+
     local_path.parent.mkdir(parents=True, exist_ok=True)
     remote_mtime_iso = remote_info.get("mtime")
 
@@ -2062,6 +2132,20 @@ def _download_and_apply(
 
             bytes_transferred += len(enc_data)
             local_path = base_path / rel_path
+
+            # Reject a local link at the destination or in a child component
+            # before resolving containment. The root itself may be symlinked,
+            # but following a link below it would either escape the source or
+            # let atomic_write_bytes replace local routing with peer content.
+            if _has_symlinked_component(local_path, base_path):
+                if not quiet:
+                    console.print(
+                        f"  [yellow]skipped (local symlink preserved):[/yellow] "
+                        f"{safe_str(rel_path)}"
+                    )
+                outcomes["skipped"].append(rel_path)
+                _advance()
+                continue
 
             # Belt-and-braces: load_manifest already rejects rel_paths
             # that could escape via '..' / absolute / null-byte (see
@@ -3629,6 +3713,7 @@ def _push_core(
     if remote_manifest is not None:
         remote_manifest = _filter_disabled_sources(remote_manifest, disabled_sources)
         remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map)
+        remote_manifest = _filter_symlinked_paths(remote_manifest, sources)
 
     # Generate tombstones for files that disappeared since last push
     tombstones = generate_tombstones(local_manifest, remote_manifest, device_id)

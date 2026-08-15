@@ -389,6 +389,10 @@ def walk_generic_source(
     # Walk each include_dir recursively
     for dir_name in include_dirs:
         scan_dir = base / dir_name
+        if scan_dir.is_symlink():
+            if on_skip:
+                on_skip(str(scan_dir), "symlink")
+            continue
         if not scan_dir.exists() or not scan_dir.is_dir():
             continue
         for path in scan_dir.rglob("*"):
@@ -424,6 +428,14 @@ def walk_generic_source(
     )
     seen: set[tuple[int, int]] = set()
     for path in collected_paths:
+        # A symlink is local routing, not syncable content. Publishing its
+        # target would produce a manifest entry the pull path cannot safely
+        # apply without either traversing outside the source root or replacing
+        # the link with a regular file.
+        if path.is_symlink():
+            if on_skip:
+                on_skip(str(path), "symlink")
+            continue
         try:
             st = path.stat()
         except OSError:
