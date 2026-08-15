@@ -117,6 +117,8 @@ Mind Meld treats Codex and OpenCode as first-class peers of Claude Code:
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` / `opencode.json{,c}` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
 - The bundled `/retro-fleet` skill installs for Claude Code, Codex, and OpenCode when you run `mm init`, `mm push`, or `mm install-skills`. OpenCode's Claude compatibility remains useful for existing gstack skills, but its own skill link works even when compatibility is disabled.
 
+Symlinks inside any sync source are local routing, not portable content: Mind Meld does not upload them and leaves existing local links untouched on pull, including dangling links and linked directories. A source root itself may be a symlink.
+
 Fresh installs are asked about the `codex` and `opencode` sources during `mm init`. Existing installations remain opt-in:
 
 ```bash
