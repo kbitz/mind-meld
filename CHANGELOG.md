@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.22] - 2026-08-15
+
+**`mm push` and `mm init` now capture their fleet-retro snapshots through the same path, so the two flows stay in lockstep without changing their existing behavior.**
+
+### Changed
+
+- **Shared event capture for push and init.** Git discovery, bounded git capture, device stamping, session snapshot assembly, cache-lock lifetime, and walk-budget measurement now live in one private seam. Push keeps its token-cache policy, identity capture, `mm-push` row, and degradation breadcrumb; init keeps its 30-day backfill, token/identity warming, and snapshot-only write.
+
+- **Pinned the refactor's edge cases.** Regression coverage now proves cache warming and identity work do not consume the session budget, one lock spans every enabled Claude root, cache contention remains visible to unattended autopush, and init passes the same explicit cursor to both git and session capture.
+
 ## [0.12.21] - 2026-08-15
 
 **`cli.py` is no longer one 8,840-line file that serialized every plan — it is 6,692 lines plus six focused modules, and the test suite has stopped writing into your real `~/.claude`.** The decomposition itself changes no command, flag, output, exit code, or on-disk format. Three deliberate user-visible changes ship alongside it: one hidden command (`mm conflict-log-backfill`) is gone, `mm status` gained a staleness marker, and `pytest` stopped writing your real config dirs.
