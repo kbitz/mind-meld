@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.17] - 2026-08-15
+
+**Mind Meld now treats symlinks inside a sync source as local routing rather than portable content.** A linked `AGENTS.md` or generated agent skill could previously be uploaded, then rejected on every peer pull or replaced with a regular file. Push now omits child links without creating deletion tombstones; pull preserves both live and dangling links, including linked directories, while still allowing a source root itself to be linked.
+
+### Fixed
+
+- **Symlinked Codex and OpenCode configuration no longer causes persistent pull failures or link replacement.** The prior manifest is filtered before tombstone generation, so existing peers with ordinary files are not fleet-wide suppressed. Generated skill namespaces are also excluded by default while hand-authored skills remain eligible.
+- **The Rich formatting contract test now isolates the process-level `NO_COLOR` preference.** It verifies Rich's forced-color path rather than inheriting the terminal's intentional plain-text setting.
+
 ## [0.12.16] - 2026-08-14
 
 **One invalid UTF-8 byte in a Claude Code session file could kill the whole events tail on every push, and `mm status` reported `success` the entire time.** `_read_cwd_from_latest_jsonl` opened session jsonls in text mode and caught only `OSError`. `UnicodeDecodeError` is a `ValueError`, so it escaped through `_scan_one_project`, through `walk_session_metadata`, into `_run_events_tail`'s wrapper — which swallowed it, printed one `mm: notice:` line, and let the push continue. That notice is the interactive signal, but the tail runs from `mm autopush`, which fires unattended from a Claude Code hook, so nobody sees its stderr. Meanwhile `autopush` wrote a `success` breadcrumb unconditionally, so `mm status` kept saying everything was fine while `mm retro-fleet` quietly went stale. This release fixes the crash, the two other readers on the same path, a latent quadratic scan in the same function, a duplicate-emit bug in the git walk, and the reporting gap that hid all of it.
