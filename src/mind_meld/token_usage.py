@@ -26,8 +26,9 @@ re-parse. Session jsonls are append-only and routinely reach 10 MB, so
 re-reading one end-to-end because it grew by a few hundred bytes made
 the events tail cost O(total bytes on disk) — the real cause of the
 recurring ``mm: notice: events tail budget exceeded``. Entries carry
-``offset`` (resume point), ``head`` (fingerprint proving the file is
-still the same file) and ``tail_msg_ids`` (cross-boundary dedup seed);
+``offset`` (resume point), ``head`` and ``head_len`` (the fingerprint
+proving the file is still the same file), and ``tail_msg_ids``
+(cross-boundary dedup seed);
 ``_resume_plan`` gates their use and falls back to a full walk on any
 doubt. A warm walk is now O(bytes appended since the last push).
 
@@ -345,15 +346,6 @@ SkillBuckets = dict[str, dict[str, int]]
 Bounded by ``MAX_BY_DAY_DAYS``. Skill names are stored verbatim (the raw
 bytes from peer jsonls); sanitization happens at render time so cross-
 machine aggregation matches byte-for-byte."""
-
-
-class CacheEntry(TypedDict, total=False):
-    """One per-jsonl entry in session-tokens.json."""
-
-    size: int
-    mtime: float
-    by_day: dict[str, DayBucket]
-    skills_by_day: SkillBuckets
 
 
 # ---------------------------------------------------------------------------
@@ -799,18 +791,6 @@ def walk_jsonl_buckets(path: Path) -> tuple[dict[str, DayBucket], SkillBuckets]:
     return _trim_by_day(seg.by_day, MAX_BY_DAY_DAYS), _trim_skills_by_day(
         seg.skills_by_day, MAX_BY_DAY_DAYS
     )
-
-
-def walk_jsonl_token_buckets(path: Path) -> dict[str, DayBucket]:
-    """Backwards-compat shim for callers that only want the token view.
-
-    Pre-v0.11.27 this was the canonical walker. Now ``walk_jsonl_buckets``
-    is canonical and returns both views; this shim drops the skill view.
-    Tests + external callers that pre-date the skill view continue to
-    work unchanged. New code should call ``walk_jsonl_buckets`` directly.
-    """
-    by_day, _ = walk_jsonl_buckets(path)
-    return by_day
 
 
 def _accumulate_skills(
@@ -1660,7 +1640,6 @@ __all__ = [
     "CACHE_PATH",
     "CACHE_VERSION",
     "COST_EXCLUDED_MODELS",
-    "CacheEntry",
     "DEFAULT_WARM_BUDGET_S",
     "DayBucket",
     "MAX_BY_DAY_DAYS",
@@ -1691,7 +1670,6 @@ __all__ = [
     "slice_window",
     "walk_jsonl_buckets",
     "walk_jsonl_segment",
-    "walk_jsonl_token_buckets",
     "warm_token_cache_inline",
     "zero_day_bucket",
     "zero_model_bucket",

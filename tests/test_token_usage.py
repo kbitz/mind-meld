@@ -3,8 +3,8 @@
 Pinned behaviors per the eng-review test diagram:
   - parse_usage: happy + various malformed inputs
   - _normalize_model_id: dated/undated/synthetic/garbage
-  - walk_jsonl_token_buckets: empty/single-day/midnight-cross/mixed-models/
-                              corrupt-line/unreadable/dedup-by-id
+  - walk_jsonl_buckets: empty/single-day/midnight-cross/mixed-models/
+                        corrupt-line/unreadable/dedup-by-id
   - get_or_compute: cache hit/miss/concurrent-append-skip/deadline
   - slice_window: inside/partial-overlap/outside/empty
   - estimate_cost: known/unknown/synthetic/zero
@@ -302,20 +302,21 @@ class TestParseUsage:
 
 
 # ---------------------------------------------------------------------------
-# walk_jsonl_token_buckets
+# walk_jsonl_buckets
 # ---------------------------------------------------------------------------
 
 
-class TestWalkJsonlTokenBuckets:
+class TestWalkJsonlBuckets:
     def test_empty_file(self, tmp_path: Path) -> None:
         path = tmp_path / "empty.jsonl"
         path.write_text("")
-        assert tu.walk_jsonl_token_buckets(path) == {}
+        by_day, _ = tu.walk_jsonl_buckets(path)
+        assert by_day == {}
 
     def test_single_day_single_message(self, tmp_path: Path) -> None:
         path = tmp_path / "one.jsonl"
         _write_jsonl(path, [_wrap(_assistant_msg(), ts="2026-05-01T12:00:00.000Z")])
-        result = tu.walk_jsonl_token_buckets(path)
+        result, _ = tu.walk_jsonl_buckets(path)
         assert "2026-05-01" in result
         assert result["2026-05-01"]["input"] == 100
         assert result["2026-05-01"]["cache_read"] == 1000
@@ -330,7 +331,7 @@ class TestWalkJsonlTokenBuckets:
                 _wrap(_assistant_msg(msg_id="b"), ts="2026-05-02T00:05:00.000Z"),
             ],
         )
-        result = tu.walk_jsonl_token_buckets(path)
+        result, _ = tu.walk_jsonl_buckets(path)
         assert "2026-05-01" in result
         assert "2026-05-02" in result
 
@@ -343,7 +344,7 @@ class TestWalkJsonlTokenBuckets:
                 _wrap(_assistant_msg(model="claude-sonnet-4-6", msg_id="b")),
             ],
         )
-        result = tu.walk_jsonl_token_buckets(path)
+        result, _ = tu.walk_jsonl_buckets(path)
         day = result["2026-05-01"]
         assert "claude-opus-4-7" in day["by_model"]
         assert "claude-sonnet-4-6" in day["by_model"]
@@ -355,14 +356,15 @@ class TestWalkJsonlTokenBuckets:
             f.write(json.dumps(_wrap(_assistant_msg(msg_id="a"))) + "\n")
             f.write("garbage line\n")
             f.write(json.dumps(_wrap(_assistant_msg(msg_id="b"))) + "\n")
-        result = tu.walk_jsonl_token_buckets(path)
+        result, _ = tu.walk_jsonl_buckets(path)
         # Both valid messages counted; garbage line skipped.
         assert result["2026-05-01"]["input"] == 200
 
     def test_unreadable_file_returns_empty(self, tmp_path: Path) -> None:
         path = tmp_path / "missing.jsonl"
         # File doesn't exist.
-        assert tu.walk_jsonl_token_buckets(path) == {}
+        by_day, _ = tu.walk_jsonl_buckets(path)
+        assert by_day == {}
 
     def test_dedup_by_message_id(self, tmp_path: Path) -> None:
         path = tmp_path / "dups.jsonl"
@@ -374,7 +376,7 @@ class TestWalkJsonlTokenBuckets:
                 _wrap(_assistant_msg(msg_id="dup")),  # duplicate
             ],
         )
-        result = tu.walk_jsonl_token_buckets(path)
+        result, _ = tu.walk_jsonl_buckets(path)
         assert result["2026-05-01"]["input"] == 100  # NOT 300
 
     def test_message_without_id_not_deduped(self, tmp_path: Path) -> None:
@@ -385,7 +387,7 @@ class TestWalkJsonlTokenBuckets:
         m2 = _assistant_msg()
         m2.pop("id")
         _write_jsonl(path, [_wrap(m1), _wrap(m2)])
-        result = tu.walk_jsonl_token_buckets(path)
+        result, _ = tu.walk_jsonl_buckets(path)
         assert result["2026-05-01"]["input"] == 200
 
     def test_message_without_timestamp_skipped(self, tmp_path: Path) -> None:
@@ -393,7 +395,7 @@ class TestWalkJsonlTokenBuckets:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w") as f:
             f.write(json.dumps({"message": _assistant_msg()}) + "\n")
-        result = tu.walk_jsonl_token_buckets(path)
+        result, _ = tu.walk_jsonl_buckets(path)
         assert result == {}
 
 
@@ -1373,14 +1375,11 @@ class TestSkillDetection:
         assert skills == {}
 
     def test_walk_jsonl_buckets_returns_tuple_shape(self, tmp_path: Path) -> None:
-        """Plan test #4: tuple shape from new walker; shim returns single."""
+        """Plan test #4: canonical walker returns token and skill views."""
         path = tmp_path / "session.jsonl"
         _write_jsonl(path, [_wrap(_assistant_with_blocks([_skill_block("ship")], msg_id="m1"))])
         result = tu.walk_jsonl_buckets(path)
         assert isinstance(result, tuple) and len(result) == 2
-        # Shim drops the skills view (back-compat with pre-v0.11.27 callers).
-        shim_result = tu.walk_jsonl_token_buckets(path)
-        assert isinstance(shim_result, dict)
 
 
 class TestCacheShapeUpgradeGate:
