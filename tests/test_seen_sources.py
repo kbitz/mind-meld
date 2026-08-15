@@ -92,6 +92,15 @@ class TestRead:
 
 
 class TestWrite:
+    def test_write_uses_directory_patched_after_import(self, monkeypatch, tmp_path):
+        redirected = tmp_path / "late-patch"
+        monkeypatch.setattr(seen_sources, "SEEN_DIR", redirected)
+
+        seen_sources.write({"claude"})
+
+        assert seen_sources.seen_path() == redirected / "seen-sources.json"
+        assert seen_sources.seen_path().exists()
+
     def test_write_replaces_contents(self):
         seen_sources.write({"claude", "gstack"})
         on_disk = json.loads(seen_sources.seen_path().read_text())

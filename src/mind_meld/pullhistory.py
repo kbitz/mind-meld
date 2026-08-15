@@ -60,7 +60,6 @@ from typing import Any, Iterator, Literal
 from mind_meld import fsutil
 
 HISTORY_DIR = Path.home() / ".config" / "mind-meld"
-HISTORY_PATH = HISTORY_DIR / "pull-history.jsonl"
 ROTATED_SUFFIX = ".1"
 _ROTATE_BYTES = 1_000_000  # 1MB cap; rotate at line boundary on next write
 
@@ -82,10 +81,6 @@ def history_path() -> Path:
     that monkeypatch `HISTORY_DIR` get full isolation (mirrors sidecar.py).
     """
     return HISTORY_DIR / "pull-history.jsonl"
-
-
-def _rotated_path() -> Path:
-    return history_path().with_name(history_path().name + ROTATED_SUFFIX)
 
 
 def append(

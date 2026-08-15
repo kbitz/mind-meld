@@ -43,7 +43,7 @@ from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
-from mind_meld import __version__, fsutil, pullhistory
+from mind_meld import __version__, pullhistory
 from mind_meld.lockedjson import locked_json_rmw
 
 CACHE_DIR = Path.home() / ".config" / "mind-meld"
@@ -545,8 +545,3 @@ __all__ = [
     "run_transition_hook",
     "set_invocation_skip",
 ]
-
-
-# Suppress unused-import warning for fsutil — kept available for future
-# atomic-write needs (e.g., a self-version split file if we ever revisit D14).
-_ = fsutil

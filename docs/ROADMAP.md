@@ -1,3 +1,4 @@
+<!-- /autoplan restore point: /Users/kb/.gstack/projects/kbitz-mind-meld/kbitz-track-15b-dead-constants-autoplan-restore-20260815-000000.md -->
 <!-- /autoplan restore point: /Users/kb/.gstack/projects/kbitz-mind-meld/kbitz-remove-token-usage-shim-autoplan-restore-20260815-083442.md -->
 # Roadmap
 
@@ -86,6 +87,240 @@ _touches: src/mind_meld/pullhistory.py, src/mind_meld/seen_sources.py, src/mind_
 
 - **`HISTORY_PATH` and `SEEN_PATH`** -- zero references, and each sits beside the call-time resolver its isolation fixture depends on; a future caller picking the import-time-frozen one silently breaks `_isolate_pullhistory`. Also check whether `_rotated_path()` can stop being production code that exists only for tests. _2 modules, ~30 lines._ (S)
 - **`upgrade.py`'s `_ = fsutil` keeper** -- a dead import, plus a statement whose only job is defeating ruff F401, plus a comment explaining why the dead code is there, for a feature (D14) never revisited. _upgrade.py, ~10 lines._ (XS)
+
+###### Track 15B review addendum (autoplan, 2026-08-15)
+
+**Approved premise:** This is a narrow removal of redundant import-time bypasses where a call-time resolver already exists. It is not a general import-time-path cleanup: `upgrade.CACHE_DIR` / `CACHE_PATH` remain live, and their fixture deliberately patches both.
+
+**What already exists**
+
+| Sub-problem | Existing code to reuse | Plan decision |
+|---|---|---|
+| Isolated pull-history path | `pullhistory.history_path()` reads `HISTORY_DIR` at call time; `tests/conftest.py::_isolate_pullhistory` patches that directory | Keep resolver; delete frozen `HISTORY_PATH` |
+| Isolated seen-sources path | `seen_sources.seen_path()` reads `SEEN_DIR` at call time; module and source-toggle tests patch it | Keep resolver; delete frozen `SEEN_PATH` |
+| History rotation | `_rotate_under_lock(live_path)` derives `.1` directly; tests intentionally own their own `_rotated_path` helper | Delete production `_rotated_path()` |
+| Upgrade state | `upgrade` persists through `locked_json_rmw`; `fsutil` has no reference in the module | Remove import, keeper, and comment only |
+
+**Premise challenge and alternatives**
+
+The user-visible problem is not today’s behavior. It is a future caller choosing a frozen constant that bypasses the test fixture and writes fixture rows into real `~/.config/mind-meld` state. Doing nothing leaves that footgun and three dead symbols in the codebase. The approved approach is intentionally small because none of these removals changes the storage format, CLI surface, or runtime control flow.
+
+| Approach | Scope | Risk | Decision |
+|---|---|---|---|
+| A. Focused deletion plus resolver-contract tests | Delete `HISTORY_PATH`, `SEEN_PATH`, `_rotated_path`, and the `upgrade.fsutil` keeper; pin both public resolver paths after module import | Low | **Approved** |
+| B. Deletion only | Same source deletions with no explicit resolver-contract pin | Low now, higher regression risk | Rejected: preserves the important guarantee only by convention |
+| C. Audit every import-time path | Also change live `upgrade.CACHE_*` and similar intentional constants | Medium, out of blast radius | Deferred: no evidence those live paths are erroneous |
+
+```
+CURRENT                         TRACK 15B                         12-MONTH IDEAL
+dead frozen bypasses     ->     one resolver per path        ->   no isolation-sensitive
+beside resolvers                 + executable contract              import-time bypasses
+```
+
+**CEO review sections**
+
+1. **Architecture:** No new component, data flow, integration, or distribution artifact is introduced. The dependency stays `callers -> history_path()/seen_path() -> patched directory`, so deleting the constants reduces a false second path rather than coupling modules.
+2. **Error and rescue:** Runtime error behavior is unchanged. The only avoided failure is a future test or caller writing to the real history/seen-source location after patching the directory; the new focused tests make that failure observable before merge.
+3. **Security:** No new input, authorization boundary, secret, dependency, or file-system capability is added. Removing dead names reduces the chance of accidental writes to a real user-state path during tests.
+4. **Data and interaction edge cases:** The resolver must continue to derive its path after a post-import `HISTORY_DIR` or `SEEN_DIR` monkeypatch. Empty, corrupt, and rotation cases remain covered by existing tests and are not changed by the deletions.
+5. **Code quality:** `_rotated_path()` is confirmed dead production code; the tests’ separate helper proves it is not a test API. The `fsutil` keeper is a linter workaround for an unused import, not an extension seam, so retaining it would be misleading documentation.
+6. **Tests:** Add one regression pin per resolver, explicitly monkeypatching its directory after import and exercising a public write/read path. Run the focused `pullhistory`, `seen_sources`, and `upgrade` test modules, then the full suite.
+7. **Performance:** Path construction remains O(1); deleting constants and a function has no meaningful latency or allocation impact.
+8. **Observability:** No production path changes, so no new telemetry is warranted. Focused tests are the correct signal because the risk is test-isolation regression, not a runtime operational failure.
+9. **Deployment:** This is backward-compatible deletion of non-public, zero-reference names. Normal CI plus a direct test-module run is sufficient; rollback is a git revert.
+10. **Long-term trajectory:** Reversibility is 5/5. The plan prevents an accidental second authority for isolation-sensitive paths without prematurely refactoring intentional upgrade cache state.
+11. **Design:** Skipped: no UI scope.
+
+**Error & Rescue Registry**
+
+| Codepath | What can go wrong | Rescue / prevention | User sees |
+|---|---|---|---|
+| Future pullhistory caller | Uses frozen path after fixture redirects `HISTORY_DIR` | Remove frozen constant; regression pin checks redirected write | No real user history pollution |
+| Future seen-sources caller | Uses frozen path after fixture redirects `SEEN_DIR` | Remove frozen constant; regression pin checks redirected public path | No real tracker pollution |
+| Upgrade cleanup | Removes a still-needed `fsutil` use | Static zero-reference check plus `tests/test_upgrade.py` | No behavior change |
+
+**Failure Modes Registry**
+
+| Codepath | Failure mode | Rescued? | Test? | User sees? | Logged? |
+|---|---|---:|---:|---|---:|
+| `history_path()` | resolver regresses to import-time path | Prevented | Add | unintended real-state write | N/A |
+| `seen_path()` | resolver regresses to import-time path | Prevented | Add | repeated or polluted tracker state | N/A |
+| `_rotate_under_lock()` | rotation no longer locates `.1` | Existing direct-path behavior | Existing | forensic rotation works | N/A |
+| `upgrade` import set | removed import was secretly live | Prevented by tests/lint | Existing | unchanged upgrade behavior | N/A |
+
+**NOT in scope**
+
+- `upgrade.CACHE_DIR` / `CACHE_PATH` and other intentional import-time paths: live production state with fixtures that patch both values, not redundant resolver bypasses.
+- A suite-wide `seen_sources` isolation-fixture expansion: worthwhile only if a real unisolated CLI test is found; no evidence ties it to this deletion.
+- Any storage, lock, or migration rewrite: this track must remain a low-risk hygiene PR.
+
+**Implementation tasks**
+
+- [ ] **T1 (P1, human: ~20 min / CC: ~3 min)** — path resolver hygiene — remove `HISTORY_PATH`, `SEEN_PATH`, and production `_rotated_path()`; preserve `history_path()` and `seen_path()` as the only location authority. Verify with `pytest tests/test_pullhistory.py tests/test_seen_sources.py`.
+- [ ] **T2 (P2, human: ~10 min / CC: ~2 min)** — resolver contract — add one post-import directory-monkeypatch regression assertion per resolver through public behavior. Verify that neither operation creates a file in the original home-derived directory.
+- [ ] **T3 (P2, human: ~5 min / CC: ~1 min)** — upgrade import hygiene — remove `fsutil`, `_ = fsutil`, and its obsolete comment from `upgrade.py`. Verify with `pytest tests/test_upgrade.py` and `ruff check src/mind_meld/upgrade.py`.
+
+**CEO dual voices consensus**
+
+| Dimension | Independent reviewer | Codex CLI | Consensus |
+|---|---|---|---|
+| Premises valid? | Yes, with narrow-scope guard | unavailable | N/A |
+| Right problem? | Yes | unavailable | N/A |
+| Scope calibrated? | Yes, keep it opportunistic | unavailable | N/A |
+| Alternatives explored? | Yes | unavailable | N/A |
+| Market risk covered? | No direct market risk | unavailable | N/A |
+| Six-month trajectory sound? | Yes, if resolver behavior is pinned | unavailable | N/A |
+
+Codex CLI was invoked but did not return a usable final review response; the phase proceeds in subagent-only mode. The independent review produced three medium findings, all addressed above: keep the objective narrow, make `_rotated_path()` deletion explicit, and pin resolver behavior.
+
+<!-- AUTONOMOUS DECISION LOG -->
+## Decision Audit Trail
+
+| # | Phase | Decision | Classification | Principle | Rationale | Rejected |
+|---|---|---|---|---|---|---|
+| 1 | CEO | Keep Track 15B limited to redundant frozen bypasses | User-confirmed | P3 Pragmatic | Live upgrade cache paths have a different contract | Broad import-time-path audit |
+| 2 | CEO | Delete `_rotated_path()` outright | Mechanical | P4 DRY | No production or test caller; tests own their helper | “Investigate later” ambiguity |
+| 3 | CEO | Add resolver-contract regression pins | Auto-decided | P1 Completeness | The safety benefit is otherwise implicit and can regress silently | Deletion-only plan |
+
+**Engineering review addendum**
+
+**Scope challenge:** The approved plan changes three production modules and two direct test modules, introduces no class, service, external call, or artifact, and has no dependency on an unprocessed TODO. It is already the minimum complete change: removing the dead names without testing the call-time seam would preserve the most important property only by convention; replacing the directory variables or converting upgrade cache paths to resolvers would be a different behavioral change.
+
+**Architecture and dependency graph**
+
+```
+tests/conftest.py                 tests/test_seen_sources.py
+        |                                      |
+        v                                      v
+patch HISTORY_DIR                         patch SEEN_DIR
+        |                                      |
+        v                                      v
+pullhistory.history_path()             seen_sources.seen_path()
+        |                                      |
+        v                                      v
+append -> flock_append_jsonl           read/write -> flock or atomic write
+
+Removed: HISTORY_PATH, SEEN_PATH, _rotated_path(), upgrade.fsutil keeper
+Unchanged: HISTORY_DIR, SEEN_DIR, rotation, locks, permissions, cache layout
+```
+
+1. **Architecture:** No coupling is added. `history_path()` and `seen_path()` are the one intentional seam between their module state and isolation fixtures; preserve their current `DIR / filename` implementation exactly.
+2. **Code quality:** Delete only the three dead path symbols and the upgrade import/keeper. Do not add absence-of-symbol tests, a generic path abstraction, or an upgrade resolver: each would either test an implementation detail or expand into a separate contract change.
+3. **Test review:** Existing tests cover history rotation, torn/corrupt history reads, seen-source lazy init and write behavior, and upgrade state behavior. Add two behavioral regression pins that patch a module directory after import, invoke `append()` or `write()`, and assert the created state lies under the patched directory.
+4. **Performance:** No lookup is added, and removing module-level `Path` construction has no measurable impact. Locking, `0600` mode, `os.replace`, append, and read behavior remain untouched.
+
+**Test diagram**
+
+```
+CODE PATHS                                                COVERAGE
+pullhistory.history_path() -> HISTORY_DIR / filename     [GAP -> add behavioral pin]
+  -> append() -> _append_payload() -> flock append       [★★★ existing]
+  -> over cap -> _rotate_under_lock(live_path)            [★★★ existing]
+  -> read_records() -> rotated/live -> _yield_lines       [★★★ existing]
+
+seen_sources.seen_path() -> SEEN_DIR / filename           [GAP -> add behavioral pin]
+  -> write() -> mkdir -> atomic_write_bytes               [★★★ existing]
+  -> read()/acknowledge() -> flock -> in-place seed/RMW   [★★★ existing]
+
+upgrade import set -> upgrade state behavior              [★★★ existing: test_upgrade.py]
+
+NEW USER FLOWS: none.  NEW EXTERNAL CALLS: none.  NEW EVALS: none.
+```
+
+**Engineering failure modes**
+
+| Codepath | Failure mode | Mitigation / test | Critical gap? |
+|---|---|---|---:|
+| `history_path()` | a refactor reads a frozen path after isolation patch | behavioral post-import append pin | No |
+| `seen_path()` | a refactor bypasses patched `SEEN_DIR` | behavioral post-import write/read pin | No |
+| `_rotate_under_lock()` | rotation path is accidentally affected by helper deletion | existing rotation and rotated-read tests | No |
+| `upgrade` import cleanup | `fsutil` was silently needed | ruff plus existing upgrade suite | No |
+
+**Parallel implementation strategy**
+
+| Lane | Modules | Depends on |
+|---|---|---|
+| A | `pullhistory.py`, `test_pullhistory.py` | — |
+| B | `seen_sources.py`, `test_seen_sources.py` | — |
+| C | `upgrade.py`, `test_upgrade.py` | — |
+
+Launch A, B, and C in parallel Conductor workspaces. Their source and test files are disjoint; merge independently after focused tests pass.
+
+**Eng dual voices consensus**
+
+| Dimension | Independent reviewer | Codex CLI | Consensus |
+|---|---|---|---|
+| Architecture sound? | Yes | unavailable | N/A |
+| Test coverage sufficient? | Yes, after two behavioral pins | unavailable | N/A |
+| Performance risks addressed? | Yes | unavailable | N/A |
+| Security threats covered? | Neutral/reduced risk | unavailable | N/A |
+| Error paths handled? | Yes, unchanged | unavailable | N/A |
+| Deployment risk manageable? | Yes, revertable deletion | unavailable | N/A |
+
+**Engineering implementation tasks**
+
+- [ ] **E1 (P1, human: ~15 min / CC: ~2 min)** — behavioral isolation tests — add a post-import `HISTORY_DIR` append pin and a post-import `SEEN_DIR` write/read pin. Files: `tests/test_pullhistory.py`, `tests/test_seen_sources.py`.
+- [ ] **E2 (P2, human: ~10 min / CC: ~2 min)** — narrow deletion discipline — retain `HISTORY_DIR`, `SEEN_DIR`, `history_path`, `seen_path`, and `_rotate_under_lock`; remove only confirmed dead symbols. Files: `src/mind_meld/pullhistory.py`, `src/mind_meld/seen_sources.py`, `src/mind_meld/upgrade.py`.
+
+| 4 | Eng | Preserve resolver implementation and module directory seams | Auto-decided | P5 Explicit | The existing single-path seam is clear and fixture-safe | Generic path abstraction |
+| 5 | Eng | Test resolver behavior through public writes | Auto-decided | P1 Completeness | Tests should prove isolation, not symbol absence | `hasattr` or export assertions |
+| 6 | Eng | Keep upgrade cleanup import-only | Auto-decided | P2 Boil lakes | No evidence supports changing live cache semantics | Upgrade-path refactor |
+
+**DX review addendum**
+
+**Product type:** CLI tool. **Persona:** a Mind Meld maintainer or contributor who needs to run the test suite safely on a development Mac. Their tolerance for an internal hygiene change is zero visible friction: the cleanup must neither alter `mm` commands nor create state in their real home directory.
+
+**Developer empathy narrative:** I install with the README’s one `pipx install …@latest` command, initialize or upgrade with the documented `mm` commands, and expect my existing configuration and upgrade state to stay untouched. As a contributor, I run focused tests and expect their fixture rows to live only under `tmp_path`. Track 15B should be invisible: if a user notices it in `mm --help`, output, a migration prompt, a changelog entry, or an upgrade nudge, the track grew beyond its job.
+
+**Competitive and journey assessment:** pipx’s documented workflow is install, run, upgrade, and remove; Mind Meld’s README follows that same direct install/upgrade shape. This track changes none of those steps, so TTHW is unchanged rather than newly measured. The only developer journey segment affected is local test execution: `import module -> patch directory -> exercise public behavior -> temporary state only`.
+
+| Journey stage | Developer action | Track 15B outcome |
+|---|---|---|
+| Discover | Read README and command table | Unchanged |
+| Install | `pipx install …@latest` | Unchanged |
+| Hello world | `mm init`, `mm push`, `mm pull` | Unchanged |
+| Integrate | Configure sources | Unchanged |
+| Debug | Read warnings and `mm status` | Unchanged |
+| Upgrade | Follow `pipx upgrade` or nudge | Unchanged |
+| Contribute | Run focused pytest modules | Safer: explicit resolver-isolation pins |
+| CI | Run ruff and pytest | Unchanged commands; narrower failure signal |
+| Maintain | Refactor path code later | One obvious path authority per module |
+
+**DX passes**
+
+1. **Getting started: 10/10 for this plan.** No installation, first-run, credential, or time-to-hello-world step changes.
+2. **CLI design: 10/10 for this plan.** No command, flag, default, or output changes.
+3. **Errors and debugging: 10/10 for this plan.** Existing warnings and upgrade notices remain intact; the behavioral pins make a developer-machine leakage regression fail in tests rather than requiring diagnosis after the fact.
+4. **Documentation: 10/10 for this plan.** README, changelog, migration notes, and invariant wording correctly describe behavior rather than implementation-only constants; no docs update is warranted.
+5. **Upgrade path: 10/10 for this plan.** Removing the unused `fsutil` keeper cannot alter the nudge, cache, tag lookup, or `@latest` install contract.
+6. **Developer environment: 10/10 for this plan.** Focused pytest and ruff commands are enough; no platform, CI, or editor integration changes.
+7. **Community and ecosystem: 10/10 for this plan.** No public API or extension contract changes.
+8. **DX measurement: 9/10 for this plan.** The two focused tests are a direct developer-safety signal. No new runtime metric is justified for a zero-behavior cleanup.
+
+**DX implementation checklist**
+
+- [x] No change to install, upgrade, command, flag, output, persisted-file format, or README contract.
+- [x] Preserve problem + cause + fix quality of existing CLI notices and warnings.
+- [x] Add behavioral resolver pins so local `pytest` remains safe on a contributor’s machine.
+- [x] Verify upgrade behavior with the existing focused suite.
+
+**DX dual voices consensus:** Independent reviewer found no material DX gap and recommends no README, changelog, migration, support note, or diagnostics work. Codex CLI was unavailable. The phase emits no new implementation task.
+
+| 7 | DX | Keep this cleanup invisible to CLI users | Auto-decided | P5 Explicit | Public behavior and docs reference behavior, not dead internals | User-facing release work |
+
+**Cross-phase themes**
+
+- **One authority for isolation-sensitive paths.** CEO, Eng, and DX independently converged on preserving the call-time resolver as the sole authority and proving it through public behavior.
+- **Do not turn hygiene into a refactor.** All phases rejected a generic path abstraction, an upgrade-cache resolver change, and user-facing release work as outside the blast radius.
+
+**Completion summaries**
+
+| Phase | Result | Unresolved / critical gaps |
+|---|---|---|
+| CEO | Focused cleanup approved; three implementation tasks | 0 / 0 |
+| Design | Skipped: no UI scope | 0 / 0 |
+| Eng | Architecture, test diagram, and three parallel lanes complete | 0 / 0 |
+| DX | Invisible cleanup; no public-surface task | 0 / 0 |
 
 ##### Track 15C: Aggregator import hygiene
 _2 tasks . ~50 LOC . low risk . aggregator.py_
@@ -504,3 +739,19 @@ Deferred the inline `keep-canonical` mtime bump to end-of-pull-batch so `mm pull
 Child symlinks are now local routing rather than sync content: generic walkers omit them, pull preserves live and dangling local links, and source roots may still be symlinked. Prior-manifest filtering prevents this policy change from generating deletion tombstones; generated Codex/OpenCode skill trees are excluded without excluding hand-authored skills.
 
 - Track 14A — _shipped (v0.12.17): tombstone-safe child-symlink suppression, pull-time link preservation, generated-skill exclusions, invariant documentation, and regression coverage._
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|---|---|---|---:|---|---|
+| CEO Review | `/plan-ceo-review` | Scope and strategy | 1 | clean | Narrow cleanup approved; 0 critical gaps |
+| Codex Review | `/codex review` | Independent second opinion | 0 | unavailable | CLI did not return a usable final review |
+| Eng Review | `/plan-eng-review` | Architecture and tests | 1 | clean | 4 findings resolved; 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | skipped | No UI scope |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 1 | clean | 9/10 → 10/10; TTHW unchanged |
+
+**CROSS-MODEL:** Independent reviewer agreed with the focused scope, resolver-behavior pins, and no-user-facing-change posture. Codex CLI was unavailable.
+
+**VERDICT:** CEO + ENG + DX CLEARED — ready to implement Track 15B.
+
+NO UNRESOLVED DECISIONS
