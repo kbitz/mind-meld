@@ -153,21 +153,13 @@ class TestTargetCorrect:
 
 
 # ---------------------------------------------------------------------------
-# Branch 3: dangling symlink (pipx-reinstall recovery) — IRON RULE PIN.
+# Branch 3: dangling symlink is a no-clobber conflict.
 # ---------------------------------------------------------------------------
 
 
 class TestDanglingSymlink:
-    """REGRESSION test for /plan-eng-review Test review #1.
-
-    Pre-fix, the original installer pseudocode never replaced a dangling
-    symlink because is_symlink() returned True and the conflict-skip
-    branch matched. This locked pipx-reinstall recovery into a permanent
-    broken state.
-    """
-
-    def test_dangling_symlink_unlinked_and_recreated(self, target, skill_src, _isolate_paths):
-        """Symlink whose target no longer exists → unlink + recreate."""
+    def test_dangling_symlink_is_not_replaced(self, target, skill_src, _isolate_paths, capsys):
+        """A dangling path could be replaced concurrently, so never unlink it."""
         # Create a deleted target (simulates pipx reinstall rewriting the
         # venv path).
         deleted_target = _isolate_paths / "old-venv" / "skills" / "retro_fleet"
@@ -180,12 +172,12 @@ class TestDanglingSymlink:
         assert target.is_symlink()
         assert not target.exists()  # dangling
 
-        # Self-heal must replace it pointing at the live source.
+        # It remains a conflict until the user removes it deliberately.
         skill_link._ensure_retro_skill_link()
 
         assert target.is_symlink()
-        assert target.exists()  # No longer dangling.
-        assert target.resolve() == skill_src.resolve()
+        assert not target.exists()
+        assert "not replacing" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +284,28 @@ class TestSymlinkToError:
 class TestSkillLinkCheckDue:
     def test_no_marker_means_check_due(self, config_dir):
         assert skill_link._skill_link_check_due() is True
+
+    @pytest.mark.parametrize(
+        ("gate_name", "target_index", "success_marker"),
+        [
+            ("_skill_link_check_due", 0, skill_link._SKILL_LINK_SUCCESS_MARKER),
+            ("_codex_skill_link_check_due", 1, skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER),
+            ("_opencode_skill_link_check_due", 2, skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER),
+        ],
+    )
+    def test_present_agent_root_without_skills_directory_is_due(
+        self, config_dir, gate_name, target_index, success_marker
+    ):
+        """A fresh legacy marker must not delay repair of a missing skills dir."""
+        import shutil
+
+        skills_dir = skill_link.skill_targets()[target_index].parent
+        if skills_dir.exists():
+            shutil.rmtree(skills_dir)
+        skills_dir.parent.mkdir(parents=True, exist_ok=True)
+        (config_dir / f".{success_marker}").touch()
+
+        assert getattr(skill_link, gate_name)() is True
 
     def test_codex_fresh_marker_with_correct_link_means_not_due(
         self, codex_target, skill_src, config_dir
@@ -486,75 +500,162 @@ class TestSkillTargets:
 
 
 # ---------------------------------------------------------------------------
-# Track 16A NEW: `classify_targets()` — extracted out of `install_skills_cmd`
-# so Track 17A can add the missing third bucket without touching the shell.
+# Track 17A: descriptor-driven installation outcomes.
 # ---------------------------------------------------------------------------
 
 
-class TestClassifyTargets:
-    """Four of the five branches were only ever reached transitively through
-    `mm install-skills`, and the absent-target branch — the one Track 17A is
-    chartered to change — was asserted nowhere at all. It is a pure function;
-    test it as one."""
+class TestInstallerResults:
+    def test_reports_one_outcome_for_each_agent(
+        self, target, codex_target, opencode_target, skill_src
+    ):
+        results = skill_link._ensure_retro_skill_links()
 
-    def test_correct_symlink_is_installed(self, target, skill_src):
+        assert [result.descriptor.display_name for result in results] == [
+            "Claude Code",
+            "Codex",
+            "OpenCode",
+        ]
+        assert [result.status for result in results] == ["installed", "installed", "installed"]
+        assert [result.target for result in results] == [target, codex_target, opencode_target]
+
+    def test_correct_link_reports_unchanged(self, target, codex_target, opencode_target, skill_src):
         target.symlink_to(skill_src)
-        installed, conflicts = skill_link.classify_targets((target,), skill_src)
-        assert (installed, conflicts) == ([target], [])
 
-    def test_symlink_to_elsewhere_is_a_conflict(self, target, skill_src, _isolate_paths):
-        theirs = _isolate_paths / "their-skill"
-        theirs.mkdir()
-        target.symlink_to(theirs)
-        installed, conflicts = skill_link.classify_targets((target,), skill_src)
-        assert (installed, conflicts) == ([], [target])
+        result = skill_link._ensure_retro_skill_links()[0]
 
-    def test_real_file_is_a_conflict(self, target, skill_src):
+        assert result.status == "unchanged"
+        assert result.skill_src == skill_src.resolve()
+
+    def test_conflict_does_not_hide_other_successes(
+        self, target, codex_target, opencode_target, skill_src
+    ):
         target.write_text("user's own retro-fleet skill")
-        installed, conflicts = skill_link.classify_targets((target,), skill_src)
-        assert (installed, conflicts) == ([], [target])
 
-    def test_dangling_symlink_is_a_conflict(self, target, skill_src, _isolate_paths):
-        """`exists()` is False on a dangling link, so the installed branch is
-        skipped; the `or target.is_symlink()` tail is the only thing that keeps
-        it out of the silently-ignored bucket. Reachable in the wild whenever
-        the preceding self-heal's `symlink_to` failed (read-only ~/.claude)."""
+        results = skill_link._ensure_retro_skill_links()
+
+        assert [result.status for result in results] == ["conflict", "installed", "installed"]
+        assert target.read_text() == "user's own retro-fleet skill"
+        assert codex_target.resolve() == skill_src.resolve()
+        assert opencode_target.resolve() == skill_src.resolve()
+
+    def test_dangling_symlink_reports_conflict_without_unlinking(
+        self, target, skill_src, _isolate_paths, monkeypatch
+    ):
+        import pathlib
+
         gone = _isolate_paths / "old-venv" / "retro_fleet"
         gone.mkdir(parents=True)
         target.symlink_to(gone)
         import shutil
 
         shutil.rmtree(gone.parent)
-        assert target.is_symlink() and not target.exists()
-        installed, conflicts = skill_link.classify_targets((target,), skill_src)
-        assert (installed, conflicts) == ([], [target])
+        monkeypatch.setattr(
+            pathlib.Path,
+            "unlink",
+            lambda _self, *args, **kwargs: pytest.fail("installer must not unlink dangling links"),
+        )
 
-    def test_absent_target_is_in_neither_bucket(self, target, skill_src):
-        """The documented missing third bucket. `mm install-skills` reports
-        "Installed" / "conflict" off these two lists, so a target that simply
-        was not created is silently reported as neither — the gap Track 17A
-        owns. Pin the CURRENT behavior so 17A's change is a visible diff, not
-        an accident."""
+        result = skill_link._ensure_retro_skill_links()[0]
+
+        assert result.status == "conflict"
+        assert target.is_symlink()
         assert not target.exists()
-        assert skill_link.classify_targets((target,), skill_src) == ([], [])
 
-    def test_resolve_failure_falls_through_to_conflict(self, target, skill_src, monkeypatch):
-        """`resolve()` can raise on a path with permission issues. The
-        `except OSError: pass` must fall through to conflict-skip, never
-        report the link as installed."""
+    def test_target_resolution_failure_is_not_reported_as_conflict(
+        self, target, skill_src, monkeypatch
+    ):
         import pathlib
 
         target.symlink_to(skill_src)
         original = pathlib.Path.resolve
 
-        def fake_resolve(self, *a, **kw):
-            if str(self) == str(target):
-                raise OSError("EACCES")
-            return original(self, *a, **kw)
+        def fake_resolve(self, *args, **kwargs):
+            if self == target:
+                raise OSError("simulated EACCES")
+            return original(self, *args, **kwargs)
 
         monkeypatch.setattr(pathlib.Path, "resolve", fake_resolve)
-        installed, conflicts = skill_link.classify_targets((target,), skill_src)
-        assert (installed, conflicts) == ([], [target])
+
+        result = skill_link._ensure_retro_skill_links()[0]
+
+        assert result.status == "failed"
+        assert result.reason is not None
+        assert "OSError" in result.reason
+
+    def test_source_failure_fans_out_to_every_available_agent(
+        self, codex_target, opencode_target, monkeypatch
+    ):
+        calls = 0
+
+        def boom():
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("source unavailable")
+
+        monkeypatch.setattr(skill_link, "_resolve_retro_skill_src", boom)
+
+        results = skill_link._ensure_retro_skill_links()
+
+        assert calls == 1
+        assert [result.status for result in results] == ["failed", "failed", "failed"]
+        assert all(result.reason is not None for result in results)
+
+    def test_directory_setup_failure_does_not_hide_other_outcomes(
+        self, target, codex_target, skill_src, monkeypatch
+    ):
+        import pathlib
+        import shutil
+
+        shutil.rmtree(codex_target.parent)
+        original_mkdir = pathlib.Path.mkdir
+
+        def fake_mkdir(self, *args, **kwargs):
+            if self == codex_target.parent:
+                raise PermissionError("simulated read-only skills directory")
+            return original_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "mkdir", fake_mkdir)
+
+        results = skill_link._ensure_retro_skill_links()
+
+        assert [result.status for result in results] == ["installed", "failed", "unavailable"]
+        assert target.resolve() == skill_src.resolve()
+
+    def test_dangling_conflict_does_not_hide_other_outcomes(
+        self, target, codex_target, skill_src, _isolate_paths
+    ):
+        import shutil
+
+        gone = _isolate_paths / "old-venv" / "retro_fleet"
+        gone.mkdir(parents=True)
+        target.symlink_to(gone)
+        shutil.rmtree(gone.parent)
+
+        results = skill_link._ensure_retro_skill_links()
+
+        assert [result.status for result in results] == ["conflict", "installed", "unavailable"]
+        assert codex_target.resolve() == skill_src.resolve()
+
+    def test_non_directory_agent_root_is_a_failed_result(self, target, skill_src, _isolate_paths):
+        import shutil
+
+        shutil.rmtree(_isolate_paths / ".claude")
+        (_isolate_paths / ".claude").write_text("not a directory")
+
+        results = skill_link._ensure_retro_skill_links()
+
+        assert [result.status for result in results] == ["failed", "unavailable", "unavailable"]
+        assert results[0].reason is not None
+        assert "NotADirectoryError" in results[0].reason
+
+    def test_dry_run_returns_no_results_or_side_effects(self, target, monkeypatch):
+        def fail_if_called():
+            raise AssertionError("dry-run must not resolve the source")
+
+        monkeypatch.setattr(skill_link, "_resolve_retro_skill_src", fail_if_called)
+
+        assert skill_link._ensure_retro_skill_links(dry_run=True) == ()
+        assert not target.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +692,7 @@ class TestInstallSkillsCommand:
         assert result.exit_code == 0, result.output
         assert "Installed" in result.output
 
-    def test_self_heals_dangling_link(self, target, skill_src, _isolate_paths):
+    def test_reports_dangling_link_as_conflict(self, target, skill_src, _isolate_paths):
         from mind_meld.cli import app
 
         deleted_target = _isolate_paths / "old-venv" / "skills" / "retro_fleet"
@@ -602,9 +703,10 @@ class TestInstallSkillsCommand:
         shutil.rmtree(deleted_target.parent.parent)
 
         result = self._runner().invoke(app, ["install-skills"])
-        assert result.exit_code == 0, result.output
-        assert target.exists()  # no longer dangling
-        assert target.resolve() == skill_src.resolve()
+        assert result.exit_code == 1
+        assert "mm: error: Claude Code:" in result.output
+        assert target.is_symlink()
+        assert not target.exists()
 
     def test_errors_on_conflict_real_file(self, target, skill_src):
         from mind_meld.cli import app
@@ -685,6 +787,30 @@ class TestInstallSkillsCommand:
         assert str(codex_target) in result.output
         assert str(target) in result.output
 
+    def test_reports_failed_agent_alongside_success(
+        self, target, codex_target, skill_src, monkeypatch
+    ):
+        import pathlib
+
+        from mind_meld.cli import app
+
+        original_symlink_to = pathlib.Path.symlink_to
+
+        def fake_symlink_to(self, target_path, target_is_directory=False):
+            if self == codex_target:
+                raise PermissionError("simulated read-only Codex directory")
+            return original_symlink_to(self, target_path, target_is_directory)
+
+        monkeypatch.setattr(pathlib.Path, "symlink_to", fake_symlink_to)
+
+        result = self._runner().invoke(app, ["install-skills"])
+
+        assert result.exit_code == 1
+        assert "Installed: Claude Code:" in result.output
+        assert "mm: error: Codex:" in result.output
+        assert "PermissionError" in result.output
+        assert target.resolve() == skill_src.resolve()
+
     def test_bypasses_ttl_gate(self, target, skill_src, config_dir):
         """The CLI command runs the installer regardless of the 24h-TTL
         marker. The gate only governs the implicit self-heal in push."""
@@ -718,3 +844,21 @@ class TestPushSkillLinkWiring:
 
         assert cli_module._push_core(config, "pw", 1024) is None
         assert calls == [False]
+
+    def test_push_keeps_running_when_installer_regresses(self, monkeypatch, capsys):
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "sync": {"max_file_size": 1024},
+        }
+        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda: True)
+
+        def boom(*, dry_run):
+            raise RuntimeError("unexpected installer regression")
+
+        monkeypatch.setattr(skill_link, "_ensure_retro_skill_links", boom)
+        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+
+        assert cli_module._push_core(config, "pw", 1024) is None
+        assert "retro-fleet skill installation failed" in capsys.readouterr().err
