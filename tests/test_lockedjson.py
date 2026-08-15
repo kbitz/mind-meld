@@ -15,7 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from mind_meld.lockedjson import LockContended, LockedJson, locked_json_rmw
+from mind_meld import lockedjson
+from mind_meld.lockedjson import (
+    LockContended,
+    LockedJson,
+    locked_json_rmw,
+    locked_json_snapshot,
+)
 
 
 class TestLockedJsonHappyPath:
@@ -102,6 +108,50 @@ class TestLockedJsonCorruption:
             assert ljson.data == {}
 
 
+class TestLockedJsonSnapshot:
+    def test_missing_snapshot_does_not_create_parent_or_file(self, tmp_path: Path) -> None:
+        path = tmp_path / "nested" / "cache.json"
+
+        with locked_json_snapshot(path) as snapshot:
+            assert snapshot.state == "missing"
+            assert snapshot.data is None
+
+        assert not path.parent.exists()
+        assert not path.exists()
+
+    def test_snapshot_preserves_existing_cache_bytes_and_mode(self, tmp_path: Path) -> None:
+        path = tmp_path / "cache.json"
+        original = b'{"files":{},"version":1,"unknown":"preserve me"}'
+        path.write_bytes(original)
+        path.chmod(0o640)
+        before = path.stat()
+
+        with locked_json_snapshot(path) as snapshot:
+            assert snapshot.state == "valid"
+            assert snapshot.data == {"files": {}, "version": 1, "unknown": "preserve me"}
+
+        after = path.stat()
+        assert path.read_bytes() == original
+        assert after.st_mode & 0o777 == before.st_mode & 0o777
+        assert after.st_mtime_ns == before.st_mtime_ns
+
+    @pytest.mark.parametrize(
+        ("contents", "expected_state"),
+        [(b"not json", "malformed"), (b"[]", "non_dict"), (b"", "empty")],
+    )
+    def test_snapshot_reports_unrepairable_state_without_writing(
+        self, tmp_path: Path, contents: bytes, expected_state: str
+    ) -> None:
+        path = tmp_path / "cache.json"
+        path.write_bytes(contents)
+
+        with locked_json_snapshot(path) as snapshot:
+            assert snapshot.state == expected_state
+            assert snapshot.data is None
+
+        assert path.read_bytes() == contents
+
+
 class TestLockedJsonExceptionPath:
     def test_caller_exception_does_not_persist_mutations(self, tmp_path: Path) -> None:
         path = tmp_path / "cache.json"
@@ -112,6 +162,17 @@ class TestLockedJsonExceptionPath:
                 raise RuntimeError("boom")
         # Original content preserved (lock was released without write).
         assert json.loads(path.read_text()) == {"original": True}
+
+    def test_write_failure_is_reported_to_caller(self, tmp_path: Path, monkeypatch) -> None:
+        path = tmp_path / "cache.json"
+        failure = OSError("disk full")
+        monkeypatch.setattr(lockedjson, "_write_json", lambda _fd, _data: failure)
+
+        with locked_json_rmw(path) as ljson:
+            ljson.data["attempted"] = True
+
+        assert ljson.write_attempted is True
+        assert ljson.write_error is failure
 
 
 class TestLockedJsonContentionRaise:
