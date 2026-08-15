@@ -83,7 +83,8 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `devices.py` / `storage/local.py:put_exclusive` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
-| `cli.py:_run_events_tail` / `_run_events_backfill` | `docs/invariants/events-retro.md` |
+| `cli.py:_run_events_tail` / `_run_events_backfill` / `PushResult.events_degradations` / the `autopush` breadcrumb outcome | `docs/invariants/events-retro.md` |
+| `events.py:_read_cwd_from_latest_jsonl` / `_last_mm_push_ts` / `_scan_one_project` cwd-scan site / `walk_git_projects` future-collection blocks / `token_usage.is_cache_cold` / `token_usage.iter_bounded_lines` / `pullhistory._yield_lines` | `docs/invariants/events-retro.md` (tolerant-binary-reads + one-cwd-scan sections) |
 | `cli.py:_ensure_retro_skill_link` / `_skill_link_check_due` / `install_skills_cmd` / `retro_fleet_cmd` | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `_devices_json_cmd` / `EVENTS_RETENTION_DAYS` / `_gc_old_event_files` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |

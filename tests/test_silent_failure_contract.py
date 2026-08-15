@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from mind_meld import cli as cli_module
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
@@ -930,6 +931,78 @@ def test_autopush_breadcrumb_no_sources_distinguishes_from_success(tmp_path, mon
     crumb = iso / "last-autorun.json"
     assert crumb.exists()
     assert json.loads(crumb.read_text())["outcome"] == "no-sources"
+
+
+def test_autopush_breadcrumb_degraded_when_events_tail_fails(tmp_path, monkeypatch):
+    """v0.12.16: an events-tail failure must downgrade the autopush
+    breadcrumb to 'degraded' instead of reporting 'success'.
+
+    The events tail is forensic-only: it swallows every failure behind a
+    `mm: notice:` line and lets the push proceed. That is correct for the
+    push, and useless as a signal — autopush runs unattended from a Claude
+    Code hook, so its stderr reaches nobody. Pre-fix, `mm status` reported
+    `success` no matter how badly the retro pipeline had degraded, which is
+    exactly the wedge the sibling `no-sources` test above exists to prevent.
+    Same argument, applied to the other silent path.
+    """
+    storage_dir = tmp_path / "storage"
+    config_path = tmp_path / "config.toml"
+    src = tmp_path / "claude"
+    # A `claude` source walks projects/<encoded>/memory — a top-level
+    # memory/ finds nothing, `_push_core` returns None at the
+    # nothing-to-push gate, and the tail never runs.
+    _populate_claude(src)
+    save_config(
+        {
+            "device": {"id": "dev-deg", "name": "Deg"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "type": "claude", "path": str(src)},
+                    # The tail no-ops without this source, so the degradation
+                    # path is unreachable if it's omitted.
+                    {
+                        "name": "mm-events",
+                        "type": "generic",
+                        "path": str(tmp_path / "mm-events"),
+                        "include_dirs": ["events"],
+                        "exclude_patterns": [],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        config_path,
+    )
+    (tmp_path / "mm-events" / "events").mkdir(parents=True)
+
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-deg", "Deg")
+
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    _redirect_lock(monkeypatch, tmp_path)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    # Blow up inside the tail. The tail must still swallow it (push
+    # succeeds) but must now REPORT it through the breadcrumb.
+    def _boom(*_a, **_kw):
+        raise RuntimeError("synthetic tail failure")
+
+    monkeypatch.setattr(cli_module.events, "discover_git_roots", _boom)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    crumb = iso / "last-autorun.json"
+    assert crumb.exists()
+    payload = json.loads(crumb.read_text())
+    assert payload["outcome"] == "degraded", (
+        "events-tail failure still reported as success to mm status"
+    )
+    assert "events tail failed" in payload.get("detail", "")
+    assert "RuntimeError" in payload.get("detail", "")
 
 
 def test_autopush_surfaces_no_sources_warning_in_quiet_mode(tmp_path, monkeypatch):

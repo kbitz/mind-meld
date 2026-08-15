@@ -48,7 +48,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import (
-    CancelledError,
     Future,
     ThreadPoolExecutor,
     as_completed,
@@ -421,7 +420,32 @@ def _probe_claude() -> list[Path]:
 
 def _read_cwd_from_latest_jsonl(proj_dir: Path) -> str | None:
     """Find a `cwd` field in the most recent .jsonl session file. Falls
-    back to older files if the newest is empty/corrupt."""
+    back to older files if the newest is empty/corrupt.
+
+    BINARY mode via ``token_usage.iter_bounded_lines`` (v0.12.16) — the same
+    primitive ``walk_jsonl_segment`` uses on this corpus. Two independent
+    reasons, both load-bearing:
+
+      * Text mode decodes in ~8KB CHUNKS, not per line, so a single invalid
+        UTF-8 byte falling in the first chunk raised ``UnicodeDecodeError``
+        (a ``ValueError``, NOT an ``OSError``, so the guard below never
+        caught it) straight past ``_scan_one_project`` and
+        ``walk_session_metadata`` into ``_run_events_tail``'s wrapper —
+        losing the ENTIRE events tail on every push until the file changed.
+        Chunked decoding is also why a `cwd` on line 1 did not protect
+        against a bad byte on line 2.
+      * ``for line in f`` lets Python extend its buffer to newline-or-EOF,
+        so one pathological multi-GB line could OOM the push.
+        ``iter_bounded_lines`` caps each read at ``MAX_JSONL_LINE_BYTES``.
+
+    ``json.loads`` accepts bytes directly, and both malformed JSON and
+    invalid UTF-8 surface as ``ValueError`` — so a bad byte now costs the
+    one line it sits on, not the walk.
+
+    Call this AT MOST ONCE per project. See the hoist note in
+    ``_scan_one_project``: it scans the whole directory, so putting it back
+    inside a per-file loop reintroduces an O(N^2) read.
+    """
     try:
         jsonls = sorted(
             (p for p in proj_dir.iterdir() if p.suffix == ".jsonl"),
@@ -432,14 +456,18 @@ def _read_cwd_from_latest_jsonl(proj_dir: Path) -> str | None:
         return None
     for jl in jsonls:
         try:
-            with open(jl, encoding="utf-8") as f:
-                for line in f:
-                    stripped = line.strip()
+            with open(jl, "rb") as f:
+                for raw, _end in token_usage.iter_bounded_lines(
+                    f, str(jl), 0, label="session cwd reader"
+                ):
+                    stripped = raw.strip()
                     if not stripped:
                         continue
                     try:
                         obj = json.loads(stripped)
-                    except json.JSONDecodeError:
+                    except ValueError:
+                        # JSONDecodeError (malformed) and UnicodeDecodeError
+                        # (invalid utf-8) are both ValueError subclasses.
                         continue
                     cwd = obj.get("cwd") if isinstance(obj, dict) else None
                     if isinstance(cwd, str) and cwd:
@@ -536,12 +564,30 @@ def walk_git_projects(
             executor.submit(_walk_one_repo, root, since_iso, per_repo_timeout_ms): root
             for root in roots
         }
+        # Futures already drained by the pump below. The budget-abort handler
+        # MUST skip these (v0.12.16): it iterates all of `futures.items()`,
+        # so without this set every repo that finished before the timeout was
+        # collected a SECOND time — its full commit list serialised twice into
+        # the row, then gzipped, encrypted, uploaded and replicated to every
+        # peer. Measured pre-fix with 4 roots / 2 slow / 300ms: 4 project rows,
+        # 2 unique. The retro card survived it only because `aggregate_git`
+        # dedups on (canonical_remote, sha).
+        collected: set[Future] = set()
         try:
             for fut in as_completed(futures, timeout=max(0.0, deadline - time.monotonic())):
                 root = futures[fut]
+                collected.add(fut)
+                # `except Exception` alone: CancelledError and
+                # FuturesTimeoutError are both Exception subclasses, so naming
+                # them added nothing. NOTE two near-misses worth keeping in
+                # mind before touching this clause — concurrent.futures.
+                # CancelledError is NOT asyncio.CancelledError (that one is
+                # BaseException-derived and would escape), and
+                # FuturesTimeoutError aliases builtin TimeoutError, which is an
+                # OSError subclass, so never narrow this to OSError.
                 try:
                     proj, err = fut.result(timeout=0)
-                except (CancelledError, FuturesTimeoutError, Exception) as e:
+                except Exception as e:
                     skipped.append({"path": str(root), "reason": f"{type(e).__name__}: {e}"})
                     continue
                 if err:
@@ -549,8 +595,14 @@ def walk_git_projects(
                 if proj is not None:
                     projects.append(proj)
         except FuturesTimeoutError:
-            # Budget exhausted at the pump. Cancel pending; collect what's done.
+            # Budget exhausted at the PUMP (`as_completed` itself raised, from
+            # the for-statement rather than the loop body — which is why this
+            # handler is separate from the per-future one above and why the two
+            # blocks are not interchangeable: only this one marks budget_abort).
+            # Cancel pending; collect what's done and not already drained.
             for fut, root in futures.items():
+                if fut in collected:
+                    continue
                 if fut.done():
                     try:
                         proj, err = fut.result(timeout=0)
@@ -816,7 +868,6 @@ def _scan_one_project(
     sessions = 0
     total_bytes = 0
     last_mtime = 0.0
-    cwd: str | None = None
     parent_jsonls: list[Path] = []
     subagent_jsonls: list[Path] = []
     try:
@@ -832,9 +883,6 @@ def _scan_one_project(
                     if st.st_mtime > last_mtime:
                         last_mtime = st.st_mtime
                     parent_jsonls.append(Path(f_entry.path))
-                    # Only read cwd from one file per project — first one wins.
-                    if cwd is None:
-                        cwd = _read_cwd_from_latest_jsonl(Path(proj_entry.path))
                 elif f_entry.is_dir(follow_symlinks=False):
                     # Look for <session-uuid>/subagents/*.jsonl one level deeper.
                     subagent_jsonls.extend(_collect_subagent_jsonls(Path(f_entry.path)))
@@ -842,6 +890,17 @@ def _scan_one_project(
         return None
     if sessions == 0:
         return None
+    # EXACTLY ONE cwd scan per project (v0.12.16). This call used to sit
+    # INSIDE the loop above, guarded by `if cwd is None` and commented
+    # "first one wins". That comment held only when a cwd was actually
+    # found: the helper takes the PROJECT dir, not the file, so when no
+    # jsonl in the project carries a `cwd` the guard never flipped and the
+    # helper re-scanned the whole directory once per jsonl — iterdir +
+    # N stat + a full read of every file, N times over. Measured before
+    # the hoist: 20 jsonls -> 20 calls -> 400 file opens; 15ms at N=10,
+    # 1.44s at N=100, 13.2s at N=300 for a SINGLE project, against a
+    # 250ms autopush budget. Keep this call out of any per-file loop.
+    cwd = _read_cwd_from_latest_jsonl(Path(proj_entry.path))
     decoded_path = cwd or proj_entry.name  # fallback to encoded name
     last_iso = datetime.fromtimestamp(last_mtime, tz=timezone.utc).isoformat() if last_mtime else ""
     meta: SessionMetadata = {
@@ -951,17 +1010,27 @@ def last_push_ts(events_dir: Path, device_id: str) -> datetime:
 def _last_mm_push_ts(path: Path) -> datetime | None:
     """Read `path` and return the ts of the LAST `{"type":"mm-push", ...}`
     line, or None if no such line exists. Reads forward (small daily files),
-    keeping last-match semantics so the most recent push wins."""
+    keeping last-match semantics so the most recent push wins.
+
+    BINARY mode (v0.12.16), same rationale as
+    ``_read_cwd_from_latest_jsonl``. This file lives under the SYNCED
+    mm-events source, so its bytes can arrive via the pull apply path and
+    ``merge.merge_jsonl`` rather than only from this device's own writer.
+    Returning ``None`` here is NOT a benign fallback: it rewinds the cursor
+    to ``now - INITIAL_CURSOR_LOOKBACK_DAYS`` and re-walks 30 days of git
+    history on every subsequent push, forever. Per-line tolerance keeps a
+    single bad byte from costing the cursor."""
     last: datetime | None = None
     try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
+        with open(path, "rb") as f:
+            for raw in f:
+                stripped = raw.strip()
                 if not stripped:
                     continue
                 try:
                     obj = json.loads(stripped)
-                except json.JSONDecodeError:
+                except ValueError:
+                    # Malformed JSON and invalid utf-8 are both ValueError.
                     continue
                 if not isinstance(obj, dict):
                     continue

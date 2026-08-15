@@ -823,6 +823,24 @@ class TestIsCacheCold:
         tu.CACHE_PATH.write_text("garbage")
         assert tu.is_cache_cold() is True
 
+    def test_invalid_utf8_treated_as_cold_not_raised(self) -> None:
+        """v0.12.16 T3: a bad byte in the cache must report cold, not raise.
+
+        Pre-fix `is_cache_cold` used `read_text(encoding="utf-8")` guarded
+        only by OSError, so UnicodeDecodeError escaped. This runs on the
+        events-tail path via `_decide_token_walk_policy`, so it killed the
+        whole tail exactly like the session readers did.
+
+        The `except UnicodeDecodeError` on the json.loads below it looked
+        like the guard but was DEAD — json.loads on a `str` cannot raise it.
+        Feeding bytes makes ValueError cover both cases for real.
+        """
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_bytes(
+            b'{"version": 1, "files": {"a": {"size": 1}}, "junk": "\xff\xfe"}' + b" " * 300
+        )
+        assert tu.is_cache_cold() is True
+
     def test_populated_cache_treated_as_warm(self) -> None:
         """A realistically-shaped populated cache exceeds the
         64-byte threshold AND has the right version prefix."""

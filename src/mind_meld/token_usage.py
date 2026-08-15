@@ -713,7 +713,7 @@ def walk_jsonl_segment(
         with open(path, "rb") as fp:
             if start_offset:
                 fp.seek(start_offset)
-            for raw, end in _iter_bounded_lines(fp, path_str, start_offset):
+            for raw, end in iter_bounded_lines(fp, path_str, start_offset):
                 offset = end
                 stripped = raw.strip()
                 if not stripped:
@@ -880,11 +880,23 @@ def _trim_skills_by_day(skills_by_day: SkillBuckets, max_days: int) -> SkillBuck
     return {k: pruned[k] for k in keep_keys}
 
 
-def _iter_bounded_lines(fp, path_str: str, start_offset: int) -> Iterable[tuple[bytes, int]]:
+def iter_bounded_lines(
+    fp,
+    path_str: str,
+    start_offset: int,
+    *,
+    label: str = "token walker",
+) -> Iterable[tuple[bytes, int]]:
     """Yield ``(line_bytes, end_offset)`` for each COMPLETE line in the
     binary stream ``fp``, capped at ``MAX_JSONL_LINE_BYTES`` per line.
     A skipped oversize line is yielded as ``b""`` so the caller's offset
     still advances past it.
+
+    PUBLIC (v0.12.16). This is the canonical bounded reader for the Claude
+    Code session-jsonl corpus and has a second consumer outside this module:
+    ``events._read_cwd_from_latest_jsonl``. ``label`` names the caller in the
+    oversize notice so that message stays accurate from either site — do NOT
+    hardcode "token walker" back into it.
 
     ``end_offset`` is an absolute byte offset one past the line's
     terminating newline, so the caller can persist a resume point.
@@ -919,7 +931,7 @@ def _iter_bounded_lines(fp, path_str: str, start_offset: int) -> Iterable[tuple[
             # stop without advancing past it.
             return
         if path_str not in _WARNED_OVERSIZE_PATHS:
-            sys.stderr.write(f"mm: notice: token walker skipping oversize line in {path_str}\n")
+            sys.stderr.write(f"mm: notice: {label} skipping oversize line in {path_str}\n")
             _WARNED_OVERSIZE_PATHS.add(path_str)
         drained = _drain_to_newline(fp)
         if drained is None:
@@ -1452,12 +1464,21 @@ def is_cache_cold() -> bool:
     if st.st_size < _MIN_WARM_CACHE_BYTES:
         return True
     try:
-        raw = CACHE_PATH.read_text(encoding="utf-8")
+        # BINARY read (v0.12.16). `read_text` decoded eagerly and was guarded
+        # only by OSError, so one bad byte in the cache raised
+        # UnicodeDecodeError out of here — and this runs on the events-tail
+        # path via `_decide_token_walk_policy`, so it killed the tail exactly
+        # like the session readers did. The `except UnicodeDecodeError` on the
+        # json.loads below used to sit here looking like the guard; it was
+        # DEAD (json.loads on a `str` cannot raise it). Feeding bytes to
+        # json.loads makes that arm live: ValueError now covers both
+        # malformed JSON and invalid utf-8.
+        raw = CACHE_PATH.read_bytes()
     except OSError:
         return True
     try:
         parsed = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except ValueError:
         return True
     if not isinstance(parsed, dict) or parsed.get("version") != CACHE_VERSION:
         return True
@@ -1626,6 +1647,7 @@ __all__ = [
     "head_fingerprint",
     "head_probe_len",
     "is_cache_cold",
+    "iter_bounded_lines",
     "lock_and_get_files",
     "merge_by_model",
     "merge_skill_days",

@@ -223,14 +223,20 @@ def read_records(
 
 def _yield_lines(path: Path, *, tolerate_first_line: bool) -> Iterator[dict[str, Any]]:
     try:
-        with open(path, encoding="utf-8") as f:
-            for i, line in enumerate(f):
-                stripped = line.strip()
+        # BINARY mode (v0.12.16): text mode decodes in chunks and was guarded
+        # only by OSError, so one invalid utf-8 byte raised
+        # UnicodeDecodeError through this generator into the caller's frame.
+        # Per-line tolerance keeps a bad byte costing one line, matching the
+        # forensic-reader stance the rest of this function already takes.
+        with open(path, "rb") as f:
+            for i, raw in enumerate(f):
+                stripped = raw.strip()
                 if not stripped:
                     continue
                 try:
                     obj = json.loads(stripped)
-                except json.JSONDecodeError:
+                except ValueError:
+                    # Malformed JSON and invalid utf-8 are both ValueError.
                     if tolerate_first_line and i == 0:
                         continue  # crash-mid-rotate fingerprint
                     continue  # other corrupt lines: skip silently
