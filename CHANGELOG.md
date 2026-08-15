@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.22] - 2026-08-15
+
+### Added
+
+- Retro snapshots now record distinct, repository-qualified GitHub pull requests
+  from supported squash/rebase and merge commit subjects. The metric shares the
+  existing author, time-window, and commit-dedup eligibility rules; malformed
+  subjects and remotes are rejected. It is additive storage for the next retro
+  presentation track, not an API-backed throughput or trend metric.
+
 ## [0.12.21] - 2026-08-15
 
 **`cli.py` is no longer one 8,840-line file that serialized every plan — it is 6,692 lines plus six focused modules, and the test suite has stopped writing into your real `~/.claude`.** The decomposition itself changes no command, flag, output, exit code, or on-disk format. Three deliberate user-visible changes ship alongside it: one hidden command (`mm conflict-log-backfill`) is gone, `mm status` gained a staleness marker, and `pytest` stopped writing your real config dirs.
