@@ -67,7 +67,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mind_meld import identity
+from mind_meld import events as mm_events
+from mind_meld import identity, safety, token_usage
 
 # ---------------------------------------------------------------------------
 # Constants — kept in lockstep with mm's source-of-truth values.
@@ -532,15 +533,6 @@ def _monday_of(d: datetime) -> str:
     return (local - timedelta(days=local.weekday())).isoformat()
 
 
-def _import_canonicalize() -> "callable":
-    """Lazy import so tests can run without the full mind_meld install if
-    they monkeypatch this. The aggregator's contract is to use mm's own
-    canonicalization so dedup keys agree fleet-wide."""
-    from mind_meld.events import canonicalize_remote_url
-
-    return canonicalize_remote_url
-
-
 def aggregate_git(
     events: Iterable[dict],
     *,
@@ -562,7 +554,6 @@ def aggregate_git(
     ``window_days`` is consulted ONLY for whether to emit weekly buckets
     (skipped when <14d); zero is fine for the typical 7d retro path.
     """
-    canonicalize = _import_canonicalize()
     seen_keys: set[tuple[str, str]] = set()
     streak_seen: set[tuple[str, str]] = set()
     streak_days_set: set[str] = set()
@@ -580,7 +571,9 @@ def aggregate_git(
             if not isinstance(proj, dict):
                 continue
             remote_raw = proj.get("remote")
-            remote = canonicalize(remote_raw) if isinstance(remote_raw, str) else ""
+            remote = (
+                mm_events.canonicalize_remote_url(remote_raw) if isinstance(remote_raw, str) else ""
+            )
             commits = proj.get("commits")
             if not isinstance(commits, list):
                 continue
@@ -959,8 +952,6 @@ def _merge_token_window(
     nor in the user-facing total. ``tokens_by_model`` retains every peer-
     reported entry so the unpriced-model breadcrumb in ``format_retro``
     can surface volume that was excluded from the cost line."""
-    from mind_meld.token_usage import COST_EXCLUDED_MODELS, zero_model_bucket
-
     since_d = since.astimezone(timezone.utc).date().isoformat()
     until_d = until.astimezone(timezone.utc).date().isoformat()
     for day_key, bucket in tokens_by_day.items():
@@ -976,7 +967,7 @@ def _merge_token_window(
             # through `_safe_int`. token_usage's helper is for trusted local
             # data and intentionally skips that hardening. /plan-eng-review
             # cross-model tension #3 (2026-05-06).
-            mtarget = out.tokens_by_model.setdefault(model, zero_model_bucket())
+            mtarget = out.tokens_by_model.setdefault(model, token_usage.zero_model_bucket())
             in_ = _safe_int(mbucket.get("input"))
             cc = _safe_int(mbucket.get("cache_create"))
             cr = _safe_int(mbucket.get("cache_read"))
@@ -985,7 +976,7 @@ def _merge_token_window(
             mtarget["cache_create"] += cc
             mtarget["cache_read"] += cr
             mtarget["output"] += outp
-            if model in COST_EXCLUDED_MODELS:
+            if model in token_usage.COST_EXCLUDED_MODELS:
                 continue
             out.tokens_input += in_
             out.tokens_cache_create += cc
@@ -1309,8 +1300,6 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
     a floor, not an estimate, and saying ``~`` would repeat the
     v0.12.13 failure of printing a confident total over incomplete data.
     """
-    from mind_meld.token_usage import PRICING_LAST_UPDATED, SUBSCRIPTION_CAVEAT, estimate_cost
-
     total_in = sessions.tokens_input
     total_cc = sessions.tokens_cache_create
     total_cr = sessions.tokens_cache_read
@@ -1332,7 +1321,7 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
         hit_ratio = total_cr / consumed
         lines.append(f"- Cache hit ratio:    {hit_ratio:.0%}")
 
-    total_cost, per_model_cost = estimate_cost(sessions.tokens_by_model)
+    total_cost, per_model_cost = token_usage.estimate_cost(sessions.tokens_by_model)
     # Any unpriced volume makes the figure a lower bound, not an estimate.
     unpriced_tokens, _ = _unpriced_token_summary(sessions.tokens_by_model)
     if total_cost > 0:
@@ -1363,7 +1352,10 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
         short_names = ", ".join(_short_model_name(m) for m in active_models)
         lines.append(f"- Per-model:          {short_names}")
 
-    lines.append(f"- *List pricing last verified {PRICING_LAST_UPDATED}. {SUBSCRIPTION_CAVEAT}*")
+    lines.append(
+        f"- *List pricing last verified {token_usage.PRICING_LAST_UPDATED}. "
+        f"{token_usage.SUBSCRIPTION_CAVEAT}*"
+    )
 
 
 def _format_usd(amount: float) -> str:
@@ -1398,16 +1390,17 @@ def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple
     once family-tier fallback landed: the cost line would price
     ``claude-opus-6`` while this line still called it unpriced. One
     predicate, one answer — see ``token_usage.resolve_prices``."""
-    from mind_meld.token_usage import COST_EXCLUDED_MODELS, TOKEN_FIELDS, resolve_prices
-
     total = 0
     n = 0
     for model, mbucket in (tokens_by_model or {}).items():
-        if model in COST_EXCLUDED_MODELS or resolve_prices(model) is not None:
+        if (
+            model in token_usage.COST_EXCLUDED_MODELS
+            or token_usage.resolve_prices(model) is not None
+        ):
             continue
         if not isinstance(mbucket, dict):
             continue
-        for k in TOKEN_FIELDS:
+        for k in token_usage.TOKEN_FIELDS:
             total += _safe_int(mbucket.get(k))
         n += 1
     return total, n
@@ -1442,10 +1435,8 @@ def _short_model_name(model: str) -> str:
     # `claude-3-opus` and rendered as "3 opus", `claude-3-5-sonnet` as
     # "3 5.sonnet". Anything unrecognized falls through to the raw
     # (defanged) string, which is the honest rendering.
-    from mind_meld.token_usage import model_family
-
     parts = model.split("-")
-    if len(parts) >= 3 and parts[0] == "claude" and model_family(model) is not None:
+    if len(parts) >= 3 and parts[0] == "claude" and token_usage.model_family(model) is not None:
         # Family/version both come from the peer-controlled string but
         # are bucketed into known character classes by the split — still
         # defang via safe_str to defend against future schema drift.
@@ -1473,9 +1464,7 @@ def _safe_short(s: str) -> str:
     conservative bucketing is fine. For prose-shaped strings (commit
     subjects, LLM-supplied themes) use ``_safe_prose`` instead — this
     whitelist mangles punctuation."""
-    from mind_meld.safety import safe_str
-
-    cleaned = safe_str(s) if isinstance(s, str) else ""
+    cleaned = safety.safe_str(s) if isinstance(s, str) else ""
     # Whitelist: alphanumerics, dots, dashes, underscores, parens, spaces.
     # Anything else (newlines, backticks, angle brackets, pipes) becomes "_".
     return re.sub(r"[^A-Za-z0-9._\-() ]", "_", cleaned)[:_SHORT_LEN_CAP]
@@ -1520,13 +1509,11 @@ def _safe_prose(s: str) -> str:
 
     Length-capped at ``_PROSE_LEN_CAP`` before sanitization so a
     pathologically long peer subject doesn't burn CPU on the regex."""
-    from mind_meld.safety import safe_str
-
     if not isinstance(s, str):
         return ""
     if len(s) > _PROSE_LEN_CAP:
         s = s[:_PROSE_LEN_CAP]
-    cleaned = safe_str(s)
+    cleaned = safety.safe_str(s)
     return _PROSE_CTRL_RE.sub(" ", cleaned)
 
 
@@ -1543,9 +1530,7 @@ def _safe_repo_url(s: str) -> str:
     (alphanumerics, ``.`` ``-`` ``/`` ``_`` ``~``); anything else
     — newlines, backticks, angle brackets, pipes, square brackets,
     surviving control bytes — becomes ``_``."""
-    from mind_meld.safety import strip_terminal_escapes
-
-    cleaned = strip_terminal_escapes(s) if isinstance(s, str) else ""
+    cleaned = safety.strip_terminal_escapes(s) if isinstance(s, str) else ""
     return re.sub(r"[^A-Za-z0-9._\-/~]", "_", cleaned)
 
 
