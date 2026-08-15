@@ -57,11 +57,26 @@ until `mm push` writes them — without this, the retro is missing the
 running machine's most recent activity. `mm autopull` then collects what
 other Macs have pushed since the last sync.
 
-Both commands are silent, never prompt, and exit gracefully on errors or
-when mm isn't initialized — safe to run unconditionally.
+Use `mm push`, not `mm autopush` (v0.12.16). The quiet autopush path gets
+the 250ms walk budget instead of 500ms AND takes
+`_decide_token_walk_policy`'s cold-cache branch, which passes
+`token_cache_files=None` and drops both `tokens_by_day` and `skills_by_day`
+for every project — so refreshing through it made the retro's own refresh
+the most truncation-prone push in the system, immediately before the retro
+read that snapshot. `mm push` is safe here: `_maybe_prompt_migration`
+short-circuits to a stderr warning on a non-TTY, which is what a skill Bash
+call is.
+
+The two commands do NOT have the same failure contract, so don't treat a
+non-zero exit as fatal here. `mm autopull` exits 0 on every error path,
+including when mm isn't initialized. `mm push` exits 1 on missing config, an
+unavailable passphrase, or a lock held by a concurrent autopush hook — all
+routine, none of them a reason to abandon the retro. Run both, ignore a
+non-zero exit from `mm push`, and continue to Step 2 with whatever state
+exists on disk.
 
 ```bash
-mm autopush
+mm push
 mm autopull
 ```
 

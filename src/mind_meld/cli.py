@@ -258,6 +258,15 @@ class PushResult:
     total_deleted: int = 0
     bytes_transferred: int = 0
     elapsed: float = 0.0
+    # Events-tail degradations for this push, one human-readable phrase each
+    # (v0.12.16). Empty on a healthy push. `autopush` turns a non-empty list
+    # into a `degraded` autorun breadcrumb so `mm status` stops reporting
+    # `success` while the retro pipeline is dead — the events tail is
+    # forensic-only and swallows its own failures, so before this the ONLY
+    # signal was a stderr notice from a command that runs unattended from a
+    # Claude Code hook, i.e. nobody's terminal. Mirrors the `degradations`
+    # list `autopull` has carried since v0.8.1.
+    events_degradations: list[str] = field(default_factory=list)
 
 
 app = typer.Typer(
@@ -3152,8 +3161,21 @@ def _run_events_tail(
     *,
     dry_run: bool,
     quiet: bool,
-) -> None:
+) -> list[str]:
     """Capture per-push fleet-retro events at the HEAD of ``_push_core``.
+
+    Returns a list of human-readable degradation phrases for this push
+    (empty when healthy). ``autopush`` turns a non-empty list into a
+    ``degraded`` autorun breadcrumb (v0.12.16). The stderr notices below
+    stay exactly as they are — they are the interactive signal — but they
+    are NOT the load-bearing one: this function runs from ``mm autopush``,
+    which fires unattended from a Claude Code hook, so its stderr reaches
+    nobody. Before the return value existed, ``mm status`` reported
+    ``success`` no matter how badly this degraded. CHANGELOG v0.12.13
+    records the same lesson from the unpriced-model breadcrumb, which
+    "fired for four unpriced models across the whole v0.12.x line and
+    nobody saw it." Any new degradation detected here MUST be appended to
+    the returned list as well as printed.
 
     See CLAUDE.md "Events tail in _push_core (load-bearing, v0.10.3)" for
     the load-bearing invariants: head-position single-call-site (Codex C4
@@ -3169,11 +3191,12 @@ def _run_events_tail(
     Forensic-only invariant: any failure in this block is swallowed and
     breadcrumbed via ``mm: notice:``. The push proceeds.
     """
+    degradations: list[str] = []
     if dry_run:
-        return
+        return degradations
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
-        return
+        return degradations
     try:
         budget_ms = (
             events.WALK_TIME_BUDGET_AUTOPUSH_MS if quiet else events.WALK_TIME_BUDGET_INTERACTIVE_MS
@@ -3213,6 +3236,18 @@ def _run_events_tail(
             # isinstance) are owned by token_usage.lock_and_get_files.
             mode = "warn" if quiet else "block"
             with token_usage.lock_and_get_files(mode) as files_dict:
+                if files_dict is None:
+                    # Warn-mode contention. `do_token_walk` stays True, so
+                    # the gate below cannot see this — but the user-visible
+                    # outcome is IDENTICAL to the cold-cache case: every
+                    # project ships without tokens_by_day or skills_by_day,
+                    # and latest-snapshot-wins then replaces the prior
+                    # complete data with it. Caught by Codex + the
+                    # maintainability specialist during /review; the
+                    # invariant this function documents says every
+                    # degradation MUST reach the returned list, and this
+                    # one previously reached only a stderr warning.
+                    degradations.append("token cache was locked, so tokens and skills are missing")
                 for claude_dir in claude_paths:
                     for row in events.walk_session_metadata(
                         claude_dir,
@@ -3274,8 +3309,23 @@ def _run_events_tail(
 
         if walk_done > deadline:
             sys.stderr.write("mm: notice: events tail budget exceeded\n")
+            degradations.append(f"events walk exceeded its {budget_ms}ms budget")
+        # `claude_paths` gate is load-bearing: `_decide_token_walk_policy`
+        # ALSO returns False when there is no enabled claude source at all
+        # (`if not claude_paths: return False`). That is a config shape, not
+        # a degradation — a gstack-only or codex-only machine has no tokens
+        # or skills to collect, and reporting it would pin `mm status` at
+        # `degraded` forever while blaming a cache that isn't the cause.
+        # Reproduced during /review before this guard existed. The remaining
+        # False causes (cold cache on autopush, cache stat/parse OSError,
+        # inline warm raised) all mean the same thing to the user: this
+        # push published no token or skill data.
+        if claude_paths and not do_token_walk:
+            degradations.append("token walk skipped, so tokens and skills are missing")
     except Exception as e:
         sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
+        degradations.append(f"events tail failed ({type(e).__name__})")
+    return degradations
 
 
 def _run_events_backfill(
@@ -3616,7 +3666,7 @@ def _push_core(
     # the cursor + git/sessions snapshots, then re-walk mm-events to fold
     # the just-written event row into local_manifest. dry_run still gates
     # the tail's own writes; the re-walk reads existing on-disk state.
-    _run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
+    events_degradations = _run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
@@ -3732,6 +3782,7 @@ def _push_core(
         total_deleted=total_deleted,
         bytes_transferred=total_bytes,
         elapsed=elapsed,
+        events_degradations=events_degradations,
     )
 
     if not quiet:
@@ -4904,9 +4955,21 @@ def status(
             ts = crumb.get("timestamp", "?")
             verb = crumb.get("verb", "?")
             outcome = crumb.get("outcome", "?")
+            # safe_str the peer-reachable fields before they hit a Rich
+            # console, which interprets markup and passes escapes through.
+            # `detail` is fed raw `str(e)` by the `failed` / `config-error` /
+            # `crypto-error` breadcrumb writers, and those exceptions can
+            # carry peer-derived text (device names, source names, rel_paths
+            # from a peer manifest). This is the render site that MATTERS:
+            # `mm status` is the command the v0.12.16 degradation signal is
+            # designed to reach, and it runs far more often than `mm diag`.
             detail = crumb.get("detail")
-            outcome_str = f"{outcome}: {detail}" if detail else outcome
-            console.print(f"  Last auto-{verb}: {ts} ({outcome_str})")
+            outcome_str = (
+                f"{safe_str(str(outcome))}: {safe_str(str(detail))}"
+                if detail
+                else safe_str(str(outcome))
+            )
+            console.print(f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})")
         except (OSError, ValueError):
             pass  # corrupt breadcrumb is not worth surfacing an error for
     if fetch.status == "missing":
@@ -5253,7 +5316,13 @@ def diag(
         console.print(f"  outcome:    {br.get('outcome')}")
         console.print(f"  timestamp:  {br.get('timestamp')}")
         if br.get("detail"):
-            console.print(f"  detail:     {br.get('detail')}")
+            # safe_str at the render site covers every producer at once:
+            # sibling `_write_autorun_breadcrumb(verb, "failed"/"config-error",
+            # str(e))` calls can carry peer-derived text (device names, source
+            # names, rel_paths from a peer manifest) into this field, and Rich
+            # interprets markup in an f-string. The v0.12.16 degradation
+            # strings are all literals, but the field is shared.
+            console.print(f"  detail:     {safe_str(str(br.get('detail')))}")
 
 
 # ── devices ───────────────────────────────────────────────────────────
@@ -8633,7 +8702,20 @@ def autopush() -> None:
             total = result.total_new + result.total_modified + result.total_deleted
             print(f"mm: pushed {total} files ({', '.join(parts)})")
 
-        _write_autorun_breadcrumb("push", "success")
+        # Persist events-tail degradation the same way autopull persists its
+        # own (see the `degradations` list in `autopull` below). The tail is
+        # forensic-only and swallows its failures behind a `mm: notice:` line,
+        # but autopush runs unattended from a Claude Code hook — that stderr
+        # reaches nobody, so pre-v0.12.16 the breadcrumb said `success` while
+        # the retro pipeline was dead, and `mm status` repeated it. Same
+        # argument CLAUDE.md already makes for the `no-sources` breadcrumb:
+        # without this, `mm status` only ever sees `success` and monitoring
+        # built on top of it never catches the wedge.
+        events_degradations = result.events_degradations if result else []
+        if events_degradations:
+            _write_autorun_breadcrumb("push", "degraded", "; ".join(events_degradations))
+        else:
+            _write_autorun_breadcrumb("push", "success")
 
         # Seam 2 — auto-upgrade nudge emission at the TAIL (mirrors autopull).
         upgrade.emit_nudge_if_due(setup.config)

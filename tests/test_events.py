@@ -374,6 +374,44 @@ class TestWalkGitProjects:
         assert out[0]["projects"] == []
         assert len(out[0]["skipped"]) >= 1
 
+    def test_budget_abort_emits_each_completed_repo_exactly_once(self, tmp_path, monkeypatch):
+        """v0.12.16 T4: on budget abort, a repo that finished before the
+        timeout must appear ONCE.
+
+        Pre-fix, block 1 drained `as_completed` and appended each result,
+        then the `FuturesTimeoutError` handler iterated ALL of
+        `futures.items()` and re-appended every `fut.done()` — so every
+        completed repo's full commit list was serialised twice into the
+        git-snapshot row, then gzipped, encrypted, uploaded, and replicated
+        to every peer. Measured pre-fix with 4 roots / 2 slow: 4 rows,
+        2 unique. The card survived it only because `aggregate_git` dedups
+        on (canonical_remote, sha).
+
+        `test_budget_abort_marks_pending_as_skipped` above cannot catch it:
+        it makes ALL repos slow, so `projects == []` and there is nothing to
+        double-collect. This one needs a MIXED fast/slow set.
+        """
+
+        def _mixed_walk(root, since_iso, timeout_ms):
+            if root.name in ("slow0", "slow1"):
+                time.sleep(1.5)
+            return {"remote": "", "local_path": str(root), "commits": []}, None
+
+        monkeypatch.setattr(events, "_walk_one_repo", _mixed_walk)
+        roots = []
+        for name in ("fast0", "fast1", "slow0", "slow1"):
+            r = tmp_path / name
+            r.mkdir()
+            roots.append(r)
+
+        out = events.walk_git_projects(roots, datetime.now(timezone.utc), 300)
+        paths = [p["local_path"] for p in out[0]["projects"]]
+        assert len(paths) == len(set(paths)), f"repos double-collected: {sorted(paths)}"
+        assert {Path(p).name for p in paths} == {"fast0", "fast1"}
+        # budget_abort accounting must survive the dedup — the two except
+        # sites are NOT interchangeable and only the pump handler marks it.
+        assert {s["reason"] for s in out[0]["skipped"]} == {"budget_abort"}
+
     def test_per_repo_timeout_formula(self, monkeypatch):
         """A2: per-repo timeout = max(200, (budget * 8) // n_repos), cap 2000.
         Verify by inspecting what gets passed into _walk_one_repo."""
@@ -546,6 +584,151 @@ class TestWalkSessionMetadata:
         # No crash, ephemeral derived from the encoded fallback name.
         assert out[0]["projects"][0]["ephemeral"] is False
 
+    def test_no_cwd_anywhere_scans_the_project_exactly_once(self, tmp_path, monkeypatch):
+        """v0.12.16 T1: the cwd read is hoisted OUT of the per-file loop.
+
+        Pre-fix, `_scan_one_project` called `_read_cwd_from_latest_jsonl`
+        inside the per-file loop guarded by `if cwd is None`. The helper
+        takes the PROJECT dir, so when no jsonl carries a `cwd` the guard
+        never flipped and the helper rescanned the whole directory once per
+        jsonl: N calls x N files. Measured 400 opens for 20 files, and 13.2s
+        for a single 300-file project against a 250ms budget.
+
+        `test_pathological_session_walk_no_cwd_anywhere` above cannot catch
+        this: it uses ONE jsonl, so N=1 and the quadratic collapses.
+        """
+        proj = tmp_path / "projects" / "-tmp-no-cwd-many"
+        proj.mkdir(parents=True)
+        body = "\n".join(json.dumps({"type": "user"}) for _ in range(50)) + "\n"
+        for i in range(20):
+            (proj / f"s{i}.jsonl").write_text(body)
+
+        calls: list[Path] = []
+        real = events._read_cwd_from_latest_jsonl
+        monkeypatch.setattr(
+            events,
+            "_read_cwd_from_latest_jsonl",
+            lambda d: (calls.append(d), real(d))[1],
+        )
+        out = events.walk_session_metadata(
+            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
+        )
+        assert len(calls) == 1, f"cwd scanned {len(calls)}x for one project (pre-fix: 20)"
+        assert out[0]["projects"][0]["sessions"] == 20
+
+    def test_bad_utf8_before_cwd_does_not_kill_the_walk(self, tmp_path):
+        """v0.12.16 T2: one invalid UTF-8 byte must cost its own line, not
+        the events tail.
+
+        Pre-fix `_read_cwd_from_latest_jsonl` read text-mode and caught only
+        OSError, so UnicodeDecodeError (a ValueError) escaped through
+        `_scan_one_project` and `walk_session_metadata` into
+        `_run_events_tail`'s wrapper — the whole tail was lost on every push.
+
+        Bad byte FIRST, valid `cwd` line SECOND. The reverse ordering passes
+        trivially post-fix (the helper returns before reaching the bad byte)
+        and would prove only "didn't crash", not per-line tolerance. Note
+        text mode decoded in ~8KB chunks, so even a `cwd` on line 1 did not
+        protect against a bad byte a few lines later.
+        """
+        proj = tmp_path / "projects" / "-tmp-badbyte"
+        proj.mkdir(parents=True)
+        (proj / "session.jsonl").write_bytes(
+            b'{"type":"user","note":"\xe9 invalid utf-8"}\n'
+            + json.dumps({"cwd": "/tmp/real/path", "type": "user"}).encode()
+            + b"\n"
+        )
+        # Assert the reader CONTINUED PAST the bad byte and found the cwd.
+        # "no exception + 1 project" is not enough: mutation-tested during
+        # /review by swapping the per-line `continue` for a per-file `break`
+        # (i.e. abandon the file on first bad byte) — all 84 events tests
+        # still passed. Per-line tolerance is the contract; pin the value.
+        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/real/path", (
+            "reader abandoned the file on the bad byte instead of skipping one line"
+        )
+        out = events.walk_session_metadata(
+            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
+        )
+        assert len(out[0]["projects"]) == 1
+        assert out[0]["projects"][0]["sessions"] == 1
+
+    def test_bad_utf8_project_does_not_cost_the_other_projects(self, tmp_path):
+        """A corrupt project must not take healthy siblings down with it.
+
+        Pre-fix this raised out of the whole walk, so EVERY project's row
+        was lost — not just the corrupt one's.
+        """
+        bad = tmp_path / "projects" / "-tmp-bad"
+        bad.mkdir(parents=True)
+        (bad / "s.jsonl").write_bytes(b'{"type":"user","x":"\xff\xfe"}\n')
+        good = tmp_path / "projects" / "-tmp-good"
+        good.mkdir(parents=True)
+        (good / "s.jsonl").write_text(json.dumps({"cwd": "/tmp/good", "type": "user"}) + "\n")
+
+        out = events.walk_session_metadata(
+            tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
+        )
+        names = {p["claude_dir"] for p in out[0]["projects"]}
+        assert names == {"-tmp-bad", "-tmp-good"}
+
+    def test_oversize_line_is_bounded_not_slurped(self, tmp_path, capsys):
+        """The binary port must route through `token_usage.iter_bounded_lines`
+        so a pathological single line is capped at MAX_JSONL_LINE_BYTES
+        rather than pulled whole into memory. A naive `open(path, "rb")` +
+        `for line in fp:` port would let Python extend its buffer to
+        newline-or-EOF — the exact OOM that primitive exists to prevent on
+        this corpus.
+
+        Asserting only "the cwd is still found" would be a pin that proves
+        NOTHING: the pre-fix text-mode reader also slurped the giant line,
+        failed json.loads on it, and moved on to find the cwd. Verified —
+        that weaker assertion passed against pre-fix code. The load-bearing
+        observable is the oversize NOTICE, which only the bounded reader
+        emits, and which also names this call site rather than "token
+        walker". `_WARNED_OVERSIZE_PATHS` is reset per-test by conftest's
+        `_isolate_token_cache`, so the warn-once state can't leak in.
+        """
+        from mind_meld import token_usage
+
+        proj = tmp_path / "projects" / "-tmp-oversize"
+        proj.mkdir(parents=True)
+        cap = token_usage.MAX_JSONL_LINE_BYTES
+        (proj / "s.jsonl").write_bytes(
+            b'{"junk":"'
+            + (b"x" * (cap + 1024))
+            + b'"}\n'
+            + json.dumps({"cwd": "/tmp/after/oversize"}).encode()
+            + b"\n"
+        )
+        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/after/oversize"
+        err = capsys.readouterr().err
+        assert "skipping oversize line" in err, "bounded reader not in the cwd read path"
+        # The notice is deduped by PATH only, so in production the label is
+        # whichever site reached the file first. Here conftest's
+        # `_isolate_token_cache` resets `_WARNED_OVERSIZE_PATHS` per test and
+        # only this reader runs, so the label is deterministic.
+        assert "session cwd reader" in err, "oversize notice misattributes the call site"
+
+    def test_unterminated_final_line_is_still_read(self, tmp_path):
+        """v0.12.16 REGRESSION PIN: a complete record with no trailing
+        newline must still be parsed by this one-shot reader.
+
+        `iter_bounded_lines` defaults to treating a trailing chunk with no
+        newline as a PARTIAL WRITE and discarding it — correct for
+        `walk_jsonl_segment`, which persists a resume offset and re-reads it
+        next push. This reader has no next push. Porting it to the shared
+        primitive without `yield_final_partial=True` made it return None for
+        a session whose only line wasn't newline-terminated yet, where the
+        old text-mode reader returned the cwd. Caught by Codex adversarial
+        review during /review, after the first fix had already landed.
+        """
+        proj = tmp_path / "projects" / "-tmp-unterminated"
+        proj.mkdir(parents=True)
+        (proj / "session.jsonl").write_bytes(
+            json.dumps({"cwd": "/tmp/mid/write", "type": "user"}).encode()  # no \n
+        )
+        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/mid/write"
+
     def test_source_root_field_emitted(self, tmp_path):
         """Group 8 hotfix #4: every emitted SessionMetadata carries a
         ``source_root`` field equal to the str of the claude_dir argument
@@ -571,6 +754,91 @@ class TestWalkSessionMetadata:
 
 
 class TestLastPushTs:
+    def test_bad_utf8_preserves_the_cursor(self, tmp_path):
+        """v0.12.16 T3: a bad byte must cost its line, NOT the cursor.
+
+        Asserting "doesn't raise" is not enough here and would be a pin that
+        proves nothing: a bare `return None` also doesn't raise, and it
+        silently rewinds the cursor to now - INITIAL_CURSOR_LOOKBACK_DAYS,
+        making every subsequent push re-walk 30 days of git history forever.
+        So assert the timestamp comes BACK.
+
+        Bad byte first, valid mm-push line second. These files live under the
+        synced mm-events source, so their bytes can arrive via the pull apply
+        path and `merge.merge_jsonl`, not only from this device's writer.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        day = datetime.now(timezone.utc).date().isoformat()
+        (events_dir / f"dev-a-{day}.jsonl").write_bytes(
+            b'{"type":"mm-push","note":"\xe9 invalid","ts":"2020-01-01T00:00:00+00:00"}\n'
+            + json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
+            + b"\n"
+        )
+        ts = events.last_push_ts(events_dir, "dev-a")
+        assert ts == datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc), (
+            "bad byte rewound the cursor instead of skipping one line"
+        )
+
+    def test_unterminated_final_line_preserves_the_cursor(self, tmp_path):
+        """Same one-shot contract as the cwd reader, and the blast radius
+        here is worse.
+
+        A torn peer write or a `merge_jsonl` result can leave the final
+        mm-push record without a trailing newline. With the shared reader's
+        default (`yield_final_partial=False`) that record is discarded,
+        `_last_mm_push_ts` returns None, and the cursor rewinds to
+        `now - INITIAL_CURSOR_LOOKBACK_DAYS` — re-walking 30 days of git
+        history on every subsequent push, forever. The cwd reader got a
+        regression pin for this after Codex caught it; the cursor reader
+        shipped with the same flag and no test, and flipping it to False
+        left all 1795 tests green.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        day = datetime.now(timezone.utc).date().isoformat()
+        (events_dir / f"dev-a-{day}.jsonl").write_bytes(
+            json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
+        )  # no trailing newline
+        assert events.last_push_ts(events_dir, "dev-a") == datetime(
+            2026, 8, 14, 12, 0, tzinfo=timezone.utc
+        ), "unterminated final record dropped; cursor silently rewound 30 days"
+
+    def test_oversize_line_is_bounded(self, tmp_path, monkeypatch, capsys):
+        """The cursor reader goes through `iter_bounded_lines` too.
+
+        These files live under the SYNCED mm-events source, so their bytes
+        can arrive from a peer via the pull apply path. A bare
+        `for raw in f` would let one oversized line be slurped whole on
+        every push.
+
+        Assert the NOTICE, not just the returned timestamp. The unbounded
+        reader also returns the right timestamp — it slurps the giant line,
+        fails `json.loads` on it, and moves on — so a value-only assertion
+        passes either way. Verified: that weaker form passed against the
+        unbounded implementation. The notice is emitted only from the
+        bounded primitive, so it is the observable that proves the bound.
+        """
+        from mind_meld import token_usage
+
+        monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 512)
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        day = datetime.now(timezone.utc).date().isoformat()
+        (events_dir / f"dev-a-{day}.jsonl").write_bytes(
+            b'{"junk":"'
+            + (b"x" * 4096)
+            + b'"}\n'
+            + json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
+            + b"\n"
+        )
+        assert events.last_push_ts(events_dir, "dev-a") == datetime(
+            2026, 8, 14, 12, 0, tzinfo=timezone.utc
+        )
+        err = capsys.readouterr().err
+        assert "skipping oversize line" in err, "cursor reader is not bounded"
+        assert "events cursor reader" in err
+
     def test_first_run_returns_now_minus_30d(self, tmp_path):
         ts = events.last_push_ts(tmp_path / "events", "dev-a")
         now = datetime.now(timezone.utc)

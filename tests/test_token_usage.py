@@ -823,6 +823,37 @@ class TestIsCacheCold:
         tu.CACHE_PATH.write_text("garbage")
         assert tu.is_cache_cold() is True
 
+    def test_invalid_utf8_treated_as_cold_not_raised(self) -> None:
+        """v0.12.16 T3: a bad byte in the cache must report cold, not raise.
+
+        Pre-fix `is_cache_cold` used `read_text(encoding="utf-8")` guarded
+        only by OSError, so UnicodeDecodeError escaped. This runs on the
+        events-tail path via `_decide_token_walk_policy`, so it killed the
+        whole tail exactly like the session readers did.
+
+        The `except UnicodeDecodeError` on the json.loads below it looked
+        like the guard but was DEAD — json.loads on a `str` cannot raise it.
+        Feeding bytes makes ValueError cover both cases for real.
+        """
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_bytes(
+            b'{"version": 1, "files": {"a": {"size": 1}}, "junk": "\xff\xfe"}' + b" " * 300
+        )
+        assert tu.is_cache_cold() is True
+
+    def test_bom_prefixed_cache_treated_as_cold(self) -> None:
+        """`is_cache_cold` must agree with the reader that actually loads
+        this file. `json.loads` on BYTES accepts a utf-8 BOM (and utf-16/32);
+        `lockedjson` decodes strict utf-8 and rejects them as corrupt. Pre-fix
+        the two disagreed: a BOM cache reported WARM, so the inline warm was
+        skipped, then the real read reset it as corrupt — no token data AND
+        no warm cache. Caught by Codex adversarial review during /review.
+        """
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": tu.CACHE_VERSION, "files": {"/a/b.jsonl": {"size": 1}}}
+        tu.CACHE_PATH.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode() + b" " * 200)
+        assert tu.is_cache_cold() is True
+
     def test_populated_cache_treated_as_warm(self) -> None:
         """A realistically-shaped populated cache exceeds the
         64-byte threshold AND has the right version prefix."""
@@ -1664,6 +1695,20 @@ class TestIncrementalResume:
         by_day, _skills = tu.get_or_compute(path, cache)
         assert by_day["2026-05-01"]["input"] == 300
         assert by_day == tu.walk_jsonl_buckets(path)[0]
+
+    def test_oversize_notice_default_label_is_the_token_walker(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """`iter_bounded_lines` grew a `label` kwarg in v0.12.16 so
+        events.py's cwd and cursor readers could name themselves in the
+        oversize notice. Those two pass an explicit label and are pinned;
+        the DEFAULT was not, so a regression to a wrong or empty default
+        was invisible."""
+        monkeypatch.setattr(tu, "MAX_JSONL_LINE_BYTES", 512)
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(b'{"junk":"' + (b"x" * 4000) + b'"}\n')
+        list(tu.walk_jsonl_buckets(path))
+        assert "token walker skipping oversize line" in capsys.readouterr().err
 
     def test_eof_inside_oversize_line_does_not_advance(self, tmp_path: Path, monkeypatch) -> None:
         """Claude Code mid-write of a huge line: `_drain_to_newline` hits

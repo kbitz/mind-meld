@@ -713,7 +713,7 @@ def walk_jsonl_segment(
         with open(path, "rb") as fp:
             if start_offset:
                 fp.seek(start_offset)
-            for raw, end in _iter_bounded_lines(fp, path_str, start_offset):
+            for raw, end in iter_bounded_lines(fp, path_str, start_offset):
                 offset = end
                 stripped = raw.strip()
                 if not stripped:
@@ -880,11 +880,42 @@ def _trim_skills_by_day(skills_by_day: SkillBuckets, max_days: int) -> SkillBuck
     return {k: pruned[k] for k in keep_keys}
 
 
-def _iter_bounded_lines(fp, path_str: str, start_offset: int) -> Iterable[tuple[bytes, int]]:
+def iter_bounded_lines(
+    fp,
+    path_str: str,
+    start_offset: int,
+    *,
+    label: str = "token walker",
+    yield_final_partial: bool = False,
+) -> Iterable[tuple[bytes, int]]:
     """Yield ``(line_bytes, end_offset)`` for each COMPLETE line in the
     binary stream ``fp``, capped at ``MAX_JSONL_LINE_BYTES`` per line.
     A skipped oversize line is yielded as ``b""`` so the caller's offset
     still advances past it.
+
+    PUBLIC (v0.12.16). This is the canonical bounded reader for the Claude
+    Code session-jsonl corpus and has consumers outside this module:
+    ``events._read_cwd_from_latest_jsonl`` and ``events._last_mm_push_ts``.
+
+    ``label`` names a caller in the oversize notice. Note the notice is
+    deduped by PATH ONLY (``_WARNED_OVERSIZE_PATHS``), so when two call
+    sites read the same file the label shown is whichever one reached it
+    first in this process — the label makes the message *plausible* from
+    either site, not authoritative about which one hit it. Do NOT hardcode
+    "token walker" back into the string.
+
+    ``yield_final_partial`` (v0.12.16) governs a trailing chunk with no
+    newline. Default False is the RESUMABLE contract: such a chunk is a
+    partial write, so it is neither yielded nor counted toward the offset
+    and the next walk re-reads it once it settles. That is load-bearing for
+    ``walk_jsonl_segment`` and must not change. **One-shot readers must
+    pass True.** They have no "next walk" — a complete-but-unterminated
+    final record is simply data they would silently drop. Regression caught
+    by Codex adversarial review: porting the cwd reader to this primitive
+    without the flag made ``_read_cwd_from_latest_jsonl`` return None for a
+    session whose only line had not been newline-terminated yet, where the
+    old text-mode reader returned the cwd. The yielded partial still
+    advances ``pos``, but a one-shot reader has no resume point to corrupt.
 
     ``end_offset`` is an absolute byte offset one past the line's
     terminating newline, so the caller can persist a resume point.
@@ -915,11 +946,16 @@ def _iter_bounded_lines(fp, path_str: str, start_offset: int) -> Iterable[tuple[
             yield chunk, pos
             continue
         if len(chunk) < cap:
-            # Short read with no newline == EOF mid-line. Partial write;
-            # stop without advancing past it.
+            # Short read with no newline == EOF mid-line.
+            if yield_final_partial:
+                # One-shot reader: no next walk, so an unterminated final
+                # record is data, not a partial write to re-read later.
+                pos += len(chunk)
+                yield chunk, pos
+            # Resumable reader: partial write. Stop without advancing past it.
             return
         if path_str not in _WARNED_OVERSIZE_PATHS:
-            sys.stderr.write(f"mm: notice: token walker skipping oversize line in {path_str}\n")
+            sys.stderr.write(f"mm: notice: {label} skipping oversize line in {path_str}\n")
             _WARNED_OVERSIZE_PATHS.add(path_str)
         drained = _drain_to_newline(fp)
         if drained is None:
@@ -1452,12 +1488,29 @@ def is_cache_cold() -> bool:
     if st.st_size < _MIN_WARM_CACHE_BYTES:
         return True
     try:
-        raw = CACHE_PATH.read_text(encoding="utf-8")
+        # BINARY read (v0.12.16). `read_text` decoded eagerly and was guarded
+        # only by OSError, so one bad byte in the cache raised
+        # UnicodeDecodeError out of here — and this runs on the events-tail
+        # path via `_decide_token_walk_policy`, so it killed the tail exactly
+        # like the session readers did. The `except UnicodeDecodeError` on the
+        # json.loads below used to sit here looking like the guard; it was
+        # DEAD (json.loads on a `str` cannot raise it). Feeding bytes to
+        # json.loads makes that arm live: ValueError now covers both
+        # malformed JSON and invalid utf-8.
+        raw = CACHE_PATH.read_bytes()
     except OSError:
         return True
     try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        # Decode STRICTLY as utf-8 before parsing, rather than handing bytes
+        # to json.loads. json.loads on bytes also accepts a utf-8 BOM and
+        # utf-16/32, but `lockedjson` — the reader that actually loads this
+        # cache — decodes strict utf-8 and would reject those as corrupt.
+        # Pre-fix the two disagreed: a BOM-prefixed cache reported WARM here,
+        # so the inline warm was skipped, and then the real read reset it as
+        # corrupt — the walk got no token data and the cache never warmed.
+        # UnicodeDecodeError is a ValueError, so one guard covers both.
+        parsed = json.loads(raw.decode("utf-8"))
+    except ValueError:
         return True
     if not isinstance(parsed, dict) or parsed.get("version") != CACHE_VERSION:
         return True
@@ -1626,6 +1679,7 @@ __all__ = [
     "head_fingerprint",
     "head_probe_len",
     "is_cache_cold",
+    "iter_bounded_lines",
     "lock_and_get_files",
     "merge_by_model",
     "merge_skill_days",

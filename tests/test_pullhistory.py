@@ -188,6 +188,37 @@ class TestRotation:
 
 
 class TestReadRecords:
+    def test_invalid_utf8_line_is_skipped_not_raised(self):
+        """v0.12.16 T3: `_yield_lines` read text-mode guarded only by
+        OSError, so one invalid UTF-8 byte raised UnicodeDecodeError out of
+        the generator into the caller's frame — inconsistent with the
+        forensic-reader stance every other branch of this function takes.
+
+        Bad byte in the MIDDLE: the rows on both sides must survive, which
+        also proves the tolerance is per-line rather than a bail-out.
+        """
+        live = _live_path()
+        live.parent.mkdir(parents=True, exist_ok=True)
+
+        def _rec(rel_path: str) -> bytes:
+            return (
+                json.dumps(
+                    {
+                        "ts": "2026-08-14T00:00:00+00:00",
+                        "verb": "pull",
+                        "device": "dev-a",
+                        "source": "claude",
+                        "rel_path": rel_path,
+                        "action": "written",
+                    }
+                ).encode()
+                + b"\n"
+            )
+
+        live.write_bytes(_rec("before.md") + b'{"rel_path":"\xe9bad"}\n' + _rec("after.md"))
+        recs = list(pullhistory.read_records())
+        assert [r["rel_path"] for r in recs] == ["before.md", "after.md"]
+
     def test_read_returns_records_in_file_order(self):
         for i in range(3):
             pullhistory.append(

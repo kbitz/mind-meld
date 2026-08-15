@@ -122,7 +122,8 @@ def _isolate_token_cache(monkeypatch, tmp_path) -> None:
     that triggers a breadcrumb doesn't silently mute the same breadcrumb
     in a later test:
       - ``_WARNED_UNKNOWN_MODELS`` (estimate_cost path)
-      - ``_WARNED_OVERSIZE_PATHS`` (_iter_bounded_lines path)
+      - ``_WARNED_OVERSIZE_PATHS`` (iter_bounded_lines path; shared by the
+        token walker and events.py's cwd + cursor readers)
 
     Pattern mirrors ``_isolate_identity_cache``: lazy-import inside the
     fixture body, single setattr per state.
