@@ -572,9 +572,7 @@ def aggregate_git(
                 continue
             remote_raw = proj.get("remote")
             remote = (
-                mm_events.canonicalize_remote_url(remote_raw)
-                if isinstance(remote_raw, str)
-                else ""
+                mm_events.canonicalize_remote_url(remote_raw) if isinstance(remote_raw, str) else ""
             )
             commits = proj.get("commits")
             if not isinstance(commits, list):
