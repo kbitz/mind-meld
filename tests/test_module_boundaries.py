@@ -101,11 +101,59 @@ def _imports_cli(path: Path) -> list[tuple[int, str]]:
                     hits.append((node.lineno, f"import {a.name}"))
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
+            if node.level:
+                # RELATIVE import. Every file here lives directly in
+                # src/mind_meld/, so `from .cli import x` has module == "cli"
+                # and `from . import cli` has module == None with "cli" in
+                # names. Both re-create the exact cycle, and both were
+                # invisible before this branch — node.level was never read.
+                if mod == "cli" or mod.startswith("cli."):
+                    hits.append((node.lineno, f"from {'.' * node.level}{mod} import ..."))
+                elif not mod and any(a.name == "cli" for a in node.names):
+                    hits.append((node.lineno, f"from {'.' * node.level} import cli"))
+                continue
             if mod == "mind_meld.cli" or mod.startswith("mind_meld.cli."):
                 hits.append((node.lineno, f"from {mod} import ..."))
             elif mod == "mind_meld" and any(a.name == "cli" for a in node.names):
                 hits.append((node.lineno, "from mind_meld import cli"))
     return hits
+
+
+# Every import shape that re-creates the cycle, plus controls that must NOT
+# trip. Keeping this as data makes the detector's coverage auditable, and
+# `test_cycle_detector_is_not_vacuous` proves each row still behaves.
+_CYCLE_SHAPES = [
+    ("from mind_meld.cli import _error\n", True),
+    ("from mind_meld.cli.sub import x\n", True),
+    ("import mind_meld.cli\n", True),
+    ("import mind_meld.cli as c\n", True),
+    ("from mind_meld import cli\n", True),
+    ("from mind_meld import cli as c\n", True),
+    ("from .cli import _error\n", True),
+    ("from . import cli\n", True),
+    ("def f():\n    from mind_meld import cli\n", True),
+    ("def f():\n    from .cli import _error\n", True),
+    ("def f():\n    import mind_meld.cli\n", True),
+    # Controls: siblings and leaves are fine.
+    ("from mind_meld.safety import safe_str\n", False),
+    ("from mind_meld import resolveflow\n", False),
+    ("from .safety import safe_str\n", False),
+    ("from mind_meld.client import x\n", False),
+]
+
+
+@pytest.mark.parametrize("source,should_flag", _CYCLE_SHAPES)
+def test_cycle_detector_is_not_vacuous(source: str, should_flag: bool, tmp_path: Path) -> None:
+    """The detector flags every cycle shape and no sibling import.
+
+    A structural gate that cannot fail is worse than no gate: it reads as
+    coverage. Relative-import and function-local forms are in here because both
+    slipped past the first version of this check.
+    """
+    probe = tmp_path / "probe.py"
+    probe.write_text(source, encoding="utf-8")
+    hits = _imports_cli(probe)
+    assert bool(hits) is should_flag, f"{source!r} -> {hits}"
 
 
 @pytest.mark.parametrize("mod", EXTRACTED)
@@ -230,11 +278,51 @@ def test_real_home_guard_fires(tmp_path: Path) -> None:
     """
     from mind_meld import skill_link
 
-    with pytest.raises(AssertionError, match="real skill installer"):
-        skill_link._refuse_real_home_under_pytest(Path("~/.claude/skills/retro-fleet").expanduser())
+    for real in (
+        Path("~/.claude/skills/retro-fleet").expanduser(),
+        Path("~/.codex/skills/retro-fleet").expanduser(),
+        Path("~/.config/opencode/skills/retro-fleet").expanduser(),
+        Path("~/.config/mind-meld").expanduser(),
+    ):
+        assert skill_link._is_real_agent_dir_under_pytest(real), real
 
-    # A redirected target is fine -- the guard is about location, not shape.
-    skill_link._refuse_real_home_under_pytest(tmp_path / "agents" / "claude" / "retro-fleet")
+    # A redirected target is fine -- the guard matches the THREE KNOWN AGENT
+    # PATHS, not "anything under $HOME". A developer whose TMPDIR lives under
+    # $HOME must not see every skill-link test fail with a message accusing the
+    # test of being unisolated when it is correctly using tmp_path.
+    assert not skill_link._is_real_agent_dir_under_pytest(
+        tmp_path / "agents" / "claude" / "skills" / "retro-fleet"
+    )
+    assert not skill_link._is_real_agent_dir_under_pytest(
+        Path("~/some-unrelated-dir/skills").expanduser()
+    )
+
+
+def test_real_home_guard_warns_instead_of_raising(capsys) -> None:
+    """The guard must not raise: it sits on the `mm push` path.
+
+    `_push_core` calls `_ensure_retro_skill_links` with no try/except, so an
+    AssertionError here would abort a real push for anyone whose environment
+    carries PYTEST_CURRENT_TEST (a pytest-driven harness, a hook fired from
+    inside a test run, an inherited subprocess env). The precedent it follows,
+    `crypto.store_passphrase_in_keyring`, returns False rather than raising.
+    """
+    from mind_meld import skill_link
+
+    skill_link._refuse_real_home_under_pytest(Path("~/.claude/skills/retro-fleet").expanduser())
+    assert "refusing to touch" in capsys.readouterr().err
+
+
+def test_installer_skips_the_write_when_the_guard_trips(monkeypatch, tmp_path: Path) -> None:
+    """Warning is not enough -- the write itself must not happen."""
+    from mind_meld import skill_link
+
+    monkeypatch.setattr(skill_link, "_is_real_agent_dir_under_pytest", lambda _t: True)
+    target = tmp_path / "would-be-written" / "skills" / "retro-fleet"
+    skill_link._ensure_retro_skill_link_at(
+        target, success_marker="s", conflict_marker="c", dry_run=False
+    )
+    assert not target.exists()
 
 
 def test_skill_roots_are_redirected_for_this_test() -> None:

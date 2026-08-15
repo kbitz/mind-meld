@@ -4,7 +4,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ## [0.12.21] - 2026-08-15
 
-**`cli.py` is no longer one 8,840-line file that serialized every plan — it is 6,653 lines plus six focused modules, and the test suite has stopped writing into your real `~/.claude`.** No user-visible change to any command, flag, output, exit code, or on-disk format. One hidden command (`mm conflict-log-backfill`) is gone.
+**`cli.py` is no longer one 8,840-line file that serialized every plan — it is 6,692 lines plus six focused modules, and the test suite has stopped writing into your real `~/.claude`.** The decomposition itself changes no command, flag, output, exit code, or on-disk format. Three deliberate user-visible changes ship alongside it: one hidden command (`mm conflict-log-backfill`) is gone, `mm status` gained a staleness marker, and `pytest` stopped writing your real config dirs.
 
 ### Changed
 
@@ -19,6 +19,8 @@ All notable changes to Mind Meld will be documented in this file.
 - **`pytest` no longer mutates your real agent config directories.** 67 tests were creating symlinks and marker files under the developer's actual `~/.claude/skills`, `~/.codex/skills`, and `~/.config/opencode/skills`. `conftest.py` had nine autouse isolation fixtures and none covered the skill installer; only `test_skill_link.py` isolated `HOME`, via its own local fixture. This is a pre-existing leak the extraction made visible. Closed with a `SKILL_ROOTS` indirection, a new autouse `_isolate_skill_links` fixture, and a `PYTEST_CURRENT_TEST` guard that raises if a target ever resolves under the real `HOME` — the same shape as the existing guard on `crypto.store_passphrase_in_keyring`. Deliberately not a suite-wide `HOME` move: that degrades `importlib.metadata.version()` to `0.0.0+dev` and trips the mixed-fleet version guard.
 
 - **`mm status` now marks a stale autorun breadcrumb.** The breadcrumb is written from inside the command, so a failure before typer's runner writes nothing at all and `mm status` reported the last `success` indefinitely. Past 48 hours it now says `stale — no autorun in Nh`.
+
+- **`pytest` writes nothing outside `tmp_path` for the manifest sidecar or the lockfile either.** `_redirect_sidecar` / `_redirect_lock` were opt-in helpers most tests remembered to call; **47 did not**, leaving the real `~/.config/mind-meld/last-push.json` holding fixture values. Two consequences on the maintainer's own machine: `_recover_prior_manifest` reads that sidecar when a remote manifest goes corrupt (device-id scoping rejects the fixture value rather than trusting it, so no data loss — but recovery silently degrades to the peer fallback, which does not preserve this device's fresh local deletions), and the new `mm status` staleness marker reads `last-autorun.json`, which the suite rewrote to "now" — the suite forging the exact signal the feature exists to produce. Both are now autouse. Verified by diffing the real config dir's mtimes and checksums across a full run.
 
 ### Removed
 

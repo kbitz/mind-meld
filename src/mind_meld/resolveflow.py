@@ -211,8 +211,16 @@ def _migrate_pre_inversion_conflict(path: Path) -> Path:
     try:
         path.rename(new_path)
     except OSError as e:
+        # safe_str both: the sidecar filename derives from a peer-supplied
+        # manifest rel_path stem, and manifest._validate_rel_path rejects only
+        # NUL / absolute / ".." / drive-letter — ESC passes through. Without
+        # this, a peer holding the storage passphrase can land an OSC-52 payload
+        # in a filename that reaches the terminal unstripped. Every other print
+        # in this module was already sanitized; this was the one hole, carried
+        # over from cli.py.
         stderr_console.print(
-            f"[yellow]warning:[/yellow] failed to migrate pre-inversion conflict file {path} — {e}"
+            f"[yellow]warning:[/yellow] failed to migrate pre-inversion conflict "
+            f"file {safe_str(path)} — {safe_str(e)}"
         )
         return path
     return new_path

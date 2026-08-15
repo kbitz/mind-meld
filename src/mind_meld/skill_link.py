@@ -31,39 +31,69 @@ from mind_meld.safety import safe_str
 _REAL_HOME = Path(os.path.expanduser("~")).resolve()
 
 
-def _refuse_real_home_under_pytest(target: Path) -> None:
-    """Fail loudly if a test is about to symlink into the developer's real HOME.
+def _is_real_agent_dir_under_pytest(target: Path) -> bool:
+    """True when a TEST is about to write one of the real agent skills dirs.
 
     The installer mkdirs and symlinks into ``~/.claude/skills``,
-    ``~/.codex/skills``, and ``~/.config/opencode/skills``. ``conftest.py`` has
-    nine autouse isolation fixtures and none covered these, so any test that
-    drove ``_push_core`` or ``init`` without stubbing the installer mutated the
-    developer's real agent config dirs. Only ``test_skill_link.py`` isolates
-    HOME, via its own local fixture.
+    ``~/.codex/skills``, and ``~/.config/opencode/skills``. ``conftest.py`` had
+    eight autouse isolation fixtures and none covered these, so any test driving
+    ``_push_core`` or ``init`` without stubbing the installer mutated the
+    developer's real agent config dirs — **67 tests**, measured.
 
-    Same shape as the load-bearing ``PYTEST_CURRENT_TEST`` guard on
-    ``crypto.store_passphrase_in_keyring``. Deliberately NOT a suite-wide
-    ``monkeypatch.setenv("HOME", ...)``: ``importlib.metadata.version()``
-    resolves from the HOME-derived user site-packages, so a moved HOME degrades
-    ``__version__`` to ``0.0.0+dev`` and trips ``_check_fleet_version_or_refuse``
-    in a dozen integration tests.
+    Matches the THREE KNOWN AGENT PATHS, not "anything under ``$HOME``". A
+    developer whose ``TMPDIR`` lives under ``$HOME`` (common on macOS with a
+    custom setting) would otherwise see every skill-link test fail with a
+    message accusing the test of being unisolated when it is correctly using
+    ``tmp_path``.
 
-    Raises rather than silently skipping: a test that reaches the real installer
-    is a bug in the test, and this Track is the one that would otherwise have
-    made it invisible.
+    Deliberately NOT a suite-wide ``monkeypatch.setenv("HOME", ...)``:
+    ``importlib.metadata.version()`` resolves from the HOME-derived user
+    site-packages, so a moved HOME degrades ``__version__`` to ``0.0.0+dev`` and
+    trips ``_check_fleet_version_or_refuse`` in a dozen integration tests.
+
+    Returns a bool rather than raising. The caller decides, because this runs on
+    the ``mm push`` path: an ``AssertionError`` here would abort a real push for
+    anyone whose environment happens to carry ``PYTEST_CURRENT_TEST`` (a
+    pytest-driven harness, a hook fired from inside a test run, an inherited
+    subprocess env). ``crypto.store_passphrase_in_keyring``, the precedent this
+    follows, returns ``False`` for the same reason.
     """
     if not os.environ.get("PYTEST_CURRENT_TEST"):
-        return
+        return False
     try:
-        resolved = target.expanduser().resolve()
+        # abspath, NOT resolve(): we care about the LOCATION BEING WRITTEN, not
+        # where an existing symlink points. `~/.claude/skills/retro-fleet` is
+        # normally already a symlink into the pipx venv, so `resolve()` follows
+        # it clean out of $HOME and the guard silently returns False for the
+        # exact case it exists to catch. abspath still normalizes "..".
+        candidate = Path(os.path.abspath(target.expanduser()))
     except OSError:
-        return
-    if resolved == _REAL_HOME or _REAL_HOME in resolved.parents:
-        raise AssertionError(
-            f"test reached the real skill installer: {resolved} is under the "
-            f"developer's real HOME ({_REAL_HOME}). Stub "
-            f"skill_link._ensure_retro_skill_links, or isolate HOME in the test."
+        return False
+    return any(
+        candidate == real or real in candidate.parents
+        for real in (
+            (_REAL_HOME / ".claude" / "skills"),
+            (_REAL_HOME / ".codex" / "skills"),
+            (_REAL_HOME / ".config" / "opencode" / "skills"),
+            (_REAL_HOME / ".config" / "mind-meld"),
         )
+    )
+
+
+def _refuse_real_home_under_pytest(target: Path) -> None:
+    """Skip the write, loudly, when a test reaches a real agent skills dir.
+
+    Emits to stderr and returns instead of raising, so the installer keeps its
+    documented "forensic-only, never fail a push" contract. pytest surfaces the
+    line in captured output, and `test_real_home_guard_fires` asserts on it.
+    """
+    if not _is_real_agent_dir_under_pytest(target):
+        return
+    sys.stderr.write(
+        f"mm: notice: refusing to touch {target} from a test — this test reached "
+        f"the real skill installer. Stub skill_link._ensure_retro_skill_links, or "
+        f"mark the test with @pytest.mark.owns_skill_paths.\n"
+    )
 
 
 # Group 8 / Track 8A: 24h-TTL gate for the retro-fleet skill symlink installer.
@@ -178,7 +208,9 @@ def _ensure_retro_skill_link_at(
     if dry_run:
         return
 
-    _refuse_real_home_under_pytest(target)
+    if _is_real_agent_dir_under_pytest(target):
+        _refuse_real_home_under_pytest(target)
+        return
 
     skills_dir = target.parent
     agent_dir = skills_dir.parent
@@ -300,6 +332,14 @@ def _touch_marker(name: str) -> None:
     """Mtime-touch the named marker. Best-effort; OSError is swallowed
     silently (the next push will simply re-run the installer)."""
     marker_dir = _marker_dir()
+    # Guard the WRITE LOCATION, not just one caller. Markers live in
+    # ~/.config/mind-meld, which conftest redirects — but a test that opts out
+    # of that fixture, or any future path reaching here without going through
+    # _ensure_retro_skill_link_at, would otherwise write the developer's real
+    # config dir with the guard silent.
+    if _is_real_agent_dir_under_pytest(marker_dir):
+        _refuse_real_home_under_pytest(marker_dir)
+        return
     try:
         marker_dir.mkdir(parents=True, exist_ok=True)
         (marker_dir / f".{name}").touch()
@@ -426,6 +466,8 @@ def classify_targets(targets: tuple[Path, ...], skill_src: Path) -> tuple[list[P
 
 __all__ = [
     "SKILL_LINK_TTL_SECONDS",
+    "SKILL_ROOTS",
+    "_refuse_real_home_under_pytest",
     "classify_targets",
     "skill_targets",
     "_codex_skill_link_check_due",

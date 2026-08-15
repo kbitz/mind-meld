@@ -116,7 +116,7 @@ def _run_events_tail(
     nobody saw it." Any new degradation detected here MUST be appended to
     the returned list as well as printed.
 
-    See CLAUDE.md "Events tail in _push_core (load-bearing, v0.10.3)" for
+    See docs/invariants/events-retro.md "Events tail in `_push_core`" for
     the load-bearing invariants: head-position single-call-site (Codex C4
     — branch-fragility-free, one-push-lag-free), dry_run no-op (preview
     contract), mm-events-resolved gate (covers fresh / migrated / un-

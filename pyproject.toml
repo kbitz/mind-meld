@@ -49,6 +49,9 @@ packages = ["src/mind_meld"]
 # needed; force-include + packages= would double-ship the same files.
 
 [tool.pytest.ini_options]
+markers = [
+    "owns_skill_paths: test moves $HOME itself; conftest's _isolate_skill_links steps aside",
+]
 testpaths = ["tests"]
 
 [tool.ruff]

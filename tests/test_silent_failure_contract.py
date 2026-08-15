@@ -1384,3 +1384,64 @@ def test_autopull_surfaces_fsync_failure_in_quiet_mode(tmp_path, monkeypatch):
     r = runner.invoke(app, ["autopull"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
     assert "fsync failed" in (r.stderr or "")
+
+
+class TestBreadcrumbStaleness:
+    """`mm status` must mark an autorun breadcrumb that stopped being written.
+
+    `_write_autorun_breadcrumb` is called from INSIDE the command, so a failure
+    before typer's runner -- a module-scope ImportError being the obvious one,
+    and the exact risk Track 16A's decomposition introduces -- writes no
+    breadcrumb at all. Without an age check, `mm status` then reports the last
+    `success` forever while sync is wedged. This is the one degradation neither
+    the v0.8.1 `no-sources` nor the v0.12.16 `degraded` breadcrumb can cover,
+    because both are written by code that never ran.
+    """
+
+    @staticmethod
+    def _iso(hours_ago: float) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+
+    def test_fresh_breadcrumb_has_no_marker(self) -> None:
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(self._iso(1)) == ""
+
+    def test_just_under_the_threshold_is_not_stale(self) -> None:
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(self._iso(47.5)) == ""
+
+    def test_past_the_threshold_is_marked_stale(self) -> None:
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        out = _breadcrumb_staleness_suffix(self._iso(72))
+        assert "stale" in out
+        assert "72h" in out
+
+    def test_trailing_z_timestamps_parse(self) -> None:
+        """The breadcrumb writer emits `...Z`, which `fromisoformat` rejects
+        on 3.11 unless the suffix is normalized first."""
+        from datetime import datetime, timedelta, timezone
+
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        z = (datetime.now(timezone.utc) - timedelta(hours=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert "stale" in _breadcrumb_staleness_suffix(z)
+
+    def test_naive_timestamp_is_treated_as_utc_not_crashed_on(self) -> None:
+        from datetime import datetime, timedelta
+
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        naive = (datetime.utcnow() - timedelta(hours=100)).isoformat()
+        assert "stale" in _breadcrumb_staleness_suffix(naive)
+
+    @pytest.mark.parametrize("bad", ["", "not-a-date", None, 12345, {"ts": 1}])
+    def test_unparseable_input_degrades_to_no_marker(self, bad) -> None:
+        """Diagnostics must never raise into `mm status`."""
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(bad) == ""

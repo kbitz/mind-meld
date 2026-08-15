@@ -27,7 +27,9 @@ CLAUDE_MD = ROOT / "CLAUDE.md"
 
 # `| `foo.py:bar` / `baz` / ... | doc |` — the leading cell names the owning
 # file, then one or more `/`-separated symbols.
-_ROW = re.compile(r"^\|\s*`(?P<file>[\w/]+\.py):(?P<rest>.+?)`?\s*\|", re.M)
+_ROW = re.compile(r"^\|(?P<cell>[^|]*)\|", re.M)
+# Any `path/to/file.py:symbol` occurrence anywhere in the routing cell.
+_CITATION = re.compile(r"`(?P<file>[\w/]+\.py):")
 _SYMBOL = re.compile(r"`?([A-Za-z_][\w.]*\*?)`?")
 
 
@@ -40,7 +42,12 @@ def _defined_names(path: Path) -> set[str]:
             names.add(node.name)
             if isinstance(node, ast.ClassDef):
                 for sub in node.body:
-                    if isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
+                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        # Methods count both bare and qualified: the table cites
+                        # `storage/local.py:put_exclusive`, not the class.
+                        names.add(sub.name)
+                        names.add(f"{node.name}.{sub.name}")
+                    elif isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name):
                         names.add(f"{node.name}.{sub.target.id}")
                     elif isinstance(sub, ast.Assign):
                         names.update(
@@ -50,7 +57,22 @@ def _defined_names(path: Path) -> set[str]:
             names.update(t.id for t in node.targets if isinstance(t, ast.Name))
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names.add(node.target.id)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+    return names
+
+
+def _imported_names(path: Path) -> set[str]:
+    """Names `path` merely IMPORTS. Deliberately kept apart from definitions.
+
+    Counting these as definitions is what made the first version of this gate
+    partly vacuous: `cli.py` still imports `_restore_mtime_best_effort`,
+    `_stat_mtime_btime`, `_bump_canonical_mtime_post_resolve`, `CONFLICT_AGE_DAYS`,
+    `console` and `safe_str`, so a routing row that kept citing `cli.py:` for
+    any of them passed green even though every one of them moved.
+    """
+    names: set[str] = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
             names.update(a.asname or a.name.split(".")[0] for a in node.names)
     return names
 
@@ -58,33 +80,44 @@ def _defined_names(path: Path) -> set[str]:
 def _routing_citations() -> list[tuple[str, str]]:
     """(file, symbol) pairs cited in the pointer table."""
     out: list[tuple[str, str]] = []
-    for m in _ROW.finditer(CLAUDE_MD.read_text(encoding="utf-8")):
-        fname = m.group("file")
-        for chunk in m.group("rest").split("/"):
-            chunk = chunk.strip()
-            # Prose tails like "(both prompt sites share these)" or
-            # "rel_path / base_path concatenation site" are not citations.
-            if not chunk or chunk.startswith("(") or " " in chunk.strip("`"):
-                continue
-            sym = _SYMBOL.match(chunk)
-            if not sym or sym.group(1).endswith(".py"):
-                continue
-            name = sym.group(1)
-            # A row keyed on one file may cite a sibling module explicitly as
-            # `other_module.symbol` (e.g. the tolerant-binary-reads row lists
-            # token_usage and pullhistory readers alongside events' own).
-            # Resolve those against the named module, not the row's file.
-            if "." in name:
-                owner, _, leaf = name.rpartition(".")
-                if (SRC / f"{owner}.py").exists():
-                    out.append((f"{owner}.py", leaf))
-                else:
-                    # A dotted name whose head is not a module is an attribute
-                    # of a class in THIS row's file, e.g. `PushResult.events_
-                    # degradations`. _defined_names() records those dotted.
-                    out.append((fname, name))
+    text = CLAUDE_MD.read_text(encoding="utf-8")
+    for row in _ROW.finditer(text):
+        cell = row.group("cell")
+        marks = list(_CITATION.finditer(cell))
+        for i, m in enumerate(marks):
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(cell)
+            out.extend(_chunk_citations(m.group("file"), cell[m.end() : end]))
+    return out
+
+
+def _chunk_citations(fname: str, rest: str) -> list[tuple[str, str]]:
+    """Split one `file.py:a / b / c` citation into (file, symbol) pairs."""
+    out: list[tuple[str, str]] = []
+    for chunk in rest.split("/"):
+        chunk = chunk.strip()
+        # Prose tails like "(both prompt sites share these)" or
+        # "rel_path / base_path concatenation site" are not citations.
+        if not chunk or chunk.startswith("(") or " " in chunk.strip("`"):
+            continue
+        sym = _SYMBOL.match(chunk)
+        if not sym or sym.group(1).endswith(".py"):
+            continue
+        name = sym.group(1)
+        # A row keyed on one file may cite a sibling module explicitly as
+        # `other_module.symbol` (e.g. the tolerant-binary-reads row lists
+        # token_usage and pullhistory readers alongside events' own).
+        # Resolve those against the named module, not the row's file.
+        if "." in name:
+            owner, _, leaf = name.rpartition(".")
+            if (SRC / f"{owner}.py").exists():
+                out.append((f"{owner}.py", leaf))
             else:
+                # A dotted name whose head is not a module is an attribute
+                # of a class in THIS row's file, e.g. `PushResult.events_
+                # degradations`. _defined_names() records those dotted.
                 out.append((fname, name))
+        else:
+            out.append((fname, name))
     return out
 
 
@@ -106,9 +139,16 @@ def test_routing_citation_resolves(fname: str, symbol: str) -> None:
             f"CLAUDE.md routes {fname}:{symbol} but nothing there starts with {stem!r}"
         )
         return
-    assert symbol in _defined_names(path), (
-        f"CLAUDE.md routes {fname}:{symbol}, which is not defined there — "
-        f"the symbol moved, or the row is stale"
+    if symbol in _defined_names(path):
+        return
+    hint = (
+        " — it is only IMPORTED there, so it lives somewhere else now"
+        if symbol in _imported_names(path)
+        else ""
+    )
+    raise AssertionError(
+        f"CLAUDE.md routes {fname}:{symbol}, which is not defined there{hint}. "
+        f"The symbol moved, or the row is stale."
     )
 
 
@@ -167,3 +207,60 @@ def test_every_extracted_module_has_a_routing_row() -> None:
         "conflictmtime.py",
     ):
         assert f"`{mod}:" in table, f"{mod} has no routing row — Group 17 would fly blind"
+
+
+# ---------------------------------------------------------------------------
+# The invariant docs carry their OWN routing header, and it drifted where
+# CLAUDE.md's table did not.
+# ---------------------------------------------------------------------------
+
+_INVARIANT_ROW = re.compile(r"^- `src/mind_meld/(?P<file>[\w/]+\.py)` — (?P<rest>.+)$", re.M)
+
+
+def _invariant_citations() -> list[tuple[str, str, str]]:
+    """(doc, file, symbol) for every `- \\`src/mind_meld/x.py\\` — \\`a\\` / \\`b\\`` line."""
+    out: list[tuple[str, str, str]] = []
+    for doc in sorted((ROOT / "docs" / "invariants").glob("*.md")):
+        for m in _INVARIANT_ROW.finditer(doc.read_text(encoding="utf-8")):
+            for fname, sym in _chunk_citations(m.group("file"), m.group("rest")):
+                out.append((doc.name, fname, sym))
+    return out
+
+
+def test_invariant_docs_have_citations() -> None:
+    assert len(_invariant_citations()) > 30
+
+
+@pytest.mark.parametrize("doc,fname,symbol", _invariant_citations())
+def test_invariant_doc_citation_resolves(doc: str, fname: str, symbol: str) -> None:
+    """Each invariant doc's own "Read BEFORE editing" list must resolve too.
+
+    CLAUDE.md's table routes an agent to the right DOC; that doc's first lines
+    then route them to the right CODE. Track 16A re-anchored the table but not
+    these, so `conflicts.md` still filed `_resolve_interactive_loop` and
+    `_find_conflict_files` under `cli.py`, and `events-retro.md` filed seven
+    moved symbols there plus `_devices_json_cmd`, which never existed. The
+    gate that only read CLAUDE.md could not see any of it — an agent would be
+    routed correctly and then sent straight back to the wrong file.
+    """
+    candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
+    path = next((c for c in candidates if c.exists()), None)
+    assert path is not None, f"{doc} routes to src/mind_meld/{fname}, which does not exist"
+
+    if symbol.endswith("*"):
+        stem = symbol.rstrip("*")
+        assert any(n.startswith(stem) for n in _defined_names(path)), (
+            f"{doc} routes {fname}:{symbol} but nothing there starts with {stem!r}"
+        )
+        return
+    if symbol in _defined_names(path):
+        return
+    hint = (
+        " — it is only IMPORTED there, so it lives somewhere else now"
+        if symbol in _imported_names(path)
+        else ""
+    )
+    raise AssertionError(
+        f"{doc} routes {fname}:{symbol}, which is not defined there{hint}. "
+        f"The symbol moved, or the row is stale."
+    )

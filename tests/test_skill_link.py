@@ -28,6 +28,12 @@ import pytest
 from mind_meld import cli as cli_module
 from mind_meld import skill_link
 
+# This file owns its own path isolation: it moves $HOME deliberately, because
+# it is testing the installer's real path resolution. conftest's autouse
+# _isolate_skill_links pins SKILL_ROOTS to absolute tmp paths, which would
+# fight that -- the marker tells it to step aside.
+pytestmark = pytest.mark.owns_skill_paths
+
 
 @pytest.fixture(autouse=True)
 def _isolate_paths(tmp_path, monkeypatch):

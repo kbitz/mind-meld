@@ -3021,3 +3021,88 @@ class TestInlinePromptTimestamps:
         # No inline (n) branch → unrecognized → keep-both (skip), NOT keep-remote.
         assert choice == "keep-both"
         assert merged is None
+
+
+class TestResolveMergeGuards:
+    """Guards in the (m)erge branch of ``_resolve_interactive_loop``.
+
+    These were covered only by ``tests/test_conflictlog.py``, which Track 16A
+    deleted along with the CONFLICT-TELEMETRY collector it tested. The telemetry
+    rows were incidental; the accounting and the binary-suppression guard they
+    happened to assert on are not. Both gaps were mutation-verified during the
+    /review pass: neutering either guard left the full suite green.
+    """
+
+    @staticmethod
+    def _pair(tmp_path, canonical_bytes: bytes, sidecar_bytes: bytes):
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(canonical_bytes)
+        conflict = tmp_path / "user.sync-conflict-20260421-143055-devA1234.md"
+        conflict.write_bytes(sidecar_bytes)
+        return canonical, conflict
+
+    def test_merge_on_binary_pair_is_a_no_op(self, tmp_path, monkeypatch) -> None:
+        """Typing (m) on binary content must not write lcs_merge's empty output.
+
+        ``lcs_merge`` returns ``(b"", -1)`` for NUL-containing input, so
+        ``merge_available`` is False and (m) is never offered. Without the
+        ``if not merge_available`` guard, the typed 'm' would fall through and
+        ``atomic_write_bytes(canonical, b"")`` would truncate the user's file --
+        silent data loss on exactly the content type that cannot be recovered
+        by re-merging.
+        """
+        canonical, conflict = self._pair(tmp_path, b"local\x00bytes", b"remote\x00bytes")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+
+        resolved, failed = resolveflow._resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert (resolved, failed) == (0, 0)
+        assert canonical.read_bytes() == b"local\x00bytes", "canonical must be untouched"
+        assert conflict.exists(), "sidecar stays on disk for a later manual resolve"
+
+    def test_merge_write_failure_counts_as_failed_not_resolved(self, tmp_path, monkeypatch) -> None:
+        """A failed merge write increments ``failed``, so ``mm resolve`` exits 1.
+
+        ``resolve``'s documented contract is a non-zero exit when any conflict
+        was not actually resolved, so CI driving it can tell. Mis-attributing
+        this to ``resolved`` would report success on a conflict still on disk.
+        """
+        canonical, conflict = self._pair(tmp_path, b"a\nb\n", b"a\nb\nc\n")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+
+        def boom(*_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("mind_meld.fsutil.atomic_write_bytes", boom)
+
+        resolved, failed = resolveflow._resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert (resolved, failed) == (0, 1)
+        assert canonical.read_bytes() == b"a\nb\n", "canonical unchanged on write failure"
+        assert conflict.exists()
+
+
+class TestMigrationWarningIsSanitized:
+    def test_rename_failure_warning_strips_terminal_escapes(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Peer-controlled sidecar filenames reach stderr through safe_str.
+
+        A sidecar name derives from a peer-supplied manifest rel_path stem, and
+        ``manifest._validate_rel_path`` rejects NUL / absolute / ".." but NOT
+        ESC. Without sanitization this warning hands a peer an OSC-52 clipboard
+        write on the resolving user's terminal.
+        """
+        nasty = tmp_path / "u\x1b]52;c;cGF5bG9hZA==\x07.sync-conflict-20200101-000000-devA1234.md"
+        nasty.write_bytes(b"x")
+
+        def boom(*_a, **_kw):
+            raise OSError("read-only fs")
+
+        monkeypatch.setattr(Path, "rename", boom)
+        out = resolveflow._migrate_pre_inversion_conflict(nasty)
+
+        assert out == nasty, "migration failure leaves the file where it was"
+        captured = capsys.readouterr()
+        assert "\x1b" not in (captured.out + captured.err), "raw ESC reached the terminal"
+        assert "failed to migrate" in (captured.out + captured.err)

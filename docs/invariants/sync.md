@@ -4,7 +4,7 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests`
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones`
-- `src/mind_meld/config.py` — `exclude_patterns` / `disabled_sources` / `seen_sources` consumer paths
+- `src/mind_meld/config.py` — the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`
