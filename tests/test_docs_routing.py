@@ -112,6 +112,45 @@ def test_routing_citation_resolves(fname: str, symbol: str) -> None:
     )
 
 
+def test_every_changelog_version_has_a_progress_row() -> None:
+    """Every released version appears in docs/PROGRESS.md.
+
+    Fourth occurrence of this gap: v0.11.24 and v0.11.27 are already named in
+    CLAUDE.md, and v0.12.12 and v0.12.18 were found missing during Track 16A.
+    The v0.11.24 design tried to auto-append the row from `release.yml` via
+    `git push`, which branch protection rejects on every release where the row
+    was not already in the PR -- so the workflow is not the place to fix this.
+
+    A test is: the row goes in the SAME PR as the pyproject + CHANGELOG bump,
+    and CI fails the PR if it does not. That is the durable fix CLAUDE.md's
+    PROGRESS-row convention asks for, and it costs nothing at release time.
+    """
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    progress = (ROOT / "docs" / "PROGRESS.md").read_text(encoding="utf-8")
+
+    released = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.M)
+    assert len(released) > 20, "CHANGELOG parse found suspiciously few releases"
+
+    charted = set(re.findall(r"^\|\s*(\d+\.\d+\.\d+)\s*\|", progress, re.M))
+
+    # Enforced from 0.11.0 forward. Running this gate for the first time turned
+    # up nine OLDER gaps too -- 0.10.3, 0.10.2, 0.10.0, 0.9.6, 0.9.5, 0.8.8,
+    # 0.8.7, 0.8.6, 0.1.0 -- so the problem is considerably older than the two
+    # occurrences CLAUDE.md names. They are listed here rather than silently
+    # excluded: backfilling pre-0.11 prose is a separate call, and the point of
+    # this gate is to stop the RECURRENCE, not to relitigate history.
+    def _key(v: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in v.split("."))
+
+    baseline = (0, 11, 0)
+    missing = [v for v in released if v not in charted and _key(v) >= baseline]
+    assert missing == [], (
+        f"CHANGELOG has {missing} with no docs/PROGRESS.md row. Add the row in "
+        f"the same PR as the version bump — release.yml cannot push it to a "
+        f"protected branch, which is why the v0.11.24 auto-append design failed."
+    )
+
+
 def test_every_extracted_module_has_a_routing_row() -> None:
     """The Track 16A modules each get at least one row.
 
