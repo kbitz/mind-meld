@@ -30,6 +30,7 @@ EXTRACTED = [
     "skill_link",
     "events_tail",
     "resolveflow",
+    "retention",
 ]
 
 LEAVES = ["consoles", "conflictmtime", "safety", "conflictdiff", "fsutil"]

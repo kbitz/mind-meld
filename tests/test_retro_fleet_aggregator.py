@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 
+from mind_meld import retention
 from mind_meld.skills.retro_fleet import aggregator
 
 # ---------------------------------------------------------------------------
@@ -987,9 +988,8 @@ class TestRetentionConstant:
     def test_retention_constant_matches_cli(self):
         """Aggregator hardcodes 90; mm cli hardcodes 90. If either drifts,
         the window-exceeds breadcrumb is wrong. Pin the agreement."""
-        from mind_meld import cli as cli_module
 
-        assert aggregator.EVENTS_RETENTION_DAYS == cli_module.EVENTS_RETENTION_DAYS
+        assert aggregator.EVENTS_RETENTION_DAYS == retention.EVENTS_RETENTION_DAYS
 
 
 # ---------------------------------------------------------------------------

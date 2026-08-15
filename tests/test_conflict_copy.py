@@ -31,7 +31,6 @@ from mind_meld import resolveflow
 from mind_meld.cli import (
     CONFLICT_INFIX,
     _apply_incoming_file,
-    _gc_old_conflict_files,
     _predict_pull_outcome,
     _prompt_conflict_choice,
     app,
@@ -51,6 +50,7 @@ from mind_meld.resolveflow import (
     _promote_target_path,
     _resolve_interactive_loop,
 )
+from mind_meld.retention import _gc_old_conflict_files
 
 # ── helpers ──────────────────────────────────────────────────────────
 
