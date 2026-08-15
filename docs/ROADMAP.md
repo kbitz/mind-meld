@@ -1,3 +1,5 @@
+<!-- /autoplan restore point: /Users/kb/.gstack/projects/kbitz-mind-meld/kbitz-extract-event-capture-autoplan-restore-20260815-143545.md -->
+
 # Roadmap
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
@@ -397,3 +399,36 @@ Child symlinks are now local routing rather than sync content: generic walkers o
 ### Group 16: cli.py decomposition ✓ Shipped (v0.12.21)
 
 - Track 16A — _shipped (v0.12.21): remove the unused collector, extract six cohesive modules, tighten isolation and routing gates, and update release documentation._
+
+## Track 17B — Approved implementation notes
+
+Extract one private, data-only capture path for git and Claude-session snapshots.
+
+- `CaptureResult` returns device-stamped snapshot rows, discovery errors, the session-budget result, and warn-lock contention.
+- Push and init retain their own source gates, cache warming, error handling, identities, and writes.
+- The core discovers roots and completes the bounded git walk before acquiring one cache lock for all Claude roots.
+- Push still writes `mm-push` last; init still writes snapshots only with an explicit 30-day cursor.
+- Track 18C memoization and heartbeat work remain out of scope.
+
+Required regression coverage:
+
+- One post-git cache lock spans every Claude root.
+- Budget checks exclude cache warming and identity work.
+- Push/init row composition and device stamping remain unchanged.
+- Autopush distinguishes warn-lock degradation from a no-Claude configuration.
+- Init passes its explicit 30-day cursor to both git and session capture.
+
+Approved 2026-08-15.
+
+## GSTACK REVIEW REPORT
+
+| Phase | Status |
+|---|---|
+| CEO | Complete |
+| Design | Skipped — no UI |
+| Engineering | Complete |
+| DX | Complete |
+
+**Verdict:** Approved for implementation.
+
+NO UNRESOLVED DECISIONS

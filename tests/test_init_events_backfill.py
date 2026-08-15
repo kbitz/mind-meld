@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from mind_meld import events, events_tail
 from mind_meld import events as _mm_events
+from mind_meld import token_usage as _mm_token_usage
 
 
 def _read_events(events_file: Path) -> list[dict]:
@@ -160,21 +162,24 @@ class TestRunEventsBackfill:
         assert "git-snapshot" in types
         assert "mm-push" not in types
 
-    def test_backfill_uses_30_day_window(self, tmp_path, monkeypatch):
-        """The since= passed to walk_git_projects must be exactly
-        ``now - INITIAL_CURSOR_LOOKBACK_DAYS``. Pins the explicit-since
-        contract — the backfill MUST NOT read ``last_push_ts`` (which
-        would also default to now-30d on first run, but the explicit
-        since at the call site is what makes the backfill semantics
-        legible vs accidental)."""
+    def test_backfill_uses_30_day_window_for_git_and_sessions(self, tmp_path, monkeypatch):
+        """Both capture paths receive the same explicit 30-day window.
+
+        The session walker currently keeps ``since`` for API stability, but
+        passing it remains part of the backfill's legible semantic contract.
+        This must not silently drift to ``last_push_ts`` while the git path
+        stays correct.
+        """
         events_root = tmp_path / "events_root"
-        sources = _make_sources(events_root, claude_dir=None)
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        sources = _make_sources(events_root, claude_dir)
         config = {"sync": {"sources": sources}}
 
         captured: dict = {}
 
         def fake_walk(roots, since, total_budget_ms):
-            captured["since"] = since
+            captured["git_since"] = since
             return [
                 {
                     "v": events.EVENTS_SCHEMA_VERSION,
@@ -188,19 +193,35 @@ class TestRunEventsBackfill:
 
         monkeypatch.setattr(_mm_events, "walk_git_projects", fake_walk)
         monkeypatch.setattr(_mm_events, "discover_git_roots", lambda _c: ([], []))
+        monkeypatch.setattr(_mm_token_usage, "warm_token_cache_inline", lambda paths: None)
+
+        @contextmanager
+        def fake_lock(mode):
+            assert mode == "block"
+            yield {}
+
+        monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_lock)
+
+        def fake_session_walk(path, since, **kwargs):
+            assert path == claude_dir
+            captured["session_since"] = since
+            return []
+
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", fake_session_walk)
 
         events_tail._run_events_backfill(config, sources, "dev-a")
 
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc)
-        since = captured["since"]
+        since = captured["git_since"]
         # Within a few seconds of now-30d.
         delta = (now - since).total_seconds()
         target = events.INITIAL_CURSOR_LOOKBACK_DAYS * 86400
         assert abs(delta - target) < 60, (
             f"since must be ~now-30d, got delta={delta}s vs target={target}s"
         )
+        assert captured["session_since"] == since
 
 
 class TestInitWiring:
