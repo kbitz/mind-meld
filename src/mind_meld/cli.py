@@ -11,19 +11,17 @@ import fnmatch
 import hashlib
 import json
 import os
-import re
 import secrets
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 import typer
-from rich.console import Console
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -35,14 +33,15 @@ from rich.table import Table
 
 from mind_meld import (
     __version__,
-    conflictlog,
-    events,
+    events_tail,
     fsutil,
     identity,
     pullhistory,
+    resolveflow,
+    retention,
     seen_sources,
     sidecar,
-    token_usage,
+    skill_link,
     upgrade,
 )
 from mind_meld import config as _config_module
@@ -58,6 +57,12 @@ from mind_meld.config import (
     patch_config_on_disk,
     save_config,
 )
+from mind_meld.conflictmtime import (
+    _bump_canonical_mtime_post_resolve,
+    _restore_mtime_best_effort,
+    _stat_mtime_btime,
+)
+from mind_meld.consoles import console, stderr_console
 from mind_meld.crypto import (
     FORMAT_VERSION,
     CryptoInitFetch,
@@ -110,6 +115,7 @@ from mind_meld.manifest import (
     serialize_manifest,
 )
 from mind_meld.merge import merge_file, should_merge
+from mind_meld.retention import CONFLICT_AGE_DAYS
 from mind_meld.safety import (  # noqa: F401 — re-exported for backwards-compat
     safe_str,
     safe_text,
@@ -151,28 +157,7 @@ _CANONICAL_WRITE_OUTCOMES: frozenset[ApplyOutcome] = frozenset(
     {"written", "merged", "merged-via-lcs", "conflicted"}
 )
 FetchStatus = Literal["ok", "missing", "corrupt"]
-CONFLICT_AGE_DAYS = 30
-# Track 7B (v0.10.3): per-device daily JSONL events files older than this
-# are reaped at every `mm gc`. The retention is fleet policy, not per-
-# device opt-in: a stale device's old events would otherwise pin storage
-# forever via tombstone propagation. Reap by FILENAME date (Codex C5,
-# C6) — iCloud restores produce misleading mtimes.
-EVENTS_RETENTION_DAYS = 90
-_EVENTS_FILENAME_DATE_RE = re.compile(r"^(?P<device>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$")
 
-# Group 8 / Track 8A: 24h-TTL gate for the retro-fleet skill symlink installer.
-# Two markers (cross-model #3 from /plan-eng-review): success caches the happy
-# path; conflict-skip suppresses the per-push notice when the user has their
-# own file at the target. Transient failure paths (OSError) leave both
-# untouched so next push retries — matches the visible-failure contract.
-SKILL_LINK_TTL_SECONDS = 24 * 60 * 60
-_SKILL_LINK_NAME = "retro-fleet"
-_SKILL_LINK_SUCCESS_MARKER = "skill-link-checked"
-_SKILL_LINK_CONFLICT_MARKER = "skill-link-conflict"
-_CODEX_SKILL_LINK_SUCCESS_MARKER = "codex-skill-link-checked"
-_CODEX_SKILL_LINK_CONFLICT_MARKER = "codex-skill-link-conflict"
-_OPENCODE_SKILL_LINK_SUCCESS_MARKER = "opencode-skill-link-checked"
-_OPENCODE_SKILL_LINK_CONFLICT_MARKER = "opencode-skill-link-conflict"
 
 # Track 5E (v0.9.2 BREAKING): minimum peer version required for safe pull.
 # v0.9.2 inverted the conflict-direction semantics — a peer running an
@@ -274,14 +259,18 @@ app = typer.Typer(
     help="Mind Meld — sync Claude Code sessions and other sources across machines.",
     add_completion=False,
 )
-console = Console()
-# Dedicated stderr sink for _error and other failure-path output. Rich
-# formatting is preserved in interactive terminals; pipes (autopush/autopull
-# quiet mode, CI) get a clean stdout and one-line stderr per the contract
-# documented in README.md "Claude Code Integration." Using a single module-
-# level instance rather than constructing ad-hoc keeps color-capability
+# `console` / `stderr_console` now live in `mind_meld.consoles` (Track 16A) so
+# `resolveflow` and `retention` can render through the SAME objects without
+# importing `cli` — see that module's docstring for why sharing the instances is
+# load-bearing. Imported into this namespace so the ~280 existing bare
+# `console.print(...)` call sites stay unchanged.
+#
+# stderr_console is the dedicated stderr sink for _error and other failure-path
+# output. Rich formatting is preserved in interactive terminals; pipes
+# (autopush/autopull quiet mode, CI) get a clean stdout and one-line stderr per
+# the contract documented in README.md "Claude Code Integration." A single
+# module-level instance rather than ad-hoc construction keeps color-capability
 # detection and terminal-width behavior consistent across call sites.
-stderr_console = Console(stderr=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -966,9 +955,6 @@ def _manifest_content_hash(manifest: dict) -> str:
     means sorted keys + no ASCII escaping, so the hash is stable across
     any platform that implements the same JSON serializer contract.
     """
-    import hashlib
-    import json
-
     canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -1442,95 +1428,6 @@ def _prompt_conflict_choice(
 #
 #   Failures (sidecar write) are isolated per-file: local is untouched at
 #   canonical because we never overwrite it. Returns "failed" on error.
-
-
-_MTIME_RESTORE_MAX_SKEW_SECONDS = 60.0
-
-
-def _restore_mtime_best_effort(path: Path, mtime_iso: str | None) -> None:
-    """Stamp `path` with mtime/atime from a manifest ISO-8601 timestamp.
-
-    Best-effort: silently no-ops on None/empty input, an unparseable or
-    wrong-typed value, or any filesystem error. Mtime is metadata; the
-    load-bearing contract is that the file's bytes match the remote \u2014
-    `os.utime` failing on iCloud-restored placeholders or networked
-    filesystems must not abort the pull.
-
-    Future-clamp (load-bearing). Cap the applied mtime at
-    ``now + _MTIME_RESTORE_MAX_SKEW_SECONDS`` so a peer with a bad clock
-    (or a passphrase-holding attacker minting a manifest dated in 2099)
-    can't poison this device's local mtime into a permanent
-    `local_mtime > remote_mtime` skip at `_apply_incoming_file`'s mtime
-    gate. Without this clamp, one bad pull would silently lock the
-    victim out of all future legitimate updates to that path.
-
-    Why we restore at all: pre-fix, every pulled file landed with
-    `st_mtime = now-of-pull`, breaking any downstream consumer that uses
-    mtime to order content (e.g. gstack skill preambles' `ls -t` recency
-    scan over `~/.gstack/projects/*/checkpoints/`). The mtime mm captures
-    on push is the original source mtime; restoring it on pull preserves
-    cross-machine ordering even when locally-authored and remotely-pulled
-    files are interleaved on the same disk.
-    """
-    if not mtime_iso:
-        return
-    try:
-        ts = mtime_from_manifest(mtime_iso).timestamp()
-    except (TypeError, ValueError, OverflowError, OSError):
-        return
-    ts = min(ts, time.time() + _MTIME_RESTORE_MAX_SKEW_SECONDS)
-    try:
-        os.utime(path, (ts, ts))
-    except (OSError, OverflowError):
-        return
-
-
-def _stat_mtime_btime(path: Path) -> tuple[float | None, float | None]:
-    """Best-effort ``(mtime, birthtime)`` epoch floats for the conflict-prompt
-    timestamp display. Shared by both prompt sites.
-
-    Returns ``(None, None)`` on any stat failure (iCloud placeholder, race,
-    permission) so the renderer shows "unknown" rather than crashing the
-    prompt. ``st_birthtime`` is present on macOS/APFS; ``getattr`` guards
-    against filesystems that lack it (returns None there). The caller decides
-    what the birthtime MEANS per side -- genuine "created" for the local
-    file, "pulled" (local iCloud-drop time) for a restored remote sidecar.
-    """
-    try:
-        st = path.stat()
-    except OSError:
-        return None, None
-    return st.st_mtime, getattr(st, "st_birthtime", None)
-
-
-def _bump_canonical_mtime_post_resolve(canonical: Path, peer_mtime: float) -> None:
-    """Stamp ``canonical`` with mtime strictly greater than ``peer_mtime``.
-
-    Called from ``_resolve_interactive_loop`` after the user picks (l)ocal
-    so the "I picked local" decision propagates across the fleet on the
-    next push. Without this bump, canonical's mtime stays at whatever
-    ``_apply_incoming_file``'s mtime gate just classified as <= peer's,
-    and the next pull from the same peer re-conflicts because the dedup
-    signal (existing sidecar) was just deleted by the resolve. The user
-    ends up in a resolve -> pull -> resolve -> pull loop indefinitely.
-
-    Future-clamp symmetry: cap at ``now + _MTIME_RESTORE_MAX_SKEW_SECONDS``
-    so downstream peers don't have to clamp our pushed mtime. The cap edge
-    case (peer's mtime already at the max clamp) leaves canonical's mtime
-    exactly equal to peer's; the cycle persists for one more pull but is
-    self-correcting on peer's next legitimate push.
-
-    Best-effort. ``os.utime`` failure on iCloud-restored placeholders or
-    networked filesystems must not fail the resolve action itself --
-    bumping is a propagation hint, not a correctness gate.
-    """
-    now = time.time()
-    target = max(now, peer_mtime + 1.0)
-    target = min(target, now + _MTIME_RESTORE_MAX_SKEW_SECONDS)
-    try:
-        os.utime(canonical, (target, target))
-    except (OSError, OverflowError):
-        return
 
 
 # ── deferred inline keep-canonical mtime bump (Track 12A) ─────────────
@@ -2768,7 +2665,7 @@ def init() -> None:
     # (no 24h gate here — first-install pass should always try). Idempotent
     # if the user already has a correct symlink. Conflicts emit a one-line
     # notice; failures are forensic-only.
-    _ensure_retro_skill_links(dry_run=False)
+    skill_link._ensure_retro_skill_links(dry_run=False)
 
     # Init-time event backfill (v0.11.8). Captures the past 30 days of git
     # commits + a full sessions inventory so retro-fleet works immediately
@@ -2776,7 +2673,7 @@ def init() -> None:
     # Resolves sources via get_sources() so mm-events bootstraps the events
     # dir before walk runs. Forensic-only on failure; init proceeds.
     resolved_sources = get_sources(config)
-    _run_events_backfill(config, resolved_sources, device_id)
+    events_tail._run_events_backfill(config, resolved_sources, device_id)
 
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
 
@@ -2888,648 +2785,6 @@ def _ensure_device_registered(
         raise
 
 
-def _ensure_retro_skill_link(*, dry_run: bool = False) -> None:
-    """Group 8 / Track 8A symlink self-heal for the retro-fleet skill.
-
-    Three states (cross-model #3 from /plan-eng-review uses a 2-marker gate
-    so deliberate-conflict skips don't spam stderr forever):
-
-    * **success** — target absent OR target is a correct symlink at our
-      skill source. Idempotent. Touch ``skill-link-checked`` marker.
-    * **conflict-skip** — target exists as a real file or wrong symlink.
-      Don't clobber the user's file. Emit ``mm: notice:`` once per 24h
-      (gated by ``skill-link-conflict`` marker). User can ``rm`` to take
-      mm's version.
-    * **transient-failure** — TOCTOU FileExistsError, PermissionError on
-      read-only ~/.claude, OSError on a filesystem without symlink
-      support. CQ#1 forensic-only contract: emit ``mm: notice:``,
-      return, leave both markers alone so next push retries.
-
-    Dangling-symlink branch (Test review #1 IRON-RULE pin from
-    /plan-eng-review): a symlink whose target was deleted (e.g., after
-    ``pipx reinstall`` rebuilt the venv at a different path) is unlinked
-    and replaced. Pre-fix, ``target.is_symlink() and target.resolve() ==
-    src.resolve()`` skipped this case because resolve() returns the bad
-    path; the second branch then matched ``target.is_symlink()`` and
-    routed into "exists, don't replace" — silent permanent broken state.
-
-    Called from ``mm init`` (always, no gate) and ``_push_core`` HEAD
-    (24h-TTL gated). Both gates are read with ``os.stat`` wrapped in
-    try/except (TODO#3 critical-gap fix: EACCES on the marker dir must
-    fail-open so push doesn't crash).
-    """
-    _ensure_retro_skill_link_at(
-        Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME,
-        success_marker=_SKILL_LINK_SUCCESS_MARKER,
-        conflict_marker=_SKILL_LINK_CONFLICT_MARKER,
-        dry_run=dry_run,
-    )
-
-
-def _ensure_codex_retro_skill_link(*, dry_run: bool = False) -> None:
-    """Install the bundled retro-fleet skill for Codex when it is present."""
-    _ensure_retro_skill_link_at(
-        Path("~/.codex/skills").expanduser() / _SKILL_LINK_NAME,
-        success_marker=_CODEX_SKILL_LINK_SUCCESS_MARKER,
-        conflict_marker=_CODEX_SKILL_LINK_CONFLICT_MARKER,
-        dry_run=dry_run,
-    )
-
-
-def _ensure_opencode_retro_skill_link(*, dry_run: bool = False) -> None:
-    """Install the bundled retro-fleet skill for OpenCode when it is present."""
-    _ensure_retro_skill_link_at(
-        Path("~/.config/opencode/skills").expanduser() / _SKILL_LINK_NAME,
-        success_marker=_OPENCODE_SKILL_LINK_SUCCESS_MARKER,
-        conflict_marker=_OPENCODE_SKILL_LINK_CONFLICT_MARKER,
-        dry_run=dry_run,
-    )
-
-
-def _ensure_retro_skill_links(*, dry_run: bool = False) -> None:
-    """Best-effort install for every supported global skill directory."""
-    _ensure_retro_skill_link(dry_run=dry_run)
-    _ensure_codex_retro_skill_link(dry_run=dry_run)
-    _ensure_opencode_retro_skill_link(dry_run=dry_run)
-
-
-def _ensure_retro_skill_link_at(
-    target: Path,
-    *,
-    success_marker: str,
-    conflict_marker: str,
-    dry_run: bool = False,
-) -> None:
-    """Install the bundled skill at one agent-specific target.
-
-    Claude Code, Codex, and OpenCode discover the same Agent Skills format
-    from different global directories. Keeping target-specific markers separate
-    means a missing installation of one agent never suppresses another's repair.
-    """
-    if dry_run:
-        return
-
-    skills_dir = target.parent
-    agent_dir = skills_dir.parent
-    if not agent_dir.exists():
-        # Silent skip — the agent is not installed. Touching the success marker
-        # would suppress retries if the user installs it later in the day.
-        return
-    if not skills_dir.exists():
-        try:
-            skills_dir.mkdir(mode=0o700)
-        except OSError as e:
-            sys.stderr.write(
-                f"mm: notice: retro-fleet skills directory setup failed: "
-                f"{type(e).__name__}: {safe_str(e)}\n"
-            )
-            return
-
-    try:
-        skill_src = _resolve_retro_skill_src()
-    except Exception as e:
-        sys.stderr.write(
-            f"mm: notice: retro-fleet skill source unresolvable: "
-            f"{type(e).__name__}: {safe_str(e)}\n"
-        )
-        return
-
-    # Branch 1: dangling symlink → unlink + recreate.
-    # Path.exists() returns False on a dangling symlink while is_symlink()
-    # returns True. This branch was missing in the original /plan-eng-review
-    # design and is REGRESSION-class for pipx-reinstall recovery.
-    if target.is_symlink() and not target.exists():
-        try:
-            target.unlink()
-        except OSError as e:
-            sys.stderr.write(
-                f"mm: notice: retro-fleet skill dangling-link cleanup failed: "
-                f"{type(e).__name__}: {safe_str(e)}\n"
-            )
-            return
-        # Fall through to symlink_to creation below.
-    # Branch 2: target is a correct, intact symlink to our source → no-op.
-    elif target.is_symlink() and target.exists():
-        try:
-            if target.resolve() == skill_src.resolve():
-                _touch_marker(success_marker)
-                return
-        except OSError:
-            # resolve() can raise on a path with permission issues — fall
-            # through to the conflict-skip branch.
-            pass
-        # Wrong target — user's own symlink elsewhere. Conflict-skip.
-        _emit_conflict_notice(target, conflict_marker=conflict_marker)
-        return
-    # Branch 3: a real file or directory at the target → conflict-skip.
-    elif target.exists():
-        _emit_conflict_notice(target, conflict_marker=conflict_marker)
-        return
-
-    # Branch 4: target is absent (or just unlinked from dangling branch above).
-    # Create the symlink.
-    try:
-        target.symlink_to(skill_src)
-    except OSError as e:
-        # CQ#1: TOCTOU FileExistsError, EACCES, EPERM, ENOTSUP — forensic
-        # only. Don't crash push; don't touch markers; next push retries.
-        sys.stderr.write(
-            f"mm: notice: retro-fleet skill link install failed: "
-            f"{type(e).__name__}: {safe_str(e)}\n"
-        )
-        return
-    _touch_marker(success_marker)
-
-
-def _resolve_retro_skill_src() -> Path:
-    """Return the on-disk dir that the symlink should point at.
-
-    Subtle: the on-disk dir is named ``retro_fleet`` (Python identifier) but
-    the symlink target name is ``retro-fleet`` (Claude Code skill convention).
-    The aggregator imports cleanly via ``mind_meld.skills.retro_fleet`` and
-    Claude Code reads the symlinked dir as ``retro-fleet``.
-    """
-    import importlib.resources
-
-    return Path(str(importlib.resources.files("mind_meld") / "skills" / "retro_fleet"))
-
-
-def _emit_conflict_notice(
-    target: Path, *, conflict_marker: str = _SKILL_LINK_CONFLICT_MARKER
-) -> None:
-    """Notice once per 24h — gated by the conflict marker. Cross-model #3
-    from /plan-eng-review: per-push spam on a deliberate conflict is
-    hostile; the gate suppresses repeats."""
-    if _marker_is_fresh(conflict_marker):
-        return
-    sys.stderr.write(
-        f"mm: notice: skill at {safe_str(str(target))} exists; not replacing "
-        f"(remove the file to take mm's retro-fleet skill)\n"
-    )
-    _touch_marker(conflict_marker)
-
-
-def _marker_is_fresh(name: str) -> bool:
-    """Return True iff the marker exists AND its mtime is within
-    ``SKILL_LINK_TTL_SECONDS``. TODO#3 critical-gap fix: stat failure
-    fail-open (treat as if no marker — re-run installer)."""
-    marker = _config_dir() / f".{name}"
-    try:
-        st = marker.stat()
-    except OSError:
-        # FileNotFoundError, EACCES, EIO — fail-open. Returns False so the
-        # caller runs the installer; matches the visible-failure contract
-        # (no silent broken state).
-        return False
-    age = time.time() - st.st_mtime
-    return age < SKILL_LINK_TTL_SECONDS
-
-
-def _touch_marker(name: str) -> None:
-    """Mtime-touch the named marker. Best-effort; OSError is swallowed
-    silently (the next push will simply re-run the installer)."""
-    marker_dir = _config_dir()
-    try:
-        marker_dir.mkdir(parents=True, exist_ok=True)
-        (marker_dir / f".{name}").touch()
-    except OSError:
-        pass
-
-
-def _config_dir() -> Path:
-    return Path("~/.config/mind-meld").expanduser()
-
-
-def _skill_link_check_due() -> bool:
-    """Gate consulted by ``_push_core``. Returns True when the installer
-    should run.
-
-    Two paths to True:
-
-    1. **Marker is stale** (or absent) — the original 24h-TTL behavior.
-    2. **Marker is fresh but link state has drifted** — link is missing,
-       dangling, or pointing somewhere other than our source. Pre-fix
-       (post-v0.11.0 / pre-this-fix) the fresh marker silently suppressed
-       self-heal for 24h. The case in the wild: pipx-installed mm 0.11.0
-       creates the link successfully and touches the marker; user later
-       removes the link manually (e.g. cleaning up an old conductor
-       workspace whose path the link used to point at on a previous
-       install); next push sees fresh marker + missing link and skips
-       the installer for the rest of the day. The drift check costs one
-       ``lstat`` + one ``readlink`` + ``importlib.resources`` resolution
-       on the steady-state path — negligible vs the rest of push.
-
-    Any I/O or resolver error in the drift check fails open (returns
-    True) so the installer runs and emits its own notice. The conflict
-    marker is consulted separately by ``_emit_conflict_notice``.
-    """
-    return _skill_link_check_due_at(
-        Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME,
-        success_marker=_SKILL_LINK_SUCCESS_MARKER,
-    )
-
-
-def _codex_skill_link_check_due() -> bool:
-    """Return whether Codex's retro-fleet skill needs a self-heal attempt."""
-    target = Path("~/.codex/skills").expanduser() / _SKILL_LINK_NAME
-    if not target.parent.exists():
-        return False
-    return _skill_link_check_due_at(
-        target,
-        success_marker=_CODEX_SKILL_LINK_SUCCESS_MARKER,
-    )
-
-
-def _opencode_skill_link_check_due() -> bool:
-    """Return whether OpenCode's retro-fleet skill needs a self-heal attempt."""
-    target = Path("~/.config/opencode/skills").expanduser() / _SKILL_LINK_NAME
-    if not target.parent.exists():
-        return False
-    return _skill_link_check_due_at(
-        target,
-        success_marker=_OPENCODE_SKILL_LINK_SUCCESS_MARKER,
-    )
-
-
-def _skill_links_check_due() -> bool:
-    """Return whether any supported agent's retro-fleet link has drifted."""
-    return (
-        _skill_link_check_due() or _codex_skill_link_check_due() or _opencode_skill_link_check_due()
-    )
-
-
-def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
-    """Target-specific implementation of the 24-hour skill-link drift gate."""
-    if not _marker_is_fresh(success_marker):
-        return True
-    try:
-        if not target.is_symlink():
-            return True
-        if not target.exists():
-            return True  # dangling
-        skill_src = _resolve_retro_skill_src()
-        if target.resolve() != skill_src.resolve():
-            return True  # wrong target (e.g. stale workspace path)
-    except Exception:
-        return True
-    return False
-
-
-def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
-    """Return the base directory of each ``type=claude`` source resolved by
-    ``get_sources()``. Used by ``_run_events_tail`` to feed Track 7B's
-    ``walk_session_metadata`` once per claude dir; aggregated into a single
-    sessions-snapshot row so pull-merge set-union semantics stay stable
-    regardless of how many claude sources are configured."""
-    return [Path(s["path"]).expanduser() for s in sources if s.get("type") == "claude"]
-
-
-def _decide_token_walk_policy(
-    claude_paths: list[Path],
-    *,
-    quiet: bool,
-) -> bool:
-    """Return True if the events tail should aggregate token data this push.
-
-    Side effect: when cold cache + (interactive OR detected upgrade
-    transition), runs ``warm_token_cache_inline`` to populate the cache
-    BEFORE the tail walk starts. False return means cold cache + no warm
-    eligibility (autopush, no transition) — emit a notice and skip.
-
-    Four policies:
-
-    1. **Cache already warm**: return True. Tail walk picks up cache hits
-       on every existing jsonl, walks only newly-touched ones.
-
-    2. **Cold + interactive (``quiet=False``)**: telegraph one-time warm
-       cost, run ``warm_token_cache_inline``, return True.
-
-    3. **Cold + autopush + transition fired**: warm silently using the
-       ``warm_token_cache_inline`` default budget. The transition flag is
-       set by the call to ``upgrade.run_transition_hook`` earlier in the
-       same process — its presence (not a budget bump) is what unlocks
-       this path on autopush.
-
-    4. **Cold + autopush + no transition**: emit ``mm: notice: token cache
-       not warm; run 'mm push' to populate`` and return False (skip token
-       aggregation this push).
-    """
-    if not claude_paths:
-        return False
-    try:
-        is_cold = token_usage.is_cache_cold()
-    except OSError:
-        return False
-    if not is_cold:
-        return True
-    transition = upgrade.last_transition_seen()
-    if quiet and transition is None:
-        sys.stderr.write("mm: notice: token cache not warm; run 'mm push' to populate\n")
-        return False
-    if not quiet:
-        sys.stderr.write("mm: warming token cache (one-time, ~3s)...\n")
-    try:
-        token_usage.warm_token_cache_inline(claude_paths)
-    except Exception as e:
-        sys.stderr.write(
-            f"mm: notice: token cache warm failed: {type(e).__name__}: {safe_str(e)}\n"
-        )
-        return False
-    return True
-
-
-def _run_events_tail(
-    config: dict,
-    sources: list[dict],
-    device_id: str,
-    *,
-    dry_run: bool,
-    quiet: bool,
-) -> list[str]:
-    """Capture per-push fleet-retro events at the HEAD of ``_push_core``.
-
-    Returns a list of human-readable degradation phrases for this push
-    (empty when healthy). ``autopush`` turns a non-empty list into a
-    ``degraded`` autorun breadcrumb (v0.12.16). The stderr notices below
-    stay exactly as they are — they are the interactive signal — but they
-    are NOT the load-bearing one: this function runs from ``mm autopush``,
-    which fires unattended from a Claude Code hook, so its stderr reaches
-    nobody. Before the return value existed, ``mm status`` reported
-    ``success`` no matter how badly this degraded. CHANGELOG v0.12.13
-    records the same lesson from the unpriced-model breadcrumb, which
-    "fired for four unpriced models across the whole v0.12.x line and
-    nobody saw it." Any new degradation detected here MUST be appended to
-    the returned list as well as printed.
-
-    See CLAUDE.md "Events tail in _push_core (load-bearing, v0.10.3)" for
-    the load-bearing invariants: head-position single-call-site (Codex C4
-    — branch-fragility-free, one-push-lag-free), dry_run no-op (preview
-    contract), mm-events-resolved gate (covers fresh / migrated / un-
-    migrated configs uniformly, Codex C1), and the autopush 250ms /
-    interactive 500ms wall-clock budget. The "budget exceeded" notice
-    reports on the session-metadata walk (the git walk self-bounds via its
-    own total_budget_ms); the snapshot is taken before the self-bounded
-    identity gather so a cold 7d-TTL identity refresh no longer masquerades
-    as a slow walk (v0.12.9).
-
-    Forensic-only invariant: any failure in this block is swallowed and
-    breadcrumbed via ``mm: notice:``. The push proceeds.
-    """
-    degradations: list[str] = []
-    if dry_run:
-        return degradations
-    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
-    if mm_events_src is None:
-        return degradations
-    try:
-        budget_ms = (
-            events.WALK_TIME_BUDGET_AUTOPUSH_MS if quiet else events.WALK_TIME_BUDGET_INTERACTIVE_MS
-        )
-        deadline = time.monotonic() + budget_ms / 1000.0
-        events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-
-        roots, errs = events.discover_git_roots(config)
-        since = events.last_push_ts(events_dir, device_id)
-
-        g_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
-        for r in g_rows:
-            r["device"] = device_id
-
-        claude_paths = _enabled_claude_paths(sources)
-        # Token cache wiring (v0.11.14+).
-        # Step 1: decide whether to aggregate tokens this push (handles cold-
-        # cache warm internally). Returns False on autopush + cold + no
-        # detected upgrade transition — caller skips the token aggregation.
-        do_token_walk = _decide_token_walk_policy(claude_paths, quiet=quiet)
-        # Warm may have consumed several seconds. Refresh the deadline so
-        # the session-metadata walk gets its full advertised budget instead
-        # of an already-expired one (Codex outside-voice review caught this
-        # — pre-fix, first interactive push / upgrade autopush could emit
-        # an empty `projects: []` snapshot when warm ate the original
-        # deadline).
-        deadline = time.monotonic() + budget_ms / 1000.0
-
-        agg_projects: list[dict] = []
-        if do_token_walk:
-            # Step 2: hold the token cache flock across the walk so
-            # walk_session_metadata's per-file mutations to files dict are
-            # captured atomically. "warn" mode under autopush degrades
-            # gracefully on contention (`files is None`, no token
-            # aggregation this push); "block" under interactive (user is
-            # waiting anyway). Cache-shape invariants (version + files
-            # isinstance) are owned by token_usage.lock_and_get_files.
-            mode = "warn" if quiet else "block"
-            with token_usage.lock_and_get_files(mode) as files_dict:
-                if files_dict is None:
-                    # Warn-mode contention. `do_token_walk` stays True, so
-                    # the gate below cannot see this — but the user-visible
-                    # outcome is IDENTICAL to the cold-cache case: every
-                    # project ships without tokens_by_day or skills_by_day,
-                    # and latest-snapshot-wins then replaces the prior
-                    # complete data with it. Caught by Codex + the
-                    # maintainability specialist during /review; the
-                    # invariant this function documents says every
-                    # degradation MUST reach the returned list, and this
-                    # one previously reached only a stderr warning.
-                    degradations.append("token cache was locked, so tokens and skills are missing")
-                for claude_dir in claude_paths:
-                    for row in events.walk_session_metadata(
-                        claude_dir,
-                        since=since,
-                        deadline_monotonic=deadline,
-                        token_cache_files=files_dict,
-                    ):
-                        agg_projects.extend(row.get("projects", []))
-        else:
-            for claude_dir in claude_paths:
-                for row in events.walk_session_metadata(
-                    claude_dir,
-                    since=since,
-                    deadline_monotonic=deadline,
-                    token_cache_files=None,
-                ):
-                    agg_projects.extend(row.get("projects", []))
-        # Budget check covers the session-metadata WALK — snapshot the clock
-        # HERE, before the self-bounded identity gather (≤10s worst case, 7d
-        # TTL) and the event write. (The git walk above self-bounds via its
-        # own total_budget_ms; this deadline was reset after it.) Pre-v0.12.9
-        # the check sat after gather_local_identities, so a cold identity
-        # refresh masqueraded as "events tail budget exceeded" even when the
-        # walk finished in ~200ms. The gather announces itself separately via
-        # `refreshing identity cache (one-off)`. See events-retro.md inv. 4.
-        walk_done = time.monotonic()
-        s_rows: list[dict] = []
-        if claude_paths:
-            s_rows.append(
-                {
-                    "v": events.EVENTS_SCHEMA_VERSION,
-                    "type": "sessions-snapshot",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "device": device_id,
-                    "projects": agg_projects,
-                }
-            )
-
-        source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
-        # Fleet-wide author-email trust set (v0.11.17). gather_local_identities
-        # is cache-first: hot path is ~1ms; cold/stale path emits a single
-        # `mm: notice: refreshing identity cache (one-off)` line and runs a
-        # synchronous refresh inline (D1 from /plan-eng-review — the user
-        # accepted the one-off slow path over budget contortions). Emitted
-        # as `local_emails: []` (explicit empty) when this machine has no
-        # configured identities — distinguishable from "pre-v0.11.17 peer
-        # with no field at all" so the aggregator can choose its fallback.
-        local_emails = identity.gather_local_identities(allow_refresh=True)
-        mm_event = events.make_mm_push_event(
-            device=device_id,
-            mm_version=__version__,
-            sources=source_names,
-            discovery_errors=errs,
-            local_emails=local_emails,
-        )
-        # CT-4 invariant: mm-push event LAST so a partial write doesn't
-        # advance the next-push cursor.
-        events.write_push_event(events_dir, device_id, [*g_rows, *s_rows, mm_event])
-
-        if walk_done > deadline:
-            sys.stderr.write("mm: notice: events tail budget exceeded\n")
-            degradations.append(f"events walk exceeded its {budget_ms}ms budget")
-        # `claude_paths` gate is load-bearing: `_decide_token_walk_policy`
-        # ALSO returns False when there is no enabled claude source at all
-        # (`if not claude_paths: return False`). That is a config shape, not
-        # a degradation — a gstack-only or codex-only machine has no tokens
-        # or skills to collect, and reporting it would pin `mm status` at
-        # `degraded` forever while blaming a cache that isn't the cause.
-        # Reproduced during /review before this guard existed. The remaining
-        # False causes (cold cache on autopush, cache stat/parse OSError,
-        # inline warm raised) all mean the same thing to the user: this
-        # push published no token or skill data.
-        if claude_paths and not do_token_walk:
-            degradations.append("token walk skipped, so tokens and skills are missing")
-    except Exception as e:
-        sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
-        degradations.append(f"events tail failed ({type(e).__name__})")
-    return degradations
-
-
-def _run_events_backfill(
-    config: dict,
-    sources: list[dict],
-    device_id: str,
-) -> None:
-    """Init-time backfill of git+sessions events for the past 30 days.
-
-    Mirrors ``_run_events_tail`` but writes only ``git-snapshot`` and
-    ``sessions-snapshot`` rows — NO ``mm-push`` row. Two consequences:
-
-    * Push-count semantics stay honest: an init-counted-as-push would
-      inflate the per-window mm-push count in the retro by 1 on every
-      fresh-install machine.
-    * The cursor (``last_push_ts``) stays at "no prior mm-push" so the
-      first real push walks the same 30-day range. Aggregator dedups via
-      ``(canonical_remote_url, sha)`` so retro output is unchanged; cost
-      is one extra ~500ms ``git log`` walk on the first push, paid once
-      per machine.
-
-    Idempotent at the aggregator layer (commits dedup; sessions latest-
-    per-tuple wins). Forensic-only on failure: stderr breadcrumb, init
-    proceeds.
-    """
-    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
-    if mm_events_src is None:
-        return
-    try:
-        budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
-        deadline = time.monotonic() + budget_ms / 1000.0
-        events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-
-        # Explicit 30-day window. last_push_ts() returns the same value
-        # on first run, but stating intent at the call site makes the
-        # backfill semantics legible without chasing a default.
-        since = datetime.now(timezone.utc) - timedelta(days=events.INITIAL_CURSOR_LOOKBACK_DAYS)
-
-        roots, _errs = events.discover_git_roots(config)
-        g_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
-        for r in g_rows:
-            r["device"] = device_id
-
-        claude_paths = _enabled_claude_paths(sources)
-
-        # Warm the token cache inline at init (v0.11.14+). One-time cost
-        # at init time — kb already accepts init takes a few seconds.
-        # Subsequent pushes inherit a warm cache.
-        if claude_paths:
-            try:
-                token_usage.warm_token_cache_inline(claude_paths)
-            except Exception as e:
-                sys.stderr.write(
-                    f"mm: notice: token cache warm at init failed: "
-                    f"{type(e).__name__}: {safe_str(e)}\n"
-                )
-
-        # Refresh deadline after warm — the warm can spend ~5s, which
-        # would otherwise leave an already-expired deadline for the
-        # session-metadata walk and produce an empty `projects: []`
-        # backfill on fresh installs (Codex outside-voice review caught
-        # this; matches the same fix in `_run_events_tail`).
-        deadline = time.monotonic() + budget_ms / 1000.0
-
-        agg_projects: list[dict] = []
-        # Hold the token cache lock across the walk so per-jsonl mutations
-        # persist as part of the same R/M/W. Init is interactive, so use
-        # blocking mode. Cache-shape invariants are owned by
-        # token_usage.lock_and_get_files.
-        if claude_paths:
-            with token_usage.lock_and_get_files("block") as files_dict:
-                for claude_dir in claude_paths:
-                    for row in events.walk_session_metadata(
-                        claude_dir,
-                        since=since,
-                        deadline_monotonic=deadline,
-                        token_cache_files=files_dict,
-                    ):
-                        agg_projects.extend(row.get("projects", []))
-        # Budget check covers the session-metadata WALK (mirrors
-        # _run_events_tail; the git walk above self-bounds via total_budget_ms)
-        # — snapshot the clock HERE, before the deliberate
-        # identity.refresh_identity_cache(force=True) warm below. That refresh
-        # ALWAYS runs at init and can spend ~10s on a cold gather; counting it
-        # against the walk budget made "events backfill budget exceeded" fire
-        # on essentially every init. See docs/invariants/events-retro.md inv. 4.
-        walk_done = time.monotonic()
-        s_rows: list[dict] = []
-        if claude_paths:
-            s_rows.append(
-                {
-                    "v": events.EVENTS_SCHEMA_VERSION,
-                    "type": "sessions-snapshot",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "device": device_id,
-                    "projects": agg_projects,
-                }
-            )
-
-        rows_to_write = [*g_rows, *s_rows]
-        if rows_to_write:
-            events.write_push_event(events_dir, device_id, rows_to_write)
-
-        # Warm the identity cache at init (v0.11.17, D5 from /plan-eng-review).
-        # First push after init then has hot identity data and emits no
-        # slow-path notice. Failure is forensic-only — backfill proceeds.
-        try:
-            identity.refresh_identity_cache(force=True)
-        except Exception as e:
-            sys.stderr.write(
-                f"mm: notice: identity cache warm at init failed: "
-                f"{type(e).__name__}: {safe_str(e)}\n"
-            )
-
-        if walk_done > deadline:
-            sys.stderr.write("mm: notice: events backfill budget exceeded\n")
-    except Exception as e:
-        sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")
-
-
 def _has_mtime_only_changes_vs_remote(
     local_manifest: dict[str, Any],
     remote_sources: dict[str, Any],
@@ -3636,8 +2891,8 @@ def _push_core(
     # 24h-TTL — the marker stat is the entire hot-path cost on the steady-
     # state push (~1 syscall). dry_run gates the install too (preview
     # contract; mirrors _ensure_device_registered).
-    if not dry_run and _skill_links_check_due():
-        _ensure_retro_skill_links(dry_run=False)
+    if not dry_run and skill_link._skill_links_check_due():
+        skill_link._ensure_retro_skill_links(dry_run=False)
 
     # Build local manifest (v2 with sources)
     sources = get_sources(config)
@@ -3751,7 +3006,9 @@ def _push_core(
     # the cursor + git/sessions snapshots, then re-walk mm-events to fold
     # the just-written event row into local_manifest. dry_run still gates
     # the tail's own writes; the re-walk reads existing on-disk state.
-    events_degradations = _run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
+    events_degradations = events_tail._run_events_tail(
+        config, sources, device_id, dry_run=dry_run, quiet=quiet
+    )
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
@@ -4664,7 +3921,7 @@ def _pull_core(
     # the user's tree would end up with a mix of pre-inversion and post-
     # inversion files indistinguishable except by mtime — and resolve's
     # dual-mode dispatch needs the prefix, not the timestamp.
-    _find_conflict_files(config, migrate_pre_inversion=True)
+    resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
     # Widened to carry path + type per source. Type is load-bearing for
     # the sync-log gate in _pull_one_source — keying on type (not name)
@@ -5054,7 +4311,17 @@ def status(
                 if detail
                 else safe_str(str(outcome))
             )
-            console.print(f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})")
+            # Staleness gate. `_write_autorun_breadcrumb` is called from INSIDE
+            # the command, so a failure that happens before typer's runner --
+            # an ImportError at module scope being the obvious one -- writes no
+            # breadcrumb at all, and this line then reports the last SUCCESS
+            # forever while sync is wedged. That is the one degradation the
+            # v0.8.1 `no-sources` and v0.12.16 `degraded` breadcrumbs cannot
+            # cover, because both are written by code that never ran.
+            console.print(
+                f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})"
+                f"{_breadcrumb_staleness_suffix(ts)}"
+            )
         except (OSError, ValueError):
             pass  # corrupt breadcrumb is not worth surfacing an error for
     if fetch.status == "missing":
@@ -5618,98 +4885,15 @@ def gc(
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
         # Track 7B: events retention is always-on (fleet policy, not opt-in).
         # See `_gc_old_event_files` for the tombstone-propagation framing.
-        _gc_old_event_files(config, dry_run, verbose)
+        retention._gc_old_event_files(config, dry_run, verbose)
         # v0.11.14+: token cache reaper. Stale entries (no living jsonl OR
         # by_day older than 90d) are dropped. Dry-run reports without
         # mutating the cache file.
-        _gc_token_cache(dry_run, verbose)
+        retention._gc_token_cache(dry_run, verbose)
         if prune_conflicts:
-            _gc_old_conflict_files(config, dry_run, verbose)
+            retention._gc_old_conflict_files(config, dry_run, verbose)
     finally:
         release_lock()
-
-
-def _gc_token_cache(dry_run: bool, verbose: bool) -> None:
-    """Reap session-tokens.json entries with no living jsonl AND entries
-    whose most recent by_day key is older than 90 days. Best-effort —
-    cache reconstruction on the next push backstops a GC failure."""
-    if dry_run:
-        # Dry-run: count without mutating. Re-implement the predicate
-        # cheaply via is_cache_cold + a peek.
-        if not token_usage.CACHE_PATH.exists():
-            if verbose:
-                console.print("[dim]No token cache to gc.[/dim]")
-            return
-        if verbose:
-            console.print("[dim]Token cache reaper: dry-run; skipping.[/dim]")
-        return
-    try:
-        n = token_usage.gc_cache_entries()
-    except Exception as e:
-        sys.stderr.write(f"mm: notice: token cache gc failed: {type(e).__name__}: {safe_str(e)}\n")
-        return
-    if verbose and n:
-        console.print(f"[dim]Reaped {n} stale token cache entr{'y' if n == 1 else 'ies'}.[/dim]")
-
-
-def _sweep_local_tmp_files(
-    backend: LocalBackend,
-    my_device_id: str,
-    dry_run: bool,
-    verbose: bool,
-) -> int:
-    """Reap stale tmp*.tmp left by crashed atomic_write_bytes calls.
-
-    Scoped strictly to THIS device's subtrees:
-        <root>/data/<my_device_id>/
-        <root>/manifests/<my_device_id>/
-
-    Peer subtrees are never touched — the iCloud storage tree is shared
-    across machines but flock only serializes THIS Mac, so a file in
-    another device's subtree might be in the middle of being uploaded
-    by their iCloud daemon. Not our garbage to collect.
-
-    NOTE: devices/ is intentionally EXCLUDED. It is a flat directory
-    shared across machines (no per-device subdir), and tempfile.mkstemp
-    names are random — there is no reliable way to tell this device's
-    stranded tmp from a peer's in-flight write. The rare leak there is
-    accepted; see Track 3A GC sweep for global orphan reaping.
-
-    Returns the count swept (or would-be-swept if dry_run).
-    """
-    count = 0
-    scoped_dirs = [
-        backend.root / "data" / my_device_id,
-        backend.root / "manifests" / my_device_id,
-    ]
-    victims: list[Path] = []
-    for base in scoped_dirs:
-        if not base.exists():
-            continue
-        for p in base.rglob("tmp*.tmp"):
-            if p.is_file():
-                victims.append(p)
-
-    # devices/ deliberately excluded — see docstring.
-
-    for v in victims:
-        if dry_run:
-            if verbose:
-                console.print(f"  [dim]would sweep: {v}[/dim]")
-        else:
-            try:
-                v.unlink()
-            except OSError as e:
-                if verbose:
-                    console.print(f"  [yellow]sweep failed: {v} — {e}[/yellow]")
-                continue
-        count += 1
-
-    if count > 0 and not dry_run:
-        console.print(f"  [dim]swept {count} stale tmp files[/dim]")
-    elif count > 0 and dry_run:
-        console.print(f"  [dim]would sweep {count} stale tmp files[/dim]")
-    return count
 
 
 def _do_gc(
@@ -5726,7 +4910,7 @@ def _do_gc(
     # Sweep this device's stale tmp*.tmp files before ref-counting.
     # Runs UNDER the caller's lock (acquire_lock already held by gc()),
     # so no concurrent writer can race with the sweep.
-    _sweep_local_tmp_files(backend, my_device_id, dry_run, verbose)
+    retention._sweep_local_tmp_files(backend, my_device_id, dry_run, verbose)
 
     # Collect all referenced hashes from ALL device manifests
     devices = _list_devices_warn(backend)
@@ -6288,11 +5472,7 @@ def install_skills_cmd() -> None:
     contents of ``~/.local/pipx/venvs/mind-meld/`` in place, so the link
     auto-updates on every ``pipx upgrade mind-meld``.
     """
-    targets = (
-        Path("~/.claude/skills").expanduser() / _SKILL_LINK_NAME,
-        Path("~/.codex/skills").expanduser() / _SKILL_LINK_NAME,
-        Path("~/.config/opencode/skills").expanduser() / _SKILL_LINK_NAME,
-    )
+    targets = skill_link.skill_targets()
     available_targets = tuple(target for target in targets if target.parent.parent.exists())
     if not available_targets:
         typer.echo(
@@ -6303,7 +5483,7 @@ def install_skills_cmd() -> None:
         raise typer.Exit(code=1)
 
     try:
-        skill_src = _resolve_retro_skill_src()
+        skill_src = skill_link._resolve_retro_skill_src()
     except Exception as e:
         typer.echo(
             f"mm: error: skill source unresolvable: {type(e).__name__}: {safe_str(e)}",
@@ -6311,20 +5491,9 @@ def install_skills_cmd() -> None:
         )
         raise typer.Exit(code=1) from e
 
-    _ensure_retro_skill_links(dry_run=False)
+    skill_link._ensure_retro_skill_links(dry_run=False)
 
-    installed: list[Path] = []
-    conflicts: list[Path] = []
-    for target in available_targets:
-        if target.is_symlink() and target.exists():
-            try:
-                if target.resolve() == skill_src.resolve():
-                    installed.append(target)
-                    continue
-            except OSError:
-                pass
-        if target.exists() or target.is_symlink():
-            conflicts.append(target)
+    installed, conflicts = skill_link.classify_targets(available_targets, skill_src)
 
     if installed:
         for target in installed:
@@ -6613,378 +5782,6 @@ def log_cmd(
 # ── conflicts / resolve ───────────────────────────────────────────────
 
 
-def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
-    """Return the directories `mm push` would walk for this source.
-
-    Limits conflict discovery to paths mm actually syncs so we don't
-    list .sync-conflict-* files from unsynced areas (e.g., ~/.claude/sessions
-    when the claude source only syncs memory/ and todos/).
-
-    - claude type: projects/<any>/memory, projects/<any>/todos
-    - generic type: include_dirs (relative to source root)
-    """
-    src_type = src_cfg.get("type", "claude")
-    if src_type == "claude":
-        from mind_meld.manifest import SYNCED_SUBDIRS
-
-        projects = base_path / "projects"
-        if not projects.exists():
-            return []
-        dirs: list[Path] = []
-        for project_dir in projects.iterdir():
-            if not project_dir.is_dir():
-                continue
-            for sub in SYNCED_SUBDIRS:
-                candidate = project_dir / sub
-                if candidate.exists():
-                    dirs.append(candidate)
-        return dirs
-    # generic: include_dirs (resolved) + base for single-file includes
-    dirs = []
-    for d in src_cfg.get("include_dirs", []):
-        candidate = base_path / d
-        if candidate.exists():
-            dirs.append(candidate)
-    return dirs
-
-
-def _inversion_marker_path() -> Path:
-    """Canonical path for the one-shot inversion-install timestamp file."""
-    return sidecar.SIDECAR_DIR / "inversion-installed-at"
-
-
-def _ensure_inversion_marker() -> float | None:
-    """Get-or-create the inversion-install timestamp (epoch seconds).
-
-    Returns the timestamp as a float, or None on any read/parse/write
-    failure (fail-safe: the caller treats None as "skip migration").
-
-    Critical safety property: distinguishes pre-inversion conflict files
-    (mtime predates the marker — produced by pre-v0.9.2 code on this
-    machine) from post-inversion conflict files (mtime is at-or-after
-    the marker — produced by THIS version's `_apply_conflict`, which
-    emits unprefixed filenames). Without this gate, the migration sweep
-    re-tags every fresh post-inversion sidecar as `v0-` on the next
-    pull and resolve silently dispatches them backwards, causing data
-    loss (the CRITICAL bug caught by /ship pre-landing review and
-    independently confirmed by both adversarial and reviewer subagents).
-
-    First-call semantics: writes the marker at "now" so any pre-existing
-    `.sync-conflict-*` files already on disk (mtime < now) get migrated
-    on this pull, and every NEW conflict file produced from here on
-    (mtime > now) is correctly skipped.
-
-    Best-effort: directory creation and file write may fail (perms,
-    disk full). Failure returns None — the caller MUST treat None as
-    "do not migrate" rather than "migrate everything", so a broken
-    marker degrades to safe-default-no-migration instead of mass
-    re-tagging.
-    """
-    path = _inversion_marker_path()
-    try:
-        if path.exists():
-            return float(path.read_text().strip())
-        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
-        marker_ts = time.time()
-        # Atomic write so a crash mid-create doesn't leave a partial
-        # number that fails to float-parse on the next read.
-        fsutil.atomic_write_bytes(
-            path,
-            f"{marker_ts}\n".encode(),
-            fsync=True,
-            mode=0o600,
-        )
-        return marker_ts
-    except (OSError, ValueError, StorageError):
-        return None
-
-
-def _migrate_pre_inversion_conflict(path: Path) -> Path:
-    """Rename a pre-inversion conflict file to carry the `v0-` prefix.
-
-    Idempotent: a path already prefixed with `v0-` returns unchanged.
-    Skips files whose mtime is at-or-after the inversion-install marker
-    (those are post-inversion files produced by THIS version's
-    `_apply_conflict`, which emits unprefixed filenames — re-tagging
-    them as `v0-` would silently invert resolve's dispatch and cause
-    data loss). Failure (rename error, target collision, missing marker)
-    logs a warning to stderr and returns the original path so the
-    caller can keep walking — losing one migration attempt is preferable
-    to aborting the whole conflict-discovery sweep.
-
-    MUST only be called from a lock-protected context (mm pull, mm
-    resolve). `mm conflicts` is intentionally read-only and lockless;
-    renaming there would race with autopull's own discovery walk
-    (codex-2 #5).
-    """
-    from mind_meld.manifest import (
-        CONFLICT_V0_PREFIX,
-        is_pre_inversion_conflict_filename,
-    )
-
-    name = path.name
-    if is_pre_inversion_conflict_filename(name):
-        return path
-    if not is_conflict_filename(name):
-        return path
-
-    # Mtime gate (5E ship-fix): only migrate files whose mtime predates
-    # the inversion-install marker. Without this, fresh post-inversion
-    # sidecars produced by `_apply_conflict` (which has the same
-    # unprefixed shape as legacy pre-inversion files) get false-tagged
-    # `v0-` on the very next pull, then `_resolve_interactive_loop`
-    # dispatches them backwards (silent data loss).
-    marker_ts = _ensure_inversion_marker()
-    if marker_ts is None:
-        # Fail-safe: marker unreadable / unwriteable. Refuse to migrate
-        # rather than risk mis-tagging.
-        return path
-    try:
-        file_mtime = path.stat().st_mtime
-    except OSError:
-        return path
-    if file_mtime >= marker_ts:
-        # Post-inversion file — produced after this version was installed.
-        # Leave its filename unprefixed (the resolve dual-mode dispatch
-        # treats no-prefix as post-inversion semantics).
-        return path
-
-    idx = name.find(CONFLICT_INFIX)
-    if idx == -1:
-        return path  # defensive — is_conflict_filename guarantees presence
-    before = name[: idx + len(CONFLICT_INFIX)]
-    after = name[idx + len(CONFLICT_INFIX) :]
-    new_name = f"{before}{CONFLICT_V0_PREFIX}{after}"
-    new_path = path.with_name(new_name)
-    if new_path.exists():
-        return path  # collision — leave both copies in place for resolve
-    try:
-        path.rename(new_path)
-    except OSError as e:
-        stderr_console.print(
-            f"[yellow]warning:[/yellow] failed to migrate pre-inversion conflict file {path} — {e}"
-        )
-        return path
-    return new_path
-
-
-def _find_conflict_files(
-    config: dict,
-    *,
-    migrate_pre_inversion: bool = False,
-) -> list[tuple[str, Path, Path | None]]:
-    """Walk all sync sources looking for .sync-conflict-* files.
-
-    Scoped to the same paths mm push walks — won't surface conflict files
-    from unsynced areas of the source tree. Returns (source_name,
-    conflict_path, canonical_path_if_exists). Canonical is None if the user
-    has already deleted it.
-
-    Two scan strategies, since `mm push` walks two surfaces per source:
-      1. Recursive scan inside include_dirs (and claude SYNCED_SUBDIRS).
-      2. Depth-0 sibling-glob for generic include_files entries — top-level
-         single-file syncs whose conflict siblings live next to them, not
-         inside `_synced_scan_dirs`' recursive surface. Without (2), conflict
-         files for top-level entries like ~/.gstack/retro-context.md are invisible
-         to `mm conflicts` / `mm resolve` / `mm gc --conflicts` (the
-         2026-04-24 first-pull bug — listed 5 of 6 conflicts).
-
-    `migrate_pre_inversion` (default False): if True, rename any
-    pre-inversion conflict files to carry the `v0-` prefix before
-    returning. Lock-protected callers ONLY (mm pull, mm resolve).
-    Pass False from `mm conflicts` (read-only; lockless — would race
-    autopull) and from `_gc_old_conflict_files` (mtime-based reaping
-    doesn't need the prefix discrimination, codex-2 #5).
-
-    Dedup: scan strategies (1) and (2) overlap when an `include_files`
-    entry sits inside an `include_dirs` directory (e.g. user customizes
-    `include_files: ["projects/notes.md"]` AND `include_dirs:
-    ["projects"]`). Without dedup, `mm conflicts` shows duplicate rows
-    and `mm gc --conflicts` double-counts reaped files. Key is
-    `(src_name, conflict_path)` not bare `Path`: two configured sources
-    could legitimately reference overlapping subtrees, and dedup must
-    preserve source attribution.
-    """
-    hits: list[tuple[str, Path, Path | None]] = []
-    # Group 7 preflight #3 + D6: dedup key uses filesystem identity
-    # (src_name, st_dev, st_ino) when stat succeeds — handles APFS
-    # case-mismatched config (e.g. include_dirs ["projects"] +
-    # include_files ["Projects/notes.md"]) correctly. Falls back to
-    # (src_name, str(path)) when stat fails (race window between glob
-    # and dedup) so we never silently drop a conflict file just because
-    # of a transient stat error. The src_name component preserves source
-    # attribution when two configured sources legitimately reference
-    # overlapping subtrees.
-    seen: set[tuple[str, int, int] | tuple[str, str]] = set()
-
-    def _maybe_migrate(p: Path) -> Path:
-        if migrate_pre_inversion:
-            return _migrate_pre_inversion_conflict(p)
-        return p
-
-    def _identity_key(src_name: str, conflict_path: Path) -> tuple[str, int, int] | tuple[str, str]:
-        try:
-            st = conflict_path.stat()
-        except OSError:
-            return (src_name, str(conflict_path))
-        return (src_name, st.st_dev, st.st_ino)
-
-    def _try_add(src_name: str, conflict_path: Path, canonical: Path | None) -> None:
-        key = _identity_key(src_name, conflict_path)
-        if key in seen:
-            return
-        seen.add(key)
-        hits.append((src_name, conflict_path, canonical))
-
-    for src_cfg in get_sources(config):
-        base_path = Path(src_cfg["path"]).expanduser().resolve()
-        if not base_path.exists():
-            continue
-
-        # (1) Recursive scan in include_dirs / SYNCED_SUBDIRS.
-        for scan_dir in _synced_scan_dirs(src_cfg, base_path):
-            # rglob is loose (substring); filter strictly via is_conflict_filename
-            # so user files like notes.sync-conflict-log.md are not listed/reaped.
-            for conflict_path in scan_dir.rglob(f"*{CONFLICT_INFIX}*"):
-                if not conflict_path.is_file():
-                    continue
-                if not is_conflict_filename(conflict_path.name):
-                    continue
-                conflict_path = _maybe_migrate(conflict_path)
-                canonical = _canonical_for_conflict(conflict_path)
-                _try_add(
-                    src_cfg["name"],
-                    conflict_path,
-                    canonical if canonical.exists() else None,
-                )
-
-        # (2) Depth-0 sibling-glob for include_files entries. Gate on data
-        # presence (not source type) so a future schema that adds
-        # include_files to other source types doesn't silently lose
-        # conflict visibility — the same scope-mismatch class of bug as
-        # the original Track 5A Task 2.
-        if src_cfg.get("include_files"):
-            for filename in src_cfg.get("include_files", []):
-                canonical = base_path / filename
-                # parent_dir handles both top-level entries (parent == base_path)
-                # and nested entries like "subdir/file.txt" (parent == base/subdir).
-                # .glob() is depth-0 — never recurses into unsynced subtrees.
-                parent_dir = canonical.parent
-                if not parent_dir.exists():
-                    continue
-                pattern = f"{canonical.stem}{CONFLICT_INFIX}*{canonical.suffix}"
-                for conflict_path in parent_dir.glob(pattern):
-                    if not conflict_path.is_file():
-                        continue
-                    if not is_conflict_filename(conflict_path.name):
-                        continue
-                    conflict_path = _maybe_migrate(conflict_path)
-                    _try_add(
-                        src_cfg["name"],
-                        conflict_path,
-                        canonical if canonical.exists() else None,
-                    )
-    return hits
-
-
-def _canonical_for_conflict(conflict_path: Path) -> Path:
-    """Given a .sync-conflict-<ts>-<device>.<ext> path, return the canonical sibling.
-
-    Strips the ".sync-conflict-<rest>" infix from the filename, re-assembling
-    the original stem and extension. Uses rfind so that files which already
-    had an infix before mm added its own (e.g., a Syncthing conflict file
-    that mm then conflicted again) unwind the most recent layer only.
-    """
-    name = conflict_path.name
-    idx = name.rfind(CONFLICT_INFIX)
-    if idx == -1:
-        return conflict_path
-    before = name[:idx]
-    # Everything after the infix up to the final suffix is conflict metadata.
-    after = name[idx + len(CONFLICT_INFIX) :]
-    suffix = ""
-    if "." in after:
-        suffix = "." + after.rsplit(".", 1)[-1]
-    return conflict_path.with_name(before + suffix)
-
-
-def _promote_target_path(
-    canonical: Path,
-    is_pre_inversion: bool,
-    peer_short: str | None,
-    now: datetime | None = None,
-) -> Path:
-    """Compute the collision-free target filename for promoting a conflict sidecar.
-
-    Per-mode naming -- the sidecar's bytes mean different things by inversion era:
-      * post-inversion sidecar HOLDS the peer's bytes -> ``<stem>.from-<peer>-<ts>.<ext>``
-      * pre-inversion (``v0-``) sidecar HOLDS the user's own LOCAL bytes ->
-        ``<stem>.local-<ts>.<ext>`` (naming it ``from-<peer>`` would lie about
-        provenance).
-
-    ``<ts>`` is not collision-proof at same-second granularity; if the computed
-    path already exists, append a 4-hex random suffix (same pattern as
-    ``conflict_filename``). This is a best-effort pre-check -- ``os.link`` in
-    ``_promote_conflict_file`` is the actual atomic no-clobber guarantee.
-    """
-    now = now or datetime.now(timezone.utc)
-    ts = now.strftime("%Y%m%d-%H%M%S")
-    stem = canonical.stem
-    suffix = canonical.suffix
-    if is_pre_inversion:
-        base_name = f"{stem}.local-{ts}"
-    else:
-        base_name = f"{stem}.from-{peer_short or 'unknown'}-{ts}"
-    target = canonical.with_name(f"{base_name}{suffix}")
-    if target.exists():
-        target = canonical.with_name(f"{base_name}-{secrets.token_hex(2)}{suffix}")
-    return target
-
-
-def _promote_conflict_file(cpath: Path, target: Path) -> Path:
-    """Rename a conflict sidecar to ``target`` with a no-clobber guarantee.
-
-    ``os.link`` raises ``FileExistsError`` atomically if ``target`` exists --
-    closing the TOCTOU window a plain ``Path.rename()`` (which silently
-    replaces the target on POSIX) would leave open. The promoted file is a
-    first-class user filename, so silent clobber is real data loss. On the
-    rare race, retry once with a fresh 4-hex suffix. Returns the actual path
-    written. Raises ``OSError`` on any other failure (caller counts it as
-    ``failed``).
-    """
-    try:
-        os.link(cpath, target)
-    except FileExistsError:
-        target = target.with_name(f"{target.stem}-{secrets.token_hex(2)}{target.suffix}")
-        os.link(cpath, target)
-    os.unlink(cpath)
-    return target
-
-
-def _promote_target_will_sync(src_cfg: dict, target: Path) -> bool:
-    """True if ``target`` falls within the source's recursively-synced surface.
-
-    A promoted file is a NEW filename, so it can only sync if it lives inside
-    one of the source's scanned directories (``_synced_scan_dirs``). An
-    ``include_files`` source matches only exact configured filenames -- a
-    promoted ``<stem>.from-...`` / ``<stem>.local-...`` name will never match
-    one, so promote under an ``include_files``-only source produces a file
-    that will not sync until the user adds it to config.
-    """
-    base_path = Path(src_cfg["path"]).expanduser().resolve()
-    try:
-        resolved_target = target.resolve()
-    except OSError:
-        return False
-    for scan_dir in _synced_scan_dirs(src_cfg, base_path):
-        try:
-            resolved_target.relative_to(scan_dir.resolve())
-            return True
-        except (ValueError, OSError):
-            continue
-    return False
-
-
 @app.command()
 def conflicts() -> None:
     """List .sync-conflict-* files across all synced sources.
@@ -7000,7 +5797,7 @@ def conflicts() -> None:
     `mm conflicts` is lockless and any rename here would race autopull.
     """
     config = _get_config()
-    hits = _find_conflict_files(config)
+    hits = resolveflow._find_conflict_files(config)
     if not hits:
         console.print("[green]No conflict files.[/green]")
         return
@@ -7275,7 +6072,7 @@ def resolve(
         # Lock-protected discovery: opt into pre-inversion migration so any
         # legacy `.sync-conflict-<ts>-<dev>.<ext>` files get renamed to the
         # `v0-` prefix before resolve dispatches on the prefix below.
-        hits = _find_conflict_files(config, migrate_pre_inversion=True)
+        hits = resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
         if path:
             target = Path(path).expanduser().resolve()
@@ -7291,10 +6088,7 @@ def resolve(
         # reads can spike to multi-second per call.
         devices = list_devices(backend)
         sources_by_name = {s["name"]: s for s in get_sources(config)}
-        # CONFLICT-TELEMETRY (temporary): device is THIS collector machine.
-        _, failed = _resolve_interactive_loop(
-            hits, devices, sources_by_name, device_id=config["device"]["id"]
-        )
+        _, failed = resolveflow._resolve_interactive_loop(hits, devices, sources_by_name)
     finally:
         release_lock()
 
@@ -7306,982 +6100,40 @@ def resolve(
         raise typer.Exit(1)
 
 
-def _backfill_conflict_log(
-    hits: list[tuple[str, Path, Path | None]],
-    sources_by_name: dict[str, dict],
-    device_id: str,
-) -> tuple[int, int, int, int]:
-    """CONFLICT-TELEMETRY (temporary): append quarantined backfill rows for the
-    already-discovered conflict ``hits``. Extracted from the command so it runs
-    OUTSIDE the mm lock (reads can block on iCloud) and is unit-testable without
-    config/lock/backend setup. Returns ``(written, deduped, read_failed,
-    write_failed)`` -- separate counters so the operator can tell "already had
-    it" from "couldn't read/write it".
-    """
-    from mind_meld.conflictdiff import newer_side
-    from mind_meld.manifest import parse_conflict_device_short
-
-    written = deduped = read_failed = write_failed = 0
-    # Dedup only backfill rows -- resolve rows are real repeated human decisions
-    # and must never be suppressed. Key mirrors the schema.
-    seen = {
-        (r.get("source"), r.get("rel_path"), r.get("local_sha"), r.get("remote_sha"))
-        for r in conflictlog.read_records()
-        if r.get("site") == "backfill"
-    }
-    for src_name, cpath, canonical in hits:
-        base = {
-            "device": device_id,
-            "source": src_name,
-            "rel_path": _conflict_rel_path(sources_by_name, src_name, cpath),
-            "ext": (canonical or cpath).suffix.lstrip("."),
-            "peer_short": parse_conflict_device_short(cpath.name),
-        }
-        try:
-            cpath_bytes = cpath.read_bytes()
-        except OSError:
-            read_failed += 1
-            continue
-
-        if canonical is None:
-            # No two-file pair; record identity + the sidecar's sha for dedup.
-            sha = hashlib.sha256(cpath_bytes).hexdigest()
-            key = (src_name, base["rel_path"], None, sha)
-            if key in seen:
-                deduped += 1
-                continue
-            # Pre-merge into one dict then spread once (never raises on a
-            # duplicate key, unlike f(**a, **b)); backfill needs the bool.
-            ok = conflictlog.append_decision(
-                **{
-                    **base,
-                    "site": "backfill",
-                    "mode": "canonical_missing",
-                    "choice": "deferred",
-                    "via": "backfill-implicit",
-                    "outcome": "deferred",
-                    "remote_sha": sha,
-                }
-            )
-            if ok:
-                written += 1
-                seen.add(key)
-            else:
-                write_failed += 1
-            continue
-
-        try:
-            canonical_bytes = canonical.read_bytes()
-        except OSError:
-            read_failed += 1
-            continue
-
-        # Semantic local/remote by inversion era (same mapping as resolve).
-        if is_pre_inversion_conflict_filename(cpath.name):
-            local_data, remote_data = cpath_bytes, canonical_bytes
-            local_path, remote_path, mode = cpath, canonical, "pre_inversion"
-        else:
-            local_data, remote_data = canonical_bytes, cpath_bytes
-            local_path, remote_path, mode = canonical, cpath, "post_inversion"
-
-        feat = _conflict_feature_dict(local_data, remote_data)
-        key = (src_name, base["rel_path"], feat["local_sha"], feat["remote_sha"])
-        if key in seen:
-            deduped += 1
-            continue
-        lmt, _ = _stat_mtime_btime(local_path)
-        rmt, _ = _stat_mtime_btime(remote_path)
-        ok = conflictlog.append_decision(
-            **{
-                **base,
-                **feat,
-                "site": "backfill",
-                "mode": mode,
-                "choice": "deferred",
-                "via": "backfill-implicit",
-                "outcome": "deferred",
-                "local_mtime": lmt,
-                "remote_mtime": rmt,
-                "newer_side": newer_side(lmt, rmt),
-            }
-        )
-        if ok:
-            written += 1
-            seen.add(key)
-        else:
-            write_failed += 1
-    return written, deduped, read_failed, write_failed
-
-
-@app.command(name="conflict-log-backfill", hidden=True)
-def conflict_log_backfill_cmd() -> None:
-    """CONFLICT-TELEMETRY (temporary): seed the conflict-decision log from the
-    .sync-conflict-* sidecars currently on disk.
-
-    Opt-in and hidden -- run once per Mac to bootstrap the dataset from
-    accumulated conflicts. Rows are QUARANTINED (site="backfill",
-    choice="deferred"): a surviving sidecar is an implicit skip, not a labeled
-    decision, so analysis treats these as context only, never training labels.
-
-    SIDE EFFECT: discovery RENAMES pre-v0.9.2 sidecars to the `v0-` prefix
-    (idempotent, identical to `mm resolve`) so pre/post-inversion feature
-    semantics are recorded correctly. That rename runs UNDER the mm lockfile;
-    the lock is then RELEASED before any file reads, because reading an iCloud
-    placeholder can block on materialization and holding the lock across a hung
-    read would wedge autopull/autopush. Re-running dedups against existing
-    backfill rows. A hung read is NOT rescued (best-effort covers raises, not
-    hangs).
-    """
-    config = _get_config()
-    device_id = config["device"]["id"]
-
-    # Discover + migrate UNDER the lock, then release it before the reads.
-    try:
-        acquire_lock()
-    except LockError as e:
-        _error(str(e))
-    try:
-        hits = _find_conflict_files(config, migrate_pre_inversion=True)
-    finally:
-        release_lock()
-
-    sources_by_name = {s["name"]: s for s in get_sources(config)}
-    written, deduped, read_failed, write_failed = _backfill_conflict_log(
-        hits, sources_by_name, device_id
-    )
-    console.print(
-        f"conflict-log-backfill: {written} written, {deduped} deduped, "
-        f"{read_failed} read-failed, {write_failed} write-failed "
-        f"({len(hits)} sidecars) -> {conflictlog.log_path()}"
-    )
-
-
-# CONFLICT-TELEMETRY (temporary): skip O(n*m) similarity/diff work above this
-# size so a pathological large conflict file can't stall a resolve/backfill.
-_MAX_FEATURE_BYTES = 512 * 1024
-
-
-def _conflict_feature_dict(local_data: bytes, remote_data: bytes) -> dict[str, Any]:
-    """CONFLICT-TELEMETRY (temporary): semantic feature snapshot for one conflict.
-
-    ``local_data`` is always the user's side and ``remote_data`` the peer's
-    (callers map inversion mode before calling), so ``local_only_lines`` /
-    ``remote_only_lines`` need no per-mode swap here. The classifier-candidate
-    features (similarity, merge_conflicts, divergence, line counts) are null for
-    binary input OR files over ``_MAX_FEATURE_BYTES``; sizes + content shas are
-    always recorded. Uses ``merge.similarity_ratio`` / ``lcs_merge`` so the
-    ``similarity`` metric matches what a future silarity-gated auto-resolver
-    would compute (dataset validity depends on that parity).
-    """
-    import difflib
-
-    from mind_meld.conflictdiff import count_divergent_lines
-    from mind_meld.merge import lcs_merge, similarity_ratio
-
-    feat: dict[str, Any] = {
-        "local_sha": hashlib.sha256(local_data).hexdigest(),
-        "remote_sha": hashlib.sha256(remote_data).hexdigest(),
-        "local_bytes": len(local_data),
-        "remote_bytes": len(remote_data),
-        "similarity": None,
-        "merge_conflicts": None,
-        "merge_available": False,
-        "local_only_lines": None,
-        "remote_only_lines": None,
-        "total_diff_lines": None,
-        "local_lines": None,
-        "remote_lines": None,
-        "binary": True,
-    }
-    # Bare except: telemetry must NEVER raise into the resolve/backfill caller
-    # (the D5 never-raises contract). The individual ops are safe today, but the
-    # guard makes the contract structural, not a property that a future edit to
-    # count_divergent_lines / lcs_merge could silently break. Partial feat (shas
-    # + sizes) is returned on any failure.
-    try:
-        # Size gate BEFORE lcs_merge so a pathological huge conflict file can't
-        # run the uncapped O(n*m) merge on the backfill path. Cheap NUL sniff
-        # stands in for the binary flag when we skip the full detection.
-        if max(len(local_data), len(remote_data)) > _MAX_FEATURE_BYTES:
-            binary = b"\x00" in local_data or b"\x00" in remote_data
-            feat["binary"] = binary
-            feat["merge_available"] = not binary
-            return feat
-        _, merge_conflicts = lcs_merge(local_data, remote_data)
-        if merge_conflicts < 0:  # binary / non-UTF-8 (the -1 sentinel)
-            return feat  # binary stays True
-        feat["binary"] = False
-        feat["merge_available"] = True
-        local_text = local_data.decode("utf-8", "replace").splitlines()
-        remote_text = remote_data.decode("utf-8", "replace").splitlines()
-        diff = list(difflib.unified_diff(local_text, remote_text, lineterm="", n=3))
-        m, n, k = count_divergent_lines(diff)
-        feat["similarity"] = similarity_ratio(local_data, remote_data)
-        feat["merge_conflicts"] = merge_conflicts
-        feat["local_only_lines"] = m
-        feat["remote_only_lines"] = n
-        feat["total_diff_lines"] = k
-        feat["local_lines"] = len(local_text)
-        feat["remote_lines"] = len(remote_text)
-    except Exception:
-        pass
-    return feat
-
-
-def _emit_conflict_decision(row: dict[str, Any]) -> None:
-    """CONFLICT-TELEMETRY (temporary): single guarded emit point for resolve-site
-    rows. Takes an already-merged ``row`` dict (built with ``{**a, **b}`` which is
-    last-wins and never raises on a duplicate key) and spreads it ONCE, so the
-    ``f(**a, **b)`` duplicate-keyword ``TypeError`` -- which binds at the call
-    site BEFORE ``append_decision``'s own guard runs -- can't escape into the
-    resolve walk. Swallows everything: telemetry must never break a resolution.
-    """
-    try:
-        conflictlog.append_decision(**row)
-    except Exception:
-        pass
-
-
-def _conflict_rel_path(sources_by_name: dict[str, dict], src_name: str, path: Path) -> str:
-    """CONFLICT-TELEMETRY (temporary): best-effort path-within-source for a row.
-
-    Falls back to the bare filename when the source base isn't resolvable, so a
-    logging call can never raise on a config/stat quirk.
-    """
-    src = sources_by_name.get(src_name) if sources_by_name else None
-    if src:
-        try:
-            base = Path(src["path"]).expanduser().resolve()
-            return str(path.resolve().relative_to(base))
-        except (OSError, ValueError, KeyError):
-            pass
-    return path.name
-
-
-def _resolve_interactive_loop(
-    hits: list[tuple[str, Path, Path | None]],
-    devices: list[dict[str, Any]] | None = None,
-    sources_by_name: dict[str, dict] | None = None,
-    device_id: str | None = None,
-) -> tuple[int, int]:
-    """Walk each conflict and prompt for resolution. Extracted so `resolve`
-    stays a thin wrapper around acquire/release lock boilerplate.
-
-    ``devices`` is the cached device list from ``list_devices(backend)``,
-    used by the REMOTE banner to attribute conflict bytes to a peer name.
-    None disables attribution -- legacy callers and unit tests can pass
-    ``None`` (or omit the arg) and get an "(unknown peer)" annotation.
-    Cache hoisted at the loop entry so a multi-conflict walk doesn't N+1
-    on iCloud cold-cache reads.
-
-    ``sources_by_name`` maps source name -> source config, used by the
-    ``(p)romote`` branch to warn when a promoted file would land outside the
-    source's sync surface (an ``include_files`` source). None disables the
-    warning -- unit tests that don't exercise promote can omit it.
-
-    Returns (resolved, failed). `failed` covers per-conflict OSErrors
-    (rename/unlink/read) that left the conflict file in place. `resolve`
-    uses the failure count to decide its exit code; the walk itself does
-    not abort on per-file errors (so the user gets to triage every conflict
-    in one pass).
-    """
-    import difflib
-
-    from mind_meld.conflictdiff import (
-        count_divergent_lines,
-        format_age_delta,
-        newer_side,
-        render_banner,
-        render_prompt,
-        render_time_line,
-        render_verdict,
-    )
-    from mind_meld.manifest import (
-        is_pre_inversion_conflict_filename,
-        parse_conflict_device_short,
-    )
-    from mind_meld.merge import lcs_merge
-
-    devices = devices or []
-    sources_by_name = sources_by_name or {}
-    resolved = 0
-    failed = 0
-    for src_name, cpath, canonical in hits:
-        console.print(
-            f"\n[bold yellow]Conflict in {safe_str(src_name)}:[/bold yellow] {safe_str(cpath)}"
-        )
-
-        # CONFLICT-TELEMETRY (temporary): identity fields shared by every row
-        # this conflict emits. peer_short is parsed from the sidecar filename.
-        _tele_base = {
-            "device": device_id,
-            "source": src_name,
-            "rel_path": _conflict_rel_path(sources_by_name, src_name, cpath),
-            "ext": (canonical or cpath).suffix.lstrip("."),
-            "peer_short": parse_conflict_device_short(cpath.name),
-        }
-
-        if canonical is None:
-            # Dual-mode preface by filename prefix. Pre-inversion (`v0-`)
-            # files were produced when sidecar = local bytes; post-inversion
-            # files have sidecar = remote bytes. The promote/delete ops are
-            # the same; only the preface wording flips.
-            if is_pre_inversion_conflict_filename(cpath.name):
-                console.print(
-                    "  [dim]No canonical file exists. This pre-v0.9.2 "
-                    "conflict file holds your LOCAL edits from before "
-                    "the conflict was created.[/dim]"
-                )
-            else:
-                console.print(
-                    "  [dim]No canonical file exists. This conflict file "
-                    "holds REMOTE bytes from another machine.[/dim]"
-                )
-            console.print(
-                "  [dim]Promote it to make it the canonical file, "
-                "delete it to discard, or skip to leave it for later.[/dim]"
-            )
-            choice = (
-                typer.prompt(
-                    "  (p)romote / (d)elete / (s)kip",
-                    default="s",
-                    show_default=False,
-                )
-                .strip()
-                .lower()
-            )
-            # CONFLICT-TELEMETRY (temporary): snapshot to derive real outcome.
-            _r0, _f0 = resolved, failed
-            # Exact-match dispatch (not startswith): "post"/"plan"/"description"
-            # must not silently promote/delete. (codex /review v0.9.0)
-            if choice in ("p", "promote"):
-                target_canonical = _canonical_for_conflict(cpath)
-                try:
-                    cpath.rename(target_canonical)
-                    console.print(
-                        f"  [green]promoted[/green] "
-                        f"{safe_str(cpath.name)} -> {safe_str(target_canonical.name)}"
-                    )
-                    resolved += 1
-                except OSError as e:
-                    console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
-                    failed += 1
-            elif choice in ("d", "delete"):
-                try:
-                    cpath.unlink()
-                    console.print(f"  [red]deleted[/red] {safe_str(cpath.name)}")
-                    resolved += 1
-                except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
-                    failed += 1
-            # else: skip (default)
-            # CONFLICT-TELEMETRY (temporary): canonical-missing decision. No
-            # two-file feature pair exists here, so features stay absent.
-            _emit_conflict_decision(
-                {
-                    **_tele_base,
-                    "site": "resolve",
-                    "mode": "canonical_missing",
-                    "choice": {
-                        "p": "promote",
-                        "promote": "promote",
-                        "d": "delete",
-                        "delete": "delete",
-                    }.get(choice, "skip"),
-                    "via": "typed",
-                    "outcome": (
-                        "resolved" if resolved > _r0 else ("failed" if failed > _f0 else "skipped")
-                    ),
-                }
-            )
-            continue
-
-        # Dual-mode dispatch by filename prefix. `v0-` = pre-inversion
-        # (sidecar HOLDS local bytes; canonical holds remote). No prefix =
-        # post-inversion (canonical IS local; sidecar holds remote bytes).
-        # Picking by prefix (not timestamp) is sound: post-inversion files
-        # are produced by code that NEVER stamps the v0- prefix, and
-        # pre-inversion files are migrated to the prefix at discovery time
-        # by `_migrate_pre_inversion_conflict`. Mixed prefixes in one walk
-        # are expected during migration.
-        is_pre_inversion = is_pre_inversion_conflict_filename(cpath.name)
-        mode: Literal["pre_inversion", "post_inversion"] = (
-            "pre_inversion" if is_pre_inversion else "post_inversion"
-        )
-
-        try:
-            canonical_bytes = canonical.read_bytes()
-            cpath_bytes = cpath.read_bytes()
-        except OSError as e:
-            console.print(f"  [red]read failed:[/red] {safe_str(e)}")
-            failed += 1
-            continue
-
-        canonical_text = canonical_bytes.decode("utf-8", errors="replace").splitlines()
-        cpath_text = cpath_bytes.decode("utf-8", errors="replace").splitlines()
-
-        # Try LCS-as-synthetic-base 3-way merge so the (m)erge prompt option
-        # can offer a clean union of additive edits. lcs_merge respects the
-        # inversion-mode argument order so the embedded `<<<<<<< local` /
-        # `>>>>>>> remote` markers stay accurate even on v0- files. Binary
-        # input (NUL byte) returns conflict_count = -1 -- suppress (m).
-        if is_pre_inversion:
-            merged_bytes, merge_conflicts = lcs_merge(cpath_bytes, canonical_bytes)
-        else:
-            merged_bytes, merge_conflicts = lcs_merge(canonical_bytes, cpath_bytes)
-        merge_available = merge_conflicts >= 0
-
-        # Banner attribution: pull the device-short out of the conflict
-        # filename and look it up against the cached devices list.
-        short = parse_conflict_device_short(cpath.name)
-        peer_name: str | None = None
-        ambiguous_count = 0
-        if short is not None:
-            match, count = lookup_device_by_short_id(devices, short)
-            if match is not None:
-                peer_name = match.get("device_name")
-            elif count > 1:
-                ambiguous_count = count
-
-        # Diff label semantics:
-        #   pre_inversion: canonical = remote, cpath = local.
-        #   post_inversion: canonical = local, cpath = remote.
-        if is_pre_inversion:
-            from_text, to_text = canonical_text, cpath_text
-            from_label = f"remote ({safe_str(canonical.name)})"
-            to_label = f"local  ({safe_str(cpath.name)})"
-            local_path_for_banner = cpath
-            remote_path_for_banner = canonical
-        else:
-            from_text, to_text = canonical_text, cpath_text
-            from_label = f"local  ({safe_str(canonical.name)})"
-            to_label = f"remote ({safe_str(cpath.name)})"
-            local_path_for_banner = canonical
-            remote_path_for_banner = cpath
-
-        # Color banners ABOVE the diff so the user can scan-identify which
-        # side is which without parsing diff prefixes. Both peer-controlled
-        # paths AND the peer-controlled device_name flow into render_banner,
-        # which strips terminal escapes via safe_text before they reach the
-        # terminal (closes the same trust boundary safe_str closes for
-        # filenames).
-        # Timestamp display. Both files are on disk here, so stat both. The
-        # local side shows genuine created+modified; the remote sidecar shows
-        # modified (the peer's restored source mtime) + "pulled" (the local
-        # iCloud-drop birthtime -- NOT the peer's real creation, so it is
-        # never labeled "created"). local_*/remote_* track the LOCAL vs REMOTE
-        # sides consistently regardless of inversion mode, so the verdict and
-        # the (n)ewer shortcut stay correct for v0- files too.
-        local_mtime_ts, local_btime_ts = _stat_mtime_btime(local_path_for_banner)
-        remote_mtime_ts, remote_btime_ts = _stat_mtime_btime(remote_path_for_banner)
-
-        console.print(render_banner("local", local_path_for_banner.name, None))
-        console.print(render_time_line([("modified", local_mtime_ts), ("created", local_btime_ts)]))
-        console.print(
-            render_banner(
-                "remote",
-                remote_path_for_banner.name,
-                peer_name,
-                ambiguous_count=ambiguous_count,
-            )
-        )
-        console.print(
-            render_time_line([("modified", remote_mtime_ts), ("pulled", remote_btime_ts)])
-        )
-        _verdict = render_verdict(local_mtime_ts, remote_mtime_ts)
-        if _verdict is not None:
-            console.print(_verdict)
-
-        diff = list(
-            difflib.unified_diff(
-                from_text,
-                to_text,
-                fromfile=from_label,
-                tofile=to_label,
-                lineterm="",
-                n=3,
-            )
-        )
-
-        # Three-number divergence summary BEFORE the diff so the user
-        # gets a glance at scale. count_divergent_lines returns counts
-        # keyed to the diff's from/to sides, which differ across modes:
-        # in pre-inversion the diff is remote->local, so m = remote-only
-        # and n = local-only. Map to semantic local/remote counts before
-        # rendering so the summary copy stays honest in both modes AND
-        # the prompt's (drops N ...) annotations are mode-correct.
-        # Replacements count as one of each (a 1-line change is "1 of
-        # yours + 1 from peer", K=2) -- the wording is honest about that.
-        m, n, k = count_divergent_lines(diff)
-        if is_pre_inversion:
-            local_only, remote_only = n, m
-        else:
-            local_only, remote_only = m, n
-        if k:
-            console.print(
-                f"  [dim]{local_only} unique line"
-                f"{'' if local_only == 1 else 's'} of yours; "
-                f"{remote_only} unique line"
-                f"{'' if remote_only == 1 else 's'} from peer; "
-                f"{k} total diff lines.[/dim]"
-            )
-
-        if diff:
-            # Diff CONTENT is peer-controlled bytes — render via safe_text()
-            # so Rich strips terminal escapes (CSI/OSC/DCS) AND defangs
-            # markup. Text() alone passes raw escapes through.
-            for line in diff[:80]:
-                if line.startswith("+") and not line.startswith("+++"):
-                    console.print(safe_text(line, style="green"))
-                elif line.startswith("-") and not line.startswith("---"):
-                    console.print(safe_text(line, style="red"))
-                else:
-                    console.print(safe_text(line))
-            if len(diff) > 80:
-                console.print(f"  [dim]...({len(diff) - 80} more diff lines)[/dim]")
-        else:
-            console.print("  [dim](files differ but text diff is empty — likely binary)[/dim]")
-
-        # Concrete-action prompt copy. Filenames pre-sanitized via safe_str
-        # since render_prompt does plain f-string interpolation. (m)erge
-        # is offered when the LCS attempt succeeded (binary content sets
-        # merge_available=False); the default key flips to (m) when the
-        # merged result is clean -- the user just hits Enter to accept.
-        # Pass semantic local/remote line counts so render_prompt can
-        # annotate (l)ocal / (r)emote with the consequential drop count.
-        # Suppress the counts on empty-diff (binary) so the annotation
-        # doesn't claim "drops 0 lines" when we couldn't actually compare.
-        prompt_local_only: int | None = local_only if diff else None
-        prompt_remote_only: int | None = remote_only if diff else None
-        # (n)ewer is offered when BOTH mtimes are readable (incl. a tie --
-        # pressing it on a tie re-prompts, see the input loop below). It maps
-        # to the existing (l)/(r) dispatch, so the per-mode keep-local /
-        # keep-remote semantics (and the mtime bump) come for free. nside is
-        # in LOCAL/REMOTE terms (we stat'd the banner paths), correct for
-        # both inversion modes.
-        nside = newer_side(local_mtime_ts, remote_mtime_ts)
-        newer_available = nside != "unknown"
-        if nside in ("local", "remote"):
-            _delta = format_age_delta((local_mtime_ts or 0.0) - (remote_mtime_ts or 0.0))
-            newer_desc = f"{'LOCAL' if nside == 'local' else 'REMOTE'}, {_delta} newer"
-        else:
-            newer_desc = ""  # tie: shown without a winner annotation
-        console.print(
-            render_prompt(
-                safe_str(canonical.name),
-                safe_str(cpath.name),
-                mode,
-                merge_available=merge_available,
-                merge_conflicts=max(merge_conflicts, 0),
-                promote_available=True,
-                newer_available=newer_available,
-                newer_desc=newer_desc,
-                local_only_lines=prompt_local_only,
-                remote_only_lines=prompt_remote_only,
-            )
-        )
-        # CONFLICT-TELEMETRY (temporary): feature snapshot on the SEMANTIC
-        # local/remote bytes (local always the user's side). mtimes + newer_side
-        # come from the already-computed banner values. Built here (once both
-        # files are read) so every terminal dispatch site can log a full row.
-        if is_pre_inversion:
-            _local_data, _remote_data = cpath_bytes, canonical_bytes
-        else:
-            _local_data, _remote_data = canonical_bytes, cpath_bytes
-        _tele_feat = {
-            "mode": mode,
-            "local_mtime": local_mtime_ts,
-            "remote_mtime": remote_mtime_ts,
-            "newer_side": nside,
-            **_conflict_feature_dict(_local_data, _remote_data),
-        }
-
-        # Default key is always (s)kip -- never (m)erge or (n)ewer. A clean
-        # LCS merge of two genuinely-different documents has zero markers, and
-        # "more recently modified" is a heuristic, not correctness -- Enter
-        # must not silently accept either. The user types m / n to pick them.
-        prompt_default = "s"
-        # Loop ONLY the input read. (n)ewer remaps to (l)/(r) here; a tie or an
-        # unreadable-mtime 'n' re-prompts rather than skipping (never advance
-        # the conflict on an action keystroke). Every other choice breaks out
-        # to the existing dispatch below UNCHANGED -- the dispatch owns the
-        # apply side-effects, and its `continue` advances the OUTER for-loop,
-        # so wrapping the dispatch here would re-prompt a partially-applied
-        # conflict (Codex eng review #3). Loop the parse, not the dispatch.
-        while True:
-            choice = (
-                typer.prompt("  Choice", default=prompt_default, show_default=False).strip().lower()
-            )
-            # CONFLICT-TELEMETRY (temporary): remember the raw keystroke before
-            # the (n)ewer remap below so `via` can distinguish the shortcut.
-            raw_choice = choice
-
-            # Backward-compat (v0.9.0 BREAKING): old letters `c` / `f` are still
-            # rejected loudly. They encoded directional ambiguity post-inversion
-            # (real silent-data-loss risk -- "kept canonical" meant local OR
-            # remote depending on inversion era). Exact-match (not startswith):
-            # otherwise "cancel" / "continue" would trip the rejection.
-            if choice in ("c", "f"):
-                print(
-                    "mm: error: input letters 'c' and 'f' are no longer accepted. "
-                    "Use (l)ocal to keep your local edits or (r)emote to keep "
-                    "the other machine's bytes. (Old labels removed in v0.9.0.)",
-                    file=sys.stderr,
-                )
-                raise typer.Exit(1)
-
-            # (n)ewer: keep the more recently modified side. Remaps to the
-            # existing (l)/(r) letters so the per-mode apply + mtime bump are
-            # reused verbatim. Never guesses -- on a tie or when a mtime was
-            # unreadable (option suppressed) it re-prompts with a note rather
-            # than advancing the conflict.
-            if choice in ("n", "newer"):
-                if nside == "local":
-                    choice = "l"
-                elif nside == "remote":
-                    choice = "r"
-                elif nside == "tie":
-                    console.print("  [dim]equal mtime — choose manually[/dim]")
-                    continue
-                else:  # unknown -- (n)ewer was not offered
-                    console.print(
-                        "  [dim](n)ewer unavailable (timestamp unreadable); "
-                        "choose (l)/(r)/(s)[/dim]"
-                    )
-                    continue
-
-            # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both
-            # files; no change" which is exactly what `(s)kip` does today. No
-            # silent-data-loss risk in mapping it through; emit a notice once
-            # so users learn the new letter, then perform skip semantics.
-            # Exact-match: "back"/"browse"/"between" must NOT silently trip
-            # the alias.
-            if choice in ("b", "both"):
-                print(
-                    "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward "
-                    "(alias removed at 1.0).",
-                    file=sys.stderr,
-                )
-                choice = "s"
-            break
-
-        # CONFLICT-TELEMETRY (temporary): via + outcome-snapshot for the row(s)
-        # this dispatch will emit. `via` reflects how the user picked, not the
-        # remapped letter; outcome is derived from the resolved/failed delta.
-        _via = "newer-shortcut" if raw_choice in ("n", "newer") else "typed"
-        _r0, _f0 = resolved, failed
-
-        # Exact-match dispatch (not startswith): "leave" / "lookup" must
-        # not silently keep local; "retry" / "remove" must not silently
-        # delete the conflict file. (codex /review v0.9.0 — caught a real
-        # silent-data-loss footgun the eng review missed.)
-        if choice in ("l", "local"):
-            # Capture peer's mtime BEFORE the rename/unlink so we can bump
-            # canonical past it afterward -- see _bump_canonical_mtime_post_resolve
-            # for the load-bearing fleet-propagation rationale.
-            # Pre-inversion: canonical holds peer's bytes with peer's mtime.
-            # Post-inversion: sidecar holds peer's bytes with peer's restored mtime.
-            try:
-                peer_mtime = (canonical if is_pre_inversion else cpath).stat().st_mtime
-            except OSError:
-                peer_mtime = 0.0
-            if is_pre_inversion:
-                # Pre-inversion: sidecar HOLDS local bytes — promote.
-                try:
-                    cpath.rename(canonical)
-                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
-                    console.print(
-                        f"  [green]kept local; promoted[/green] "
-                        f"{safe_str(cpath.name)} -> {safe_str(canonical.name)}"
-                    )
-                    resolved += 1
-                except OSError as e:
-                    console.print(f"  [red]rename failed:[/red] {safe_str(e)}")
-                    failed += 1
-            else:
-                # Post-inversion: canonical IS local — drop the remote sidecar.
-                try:
-                    cpath.unlink()
-                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
-                    console.print(
-                        f"  [green]kept local; discarded remote[/green] {safe_str(cpath.name)}"
-                    )
-                    resolved += 1
-                except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
-                    failed += 1
-        elif choice in ("r", "remote"):
-            if is_pre_inversion:
-                # Pre-inversion: canonical IS remote — drop the local sidecar.
-                try:
-                    cpath.unlink()
-                    console.print(
-                        f"  [green]kept remote; discarded local[/green] {safe_str(cpath.name)}"
-                    )
-                    resolved += 1
-                except OSError as e:
-                    console.print(f"  [red]delete failed:[/red] {safe_str(e)}")
-                    failed += 1
-            else:
-                # Post-inversion: sidecar HOLDS remote bytes — promote over local.
-                try:
-                    cpath.rename(canonical)
-                    console.print(
-                        f"  [green]kept remote; promoted[/green] "
-                        f"{safe_str(cpath.name)} -> {safe_str(canonical.name)}"
-                    )
-                    resolved += 1
-                except OSError as e:
-                    console.print(f"  [red]rename failed:[/red] {safe_str(e)}")
-                    failed += 1
-        elif choice in ("m", "merge"):
-            # (m)erge accept: write merged_bytes to canonical, drop sidecar.
-            # Refuse silently when merge_available is False -- (m) was not
-            # offered, treat any "m" / "merge" string as skip rather than
-            # writing potentially-empty bytes from the binary-skip branch.
-            if not merge_available:
-                console.print(
-                    "  [dim]merge unavailable for this file; "
-                    "skipped (both files left on disk)[/dim]"
-                )
-                # CONFLICT-TELEMETRY (temporary): (m) typed but binary -> nothing
-                # merged. Record as skip (the effective on-disk action) with a
-                # distinct outcome so a naive choice=="merge" filter stays clean.
-                _emit_conflict_decision(
-                    {
-                        **_tele_base,
-                        **_tele_feat,
-                        "site": "resolve",
-                        "choice": "skip",
-                        "via": _via,
-                        "outcome": "merge-unavailable",
-                    }
-                )
-                continue
-            else:
-                try:
-                    fsutil.atomic_write_bytes(canonical, merged_bytes, fsync=False)
-                except (OSError, StorageError) as e:
-                    console.print(
-                        f"  [red]merge write failed:[/red] {safe_str(canonical.name)} — "
-                        f"{safe_str(e)}"
-                    )
-                    failed += 1
-                    # CONFLICT-TELEMETRY (temporary): merge chosen, write failed.
-                    _emit_conflict_decision(
-                        {
-                            **_tele_base,
-                            **_tele_feat,
-                            "site": "resolve",
-                            "choice": "merge",
-                            "via": _via,
-                            "outcome": "failed",
-                        }
-                    )
-                    continue
-                # Sidecar unlink is best-effort: canonical already holds the
-                # merged bytes, so a unlink failure is cosmetic. Stale
-                # sidecars get reaped by `mm gc --conflicts` (30d TTL).
-                try:
-                    cpath.unlink()
-                except OSError as e:
-                    print(
-                        f"mm: warning: merged result written; sidecar unlink "
-                        f"failed: {safe_str(cpath.name)} — {safe_str(e)}",
-                        file=sys.stderr,
-                    )
-                if merge_conflicts == 0:
-                    console.print(
-                        f"  [cyan]merged[/cyan] {safe_str(canonical.name)} (clean LCS merge)"
-                    )
-                else:
-                    console.print(
-                        f"  [cyan]merged[/cyan] {safe_str(canonical.name)} "
-                        f"(contains {merge_conflicts} <<<<<<< region"
-                        f"{'s' if merge_conflicts != 1 else ''}; "
-                        f"resolve in editor)"
-                    )
-                resolved += 1
-        elif choice in ("p", "promote"):
-            # Keep BOTH: rename the sidecar to its own first-class filename.
-            # Per-mode naming -- post-inversion sidecar holds the peer's
-            # bytes (from-<peer>-<ts>); pre-inversion v0- sidecar holds the
-            # user's own local bytes (local-<ts>). `short` and
-            # `is_pre_inversion` are already computed above for this hit.
-            #
-            # Post-inversion only: capture peer's mtime BEFORE the rename so
-            # we can bump canonical past it afterward. Without the bump, the
-            # local half of "keep both" fails to propagate -- canonical's
-            # mtime stays at its old value, the peer's manifest mtime is
-            # newer, and the origin peer's next pull mtime-gates this
-            # device's local bytes out. Same fleet-propagation rationale as
-            # (l)ocal -- promote means keep-both ACROSS the fleet, not just
-            # locally. Pre-inversion: canonical holds peer's bytes
-            # intentionally (the sidecar HAD local bytes); no bump needed.
-            if is_pre_inversion:
-                peer_mtime = 0.0
-            else:
-                try:
-                    peer_mtime = cpath.stat().st_mtime
-                except OSError:
-                    peer_mtime = 0.0
-            target = _promote_target_path(canonical, is_pre_inversion, short)
-            try:
-                target = _promote_conflict_file(cpath, target)
-            except OSError as e:
-                console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
-                failed += 1
-            else:
-                if not is_pre_inversion and peer_mtime > 0.0:
-                    _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
-                console.print(
-                    f"  [green]promoted[/green] {safe_str(cpath.name)} -> {safe_str(target.name)}"
-                )
-                resolved += 1
-                # Warn if the promoted file landed outside the source's sync
-                # surface (an include_files source matches only exact configured
-                # names -- a from-/local- name will never be one of them).
-                src_cfg = sources_by_name.get(src_name)
-                if src_cfg is not None and not _promote_target_will_sync(src_cfg, target):
-                    print(
-                        f"mm: warning: {safe_str(target.name)} is under an "
-                        f"include_files source and will not sync until you add "
-                        f"it to config.",
-                        file=sys.stderr,
-                    )
-        elif choice in ("a", "abort"):
-            raise typer.Abort()
-        else:
-            # Default-or-skip path -- includes (s)kip, plain Enter, and any
-            # unrecognized input. Both files stay on disk; user can run
-            # `mm resolve` later or delete the .sync-conflict-* manually.
-            console.print("  [dim]skipped; both files left on disk[/dim]")
-
-        # CONFLICT-TELEMETRY (temporary): one row per canonical-exists decision
-        # that reached here (l/r/merge-success/promote/skip; abort raised out,
-        # merge-write-fail + merge-unavailable + read-fail logged/handled above).
-        # Outcome is the real post-apply result, not the typed choice.
-        _emit_conflict_decision(
-            {
-                **_tele_base,
-                **_tele_feat,
-                "site": "resolve",
-                "choice": {
-                    "l": "local",
-                    "local": "local",
-                    "r": "remote",
-                    "remote": "remote",
-                    "m": "merge",
-                    "merge": "merge",
-                    "p": "promote",
-                    "promote": "promote",
-                }.get(choice, "skip"),
-                "via": _via,
-                "outcome": (
-                    "resolved" if resolved > _r0 else ("failed" if failed > _f0 else "skipped")
-                ),
-            }
-        )
-
-    if failed:
-        console.print(f"\n[bold]Resolved {resolved} of {len(hits)}; {failed} failed.[/bold]")
-    else:
-        console.print(f"\n[bold]Resolved {resolved} of {len(hits)}.[/bold]")
-    return resolved, failed
-
-
-def _gc_old_event_files(config: dict, dry_run: bool, verbose: bool) -> int:
-    """Reap mm-events JSONL files older than ``EVENTS_RETENTION_DAYS``.
-
-    Track 7B fleet retention. The retro skill reads events by walking the
-    synced manifest at retro time, so deletion via tombstone propagation
-    is the fleet-wide retention mechanism: this device drops the file
-    locally → next push generates a tombstone → all peers drop it on
-    pull. An offline peer that comes back online sees the tombstone
-    too, suppressing resurrection of the deleted day file.
-
-    Reap by filename date (``<device>-YYYY-MM-DD.jsonl``), NOT mtime —
-    iCloud restores can rewrite mtimes back to "now" while the filename
-    date is intrinsic to the event-day boundary.
-
-    Path resolution: from ``get_sources(config)`` so user-customized
-    mm-events paths are honored. Returns 0 when no mm-events source is
-    enabled / resolved.
-    """
-    sources = get_sources(config)
-    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
-    if mm_events_src is None:
-        return 0
-    events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-    if not events_dir.is_dir():
-        return 0
-
-    today = datetime.now(timezone.utc).date()
-    reaped = 0
-    for path in events_dir.rglob("*-*.jsonl"):
-        m = _EVENTS_FILENAME_DATE_RE.match(path.name)
-        if m is None:
-            # Non-conforming filename in the events tree — leave alone.
-            continue
-        try:
-            file_date = datetime.strptime(m.group("date"), "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        age_days = (today - file_date).days
-        if age_days < EVENTS_RETENTION_DAYS:
-            continue
-        if verbose or dry_run:
-            prefix = "would delete" if dry_run else "deleted"
-            console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {safe_str(path)}")
-        if not dry_run:
-            try:
-                path.unlink()
-                reaped += 1
-            except OSError:
-                pass
-        else:
-            reaped += 1
-    label = "would reap" if dry_run else "reaped"
-    console.print(
-        f"[bold]{label}[/bold] {reaped} stale events files "
-        f"(older than {EVENTS_RETENTION_DAYS} days)"
-    )
-    return reaped
-
-
-def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
-    """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS. Returns count."""
-    hits = _find_conflict_files(config)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=CONFLICT_AGE_DAYS)
-    reaped = 0
-    for src_name, cpath, _canonical in hits:
-        try:
-            mtime = datetime.fromtimestamp(cpath.stat().st_mtime, tz=timezone.utc)
-        except OSError:
-            continue
-        if mtime < cutoff:
-            if verbose or dry_run:
-                age_days = (datetime.now(timezone.utc) - mtime).days
-                prefix = "would delete" if dry_run else "deleted"
-                console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {safe_str(cpath)}")
-            if not dry_run:
-                try:
-                    cpath.unlink()
-                    reaped += 1
-                except OSError:
-                    pass
-    label = "would reap" if dry_run else "reaped"
-    console.print(
-        f"[bold]{label}[/bold] {reaped} stale conflict files (older than {CONFLICT_AGE_DAYS} days)"
-    )
-    return reaped
-
-
 # ── auto commands (hook-safe: silent, never-prompt, typed errors) ─────
 
 
 _AUTO_LOG_MAX_BYTES = 1_000_000
 _AUTO_LOG_KEEP_BYTES = 512_000
+
+
+_BREADCRUMB_STALE_AFTER_HOURS = 48
+
+
+def _breadcrumb_staleness_suffix(ts: object) -> str:
+    """Return a ``[yellow]stale[/yellow]`` marker when the breadcrumb is old.
+
+    ``mm status`` renders the last autorun breadcrumb with no age check, so a
+    device whose `mm autopull` / `mm autopush` stopped running entirely reports
+    its last ``success`` indefinitely. Every other degradation signal mm has is
+    written BY the command; this is the one case where nothing runs to write
+    anything, which is exactly what a module-scope ``ImportError`` looks like.
+
+    Best-effort: an unparseable or missing timestamp yields no marker rather
+    than an error — the breadcrumb is diagnostics, not a correctness gate.
+    """
+    if not isinstance(ts, str):
+        return ""
+    try:
+        when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    age_h = (datetime.now(timezone.utc) - when).total_seconds() / 3600.0
+    if age_h < _BREADCRUMB_STALE_AFTER_HOURS:
+        return ""
+    return f" [yellow]stale — no autorun in {int(age_h)}h[/yellow]"
 
 
 def _autorun_breadcrumb_path() -> Path:

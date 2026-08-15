@@ -2,6 +2,36 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.21] - 2026-08-15
+
+**`cli.py` is no longer one 8,840-line file that serialized every plan — it is 6,692 lines plus six focused modules, and the test suite has stopped writing into your real `~/.claude`.** The decomposition itself changes no command, flag, output, exit code, or on-disk format. Three deliberate user-visible changes ship alongside it: one hidden command (`mm conflict-log-backfill`) is gone, `mm status` gained a staleness marker, and `pytest` stopped writing your real config dirs.
+
+### Changed
+
+- **Six modules extracted from `cli.py`.** `consoles.py` (the two shared Rich `Console` singletons), `conflictmtime.py` (mtime primitives the pull/apply path and the conflict resolver both call), `skill_link.py` (retro-fleet installer + its 24h drift gate), `events_tail.py` (the push/init mm-events tail), `resolveflow.py` (conflict discovery, promotion, the interactive `mm resolve` walk), and `retention.py` (the `mm gc` reapers). The `@app.command()` shells all stay in `cli.py`.
+
+  The plan called this "pure movement." It was not. `resolveflow` and `retention` both render through `console`, and `resolveflow` calls two mtime helpers whose other callers stay in `cli` — so a naive extraction raises `ImportError: cannot import name 'console' from partially initialized module` and every `mm` invocation dies. The two leaf modules are the cycle break, which is why they landed first. The plan's cut list also omitted four symbols (`_synced_scan_dirs`, `_inversion_marker_path`, `_ensure_inversion_marker`, `_canonical_for_conflict`); leaving `_ensure_inversion_marker` behind would have split a migration gate from the migration it guards, whose documented failure mode is silent data loss.
+
+- **No compatibility shim.** Moved private names are not re-exported from `cli`. The only in-repo consumer of the CLI is `aggregator.py`, which shells out via `sys.executable -m mind_meld.cli` rather than importing. Dropping the shim is what turns a stale `monkeypatch.setattr(cli, ...)` into an `AttributeError` at collection instead of a green test that patches nothing.
+
+### Fixed
+
+- **`pytest` no longer mutates your real agent config directories.** 67 tests were creating symlinks and marker files under the developer's actual `~/.claude/skills`, `~/.codex/skills`, and `~/.config/opencode/skills`. `conftest.py` had nine autouse isolation fixtures and none covered the skill installer; only `test_skill_link.py` isolated `HOME`, via its own local fixture. This is a pre-existing leak the extraction made visible. Closed with a `SKILL_ROOTS` indirection, a new autouse `_isolate_skill_links` fixture, and a `PYTEST_CURRENT_TEST` guard that raises if a target ever resolves under the real `HOME` — the same shape as the existing guard on `crypto.store_passphrase_in_keyring`. Deliberately not a suite-wide `HOME` move: that degrades `importlib.metadata.version()` to `0.0.0+dev` and trips the mixed-fleet version guard.
+
+- **`mm status` now marks a stale autorun breadcrumb.** The breadcrumb is written from inside the command, so a failure before typer's runner writes nothing at all and `mm status` reported the last `success` indefinitely. Past 48 hours it now says `stale — no autorun in Nh`.
+
+- **`pytest` writes nothing outside `tmp_path` for the manifest sidecar or the lockfile either.** `_redirect_sidecar` / `_redirect_lock` were opt-in helpers most tests remembered to call; **47 did not**, leaving the real `~/.config/mind-meld/last-push.json` holding fixture values. Two consequences on the maintainer's own machine: `_recover_prior_manifest` reads that sidecar when a remote manifest goes corrupt (device-id scoping rejects the fixture value rather than trusting it, so no data loss — but recovery silently degrades to the peer fallback, which does not preserve this device's fresh local deletions), and the new `mm status` staleness marker reads `last-autorun.json`, which the suite rewrote to "now" — the suite forging the exact signal the feature exists to produce. Both are now autouse. Verified by diffing the real config dir's mtimes and checksums across a full run.
+
+### Removed
+
+- **CONFLICT-TELEMETRY.** `conflictlog.py`, the four resolve-site helpers, the 16 in-line sentinels, `merge.similarity_ratio`, and the hidden `mm conflict-log-backfill` command. It shipped 2026-07-30 to build a labeled dataset for the deferred Phase 2 auto-resolver and collected **zero** decisions in the sixteen days it ran — the log file never existed on the fleet, so the >=25-decision trigger never tracked. Deleting it first rather than moving it six weeks before its own scheduled deletion cut ~250 lines off the riskiest extraction.
+
+### Internal
+
+- **Verification is structural, not textual.** New `tests/test_module_boundaries.py`: standalone import of every module in a fresh subprocess in both orders (a partially-initialized cycle only manifests in one), an AST walk asserting nothing under `src/` imports `cli` at module *or* function scope (ruff F811 cannot see function-local shadowing), `Console` identity, mtime-primitive sharing, and a `python -m mind_meld.cli` smoke — the path the retro-fleet skill actually uses and which CI had never covered. New `tests/test_docs_routing.py` asserts every `<file>.py:<symbol>` citation in CLAUDE.md's invariant routing table resolves to a real definition; it immediately caught two citations (`init_cmd`, `_devices_json_cmd`) that had been stale since before this work. Byte-equality of moved function text was dropped as the gate: it proves textual provenance and none of the failure modes above.
+
+- **CLAUDE.md's Source Layout is now a greppable table** with a purpose column, replacing a `{a,b,c}.py` brace-expansion one-liner that could not match a search for a filename. The routing table is re-anchored onto the new owning modules in the same release that moved them, rather than deferred — Group 17 is five agents opening exactly these files.
+
 ## [0.12.20] - 2026-08-15
 
 **Mind Meld's local pull-history and source-tracker state now have one call-time path authority.** Removing unused import-time path constants keeps test isolation aligned with the live resolvers, so contributor test runs cannot accidentally bypass a redirected state directory.

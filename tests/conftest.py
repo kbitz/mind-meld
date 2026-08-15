@@ -89,20 +89,88 @@ def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_conflictlog(monkeypatch, tmp_path) -> None:
-    """Redirect ``mind_meld.conflictlog.LOG_DIR`` to a per-test path.
+def _isolate_sidecar_and_lock(monkeypatch, tmp_path) -> None:
+    """Redirect the manifest sidecar dir and the mm lockfile for EVERY test.
 
-    CONFLICT-TELEMETRY (temporary): the ``mm resolve`` walk now appends a
-    conflict-decision row via ``conflictlog.append_decision``, which writes
-    ``~/.config/mind-meld/conflict-decisions.jsonl`` by default. Without
-    isolation, every test that drives ``_resolve_interactive_loop``
-    (test_conflict_copy) would pollute the user's real config dir. ``LOG_DIR``
-    is module-level and read at call time inside ``log_path()``, so a single
-    ``setattr`` suffices. Remove this fixture when the telemetry is ripped out.
+    ``_redirect_sidecar`` / ``_redirect_lock`` below have existed for a while as
+    opt-in helpers, and most tests that need them call them — but not all.
+    Instrumented during the Track 16A review: **47 tests** were writing the
+    developer's real ``~/.config/mind-meld/last-push.json``, leaving it holding
+    fixture values (``device_id: "dev-a"``, a ``base_path`` under
+    ``/private/var/folders/.../pytest-of-*``). Others bumped the real
+    ``last-autorun.json``, ``upgrade-state.json``, and ``mind-meld.lock``.
+
+    Two concrete harms, both on the maintainer's own machine:
+
+    * ``_recover_prior_manifest`` reads the sidecar when a remote manifest goes
+      corrupt. ``sidecar.read`` scopes by device id, so a fixture-written
+      sidecar is REJECTED rather than trusted — no data loss — but the device
+      then falls through to peer-fallback recovery, which does not preserve
+      this device's fresh local deletions. Running the suite quietly disarms
+      the recovery path the subsystem exists for.
+    * ``mm status``'s new staleness gate reads ``last-autorun.json``. The suite
+      rewrites it to "now", so any local ``pytest`` run masks a genuinely
+      wedged autopush for the next 48 hours — the suite forges the one signal
+      the feature exists to produce.
+
+    Autouse, same shape as the eight isolation fixtures above it. The opt-in
+    helpers stay for tests that want the returned path.
+
+    Imports the modules explicitly, for the same reason
+    ``_isolate_devices_write_lock`` does: ``monkeypatch.setattr`` on a dotted
+    string cannot resolve a module that the test never imported, and
+    ``test_version`` / ``test_wheel`` touch neither sidecar nor lockfile.
     """
-    from mind_meld import conflictlog as _conflictlog
+    _redirect_sidecar(monkeypatch, tmp_path)
+    _redirect_lock(monkeypatch, tmp_path)
 
-    monkeypatch.setattr(_conflictlog, "LOG_DIR", tmp_path / "conflictlog")
+
+@pytest.fixture(autouse=True)
+def _isolate_skill_links(monkeypatch, tmp_path, request) -> None:
+    """Redirect the retro-fleet skill installer's three targets to a tmp path.
+
+    The installer mkdirs and symlinks into ``~/.claude/skills``,
+    ``~/.codex/skills`` and ``~/.config/opencode/skills``, and touches marker
+    files in ``~/.config/mind-meld``. Every test that drove ``_push_core`` past
+    its TTL gate, or ``init``, without stubbing the installer was mutating the
+    developer's REAL agent config dirs. Measured when Track 16A added
+    ``skill_link._refuse_real_home_under_pytest``: **67 tests** were reaching
+    them. This is a pre-existing leak the extraction merely made visible.
+
+    Redirects the roots rather than moving ``$HOME``. A suite-wide
+    ``monkeypatch.setenv("HOME", ...)`` looks simpler and is a trap:
+    ``importlib.metadata.version("mind-meld")`` resolves from the HOME-derived
+    user site-packages, so a moved HOME degrades ``__version__`` to
+    ``0.0.0+dev``, which trips ``_check_fleet_version_or_refuse`` and fails a
+    dozen tests in ``test_integration.py``.
+
+    ``test_skill_link.py`` owns its own ``_isolate_paths`` fixture (it moves
+    HOME deliberately, because it is testing the installer's real path
+    resolution), so this one steps aside there to avoid fighting it.
+    """
+    if request.node.get_closest_marker("owns_skill_paths"):
+        return
+
+    from mind_meld import skill_link as _skill_link
+
+    # Mirror the real layout: <agent_dir>/skills/retro-fleet. SKILL_ROOTS
+    # entries ARE the skills dirs, so the agent dir is one level UP.
+    #
+    # Create the agent dir but NOT the skills dir. That keeps two branches
+    # reachable that a flatter shape would silently disable: the installer's
+    # `agent_dir.exists()` pre-check (its "agent not installed → skip" path)
+    # and the `skills_dir.mkdir(mode=0o700)` path. It also keeps the three
+    # agents in SEPARATE agent dirs — sharing one would make
+    # `agent_dir.exists()` and `target.parent.exists()` agree unconditionally,
+    # which is exactly the predicate mismatch Track 17A exists to fix. The
+    # harness Group 17 builds on must not be blind to the bug it was made for.
+    roots = []
+    for name in ("claude", "codex", "opencode"):
+        agent_dir = tmp_path / "agents" / name
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        roots.append(str(agent_dir / "skills"))
+    monkeypatch.setattr(_skill_link, "SKILL_ROOTS", tuple(roots))
+    monkeypatch.setattr(_skill_link, "_marker_dir", lambda: tmp_path / "skill-markers")
 
 
 @pytest.fixture(autouse=True)
@@ -278,16 +346,25 @@ def _redirect_sidecar(monkeypatch, tmp_path):
     the one constant is sufficient — no `mind_meld.cli._AUTO_LOG_DIR` alias
     to keep in sync.
     """
+    from mind_meld import sidecar as _sidecar
+
     iso = tmp_path / "sidecar"
     iso.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", iso)
+    # setattr on the MODULE OBJECT, not a dotted string: the string form does
+    # `getattr(mind_meld, "sidecar")`, which raises AttributeError in tests that
+    # never imported the submodule (test_version, test_wheel). Same reason
+    # `_isolate_devices_write_lock` imports `devices` explicitly.
+    monkeypatch.setattr(_sidecar, "SIDECAR_DIR", iso)
     return iso
 
 
 def _redirect_lock(monkeypatch, tmp_path):
+    from mind_meld import config as _config
+    from mind_meld import lockfile as _lockfile
+
     lp = tmp_path / "test.lock"
-    monkeypatch.setattr("mind_meld.config.LOCK_PATH", lp)
-    monkeypatch.setattr("mind_meld.lockfile.LOCK_PATH", lp)
+    monkeypatch.setattr(_config, "LOCK_PATH", lp)
+    monkeypatch.setattr(_lockfile, "LOCK_PATH", lp)
     return lp
 
 

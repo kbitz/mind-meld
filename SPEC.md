@@ -41,7 +41,7 @@ Every piece of documentation targets one of two audiences:
 
 **README structure:**
 - One-liner description + badges (PyPI, license, CI)
-- 30-second install (`pipx install git+https://github.com/kbitz/mind-meld.git`)
+- 30-second install (`pipx install git+https://github.com/kbitz/mind-meld.git@latest`). The `@latest` ref is load-bearing since v0.12.11 — it is a branch the release workflow force-advances each tag, so `pipx upgrade` keeps working. Never document the bare or `@vX.Y.Z` form as the primary install; a frozen tag pins the install forever and reports itself as up to date.
 - 2-minute quickstart (init → push → pull)
 - Links to detailed docs
 - "How it works" section with the architecture diagram
@@ -97,6 +97,10 @@ Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs a
                    │  (pathlib)      │
                    └─────────────────┘
 ```
+
+**This diagram is the core sync path only, not the full module list.** `src/mind_meld/` has grown well past it — notably the fleet-retro stack (`events.py`, `events_tail.py`, `token_usage.py`, `identity.py`), the conflict stack (`resolveflow.py`, `conflictdiff.py`, `conflictmtime.py`), and the shared leaves (`consoles.py`, `safety.py`, `fsutil.py`, `lockedjson.py`, `retention.py`, `skill_link.py`). **CLAUDE.md's Source Layout table is the authoritative one-line-per-module map** and is kept current per release; grep it for a filename before grepping the code.
+
+Track 16A (v0.12.21) cut six modules out of `cli.py`. The load-bearing rule that came with them: `cli` imports those modules, and **none of them imports `cli`** — at module scope or function scope. `aggregator.py` reaches the CLI as a subprocess, never as an import. Enforced by `tests/test_module_boundaries.py` plus a CI grep gate, because ruff's F811 cannot see function-local shadowing.
 
 ### No API Server
 
@@ -333,7 +337,7 @@ mm disable-source NAME [--force]   # turn a configured sync source OFF for this 
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
-mm install-skills           # install / re-install the ~/.claude/skills/retro-fleet symlink (force-runs the same self-heal mm init / mm push invoke automatically)
+mm install-skills           # install / re-install the retro-fleet skill symlink for Claude Code, Codex, and OpenCode (force-runs the same self-heal mm init / mm push invoke automatically)
 mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N] [--format jsonl|table]
                             # query the per-file pull/push history log
 mm retro-fleet [WINDOW] [--no-author-filter]
@@ -385,7 +389,7 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 8. Download + decrypt changed blobs. Decompress (gzip).
 9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
 10. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`; `.tmp` siblings are cleaned up on failure).
-11. For conflict-copy decisions, rename the local file to `<stem>.sync-conflict-<ts>-<device>.<ext>` before writing remote to the canonical path. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight all files and exit 2 with the predicted-conflict list if any file would conflict — no writes happen.
+11. For conflict-copy decisions, rename the local file to `<stem>.sync-conflict-<ts>-<device>.<ext>` before writing remote to the canonical path. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight all files and exit **3** with the predicted-conflict list if any file would conflict — no writes happen. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
 12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
@@ -394,13 +398,19 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 ### `mm gc`
 
 1. Acquire lockfile.
-2. Download and decrypt ALL device manifests.
-3. Collect the set of all SHA-256 hashes referenced by any manifest.
-4. List all blobs in `data/` across all devices.
-5. Delete blobs not in the referenced set.
-6. Supports `--dry-run` (list what would be deleted without deleting).
-7. Release lockfile.
-8. Print summary (blobs deleted, bytes freed).
+2. Sweep this device's stale `tmp*.tmp` files left behind by a crashed push (runs under the lock already held, so no concurrent writer can race it).
+3. Download and decrypt ALL device manifests.
+4. Collect the set of all SHA-256 hashes referenced by any manifest.
+5. List all blobs in `data/` across all devices.
+6. Delete blobs not in the referenced set.
+7. Reap `mm-events` files older than `EVENTS_RETENTION_DAYS` (90). Always-on fleet policy, not opt-in.
+8. Reap `session-tokens.json` cache entries whose underlying jsonl is gone, or whose most recent `by_day` key is more than 90 days old.
+9. With `--conflicts`, also reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30).
+10. Supports `--dry-run` (list what would be deleted without deleting). **Coverage is uneven today:** the blob and event reapers report honestly, `_gc_old_conflict_files` prints its `would delete` lines but never increments its counter under `--dry-run` (so it always reports `would reap 0`), and `_gc_token_cache` skips enumeration entirely and prints `dry-run; skipping`. Both gaps are ROADMAP Track 17B; do not treat the current output as the contract.
+11. Release lockfile.
+12. Print summary (blobs deleted, bytes freed).
+
+The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell stays in `cli.py`.
 
 ### `mm status [--source NAME]`
 
@@ -409,6 +419,8 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 3. Fetch device list.
 4. Print: local file count, remote file count per device, pending pushes, pending pulls.
 5. If `--source` is given, show changes for that source only. Otherwise group changes by source.
+6. Print the last `autopull` / `autopush` breadcrumb (timestamp + outcome + `detail`), surfacing the `no-sources` and `degraded` outcomes the auto commands write.
+7. **Staleness marker (v0.12.21).** A breadcrumb older than 48h renders as `stale — no autorun in Nh`. The breadcrumb is written from *inside* the command, so any failure before typer's runner — a module-scope `ImportError` being the obvious one — writes nothing at all and step 6 would otherwise report the last `success` forever. This is the one degradation neither the `no-sources` nor the `degraded` breadcrumb can cover, because both are written by code that never ran. Best-effort: a missing or unparseable timestamp yields no marker rather than an error.
 
 ### `mm sources`
 
@@ -500,21 +512,24 @@ Pull re-reads local hash and mtime at apply time so the decision reflects the ac
 
 **Conflict mode.** `mm pull --conflict-mode` takes one of three values:
 - `keep-both` (default): auto-keep-both via the inverted [C] path — local stays at canonical, remote lands in `.sync-conflict-*`.
-- `prompt`: per-file prompt (unified diff + pick: local / remote / skip / abort, default skip in v0.11.1+; pre-1.0 letters `b` / `both` accepted as deprecated alias mapping to skip).
+- `prompt`: per-file prompt (unified diff + pick `(m)erge` / `(l)ocal` / `(r)emote` / `(s)kip` / `(a)bort`, default skip in v0.11.1+; pre-1.0 letters `b` / `both` accepted as deprecated alias mapping to skip). Since v0.12.10 it also renders each side's timestamps and a recency verdict, but display-only — there is deliberately no `(n)ewer` shortcut at this site, because `_apply_incoming_file` already skipped before prompting whenever local was the newer file, so `(n)` would be a redundant alias of `(r)`.
 - `fail`: preflight every file via `_predict_pull_outcome`. If any file would conflict, print the list and exit **3** with **no writes**. For CI use. Best-effort — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
 
-**Conflict-prompt UX (v0.11.1).** Both prompt sites (inline `mm pull --conflict-mode prompt` and `mm resolve`) render:
+**Conflict-prompt UX (v0.11.1, extended v0.12.8 / v0.12.10).** Both prompt sites (inline `mm pull --conflict-mode prompt` and `mm resolve`) render:
 1. Color LOCAL/REMOTE banners above the diff (red + green gutters, peer-name attribution on the REMOTE banner via `lookup_device_by_short_id`).
-2. Three-number divergence summary `M removed-or-replaced / N added-or-replaced / K total diff lines`.
-3. The unified diff (`+`/`-` colored as before).
-4. Concrete-action option copy: `(l)ocal → discard <conflict>, keep <canonical>` / `(r)emote → overwrite <canonical> with <conflict> bytes` / `(s)kip → leave both files; run `mm resolve` later or delete manually` / `(a)bort → stop reviewing; exit`.
+2. Created/modified timestamps per side plus a `-> SIDE is newer by N` recency verdict (v0.12.10). The remote side's "created" reads `pulled` — it is the local sync time, not the peer's real creation, because the manifest carries only modified time.
+3. Three-number divergence summary `M removed-or-replaced / N added-or-replaced / K total diff lines`.
+4. The unified diff (`+`/`-` colored as before).
+5. Concrete-action option copy: `(l)ocal → discard <conflict>, keep <canonical>` / `(r)emote → overwrite <canonical> with <conflict> bytes` / `(s)kip → leave both files; run `mm resolve` later or delete manually` / `(a)bort → stop reviewing; exit`.
 
-Default flipped from `b` to `s` in v0.11.1; `b` / `both` aliased with one-time stderr notice until 1.0. The prior `c` / `f` letters from pre-v0.9.0 remain loud-rejected (real silent-data-loss risk pre-inversion).
+Default flipped from `b` to `s` in v0.11.1; `b` / `both` aliased with one-time stderr notice until 1.0. The prior `c` / `f` letters from pre-v0.9.0 remain loud-rejected (real silent-data-loss risk pre-inversion). Since v0.12.8 the default key is **always** `(s)kip` at both sites — Enter never auto-accepts a merge, and since v0.12.10 it never auto-accepts a recency guess either.
+
+The shared leaf renderers (`render_prompt`, `render_banner`, `count_divergent_lines`, `format_ts`, `format_age_delta`, `newer_side`, `render_time_line`, `render_verdict`) live in `conflictdiff.py`; site-level dispatch over the four canonical-exists × inversion-mode shapes stays at each call site.
 
 **Post-hoc resolution commands:**
 
 - `mm conflicts` — list every `.sync-conflict-*` file across synced sources with age, canonical sibling, and per-row Mode column (`pre-v0.9.2` for `v0-`-prefixed files, `v0.9.2+` otherwise). Read-only; does NOT migrate pre-inversion files.
-- `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows banners + divergence summary + unified diff, prompts for a winner. Dual-mode dispatch by filename prefix: `v0-` → pre-inversion ops ((l) renames sidecar over canonical, (r) unlinks sidecar); no prefix → post-inversion ops ((l) unlinks sidecar, (r) renames sidecar over canonical). Acquires the mm lockfile so autopull can't race the rename/unlink. Migrates pre-inversion files to `v0-` prefix on first discovery.
+- `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows banners + timestamps + divergence summary + unified diff, then prompts `(m)erge` / `(l)ocal` / `(r)emote` / `(n)ewer` / `(p)romote` / `(s)kip` / `(a)bort`. `(p)romote` keeps BOTH by giving the conflict file its own first-class filename; `(n)ewer` (v0.12.10) remaps onto the existing `(l)` / `(r)` dispatch rather than adding an apply branch, is offered only when both sides' mtimes are readable, and re-prompts on an exact tie instead of guessing. Dual-mode dispatch by filename prefix: `v0-` → pre-inversion ops ((l) renames sidecar over canonical, (r) unlinks sidecar); no prefix → post-inversion ops ((l) unlinks sidecar, (r) renames sidecar over canonical). Acquires the mm lockfile so autopull can't race the rename/unlink. Migrates pre-inversion files to `v0-` prefix on first discovery. Exits 1 if any per-conflict rename/unlink/read fails, so scripts can detect partial failure; the walk still continues through every conflict. Lives in `resolveflow.py` (the `@app.command()` shell stays in `cli.py`).
 - `mm gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days). Matches both prefixed and un-prefixed forms via `is_conflict_filename`.
 
 **Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.mind-meld-log.md`, and `mm diff` annotations all reflect the split so cross-machine work is visible.
@@ -732,6 +747,8 @@ rich >= 13.0          # pretty terminal output
 ---
 
 ## Project Structure
+
+> **Historical: this is the original v1 build plan, not the current tree.** It is kept alongside the Implementation Order below as a record of what was scoped up front. Several entries were never built (`CONTRIBUTING.md`, `docs/quickstart.md`, `docs/encryption.md`, `docs/troubleshooting.md`), and `src/mind_meld/` has roughly tripled since — Track 16A (v0.12.21) alone added `consoles.py`, `conflictmtime.py`, `skill_link.py`, `events_tail.py`, `resolveflow.py`, and `retention.py`. For the current tree, read **CLAUDE.md's Source Layout table** (one line per module, kept current per release) and `docs/invariants/` for the per-topic load-bearing rules.
 
 ```
 mind-meld/

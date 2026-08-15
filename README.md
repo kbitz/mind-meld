@@ -28,6 +28,17 @@ pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 
 (This is exactly the command mm's auto-upgrade nudge prints.)
 
+**Need to roll back?** Install a specific older release by tag:
+
+```bash
+pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.12.20
+```
+
+Nothing on disk needs migrating — config, manifests, blobs, and the events log
+are unchanged across the 0.12.x line, so a rollback is just a reinstall. Note
+the caveat above applies: a pinned tag stops tracking `latest`, so re-run the
+`@latest` command when you want to resume upgrades.
+
 ## Quick Start
 
 ```bash
@@ -105,7 +116,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopull` checks all other registered devices for changes and applies them locally. It writes a `.mind-meld-log.md` breadcrumb to each affected project so Claude Code knows what changed.
 - `mm autopush` builds a manifest of local memory/todos, diffs against the last push, and uploads only what changed.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
-- "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr as a single `mm: warning: ...` line so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases.
+- "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr as a single `mm: warning: ...` line so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
 - **Auto-upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag and emit a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr if you're behind. `mm` never invokes pipx itself; you run the printed command. The command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which plain `pipx upgrade mind-meld` works (see [Upgrading](#upgrading)). Disable with `--no-check-version` for one invocation, or set `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml` to disable persistently. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the nudge fires before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex and OpenCode Integration
@@ -149,13 +160,16 @@ OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immed
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
-| `mm status` | Show local vs remote state |
+| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
 | `mm gc` | Delete orphaned blobs |
 | `mm gc --conflicts` | Also delete `.sync-conflict-*` files older than 30 days |
 | `mm sources` | List configured sync sources |
+| `mm log` | Query the per-file pull/push history. Filter with `--source`, `--since`, `--action {written\|merged\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push}`, `--limit`; `--format {jsonl\|table}` |
+| `mm migrate-config` | Append any missing recommended `exclude_patterns` to your existing `[[sync.sources]]` entries. Idempotent and preserves your customizations; `--dry-run` to preview, `--yes` to skip the prompt |
+| `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. `--json` prints the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. |
@@ -256,7 +270,7 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 Session jsonls only ever grow, so from v0.12.15 each push re-reads only the bytes appended since the last one rather than the whole file. That's what stopped `mm push` periodically printing `mm: notice: events tail budget exceeded` on machines with a lot of large sessions. If your token cache has gone stale from long-deleted workspaces, `mm gc` reaps those entries and shrinks what every push has to read.
 
-The skill is auto-installed at `~/.claude/skills/retro-fleet` on `mm init`, and self-heals every push (24h-TTL gated, ~1 syscall in steady state) so a `pipx reinstall` rebuild can't leave you with a dangling symlink. If you already have your own file at that path, mm leaves it alone and prints a one-time `mm: notice:` so you know.
+The skill is auto-installed on `mm init` — at `~/.claude/skills/retro-fleet` for Claude Code, and at the Codex and OpenCode equivalents (see [Codex and OpenCode Integration](#codex-and-opencode-integration)) — and self-heals every push (24h-TTL gated, a handful of syscalls per agent in steady state) so a `pipx reinstall` rebuild can't leave you with a dangling symlink. Each agent's link is tracked separately, so a deliberate skip on one never suppresses repair of another. If you already have your own file at one of those paths, mm leaves it alone and prints a one-time `mm: notice:` so you know.
 
 **Caveats the output is honest about:**
 

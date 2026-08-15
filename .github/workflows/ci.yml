@@ -39,6 +39,25 @@ jobs:
           print(backend)
           "
 
+      # Track 16A: the decomposition's one structural rule. Nothing under src/
+      # may import cli -- that is the cli<->resolveflow / cli<->retention cycle
+      # the extraction exists to avoid.
+      #
+      # Keys on the MODULE, not the imported name: the first version of this
+      # regex required a bare `cli` token after `import`, so it missed
+      # `from mind_meld.cli import _pull_core` -- the single most likely form.
+      # Relative shapes (`from .cli import x`, `from . import cli`) are covered
+      # too. tests/test_module_boundaries.py has the authoritative AST check
+      # (it also sees function-local imports, which ruff F811 cannot); this
+      # grep is the cheap pre-test tripwire that names the offending line.
+      - name: No module imports cli
+        run: |
+          if grep -rnE '^[[:space:]]*(from[[:space:]]+(mind_meld\.cli|\.cli)([[:space:]]|\.)|from[[:space:]]+(mind_meld|\.)[[:space:]]+import[[:space:]].*\bcli\b|import[[:space:]]+mind_meld\.cli\b)' \
+               src/mind_meld --include='*.py' | grep -v '^src/mind_meld/cli.py:'; then
+            echo "::error::a module under src/ imports mind_meld.cli — see tests/test_module_boundaries.py"
+            exit 1
+          fi
+
       - name: Lint (ruff check)
         run: ruff check .
 
@@ -54,3 +73,19 @@ jobs:
           python -m build
           python -m pip install --force-reinstall dist/*.whl
           mm --version
+          # The `-m` path is what the shipped retro-fleet skill actually uses:
+          # aggregator.get_known_devices() runs
+          # `sys.executable -m mind_meld.cli devices --format json` and parses
+          # the stdout as JSON. It degrades to (None, []) on ANY failure, so a
+          # break here is silent -- every retro card just quietly drops its
+          # "of M devices" tail. CI only ever smoked the console-script path.
+          python -m mind_meld.cli --version
+          # Prove the JSON path actually parses. `... || true` would make this
+          # line unfailable — the appearance of coverage with none of it. On a
+          # fresh runner mm is uninitialized, so `devices` exits non-zero by
+          # design; assert on THAT, and that it did not die with a traceback.
+          if python -m mind_meld.cli devices --format json > /tmp/devices.out 2>/tmp/devices.err; then
+            python -c "import json,sys; json.load(open('/tmp/devices.out'))"
+          else
+            grep -q 'Traceback' /tmp/devices.err && { echo "::error::-m entrypoint crashed"; cat /tmp/devices.err; exit 1; } || true
+          fi

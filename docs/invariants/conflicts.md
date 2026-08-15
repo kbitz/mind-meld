@@ -2,7 +2,9 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_apply_conflict` / `_apply_incoming_file` / `_resolve_interactive_loop` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `_find_conflict_files`
+- `src/mind_meld/cli.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_canonical_for_conflict` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `count_divergent_lines`
 - `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge`
 - `src/mind_meld/manifest.py` — `parse_conflict_device_short` / `is_conflict_filename` / `is_pre_inversion_conflict_filename`
@@ -19,7 +21,7 @@ Tests: `tests/test_conflict_copy.py`, `tests/test_conflictdiff.py`, `tests/test_
 
 ## Conflict-prompt UX (load-bearing, v0.11.1 BREAKING — interactive prompt)
 
-The two interactive prompt sites (`_resolve_interactive_loop` post-pull walk in cli.py:5688, `_prompt_conflict_choice` inline pull-time in cli.py:1115) share leaf primitives in `src/mind_meld/conflictdiff.py`: `render_prompt`, `render_banner`, `count_divergent_lines`. Site-level dispatch over the four shapes (canonical-exists × pre-inversion / post-inversion × canonical-missing) stays at each call site — burying it in a helper would hide the load-bearing filename-prefix dispatch.
+The two interactive prompt sites (`resolveflow.py:_resolve_interactive_loop` for the `mm resolve` walk, `cli.py:_prompt_conflict_choice` for the inline pull-time prompt) share leaf primitives in `src/mind_meld/conflictdiff.py`: `render_prompt`, `render_banner`, `count_divergent_lines`. Site-level dispatch over the four shapes (canonical-exists × pre-inversion / post-inversion × canonical-missing) stays at each call site — burying it in a helper would hide the load-bearing filename-prefix dispatch.
 
 **`(b)oth` → `(s)kip` rename + alias.** Default key changed from `b` to `s` in v0.11.1. Same on-disk effect — both leave the canonical and `.sync-conflict-*` files in place — but the option name now matches the action. The pre-1.0 letters `b` / `both` are aliased to skip with a one-time `mm: notice:` so stale scripts continue to work; alias removes at 1.0. **Exact-match dispatch** (`if choice in ("b", "both")`): `back`/`browse`/`between` must NOT silently trigger the alias.
 
@@ -127,7 +129,7 @@ Pinned by `tests/test_conflict_copy.py::TestNeverDefaultToMerge` (default `s` at
 
 ## Conflict-prompt timestamps + `(n)ewer` shortcut (load-bearing, v0.12.10)
 
-Both prompt sites render created/modified timestamps per side plus a recency verdict; `mm resolve` additionally offers an `(n)ewer` shortcut. Pure leaf primitives live in `conflictdiff.py`: `format_ts` (epoch → local `YYYY-MM-DD HH:MM`, `"unknown"` on None/overflow), `format_age_delta` (`Nd`/`Nh`/`Nm`/`<1m`, sign-ignored), `newer_side` (`local`/`remote`/`tie`/`unknown`), `render_time_line` (caller-composed `(label, ts)` pairs), `render_verdict` (`-> SIDE is newer by N`, None when uncomparable). `cli.py` shares `_stat_mtime_btime(path) -> (mtime, btime)` (best-effort, `(None, None)` on `OSError`; `st_birthtime` via `getattr` for non-APFS).
+Both prompt sites render created/modified timestamps per side plus a recency verdict; `mm resolve` additionally offers an `(n)ewer` shortcut. Pure leaf primitives live in `conflictdiff.py`: `format_ts` (epoch → local `YYYY-MM-DD HH:MM`, `"unknown"` on None/overflow), `format_age_delta` (`Nd`/`Nh`/`Nm`/`<1m`, sign-ignored), `newer_side` (`local`/`remote`/`tie`/`unknown`), `render_time_line` (caller-composed `(label, ts)` pairs), `render_verdict` (`-> SIDE is newer by N`, None when uncomparable). `conflictmtime.py` owns `_stat_mtime_btime(path) -> (mtime, btime)`; both prompt sites (`cli._prompt_conflict_choice`, `resolveflow._resolve_interactive_loop`) call it (best-effort, `(None, None)` on `OSError`; `st_birthtime` via `getattr` for non-APFS).
 
 **Timestamp source differs by site (load-bearing).** `_resolve_interactive_loop`: both files on disk → `stat()` both via `_stat_mtime_btime`, statting the BANNER paths (`local_path_for_banner` / `remote_path_for_banner`) so LOCAL/REMOTE stay correct across inversion modes. `_prompt_conflict_choice`: the remote file is NOT on disk → `stat()` LOCAL only; the remote modified time comes from the manifest via a NEW keyword-only `remote_mtime: datetime | None` param threaded from `_apply_incoming_file` (`remote_mtime` already parsed at the mtime gate). The param is keyword-only/trailing so it never shifts the positional `peer_name` / `ambiguous_count` binding at the call site.
 

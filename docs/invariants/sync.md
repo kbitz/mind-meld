@@ -4,7 +4,7 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests`
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones`
-- `src/mind_meld/config.py` — `exclude_patterns` / `disabled_sources` / `seen_sources` consumer paths
+- `src/mind_meld/config.py` — the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`
@@ -103,7 +103,7 @@ Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(by
 
 `_apply_merge` and the merge-via-LCS interactive branch deliberately do NOT restore — line-union merges produce locally-authored content, and backdating to the remote mtime would cause peers' next pull to see `local_mtime <= their remote_mtime` and skip the merged result, losing the union content fleet-wide.
 
-**Future-clamp invariant.** `_restore_mtime_best_effort` caps the applied mtime at `now + _MTIME_RESTORE_MAX_SKEW_SECONDS` (60s). Without the clamp, a peer with a bad clock OR a passphrase-holding attacker minting a manifest dated in 2099 would poison the victim's local mtime into a permanent `local_mtime > remote_mtime` skip at the `_apply_incoming_file` mtime gate (cli.py:1581) — silently locking the victim out of all future legitimate updates to that path. The 60s window absorbs normal NTP drift between Macs without admitting year-2099 abuse.
+**Future-clamp invariant.** `conflictmtime.py:_restore_mtime_best_effort` caps the applied mtime at `now + _MTIME_RESTORE_MAX_SKEW_SECONDS` (60s). Without the clamp, a peer with a bad clock OR a passphrase-holding attacker minting a manifest dated in 2099 would poison the victim's local mtime into a permanent `local_mtime > remote_mtime` skip at the `cli.py:_apply_incoming_file` mtime gate — silently locking the victim out of all future legitimate updates to that path. The 60s window absorbs normal NTP drift between Macs without admitting year-2099 abuse.
 
 **Defensive parsing.** Catches `TypeError | ValueError | OverflowError | OSError` from `datetime.fromisoformat(...).timestamp()` AND from the subsequent `os.utime`. Manifest validation (`load_manifest`) does NOT type-check `files[*].mtime` values, so a peer can publish `mtime: 1234` (int) and drive `fromisoformat` into TypeError; pre-fix this would propagate and abort the pull with a partial write already on disk. Pinned by `tests/test_pull_helpers.py::TestRestoreMtimeBestEffort` (None / empty / unparseable / missing-file / future-clamp / non-string).
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mind-meld"
-version = "0.12.20"
+version = "0.12.21"
 description = "Sync AI coding-agent context across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"
@@ -49,6 +49,9 @@ packages = ["src/mind_meld"]
 # needed; force-include + packages= would double-ship the same files.
 
 [tool.pytest.ini_options]
+markers = [
+    "owns_skill_paths: test moves $HOME itself; conftest's _isolate_skill_links steps aside",
+]
 testpaths = ["tests"]
 
 [tool.ruff]

@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from mind_meld import cli as cli_module
-from mind_meld import events
+from mind_meld import events, events_tail
+from mind_meld import events as _mm_events
 
 
 def _read_events(events_file: Path) -> list[dict]:
@@ -82,7 +82,7 @@ class TestRunEventsBackfill:
         sources = _make_sources(events_root, claude_dir)
         config = {"sync": {"sources": sources}}
 
-        cli_module._run_events_backfill(config, sources, "dev-a")
+        events_tail._run_events_backfill(config, sources, "dev-a")
 
         files = sorted((events_root / "events").glob("*.jsonl"))
         assert len(files) == 1, "exactly one events file expected"
@@ -109,7 +109,7 @@ class TestRunEventsBackfill:
         sources = [{"name": "claude", "path": str(claude_dir), "type": "claude"}]
         config: dict = {"sync": {"sources": sources}}
 
-        cli_module._run_events_backfill(config, sources, "dev-a")
+        events_tail._run_events_backfill(config, sources, "dev-a")
 
         assert not (events_root / "events").exists(), (
             "backfill must not create an events tree when mm-events is absent from sources"
@@ -129,10 +129,10 @@ class TestRunEventsBackfill:
         def boom(_config):
             raise RuntimeError("synthetic walk failure")
 
-        monkeypatch.setattr(cli_module.events, "discover_git_roots", boom)
+        monkeypatch.setattr(_mm_events, "discover_git_roots", boom)
 
         # Must not raise.
-        cli_module._run_events_backfill(config, sources, "dev-a")
+        events_tail._run_events_backfill(config, sources, "dev-a")
 
         captured = capsys.readouterr()
         assert "mm: notice: events backfill failed" in captured.err
@@ -148,7 +148,7 @@ class TestRunEventsBackfill:
         sources = _make_sources(events_root, claude_dir=None)
         config = {"sync": {"sources": sources}}
 
-        cli_module._run_events_backfill(config, sources, "dev-a")
+        events_tail._run_events_backfill(config, sources, "dev-a")
 
         files = sorted((events_root / "events").glob("*.jsonl"))
         assert len(files) == 1
@@ -186,10 +186,10 @@ class TestRunEventsBackfill:
                 }
             ]
 
-        monkeypatch.setattr(cli_module.events, "walk_git_projects", fake_walk)
-        monkeypatch.setattr(cli_module.events, "discover_git_roots", lambda _c: ([], []))
+        monkeypatch.setattr(_mm_events, "walk_git_projects", fake_walk)
+        monkeypatch.setattr(_mm_events, "discover_git_roots", lambda _c: ([], []))
 
-        cli_module._run_events_backfill(config, sources, "dev-a")
+        events_tail._run_events_backfill(config, sources, "dev-a")
 
         from datetime import datetime, timezone
 
@@ -228,10 +228,12 @@ class TestInitWiring:
         def stub_backfill(config, sources, device_id):
             calls.append((config["device"]["id"], device_id, len(sources)))
 
-        monkeypatch.setattr("mind_meld.cli._run_events_backfill", stub_backfill)
+        monkeypatch.setattr("mind_meld.events_tail._run_events_backfill", stub_backfill)
         # Stub the skill link installer too — irrelevant to this test and
         # avoids touching ~/.claude.
-        monkeypatch.setattr("mind_meld.cli._ensure_retro_skill_links", lambda dry_run=False: None)
+        monkeypatch.setattr(
+            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+        )
 
         storage = tmp_path / "icloud"
         # storage path, device name, passphrase x2, claude=Y, all other sources=n
@@ -283,7 +285,9 @@ class TestEventsDirIsolation:
         cfg_path = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
-        monkeypatch.setattr("mind_meld.cli._ensure_retro_skill_links", lambda dry_run=False: None)
+        monkeypatch.setattr(
+            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+        )
 
         # Snapshot the real events dir pre-init so we can compare.
         real_dir = Path.home() / ".local" / "share" / "mind-meld" / "events"

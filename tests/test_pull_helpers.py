@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from mind_meld import resolveflow
 from mind_meld.cli import (
     _apply_conflict,
     _apply_merge,
@@ -1574,7 +1575,7 @@ class TestWarningsSurvivePartialPull:
         # Track 5E: bypass the fleet-version check + migration sweep so
         # the test stays scoped to corrupt-peer warning routing.
         monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
-        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
+        monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(
             cli_module,
             "collect_tombstones",
@@ -1677,7 +1678,7 @@ class TestWriteSyncLogBestEffort:
         # sync-log behavior, so the fleet check has no real backend to
         # query — bypass it.
         monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
-        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
+        monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(
             cli_module,
             "collect_tombstones",

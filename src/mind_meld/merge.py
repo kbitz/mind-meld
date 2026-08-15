@@ -245,29 +245,3 @@ def lcs_merge(local_bytes: bytes, remote_bytes: bytes) -> tuple[bytes, int]:
     if local_text.endswith("\n") or remote_text.endswith("\n"):
         body = body + "\n"
     return body.encode("utf-8"), conflicts
-
-
-def similarity_ratio(local_bytes: bytes, remote_bytes: bytes) -> float | None:
-    """LCS similarity ratio over the SAME line representation ``lcs_merge`` uses.
-
-    CONFLICT-TELEMETRY (temporary): feeds the conflict-decision collector so the
-    ``similarity`` feature it records is byte-for-byte the metric a future
-    similarity-gated auto-resolver (the deferred Phase 2 classifier) would
-    compute. If this drifts from ``lcs_merge``'s representation the collected
-    dataset can't validate the classifier's thresholds -- so the binary guard,
-    ``splitlines()`` (no keepends), and ``autojunk=False`` MUST match
-    ``lcs_merge`` exactly. Not called by any sync path.
-
-    Returns ``SequenceMatcher.ratio()`` in ``[0.0, 1.0]``, or ``None`` for
-    binary / non-UTF-8 input (parity with ``lcs_merge``'s ``-1`` sentinel).
-    """
-    if b"\x00" in local_bytes or b"\x00" in remote_bytes:
-        return None
-    try:
-        local_text = local_bytes.decode("utf-8")
-        remote_text = remote_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    local_lines = local_text.splitlines()
-    remote_lines = remote_text.splitlines()
-    return difflib.SequenceMatcher(a=local_lines, b=remote_lines, autojunk=False).ratio()

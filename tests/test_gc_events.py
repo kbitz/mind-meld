@@ -19,10 +19,11 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from mind_meld.cli import _gc_old_event_files, app
+from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
+from mind_meld.retention import _gc_old_event_files
 from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "gc-events-test"

@@ -18,6 +18,8 @@ import pytest
 from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
+from mind_meld import events as _mm_events
+from mind_meld import token_usage as _mm_token_usage
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
@@ -1042,7 +1044,7 @@ def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkey
 
     iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
     token_usage.warm_token_cache_inline([claude_root])
-    monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
+    monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1145,7 +1147,7 @@ def test_autopush_breadcrumb_degraded_when_token_cache_is_locked(tmp_path, monke
     def _contended(_mode):
         yield None  # what warn-mode contention actually hands back
 
-    monkeypatch.setattr(cli_module.token_usage, "lock_and_get_files", _contended)
+    monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", _contended)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1164,7 +1166,7 @@ def test_autopush_breadcrumb_joins_multiple_degradations(tmp_path, monkeypatch):
     contain `; `, or the joined detail becomes ambiguous to split.
     """
     iso, _claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
+    monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1289,7 +1291,7 @@ def test_autopush_breadcrumb_degraded_when_events_tail_fails(tmp_path, monkeypat
     def _boom(*_a, **_kw):
         raise RuntimeError("synthetic tail failure")
 
-    monkeypatch.setattr(cli_module.events, "discover_git_roots", _boom)
+    monkeypatch.setattr(_mm_events, "discover_git_roots", _boom)
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1382,3 +1384,109 @@ def test_autopull_surfaces_fsync_failure_in_quiet_mode(tmp_path, monkeypatch):
     r = runner.invoke(app, ["autopull"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
     assert "fsync failed" in (r.stderr or "")
+
+
+class TestBreadcrumbStaleness:
+    """`mm status` must mark an autorun breadcrumb that stopped being written.
+
+    `_write_autorun_breadcrumb` is called from INSIDE the command, so a failure
+    before typer's runner -- a module-scope ImportError being the obvious one,
+    and the exact risk Track 16A's decomposition introduces -- writes no
+    breadcrumb at all. Without an age check, `mm status` then reports the last
+    `success` forever while sync is wedged. This is the one degradation neither
+    the v0.8.1 `no-sources` nor the v0.12.16 `degraded` breadcrumb can cover,
+    because both are written by code that never ran.
+    """
+
+    @staticmethod
+    def _iso(hours_ago: float) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+
+    def test_fresh_breadcrumb_has_no_marker(self) -> None:
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(self._iso(1)) == ""
+
+    def test_just_under_the_threshold_is_not_stale(self) -> None:
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(self._iso(47.5)) == ""
+
+    def test_past_the_threshold_is_marked_stale(self) -> None:
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        out = _breadcrumb_staleness_suffix(self._iso(72))
+        assert "stale" in out
+        assert "72h" in out
+
+    def test_trailing_z_timestamps_parse(self) -> None:
+        """The breadcrumb writer emits `...Z`, which `fromisoformat` rejects
+        on 3.11 unless the suffix is normalized first."""
+        from datetime import datetime, timedelta, timezone
+
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        z = (datetime.now(timezone.utc) - timedelta(hours=100)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert "stale" in _breadcrumb_staleness_suffix(z)
+
+    def test_naive_timestamp_is_treated_as_utc_not_crashed_on(self) -> None:
+        from datetime import datetime, timedelta
+
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        naive = (datetime.utcnow() - timedelta(hours=100)).isoformat()
+        assert "stale" in _breadcrumb_staleness_suffix(naive)
+
+    @pytest.mark.parametrize("bad", ["", "not-a-date", None, 12345, {"ts": 1}])
+    def test_unparseable_input_degrades_to_no_marker(self, bad) -> None:
+        """Diagnostics must never raise into `mm status`."""
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(bad) == ""
+
+    def test_clock_skew_from_the_future_is_not_stale(self) -> None:
+        """A breadcrumb written by a peer with a fast clock yields a NEGATIVE
+        age. It must read as fresh, not render `stale — no autorun in -3h`."""
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(self._iso(-3)) == ""
+
+    def _plant(self, tmp_path, monkeypatch, hours_ago: float):
+        _setup_real_config(tmp_path, monkeypatch)
+        iso = _redirect_sidecar(monkeypatch, tmp_path)
+        (iso / "last-autorun.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": self._iso(hours_ago),
+                    "verb": "push",
+                    "outcome": "success",
+                }
+            )
+        )
+        return iso
+
+    def test_status_renders_the_marker_for_a_stale_breadcrumb(self, tmp_path, monkeypatch) -> None:
+        """The six unit tests above all call the helper DIRECTLY.
+
+        Dropping the `f"{_breadcrumb_staleness_suffix(ts)}"` interpolation from
+        `status`'s console.print leaves every one of them green while the
+        feature — a wedged autopush that `mm status` should flag — ships dead.
+        This is the only assertion that the marker reaches a user.
+        """
+        self._plant(tmp_path, monkeypatch, 100)
+        r = runner.invoke(app, ["status"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        assert "Last auto-push" in r.output, "breadcrumb line did not render at all"
+        assert "stale" in r.output
+        assert "success" in r.output, "the staleness marker replaced the outcome"
+
+    def test_status_omits_the_marker_for_a_fresh_breadcrumb(self, tmp_path, monkeypatch) -> None:
+        """Complement: the marker must not fire on a healthy device, or it is
+        noise on every `mm status` the fleet runs."""
+        self._plant(tmp_path, monkeypatch, 2)
+        r = runner.invoke(app, ["status"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        assert "Last auto-push" in r.output
+        assert "stale" not in r.output

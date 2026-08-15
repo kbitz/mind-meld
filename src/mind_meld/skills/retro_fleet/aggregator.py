@@ -75,7 +75,7 @@ from mind_meld import identity, safety, token_usage
 # ---------------------------------------------------------------------------
 
 EVENTS_RETENTION_DAYS = 90
-"""Mirrors ``mind_meld.cli.EVENTS_RETENTION_DAYS``. Kept as a separate
+"""Mirrors ``mind_meld.retention.EVENTS_RETENTION_DAYS``. Kept as a separate
 constant here so the aggregator is importable without dragging in the cli
 module's heavyweight imports. Pinned by ``test_retro_fleet_aggregator``'s
 ``test_retention_constant_matches_cli`` so a future bump catches drift."""

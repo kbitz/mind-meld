@@ -2,7 +2,7 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_register_and_save` / `_ensure_device_registered` / `init_cmd` / `_init_storage_guard`
+- `src/mind_meld/cli.py` — `_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard`
 - `src/mind_meld/devices.py` — `register_device` / `update_last_seen` / `list_devices` / `_devices_write_lock`
 - `src/mind_meld/storage/local.py` — `LocalBackend.put_exclusive`
 - `src/mind_meld/safety.py` — `safe_str` / `safe_text` / `strip_terminal_escapes`
