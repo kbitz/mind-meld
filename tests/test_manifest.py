@@ -678,7 +678,11 @@ class TestWalkGenericSourceDedup:
         (base / "AGENTS.md").symlink_to(target)
         remote = {
             "sources": {"codex": {"files": {"AGENTS.md": {"sha256": "a"}}}},
-            "tombstones": {},
+            "tombstones": {
+                "codex:AGENTS.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
+                "codex:real.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
+                "legacy.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
+            },
         }
 
         filtered = _filter_symlinked_paths(
@@ -686,7 +690,12 @@ class TestWalkGenericSourceDedup:
         )
         tombstones = generate_tombstones({"sources": {"codex": {"files": {}}}}, filtered, "me")
 
-        assert tombstones == {}
+        assert "codex:AGENTS.md" not in tombstones
+        assert "codex:real.md" in tombstones
+        assert "legacy.md" in tombstones
+        assert "codex:AGENTS.md" not in filtered["tombstones"]
+        assert "codex:real.md" in filtered["tombstones"]
+        assert "legacy.md" in filtered["tombstones"]
 
 
 class TestWalkSource:

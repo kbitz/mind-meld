@@ -2361,3 +2361,47 @@ class TestDownloadAndApplyPathTraversalGuard:
 
         assert (actual_base / "skills" / "tool" / "SKILL.md").read_bytes() == b"peer-bytes"
         assert outcomes["written"] == ["skills/tool/SKILL.md"]
+
+    def test_direct_apply_preserves_leaf_symlink(self, tmp_path) -> None:
+        from mind_meld.cli import _apply_incoming_file
+
+        target = tmp_path / "managed-agents.md"
+        target.write_text("managed")
+        local_link = tmp_path / "AGENTS.md"
+        local_link.symlink_to(target)
+
+        outcome = _apply_incoming_file(
+            local_link,
+            "AGENTS.md",
+            b"peer-bytes",
+            _info(_sha(b"peer-bytes")),
+            "peerA",
+        )
+
+        assert outcome == "skipped"
+        assert local_link.is_symlink()
+        assert target.read_text() == "managed"
+
+    def test_non_quiet_symlink_skip_emits_one_breadcrumb(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
+        base = tmp_path / "src"
+        base.mkdir()
+        target = tmp_path / "managed-agents.md"
+        target.write_text("managed")
+        (base / "AGENTS.md").symlink_to(target)
+
+        _download_and_apply(
+            backend,
+            base,
+            {"AGENTS.md": _info(_sha(b"peer-bytes"))},
+            "peerA",
+            "pp",
+            1024,
+        )
+
+        output = capsys.readouterr().out
+        assert output.count("skipped (local symlink preserved)") == 1
