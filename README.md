@@ -28,6 +28,17 @@ pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 
 (This is exactly the command mm's auto-upgrade nudge prints.)
 
+**Need to roll back?** Install a specific older release by tag:
+
+```bash
+pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.12.20
+```
+
+Nothing on disk needs migrating — config, manifests, blobs, and the events log
+are unchanged across the 0.12.x line, so a rollback is just a reinstall. Note
+the caveat above applies: a pinned tag stops tracking `latest`, so re-run the
+`@latest` command when you want to resume upgrades.
+
 ## Quick Start
 
 ```bash

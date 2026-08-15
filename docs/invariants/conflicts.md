@@ -19,7 +19,7 @@ Tests: `tests/test_conflict_copy.py`, `tests/test_conflictdiff.py`, `tests/test_
 
 ## Conflict-prompt UX (load-bearing, v0.11.1 BREAKING — interactive prompt)
 
-The two interactive prompt sites (`_resolve_interactive_loop` post-pull walk in cli.py:5688, `_prompt_conflict_choice` inline pull-time in cli.py:1115) share leaf primitives in `src/mind_meld/conflictdiff.py`: `render_prompt`, `render_banner`, `count_divergent_lines`. Site-level dispatch over the four shapes (canonical-exists × pre-inversion / post-inversion × canonical-missing) stays at each call site — burying it in a helper would hide the load-bearing filename-prefix dispatch.
+The two interactive prompt sites (`resolveflow.py:_resolve_interactive_loop` for the `mm resolve` walk, `cli.py:_prompt_conflict_choice` for the inline pull-time prompt) share leaf primitives in `src/mind_meld/conflictdiff.py`: `render_prompt`, `render_banner`, `count_divergent_lines`. Site-level dispatch over the four shapes (canonical-exists × pre-inversion / post-inversion × canonical-missing) stays at each call site — burying it in a helper would hide the load-bearing filename-prefix dispatch.
 
 **`(b)oth` → `(s)kip` rename + alias.** Default key changed from `b` to `s` in v0.11.1. Same on-disk effect — both leave the canonical and `.sync-conflict-*` files in place — but the option name now matches the action. The pre-1.0 letters `b` / `both` are aliased to skip with a one-time `mm: notice:` so stale scripts continue to work; alias removes at 1.0. **Exact-match dispatch** (`if choice in ("b", "both")`): `back`/`browse`/`between` must NOT silently trigger the alias.
 

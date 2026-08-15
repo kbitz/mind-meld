@@ -39,6 +39,21 @@ jobs:
           print(backend)
           "
 
+      # Track 16A: the decomposition's one structural rule. Nothing under src/
+      # may import cli -- that is the cli<->resolveflow / cli<->retention cycle
+      # the extraction exists to avoid, and a function-local `from mind_meld
+      # import cli` is how it would sneak back in (ruff F811 cannot see
+      # function-local shadowing, so lint alone will never catch it).
+      # tests/test_module_boundaries.py asserts this too; the grep is the cheap
+      # pre-test tripwire that names the offending line directly.
+      - name: No module imports cli
+        run: |
+          if grep -rnE '^[[:space:]]*(from mind_meld(\.cli)? import .*\bcli\b|import mind_meld\.cli)' \
+               src/mind_meld --include='*.py' | grep -v '^src/mind_meld/cli.py:'; then
+            echo "::error::a module under src/ imports mind_meld.cli — see tests/test_module_boundaries.py"
+            exit 1
+          fi
+
       - name: Lint (ruff check)
         run: ruff check .
 
@@ -54,3 +69,11 @@ jobs:
           python -m build
           python -m pip install --force-reinstall dist/*.whl
           mm --version
+          # The `-m` path is what the shipped retro-fleet skill actually uses:
+          # aggregator.get_known_devices() runs
+          # `sys.executable -m mind_meld.cli devices --format json` and parses
+          # the stdout as JSON. It degrades to (None, []) on ANY failure, so a
+          # break here is silent -- every retro card just quietly drops its
+          # "of M devices" tail. CI only ever smoked the console-script path.
+          python -m mind_meld.cli --version
+          python -m mind_meld.cli devices --format json >/dev/null || true

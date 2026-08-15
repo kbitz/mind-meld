@@ -22,10 +22,55 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Gzip compression before encryption. Versioned blob format (v0x01).
 
 ## Source Layout
-src/mind_meld/{cli,manifest,crypto,errors,devices,config,lockfile,synclog,merge,sidecar,pullhistory,upgrade,seen_sources,events,safety,conflictdiff,lockedjson,token_usage,identity}.py
+
+One line per module, with what lives there. Grep this table for a filename
+before grepping the code. (It used to be a `{a,b,c}.py` brace-expansion
+one-liner, which does not match a search for `resolveflow.py`.)
+
+| Module | Owns |
+|---|---|
+| `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
+| `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, tombstones |
+| `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
+| `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns |
+| `devices.py` | Device registry, short-id generation and lookup |
+| `events.py` | mm-events log: git-root discovery, git/session walkers, budgets |
+| `token_usage.py` | Session-jsonl walker, token + skill caches, pricing, incremental resume |
+| `identity.py` | Author-email set behind a flock-guarded 7d-TTL cache |
+| `merge.py` | Merge dispatch (`.jsonl`, `MEMORY.md`) + `lcs_merge` 3-way merge |
+| `upgrade.py` | Self-upgrade check, nudge, transition hook |
+| `pullhistory.py` | Forensic per-file pull log |
+| `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
+| `synclog.py` | Per-project `.mind-meld-log.md` writer |
+| `sidecar.py` | Manifest sidecar read/write |
+| `lockfile.py` | The mm lockfile |
+| `lockedjson.py` | Single-file flock read/modify/write primitive |
+| `fsutil.py` | Atomic write, flock-append, `fsync_dir` |
+| `errors.py` | Exception hierarchy |
+| **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
+| **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
+| **`skill_link.py`** | **(16A)** retro-fleet skill installer, its 24h drift gate and markers |
+| **`events_tail.py`** | **(16A)** The push/init mm-events tail and its walk budgets |
+| **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
+| **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
+| `safety.py` | Peer-controlled string sanitization |
+| `conflictdiff.py` | Pure leaf renderers for the conflict prompts |
+| `storage/{local,keys}.py` | Local backend + validated storage-key construction |
+
+**Import direction (Track 16A, load-bearing).** `cli` imports the six modules
+above; none of them imports `cli`, at module scope *or* function scope. The
+leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`) import
+nothing from the CLI layer at all. Enforced by
+`tests/test_module_boundaries.py` and a CI grep gate — ruff's F811 cannot see
+function-local shadowing, so lint alone will never catch a re-introduced cycle.
+`aggregator.py` reaches the CLI as a **subprocess**
+(`sys.executable -m mind_meld.cli devices --format json`), never as an import.
+
+Call moved symbols module-qualified (`resolveflow.foo(...)`), not via
+from-import. A from-import binds `cli`'s own global, so patching the owner in a
+test would not reach it — the dead-alias trap in reverse.
 
 CONFLICT-TELEMETRY (`conflictlog.py`, the `_conflict_feature_dict` / `_emit_conflict_decision` / `_conflict_rel_path` helpers, and the hidden `mm conflict-log-backfill` command) was **removed in Track 16A**. It shipped 2026-07-30 as a disposable labeled-dataset collector for the deferred Phase 2 auto-resolver and collected zero decisions in six weeks — `~/.config/mind-meld/conflict-decisions.jsonl` never existed on the fleet, so the ≥25-decision trigger never tracked and only the 60-day bar (~2026-09-28) would have fired, with no dataset. It was ripped out ahead of the `resolveflow.py` extraction rather than moved six weeks before its own deletion. Original design: `~/.gstack/projects/kbitz-mind-meld/kb-kbitz-conflict-resolution-log-design-20260730.md`. Do NOT reintroduce a collector without a trigger that demonstrably fires.
-src/mind_meld/storage/{local,keys}.py
 src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). SKILL.md invokes the aggregator via `mm retro-fleet <window>` (typer wrapper at `cli.py:retro_fleet_cmd`, v0.11.22) — NOT `python -m mind_meld.skills.retro_fleet.aggregator`, because pipx installs hide mind_meld from any interpreter outside the pipx venv and macOS systems often only have `python3` (not `python`) on PATH. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
 
 `safety.py` (v0.11.1) — peer-controlled string sanitization (`safe_str`, `safe_text`, `strip_terminal_escapes`); cli.py re-exports for backwards compat. New tests should import from `mind_meld.safety` directly. See `docs/invariants/init-devices.md`.
@@ -75,18 +120,24 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `manifest.py:walk_generic_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
-| `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) / `_restore_mtime_best_effort` | `docs/invariants/sync.md` |
-| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_resolve_interactive_loop` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `_find_conflict_files` / `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
+| `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) | `docs/invariants/sync.md` |
+| `conflictmtime.py:_restore_mtime_best_effort` / `_MTIME_RESTORE_MAX_SKEW_SECONDS` (future-clamp) | `docs/invariants/sync.md` |
+| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` | `docs/invariants/conflicts.md` |
+| `resolveflow.py:_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_synced_scan_dirs` / `_canonical_for_conflict` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
+| `conflictmtime.py:_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` (both prompt sites share these) | `docs/invariants/conflicts.md` |
 | `cli.py:_record_inline_bump` / `_invalidate_inline_bump` / `_drain_inline_bumps` / `_CANONICAL_WRITE_OUTCOMES` / `pending_inline_bumps` plumbing through `_pull_core` / `_pull_one_source` / `_download_and_apply` (outcome-gated invalidation) | `docs/invariants/conflicts.md` |
 | `conflictdiff.py` (incl. `format_ts` / `format_age_delta` / `newer_side` / `render_time_line` / `render_verdict`) / `merge.py:lcs_merge` / `manifest.py:parse_conflict_device_short` | `docs/invariants/conflicts.md` |
-| `cli.py:_register_and_save` / `_ensure_device_registered` / `init_cmd` / `_init_storage_guard` | `docs/invariants/init-devices.md` |
+| `cli.py:_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` | `docs/invariants/init-devices.md` |
 | `devices.py` / `storage/local.py:put_exclusive` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
-| `cli.py:_run_events_tail` / `_run_events_backfill` / `PushResult.events_degradations` / the `autopush` breadcrumb outcome | `docs/invariants/events-retro.md` |
+| `events_tail.py:_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` | `docs/invariants/events-retro.md` |
+| `cli.py:PushResult.events_degradations` / the `autopush` breadcrumb outcome / `_breadcrumb_staleness_suffix` | `docs/invariants/events-retro.md` |
 | `events.py:_read_cwd_from_latest_jsonl` / `_last_mm_push_ts` / `_scan_one_project` cwd-scan site / `walk_git_projects` future-collection blocks / `token_usage.is_cache_cold` / `token_usage.iter_bounded_lines` / `pullhistory._yield_lines` | `docs/invariants/events-retro.md` (tolerant-binary-reads + one-cwd-scan sections) |
-| `cli.py:_ensure_retro_skill_link` / `_skill_link_check_due` / `install_skills_cmd` / `retro_fleet_cmd` | `docs/invariants/events-retro.md` |
-| `cli.py:refresh_identity_cmd` / `_devices_json_cmd` / `EVENTS_RETENTION_DAYS` / `_gc_old_event_files` | `docs/invariants/events-retro.md` |
+| `skill_link.py:_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_marker_dir` / `SKILL_ROOTS` / `_refuse_real_home_under_pytest` / `skill_targets` / `classify_targets` | `docs/invariants/events-retro.md` |
+| `cli.py:install_skills_cmd` / `retro_fleet_cmd` (typer shells only) | `docs/invariants/events-retro.md` |
+| `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
+| `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
 | `token_usage.py:PRICING` / `MODEL_FAMILY_TIERS` / `resolve_prices` / `model_family` / `estimate_cost` / `_CACHE_WRITE_MULT` | `docs/invariants/events-retro.md` (cost-estimation section) |
 | `token_usage.py:walk_jsonl_segment` / `walk_jsonl_buckets` / `iter_bounded_lines` / `_drain_to_newline` / `get_or_compute` / `_resume_plan` / `head_fingerprint` / `head_probe_len` / `_carry_tail_ids` / `merge_token_days` / `merge_skill_days` / `TAIL_MSG_ID_LOOKBACK` / `_HEAD_PROBE_BYTES` / `_MAX_TAIL_MSG_ID_LEN` | `docs/invariants/events-retro.md` (incremental-resume section) |

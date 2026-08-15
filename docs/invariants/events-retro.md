@@ -291,7 +291,7 @@ retro for users who don't lean on skills.
 peers whose code never emits the field, and (2) v0.11.27+ peers whose
 skill walk was skipped this push because `events.py:_scan_one_project`
 ran with `token_cache_files=None` (cold token cache + autopush gate at
-`cli.py:2886-2894`, or warn-mode flock contention where
+`events_tail.py:_decide_token_walk_policy`, or warn-mode flock contention where
 `lock_and_get_files("warn")` yields `None`). The wire genuinely can't
 distinguish the two — both ship the field absent. The rendered Notes
 breadcrumb at `aggregator.py:1862-1864` mirrors `pre_token_peers`'s

@@ -4311,7 +4311,17 @@ def status(
                 if detail
                 else safe_str(str(outcome))
             )
-            console.print(f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})")
+            # Staleness gate. `_write_autorun_breadcrumb` is called from INSIDE
+            # the command, so a failure that happens before typer's runner --
+            # an ImportError at module scope being the obvious one -- writes no
+            # breadcrumb at all, and this line then reports the last SUCCESS
+            # forever while sync is wedged. That is the one degradation the
+            # v0.8.1 `no-sources` and v0.12.16 `degraded` breadcrumbs cannot
+            # cover, because both are written by code that never ran.
+            console.print(
+                f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})"
+                f"{_breadcrumb_staleness_suffix(ts)}"
+            )
         except (OSError, ValueError):
             pass  # corrupt breadcrumb is not worth surfacing an error for
     if fetch.status == "missing":
@@ -6095,6 +6105,35 @@ def resolve(
 
 _AUTO_LOG_MAX_BYTES = 1_000_000
 _AUTO_LOG_KEEP_BYTES = 512_000
+
+
+_BREADCRUMB_STALE_AFTER_HOURS = 48
+
+
+def _breadcrumb_staleness_suffix(ts: object) -> str:
+    """Return a ``[yellow]stale[/yellow]`` marker when the breadcrumb is old.
+
+    ``mm status`` renders the last autorun breadcrumb with no age check, so a
+    device whose `mm autopull` / `mm autopush` stopped running entirely reports
+    its last ``success`` indefinitely. Every other degradation signal mm has is
+    written BY the command; this is the one case where nothing runs to write
+    anything, which is exactly what a module-scope ``ImportError`` looks like.
+
+    Best-effort: an unparseable or missing timestamp yields no marker rather
+    than an error — the breadcrumb is diagnostics, not a correctness gate.
+    """
+    if not isinstance(ts, str):
+        return ""
+    try:
+        when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    age_h = (datetime.now(timezone.utc) - when).total_seconds() / 3600.0
+    if age_h < _BREADCRUMB_STALE_AFTER_HOURS:
+        return ""
+    return f" [yellow]stale — no autorun in {int(age_h)}h[/yellow]"
 
 
 def _autorun_breadcrumb_path() -> Path:
