@@ -1,3 +1,4 @@
+<!-- /autoplan restore point: /Users/kb/.gstack/projects/kbitz-mind-meld/kbitz-remove-token-usage-shim-autoplan-restore-20260815-083442.md -->
 # Roadmap
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups/Tracks are volatile and re-thought on each /roadmap run. A Group is a wave of PRs that lands together — Tracks within a Group must be set-disjoint on `_touches:_` footprints.
@@ -60,8 +61,24 @@ Three genuinely parallel Tracks, deliberately scoped to files nothing else in fl
 _2 tasks . ~100 LOC . low risk . token_usage.py_
 _touches: src/mind_meld/token_usage.py, tests/test_token_usage.py_
 
-- **`CacheEntry` is both dead and wrong** -- zero references anywhere, and it omits the v0.12.15 `offset` / `head` / `head_len` / `tail_msg_ids` keys `get_or_compute` actually writes, so `_resume_plan`'s isinstance gauntlet is the only surviving documentation of the on-disk shape. Delete it, or correct it and annotate the entry `get_or_compute` builds so it cannot drift again. _token_usage.py, ~30 lines._ (S)
-- **Delete `walk_jsonl_token_buckets`** -- a "backwards-compat shim" for a single-repo CLI with no external consumers; every remaining caller is in the test file, and it is now a shim over a shim. Both this and `CacheEntry` are listed in `token_usage.__all__`, so each deletion is a two-line change — "zero references" is true of call sites, not of the export list. _token_usage.py + tests, ~50 lines._ (S)
+- **Delete the stale `CacheEntry` API without replacing it** -- it has no live references and omits the v0.12.15 `offset` / `head` / `head_len` / `tail_msg_ids` keys that `get_or_compute` actually persists. Delete the `TypedDict` and its `__all__` export. Keep the runtime dict plus `_resume_plan` as the defensive schema authority; correct the module-level schema prose to name `head_len` too, rather than introducing another duplicate type that can drift. Existing cache entries remain valid; no migration or `CACHE_VERSION` bump. _token_usage.py, ~20 lines._ (S)
+- **Delete `walk_jsonl_token_buckets`, but retain its behavioral coverage** -- the shim is a public-but-undocumented one-view wrapper over canonical `walk_jsonl_buckets`, with no production in-repo callers. Delete the shim and its `__all__` export. Rename/migrate `TestWalkJsonlTokenBuckets` to destructure the token view from `walk_jsonl_buckets`, preserving its empty, corrupt, missing-file, day-bucketing, model, and message-id-dedup checks; remove only the explicit shim assertion. Historical CHANGELOG/PROGRESS entries stay history. Add a concise removal note only when this code is included in a versioned release. _token_usage.py + tests, ~50 lines._ (S)
+
+###### Autoplan review, 2026-08-15
+
+**Approved premise:** this is a clean API deletion, not a deprecation migration. `mind_meld` is an installable alpha CLI, but its README documents the supported `mm` interface rather than a Python SDK; an undocumented import will fail loudly with an obvious replacement.
+
+```
+CURRENT                              TRACK 15A                         END STATE
+CacheEntry is stale + unused    -->  remove stale exports          --> one canonical walker
+legacy token-only shim           -->  migrate parser tests              and one runtime schema gate
+```
+
+**Implementation choice:** delete the two exported names; preserve real parser tests by moving them to `walk_jsonl_buckets(path)` and checking its first tuple item. Do not create a replacement `TypedDict`, cache migration, compatibility shim, or README migration guide.
+
+**Failure/rollback posture:** no runtime data flow or persisted format changes. A bad test migration is caught by `pytest tests/test_token_usage.py`; a bad source change is a normal git revert, with no cache invalidation.
+
+**Not in scope:** a deprecation release, runtime warning, cache-version bump, and historical-document rewrites. A next-release CHANGELOG removal note belongs to the release workflow, not this cleanup branch.
 
 ##### Track 15B: Dead constants beside their call-time resolvers
 _2 tasks . ~50 LOC . low risk . three small modules_
