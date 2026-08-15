@@ -406,7 +406,7 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 7. Reap `mm-events` files older than `EVENTS_RETENTION_DAYS` (90). Always-on fleet policy, not opt-in.
 8. Reap `session-tokens.json` cache entries whose underlying jsonl is gone, or whose most recent `by_day` key is more than 90 days old.
 9. With `--conflicts`, also reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30).
-10. Supports `--dry-run` (list what would be deleted without deleting). **Coverage is uneven today:** the blob and event reapers report honestly, `_gc_old_conflict_files` prints its `would delete` lines but never increments its counter under `--dry-run` (so it always reports `would reap 0`), and `_gc_token_cache` skips enumeration entirely and prints `dry-run; skipping`. Both gaps are ROADMAP Track 17B; do not treat the current output as the contract.
+10. Supports `--dry-run` (list what would be deleted without deleting). **Coverage is uneven today:** the blob and event reapers report honestly, `_gc_old_conflict_files` prints its `would delete` lines but never increments its counter under `--dry-run` (so it always reports `would reap 0`), and `_gc_token_cache` skips enumeration entirely and prints `dry-run; skipping`. Both gaps are ROADMAP Track 17D; do not treat the current output as the contract.
 11. Release lockfile.
 12. Print summary (blobs deleted, bytes freed).
 
