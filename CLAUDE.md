@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## Project
-Mind Meld (mm) — CLI tool for syncing ~/.claude session data and ~/.gstack context across Macs via iCloud Drive. Supports multiple configurable sync sources.
+Mind Meld (mm) — CLI tool for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, OpenCode, and configurable sync sources.
 
 <!-- roadmap:parallelism_cap=8 -->
 Raised from the default 4 on 2026-08-14: work runs in parallel Conductor workspaces, so more Tracks can be genuinely in flight than a single-branch workflow assumes.
@@ -12,8 +12,8 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 ## Key Principles
 - No API server. CLI talks directly to iCloud Drive via the local filesystem.
 - Single storage backend: local folder at `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`, synced by iCloud.
-- **End-to-end encrypted.** All data (sessions, manifests, artifacts) encrypted client-side with AES-256-GCM before touching storage. The storage layer never sees plaintext. This is a hard invariant — no code path may write unencrypted session data to storage.
-- **Scoped sync.** Only syncs `memory/` and `todos/` within each project — not sessions, settings, or other git-tracked files.
+- **End-to-end encrypted.** All synced data (manifests, artifacts, and allowlisted agent context) is encrypted client-side with AES-256-GCM before touching storage. The storage layer never sees plaintext. This is a hard invariant — no code path may write unencrypted sync data to storage.
+- **Scoped sync.** Built-in sources are allowlisted: Claude Code syncs its `memory/` and `todos/` project data; Codex and OpenCode sync their documented customizations. Session databases, credentials, and whole-file settings that may contain credentials stay local.
 - **Truth-based manifests.** Manifests are complete snapshots of local state. Deletions propagate automatically — no separate prune step.
 - **Conflict resolution.** Detects and resolves iCloud and Dropbox-style conflict copies on manifest files. For source files with divergent local edits, INVERTED in v0.9.2: local stays at canonical, REMOTE bytes go to `<stem>.sync-conflict-<ts>-<device>.<ext>` (Syncthing convention's actual direction — visible sidecar holds the surprising bytes). Mtime-skip: if the local file is newer than remote, pull leaves it alone. Pre-v0.9.2 conflict files are migrated to a `v0-` prefix on first lock-protected discovery (mm pull / mm resolve only); resolve dispatches by filename prefix (`v0-` = pre-inversion semantics, no prefix = post-inversion).
 - **Sync log.** After pull, writes `.mind-meld-log.md` per project so Claude Code knows what changed from other machines.
