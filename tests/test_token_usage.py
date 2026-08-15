@@ -1696,6 +1696,20 @@ class TestIncrementalResume:
         assert by_day["2026-05-01"]["input"] == 300
         assert by_day == tu.walk_jsonl_buckets(path)[0]
 
+    def test_oversize_notice_default_label_is_the_token_walker(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """`iter_bounded_lines` grew a `label` kwarg in v0.12.16 so
+        events.py's cwd and cursor readers could name themselves in the
+        oversize notice. Those two pass an explicit label and are pinned;
+        the DEFAULT was not, so a regression to a wrong or empty default
+        was invisible."""
+        monkeypatch.setattr(tu, "MAX_JSONL_LINE_BYTES", 512)
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(b'{"junk":"' + (b"x" * 4000) + b'"}\n')
+        list(tu.walk_jsonl_buckets(path))
+        assert "token walker skipping oversize line" in capsys.readouterr().err
+
     def test_eof_inside_oversize_line_does_not_advance(self, tmp_path: Path, monkeypatch) -> None:
         """Claude Code mid-write of a huge line: `_drain_to_newline` hits
         EOF before any newline and returns None. The offset must not move."""

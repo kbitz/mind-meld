@@ -780,6 +780,30 @@ class TestLastPushTs:
             "bad byte rewound the cursor instead of skipping one line"
         )
 
+    def test_unterminated_final_line_preserves_the_cursor(self, tmp_path):
+        """Same one-shot contract as the cwd reader, and the blast radius
+        here is worse.
+
+        A torn peer write or a `merge_jsonl` result can leave the final
+        mm-push record without a trailing newline. With the shared reader's
+        default (`yield_final_partial=False`) that record is discarded,
+        `_last_mm_push_ts` returns None, and the cursor rewinds to
+        `now - INITIAL_CURSOR_LOOKBACK_DAYS` — re-walking 30 days of git
+        history on every subsequent push, forever. The cwd reader got a
+        regression pin for this after Codex caught it; the cursor reader
+        shipped with the same flag and no test, and flipping it to False
+        left all 1795 tests green.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        day = datetime.now(timezone.utc).date().isoformat()
+        (events_dir / f"dev-a-{day}.jsonl").write_bytes(
+            json.dumps({"type": "mm-push", "ts": "2026-08-14T12:00:00+00:00"}).encode()
+        )  # no trailing newline
+        assert events.last_push_ts(events_dir, "dev-a") == datetime(
+            2026, 8, 14, 12, 0, tzinfo=timezone.utc
+        ), "unterminated final record dropped; cursor silently rewound 30 days"
+
     def test_oversize_line_is_bounded(self, tmp_path, monkeypatch, capsys):
         """The cursor reader goes through `iter_bounded_lines` too.
 

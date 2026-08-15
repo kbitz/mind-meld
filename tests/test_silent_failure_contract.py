@@ -1118,6 +1118,115 @@ def test_autopush_no_claude_source_is_not_a_degradation(tmp_path, monkeypatch):
     )
 
 
+def test_autopush_breadcrumb_degraded_when_token_cache_is_locked(tmp_path, monkeypatch):
+    """Fourth degradation site: warn-mode flock contention.
+
+    `lock_and_get_files("warn")` yields None when another process holds the
+    token cache lock. `do_token_walk` stays True, so the cold-cache gate
+    cannot see it — but every project ships without tokens_by_day and
+    skills_by_day, and latest-snapshot-wins then replaces the prior complete
+    data with it. Identical user-visible outcome to the cold-cache case.
+
+    Shipped with zero coverage in the first review round: the ship coverage
+    audit deleted the whole block and all 1795 tests still passed.
+    """
+    from contextlib import contextmanager
+
+    from mind_meld import token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+
+    @contextmanager
+    def _contended(_mode):
+        yield None  # what warn-mode contention actually hands back
+
+    monkeypatch.setattr(cli_module.token_usage, "lock_and_get_files", _contended)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "degraded", payload
+    assert "locked" in payload.get("detail", "")
+
+
+def test_autopush_breadcrumb_joins_multiple_degradations(tmp_path, monkeypatch):
+    """`"; ".join(...)` must survive: two degradations co-occur regularly
+    (a cold cache and a blown budget on the same slow push), and reporting
+    only the first would hide the other. Replacing the join with `[0]` left
+    all 1795 tests green before this pin.
+
+    Also guards the separator contract: no individual degradation phrase may
+    contain `; `, or the joined detail becomes ambiguous to split.
+    """
+    iso, _claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module.events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "degraded", payload
+    detail = payload.get("detail", "")
+    assert "budget" in detail
+    assert "tokens and skills are missing" in detail
+    assert detail.count("; ") == 1, f"expected exactly one separator, got {detail!r}"
+
+
+def test_status_sanitizes_breadcrumb_detail(tmp_path, monkeypatch, capsys):
+    """`mm status` renders the breadcrumb `detail` into a Rich console.
+
+    The `failed` / `config-error` / `crypto-error` writers feed it raw
+    `str(e)`, and those exceptions can carry peer-derived text (device
+    names, source names, rel_paths from a peer manifest). Rich interprets
+    markup, so an unsanitized field lets a peer string paint the terminal
+    or smuggle escapes. v0.12.16 hardened `mm diag` first and missed this
+    site, which is the one the degradation signal is actually designed to
+    reach.
+    """
+    storage_dir = tmp_path / "storage"
+    config_path = tmp_path / "config.toml"
+    src = tmp_path / "claude"
+    _populate_claude(src)
+    save_config(
+        {
+            "device": {"id": "dev-s", "name": "S"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [{"name": "claude", "type": "claude", "path": str(src)}],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        config_path,
+    )
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-s", "S")
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    iso.mkdir(parents=True, exist_ok=True)
+    (iso / "last-autorun.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-15T00:00:00Z",
+                "verb": "push",
+                "outcome": "failed",
+                "detail": "boom \x1b[31mESCAPED\x1b[0m",
+            }
+        )
+    )
+
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    assert "Last auto-push" in r.output, "breadcrumb line did not render at all"
+    # The raw escape must NOT survive to the terminal. Assert on the actual
+    # rendered output, not on safe_str's return value -- asserting the helper
+    # works proves nothing about whether the render site calls it.
+    assert "\x1b[31m" not in r.output, "raw ANSI escape from the breadcrumb reached the terminal"
+    assert "ESCAPED" in r.output, "sanitizer ate the message text, not just the escape"
+
+
 def test_autopush_breadcrumb_degraded_when_events_tail_fails(tmp_path, monkeypatch):
     """v0.12.16: an events-tail failure must downgrade the autopush
     breadcrumb to 'degraded' instead of reporting 'success'.

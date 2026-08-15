@@ -4955,9 +4955,21 @@ def status(
             ts = crumb.get("timestamp", "?")
             verb = crumb.get("verb", "?")
             outcome = crumb.get("outcome", "?")
+            # safe_str the peer-reachable fields before they hit a Rich
+            # console, which interprets markup and passes escapes through.
+            # `detail` is fed raw `str(e)` by the `failed` / `config-error` /
+            # `crypto-error` breadcrumb writers, and those exceptions can
+            # carry peer-derived text (device names, source names, rel_paths
+            # from a peer manifest). This is the render site that MATTERS:
+            # `mm status` is the command the v0.12.16 degradation signal is
+            # designed to reach, and it runs far more often than `mm diag`.
             detail = crumb.get("detail")
-            outcome_str = f"{outcome}: {detail}" if detail else outcome
-            console.print(f"  Last auto-{verb}: {ts} ({outcome_str})")
+            outcome_str = (
+                f"{safe_str(str(outcome))}: {safe_str(str(detail))}"
+                if detail
+                else safe_str(str(outcome))
+            )
+            console.print(f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})")
         except (OSError, ValueError):
             pass  # corrupt breadcrumb is not worth surfacing an error for
     if fetch.status == "missing":
