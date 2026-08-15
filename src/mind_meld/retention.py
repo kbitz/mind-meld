@@ -19,15 +19,16 @@ interpolates it into its ``--conflicts`` help string, which typer evaluates at
 DECORATOR time. That is why a deferred/function-local import would not have
 worked as a cycle workaround.
 
-Track 17B owns the honesty fixes for these reapers (the ``--dry-run`` count that
-always reports 0, ``_gc_token_cache`` ignoring ``--dry-run``); do NOT fix them
-here — this Track is movement.
+Track 17D keeps these reapers plan-first: dry-run selects the same candidates
+as apply without writing a cache or unlinking a path, then reports a stable
+summary for each reaper that actually runs.
 """
 
 from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -47,27 +48,87 @@ EVENTS_RETENTION_DAYS = 90
 _EVENTS_FILENAME_DATE_RE = re.compile(r"^(?P<device>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$")
 
 
-def _gc_token_cache(dry_run: bool, verbose: bool) -> None:
+@dataclass(frozen=True)
+class ReapOutcome:
+    """Result of one retention reaper, with selected work separate from I/O."""
+
+    candidates: int = 0
+    deleted: int = 0
+    failed: int = 0
+    skipped: int = 0
+    repairs: int = 0
+    repair_failed: int = 0
+
+    @property
+    def needs_remediation(self) -> bool:
+        return bool(self.failed or self.skipped or self.repair_failed)
+
+
+def _render_reap_outcome(label: str, outcome: ReapOutcome, *, dry_run: bool) -> None:
+    """Print the one stable non-verbose result line for a reaper."""
+    if dry_run:
+        console.print(
+            f"[bold]{label}[/bold] dry-run: candidates={outcome.candidates} "
+            f"repairs={outcome.repairs} skipped={outcome.skipped}"
+        )
+        return
+
+    console.print(
+        f"[bold]{label}[/bold]: candidates={outcome.candidates} "
+        f"deleted={outcome.deleted} failed={outcome.failed} "
+        f"skipped={outcome.skipped} repairs={outcome.repairs} "
+        f"repair-failed={outcome.repair_failed}"
+    )
+    if outcome.needs_remediation:
+        console.print(
+            "[yellow]Retention cleanup was incomplete. Fix permissions or locks, "
+            "then rerun `mm gc`; use `-v` for paths and details.[/yellow]"
+        )
+
+
+def _gc_token_cache(dry_run: bool, verbose: bool) -> ReapOutcome:
     """Reap session-tokens.json entries with no living jsonl AND entries
     whose most recent by_day key is older than 90 days. Best-effort —
     cache reconstruction on the next push backstops a GC failure."""
-    if dry_run:
-        # Dry-run: count without mutating. Re-implement the predicate
-        # cheaply via is_cache_cold + a peek.
-        if not token_usage.CACHE_PATH.exists():
-            if verbose:
-                console.print("[dim]No token cache to gc.[/dim]")
-            return
-        if verbose:
-            console.print("[dim]Token cache reaper: dry-run; skipping.[/dim]")
-        return
     try:
-        n = token_usage.gc_cache_entries()
+        if dry_run:
+            plan = token_usage.plan_cache_entries()
+            outcome = ReapOutcome(
+                candidates=len(plan.stale_keys),
+                repairs=plan.repairs,
+                skipped=int(plan.skipped_reason is not None),
+            )
+            if verbose:
+                for cache_key in plan.stale_keys:
+                    console.print(
+                        f"  [dim]would reap token cache entry:[/dim] {safe_str(cache_key)}"
+                    )
+            if verbose and plan.skipped_reason is not None:
+                console.print(
+                    f"  [yellow]token cache skipped: {safe_str(plan.skipped_reason)}[/yellow]"
+                )
+        else:
+            result = token_usage.reap_cache_entries()
+            outcome = ReapOutcome(
+                candidates=result.candidates,
+                deleted=result.deleted,
+                failed=result.failed,
+                skipped=int(result.plan.skipped_reason is not None),
+                repairs=result.repairs_applied,
+                repair_failed=result.repairs_failed,
+            )
+            if verbose and result.write_error is None:
+                for cache_key in result.plan.stale_keys:
+                    console.print(f"  [dim]reaped token cache entry:[/dim] {safe_str(cache_key)}")
+            elif verbose and result.write_error is not None:
+                console.print(
+                    f"  [yellow]token cache write failed: {safe_str(result.write_error)}[/yellow]"
+                )
     except Exception as e:
         sys.stderr.write(f"mm: notice: token cache gc failed: {type(e).__name__}: {safe_str(e)}\n")
-        return
-    if verbose and n:
-        console.print(f"[dim]Reaped {n} stale token cache entr{'y' if n == 1 else 'ies'}.[/dim]")
+        outcome = ReapOutcome(skipped=1)
+    _render_reap_outcome("Token cache", outcome, dry_run=dry_run)
+    return outcome
 
 
 def _sweep_local_tmp_files(
@@ -75,7 +136,9 @@ def _sweep_local_tmp_files(
     my_device_id: str,
     dry_run: bool,
     verbose: bool,
-) -> int:
+    *,
+    emit_summary: bool = True,
+) -> ReapOutcome:
     """Reap stale tmp*.tmp left by crashed atomic_write_bytes calls.
 
     Scoped strictly to THIS device's subtrees:
@@ -93,44 +156,60 @@ def _sweep_local_tmp_files(
     stranded tmp from a peer's in-flight write. The rare leak there is
     accepted; see Track 3A GC sweep for global orphan reaping.
 
-    Returns the count swept (or would-be-swept if dry_run).
+    Returns selection and persistence counts. Dry-run makes no filesystem
+    changes, including to the candidate files' metadata.
     """
-    count = 0
+    skipped = 0
     scoped_dirs = [
         backend.root / "data" / my_device_id,
         backend.root / "manifests" / my_device_id,
     ]
     victims: list[Path] = []
     for base in scoped_dirs:
-        if not base.exists():
+        if not base.is_dir():
             continue
-        for p in base.rglob("tmp*.tmp"):
-            if p.is_file():
-                victims.append(p)
+        try:
+            for p in base.rglob("tmp*.tmp"):
+                if p.is_file():
+                    victims.append(p)
+        except OSError as e:
+            skipped += 1
+            if verbose:
+                console.print(
+                    f"  [yellow]tmp scan skipped: {safe_str(base)} — {safe_str(e)}[/yellow]"
+                )
 
     # devices/ deliberately excluded — see docstring.
 
+    deleted = 0
+    failed = 0
     for v in victims:
         if dry_run:
             if verbose:
-                console.print(f"  [dim]would sweep: {v}[/dim]")
+                console.print(f"  [dim]would sweep:[/dim] {safe_str(v)}")
         else:
             try:
                 v.unlink()
             except OSError as e:
+                failed += 1
                 if verbose:
-                    console.print(f"  [yellow]sweep failed: {v} — {e}[/yellow]")
+                    console.print(f"  [yellow]sweep failed:[/yellow] {safe_str(v)} — {safe_str(e)}")
                 continue
-        count += 1
+            deleted += 1
 
-    if count > 0 and not dry_run:
-        console.print(f"  [dim]swept {count} stale tmp files[/dim]")
-    elif count > 0 and dry_run:
-        console.print(f"  [dim]would sweep {count} stale tmp files[/dim]")
-    return count
+    outcome = ReapOutcome(candidates=len(victims), deleted=deleted, failed=failed, skipped=skipped)
+    if emit_summary:
+        _render_reap_outcome("Temporary files", outcome, dry_run=dry_run)
+    return outcome
 
 
-def _gc_old_event_files(config: dict, dry_run: bool, verbose: bool) -> int:
+def _gc_old_event_files(
+    config: dict,
+    dry_run: bool,
+    verbose: bool,
+    *,
+    now: datetime | None = None,
+) -> ReapOutcome:
     """Reap mm-events JSONL files older than ``EVENTS_RETENTION_DAYS``.
 
     Track 7B fleet retention. The retro skill reads events by walking the
@@ -145,81 +224,129 @@ def _gc_old_event_files(config: dict, dry_run: bool, verbose: bool) -> int:
     date is intrinsic to the event-day boundary.
 
     Path resolution: from ``get_sources(config)`` so user-customized
-    mm-events paths are honored. Returns 0 when no mm-events source is
-    enabled / resolved.
+    mm-events paths are honored. A missing source is a successful zero-count
+    reaper; it still produces the standard result line.
     """
     sources = get_sources(config)
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
-        return 0
+        outcome = ReapOutcome()
+        _render_reap_outcome("Events", outcome, dry_run=dry_run)
+        return outcome
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
     if not events_dir.is_dir():
-        return 0
+        outcome = ReapOutcome()
+        _render_reap_outcome("Events", outcome, dry_run=dry_run)
+        return outcome
 
-    today = datetime.now(timezone.utc).date()
-    reaped = 0
-    for path in events_dir.rglob("*-*.jsonl"):
-        m = _EVENTS_FILENAME_DATE_RE.match(path.name)
-        if m is None:
-            # Non-conforming filename in the events tree — leave alone.
-            continue
-        try:
-            file_date = datetime.strptime(m.group("date"), "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        age_days = (today - file_date).days
-        if age_days < EVENTS_RETENTION_DAYS:
-            continue
-        if verbose or dry_run:
-            prefix = "would delete" if dry_run else "deleted"
-            console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {safe_str(path)}")
-        if not dry_run:
+    today = (now or datetime.now(timezone.utc)).date()
+    candidates = 0
+    deleted = 0
+    failed = 0
+    skipped = 0
+    try:
+        event_paths = events_dir.rglob("*-*.jsonl")
+        for path in event_paths:
+            m = _EVENTS_FILENAME_DATE_RE.match(path.name)
+            if m is None:
+                # Non-conforming filename in the events tree — leave alone.
+                continue
+            try:
+                file_date = datetime.strptime(m.group("date"), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            age_days = (today - file_date).days
+            if age_days < EVENTS_RETENTION_DAYS:
+                continue
+            candidates += 1
+            if dry_run:
+                if verbose:
+                    console.print(f"  [dim]would delete (age {age_days}d):[/dim] {safe_str(path)}")
+                continue
             try:
                 path.unlink()
-                reaped += 1
-            except OSError:
-                pass
-        else:
-            reaped += 1
-    label = "would reap" if dry_run else "reaped"
-    console.print(
-        f"[bold]{label}[/bold] {reaped} stale events files "
-        f"(older than {EVENTS_RETENTION_DAYS} days)"
-    )
-    return reaped
+            except OSError as e:
+                failed += 1
+                if verbose:
+                    console.print(
+                        f"  [yellow]delete failed:[/yellow] {safe_str(path)} — {safe_str(e)}"
+                    )
+                continue
+            deleted += 1
+            if verbose:
+                console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(path)}")
+    except OSError as e:
+        skipped += 1
+        if verbose:
+            console.print(
+                f"  [yellow]events scan skipped: {safe_str(events_dir)} — {safe_str(e)}[/yellow]"
+            )
+
+    outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
+    _render_reap_outcome("Events", outcome, dry_run=dry_run)
+    return outcome
 
 
-def _gc_old_conflict_files(config: dict, dry_run: bool, verbose: bool) -> int:
-    """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS. Returns count."""
-    hits = resolveflow._find_conflict_files(config)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=CONFLICT_AGE_DAYS)
-    reaped = 0
-    for src_name, cpath, _canonical in hits:
+def _gc_old_conflict_files(
+    config: dict,
+    dry_run: bool,
+    verbose: bool,
+    *,
+    now: datetime | None = None,
+) -> ReapOutcome:
+    """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS."""
+    try:
+        hits = resolveflow._find_conflict_files(config)
+    except OSError as e:
+        outcome = ReapOutcome(skipped=1)
+        if verbose:
+            console.print(f"  [yellow]conflict scan skipped: {safe_str(e)}[/yellow]")
+        _render_reap_outcome("Conflicts", outcome, dry_run=dry_run)
+        return outcome
+    current_time = now or datetime.now(timezone.utc)
+    cutoff = current_time - timedelta(days=CONFLICT_AGE_DAYS)
+    candidates = 0
+    deleted = 0
+    failed = 0
+    skipped = 0
+    for _src_name, cpath, _canonical in hits:
         try:
             mtime = datetime.fromtimestamp(cpath.stat().st_mtime, tz=timezone.utc)
-        except OSError:
+        except OSError as e:
+            skipped += 1
+            if verbose:
+                console.print(
+                    f"  [yellow]conflict stat skipped:[/yellow] {safe_str(cpath)} — {safe_str(e)}"
+                )
             continue
         if mtime < cutoff:
-            if verbose or dry_run:
-                age_days = (datetime.now(timezone.utc) - mtime).days
-                prefix = "would delete" if dry_run else "deleted"
-                console.print(f"  [dim]{prefix} (age {age_days}d):[/dim] {safe_str(cpath)}")
-            if not dry_run:
-                try:
-                    cpath.unlink()
-                    reaped += 1
-                except OSError:
-                    pass
-    label = "would reap" if dry_run else "reaped"
-    console.print(
-        f"[bold]{label}[/bold] {reaped} stale conflict files (older than {CONFLICT_AGE_DAYS} days)"
-    )
-    return reaped
+            candidates += 1
+            age_days = (current_time - mtime).days
+            if dry_run:
+                if verbose:
+                    console.print(f"  [dim]would delete (age {age_days}d):[/dim] {safe_str(cpath)}")
+                continue
+            try:
+                cpath.unlink()
+            except OSError as e:
+                failed += 1
+                if verbose:
+                    console.print(
+                        f"  [yellow]delete failed:[/yellow] {safe_str(cpath)} — {safe_str(e)}"
+                    )
+                continue
+            deleted += 1
+            if verbose:
+                console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(cpath)}")
+    outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
+    _render_reap_outcome("Conflicts", outcome, dry_run=dry_run)
+    return outcome
 
 
 __all__ = [
     "CONFLICT_AGE_DAYS",
     "EVENTS_RETENTION_DAYS",
+    "ReapOutcome",
     "_gc_old_conflict_files",
     "_gc_old_event_files",
     "_gc_token_cache",

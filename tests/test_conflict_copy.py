@@ -579,7 +579,7 @@ class TestGcOldConflictFiles:
         }
 
         reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False)
-        assert reaped == 1
+        assert reaped.deleted == 1
         assert not old_conflict.exists(), "old conflict should be reaped"
         assert new_conflict.exists(), "fresh conflict should survive"
 
@@ -590,8 +590,10 @@ class TestGcOldConflictFiles:
         (src / "memory").mkdir(parents=True)
         old = src / "memory" / "a.sync-conflict-20000101-000000-devA1234.md"
         old.write_bytes(b"old")
+        old.chmod(0o640)
         ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
         os.utime(old, (ancient, ancient))
+        before = old.stat()
 
         config = {
             "sync": {
@@ -608,6 +610,45 @@ class TestGcOldConflictFiles:
         }
         _gc_old_conflict_files(config, dry_run=True, verbose=False)
         assert old.exists(), "dry-run must not delete"
+        assert old.read_bytes() == b"old"
+        after = old.stat()
+        assert after.st_mode & 0o777 == before.st_mode & 0o777
+        assert after.st_mtime_ns == before.st_mtime_ns
+
+    def test_unlink_failure_is_counted(self, tmp_path: Path, monkeypatch) -> None:
+        src = tmp_path / "src"
+        conflict = src / "memory" / "a.sync-conflict-20000101-000000-devA1234.md"
+        conflict.parent.mkdir(parents=True)
+        conflict.write_bytes(b"old")
+        ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(conflict, (ancient, ancient))
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
+        }
+
+        def fail_unlink(self: Path, missing_ok: bool = False) -> None:
+            if self == conflict:
+                raise OSError("read-only filesystem")
+            raise AssertionError(f"unexpected unlink: {self}")
+
+        monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+        outcome = _gc_old_conflict_files(config, dry_run=False, verbose=False)
+
+        assert outcome.candidates == 1
+        assert outcome.deleted == 0
+        assert outcome.failed == 1
+        assert conflict.exists()
 
 
 class TestCanonicalForConflictEdgeCases:
@@ -783,7 +824,7 @@ class TestFindConflictFilesIncludeFiles:
         reaped = _gc_old_conflict_files(
             self._config(src, ["config.yaml"]), dry_run=False, verbose=False
         )
-        assert reaped == 1
+        assert reaped.deleted == 1
         assert not old.exists()
 
 
@@ -877,7 +918,7 @@ class TestFindConflictFilesNestedDedup:
         os.utime(old, (ancient, ancient))
 
         reaped = _gc_old_conflict_files(self._nested_config(src), dry_run=False, verbose=False)
-        assert reaped == 1
+        assert reaped.deleted == 1
         assert not old.exists()
 
     def test_case_mismatched_config_dedups_on_apfs(self, tmp_path: Path) -> None:

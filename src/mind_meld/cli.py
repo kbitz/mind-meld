@@ -2719,7 +2719,14 @@ def push(
         # message. Silent-swallow would hide the safety refusal.
         if result and (result.total_new or result.total_modified or result.total_deleted):
             try:
-                gc_count = _do_gc(config, passphrase, memory_kb, dry_run=False, verbose=False)
+                gc_count = _do_gc(
+                    config,
+                    passphrase,
+                    memory_kb,
+                    dry_run=False,
+                    verbose=False,
+                    emit_retention_summary=False,
+                )
                 if gc_count:
                     console.print(f"  GC: deleted {gc_count} orphaned blobs.")
             except typer.Exit:
@@ -4859,7 +4866,11 @@ def diff_cmd(
 
 @app.command()
 def gc(
-    dry_run: bool = typer.Option(False, "--dry-run", help="List orphans without deleting"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview orphan blobs and retention cleanup without deleting",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     prune_conflicts: bool = typer.Option(
         False,
@@ -4867,7 +4878,11 @@ def gc(
         help=f"Also delete .sync-conflict-* files older than {CONFLICT_AGE_DAYS} days",
     ),
 ) -> None:
-    """Garbage collect orphaned blobs. Optionally reap stale conflict files."""
+    """Garbage collect orphaned blobs and local retention data.
+
+    ``--dry-run`` reports blob and retention candidates without changing files.
+    ``--conflicts`` opt-in reaps stale conflict sidecars as well.
+    """
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
 
@@ -4902,6 +4917,8 @@ def _do_gc(
     memory_kb: int,
     dry_run: bool,
     verbose: bool,
+    *,
+    emit_retention_summary: bool = True,
 ) -> int:
     """Run garbage collection. Returns number of orphaned blobs found/deleted."""
     backend = get_backend(config)
@@ -4910,7 +4927,13 @@ def _do_gc(
     # Sweep this device's stale tmp*.tmp files before ref-counting.
     # Runs UNDER the caller's lock (acquire_lock already held by gc()),
     # so no concurrent writer can race with the sweep.
-    retention._sweep_local_tmp_files(backend, my_device_id, dry_run, verbose)
+    retention._sweep_local_tmp_files(
+        backend,
+        my_device_id,
+        dry_run,
+        verbose,
+        emit_summary=emit_retention_summary,
+    )
 
     # Collect all referenced hashes from ALL device manifests
     devices = _list_devices_warn(backend)
