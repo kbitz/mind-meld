@@ -325,11 +325,141 @@ def test_installer_skips_the_write_when_the_guard_trips(monkeypatch, tmp_path: P
     assert not target.exists()
 
 
+def test_real_home_guard_is_inert_outside_pytest(monkeypatch) -> None:
+    """With PYTEST_CURRENT_TEST unset the guard must be a total no-op.
+
+    This is the branch every REAL `mm push` takes. `_ensure_retro_skill_link_at`
+    consults the guard before doing anything, so a predicate that answered True
+    outside pytest would silently stop the skill installer for the whole fleet
+    AND print "refusing to touch ... from a test" on every push. Nothing
+    exercised it: the suite only ever runs WITH the variable set, so the
+    early-return was covered by exactly zero tests.
+    """
+    from mind_meld import skill_link
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    for real in (
+        Path("~/.claude/skills/retro-fleet").expanduser(),
+        Path("~/.codex/skills/retro-fleet").expanduser(),
+        Path("~/.config/opencode/skills/retro-fleet").expanduser(),
+        Path("~/.config/mind-meld").expanduser(),
+    ):
+        assert skill_link._is_real_agent_dir_under_pytest(real) is False, real
+
+
+def test_real_home_guard_normalizes_without_following_symlinks(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """`abspath`, NOT `resolve` — the distinction the docstring calls load-bearing.
+
+    In the steady state `~/.claude/skills/retro-fleet` IS a symlink into the
+    pipx venv, so `resolve()` follows it clean out of $HOME and the guard
+    returns False for the exact case it exists to catch. `test_real_home_guard_
+    fires` cannot see this: on CI (and any machine without the link installed)
+    the path does not exist, so `resolve()` and `abspath()` agree and the
+    assertion passes either way. Rehome the guard onto tmp_path so the symlink
+    can actually be built.
+    """
+    from mind_meld import skill_link
+
+    home = (tmp_path / "home").resolve()
+    (home / ".claude" / "skills").mkdir(parents=True)
+    elsewhere = tmp_path / "pipx-venv" / "retro_fleet"
+    elsewhere.mkdir(parents=True)
+    link = home / ".claude" / "skills" / "retro-fleet"
+    link.symlink_to(elsewhere)
+    monkeypatch.setattr(skill_link, "_REAL_HOME", home)
+
+    assert skill_link._is_real_agent_dir_under_pytest(link), (
+        "guard followed the symlink out of $HOME — it must use abspath, not resolve"
+    )
+    # `..` still gets normalized away; abspath is not "do nothing".
+    assert skill_link._is_real_agent_dir_under_pytest(
+        home / ".claude" / "skills" / ".." / "skills" / "retro-fleet"
+    )
+    # And it still refuses to over-match a sibling of the known roots.
+    assert not skill_link._is_real_agent_dir_under_pytest(home / ".claude-backup" / "skills")
+
+    skill_link._refuse_real_home_under_pytest(link)
+    assert "refusing to touch" in capsys.readouterr().err
+
+
+def test_real_home_guard_is_silent_on_an_isolated_path(tmp_path: Path, capsys) -> None:
+    """The non-matching branch must print NOTHING.
+
+    `_refuse_real_home_under_pytest` runs on every `_touch_marker` and every
+    `_ensure_retro_skill_link_at` call, which is most of the suite. An inverted
+    predicate would bury 2,000 tests' captured stderr in false notices — and
+    `test_real_home_guard_warns_instead_of_raising` only asserts the positive
+    direction, so it would stay green.
+    """
+    from mind_meld import skill_link
+
+    skill_link._refuse_real_home_under_pytest(tmp_path / "agents" / "claude" / "skills")
+    assert capsys.readouterr().err == ""
+
+
+def test_touch_marker_refuses_the_real_config_dir(monkeypatch, capsys) -> None:
+    """`_touch_marker` guards the WRITE LOCATION, not just its usual caller.
+
+    The marker dir is `~/.config/mind-meld`, which conftest redirects — but a
+    test that opts out of that fixture (this file's sibling `test_skill_link.py`
+    does, deliberately), or any future path reaching `_touch_marker` without
+    going through `_ensure_retro_skill_link_at`, would otherwise touch the
+    developer's real config dir with the guard silent.
+    """
+    import uuid
+
+    from mind_meld import skill_link
+
+    real = Path("~/.config/mind-meld").expanduser()
+    # Unique per run: a name a previous (or mutation-testing) run could have
+    # left behind would poison the assertion forever, and the cleanup itself
+    # would have to write the very directory this test refuses to touch.
+    probe = f"mm-boundaries-probe-{uuid.uuid4().hex}"
+    monkeypatch.setattr(skill_link, "_marker_dir", lambda: real)
+    skill_link._touch_marker(probe)
+    assert "refusing to touch" in capsys.readouterr().err
+    assert not (real / f".{probe}").exists()
+
+
 def test_skill_roots_are_redirected_for_this_test() -> None:
     """conftest's autouse fixture is actually in effect (not silently skipped)."""
     from mind_meld import skill_link
 
     assert all(not r.startswith("~") for r in skill_link.SKILL_ROOTS), skill_link.SKILL_ROOTS
+
+
+def test_skill_marker_dir_is_redirected_for_this_test() -> None:
+    """The other half of `_isolate_skill_links`, which nothing pinned.
+
+    `SKILL_ROOTS` moves where the SYMLINKS go; `_marker_dir` moves where the
+    six TTL marker dotfiles go. Only the first had a non-vacuity check, so the
+    fixture could half-break — leaving every test that runs the installer
+    stamping `.skill-link-checked` into the developer's real
+    `~/.config/mind-meld` — and the suite would stay green.
+    """
+    from mind_meld import skill_link
+
+    assert skill_link._marker_dir() != Path("~/.config/mind-meld").expanduser()
+
+
+def test_sidecar_and_lock_are_redirected_for_this_test(tmp_path: Path) -> None:
+    """conftest's `_isolate_sidecar_and_lock` is in effect (not silently skipped).
+
+    47 tests were writing the developer's real
+    `~/.config/mind-meld/last-push.json` before Track 16A made this autouse, and
+    the suite was rewriting `last-autorun.json` to "now" — forging the exact
+    signal `mm status`'s staleness gate exists to produce. The fixture is the
+    fix; this is the check that the fixture still works, mirroring
+    `test_skill_roots_are_redirected_for_this_test` one section up.
+    """
+    from mind_meld import config, lockfile, sidecar
+
+    real = Path("~/.config/mind-meld").expanduser()
+    assert sidecar.SIDECAR_DIR != real
+    assert config.LOCK_PATH != real / "mind-meld.lock"
+    assert lockfile.LOCK_PATH == config.LOCK_PATH, "the two lock aliases drifted apart"
 
 
 # ---------------------------------------------------------------------------

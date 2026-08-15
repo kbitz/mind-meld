@@ -1445,3 +1445,48 @@ class TestBreadcrumbStaleness:
         from mind_meld.cli import _breadcrumb_staleness_suffix
 
         assert _breadcrumb_staleness_suffix(bad) == ""
+
+    def test_clock_skew_from_the_future_is_not_stale(self) -> None:
+        """A breadcrumb written by a peer with a fast clock yields a NEGATIVE
+        age. It must read as fresh, not render `stale — no autorun in -3h`."""
+        from mind_meld.cli import _breadcrumb_staleness_suffix
+
+        assert _breadcrumb_staleness_suffix(self._iso(-3)) == ""
+
+    def _plant(self, tmp_path, monkeypatch, hours_ago: float):
+        _setup_real_config(tmp_path, monkeypatch)
+        iso = _redirect_sidecar(monkeypatch, tmp_path)
+        (iso / "last-autorun.json").write_text(
+            json.dumps(
+                {
+                    "timestamp": self._iso(hours_ago),
+                    "verb": "push",
+                    "outcome": "success",
+                }
+            )
+        )
+        return iso
+
+    def test_status_renders_the_marker_for_a_stale_breadcrumb(self, tmp_path, monkeypatch) -> None:
+        """The six unit tests above all call the helper DIRECTLY.
+
+        Dropping the `f"{_breadcrumb_staleness_suffix(ts)}"` interpolation from
+        `status`'s console.print leaves every one of them green while the
+        feature — a wedged autopush that `mm status` should flag — ships dead.
+        This is the only assertion that the marker reaches a user.
+        """
+        self._plant(tmp_path, monkeypatch, 100)
+        r = runner.invoke(app, ["status"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        assert "Last auto-push" in r.output, "breadcrumb line did not render at all"
+        assert "stale" in r.output
+        assert "success" in r.output, "the staleness marker replaced the outcome"
+
+    def test_status_omits_the_marker_for_a_fresh_breadcrumb(self, tmp_path, monkeypatch) -> None:
+        """Complement: the marker must not fire on a healthy device, or it is
+        noise on every `mm status` the fleet runs."""
+        self._plant(tmp_path, monkeypatch, 2)
+        r = runner.invoke(app, ["status"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        assert "Last auto-push" in r.output
+        assert "stale" not in r.output

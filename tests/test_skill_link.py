@@ -433,6 +433,131 @@ class TestDryRun:
 
 
 # ---------------------------------------------------------------------------
+# Track 16A NEW: `skill_targets()` — the single source of truth the six
+# installer wrappers and `install_skills_cmd` must agree on.
+# ---------------------------------------------------------------------------
+
+
+class TestSkillTargets:
+    """`install_skills_cmd` used to rebuild this tuple from its own hardcoded
+    literals 3,000 lines from the installer, so the two could drift silently.
+    After the Track 16A cut they live in different FILES under different Group
+    17 owners, which makes the drift cheaper to introduce and harder to see.
+    Nothing pinned the agreement, so pin it here."""
+
+    def test_skill_targets_are_exactly_the_installer_targets(
+        self, target, codex_target, opencode_target
+    ):
+        """Claude / Codex / OpenCode order, matching this file's fixtures."""
+        assert skill_link.skill_targets() == (target, codex_target, opencode_target)
+
+    def test_each_wrapper_installs_at_its_skill_targets_entry(
+        self, target, codex_target, opencode_target, skill_src
+    ):
+        """The stronger form: drive the real installers and confirm the links
+        land exactly where ``skill_targets()`` says they will.
+
+        Comparing tuples alone would still pass if BOTH sides drifted together
+        (e.g. someone renames ``SKILL_ROOTS[1]`` to ``~/.codex2/skills``);
+        asserting on the on-disk result is what makes that visible.
+        """
+        skill_link._ensure_retro_skill_links()
+        assert [t for t in skill_link.skill_targets() if t.is_symlink()] == [
+            target,
+            codex_target,
+            opencode_target,
+        ]
+
+    def test_skill_targets_are_re_resolved_per_call(self, _isolate_paths, monkeypatch, tmp_path):
+        """``expanduser()`` must read ``$HOME`` at CALL time, not import time.
+
+        A "simplification" to a module-level constant (the shape
+        ``config.CONFIG_DIR`` already has, and the exact hazard the module
+        docstring warns about) would freeze these at the developer's real home
+        and silently defeat every isolation fixture in the suite.
+        """
+        before = skill_link.skill_targets()
+        moved = tmp_path / "moved-home"
+        moved.mkdir()
+        monkeypatch.setenv("HOME", str(moved))
+        after = skill_link.skill_targets()
+        assert after != before
+        assert all(str(t).startswith(str(moved)) for t in after), after
+
+
+# ---------------------------------------------------------------------------
+# Track 16A NEW: `classify_targets()` — extracted out of `install_skills_cmd`
+# so Track 17A can add the missing third bucket without touching the shell.
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyTargets:
+    """Four of the five branches were only ever reached transitively through
+    `mm install-skills`, and the absent-target branch — the one Track 17A is
+    chartered to change — was asserted nowhere at all. It is a pure function;
+    test it as one."""
+
+    def test_correct_symlink_is_installed(self, target, skill_src):
+        target.symlink_to(skill_src)
+        installed, conflicts = skill_link.classify_targets((target,), skill_src)
+        assert (installed, conflicts) == ([target], [])
+
+    def test_symlink_to_elsewhere_is_a_conflict(self, target, skill_src, _isolate_paths):
+        theirs = _isolate_paths / "their-skill"
+        theirs.mkdir()
+        target.symlink_to(theirs)
+        installed, conflicts = skill_link.classify_targets((target,), skill_src)
+        assert (installed, conflicts) == ([], [target])
+
+    def test_real_file_is_a_conflict(self, target, skill_src):
+        target.write_text("user's own retro-fleet skill")
+        installed, conflicts = skill_link.classify_targets((target,), skill_src)
+        assert (installed, conflicts) == ([], [target])
+
+    def test_dangling_symlink_is_a_conflict(self, target, skill_src, _isolate_paths):
+        """`exists()` is False on a dangling link, so the installed branch is
+        skipped; the `or target.is_symlink()` tail is the only thing that keeps
+        it out of the silently-ignored bucket. Reachable in the wild whenever
+        the preceding self-heal's `symlink_to` failed (read-only ~/.claude)."""
+        gone = _isolate_paths / "old-venv" / "retro_fleet"
+        gone.mkdir(parents=True)
+        target.symlink_to(gone)
+        import shutil
+
+        shutil.rmtree(gone.parent)
+        assert target.is_symlink() and not target.exists()
+        installed, conflicts = skill_link.classify_targets((target,), skill_src)
+        assert (installed, conflicts) == ([], [target])
+
+    def test_absent_target_is_in_neither_bucket(self, target, skill_src):
+        """The documented missing third bucket. `mm install-skills` reports
+        "Installed" / "conflict" off these two lists, so a target that simply
+        was not created is silently reported as neither — the gap Track 17A
+        owns. Pin the CURRENT behavior so 17A's change is a visible diff, not
+        an accident."""
+        assert not target.exists()
+        assert skill_link.classify_targets((target,), skill_src) == ([], [])
+
+    def test_resolve_failure_falls_through_to_conflict(self, target, skill_src, monkeypatch):
+        """`resolve()` can raise on a path with permission issues. The
+        `except OSError: pass` must fall through to conflict-skip, never
+        report the link as installed."""
+        import pathlib
+
+        target.symlink_to(skill_src)
+        original = pathlib.Path.resolve
+
+        def fake_resolve(self, *a, **kw):
+            if str(self) == str(target):
+                raise OSError("EACCES")
+            return original(self, *a, **kw)
+
+        monkeypatch.setattr(pathlib.Path, "resolve", fake_resolve)
+        installed, conflicts = skill_link.classify_targets((target,), skill_src)
+        assert (installed, conflicts) == ([], [target])
+
+
+# ---------------------------------------------------------------------------
 # `mm install-skills` user-facing command.
 # ---------------------------------------------------------------------------
 

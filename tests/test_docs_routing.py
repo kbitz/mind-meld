@@ -126,6 +126,105 @@ def test_routing_table_has_citations() -> None:
     assert len(_routing_citations()) > 30
 
 
+# ---------------------------------------------------------------------------
+# The parser itself. `_imports_cli` in test_module_boundaries.py got an
+# explicit non-vacuity table; `_chunk_citations` did not, and it is the more
+# fragile of the two — five distinct shapes, two of which resolve against a
+# DIFFERENT module than the row is keyed on.
+#
+# The `> 30` floors above are not a substitute: the table currently yields 97
+# routing and 92 invariant citations, so a regression that silently dropped
+# every dotted, wildcard and sibling-module form would still clear them by 2x
+# and the gate would read as coverage while verifying a third of what it says.
+# ---------------------------------------------------------------------------
+
+_CITATION_SHAPES = [
+    # Plain multi-symbol row: both resolve against the row's own file.
+    (
+        "cli.py",
+        "`_pull_core` / `_push_core` ",
+        [("cli.py", "_pull_core"), ("cli.py", "_push_core")],
+    ),
+    # Sibling module named explicitly — resolves against THAT module, not the row's.
+    ("events.py", "`token_usage.is_cache_cold` ", [("token_usage.py", "is_cache_cold")]),
+    # Dotted name whose head is NOT a module: a class attribute of the row's file.
+    (
+        "cli.py",
+        "`PushResult.events_degradations` ",
+        [("cli.py", "PushResult.events_degradations")],
+    ),
+    # Wildcard family — the trailing `*` must survive into the symbol.
+    (
+        "skill_link.py",
+        "`_ensure_retro_skill_link*` ",
+        [("skill_link.py", "_ensure_retro_skill_link*")],
+    ),
+    # Prose-only chunks are not citations, in either the parenthetical form...
+    ("conflictmtime.py", "(both prompt sites share these) ", []),
+    # ...or the trailing-words form.
+    ("cli.py", "the `autopush` breadcrumb outcome ", []),
+    # A chunk that is a bare filename is skipped, not mistaken for a symbol.
+    ("cli.py", "`pullhistory.py` ", []),
+]
+
+
+@pytest.mark.parametrize("fname,rest,expected", _CITATION_SHAPES)
+def test_citation_parser_is_not_vacuous(fname: str, rest: str, expected: list) -> None:
+    """Every shape the two routing tables actually use still parses."""
+    assert _chunk_citations(fname, rest) == expected
+
+
+# The one routing row whose symbol the parser cannot see: prose shares the
+# `/`-chunk with the symbol, so the whole chunk is discarded as a prose tail
+# and `cli.py:_download_and_apply` is verified by NOTHING. It happens to be
+# correct today. It would not be caught if the function moved -- which is the
+# single failure mode this file exists to prevent, and `_download_and_apply` is
+# a plausible candidate for a later extraction Track.
+#
+# Fix is one edit to CLAUDE.md: put the prose in its own `/`-chunk, i.e.
+# ``cli.py:_download_and_apply` / (rel_path + base_path concatenation site)`.
+# This list must shrink to [], never grow.
+# Empty as of v0.12.21: the one offending row was rewritten to
+# "`cli.py:_download_and_apply` / (rel_path + base_path concatenation site)",
+# which parses. Keep it at [] -- an entry here is a row nothing verifies.
+_ROWS_WITH_UNPARSEABLE_CITATIONS: list[str] = []
+
+
+def test_every_routing_row_resolves_at_least_one_symbol() -> None:
+    """A row that cites a `.py` file must yield a citation the gate can check.
+
+    Without this, a row written in the "symbol plus prose in one chunk" shape
+    is silently unverified: `test_routing_citation_resolves` is parametrized
+    over what the parser FOUND, so a row it found nothing in simply generates
+    no test case and the suite still goes green.
+    """
+    text = CLAUDE_MD.read_text(encoding="utf-8")
+    unparsed = []
+    for row in _ROW.finditer(text):
+        cell = row.group("cell")
+        marks = list(_CITATION.finditer(cell))
+        if not marks:
+            continue
+        got = []
+        for i, m in enumerate(marks):
+            end = marks[i + 1].start() if i + 1 < len(marks) else len(cell)
+            got.extend(_chunk_citations(m.group("file"), cell[m.end() : end]))
+        if not got:
+            unparsed.append(cell.strip())
+
+    unexpected = [
+        c for c in unparsed if not any(known in c for known in _ROWS_WITH_UNPARSEABLE_CITATIONS)
+    ]
+    assert unexpected == [], (
+        f"routing rows cite a .py file but resolve no symbol: {unexpected}. "
+        f"Put prose in its own `/`-chunk so the symbol stands alone."
+    )
+    assert len(unparsed) == len(_ROWS_WITH_UNPARSEABLE_CITATIONS), (
+        "a known-unparseable row was fixed — delete it from "
+        "_ROWS_WITH_UNPARSEABLE_CITATIONS so the list keeps shrinking"
+    )
+
+
 @pytest.mark.parametrize("fname,symbol", _routing_citations())
 def test_routing_citation_resolves(fname: str, symbol: str) -> None:
     """Every `<file>.py:<symbol>` in the table names a real definition."""

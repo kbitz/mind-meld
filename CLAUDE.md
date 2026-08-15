@@ -116,7 +116,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | If you're editing… | READ FIRST |
 |---|---|
 | `cli.py:_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests` | `docs/invariants/sync.md` |
-| `cli.py:_download_and_apply` rel_path / base_path concatenation site | `docs/invariants/sync.md` |
+| `cli.py:_download_and_apply` / (rel_path + base_path concatenation site) | `docs/invariants/sync.md` |
 | `manifest.py:walk_generic_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
