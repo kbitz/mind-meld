@@ -3,7 +3,7 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse`
-- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_canonical_for_conflict` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `count_divergent_lines`
 - `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge`

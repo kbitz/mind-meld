@@ -24,7 +24,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Removed
 
-- **CONFLICT-TELEMETRY.** `conflictlog.py`, the four resolve-site helpers, the 16 in-line sentinels, `merge.similarity_ratio`, and the hidden `mm conflict-log-backfill` command. It shipped 2026-07-30 to build a labeled dataset for the deferred Phase 2 auto-resolver and collected **zero** decisions in six weeks — the log file never existed on the fleet, so the >=25-decision trigger never tracked. Deleting it first rather than moving it six weeks before its own scheduled deletion cut ~250 lines off the riskiest extraction.
+- **CONFLICT-TELEMETRY.** `conflictlog.py`, the four resolve-site helpers, the 16 in-line sentinels, `merge.similarity_ratio`, and the hidden `mm conflict-log-backfill` command. It shipped 2026-07-30 to build a labeled dataset for the deferred Phase 2 auto-resolver and collected **zero** decisions in the sixteen days it ran — the log file never existed on the fleet, so the >=25-decision trigger never tracked. Deleting it first rather than moving it six weeks before its own scheduled deletion cut ~250 lines off the riskiest extraction.
 
 ### Internal
 

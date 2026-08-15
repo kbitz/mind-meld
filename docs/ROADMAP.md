@@ -18,7 +18,7 @@ Originating sources for the upcoming plan: `/full-review` 2026-08-14 (50 finding
 
 The remaining plan attacks the thing that has been forcing every recent plan into a single-file queue: `cli.py` is 8,673 lines, 52% of the package, and seven of the sweep's Tracks wanted to touch it. Extracting four cohesive modules out of it converts that serial chain into a genuinely parallel Group, and only after that does the docs re-anchor run — decomposition invalidates every path citation anyway, so re-anchoring first would be wasted work.
 
-#### Group 13: Hotfix: the events tail dies on one bad byte, and nothing says so
+#### Group 13: Hotfix: the events tail dies on one bad byte, and nothing says so — **SHIPPED (v0.12.16)**
 
 _Depends on: none. Nothing depends on Group 13 — see the sequencing note below._
 
@@ -35,7 +35,10 @@ Sequencing: the Execution Map has `Group 13 ← {}` and **no Group depends on 13
 
 Footprint note: the new `degraded`-breadcrumb task puts `cli.py` in Track 13A's footprint, which now overlaps Track 14A. That is a rebase, not a collision (the set-disjoint rule binds Tracks *within* a Group), and running Group 14 first makes it one rebase in the direction the dependency graph already wants. Group 16 then decomposes `cli.py`, so 13A must land before 16 or be re-anchored onto `events_tail.py`.
 
-##### Track 13A: Binary-mode session reads + persistent degradation signal
+##### Track 13A: Binary-mode session reads + persistent degradation signal — **SHIPPED**
+
+_Shipped 2026-08-15 as v0.12.16. All seven tasks landed: the cwd-scan hoist, binary-mode `_read_cwd_from_latest_jsonl` through the promoted bounded reader, the `is_cache_cold` / `_yield_lines` sweep, the double-collect fix, `PushResult.events_degradations` → `autopush`'s `degraded` breadcrumb, `SKILL.md`'s switch from `mm autopush` to `mm push`, and the regression pins. `conflictlog.read_records` was dropped from the sweep as planned; the module itself was deleted in v0.12.21._
+
 _7 tasks . ~200 LOC . medium risk . events.py hot path + autopush breadcrumb_
 _touches: src/mind_meld/events.py, src/mind_meld/token_usage.py, src/mind_meld/pullhistory.py, src/mind_meld/cli.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_events.py, tests/test_token_usage.py, tests/test_silent_failure_contract.py, docs/invariants/events-retro.md_
 
@@ -333,13 +336,13 @@ _touches: src/mind_meld/skills/retro_fleet/aggregator.py_
 
 _Depends on: Group 14_
 
-The unblocker. `cli.py` is 8,673 lines — 44% of the 19,697-line package, and just over half of it once the `skills/retro_fleet` subtree is set aside — and the audit's collision rule is file-granular, so every Track that touches it is forbidden from co-Grouping with every other Track that touches it. That single fact is what turned the previous regeneration into fourteen one-Track Groups. Four extractions convert the queue into Group 17's five-way parallel wave.
+The unblocker. `cli.py` is 8,673 lines — 44% of the 19,697-line package, and just over half of it once the `skills/retro_fleet` subtree is set aside — and the audit's collision rule is file-granular, so every Track that touches it is forbidden from co-Grouping with every other Track that touches it. That single fact is what turned the previous regeneration into fourteen one-Track Groups. The extractions convert the queue into Group 17's five-way parallel wave. (Planned as four; **shipped as six** — the two extra are the cycle break, see Track 16A below.)
 
 Sequenced after Group 14 because that hotfix edits the apply path; everything else waits for this Group so there is exactly one rebase, not four.
 
 ##### Track 16A: Extract six modules from cli.py — **SHIPPED**
 
-_Shipped 2026-08-15 as six commits. cli.py 8,840 -> 6,653 lines._
+_Shipped 2026-08-15 as six commits. cli.py 8,840 -> 6,692 lines._
 
 Landed as `consoles.py` + `conflictmtime.py` (Task 0 leaves), `skill_link.py`,
 `events_tail.py`, `resolveflow.py`, `retention.py` — six modules, not four. The
@@ -377,7 +380,7 @@ AST walk incl. function scope, console identity, mtime sharing, `-m` smoke) and
 CI grep gate. Byte-equality of moved text was dropped as the gate — it proves
 textual provenance and none of the failure modes above.
 
-**Stopping condition (adopted).** `cli.py` is 6,653 lines and still 39% of the
+**Stopping condition (adopted).** `cli.py` is 6,692 lines and still 39% of the
 package. Group 17's Track 17E is the last scheduled reduction. If a future
 regeneration proposes a Group 16-prime, the answer is a target
 (`cli.py` = `@app.command()` shells + `_main`, <= 2,000 lines) or nothing.
