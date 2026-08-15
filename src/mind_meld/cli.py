@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 import typer
-from rich.console import Console
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -57,6 +56,12 @@ from mind_meld.config import (
     patch_config_on_disk,
     save_config,
 )
+from mind_meld.conflictmtime import (
+    _bump_canonical_mtime_post_resolve,
+    _restore_mtime_best_effort,
+    _stat_mtime_btime,
+)
+from mind_meld.consoles import console, stderr_console
 from mind_meld.crypto import (
     FORMAT_VERSION,
     CryptoInitFetch,
@@ -273,14 +278,18 @@ app = typer.Typer(
     help="Mind Meld — sync Claude Code sessions and other sources across machines.",
     add_completion=False,
 )
-console = Console()
-# Dedicated stderr sink for _error and other failure-path output. Rich
-# formatting is preserved in interactive terminals; pipes (autopush/autopull
-# quiet mode, CI) get a clean stdout and one-line stderr per the contract
-# documented in README.md "Claude Code Integration." Using a single module-
-# level instance rather than constructing ad-hoc keeps color-capability
+# `console` / `stderr_console` now live in `mind_meld.consoles` (Track 16A) so
+# `resolveflow` and `retention` can render through the SAME objects without
+# importing `cli` — see that module's docstring for why sharing the instances is
+# load-bearing. Imported into this namespace so the ~280 existing bare
+# `console.print(...)` call sites stay unchanged.
+#
+# stderr_console is the dedicated stderr sink for _error and other failure-path
+# output. Rich formatting is preserved in interactive terminals; pipes
+# (autopush/autopull quiet mode, CI) get a clean stdout and one-line stderr per
+# the contract documented in README.md "Claude Code Integration." A single
+# module-level instance rather than ad-hoc construction keeps color-capability
 # detection and terminal-width behavior consistent across call sites.
-stderr_console = Console(stderr=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -1438,95 +1447,6 @@ def _prompt_conflict_choice(
 #
 #   Failures (sidecar write) are isolated per-file: local is untouched at
 #   canonical because we never overwrite it. Returns "failed" on error.
-
-
-_MTIME_RESTORE_MAX_SKEW_SECONDS = 60.0
-
-
-def _restore_mtime_best_effort(path: Path, mtime_iso: str | None) -> None:
-    """Stamp `path` with mtime/atime from a manifest ISO-8601 timestamp.
-
-    Best-effort: silently no-ops on None/empty input, an unparseable or
-    wrong-typed value, or any filesystem error. Mtime is metadata; the
-    load-bearing contract is that the file's bytes match the remote \u2014
-    `os.utime` failing on iCloud-restored placeholders or networked
-    filesystems must not abort the pull.
-
-    Future-clamp (load-bearing). Cap the applied mtime at
-    ``now + _MTIME_RESTORE_MAX_SKEW_SECONDS`` so a peer with a bad clock
-    (or a passphrase-holding attacker minting a manifest dated in 2099)
-    can't poison this device's local mtime into a permanent
-    `local_mtime > remote_mtime` skip at `_apply_incoming_file`'s mtime
-    gate. Without this clamp, one bad pull would silently lock the
-    victim out of all future legitimate updates to that path.
-
-    Why we restore at all: pre-fix, every pulled file landed with
-    `st_mtime = now-of-pull`, breaking any downstream consumer that uses
-    mtime to order content (e.g. gstack skill preambles' `ls -t` recency
-    scan over `~/.gstack/projects/*/checkpoints/`). The mtime mm captures
-    on push is the original source mtime; restoring it on pull preserves
-    cross-machine ordering even when locally-authored and remotely-pulled
-    files are interleaved on the same disk.
-    """
-    if not mtime_iso:
-        return
-    try:
-        ts = mtime_from_manifest(mtime_iso).timestamp()
-    except (TypeError, ValueError, OverflowError, OSError):
-        return
-    ts = min(ts, time.time() + _MTIME_RESTORE_MAX_SKEW_SECONDS)
-    try:
-        os.utime(path, (ts, ts))
-    except (OSError, OverflowError):
-        return
-
-
-def _stat_mtime_btime(path: Path) -> tuple[float | None, float | None]:
-    """Best-effort ``(mtime, birthtime)`` epoch floats for the conflict-prompt
-    timestamp display. Shared by both prompt sites.
-
-    Returns ``(None, None)`` on any stat failure (iCloud placeholder, race,
-    permission) so the renderer shows "unknown" rather than crashing the
-    prompt. ``st_birthtime`` is present on macOS/APFS; ``getattr`` guards
-    against filesystems that lack it (returns None there). The caller decides
-    what the birthtime MEANS per side -- genuine "created" for the local
-    file, "pulled" (local iCloud-drop time) for a restored remote sidecar.
-    """
-    try:
-        st = path.stat()
-    except OSError:
-        return None, None
-    return st.st_mtime, getattr(st, "st_birthtime", None)
-
-
-def _bump_canonical_mtime_post_resolve(canonical: Path, peer_mtime: float) -> None:
-    """Stamp ``canonical`` with mtime strictly greater than ``peer_mtime``.
-
-    Called from ``_resolve_interactive_loop`` after the user picks (l)ocal
-    so the "I picked local" decision propagates across the fleet on the
-    next push. Without this bump, canonical's mtime stays at whatever
-    ``_apply_incoming_file``'s mtime gate just classified as <= peer's,
-    and the next pull from the same peer re-conflicts because the dedup
-    signal (existing sidecar) was just deleted by the resolve. The user
-    ends up in a resolve -> pull -> resolve -> pull loop indefinitely.
-
-    Future-clamp symmetry: cap at ``now + _MTIME_RESTORE_MAX_SKEW_SECONDS``
-    so downstream peers don't have to clamp our pushed mtime. The cap edge
-    case (peer's mtime already at the max clamp) leaves canonical's mtime
-    exactly equal to peer's; the cycle persists for one more pull but is
-    self-correcting on peer's next legitimate push.
-
-    Best-effort. ``os.utime`` failure on iCloud-restored placeholders or
-    networked filesystems must not fail the resolve action itself --
-    bumping is a propagation hint, not a correctness gate.
-    """
-    now = time.time()
-    target = max(now, peer_mtime + 1.0)
-    target = min(target, now + _MTIME_RESTORE_MAX_SKEW_SECONDS)
-    try:
-        os.utime(canonical, (target, target))
-    except (OSError, OverflowError):
-        return
 
 
 # ── deferred inline keep-canonical mtime bump (Track 12A) ─────────────
