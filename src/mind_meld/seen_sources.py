@@ -41,7 +41,6 @@ from mind_meld import fsutil
 from mind_meld.errors import StorageError
 
 SEEN_DIR = Path.home() / ".config" / "mind-meld"
-SEEN_PATH = SEEN_DIR / "seen-sources.json"
 
 
 def seen_path() -> Path:

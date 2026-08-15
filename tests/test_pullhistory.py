@@ -33,6 +33,21 @@ def _rotated_path() -> "os.PathLike":
 
 
 class TestAppend:
+    def test_append_uses_directory_patched_after_import(self, monkeypatch, tmp_path):
+        redirected = tmp_path / "late-patch"
+        monkeypatch.setattr(pullhistory, "HISTORY_DIR", redirected)
+
+        pullhistory.append(
+            verb="pull",
+            device="dev-a",
+            source="claude",
+            rel_path="memory/role.md",
+            action="written",
+        )
+
+        assert pullhistory.history_path() == redirected / "pull-history.jsonl"
+        assert pullhistory.history_path().exists()
+
     def test_creates_directory_on_first_append(self):
         assert not pullhistory.HISTORY_DIR.exists()
         pullhistory.append(
