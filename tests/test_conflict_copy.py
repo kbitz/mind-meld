@@ -27,17 +27,13 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from mind_meld import resolveflow
 from mind_meld.cli import (
     CONFLICT_INFIX,
     _apply_incoming_file,
-    _canonical_for_conflict,
-    _find_conflict_files,
     _gc_old_conflict_files,
     _predict_pull_outcome,
-    _promote_conflict_file,
-    _promote_target_path,
     _prompt_conflict_choice,
-    _resolve_interactive_loop,
     app,
     conflict_filename,
 )
@@ -47,6 +43,13 @@ from mind_meld.manifest import (
     mtime_from_manifest,
     mtime_from_path,
     walk_claude_source,
+)
+from mind_meld.resolveflow import (
+    _canonical_for_conflict,
+    _find_conflict_files,
+    _promote_conflict_file,
+    _promote_target_path,
+    _resolve_interactive_loop,
 )
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -937,7 +940,7 @@ class TestFindConflictFilesNestedDedup:
         the sibling-glob does not re-discover it under the old name
         (file no longer exists at that path) and the dedup guards
         against any future re-introduction."""
-        from mind_meld.cli import _ensure_inversion_marker
+        from mind_meld.resolveflow import _ensure_inversion_marker
 
         sidecar_dir = tmp_path / "sidecar"
         monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
@@ -2346,7 +2349,7 @@ class TestResolveLocalMtimeBump:
         monkeypatch.setattr(cli_module, "_download_and_apply", aborting_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
         monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
-        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
+        monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(cli_module, "collect_tombstones", lambda *a, **kw: {})
 
         with pytest.raises(typer.Abort):
@@ -2439,7 +2442,7 @@ class TestResolveLocalMtimeBump:
         monkeypatch.setattr(cli_module, "_download_and_apply", keep_local_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
         monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
-        monkeypatch.setattr(cli_module, "_find_conflict_files", lambda *a, **kw: [])
+        monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(cli_module, "collect_tombstones", lambda *a, **kw: {})
         monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", lambda *a, **kw: None)
 
@@ -2959,7 +2962,7 @@ class TestResolveNewerShortcut:
     ) -> None:
         canonical, conflict = self._post_inversion_pair(tmp_path, 100.0, 200.0)
         # Force both stats to fail so (n)ewer is unavailable / unknown.
-        monkeypatch.setattr("mind_meld.cli._stat_mtime_btime", lambda p: (None, None))
+        monkeypatch.setattr("mind_meld.resolveflow._stat_mtime_btime", lambda p: (None, None))
         choices = iter(["n", "s"])
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: next(choices))
         _resolve_interactive_loop([("s1", conflict, canonical)])

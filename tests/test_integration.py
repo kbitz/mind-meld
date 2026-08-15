@@ -1431,7 +1431,7 @@ class TestInversion5E:
         """A `v0-`-prefixed file (sidecar = local, canonical = remote) routes
         through the pre-inversion arm of the dual dispatch: (l)ocal renames
         sidecar over canonical, recovering local edits."""
-        from mind_meld.cli import _resolve_interactive_loop
+        from mind_meld.resolveflow import _resolve_interactive_loop
 
         canonical = tmp_path / "doc.md"
         canonical.write_bytes(b"remote content")  # pre-inversion: canonical = remote
@@ -1449,7 +1449,7 @@ class TestInversion5E:
     def test_pre_inversion_file_keep_remote_unlinks_local_sidecar(self, tmp_path, monkeypatch):
         """A `v0-`-prefixed file with (r)emote choice: canonical IS remote,
         so we drop the local sidecar."""
-        from mind_meld.cli import _resolve_interactive_loop
+        from mind_meld.resolveflow import _resolve_interactive_loop
 
         canonical = tmp_path / "doc.md"
         canonical.write_bytes(b"remote content")
@@ -1570,11 +1570,10 @@ class TestShipFixes5E:
         `_resolve_interactive_loop`'s prefix-based dispatch would
         silently flip the (l)/(r) ops and destroy local edits."""
         from mind_meld.cli import (
-            _ensure_inversion_marker,
-            _migrate_pre_inversion_conflict,
             conflict_filename,
         )
         from mind_meld.manifest import is_pre_inversion_conflict_filename
+        from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
 
         sidecar_dir = tmp_path / "sidecar"
         monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
@@ -1611,11 +1610,8 @@ class TestShipFixes5E:
         """F1 fix complement: pre-existing legacy files (mtime < marker)
         must still be migrated. The fix is a SAFETY gate, not a
         disable-migration switch."""
-        from mind_meld.cli import (
-            _ensure_inversion_marker,
-            _migrate_pre_inversion_conflict,
-        )
         from mind_meld.manifest import is_pre_inversion_conflict_filename
+        from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
 
         sidecar_dir = tmp_path / "sidecar"
         monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
@@ -1644,7 +1640,7 @@ class TestShipFixes5E:
         disk full, parse error), `_migrate_pre_inversion_conflict` must
         return the original path unchanged. Mass re-tagging on a broken
         marker would be the original CRITICAL bug all over again."""
-        from mind_meld.cli import _migrate_pre_inversion_conflict
+        from mind_meld.resolveflow import _migrate_pre_inversion_conflict
 
         legacy = tmp_path / "doc.sync-conflict-20260420-120000-devA1234.md"
         legacy.write_bytes(b"local bytes")
@@ -1652,7 +1648,7 @@ class TestShipFixes5E:
         os.utime(legacy, (old, old))
 
         # Force the marker helper to return None.
-        monkeypatch.setattr("mind_meld.cli._ensure_inversion_marker", lambda: None)
+        monkeypatch.setattr("mind_meld.resolveflow._ensure_inversion_marker", lambda: None)
         result = _migrate_pre_inversion_conflict(legacy)
         assert result == legacy
         assert legacy.exists()
