@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.22] - 2026-08-15
+
+**`mm gc --dry-run` now shows exactly what retention cleanup would attempt without touching the files it inspects.** Preview temporary upload remnants, stale event files, stale token-cache entries, and, with `--conflicts`, stale conflict sidecars before deletion.
+
+### Fixed
+
+- **Truthful retention previews and outcomes.** Every executed reaper emits a stable result line, including zero counts and planned token-cache repairs. Apply mode distinguishes successful deletions from failed or skipped work; use `mm gc -v`, fix permissions or locks, then rerun if a reaper needs attention. Token-cache inspection holds a shared read-only lock and never creates, rewrites, re-permissions, or normalizes the cache during preview.
+
+- **Best-effort reapers no longer overstate cleanup.** Temporary, event, and conflict deletions count only after `unlink()` succeeds. A failed cleanup does not prevent the remaining reapers or orphan-blob GC from running. `mm push` keeps its concise auto-GC output.
+
 ## [0.12.21] - 2026-08-15
 
 **`cli.py` is no longer one 8,840-line file that serialized every plan — it is 6,692 lines plus six focused modules, and the test suite has stopped writing into your real `~/.claude`.** The decomposition itself changes no command, flag, output, exit code, or on-disk format. Three deliberate user-visible changes ship alongside it: one hidden command (`mm conflict-log-backfill`) is gone, `mm status` gained a staleness marker, and `pytest` stopped writing your real config dirs.

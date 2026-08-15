@@ -52,10 +52,37 @@ class LockContended(RuntimeError):
     """Raised by ``on_contention="raise"`` when the retry budget exhausts."""
 
 
+SnapshotState = Literal[
+    "missing",
+    "empty",
+    "valid",
+    "malformed",
+    "non_dict",
+    "unreadable",
+    "lock_failed",
+]
+
+
+@dataclass(frozen=True)
+class LockedJsonSnapshot:
+    """Read-only view of a JSON cache under a shared flock.
+
+    Unlike ``locked_json_rmw``, this never creates a parent or file, changes
+    permissions, normalizes malformed data, or writes on context exit. The
+    ``state`` preserves why ``data`` is unavailable so a preview can report
+    planned repair instead of silently treating it as an empty cache.
+    """
+
+    data: dict[str, Any] | None
+    state: SnapshotState
+    error: OSError | None = None
+
+
 @dataclass
 class LockedJson:
     """Yielded by ``locked_json_rmw``. Caller mutates ``data``; the helper
-    persists ``data`` on context exit iff ``is_locked`` is True.
+    persists ``data`` on context exit iff ``is_locked`` and ``write_on_exit``
+    are True.
 
     ``is_locked=False`` only happens under ``on_contention="warn"`` mode
     after retry budget exhaustion. In that case ``data`` is a fresh empty
@@ -64,6 +91,11 @@ class LockedJson:
 
     data: dict[str, Any]
     is_locked: bool
+    read_state: SnapshotState = "valid"
+    read_error: OSError | None = None
+    write_on_exit: bool = True
+    write_attempted: bool = False
+    write_error: OSError | None = None
 
 
 @contextmanager
@@ -77,8 +109,9 @@ def locked_json_rmw(
     contention_warning: str = "lock contended; skipping update",
 ) -> Iterator[LockedJson]:
     """Open ``path`` with the given ``mode``, flock it, parse JSON, yield
-    a ``LockedJson`` for caller mutation, write back atomically on context
-    exit.
+    a ``LockedJson`` for caller mutation, and writes back atomically on
+    context exit by default. A specialized caller may set
+    ``write_on_exit=False`` after deciding no persistence is needed.
 
     Parent directory is created (``parents=True, exist_ok=True``) if missing.
 
@@ -98,7 +131,7 @@ def locked_json_rmw(
     per context cost ~3.3ms, exceeding the ~2.0ms cost of an always-write.
     `_write_json` doesn't fsync — `os.write` to the kernel buffer is
     fast — so the dump dominates and hashing twice was net-negative.
-    Always-write is the right design.
+    Always-write remains the default design for normal R/M/W callers.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, mode)
@@ -115,20 +148,28 @@ def locked_json_rmw(
             contention_warning=contention_warning,
         )
         if is_locked:
-            data = _read_json(fd, default_factory)
+            snapshot = _read_json_snapshot(fd)
+            data = snapshot.data if snapshot.state == "valid" else default_factory()
         else:
             # "warn" path with exhausted retries — yield empty placeholder.
             # No write will happen at context exit because is_locked is False.
             data = default_factory()
-        ljson = LockedJson(data=data, is_locked=is_locked)
+            snapshot = LockedJsonSnapshot(data=None, state="lock_failed")
+        ljson = LockedJson(
+            data=data,
+            is_locked=is_locked,
+            read_state=snapshot.state,
+            read_error=snapshot.error,
+        )
         try:
             yield ljson
         except BaseException:
             # Caller raised: do NOT persist mutations. Re-raise.
             raise
         else:
-            if is_locked:
-                _write_json(fd, ljson.data)
+            if is_locked and ljson.write_on_exit:
+                ljson.write_attempted = True
+                ljson.write_error = _write_json(fd, ljson.data)
     finally:
         if is_locked:
             try:
@@ -174,38 +215,84 @@ def _acquire_lock(
     return False
 
 
-def _read_json(fd: int, default_factory: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+@contextmanager
+def locked_json_snapshot(path: Path) -> Iterator[LockedJsonSnapshot]:
+    """Yield a read-only, shared-lock snapshot of an existing JSON cache.
+
+    Missing, malformed, and unreadable paths are represented in the snapshot
+    rather than normalized. This is intentionally separate from the R/M/W
+    helper because a dry-run must not turn inspection into cache repair.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except FileNotFoundError:
+        yield LockedJsonSnapshot(data=None, state="missing")
+        return
+    except OSError as e:
+        yield LockedJsonSnapshot(data=None, state="unreadable", error=e)
+        return
+
+    locked = False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            locked = True
+        except OSError as e:
+            yield LockedJsonSnapshot(data=None, state="lock_failed", error=e)
+            return
+        yield _read_json_snapshot(fd)
+    finally:
+        if locked:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _read_json_snapshot(fd: int) -> LockedJsonSnapshot:
     try:
         os.lseek(fd, 0, os.SEEK_SET)
         raw = os.read(fd, 64 * 1024 * 1024)
-    except OSError:
-        return default_factory()
+    except OSError as e:
+        return LockedJsonSnapshot(data=None, state="unreadable", error=e)
     if not raw:
-        return default_factory()
+        return LockedJsonSnapshot(data=None, state="empty")
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return default_factory()
+        return LockedJsonSnapshot(data=None, state="malformed")
     if not isinstance(parsed, dict):
-        return default_factory()
-    return parsed
+        return LockedJsonSnapshot(data=None, state="non_dict")
+    return LockedJsonSnapshot(data=parsed, state="valid")
 
 
-def _write_json(fd: int, data: dict[str, Any]) -> None:
+def _write_json(fd: int, data: dict[str, Any]) -> OSError | None:
     payload = json.dumps(data, sort_keys=True, indent=2).encode("utf-8")
     try:
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, payload)
-    except OSError:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise OSError("short write to locked JSON cache")
+            offset += written
+    except OSError as e:
         # Forensic caches: a write failure is degradation, not a crash.
         # The visible-failure contract: caller can detect zero-mtime
         # advance on next read and surface it then.
-        return
+        return e
+    return None
 
 
 __all__ = [
     "LockContended",
     "LockedJson",
+    "LockedJsonSnapshot",
     "locked_json_rmw",
+    "locked_json_snapshot",
 ]
