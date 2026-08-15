@@ -80,8 +80,7 @@ class TestTmpRetention:
         assert peer_tmp.exists()
         assert shared_tmp.exists()
         assert (
-            "Temporary files dry-run: candidates=2 repairs=0 skipped=0"
-            in capsys.readouterr().out
+            "Temporary files dry-run: candidates=2 repairs=0 skipped=0" in capsys.readouterr().out
         )
 
     def test_apply_counts_partial_unlink_failure(self, tmp_path: Path, monkeypatch, capsys) -> None:

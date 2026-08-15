@@ -193,15 +193,11 @@ def _sweep_local_tmp_files(
             except OSError as e:
                 failed += 1
                 if verbose:
-                    console.print(
-                        f"  [yellow]sweep failed:[/yellow] {safe_str(v)} — {safe_str(e)}"
-                    )
+                    console.print(f"  [yellow]sweep failed:[/yellow] {safe_str(v)} — {safe_str(e)}")
                 continue
             deleted += 1
 
-    outcome = ReapOutcome(
-        candidates=len(victims), deleted=deleted, failed=failed, skipped=skipped
-    )
+    outcome = ReapOutcome(candidates=len(victims), deleted=deleted, failed=failed, skipped=skipped)
     if emit_summary:
         _render_reap_outcome("Temporary files", outcome, dry_run=dry_run)
     return outcome
@@ -265,9 +261,7 @@ def _gc_old_event_files(
             candidates += 1
             if dry_run:
                 if verbose:
-                    console.print(
-                        f"  [dim]would delete (age {age_days}d):[/dim] {safe_str(path)}"
-                    )
+                    console.print(f"  [dim]would delete (age {age_days}d):[/dim] {safe_str(path)}")
                 continue
             try:
                 path.unlink()
@@ -288,9 +282,7 @@ def _gc_old_event_files(
                 f"  [yellow]events scan skipped: {safe_str(events_dir)} — {safe_str(e)}[/yellow]"
             )
 
-    outcome = ReapOutcome(
-        candidates=candidates, deleted=deleted, failed=failed, skipped=skipped
-    )
+    outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
     _render_reap_outcome("Events", outcome, dry_run=dry_run)
     return outcome
 
@@ -346,9 +338,7 @@ def _gc_old_conflict_files(
             deleted += 1
             if verbose:
                 console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(cpath)}")
-    outcome = ReapOutcome(
-        candidates=candidates, deleted=deleted, failed=failed, skipped=skipped
-    )
+    outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
     _render_reap_outcome("Conflicts", outcome, dry_run=dry_run)
     return outcome
 
