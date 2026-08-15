@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.19] - 2026-08-15
+
+**Mind Meld's local pull-history and source-tracker state now have one call-time path authority.** Removing unused import-time path constants keeps test isolation aligned with the live resolvers, so contributor test runs cannot accidentally bypass a redirected state directory.
+
+### Changed
+
+- **Maintainer hygiene for local state paths.** Pull history and seen-source writes continue to use their existing call-time resolvers; regression tests now pin that post-import directory overrides control where public writes land. Removed an unused upgrade-module import and dead history helper with no CLI, storage-format, or upgrade behavior change.
+
 ## [0.12.17] - 2026-08-15
 
 **Mind Meld now treats symlinks inside a sync source as local routing rather than portable content.** A linked `AGENTS.md` or generated agent skill could previously be uploaded, then rejected on every peer pull or replaced with a regular file. Push now omits child links without creating deletion tombstones; pull preserves both live and dangling links, including linked directories, while still allowing a source root itself to be linked.
