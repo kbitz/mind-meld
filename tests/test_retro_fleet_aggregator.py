@@ -3404,6 +3404,143 @@ def _agg_git_only(commits: list[dict], window_days: int = 7) -> aggregator.GitAg
     )
 
 
+class TestPullRequestAggregation:
+    def test_detects_supported_squash_and_merge_subjects(self):
+        out = _agg_git_only(
+            [
+                _commit("a" * 7, 1, subject="docs: regenerate roadmap (#114)"),
+                _commit("b" * 7, 1, subject="Merge pull request #115 from kb/topic"),
+            ]
+        )
+        assert out.pull_requests == 2
+        assert out.pull_request_identities == {
+            ("github.com/kb/mm", 114),
+            ("github.com/kb/mm", 115),
+        }
+
+    def test_same_pr_in_distinct_accepted_commits_counts_once(self):
+        out = _agg_git_only(
+            [
+                _commit("a" * 7, 1, subject="feat: first part (#114)"),
+                _commit("b" * 7, 1, subject="fix: follow-up (#114)"),
+            ]
+        )
+        assert out.commits == 2
+        assert out.pull_requests == 1
+
+    def test_same_number_in_different_repositories_counts_twice(self):
+        events = [
+            _git_event(
+                "dev-a",
+                0,
+                [_commit("a" * 7, 1, subject="feat: repo one (#114)")],
+                remote="github.com/kb/one",
+            ),
+            _git_event(
+                "dev-b",
+                0,
+                [_commit("b" * 7, 1, subject="feat: repo two (#114)")],
+                remote="github.com/kb/two",
+            ),
+        ]
+        out = aggregator.aggregate_git(
+            events,
+            since=NOW - timedelta(days=7),
+            until=NOW,
+            author_emails=frozenset({"kb@example.com"}),
+        )
+        assert out.pull_requests == 2
+
+    def test_canonical_remote_equivalence_deduplicates_pr_identity(self):
+        event_a = _git_event(
+            "dev-a",
+            0,
+            [_commit("a" * 7, 1, subject="feat: first capture (#114)")],
+        )
+        event_b = _git_event(
+            "dev-b",
+            0,
+            [_commit("b" * 7, 1, subject="fix: second capture (#114)")],
+        )
+        event_b["projects"][0]["remote"] = "git@github.com:kb/mm.git"
+        out = aggregator.aggregate_git(
+            [event_a, event_b],
+            since=NOW - timedelta(days=7),
+            until=NOW,
+            author_emails=frozenset({"kb@example.com"}),
+        )
+        assert out.commits == 2
+        assert out.pull_requests == 1
+
+    def test_author_window_and_commit_dedup_gates_apply_before_pr_extraction(self):
+        events = [
+            _git_event(
+                "dev-a",
+                0,
+                [
+                    _commit("a" * 7, 1, subject="feat: accepted (#114)"),
+                    _commit("b" * 7, 1, author_email="bot@example.com", subject="feat: bot (#115)"),
+                    _commit("c" * 7, 30, subject="feat: old (#116)"),
+                    _commit("a" * 7, 1, subject="feat: duplicate fleet copy (#117)"),
+                ],
+            )
+        ]
+        out = aggregator.aggregate_git(
+            events,
+            since=NOW - timedelta(days=7),
+            until=NOW,
+            author_emails=frozenset({"kb@example.com"}),
+        )
+        assert out.commits == 1
+        assert out.pull_requests == 1
+        assert out.pull_request_identities == {("github.com/kb/mm", 114)}
+
+    @pytest.mark.parametrize(
+        "subject",
+        [
+            None,
+            114,
+            "",
+            "feat: loose #114",
+            "feat: zero (#0)",
+            "feat: leading zero (#0114)",
+            "feat: unicode digits (#١١٤)",
+            "feat: newline (#114)\n",
+            "Merge Pull Request #114 from kb/topic",
+            "Merge pull request #114",
+            "Merge pull request #114 from ",
+            "x" * 252 + " (#114)",
+        ],
+    )
+    def test_unsupported_or_untrusted_subjects_contribute_no_pr(self, subject):
+        out = _agg_git_only([_commit("a" * 7, 1, subject=subject)])
+        assert out.commits == 1
+        assert out.pull_requests == 0
+
+    def test_exactly_capped_valid_subject_is_accepted(self):
+        subject = "x" * 249 + " (#114)"
+        assert len(subject) == 256
+        out = _agg_git_only([_commit("a" * 7, 1, subject=subject)])
+        assert out.pull_request_identities == {("github.com/kb/mm", 114)}
+
+    @pytest.mark.parametrize("remote", ["", "github.com/", "not a remote", "not/a remote"])
+    def test_invalid_remote_does_not_create_pr_identity(self, remote):
+        event = _git_event(
+            "dev-a",
+            0,
+            [_commit("a" * 7, 1, subject="feat: remote absent (#114)")],
+        )
+        event["projects"][0]["remote"] = remote
+        out = aggregator.aggregate_git(
+            [event],
+            since=NOW - timedelta(days=7),
+            until=NOW,
+            author_emails=frozenset({"kb@example.com"}),
+        )
+        assert out.commits == 1
+        assert out.pull_requests == 0
+
+
 class TestCommitTypeMix:
     def test_conventional_prefixes_bucket(self):
         commits = [
@@ -3568,7 +3705,12 @@ class TestWeeklyBuckets:
 class TestSnapshotPersistence:
     def test_save_and_load_roundtrip(self, tmp_path):
         data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        data.git = aggregator.GitAggregate(commits=42, additions=1000, deletions=200)
+        data.git = aggregator.GitAggregate(
+            commits=42,
+            additions=1000,
+            deletions=200,
+            pull_request_identities={("github.com/kb/mm", 114)},
+        )
         path = aggregator._save_snapshot(data, tmp_path)
         assert path is not None
         assert path.exists()
@@ -3576,6 +3718,19 @@ class TestSnapshotPersistence:
         assert prior is not None
         assert prior["window_days"] == 7
         assert prior["metrics"]["commits"] == 42
+        assert prior["metrics"]["pull_requests"] == 1
+
+    def test_legacy_snapshot_without_pr_metric_loads(self, tmp_path):
+        legacy = {
+            "schema_version": 1,
+            "window_days": 7,
+            "since": (NOW - timedelta(days=7)).isoformat(),
+            "until": NOW.isoformat(),
+            "metrics": {"commits": 42},
+        }
+        (tmp_path / "2026-04-28-001.json").write_text(json.dumps(legacy))
+        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
+        assert prior == legacy
 
     def test_load_skips_window_mismatch(self, tmp_path):
         data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)

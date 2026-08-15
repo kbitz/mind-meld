@@ -158,7 +158,16 @@ The retro-fleet output has two artifacts with different production paths:
 
 Local-only JSON snapshots at `~/.local/share/mind-meld/retros/YYYY-MM-DD-N.json` (mode 0o700). NOT synced — fleet determinism (every machine produces identical retros after sync, per the v0.11.17 union filter) makes a local cache sufficient for "trends vs last retro" deltas without cross-fleet snapshot reconciliation. Sequence number defends against multiple retros in one day.
 
-**Saved fields (v1 schema).** `window_days`, `since`, `until`, and a `metrics` block (`commits`, `additions`, `deletions`, `streak_days`, `sessions`, `tokens_total`, `push_events`). Tokens are summed across input/cache_create/cache_read/output for a single comparable scalar. Future fields can be added without breaking older readers — `_compute_prior_delta` defaults missing keys to zero.
+**Saved fields (v1 schema).** `window_days`, `since`, `until`, and a `metrics` block (`commits`, `additions`, `deletions`, `pull_requests`, `streak_days`, `sessions`, `tokens_total`, `push_events`). Tokens are summed across input/cache_create/cache_read/output for a single comparable scalar. Future fields can be added without breaking older readers — `_compute_prior_delta` defaults missing keys to zero.
+
+**`metrics.pull_requests` (Track 17E).** Count of distinct, repository-qualified
+GitHub PR references detected from supported commit-subject forms, not an API-backed
+repository-throughput total. An identity is `(canonical remote, PR number)` and is
+created only after the existing author filter (unless `--no-author-filter`), window,
+and `(canonical remote, sha)` commit-dedup gates accept the record. Empty or malformed
+remotes and unsupported, malformed, oversized, or non-positive subject markers do not
+contribute. Older snapshots legitimately lack this additive field; it is not yet used
+for a PR trend delta, so missing history is never presented as zero.
 
 **Load picks most recent matching window.** `_load_prior_snapshot(retros_dir, window_days)` glob-sorts descending and returns the first snapshot with the same `window_days`. A 7d retro never compares against a 30d snapshot. First-run / no-match returns None and the trends section is omitted. Pinned by `TestSnapshotPersistence.test_load_skips_window_mismatch`.
 
