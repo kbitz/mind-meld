@@ -36,7 +36,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `devices.py` | Device registry, short-id generation and lookup |
 | `events.py` | mm-events log: git-root discovery, git/session walkers, budgets |
 | `token_usage.py` | Session-jsonl walker, token + skill caches, pricing, incremental resume |
-| `host_usage.py` | Local Codex rollout reader, host-family classifier, and isolated host-token cache |
+| `host_usage.py` | Local Codex and privacy-safe OpenCode usage readers, strict host-family classifier, and isolated host-token caches; Grok transcript storage is refused until it exposes a metadata-only ledger |
 | `identity.py` | Author-email set behind a flock-guarded 7d-TTL cache |
 | `merge.py` | Merge dispatch (`.jsonl`, `MEMORY.md`) + `lcs_merge` 3-way merge |
 | `upgrade.py` | Self-upgrade check, nudge, transition hook |
