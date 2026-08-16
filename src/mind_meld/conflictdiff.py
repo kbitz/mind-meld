@@ -20,7 +20,7 @@ so the caller is responsible for pre-sanitizing.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Sequence
 
 from rich.text import Text
 
@@ -221,6 +221,37 @@ def count_divergent_lines(diff: list[str]) -> tuple[int, int, int]:
         elif line.startswith("+"):
             n += 1
     return (m, n, m + n)
+
+
+def render_capped_diff(diff: Sequence[str], *, cap: int) -> list[Text]:
+    """Render a bounded unified diff through the terminal-safety boundary.
+
+    ``diff`` is the raw sequence produced by a caller's ``difflib.unified_diff``
+    invocation. The cap counts those raw entries, exactly as the two prompt
+    sites did before this helper existed: inline pull passes 60 and ``mm
+    resolve`` passes 80. This helper does not construct a diff, map its sides,
+    or make a choice; those are site-specific consent semantics.
+
+    Every diff entry is peer-controlled content and therefore passes through
+    :func:`safe_text` before Rich sees it. Added and removed content lines get
+    color, but the ``+++`` and ``---`` headers intentionally remain neutral.
+    Empty diffs receive the existing binary-content hint; a capped diff gets
+    the exact overflow count from the raw sequence length.
+    """
+    if not diff:
+        return [Text("  (files differ but text diff is empty — likely binary)", style="dim")]
+
+    rendered: list[Text] = []
+    for line in diff[:cap]:
+        if line.startswith("+") and not line.startswith("+++"):
+            rendered.append(safe_text(line, style="green"))
+        elif line.startswith("-") and not line.startswith("---"):
+            rendered.append(safe_text(line, style="red"))
+        else:
+            rendered.append(safe_text(line))
+    if len(diff) > cap:
+        rendered.append(Text(f"  ...({len(diff) - cap} more diff lines)", style="dim"))
+    return rendered
 
 
 def format_ts(ts: float | None) -> str:

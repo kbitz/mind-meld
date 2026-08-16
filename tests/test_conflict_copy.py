@@ -1202,6 +1202,42 @@ class TestResolveInteractiveLoop:
         captured = capsys.readouterr()
         assert "mm: notice:" not in captured.err
 
+    def test_resolve_delegates_legacy_alias_to_shared_normalizer(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        choices: list[str] = []
+
+        def fake_normalizer(choice: str) -> str:
+            choices.append(choice)
+            return "s"
+
+        monkeypatch.setattr(resolveflow, "_normalize_legacy_skip_choice_and_warn", fake_normalizer)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "both")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert choices == ["both"]
+        assert canonical.read_bytes() == b"local content"
+        assert conflict.read_bytes() == b"remote content"
+
+    def test_resolve_uses_shared_diff_renderer_with_its_80_line_cap(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        canonical, conflict = self._make_conflict_pair(tmp_path)
+        caps: list[int] = []
+
+        def fake_renderer(diff: list[str], *, cap: int):
+            caps.append(cap)
+            return []
+
+        monkeypatch.setattr(resolveflow, "render_capped_diff", fake_renderer)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+
+        assert caps == [80]
+
     def test_abort_raises_typer_abort(self, tmp_path: Path, monkeypatch) -> None:
         """User picks 'a' — typer.Abort is raised, subsequent conflicts not processed."""
 
@@ -2653,6 +2689,90 @@ class TestParseConflictDeviceShort:
 
 
 # ── Component 1: never default Enter to (m)erge ──────────────────────
+
+
+class TestInlinePromptLegacySkipAlias:
+    @staticmethod
+    def _local_file(tmp_path: Path) -> Path:
+        local = tmp_path / "notes.md"
+        local.write_bytes(b"local content\n")
+        return local
+
+    @pytest.mark.parametrize("choice", ["b", "both"])
+    def test_alias_warns_and_keeps_both(
+        self, tmp_path: Path, monkeypatch, capsys, choice: str
+    ) -> None:
+        local = self._local_file(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+
+        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+
+        assert (outcome, merged) == ("keep-both", None)
+        captured = capsys.readouterr()
+        assert "mm: notice:" in captured.err
+        assert "now means 'skip'" in captured.err
+
+    @pytest.mark.parametrize("choice", ["back", "browse", "between"])
+    def test_near_miss_does_not_emit_alias_notice(
+        self, tmp_path: Path, monkeypatch, capsys, choice: str
+    ) -> None:
+        local = self._local_file(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+
+        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+
+        assert (outcome, merged) == ("keep-both", None)
+        assert "mm: notice:" not in capsys.readouterr().err
+
+    @pytest.mark.parametrize("choice", ["c", "f"])
+    def test_old_directional_letters_keep_existing_inline_fallback(
+        self, tmp_path: Path, monkeypatch, capsys, choice: str
+    ) -> None:
+        local = self._local_file(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+
+        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+
+        assert (outcome, merged) == ("keep-both", None)
+        captured = capsys.readouterr()
+        assert "no longer accepted" not in captured.err
+        assert "mm: notice:" not in captured.err
+
+    def test_uses_shared_diff_renderer_with_its_60_line_cap(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from mind_meld import conflictdiff
+
+        local = self._local_file(tmp_path)
+        caps: list[int] = []
+
+        def fake_renderer(diff: list[str], *, cap: int):
+            caps.append(cap)
+            return []
+
+        monkeypatch.setattr(conflictdiff, "render_capped_diff", fake_renderer)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+
+        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+
+        assert (outcome, merged) == ("keep-both", None)
+        assert caps == [60]
+
+    def test_delegates_legacy_alias_to_shared_normalizer(self, tmp_path: Path, monkeypatch) -> None:
+        local = self._local_file(tmp_path)
+        choices: list[str] = []
+
+        def fake_normalizer(choice: str) -> str:
+            choices.append(choice)
+            return "s"
+
+        monkeypatch.setattr(resolveflow, "_normalize_legacy_skip_choice_and_warn", fake_normalizer)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "both")
+
+        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+
+        assert (outcome, merged) == ("keep-both", None)
+        assert choices == ["both"]
 
 
 class TestNeverDefaultToMerge:
