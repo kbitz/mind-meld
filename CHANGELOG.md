@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.29] - 2026-08-16
+
+**Fleet retros now show observed model-family token usage in their second-pass share card, without pretending session snapshots prove model-level delivery.**
+
+### Added
+
+- **Model-family share-card rows.** The `MODELS` block groups existing Claude Code session token buckets through Mind Meld's canonical Claude, Codex, Grok, and Unclassified classifier. It excludes synthetic and empty observations, keeps the card width-pinned, and names Claude Code snapshot coverage directly.
+
+- **Separate delivery context.** The card now includes one global detected GitHub PR-reference total. It remains a fleet aggregate, never a model-family total or verified merge claim.
+
+### Fixed
+
+- **Partial token coverage is visible and actionable.** Older session schemas and cold token caches now mark model totals incomplete, name affected peers compactly in Notes, and direct the operator to run `mm push` or upgrade. Aggregated safe token counters keep their full fleet total rather than being capped again during display.
+
 ## [0.12.28] - 2026-08-16
 
 **Fleet-retro capture now honors a small, independent root-discovery budget without pretending an incomplete scan is complete.**
