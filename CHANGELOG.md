@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.32] - 2026-08-16
+
+**Conflict resolution now keeps its safety contract clear: merge remains an explicit choice, and a failed merge still lets you resolve the next file.**
+
+### Changed
+
+- **Clearer resolver maintenance seam.** The resolver now uses its existing manifest dependency consistently, with flatter merge control flow and matching invariants that preserve the skip-by-default prompt policy.
+
+### Fixed
+
+- **Merge failure progression is pinned.** A failed write leaves its conflict untouched and continues to the next conflict instead of risking a false successful resolution.
+
 ## [0.12.31] - 2026-08-16
 
 **Conflict review now has one terminal-safe diff renderer and one compatibility path for the retired `b` / `both` choice.**
