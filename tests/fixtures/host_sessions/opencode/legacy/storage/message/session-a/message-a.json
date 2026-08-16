@@ -1,0 +1,1 @@
+{"id":"message-a","role":"assistant","modelID":"gpt-5","time":{"completed":1755216001000},"tokens":{"input":120,"output":30,"reasoning":12,"cache":{"read":20,"write":10}}}

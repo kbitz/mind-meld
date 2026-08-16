@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 import shutil
+import sqlite3
 import time
 from pathlib import Path
 
@@ -68,11 +69,62 @@ def _write_rollout(root: Path, name: str, records: list[dict], *, partial: bytes
     return path
 
 
+def _write_opencode_database(root: Path, records: list[dict]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "opencode.db"
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE TABLE message (data TEXT NOT NULL)")
+        connection.executemany(
+            "INSERT INTO message (data) VALUES (?)",
+            [(json.dumps(record),) for record in records],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return path
+
+
+def _opencode_message(
+    message_id: str = "message-a",
+    *,
+    model: str = "gpt-5",
+    completed: int = 1_755_216_001_000,
+    input_tokens: int = 120,
+    output: int = 30,
+    cache_read: int = 20,
+    cache_create: int = 10,
+    role: str = "assistant",
+) -> dict:
+    return {
+        "id": message_id,
+        "role": role,
+        "modelID": model,
+        "time": {"completed": completed},
+        "finish": "stop",
+        "tokens": {
+            "input": input_tokens,
+            "output": output,
+            "reasoning": 12,
+            "cache": {"read": cache_read, "write": cache_create},
+        },
+    }
+
+
 @pytest.fixture
 def isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     cache = tmp_path / "config" / "host-tokens.json"
     monkeypatch.setattr(hu, "CACHE_PATH", cache)
     return cache
+
+
+@pytest.fixture
+def isolated_adapter_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    grok_cache = tmp_path / "config" / "grok-host-tokens.json"
+    opencode_cache = tmp_path / "config" / "opencode-host-tokens.json"
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", grok_cache)
+    monkeypatch.setattr(hu, "OPENCODE_CACHE_PATH", opencode_cache)
+    return grok_cache, opencode_cache
 
 
 class TestHostFamily:
@@ -86,6 +138,7 @@ class TestHostFamily:
             ("o3", "codex"),
             ("o4-mini", "codex"),
             ("gpt-5-codex", "codex"),
+            ("not-codex-helper", "other"),
             ("grok-4", "grok"),
             ("openrouter/unknown", "other"),
         ],
@@ -431,3 +484,144 @@ class TestFailureAndTraversalContracts:
         result = hu.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=True)
+
+
+class TestGrokUsage:
+    def test_refuses_persisted_conversation_stream_without_reading_it(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "workspace", root / "workspace")
+
+        result = hu.read_grok_usage(root)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+        grok_cache, opencode_cache = isolated_adapter_caches
+        assert not grok_cache.exists()
+        assert not opencode_cache.exists()
+
+    def test_absent_root_and_expired_deadline_preserve_empty_vs_incomplete(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        grok_cache, _ = isolated_adapter_caches
+        assert hu.read_grok_usage(tmp_path / "absent") == hu.HostUsageResult({}, complete=True)
+        expired = hu.read_grok_usage(tmp_path / "absent", deadline=time.monotonic() - 0.001)
+        assert expired == hu.HostUsageResult(
+            {}, complete=False, reason="deadline"
+        )
+        assert grok_cache.exists()
+
+
+class TestOpenCodeUsage:
+    def test_reads_read_only_sqlite_projection_without_message_content(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        assistant = _opencode_message()
+        assistant["parts"] = [{"text": "do-not-cache-or-return-this"}]
+        in_progress = _opencode_message("message-b")
+        del in_progress["time"]["completed"]
+        wrapper = _opencode_message("message-c")
+        wrapper["tokens"] = {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {"read": 0, "write": 0},
+        }
+        del wrapper["finish"]
+        _write_opencode_database(root, [assistant, in_progress, wrapper])
+
+        result = hu.read_opencode_usage(root)
+
+        assert result == hu.HostUsageResult(
+            {
+                "codex": {
+                    "2025-08-15": {
+                        "input": 120,
+                        "cache_create": 10,
+                        "cache_read": 20,
+                        "output": 42,
+                    }
+                }
+            },
+            complete=True,
+        )
+        _, opencode_cache = isolated_adapter_caches
+        assert opencode_cache.exists()
+        assert opencode_cache.stat().st_mode & 0o777 == 0o600
+        assert "do-not-cache-or-return-this" not in opencode_cache.read_text(encoding="utf-8")
+
+    def test_refuses_legacy_message_fixture_without_deserializing_it(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        shutil.copytree(FIXTURES / "opencode" / "legacy", root)
+
+        result = hu.read_opencode_usage(root)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+
+    def test_migration_schema_drift_and_busy_database_are_incomplete(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        _write_opencode_database(root, [_opencode_message()])
+        (root / "storage" / "message").mkdir(parents=True)
+        assert hu.read_opencode_usage(root).reason == "migration"
+
+        shutil.rmtree(root / "storage")
+        connection = sqlite3.connect(root / "opencode.db")
+        try:
+            connection.execute("DROP TABLE message")
+            connection.execute("CREATE TABLE other (data TEXT NOT NULL)")
+            connection.commit()
+        finally:
+            connection.close()
+        assert hu.read_opencode_usage(root).reason == "unsupported"
+
+        shutil.rmtree(root)
+        database = _write_opencode_database(root, [_opencode_message()])
+        writer = sqlite3.connect(database)
+        try:
+            writer.execute("BEGIN EXCLUSIVE")
+            result = hu.read_opencode_usage(root, deadline=time.monotonic() + 1.0)
+        finally:
+            writer.rollback()
+            writer.close()
+        assert result == hu.HostUsageResult({}, complete=False, reason="busy")
+
+    def test_missing_source_is_empty_and_malformed_terminal_is_refused(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        assert hu.read_opencode_usage(root) == hu.HostUsageResult({}, complete=True)
+
+        malformed = _opencode_message()
+        malformed["tokens"]["input"] = "120"
+        _write_opencode_database(root, [malformed])
+        assert hu.read_opencode_usage(root).reason == "unsupported"
+
+    def test_nonzero_terminal_without_known_finish_is_refused(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        recovered = _opencode_message()
+        recovered["finish"] = "recovered"
+        _write_opencode_database(root, [recovered])
+
+        assert hu.read_opencode_usage(root).reason == "unsupported"
+
+    def test_completed_zero_usage_response_is_refused_but_zero_wrapper_is_ignored(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        zero_response = _opencode_message()
+        zero_response["tokens"] = {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache": {"read": 0, "write": 0},
+        }
+        _write_opencode_database(root, [zero_response])
+
+        assert hu.read_opencode_usage(root).reason == "unsupported"
