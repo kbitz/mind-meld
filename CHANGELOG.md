@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.12.22] - 2026-08-15
+## [0.12.24] - 2026-08-15
 
 **The bundled `retro-fleet` skill installer now tells the truth about every supported agent instead of letting one partial failure disappear behind another success.** Claude Code, Codex, and OpenCode each receive an independent outcome, and `mm install-skills` exits nonzero whenever an available agent could not be installed safely.
 
