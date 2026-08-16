@@ -11,12 +11,39 @@ cache-create, ``cached_input_tokens`` → cache-read, and ``output_tokens`` →
 output. ``reasoning_output_tokens`` is already part of output and is never
 added a second time.
 
+Two ordinary Codex shapes are tolerated rather than refused, because one
+unreadable file fails the WHOLE scan and the caller then publishes nothing
+(Track 19A is all-or-nothing). Measured on a 452-rollout machine, refusing
+them cost 167 files — 37% — and the reader returned ``unsupported`` in 5ms
+having died on the first one:
+
+* a ``token_count`` whose ``payload.info`` is null — Codex's start-of-turn
+  marker, carrying no ledger (33% of rollouts had one), and
+* a ledger that precedes the first ``turn_context`` and so has no model yet;
+  totals are cumulative, so a later attributable record restates it.
+
+Refusal is still correct for a ledger we saw and could NOT attribute to any
+model, and for a malformed (present but non-dict) ``info``. A rollout with no
+ledger at all simply contributes nothing.
+
 The reader is read-only with respect to host logs. Its private 0600 cache,
 ``~/.config/mind-meld/host-tokens.json``, stores only opaque path digests,
 file fingerprints, bounded model IDs, and aggregate totals—never transcript
 content, raw paths, prompts, or tool output. ``complete=False`` is a safety
 signal: a caller must omit the host snapshot rather than serialize a partial
 or invented zero. Track 19A owns that caller policy.
+
+Cache persistence is DECOUPLED from result validity. "May this scan be
+published?" and "did we learn something durable about individual files?" are
+different questions, and conflating them left a large corpus unable to
+bootstrap under the caller's 250ms/500ms budget: every bounded scan re-parsed
+the same prefix, expired in the same place, and discarded it — measured as six
+consecutive scans and zero bytes cached. A COMPLETE pass replaces the map
+(that is what prunes deleted rollouts); a PARTIAL pass MERGES, because
+replacing would delete entries it never reached and pruning on a listing it
+never finished would drop files that were never absent. ``warm_host_cache_inline``
+is the attended-command escape hatch for the first cold scan; the bounded
+callers still publish only from a bounded read.
 """
 
 from __future__ import annotations
@@ -59,6 +86,7 @@ _TAIL_PROBE_BYTES = 4096
 _MAX_MODEL_ID_BYTES = 256
 _MAX_COUNTER = 2**53
 _OPENCODE_SUCCESS_FINISHES = frozenset({"content-filter", "length", "stop", "tool-calls"})
+_CANONICAL_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _YEAR_PART = re.compile(r"^\d{4}$")
 _MONTH_OR_DAY_PART = re.compile(r"^\d{2}$")
 _ROLLOUT_NAME = re.compile(r"^rollout-.*\.jsonl$")
@@ -71,10 +99,22 @@ Reason = Literal[
     "locked",
     "malformed",
     "migration",
+    "no_metadata_ledger",
     "partial",
     "stale",
     "unsupported",
 ]
+"""Why a read did not complete.
+
+``no_metadata_ledger`` is categorically different from every sibling and the
+distinction is load-bearing. It means "this store, by design, exposes no
+metadata-only usage ledger, so there is nothing here to read and there never
+will be" — a standing property of the SOURCE. Every other reason, including
+``unsupported``, means "I found data and could not safely interpret it", which
+is a FAILURE and must keep its all-or-nothing veto so a caller never publishes
+totals that silently omit real usage. A caller may treat
+``no_metadata_ledger`` as "this source is not installed"; it must not do that
+with any other reason."""
 HostTokens = dict[str, dict[str, Usage]]
 
 
@@ -95,7 +135,21 @@ class HostUsageResult:
         return not self.hosts
 
 
-class _CacheEntry(TypedDict):
+class _CacheEntry(TypedDict, total=False):
+    """One rollout's cached parse. Two shapes share this map.
+
+    A LEDGER entry carries ``day`` / ``model`` / ``usage``. A NO-LEDGER entry
+    sets ``no_ledger`` instead and carries none of them: the file was parsed in
+    full and provably contained no usage (an abandoned or response-less
+    session). Both carry the same identity + fingerprint fields.
+
+    The no-ledger shape exists for convergence, not tidiness. Without it those
+    files are re-parsed on EVERY scan forever, so a corpus whose ledger-less
+    files alone outcost the caller's 250ms budget can never reach a complete
+    pass — the cache warms and the scan still expires, permanently. Pinned by
+    ``test_uncacheable_rollouts_do_not_block_convergence``.
+    """
+
     dev: int
     ino: int
     size: int
@@ -108,6 +162,7 @@ class _CacheEntry(TypedDict):
     day: str
     model: str
     usage: Usage
+    no_ledger: bool
 
 
 @dataclass(frozen=True)
@@ -186,17 +241,74 @@ def read_codex_usage(
                 raise _NoCacheCommit(_incomplete("deadline"))
 
             cached_files = _cached_files(locked.data)
-            result, staged_files = _scan_codex_root(source_root, cached_files, read_deadline)
-            if not result.complete:
+            result, staged_files, learned = _scan_codex_root(
+                source_root, cached_files, read_deadline
+            )
+            if not learned and not result.complete:
+                # Nothing NEW was learned about any file — escape without
+                # rewriting (and re-permissioning) the cache. Gating on
+                # `learned` rather than on `staged_files` matters: cache hits
+                # are staged too, so an already-warm machine with one
+                # permanently unreadable rollout would otherwise pay a full
+                # read/modify/write of the whole cache on every push to
+                # persist content identical to what it just read.
                 raise _NoCacheCommit(result)
+            # Cache persistence is DECOUPLED from result validity. Whether the
+            # scan may be published is one question; whether we learned
+            # something durable about individual files is another. Conflating
+            # them is what made a large corpus unable to bootstrap: every
+            # bounded scan re-parsed the same prefix, hit the deadline in the
+            # same place, and discarded it, so attempt 100 stood exactly where
+            # attempt 1 did. Measured on a 452-rollout Mac: six consecutive
+            # bounded scans, zero bytes cached.
+            locked.data = {
+                "version": CACHE_VERSION,
+                # A complete pass observed every rollout on disk, so REPLACING
+                # the map is what prunes entries for deleted files. A partial
+                # pass must MERGE: replacing would delete the entries for every
+                # file it never reached, and the cache would thrash between
+                # prefixes instead of converging. Entries for files deleted
+                # during a run of partial passes survive until the next
+                # complete pass prunes them; they are inert either way, because
+                # every entry is revalidated against dev/ino/size/mtime and a
+                # head+tail fingerprint before it is trusted.
+                "files": staged_files if result.complete else {**cached_files, **staged_files},
+            }
+            if not result.complete:
+                return result
             if _expired(read_deadline):
-                raise _NoCacheCommit(_incomplete("deadline"))
-            locked.data = {"version": CACHE_VERSION, "files": staged_files}
+                # The scan finished but overran its budget: refuse to publish
+                # (unchanged), yet keep the cache above so the work counts.
+                return _incomplete("deadline")
             return result
     except _NoCacheCommit as aborted:
         return aborted.result
     except OSError:
         return _incomplete("io_error")
+
+
+def warm_host_cache_inline(
+    root: Path | None = None,
+    *,
+    budget_s: float = DEFAULT_READ_BUDGET_S,
+) -> HostUsageResult:
+    """Populate the host cache under a generous one-off budget.
+
+    The push tail's per-capture budget (250ms autopush / 500ms interactive) is
+    sized for a WARM read, and a cold scan of a large corpus does not fit —
+    573ms measured across 452 rollouts. Partial commits make a cold machine
+    converge over a few pushes on their own; this makes it happen once,
+    visibly, on an attended command instead. Mirrors
+    ``token_usage.warm_token_cache_inline``.
+
+    Only Codex has an incremental cache to warm today: Grok is refused outright
+    and OpenCode's adapter cache is a lock namespace with no stored totals.
+
+    The result is returned for tests and callers that want it, but the point is
+    the side effect. Callers must still publish from a bounded capture, so this
+    never becomes a back door around the explicit-deadline rule.
+    """
+    return read_codex_usage(root, deadline=time.monotonic() + budget_s)
 
 
 def read_grok_usage(
@@ -293,8 +405,9 @@ def _scan_grok_root(root: Path, deadline: float) -> HostUsageResult:
         return _incomplete("io_error")
     # Grok's persisted session source is a conversation/tool-call stream. It
     # contains no separately allowlisted terminal usage ledger, so inspecting
-    # it would breach this reader's metadata-only boundary.
-    return _incomplete("unsupported")
+    # it would breach this reader's metadata-only boundary. This is a standing
+    # property of the store, not a failed read — see `Reason`.
+    return _incomplete("no_metadata_ledger")
 
 
 def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
@@ -323,8 +436,9 @@ def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
             terminals = _read_opencode_database(database, deadline)
         elif has_legacy:
             # Legacy message files contain complete session content. There is
-            # no metadata-only projection, so do not deserialize transcripts.
-            return _incomplete("unsupported")
+            # no metadata-only projection, so do not deserialize transcripts —
+            # same standing-property category as Grok, not a failed read.
+            return _incomplete("no_metadata_ledger")
         else:
             return HostUsageResult({}, complete=True)
     except _ReadFailure as failure:
@@ -519,33 +633,48 @@ def _scan_codex_root(
     root: Path,
     cached_files: dict[str, Any],
     deadline: float,
-) -> tuple[HostUsageResult, dict[str, _CacheEntry]]:
+) -> tuple[HostUsageResult, dict[str, _CacheEntry], bool]:
+    """Returns ``(result, staged, learned)``.
+
+    ``learned`` is True only when at least one entry was NEWLY computed. Cache
+    HITS are staged too, so a non-empty ``staged`` does not mean the scan
+    discovered anything — on a fully-warm machine with one permanently
+    unreadable rollout, committing on ``staged`` alone would rewrite the entire
+    cache with byte-identical content on every single push.
+    """
     try:
         rollouts = list(_iter_rollouts(root, deadline))
     except _ReadFailure as failure:
-        return _incomplete(failure.reason), {}
+        return _incomplete(failure.reason), {}, False
 
     staged: dict[str, _CacheEntry] = {}
+    learned = False
     for path in rollouts:
         if _expired(deadline):
-            return _incomplete("deadline"), {}
+            return _incomplete("deadline"), staged, learned
         key = _cache_key(path)
         try:
             before = _regular_stat(path)
             existing = cached_files.get(key)
             entry = _cache_hit(path, before, existing, deadline)
-            if entry is None:
+            if entry is None:  # cache miss
                 resume = _resumable_entry(path, before, existing, deadline)
                 entry = (
                     _resume_rollout(path, before, resume, deadline)
                     if resume is not None
                     else _read_full_rollout(path, before, deadline)
                 )
+                learned = True
             staged[key] = entry
         except _ReadFailure as failure:
-            return _incomplete(failure.reason), {}
+            # Hand back what was staged BEFORE the failure. Each entry is a
+            # complete, fingerprinted parse of one stable file, so it stays
+            # valid regardless of what a later file did. The result is still
+            # incomplete — the caller publishes nothing — but the work is not
+            # thrown away. See `read_codex_usage` for why that matters.
+            return _incomplete(failure.reason), staged, learned
 
-    return HostUsageResult(_aggregate(staged.values()), complete=True), staged
+    return HostUsageResult(_aggregate(staged.values()), complete=True), staged, learned
 
 
 def _iter_rollouts(root: Path, deadline: float):
@@ -598,6 +727,13 @@ def _is_regular_non_symlink(path: Path) -> bool:
 
 
 def _read_full_rollout(path: Path, before: os.stat_result, deadline: float) -> _CacheEntry:
+    """Return this rollout's cache entry — ledger or no-ledger.
+
+    A rollout with no usage ledger still gets an entry, so an unchanged one
+    costs a stat + fingerprint on later scans instead of a full re-parse. It
+    must NOT be given a synthetic model or day: ``_aggregate`` would fabricate
+    a family bucket out of it. See ``_CacheEntry``.
+    """
     terminal = _read_rollout(path, 0, None, before, deadline)
     after = _regular_stat(path)
     if not _same_source(before, after):
@@ -605,6 +741,8 @@ def _read_full_rollout(path: Path, before: os.stat_result, deadline: float) -> _
     fingerprint = _fingerprint(path, after, deadline)
     if not _same_source(after, _regular_stat(path)):
         raise _ReadFailure("stale")
+    if terminal is None:
+        return _no_ledger_entry(after, fingerprint)
     return _cache_entry(after, fingerprint, terminal)
 
 
@@ -642,6 +780,14 @@ def _resumable_entry(
     entry = _validated_entry(existing)
     if entry is None:
         return None
+    if entry.get("no_ledger"):
+        # A no-ledger entry cannot seed a resume: it has no terminal to carry
+        # forward AND no remembered `turn_context` model. Resuming from its
+        # offset would meet the file's first ledger with `current_model=None`,
+        # which `_read_rollout` then refuses as unattributable — turning a file
+        # that just gained its first response into a whole-store refusal. Fall
+        # back to a full parse, which re-reads the model context.
+        return None
     if entry["dev"] != source.st_dev or entry["ino"] != source.st_ino:
         return None
     if source.st_size <= entry["size"]:
@@ -668,6 +814,12 @@ def _resume_rollout(
 ) -> _CacheEntry:
     previous = _Terminal(entry["day"], entry["model"], entry["usage"])
     terminal = _read_rollout(path, entry["offset"], previous, before, deadline)
+    if terminal is None:
+        # Unreachable today: `previous` seeds `terminal`, so a resumed read
+        # always carries at least the cached total forward. Guarded rather
+        # than asserted so a future change to `_read_rollout` degrades to a
+        # bounded refusal instead of a TypeError inside `_cache_entry`.
+        raise _ReadFailure("unsupported")
     after = _regular_stat(path)
     if not _same_source(before, after):
         raise _ReadFailure("stale")
@@ -683,10 +835,17 @@ def _read_rollout(
     previous: _Terminal | None,
     before: os.stat_result,
     deadline: float,
-) -> _Terminal:
-    """Read a stable file from a complete-line offset and retain last total."""
+) -> _Terminal | None:
+    """Read a stable file from a complete-line offset and retain last total.
+
+    Returns ``None`` when the rollout recorded no usage ledger at all — an
+    abandoned or response-less session contributes nothing, which is a fact
+    about that file rather than a reason to refuse the whole store. Refusal is
+    reserved for a ledger we saw but could not attribute (see below).
+    """
     current_model = previous.model if previous is not None else None
     terminal = previous
+    saw_usage_ledger = previous is not None
     last_offset = start_offset
     try:
         with path.open("rb") as fp:
@@ -715,6 +874,23 @@ def _read_rollout(
                     current_model = _context_model(record)
                     continue
                 if record_type == "event_msg" and _is_token_count(record):
+                    if not _carries_usage(record):
+                        # Codex emits a `token_count` whose `payload.info` is
+                        # null at the start of a turn, before the model has
+                        # reported anything. It is a marker with no ledger
+                        # attached, not a malformed record — 33% of rollouts
+                        # on a real Codex machine carry one, and treating it
+                        # as fatal refused the entire store.
+                        continue
+                    saw_usage_ledger = True
+                    if current_model is None:
+                        # A ledger before the first `turn_context` cannot be
+                        # attributed yet. Totals are CUMULATIVE, so a later
+                        # attributable record restates these tokens; dropping
+                        # this one loses nothing. If no `turn_context` ever
+                        # arrives, `saw_usage_ledger` makes the file fatal
+                        # below rather than silently discarding real usage.
+                        continue
                     terminal = _terminal_from_record(record, current_model)
             if fp.tell() != last_offset:
                 # `iter_bounded_lines` intentionally leaves a trailing
@@ -723,7 +899,10 @@ def _read_rollout(
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
 
-    if terminal is None:
+    if terminal is None and saw_usage_ledger:
+        # We read real token counts and could not attribute a single one to a
+        # model. That is a shape this reader does not understand, and silently
+        # dropping it would under-report usage — refuse the store instead.
         raise _ReadFailure("unsupported")
     if not _same_source(before, _regular_stat(path)):
         raise _ReadFailure("stale")
@@ -743,9 +922,28 @@ def _is_token_count(record: dict[str, Any]) -> bool:
     return isinstance(payload, dict) and payload.get("type") == "token_count"
 
 
-def _terminal_from_record(record: dict[str, Any], model: str | None) -> _Terminal:
-    if model is None:
+def _carries_usage(record: dict[str, Any]) -> bool:
+    """True when a ``token_count`` event actually has a usage ledger attached.
+
+    A null or absent ``payload.info`` is Codex's "nothing to report yet"
+    marker. An ``info`` that is PRESENT but not a dict is malformed and is
+    refused HERE rather than downstream: the caller's model-attribution
+    ``continue`` runs before ``_terminal_from_record``, so a broken ledger
+    arriving before the first ``turn_context`` used to slip past the refusal
+    entirely. Do not widen this to "any info I can't parse is fine": the
+    distinction between an empty marker and a broken ledger is the whole
+    reason this reader can be trusted not to under-report.
+    """
+    payload = record.get("payload")
+    info = payload.get("info") if isinstance(payload, dict) else None
+    if info is None:
+        return False
+    if not isinstance(info, dict):
         raise _ReadFailure("unsupported")
+    return True
+
+
+def _terminal_from_record(record: dict[str, Any], model: str) -> _Terminal:
     payload = record.get("payload")
     info = payload.get("info") if isinstance(payload, dict) else None
     totals = info.get("total_token_usage") if isinstance(info, dict) else None
@@ -785,6 +983,11 @@ def _counter(totals: dict[str, Any], key: str, *, required: bool) -> int:
 def _aggregate(entries: Any) -> HostTokens:
     hosts: HostTokens = {}
     for entry in entries:
+        # No-ledger entries exist only to make an unchanged ledger-less file a
+        # cheap cache hit. They carry no model/day/usage and must never reach
+        # `host_family`, which would bucket "" as the `other` family.
+        if not isinstance(entry, _Terminal) and entry.get("no_ledger"):
+            continue
         model = entry.model if isinstance(entry, _Terminal) else entry["model"]
         day = entry.day if isinstance(entry, _Terminal) else entry["day"]
         usage = entry.usage if isinstance(entry, _Terminal) else entry["usage"]
@@ -793,6 +996,48 @@ def _aggregate(entries: Any) -> HostTokens:
         bucket = days.setdefault(day, zero_model_bucket())
         merge_usage_bucket(bucket, usage)
     return hosts
+
+
+_IDENTITY_KEYS = (
+    "dev",
+    "ino",
+    "size",
+    "mtime_ns",
+    "head",
+    "head_len",
+    "tail",
+    "tail_len",
+    "offset",
+)
+
+
+def _identity_fields(source: os.stat_result, fingerprint: _Fingerprint) -> dict[str, Any]:
+    return {
+        "dev": source.st_dev,
+        "ino": source.st_ino,
+        "size": source.st_size,
+        "mtime_ns": source.st_mtime_ns,
+        "head": fingerprint.head,
+        "head_len": fingerprint.head_len,
+        "tail": fingerprint.tail,
+        "tail_len": fingerprint.tail_len,
+        "offset": source.st_size,
+    }
+
+
+def _identity_fields_from(value: dict[str, Any]) -> dict[str, Any]:
+    """Project an already-validated cache dict down to identity fields only."""
+    return {key: value[key] for key in _IDENTITY_KEYS}
+
+
+def _no_ledger_entry(source: os.stat_result, fingerprint: _Fingerprint) -> _CacheEntry:
+    """Cache "this file was parsed in full and held no usage".
+
+    Deliberately carries no ``day`` / ``model`` / ``usage``: ``_aggregate``
+    skips it, so it can never invent a family bucket.
+    """
+    entry: _CacheEntry = {**_identity_fields(source, fingerprint), "no_ledger": True}  # type: ignore[typeddict-item]
+    return entry
 
 
 def _cache_entry(
@@ -844,9 +1089,27 @@ def _validated_entry(value: Any) -> _CacheEntry | None:
         return None
     if not isinstance(value.get("head"), str) or not isinstance(value.get("tail"), str):
         return None
+    if value.get("no_ledger") is True:
+        # Identity + fingerprint only, and normalized to exactly that: any
+        # day/model/usage riding along on a no_ledger entry is dropped rather
+        # than trusted, so a hand-edited cache cannot smuggle totals in behind
+        # the flag `_aggregate` uses to skip it.
+        entry: _CacheEntry = {
+            **_identity_fields_from(value),  # type: ignore[typeddict-item]
+            "no_ledger": True,
+        }
+        return entry
     if not isinstance(value.get("day"), str) or not isinstance(value.get("model"), str):
         return None
     if not value["model"] or len(value["model"].encode("utf-8")) > _MAX_MODEL_ID_BYTES:
+        return None
+    # Canonical YYYY-MM-DD only. `fromisoformat` alone accepts a full datetime
+    # with a local UTC offset, basic format, and week dates — and since Track
+    # 19A a cached `day` becomes a KEY in a synced event row, so a tampered or
+    # corrupted cache could otherwise put a per-machine timezone offset on the
+    # wire. Fresh parses always emit `date().isoformat()`; this bounds what a
+    # cache HIT can reintroduce.
+    if not _CANONICAL_DAY.fullmatch(value["day"]):
         return None
     try:
         datetime.fromisoformat(value["day"])
@@ -970,11 +1233,17 @@ __all__ = [
     "DEFAULT_READ_BUDGET_S",
     "GROK_CACHE_PATH",
     "GROK_SESSIONS_PATH",
+    "HostFamily",
+    "HostTokens",
     "HostUsageResult",
     "OPENCODE_CACHE_PATH",
     "OPENCODE_DATA_PATH",
+    # `Reason` is a cross-module contract since Track 19A: events_tail derives
+    # its entire user-visible reason vocabulary from `get_args(Reason)`.
+    "Reason",
     "host_family",
     "read_codex_usage",
     "read_grok_usage",
     "read_opencode_usage",
+    "warm_host_cache_inline",
 ]

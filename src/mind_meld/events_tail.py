@@ -3,20 +3,26 @@
 Extracted from ``cli.py`` in Track 16A.
 
 ``_run_events_tail`` runs at the end of ``_push_core`` and writes the
-``git-snapshot`` / ``sessions-snapshot`` / ``mm-push`` rows the retro-fleet
-aggregator later stitches across the fleet. ``_run_events_backfill`` is its
-``mm init`` counterpart. Both are FORENSIC-ONLY: they must never fail a push,
-and every degradation they detect is APPENDED TO THE RETURNED LIST, not merely
-printed — an unattended `mm autopush` hook's stderr goes nowhere, which is why
-`autopush` writes a `degraded` breadcrumb from these reasons.
+``git-snapshot`` / ``sessions-snapshot`` / optional ``host-usage-snapshot`` /
+``mm-push`` rows the retro-fleet aggregator later stitches across the fleet.
+``_run_events_backfill`` is its ``mm init`` counterpart. Both are
+FORENSIC-ONLY: they must never fail a push, and every degradation they detect
+is APPENDED TO THE RETURNED LIST, not merely printed — an unattended
+`mm autopush` hook's stderr goes nowhere, which is why `autopush` writes a
+`degraded` breadcrumb from these reasons.
 
 Imports nothing from ``cli`` — pinned by ``tests/test_module_boundaries.py``.
+The one new dependency edge is ``events_tail -> host_usage``: this module is
+the sole event producer and ``host_usage`` is the canonical local-reader and
+model-family authority. There is no reverse edge.
 
 Read ``docs/invariants/events-retro.md`` BEFORE editing: the wall-clock budget
 is scoped to the walk (the ``walk_done`` snapshot precedes the identity gather
-on purpose), and `_decide_token_walk_policy` returning False does NOT by itself
-mean degradation — it also returns False when no `claude` source is enabled,
-which is a config shape, so the append is gated on `claude_paths`.
+AND the host capture on purpose), `_decide_token_walk_policy` returning False
+does NOT by itself mean degradation — it also returns False when no `claude`
+source is enabled, which is a config shape, so the append is gated on
+`claude_paths` — and the host snapshot is all-or-nothing: any incomplete
+reader omits the WHOLE row rather than publishing a partial or invented zero.
 """
 
 from __future__ import annotations
@@ -26,17 +32,113 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, Sequence, get_args
 
-from mind_meld import __version__, events, identity, token_usage, upgrade
+from mind_meld import __version__, events, host_usage, identity, token_usage, upgrade
 from mind_meld.safety import safe_str
 
 CacheLockMode = Literal["warn", "block"] | None
+HostReader = Callable[..., host_usage.HostUsageResult]
+
+HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = 500
+HOST_USAGE_READ_BUDGET_AUTOPUSH_MS = 250
+"""Host reads get their OWN absolute deadline, deliberately separate from the
+git/session walk budgets. It starts after the ``walk_done`` snapshot so host
+time can never trigger or redefine the session-walk notice, and it is passed
+explicitly to every reader — no caller may fall through to ``host_usage``'s
+5-second default, which is ~20x an autopush's entire walk budget."""
 
 _ROOT_DISCOVERY_DEGRADATION = (
     "git repository discovery hit its time budget: this retro capture may omit repositories. "
     "A later substantive push will retry"
 )
+
+_HOST_READ_REASONS = frozenset(get_args(host_usage.Reason))
+"""Reason classes a reader may report, taken from ``host_usage`` so the two
+cannot drift. Anything outside the set is reported as ``_HOST_UNKNOWN_REASON``
+— the reason lands in a user-visible notice and breadcrumb, so it stays a
+closed vocabulary rather than a pass-through string."""
+
+_HOST_UNKNOWN_REASON = "unavailable"
+
+_HOST_ABSENT_REASONS = frozenset({"no_metadata_ledger"})
+"""Reasons that mean "this source is not installed", not "this read failed".
+
+A store that exposes no metadata-only usage ledger (Grok's transcript stream,
+OpenCode's legacy message files) can never produce data on this machine. That
+is a known, permanent ABSENCE — categorically unlike a failed read — so the
+sweep drops the reader from ``token_sources`` and carries on with the rest
+rather than vetoing the whole snapshot.
+
+This is deliberately NOT keyed on ``unsupported``. Codex returns ``unsupported``
+when it finds a ledger it cannot attribute, and OpenCode when a row is
+malformed: those mean "real usage exists here that I could not read", so
+publishing without them would silently under-report. They keep the veto.
+
+Pinned as a SUBSET of ``_HOST_READ_REASONS`` by
+``test_absent_reasons_are_real_reader_reasons``: a rename on the
+``host_usage.Reason`` side would otherwise empty this set silently and turn
+every Grok machine back into a total veto."""
+
+_HOST_PERMANENT_REASONS = frozenset({"unsupported"})
+"""Failure reasons a later push cannot fix, so the notice must not promise a
+retry. Distinct from ``_HOST_ABSENT_REASONS``: these still veto the snapshot,
+they just do it permanently."""
+
+HOST_READER_SOURCE_GATE: dict[str, str | None] = {
+    "codex": "codex",
+    # The Grok reader opens nothing — it stats a directory and reports whether
+    # a ledger could exist — so it needs no consent gate, and mind-meld has no
+    # `grok` source to gate it on. Its outcome is handled by
+    # `_HOST_ABSENT_REASONS` instead.
+    "grok": None,
+    "opencode": "opencode",
+}
+"""Which enabled sync source each reader's consent derives from.
+
+A reader that parses a host's local store only runs when the user enabled that
+host as a source. The Claude session walk has always been gated this way
+(``_enabled_claude_paths``); the host readers shipped without it, which meant a
+user who declined the ``codex`` source still had `~/.codex/sessions` parsed and
+their totals published to the fleet. Only aggregates ever crossed the boundary,
+but "we read it unless you read the README" is the wrong default for a tool
+whose whole premise is scoped, opt-in sync."""
+
+WARMABLE_HOST_READER = "codex"
+"""The only reader with an incremental cache a warm can populate. Grok is
+refused outright and OpenCode's adapter cache stores no totals, so a
+``deadline`` charged to either of them is not warmable and must not trigger
+the multi-second warm path."""
+
+
+@dataclass(frozen=True)
+class HostUsageCapture:
+    """The outcome of one all-or-nothing host-reader sweep.
+
+    ``hosts is None`` means the sweep was INCOMPLETE and the caller must omit
+    the whole snapshot: no partial totals, no zero placeholder. An empty dict
+    (``complete`` True) is a real completed empty scan and is healthy — it is
+    what a machine with no Codex/Grok/OpenCode data legitimately reports.
+
+    ``reader`` and ``reason`` are safe, closed-vocabulary labels for the notice
+    and breadcrumb: never a path, transcript excerpt, SQL fragment, or raw
+    exception text.
+    """
+
+    hosts: dict[str, dict[str, token_usage.Usage]] | None
+    reader: str = ""
+    reason: str = ""
+    token_sources: tuple[str, ...] = ()
+    """The readers that actually CONTRIBUTED to ``hosts`` this sweep.
+
+    Per-push, not a constant: a host the user has not enabled as a source is
+    never invoked, and one whose store can never hold a ledger is dropped. Both
+    are honest absences, and the row says so rather than implying every built-in
+    reader was consulted."""
+
+    @property
+    def complete(self) -> bool:
+        return self.hosts is not None
 
 
 @dataclass
@@ -46,11 +148,15 @@ class CaptureResult:
     This contract intentionally excludes token-cache warming, identity work,
     notices, terminal events, and writes. Push and init have different policy
     for each of those concerns; sharing them here would reintroduce the
-    coupling this helper is meant to remove.
+    coupling this helper is meant to remove. ``host_capture`` is carried as
+    data for the same reason: the tail turns an incomplete sweep into a notice
+    plus a returned degradation, init into a notice alone.
     """
 
     git_rows: list[dict]
     session_rows: list[dict]
+    host_rows: list[dict]
+    host_capture: HostUsageCapture
     root_discovery: events.GitRootDiscovery
     discovery_errors: list[str]
     walk_exceeded_budget: bool
@@ -121,6 +227,141 @@ def _decide_token_walk_policy(
     return True
 
 
+def _default_host_readers(sources: list[dict]) -> tuple[tuple[str, HostReader], ...]:
+    """The built-in readers the user has CONSENTED to, in their fixed order.
+
+    A reader whose host is not an enabled sync source is not invoked at all —
+    see ``HOST_READER_SOURCE_GATE``. ``sources`` is the resolved
+    ``get_sources(config)`` list, the same input ``_enabled_claude_paths``
+    reads, so enabling/disabling a host source moves both walks together.
+
+    Module-qualified lookups on purpose (CLAUDE.md's dead-alias rule in
+    reverse): a from-import would bind this module's own global, so a test
+    patching ``host_usage.read_codex_usage`` would never reach it.
+    """
+    enabled = {s.get("name") for s in sources if isinstance(s.get("name"), str)}
+    built_in: tuple[tuple[str, HostReader], ...] = (
+        ("codex", host_usage.read_codex_usage),
+        ("grok", host_usage.read_grok_usage),
+        ("opencode", host_usage.read_opencode_usage),
+    )
+    return tuple(
+        (name, read)
+        for name, read in built_in
+        if HOST_READER_SOURCE_GATE.get(name) is None or HOST_READER_SOURCE_GATE[name] in enabled
+    )
+
+
+def _capture_host_usage(
+    readers: Sequence[tuple[str, HostReader]],
+    *,
+    deadline: float,
+    now: Callable[[], float] = time.monotonic,
+) -> HostUsageCapture:
+    """Read the consented host sources under ONE explicit deadline.
+
+    All-or-nothing for FAILURES (premise confirmed 2026-08-16): if any reader
+    could not read data that exists, the merged map is discarded and the caller
+    publishes nothing, because a total that silently omits real usage is worse
+    than no total.
+
+    A source that can never hold a ledger is NOT a failure (premise revised
+    2026-08-16, see ``_HOST_ABSENT_REASONS``). It is dropped from
+    ``token_sources`` and the sweep continues. Without that carve-out, merely
+    having Grok installed made the row unpublishable forever — measured on a
+    real machine, where it also pinned ``mm status`` at ``degraded`` and so
+    destroyed that breadcrumb as a signal for actual sync degradation.
+
+    A reader that RAISES is caught here rather than at the tail's outer guard,
+    because that guard would also discard the git and session rows already
+    captured and the terminal ``mm-push`` row with them — an unreadable host
+    store must not cost the retro its actual content.
+
+    ``readers`` and ``now`` are injected so ordering, short-circuit, gating and
+    deadline behavior are table-testable without touching a real host store.
+    """
+    merged: dict[str, dict[str, token_usage.Usage]] = {}
+    contributed: list[str] = []
+    for name, read in readers:
+        if now() >= deadline:
+            return HostUsageCapture(None, name, "deadline")
+        try:
+            result = read(deadline=deadline)
+        except Exception as e:
+            # The breadcrumb reason stays a closed vocabulary, but the TYPE
+            # goes to stderr like every other swallow in this module. Without
+            # it a `TypeError` regression inside a reader is indistinguishable
+            # from a benign transient and can crash-loop on every push while
+            # the breadcrumb calmly promises a retry.
+            sys.stderr.write(
+                f"mm: notice: host reader {name} raised: {type(e).__name__}: {safe_str(e)}\n"
+            )
+            return HostUsageCapture(None, name, _HOST_UNKNOWN_REASON)
+        if not result.complete:
+            reason = result.reason if result.reason in _HOST_READ_REASONS else _HOST_UNKNOWN_REASON
+            if reason in _HOST_ABSENT_REASONS:
+                # Not installed, in effect. Drop it and keep going — the row
+                # will name only the sources that actually contributed.
+                continue
+            return HostUsageCapture(None, name, reason)
+        contributed.append(name)
+        # Codex and OpenCode both classify into the `codex` family, so a
+        # collision on (family, UTC day) is ordinary rather than an error.
+        # Sum the four TOKEN_FIELDS through the shared helper — a shallow map
+        # update would silently drop whichever reader landed first.
+        for family, days in result.hosts.items():
+            target = merged.setdefault(family, {})
+            for day, usage in days.items():
+                bucket = target.setdefault(day, token_usage.zero_model_bucket())
+                token_usage.merge_usage_bucket(bucket, usage)
+    return HostUsageCapture(merged, token_sources=tuple(contributed))
+
+
+def _warm_host_cache_with_notice() -> bool:
+    """Telegraph and run the one-off host-cache warm. Never raises.
+
+    Returns whether the warm actually COMPLETED. That return value is the
+    retry backstop: if the warm could not finish inside its own (much larger)
+    budget, the bounded read that follows cannot finish either, and paying for
+    it just adds latency to a push that will publish nothing anyway. Without
+    it, a corpus that outgrows even the warm budget makes every interactive
+    push pay bounded-attempt + warm + bounded-retry, forever.
+
+    Wrapper policy, kept out of the capture core so that core stays notice-free
+    (it is shared by push and init, which report differently).
+    """
+    # States the real ceiling rather than a measured-once estimate: the warm is
+    # bounded by `DEFAULT_READ_BUDGET_S`, not by the ~600ms one corpus happened
+    # to take.
+    sys.stderr.write(
+        f"mm: warming host usage cache (one-time, up to "
+        f"{host_usage.DEFAULT_READ_BUDGET_S:.0f}s)...\n"
+    )
+    try:
+        return host_usage.warm_host_cache_inline().complete
+    except Exception as e:
+        sys.stderr.write(
+            f"mm: notice: host usage cache warm failed: {type(e).__name__}: {safe_str(e)}\n"
+        )
+        return False
+
+
+def _host_skip_phrase(reader: str, reason: str) -> str:
+    """One stable, safe sentence for an omitted host snapshot.
+
+    It names the affected optional subsystem so a `degraded` breadcrumb can't
+    be misread as content-sync loss, and it names only the reader and reason
+    class — never a path, transcript, query, or exception string.
+    """
+    phrase = (
+        f"host-usage snapshot skipped ({reader} {reason}) — "
+        "content sync and git/session capture unaffected"
+    )
+    if reason in _HOST_PERMANENT_REASONS:
+        return phrase
+    return f"{phrase}. A later substantive push will retry"
+
+
 def _capture_event_snapshots(
     config: dict,
     claude_paths: list[Path],
@@ -129,9 +370,12 @@ def _capture_event_snapshots(
     since: datetime,
     budget_ms: int,
     prepare_token_cache: Callable[[], CacheLockMode],
+    host_readers: Sequence[tuple[str, HostReader]],
     root_discovery_budget_ms: int | None = None,
+    host_budget_ms: int | None = None,
+    warm_host_cache: Callable[[], bool] | None = None,
 ) -> CaptureResult:
-    """Capture device-stamped git and session snapshot rows without writing.
+    """Capture device-stamped git, session, and host snapshot rows without writing.
 
     Callers retain token-cache policy in ``prepare_token_cache``; it runs after
     the bounded git walk and returns whether token data is available and, when
@@ -139,12 +383,27 @@ def _capture_event_snapshots(
     open for every Claude root, preserving the token cache's read/modify/write
     lock contract without holding it across git subprocess work. The session
     deadline begins after caller-owned preparation.
+
+    Host capture runs last, on its own ``host_budget_ms`` deadline started
+    after the session walk's ``walk_done`` snapshot, and yields at most one
+    optional row. Its outcome is returned as data — the notice and the
+    ``autopush`` breadcrumb are wrapper policy. ``warm_host_cache`` is the
+    attended-command escape hatch: supplied by callers that may spend a
+    one-off multi-second warm (interactive push, init), omitted by ``autopush``
+    so an unattended hook never does. Published rows always come from a bounded
+    capture, warm or not.
     """
     if root_discovery_budget_ms is None:
         root_discovery_budget_ms = (
             events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
             if budget_ms <= events.WALK_TIME_BUDGET_AUTOPUSH_MS
             else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
+        )
+    if host_budget_ms is None:
+        host_budget_ms = (
+            HOST_USAGE_READ_BUDGET_AUTOPUSH_MS
+            if budget_ms <= events.WALK_TIME_BUDGET_AUTOPUSH_MS
+            else HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
         )
     root_discovery = events.discover_git_roots(
         config,
@@ -193,9 +452,56 @@ def _capture_event_snapshots(
             }
         )
 
+    # Host capture starts only AFTER the `walk_done` snapshot, on a fresh
+    # absolute deadline of its own. Both halves matter: reading the hosts
+    # before the snapshot would let a slow host store trip the session-walk
+    # notice, and reusing `deadline` would silently spend whatever the walk
+    # left over (usually nothing on a busy machine, so the row would vanish
+    # exactly when it is most interesting).
+    host_capture = _capture_host_usage(
+        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+    )
+    if (
+        warm_host_cache is not None
+        and host_capture.reason == "deadline"
+        and host_capture.reader == WARMABLE_HOST_READER
+    ):
+        # Warm-and-retry, and ONLY after a bounded attempt has already proven
+        # the cache is too cold to fit. Gating on the failure instead of on a
+        # "is it cold?" predicate costs nothing on the happy path, needs no
+        # persisted marker, and cannot misfire on a machine that legitimately
+        # has no host data — that machine's first attempt completes, so it
+        # never warms. `deadline` is also the only reason a warm can fix.
+        #
+        # The reader gate matters as much as the reason: `warm_host_cache_inline`
+        # warms CODEX ONLY. A `deadline` charged to any other reader cannot be
+        # helped by it, so without this the push would pay bounded-attempt +
+        # up to 5s warm + bounded-retry (~6s worst case) on EVERY interactive
+        # push, forever, and still publish nothing.
+        #
+        # Retry ONLY if the warm finished. A corpus large enough to outgrow the
+        # warm's own budget keeps reporting (deadline, codex) forever, so both
+        # halves of the gate above keep passing and the reader gate alone does
+        # not bound the repeat cost — the warm's own outcome does.
+        if warm_host_cache():
+            host_capture = _capture_host_usage(
+                host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+            )
+    host_rows: list[dict] = []
+    if host_capture.hosts is not None:
+        host_rows.append(
+            events.make_host_usage_snapshot(
+                device=device_id,
+                hosts=host_capture.hosts,
+                token_sources=host_capture.token_sources,
+            )
+        )
+
     return CaptureResult(
         git_rows=git_rows,
         session_rows=session_rows,
+        host_rows=host_rows,
+        host_capture=host_capture,
         root_discovery=root_discovery,
         discovery_errors=discovery_errors,
         walk_exceeded_budget=walk_done > deadline,
@@ -232,12 +538,12 @@ def _run_events_tail(
     — branch-fragility-free, one-push-lag-free), dry_run no-op (preview
     contract), mm-events-resolved gate (covers fresh / migrated / un-
     migrated configs uniformly, Codex C1), the independent 50ms autopush /
-    100ms interactive root-discovery budget, and the 250ms / 500ms walk
-    budgets. The "budget exceeded" notice
-    reports on the session-metadata walk (the git walk self-bounds via its
-    own total_budget_ms); the snapshot is taken before the self-bounded
-    identity gather so a cold 7d-TTL identity refresh no longer masquerades
-    as a slow walk (v0.12.9).
+    100ms interactive root-discovery budget, the 250ms / 500ms walk budgets,
+    and the separate 250ms / 500ms host-read budget. The "budget exceeded"
+    notice reports on the session-metadata walk (the git walk self-bounds via
+    its own total_budget_ms); the snapshot is taken before the self-bounded
+    identity gather AND before host capture, so neither a cold 7d-TTL identity
+    refresh nor a slow host store masquerades as a slow walk (v0.12.9).
 
     Forensic-only invariant: any failure in this block is swallowed and
     breadcrumbed via ``mm: notice:``. The push proceeds.
@@ -277,7 +583,17 @@ def _run_events_tail(
                 if quiet
                 else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
             ),
+            host_budget_ms=(
+                HOST_USAGE_READ_BUDGET_AUTOPUSH_MS
+                if quiet
+                else HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
+            ),
+            # Only the attended path may spend the one-off warm. On autopush a
+            # cold corpus instead converges across pushes, because an aborted
+            # scan now keeps its per-file progress.
+            warm_host_cache=None if quiet else _warm_host_cache_with_notice,
             prepare_token_cache=prepare_tail_token_cache,
+            host_readers=_default_host_readers(sources),
         )
 
         source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
@@ -301,11 +617,13 @@ def _run_events_tail(
             local_emails=local_emails,
         )
         # CT-4 invariant: mm-push event LAST so a partial write doesn't
-        # advance the next-push cursor.
+        # advance the next-push cursor. The optional host row sits between the
+        # session rows and it — it is capture data like the others, and must
+        # not displace the terminal row.
         events.write_push_event(
             events_dir,
             device_id,
-            [*capture.git_rows, *capture.session_rows, mm_event],
+            [*capture.git_rows, *capture.session_rows, *capture.host_rows, mm_event],
         )
 
         if capture.root_discovery.exceeded:
@@ -328,6 +646,15 @@ def _run_events_tail(
         # push published no token or skill data.
         if claude_paths and not capture.token_cache_requested:
             degradations.append("token walk skipped, so tokens and skills are missing")
+        # A COMPLETED empty host scan is healthy and stays silent; only an
+        # omission is reported. Deliberately not rate-limited: this describes
+        # the CURRENT state, and a stale `success` breadcrumb would hide an
+        # ongoing degradation from the unattended-hook user who only ever
+        # looks at `mm status`. No-op pushes never reach here at all.
+        if not capture.host_capture.complete:
+            phrase = _host_skip_phrase(capture.host_capture.reader, capture.host_capture.reason)
+            sys.stderr.write(f"mm: notice: {phrase}\n")
+            degradations.append(phrase)
     except Exception as e:
         sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
         degradations.append(f"events tail failed ({type(e).__name__})")
@@ -339,10 +666,15 @@ def _run_events_backfill(
     sources: list[dict],
     device_id: str,
 ) -> None:
-    """Init-time backfill of git+sessions events for the past 30 days.
+    """Init-time backfill of git+sessions events for the past 30 days, plus
+    the optional host-usage row.
 
-    Mirrors ``_run_events_tail`` but writes only ``git-snapshot`` and
-    ``sessions-snapshot`` rows — NO ``mm-push`` row. Two consequences:
+    Mirrors ``_run_events_tail`` but writes only ``git-snapshot``,
+    ``sessions-snapshot`` and (when the host sweep completed)
+    ``host-usage-snapshot`` rows — NO ``mm-push`` row. The host row is the one
+    exception to "for the past 30 days": the readers aggregate the whole local
+    corpus, so it carries the most recent ``MAX_BY_DAY_DAYS`` days no matter
+    what window the git and session walks used. Two consequences:
 
     * Push-count semantics stay honest: an init-counted-as-push would
       inflate the per-window mm-push count in the retro by 1 on every
@@ -394,10 +726,16 @@ def _run_events_backfill(
             since=since,
             budget_ms=budget_ms,
             root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
+            host_budget_ms=HOST_USAGE_READ_BUDGET_INTERACTIVE_MS,
+            # Init already warms the token cache inline and is attended; paying
+            # the host warm here means the first push after install inherits a
+            # hot cache, exactly as it does for tokens.
+            warm_host_cache=_warm_host_cache_with_notice,
             prepare_token_cache=prepare_backfill_token_cache,
+            host_readers=_default_host_readers(sources),
         )
 
-        rows_to_write = [*capture.git_rows, *capture.session_rows]
+        rows_to_write = [*capture.git_rows, *capture.session_rows, *capture.host_rows]
         if rows_to_write:
             events.write_push_event(events_dir, device_id, rows_to_write)
 
@@ -421,6 +759,14 @@ def _run_events_backfill(
             sys.stderr.write(
                 "mm: notice: git repository discovery hit its time budget: "
                 "initial retro capture may omit repositories. A later substantive push will retry\n"
+            )
+        # Init has no `mm-push` row and no autorun breadcrumb, so the notice is
+        # the only surface available — and init IS attended, so it lands.
+        if not capture.host_capture.complete:
+            sys.stderr.write(
+                "mm: notice: "
+                + _host_skip_phrase(capture.host_capture.reader, capture.host_capture.reason)
+                + "\n"
             )
     except Exception as e:
         sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")

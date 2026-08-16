@@ -204,6 +204,39 @@ def _isolate_token_cache(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_host_usage(monkeypatch, tmp_path) -> None:
+    """Point every host-usage reader root and cache at a per-test path.
+
+    Since Track 19A the events tail reads the built-in Codex / Grok / OpenCode
+    sources on every substantive push and init backfill, so without this every
+    test that drives ``mm push`` / ``mm init`` would parse the DEVELOPER'S REAL
+    ``~/.codex/sessions`` and write the real ``~/.config/mind-meld/*host-
+    tokens.json`` caches. Same class of leak as ``_isolate_token_cache`` and
+    ``_isolate_identity_cache``, with a sharper edge: the suite's own result
+    would depend on which agents happen to be installed on the machine running
+    it. A developer with a ``~/.grok/sessions`` directory gets the (correct)
+    ``unsupported`` omission, which turns the healthy-tail control pin in
+    ``test_silent_failure_contract.py`` into a ``degraded`` failure on their
+    Mac while CI, where the directory does not exist, stays green.
+
+    The redirected roots do not exist, so every reader returns a COMPLETED
+    EMPTY scan — the healthy default, and the same thing CI would see. Tests
+    that need populated or incomplete host data monkeypatch the reader
+    function itself (``host_usage.read_codex_usage`` and friends), which is
+    also what keeps them off real host logs.
+    """
+    from mind_meld import host_usage as _host_usage
+
+    root = tmp_path / "_isolated_hosts"
+    monkeypatch.setattr(_host_usage, "CODEX_SESSIONS_PATH", root / "codex" / "sessions")
+    monkeypatch.setattr(_host_usage, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
+    monkeypatch.setattr(_host_usage, "OPENCODE_DATA_PATH", root / "opencode")
+    monkeypatch.setattr(_host_usage, "CACHE_PATH", root / "host-tokens.json")
+    monkeypatch.setattr(_host_usage, "GROK_CACHE_PATH", root / "grok-host-tokens.json")
+    monkeypatch.setattr(_host_usage, "OPENCODE_CACHE_PATH", root / "opencode-host-tokens.json")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
     """Redirect pullhistory.HISTORY_DIR to a per-test path.
 

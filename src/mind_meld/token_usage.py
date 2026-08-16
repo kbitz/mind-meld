@@ -87,6 +87,7 @@ from mind_meld.lockedjson import (
     locked_json_rmw,
     locked_json_snapshot,
 )
+from mind_meld.safety import safe_str
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -940,7 +941,15 @@ def iter_bounded_lines(
             # Resumable reader: partial write. Stop without advancing past it.
             return
         if path_str not in _WARNED_OVERSIZE_PATHS:
-            sys.stderr.write(f"mm: notice: {label} skipping oversize line in {path_str}\n")
+            # `safe_str` because the path is a FILENAME from an agent-writable
+            # tree (`~/.codex/sessions/**/rollout-*.jsonl` matches `.*`, and
+            # macOS permits control bytes in filenames), so it can smuggle an
+            # OSC/CSI escape into the terminal. Track 19A's relaxed Codex
+            # refusal made this reachable on far more files than before —
+            # the scan used to die on the first ledger-less rollout.
+            sys.stderr.write(
+                f"mm: notice: {label} skipping oversize line in {safe_str(path_str)}\n"
+            )
             _WARNED_OVERSIZE_PATHS.add(path_str)
         drained = _drain_to_newline(fp)
         if drained is None:

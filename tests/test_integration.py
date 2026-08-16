@@ -20,6 +20,7 @@ from mind_meld import config as config_module
 from mind_meld import crypto as crypto_module
 from mind_meld import events as _mm_events
 from mind_meld import events_tail, fsutil, synclog
+from mind_meld import host_usage as _mm_host_usage
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import (
@@ -3585,6 +3586,85 @@ class TestTrack7BEventsTail:
         third_rows = self._read_events(first[0])
         assert len(third_rows) > len(second_rows), "events tail did not fire on a substantive push"
         assert third_rows[-1]["type"] == "mm-push"
+
+    def test_host_usage_row_ships_on_a_real_push(self, tmp_path, monkeypatch):
+        """Track 19A end-to-end: the host snapshot rides the same push as the
+        rows around it, ordered before the terminal ``mm-push``."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config_path = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        # The codex reader is CONSENT-GATED on the `codex` source being enabled,
+        # so a host row only ships for a user who opted that host in.
+        config = config_module.load_config(config_path)
+        codex_root = tmp_path / "codex-home"
+        codex_root.mkdir()
+        config["sync"]["sources"].append(
+            {"name": "codex", "path": str(codex_root), "type": "generic"}
+        )
+        save_config(config, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setattr(
+            _mm_host_usage,
+            "read_codex_usage",
+            lambda **_kw: _mm_host_usage.HostUsageResult(
+                {
+                    "codex": {
+                        "2026-08-15": {"input": 12, "cache_create": 0, "cache_read": 0, "output": 3}
+                    }
+                },
+                complete=True,
+            ),
+        )
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        types = [r["type"] for r in rows]
+        assert types.index("host-usage-snapshot") < types.index("mm-push")
+        assert types[-1] == "mm-push"
+        host_row = rows[types.index("host-usage-snapshot")]
+        assert host_row["hosts"]["codex"]["2026-08-15"]["input"] == 12
+        assert host_row["active_days"] == ["2026-08-15"]
+
+    def test_no_content_push_touches_no_host_reader(self, tmp_path, monkeypatch):
+        """Zero-work gate: the substantive-change gate short-circuits before
+        the tail, so an empty push must not open a host store or its cache
+        either. Host reads are optional analytics — they never pay for a
+        push that has nothing to say."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        config = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        calls: list[str] = []
+
+        def record(name):
+            def read(**_kw):
+                calls.append(name)
+                return _mm_host_usage.HostUsageResult({}, complete=True)
+
+            return read
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", record("codex"))
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", record("grok"))
+        monkeypatch.setattr(_mm_host_usage, "read_opencode_usage", record("opencode"))
+
+        # Nothing changed since the first push → no-op.
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0
+        assert "Nothing to push" in result.output
+        assert calls == []
 
     def test_noop_across_utc_keeps_cursor_for_later_git_catchup(self, tmp_path, monkeypatch):
         """A date rollover does not manufacture an event or lose idle commits.

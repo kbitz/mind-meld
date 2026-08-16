@@ -2,6 +2,26 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.32] - 2026-08-16
+
+**Pushes now publish aggregate non-Claude host token usage to the fleet, for the hosts you actually enabled, and only when the sweep can be trusted.**
+
+### Added
+
+- **`host-usage-snapshot` event row.** The push tail and `mm init` backfill emit an additive row carrying per-host-family, per-UTC-day token totals plus the days present. It ships between the session rows and the terminal `mm-push`, is capped at the same 90-day window as Claude token history, and is omitted entirely when a host could not be read — an absent row means "unknown", never zero.
+- **Consent gate on host readers.** A host's local usage records are read only when you have enabled that host as a sync source, matching how the Claude session walk has always been gated. Declining `codex` means `~/.codex/sessions` is never opened.
+- **One-off host cache warm.** An attended `mm push` or `mm init` may spend a single bounded warm when the per-push budget cannot fit a cold scan; unattended `autopush` never does, and instead converges across pushes.
+
+### Changed
+
+- **A source that keeps no usage ledger is absent, not failed.** Grok's transcript-only store and OpenCode's legacy message files now report `no_metadata_ledger` and are dropped from the row's `token_sources` instead of suppressing the whole snapshot. Genuine read failures still withhold everything. Before this, merely having Grok installed made the row unpublishable on that machine forever and pinned `mm status` at `degraded`.
+- **Ordinary Codex rollout shapes no longer refuse the whole store.** A `token_count` with no usage payload (33% of rollouts on a real machine) and a ledger preceding the first `turn_context` are skipped rather than treated as fatal; a rollout with no ledger contributes nothing. Measured before the fix: 167 of 452 rollouts failed and the reader gave up on the first one in 5ms.
+- **An interrupted host scan keeps its per-file progress.** Cache persistence is now separate from whether the scan may be published, so a corpus too large for one bounded read converges over a few pushes instead of re-parsing the same prefix forever.
+
+### Fixed
+
+- **Withheld host snapshots reach `mm status`.** An incomplete sweep appends a safe `degraded` breadcrumb naming only the reader and reason class, and states that content sync and git/session capture are unaffected.
+
 ## [0.12.31] - 2026-08-16
 
 **Conflict review now has one terminal-safe diff renderer and one compatibility path for the retired `b` / `both` choice.**
