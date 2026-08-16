@@ -62,8 +62,12 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mind_meld.lockedjson import locked_json_rmw
+
+if TYPE_CHECKING:
+    from mind_meld.events import GitRootDiscovery
 
 CACHE_PATH = Path("~/.config/mind-meld/identity-cache.json").expanduser()
 CACHE_VERSION = 1
@@ -77,7 +81,11 @@ _PER_REPO_TIMEOUT_S = 2.0
 _PER_REPO_BUDGET_S = 5.0
 
 
-def gather_local_identities(*, allow_refresh: bool = True) -> list[str]:
+def gather_local_identities(
+    *,
+    allow_refresh: bool = True,
+    root_discovery: GitRootDiscovery | None = None,
+) -> list[str]:
     """Return the locally-known author emails as a sorted, lowercased list.
 
     Read-and-refresh contract:
@@ -118,7 +126,14 @@ def gather_local_identities(*, allow_refresh: bool = True) -> list[str]:
         return []
 
     # Phase 2: slow subprocess gather, no flock held.
-    emails = _do_full_gather()
+    emails = (
+        _do_full_gather()
+        if root_discovery is None
+        else _do_full_gather(root_discovery=root_discovery)
+    )
+
+    if root_discovery is not None and root_discovery.exceeded:
+        return _return_incomplete_union(emails)
 
     # Phase 3: brief write under lock. A concurrent caller may have written
     # a fresh cache while we were gathering; in that case use theirs and
@@ -126,12 +141,18 @@ def gather_local_identities(*, allow_refresh: bool = True) -> list[str]:
     return _persist_or_yield_concurrent(emails)
 
 
-def refresh_identity_cache(*, force: bool = False) -> list[str]:
+def refresh_identity_cache(
+    *,
+    force: bool = False,
+    root_discovery: GitRootDiscovery | None = None,
+) -> list[str]:
     """Refresh the identity cache and return the new list.
 
-    ``force=True`` always rewrites the cache (used by ``mm init`` warm,
-    ``mm refresh-identity``). ``force=False`` is a no-op when the cache is
-    already fresh.
+    ``force=True`` rewrites the cache (used by ``mm init`` warm,
+    ``mm refresh-identity``) when discovery is complete. A supplied
+    incomplete discovery returns a transient union without rewriting cache
+    bytes or freshness. ``force=False`` is a no-op when the cache is already
+    fresh.
 
     Returns the resulting email list. On failure, returns whatever was in
     the cache before (may be empty).
@@ -157,13 +178,42 @@ def refresh_identity_cache(*, force: bool = False) -> list[str]:
         return []
 
     # Phase 2: slow subprocess gather, no flock held.
-    emails = _do_full_gather()
+    emails = (
+        _do_full_gather()
+        if root_discovery is None
+        else _do_full_gather(root_discovery=root_discovery)
+    )
+
+    if root_discovery is not None and root_discovery.exceeded:
+        return _return_incomplete_union(emails)
 
     # Phase 3: write — but on ``force=False``, defer to a concurrent fresh
     # write if one landed. ``force=True`` always overwrites.
     if force:
         return _persist_force(emails)
     return _persist_or_yield_concurrent(emails)
+
+
+def _return_incomplete_union(emails: list[str]) -> list[str]:
+    """Return current cache plus partial discovery without refreshing cache.
+
+    A root deadline proves only that repository observation was incomplete.
+    Persisting a union here would make identities removed from config or a
+    repository survive a full TTL as if the observation had been complete.
+    The lock gives this one caller the latest concurrent cache, while leaving
+    both cache bytes and refreshed_at untouched for a later complete refresh.
+    """
+    try:
+        with locked_json_rmw(
+            CACHE_PATH,
+            default_factory=_default_cache,
+            on_contention="block",
+        ) as ljson:
+            cache = ljson.data
+            cached = cache.get("emails") if _is_valid_cache(cache) else []
+            return sorted({*emails, *(cached or [])})
+    except Exception:
+        return list(emails)
 
 
 def _persist_or_yield_concurrent(emails: list[str]) -> list[str]:
@@ -245,13 +295,13 @@ def _is_cache_stale(cache: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _do_full_gather() -> list[str]:
+def _do_full_gather(*, root_discovery: GitRootDiscovery | None = None) -> list[str]:
     """Run all four sources and return a deduped, lowercased, sorted list."""
     emails: set[str] = set()
     g = _gather_global_email()
     if g:
         emails.add(g)
-    for e in _gather_per_repo_emails():
+    for e in _gather_per_repo_emails(root_discovery=root_discovery):
         emails.add(e)
     for e in _gather_config_author_emails():
         emails.add(e)
@@ -278,7 +328,10 @@ def _gather_global_email() -> str | None:
     return email or None
 
 
-def _gather_per_repo_emails() -> set[str]:
+def _gather_per_repo_emails(
+    *,
+    root_discovery: GitRootDiscovery | None = None,
+) -> set[str]:
     """For each discovered git root, read per-repo ``git config user.email``.
 
     Bounded by ``_PER_REPO_BUDGET_S`` total wall-clock and per-repo
@@ -289,21 +342,24 @@ def _gather_per_repo_emails() -> set[str]:
     Walking commits would pull in collaborator emails from shared repos and
     silently inflate the trust set.
     """
-    try:
-        from mind_meld.config import CONFIG_PATH, load_config
-        from mind_meld.events import discover_git_roots
-    except Exception:
-        return set()
+    if root_discovery is not None:
+        roots, _errors = root_discovery
+    else:
+        try:
+            from mind_meld.config import CONFIG_PATH, load_config
+            from mind_meld.events import discover_git_roots
+        except Exception:
+            return set()
 
-    try:
-        cfg = load_config(CONFIG_PATH)
-    except Exception:
-        return set()
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except Exception:
+            return set()
 
-    try:
-        roots, _errors = discover_git_roots(cfg if isinstance(cfg, dict) else {})
-    except Exception:
-        return set()
+        try:
+            roots, _errors = discover_git_roots(cfg if isinstance(cfg, dict) else {})
+        except Exception:
+            return set()
 
     if not roots:
         return set()

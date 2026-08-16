@@ -7,21 +7,27 @@ Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
 from __future__ import annotations
 
 import copy
+import difflib
+import fcntl
 import fnmatch
 import hashlib
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 import typer
+from packaging.version import InvalidVersion, Version
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -56,6 +62,13 @@ from mind_meld.config import (
     load_config,
     patch_config_on_disk,
     save_config,
+)
+from mind_meld.conflictdiff import (
+    count_divergent_lines,
+    render_banner,
+    render_prompt,
+    render_time_line,
+    render_verdict,
 )
 from mind_meld.conflictmtime import (
     _bump_canonical_mtime_post_resolve,
@@ -113,8 +126,12 @@ from mind_meld.manifest import (
     parse_conflict_device_short,
     read_and_hash,
     serialize_manifest,
+    walk_source,
 )
-from mind_meld.merge import merge_file, should_merge
+from mind_meld.manifest import (
+    _is_excluded as _manifest_is_excluded,
+)
+from mind_meld.merge import lcs_merge, merge_file, should_merge
 from mind_meld.retention import CONFLICT_AGE_DAYS
 from mind_meld.safety import (  # noqa: F401 — re-exported for backwards-compat
     safe_str,
@@ -310,7 +327,7 @@ def _error(msg: str) -> None:
     # still see the [red]Error:[/red] formatting because terminals render
     # stderr alongside stdout — the separation only matters when stdout is
     # being consumed programmatically.
-    stderr_console.print(f"[red]Error:[/red] {msg}")
+    stderr_console.print(f"[red]Error:[/red] {safe_str(msg)}")
     raise typer.Exit(1)
 
 
@@ -329,7 +346,9 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     """
 
     def _warn(key: str, reason: str) -> None:
-        stderr_console.print(f"[yellow]Warning:[/yellow] dropped device entry {key} — {reason}")
+        stderr_console.print(
+            f"[yellow]Warning:[/yellow] dropped device entry {safe_str(key)} — {safe_str(reason)}"
+        )
 
     return _list_devices_impl(backend, on_drop=_warn)
 
@@ -1261,7 +1280,6 @@ def _prompt_conflict_choice(
         render_verdict,
     )
     from mind_meld.merge import lcs_merge
-
     # Stat local for the timestamp display. Best-effort: a failed stat just
     # renders "unknown". The remote side has NO on-disk file at this inline
     # site, so its created/birthtime is genuinely unavailable -- only the
@@ -2203,7 +2221,9 @@ def _init_storage_guard(
     # is ok and nothing else exists.
 
 
-def _prompt_source_toggle(source: dict[str, Any], *, current_state: bool) -> bool:
+def _prompt_source_toggle(
+    source: dict[str, Any], *, current_state: bool, detected: bool | None = None
+) -> bool:
     """One Y/n confirm for a single source.
 
     Single source of truth for the prompt copy + default-Y/N rule. Used
@@ -2215,8 +2235,10 @@ def _prompt_source_toggle(source: dict[str, Any], *, current_state: bool) -> boo
     name = source["name"]
     path_str = str(source.get("path", ""))
     if path_str:
-        detected = "detected" if Path(path_str).expanduser().exists() else "not detected"
-        prompt = f"Sync '{name}' source at {path_str}? ({detected})"
+        if detected is None:
+            detected = Path(path_str).expanduser().exists()
+        detection_label = "detected" if detected else "not detected"
+        prompt = f"Sync '{name}' source at {path_str}? ({detection_label})"
     else:
         prompt = f"Sync '{name}' source?"
     return typer.confirm(prompt, default=current_state)
@@ -2249,7 +2271,7 @@ def _prompt_sources() -> list[dict[str, Any]]:
             continue
         path_str = str(default["path"])
         exists = Path(path_str).expanduser().exists()
-        if _prompt_source_toggle(default, current_state=exists):
+        if _prompt_source_toggle(default, current_state=exists, detected=exists):
             src = get_default_source(default["name"])
             if src is not None:
                 enabled.append(src)
@@ -2325,17 +2347,11 @@ def _bootstrap_or_verify_crypto(
             assert retry_fetch.root_salt is not None
             assert retry_fetch.argon2_memory_kb is not None
             assert retry_fetch.keycheck_blob is not None
-            root_salt = retry_fetch.root_salt
-            argon2_memory_kb = retry_fetch.argon2_memory_kb
-            keycheck_blob = retry_fetch.keycheck_blob
-            set_crypto_session(root_salt, argon2_memory_kb)
-            master_key = load_master_key(passphrase, root_salt, argon2_memory_kb)
-            try:
-                verify_passphrase(master_key, keycheck_blob)
-            except CryptoError as e:
-                _error(str(e))
-            console.print("  Verified passphrase against peer mm-crypto-init.")
-            return root_salt, argon2_memory_kb, keycheck_blob
+            return _verify_existing_crypto_init(
+                retry_fetch,
+                passphrase,
+                success_message="  Verified passphrase against peer mm-crypto-init.",
+            )
 
         assert bootstrap.root_salt is not None
         assert bootstrap.argon2_memory_kb is not None
@@ -2350,6 +2366,28 @@ def _bootstrap_or_verify_crypto(
         return root_salt, argon2_memory_kb, keycheck_blob
 
     # Second-device: verify against the fetch we already did.
+    return _verify_existing_crypto_init(
+        fetch,
+        passphrase,
+        success_message=(
+            "  Verified passphrase against existing mm-crypto-init "
+            f"(root_salt fp={root_salt_fingerprint(fetch.root_salt)})."
+        ),
+    )
+
+
+def _verify_existing_crypto_init(
+    fetch: CryptoInitFetch,
+    passphrase: str,
+    *,
+    success_message: str,
+) -> tuple[bytes, int, bytes]:
+    """Verify an already-fetched crypto init and activate its session.
+
+    The caller owns any race retry before invoking this helper. In particular,
+    `_bootstrap_or_verify_crypto` must never feed its stale pre-bootstrap fetch
+    here after an exclusive-create loss.
+    """
     assert fetch.root_salt is not None
     assert fetch.argon2_memory_kb is not None
     assert fetch.keycheck_blob is not None
@@ -2362,10 +2400,7 @@ def _bootstrap_or_verify_crypto(
         verify_passphrase(master_key, keycheck_blob)
     except CryptoError as e:
         _error(str(e))
-    console.print(
-        f"  Verified passphrase against existing mm-crypto-init "
-        f"(root_salt fp={root_salt_fingerprint(root_salt)})."
-    )
+    console.print(success_message)
     return root_salt, argon2_memory_kb, keycheck_blob
 
 
@@ -3324,8 +3359,6 @@ def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> 
     `_list_devices_warn` runs later in `_select_devices` only if the
     fleet check passes.
     """
-    from packaging.version import InvalidVersion, Version
-
     valid, dropped = list_devices_with_drops(backend)
     refusals: list[str] = []
 
@@ -4286,7 +4319,7 @@ def status(
     devices = _list_devices_warn(backend)
 
     console.print("\n[bold]Mind Meld Status[/bold]")
-    console.print(f"  Device: {device_name} ({device_id})")
+    console.print(f"  Device: {safe_str(device_name)} ({safe_str(device_id)})")
 
     # Surface the last autopull/autopush breadcrumb so a wedged sync
     # (silent lock contention, missing passphrase, bad config) is visible.
@@ -4343,7 +4376,8 @@ def status(
     if missing_excludes:
         console.print(
             f"  [yellow]Config missing recommended excludes for source(s):[/yellow] "
-            f"{', '.join(missing_excludes)} — run [bold]mm migrate-config[/bold] to add."
+            f"{', '.join(safe_str(name) for name in missing_excludes)} — "
+            "run [bold]mm migrate-config[/bold] to add."
         )
 
     # Seam 3 — auto-upgrade nudge surfacing in status. Reads cache only,
@@ -4354,8 +4388,8 @@ def status(
     if upgrade_result.state == "upgrade-available" and upgrade_result.latest:
         console.print(
             f"  [yellow]Upgrade available:[/yellow] "
-            f"{upgrade_result.local} → {upgrade_result.latest} "
-            f"(run [bold]{upgrade_result.install_cmd}[/bold])"
+            f"{safe_str(upgrade_result.local)} → {safe_str(upgrade_result.latest)} "
+            f"(run [bold]{safe_str(upgrade_result.install_cmd)}[/bold])"
         )
 
     # Per-machine source-toggle visibility (v0.10.0). Two breadcrumbs:
@@ -4370,7 +4404,7 @@ def status(
     if disabled_list:
         console.print(
             f"  [yellow]Disabled sources (this device):[/yellow] "
-            f"{', '.join(sorted(disabled_list))} — "
+            f"{', '.join(safe_str(name) for name in sorted(disabled_list))} — "
             "run [bold]mm enable-source <name>[/bold] to re-enable."
         )
 
@@ -4386,9 +4420,9 @@ def status(
     )
     for name in new_sources:
         console.print(
-            f"  [cyan]New source available:[/cyan] {name} — "
-            f"run [bold]mm enable-source {name}[/bold] to sync, "
-            f"or [bold]mm disable-source {name}[/bold] to dismiss."
+            f"  [cyan]New source available:[/cyan] {safe_str(name)} — "
+            f"run [bold]mm enable-source {safe_str(name)}[/bold] to sync, "
+            f"or [bold]mm disable-source {safe_str(name)}[/bold] to dismiss."
         )
 
     # Per-source breakdown
@@ -4412,7 +4446,7 @@ def status(
         total_modified += len(diff.modified)
         total_deleted += len(diff.deleted)
 
-        console.print(f"\n  [bold]Source '{src_name}':[/bold]")
+        console.print(f"\n  [bold]Source '{safe_str(src_name)}':[/bold]")
         console.print(f"    Local files: {local_count}")
         console.print(f"    Remote files: {remote_count}")
 
@@ -4453,7 +4487,7 @@ def status(
         console.print("\n  Other devices:")
         for d in devices:
             if d["device_id"] != device_id:
-                console.print(f"    {d['device_name']} ({d['device_id']})")
+                console.print(f"    {safe_str(d['device_name'])} ({safe_str(d['device_id'])})")
 
 
 # ── diag ──────────────────────────────────────────────────────────────
@@ -4474,8 +4508,6 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     where corruption meaning lives, so bypassing them would misreport the
     exact scenario this command exists to diagnose.
     """
-    import json as _json
-
     # Local config (best-effort — a broken config is itself diag-worthy).
     try:
         cfg = load_config()
@@ -4562,7 +4594,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     try:
         bp = _autorun_breadcrumb_path()
         if bp.exists():
-            breadcrumb = _json.loads(bp.read_text())
+            breadcrumb = json.loads(bp.read_text())
     except (OSError, ValueError):
         breadcrumb = {"error": "unreadable"}
 
@@ -5043,9 +5075,6 @@ def sources() -> None:
     """
     config = _get_config()
 
-    from mind_meld.manifest import _is_excluded as _manifest_is_excluded
-    from mind_meld.manifest import walk_source
-
     src_list = _resolve_all_configured_sources(config)
     disabled_set = set(config.get("sync", {}).get("disabled_sources", []) or [])
     max_file_size = config["sync"]["max_file_size"]
@@ -5125,8 +5154,6 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
             file=sys.stderr,
         )
         return
-    import difflib
-
     matches = difflib.get_close_matches(name, valid, n=1, cutoff=0.6)
     suggestion = f" Did you mean '{matches[0]}'?" if matches else ""
     raise ConfigError(
@@ -5824,8 +5851,6 @@ def conflicts() -> None:
         console.print("[green]No conflict files.[/green]")
         return
 
-    from mind_meld.manifest import is_pre_inversion_conflict_filename
-
     table = Table(title=f"Conflict files ({len(hits)})")
     table.add_column("Source")
     table.add_column("Mode")
@@ -5887,9 +5912,6 @@ def _quarantine_corrupt_manifest(
 
     Returns the quarantine path.
     """
-    import secrets as _secrets
-    from datetime import datetime, timezone
-
     mkey = manifest_key(device_id)
     src = storage_root / mkey
     if not src.exists():
@@ -5898,12 +5920,12 @@ def _quarantine_corrupt_manifest(
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     candidates = [
         src.with_name(src.name + f".corrupt-{ts}"),
-        src.with_name(src.name + f".corrupt-{ts}-{_secrets.token_hex(2)}"),
+        src.with_name(src.name + f".corrupt-{ts}-{secrets.token_hex(2)}"),
     ]
     dst = next((c for c in candidates if not c.exists()), None)
     if dst is None:
         # Both collided — extremely improbable, but pick a guaranteed-unique name.
-        dst = src.with_name(src.name + f".corrupt-{ts}-{_secrets.token_hex(4)}")
+        dst = src.with_name(src.name + f".corrupt-{ts}-{secrets.token_hex(4)}")
 
     data = src.read_bytes()
     # atomic_write_bytes with fsync=True ensures dst is durably written
@@ -6309,9 +6331,6 @@ def _log_unexpected(verb: str, exc: BaseException) -> None:
     Any failure here is swallowed; the caller has already emitted the
     one-line stderr message, and a broken log file must never crash the hook.
     """
-    import fcntl
-    import traceback
-
     try:
         sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
         path = _auto_log_path(verb)
@@ -6365,6 +6384,14 @@ def _should_log_cause(exc: BaseException) -> bool:
     return exc.__cause__ is not None
 
 
+def _print_auto_typed_error(verb: str, verb_action: str, exc: BaseException) -> None:
+    """Render a typed hook error safely on its plain stderr surface."""
+    print(
+        f"mm: {verb} {verb_action} - {strip_terminal_escapes(str(exc))}",
+        file=sys.stderr,
+    )
+
+
 def _auto_command_setup(verb: str) -> _AutoSetup | None:
     """Load config + passphrase + crypto session for autopull/autopush.
 
@@ -6406,7 +6433,7 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
     try:
         config = load_config()
     except MindMeldError as e:
-        print(f"mm: {verb} failed - {e}", file=sys.stderr)
+        _print_auto_typed_error(verb, "failed", e)
         if _should_log_cause(e):
             _log_unexpected(verb, e)
         _write_autorun_breadcrumb(verb, "config-error", str(e))
@@ -6429,7 +6456,7 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
     try:
         passphrase = get_passphrase(non_interactive=True)
     except CryptoError as e:
-        print(f"mm: {verb} skipped - {e}", file=sys.stderr)
+        _print_auto_typed_error(verb, "skipped", e)
         _write_autorun_breadcrumb(verb, "no-passphrase")
         return None
     except Exception as e:
@@ -6464,7 +6491,7 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
     try:
         memory_kb = _init_crypto_session(backend, passphrase, config)
     except MindMeldError as e:
-        print(f"mm: {verb} failed - {e}", file=sys.stderr)
+        _print_auto_typed_error(verb, "failed", e)
         if _should_log_cause(e):
             _log_unexpected(verb, e)
         _write_autorun_breadcrumb(verb, "crypto-error", str(e))
@@ -6481,6 +6508,52 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
     return _AutoSetup(config=config, passphrase=passphrase, memory_kb=memory_kb)
 
 
+@contextmanager
+def _auto_command_scope(
+    verb: str,
+    *,
+    typer_exit_outcome: str,
+) -> Iterator[_AutoSetup | None]:
+    """Own the shared unattended-command control flow.
+
+    Pull and push keep their own tail bodies and success/degradation outcome
+    mappings. This scope owns only the shared setup, migration breadcrumb,
+    lock lifecycle, and common exception-to-breadcrumb policy.
+    """
+    setup = _auto_command_setup(verb)
+    if setup is None:
+        yield None
+        return
+
+    _write_migration_breadcrumb(_config_missing_recommended_excludes(setup.config))
+
+    try:
+        acquire_lock()
+    except LockError:
+        _write_autorun_breadcrumb(verb, "lock-held")
+        yield None
+        return
+
+    try:
+        yield setup
+    except typer.Exit:
+        _write_autorun_breadcrumb(verb, typer_exit_outcome)
+    except MindMeldError as e:
+        _print_auto_typed_error(verb, "failed", e)
+        if _should_log_cause(e):
+            _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "failed", str(e))
+    except Exception as e:
+        print(
+            f"mm: {verb} failed - unexpected error (see auto{verb}.log)",
+            file=sys.stderr,
+        )
+        _log_unexpected(verb, e)
+        _write_autorun_breadcrumb(verb, "failed", type(e).__name__)
+    finally:
+        release_lock()
+
+
 @app.command()
 def autopull() -> None:
     """Pull changes silently. Designed for Claude Code -- no prompts, minimal output.
@@ -6490,26 +6563,10 @@ def autopull() -> None:
     stderr + traceback to `~/.config/mind-meld/autopull.log`) on: corrupt
     config, crypto init failure, unexpected bug inside `_pull_core`.
     """
-    setup = _auto_command_setup("pull")
-    if setup is None:
-        return
+    with _auto_command_scope("pull", typer_exit_outcome="fleet-refused") as setup:
+        if setup is None:
+            return
 
-    # Visible-failure contract: NEVER auto-mutate config. Record the
-    # missing-excludes signal so `mm status` can surface it for the next
-    # interactive run. This breadcrumb is intentionally orthogonal to the
-    # autorun outcome — pull can succeed AND have a pending migration.
-    _write_migration_breadcrumb(_config_missing_recommended_excludes(setup.config))
-
-    try:
-        acquire_lock()
-    except LockError:
-        # Silent to Claude (never block the hook), but leave a breadcrumb
-        # so `mm status` can show repeated lock-skips -- a wedged flock
-        # used to produce hours of silent no-ops with no signal.
-        _write_autorun_breadcrumb("pull", "lock-held")
-        return
-
-    try:
         result = _pull_core(
             setup.config,
             setup.passphrase,
@@ -6583,30 +6640,6 @@ def autopull() -> None:
         # (~500ms 1x/24h) doesn't stack on sync latency. Silent unless an
         # upgrade is genuinely available AND the 24h re-nudge gate permits.
         upgrade.emit_nudge_if_due(setup.config)
-    except typer.Exit:
-        # 5E ship-fix: `_check_fleet_version_or_refuse` exits via
-        # `_error()` → `typer.Exit(1)` on a mixed-version fleet refusal.
-        # Without this branch, the typed exit lands in `except Exception`
-        # below — autopull would log the full refusal traceback to
-        # `autopull.log` and write a "failed" breadcrumb on every
-        # Claude Code session start, masking the real signal. `_error`
-        # already wrote the user-facing stderr line; just mark the
-        # breadcrumb and exit.
-        _write_autorun_breadcrumb("pull", "fleet-refused")
-    except MindMeldError as e:
-        print(f"mm: pull failed - {e}", file=sys.stderr)
-        if _should_log_cause(e):
-            _log_unexpected("pull", e)
-        _write_autorun_breadcrumb("pull", "failed", str(e))
-    except Exception as e:
-        print(
-            "mm: pull failed - unexpected error (see autopull.log)",
-            file=sys.stderr,
-        )
-        _log_unexpected("pull", e)
-        _write_autorun_breadcrumb("pull", "failed", type(e).__name__)
-    finally:
-        release_lock()
 
 
 @app.command()
@@ -6619,22 +6652,10 @@ def autopush() -> None:
     config, crypto init failure, unexpected bug inside `_push_core`. No
     auto-GC on autopush (prevents blob-deletion hole).
     """
-    setup = _auto_command_setup("push")
-    if setup is None:
-        return
+    with _auto_command_scope("push", typer_exit_outcome="refused") as setup:
+        if setup is None:
+            return
 
-    # Visible-failure contract: NEVER auto-mutate config from a hook.
-    # Surface the missing-excludes signal via a breadcrumb so `mm status`
-    # nudges the user on their next interactive run.
-    _write_migration_breadcrumb(_config_missing_recommended_excludes(setup.config))
-
-    try:
-        acquire_lock()
-    except LockError:
-        _write_autorun_breadcrumb("push", "lock-held")
-        return
-
-    try:
         result = _push_core(
             setup.config,
             setup.passphrase,
@@ -6678,26 +6699,6 @@ def autopush() -> None:
 
         # Seam 2 — auto-upgrade nudge emission at the TAIL (mirrors autopull).
         upgrade.emit_nudge_if_due(setup.config)
-    except typer.Exit:
-        # 5E ship-fix: same as autopull — typed `typer.Exit` from
-        # `_error()` (e.g. corrupt-manifest recovery refusal) must NOT
-        # be logged as an unexpected error. `_error` already wrote the
-        # user-facing stderr line; just mark the breadcrumb.
-        _write_autorun_breadcrumb("push", "refused")
-    except MindMeldError as e:
-        print(f"mm: push failed - {e}", file=sys.stderr)
-        if _should_log_cause(e):
-            _log_unexpected("push", e)
-        _write_autorun_breadcrumb("push", "failed", str(e))
-    except Exception as e:
-        print(
-            "mm: push failed - unexpected error (see autopush.log)",
-            file=sys.stderr,
-        )
-        _log_unexpected("push", e)
-        _write_autorun_breadcrumb("push", "failed", type(e).__name__)
-    finally:
-        release_lock()
 
 
 # ── helpers ───────────────────────────────────────────────────────────
@@ -6705,8 +6706,6 @@ def autopush() -> None:
 
 def _default_device_name() -> str:
     """Generate a default device name from hostname."""
-    import socket
-
     return socket.gethostname()
 
 

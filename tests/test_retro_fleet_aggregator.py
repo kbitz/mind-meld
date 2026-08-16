@@ -1945,7 +1945,8 @@ class TestTokenBlockRender:
         data = self._data_with_tokens()
         data.sessions.pre_token_peers = {"dev-mac-mini"}
         out = format_retro(data)
-        assert "Tokens incomplete: 1 peer(s)" in out
+        assert "Tokens incomplete on dev-mac-mini" in out
+        assert "run `mm push` on those machines" in out
 
 
 class TestSyntheticAndUnpricedTokens:
@@ -3831,15 +3832,26 @@ class TestAsciiCard:
 
     def test_card_lines_pad_to_fixed_width(self):
         data = self._baseline()
+        data.sessions = aggregator.SessionsAggregate(
+            tokens_by_model={
+                "claude-sonnet-4-6": {
+                    "input": 2**53,
+                    "cache_create": 2**53,
+                    "cache_read": 2**53,
+                    "output": 2**53,
+                }
+            },
+            pre_token_peers={f"dev-{n}" for n in range(10)},
+        )
         out = aggregator.format_retro(
             data,
             name="kb",
             themes=["short", "longer theme line", "x"],
             noteworthy="medium length",
         )
-        card_lines = [line for line in out.splitlines() if line.startswith("║")]
+        card_lines = [line for line in out.splitlines() if line.startswith(("╔", "╠", "╚", "║"))]
         assert card_lines, "card not present"
-        # Every interior card line is exactly CARD_WIDTH chars wide.
+        # Every card border and interior line is exactly CARD_WIDTH chars wide.
         widths = {len(line) for line in card_lines}
         assert widths == {aggregator.CARD_WIDTH}, f"variable widths: {widths}"
 
@@ -3874,6 +3886,155 @@ class TestAsciiCard:
             noteworthy="\x1b[1mbold\x1b[0m",
         )
         assert "\x1b" not in out
+
+    def test_model_family_rows_are_defensive_and_reconcile(self):
+        rows = aggregator._aggregate_model_families(
+            {
+                "claude-sonnet-4-6": {
+                    "input": 100,
+                    "cache_create": 7,
+                    "cache_read": 1_000,
+                    "output": 3,
+                },
+                "CLAUDE-OPUS-4-7": {
+                    "input": 10,
+                    "cache_create": 3,
+                    "cache_read": 4,
+                    "output": 5,
+                },
+                "gpt-5": {"input": 1, "cache_create": 2, "cache_read": 3, "output": 4},
+                "grok-3": {"input": 20, "cache_create": 0, "cache_read": 0, "output": 1},
+                "anthropic.claude-bedrock": {
+                    "input": -1,
+                    "cache_create": True,
+                    "cache_read": "9",
+                    "output": "not-a-number",
+                },
+                "<synthetic>": {
+                    "input": 9_999,
+                    "cache_create": 9_999,
+                    "cache_read": 9_999,
+                    "output": 9_999,
+                },
+                "": {"input": 99, "cache_create": 0, "cache_read": 0, "output": 0},
+                "   ": {"input": 99, "cache_create": 0, "cache_read": 0, "output": 0},
+                "zero": {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
+                "malformed": "not-a-bucket",
+            }
+        )
+
+        assert rows == [
+            ("Claude", 1_132),
+            ("Codex", 10),
+            ("Grok", 21),
+            ("Unclassified", 9),
+        ]
+        assert sum(total for _family, total in rows) == 1_172
+        assert aggregator._aggregate_model_families(None) == []
+
+    def test_model_family_rows_preserve_accumulated_safe_peer_totals(self):
+        rows = aggregator._aggregate_model_families(
+            {
+                # _merge_token_window caps each peer contribution before
+                # summing. Two valid maximum-size peers can therefore leave
+                # an aggregate field above the per-peer cap.
+                "claude-sonnet-4-6": {
+                    "input": 2**54,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                }
+            }
+        )
+
+        assert rows == [("Claude", 2**54)]
+
+    def test_models_block_golden_layout_and_global_pr_reference(self):
+        data = self._baseline()
+        data.git.pull_request_identities = {
+            ("github.com/kb/mm", 114),
+            ("github.com/kb/bolt", 115),
+        }
+        data.sessions = aggregator.SessionsAggregate(
+            tokens_by_model={
+                "claude-sonnet-4-6": {
+                    "input": 100,
+                    "cache_create": 0,
+                    "cache_read": 1_000,
+                    "output": 0,
+                },
+                "gpt-5": {"input": 10, "cache_create": 0, "cache_read": 0, "output": 0},
+                "unknown-model": {"input": 9, "cache_create": 0, "cache_read": 0, "output": 0},
+            },
+            pre_token_peers={"dev-b", "dev-a"},
+        )
+        out = aggregator.format_retro(
+            data,
+            name="kb",
+            themes=["theme one", "theme two"],
+            noteworthy="something noteworthy",
+        )
+        card_contents = [line[3:-3].rstrip() for line in out.splitlines() if line.startswith("║")]
+
+        assert card_contents == [
+            "kb · 2026-04-21 → 2026-04-28",
+            "42 commits · 2 repos · 2 machines",
+            "+1.0k / -200 LOC · 37-day streak",
+            "2 detected GitHub PR references",
+            "",
+            "MODELS",
+            "Claude: 1.1k tokens",
+            "Codex: 10 tokens",
+            "Unclassified: 9 tokens",
+            "Coverage: Claude Code session snapshots only",
+            "Model-token coverage incomplete: 2 peer(s); see Notes",
+            "",
+            "NOTEWORTHY",
+            "something noteworthy",
+            "",
+            "TOP WORK",
+            "• theme one",
+            "• theme two",
+        ]
+        assert out.count("2 detected GitHub PR references") == 1
+        assert "merged" not in out
+        assert "Tokens incomplete on dev-a, dev-b" in out
+
+    def test_models_block_renders_for_name_only_second_pass(self):
+        data = self._baseline()
+        out = aggregator.format_retro(data, name="kb")
+
+        assert "MODELS" in out
+        assert "No model usage observed in available snapshots" in out
+        assert aggregator.MODEL_COVERAGE_LINE in out
+        assert "0 detected GitHub PR references" in out
+        assert "MM_THEMES_PROMPT" not in out
+
+    def test_models_block_warns_for_pre_v2_peer(self):
+        data = self._baseline()
+        data.sessions = aggregator.SessionsAggregate(
+            tokens_by_model={
+                "claude-sonnet-4-6": {
+                    "input": 100,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                }
+            },
+            pre_v2_peers={"old-host"},
+        )
+        out = aggregator.format_retro(data, name="kb")
+
+        assert "Model-token coverage incomplete: 1 peer(s); see Notes" in out
+        assert "Tokens incomplete on old-host: pre-v0.11.0 session schema" in out
+
+    def test_token_coverage_notes_bound_peer_names(self):
+        data = self._baseline()
+        data.sessions.pre_token_peers = {f"dev-{n}" for n in range(6)}
+        out = aggregator.format_retro(data)
+
+        assert "Tokens incomplete on dev-0, dev-1, dev-2, dev-3, dev-4 (+1 more)" in out
+        assert "dev-5" not in out
 
 
 class TestThemesPrompt:
@@ -3957,6 +4118,8 @@ class TestMainCliFlags:
         assert "╔" in out
         assert "kb · " in out
         assert "alpha" in out
+        assert "MODELS" in out
+        assert "0 detected GitHub PR references" in out
         assert "MM_THEMES_PROMPT" not in out
 
     def test_first_pass_writes_snapshot(self, tmp_path, monkeypatch):

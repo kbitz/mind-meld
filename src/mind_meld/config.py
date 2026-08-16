@@ -13,6 +13,7 @@ from typing import Any
 
 from mind_meld import fsutil
 from mind_meld.errors import ConfigError
+from mind_meld.safety import strip_terminal_escapes
 
 CONFIG_DIR = Path.home() / ".config" / "mind-meld"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -445,7 +446,9 @@ def _bootstrap_mm_events_path(path: str) -> None:
     except OSError as e:
         _BOOTSTRAP_WARNED_PATHS.add(path_key)
         sys.stderr.write(
-            f"mm: warning: could not create mm-events source dir {p} ({type(e).__name__}: {e}); "
+            "mm: warning: could not create mm-events source dir "
+            f"{strip_terminal_escapes(str(p))} "
+            f"({type(e).__name__}: {strip_terminal_escapes(str(e))}); "
             "events will not be synced from this device\n"
         )
 
