@@ -13,6 +13,9 @@ never interprets markup in remote-byte file contents.
 from __future__ import annotations
 
 import io
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
@@ -161,6 +164,148 @@ class TestStripTerminalEscapesBroadCoverage:
     def test_does_not_strip_normal_brackets(self):
         # Square brackets that are NOT terminal escapes survive.
         assert strip_terminal_escapes("plain [bracketed] text") == "plain [bracketed] text"
+
+
+class TestFinalOutputSinks:
+    """Pins for final renderers that previously interpolated raw values."""
+
+    @staticmethod
+    def _console(buf: io.StringIO) -> Console:
+        return Console(file=buf, force_terminal=False, width=200)
+
+    def test_error_renders_exception_text_as_literal_rich_text(self, monkeypatch):
+        import typer
+
+        from mind_meld import cli
+
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "stderr_console", self._console(buf))
+        with pytest.raises(typer.Exit):
+            cli._error("bad \x1b]52;c;ZXZpbA==\x07[red]configuration[/red]")
+
+        out = buf.getvalue()
+        assert "\x1b" not in out
+        assert "ZXZpbA==" not in out
+        assert "[red]configuration[/red]" in out
+
+    def test_dropped_device_warning_renders_peer_fields_as_literal(self, monkeypatch):
+        from mind_meld import cli
+
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "stderr_console", self._console(buf))
+        evil = "peer\x1b]52;c;ZXZpbA==\x07[red]name[/red]"
+
+        def fake_list_devices_impl(_backend, *, on_drop):
+            on_drop(evil, evil)
+            return []
+
+        monkeypatch.setattr(cli, "_list_devices_impl", fake_list_devices_impl)
+        assert cli._list_devices_warn(object()) == []
+
+        out = buf.getvalue()
+        assert "\x1b" not in out
+        assert "ZXZpbA==" not in out
+        assert "[red]name[/red]" in out
+
+    def test_status_renders_peer_device_fields_as_literal(self, monkeypatch, tmp_path: Path):
+        from mind_meld import cli
+
+        buf = io.StringIO()
+        peer_name = "peer\x1b]52;c;ZXZpbA==\x07[red]name[/red]"
+        peer_id = "peer\x1b[2Jid"
+        config = {
+            "device": {"id": "self", "name": "self"},
+            "sync": {"max_file_size": 0, "disabled_sources": []},
+        }
+        monkeypatch.setattr(cli, "console", self._console(buf))
+        monkeypatch.setattr(cli, "_get_config", lambda: config)
+        monkeypatch.setattr(cli, "_get_passphrase_or_exit", lambda: "passphrase")
+        monkeypatch.setattr(cli, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli, "_init_crypto_session", lambda *args: 1024)
+        monkeypatch.setattr(cli, "get_sources", lambda _config: [])
+        monkeypatch.setattr(cli, "build_manifest_v2", lambda *args: {"sources": {}})
+        monkeypatch.setattr(
+            cli,
+            "_fetch_remote_manifest",
+            lambda *args: SimpleNamespace(is_ok=False, manifest=None, status="missing"),
+        )
+        monkeypatch.setattr(
+            cli,
+            "_list_devices_warn",
+            lambda _backend: [
+                {"device_id": "self", "device_name": "self"},
+                {"device_id": peer_id, "device_name": peer_name},
+            ],
+        )
+        monkeypatch.setattr(cli, "_autorun_breadcrumb_path", lambda: tmp_path / "missing")
+        monkeypatch.setattr(cli, "_config_missing_recommended_excludes", lambda _config: [])
+        monkeypatch.setattr(
+            cli.upgrade,
+            "check_for_upgrade",
+            lambda _config: SimpleNamespace(state="up-to-date", latest=None),
+        )
+        monkeypatch.setattr(cli.seen_sources, "read", lambda *, initial: set())
+        monkeypatch.setattr(cli.seen_sources, "compute_new_sources", lambda **kwargs: [])
+        monkeypatch.setattr(cli, "iter_source_diffs", lambda *args, **kwargs: iter(()))
+        monkeypatch.setattr(cli, "_has_mtime_only_changes_vs_remote", lambda *args, **kwargs: False)
+
+        cli.status(source=None)
+
+        out = buf.getvalue()
+        assert "\x1b" not in out
+        assert "ZXZpbA==" not in out
+        assert "[red]name[/red]" in out
+        assert "peerid" in out
+
+    def test_events_whole_walk_notice_strips_terminal_escapes(self, monkeypatch, capsys):
+        from mind_meld import events
+
+        evil = "walk\x1b]52;c;ZXZpbA==\x07failure"
+
+        class FailingExecutor:
+            def __init__(self, **_kwargs):
+                pass
+
+            def submit(self, *_args):
+                raise RuntimeError(evil)
+
+            def shutdown(self, **_kwargs):
+                pass
+
+        monkeypatch.setattr(events, "ThreadPoolExecutor", FailingExecutor)
+        events.walk_git_projects([Path("/tmp/peer")], datetime.now(timezone.utc), 250)
+
+        out = capsys.readouterr().err
+        assert "\x1b" not in out
+        assert "ZXZpbA==" not in out
+        assert "walkfailure" in out
+
+    def test_config_bootstrap_warning_strips_terminal_escapes(self, monkeypatch, capsys):
+        from mind_meld import config
+
+        evil = "denied\x1b]52;c;ZXZpbA==\x07"
+
+        class FailingPath:
+            def expanduser(self):
+                return self
+
+            def exists(self):
+                return False
+
+            def mkdir(self, **_kwargs):
+                raise OSError(evil)
+
+            def __str__(self):
+                return "path\x1b[2J"
+
+        monkeypatch.setattr(config, "Path", lambda _path: FailingPath())
+        monkeypatch.setattr(config, "_BOOTSTRAP_WARNED_PATHS", set())
+        config._bootstrap_mm_events_path("ignored")
+
+        out = capsys.readouterr().err
+        assert "\x1b" not in out
+        assert "ZXZpbA==" not in out
+        assert "denied" in out
 
 
 class TestConflictBannerSanitization:

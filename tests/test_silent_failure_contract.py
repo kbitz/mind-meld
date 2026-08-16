@@ -41,10 +41,11 @@ runner = CliRunner()
 # ─── Config-surface regressions ──────────────────────────────────────────
 
 
-def test_autopull_silent_exit_when_config_missing(tmp_path, monkeypatch):
-    """REGRESSION: only FileNotFoundError-equivalent silences autopull."""
+@pytest.mark.parametrize("command", ["autopull", "autopush"])
+def test_auto_command_silent_exit_when_config_missing(tmp_path, monkeypatch, command):
+    """REGRESSION: only FileNotFoundError-equivalent silences auto commands."""
     monkeypatch.setattr("mind_meld.config.CONFIG_PATH", tmp_path / "nope.toml")
-    result = runner.invoke(app, ["autopull"])
+    result = runner.invoke(app, [command])
     assert result.exit_code == 0
     assert result.stdout == ""
     assert (result.stderr or "") == ""
@@ -71,6 +72,30 @@ def test_autopull_surfaces_corrupt_config(tmp_path, monkeypatch):
     log = iso / "autopull.log"
     assert log.exists()
     assert "TOMLDecodeError" in log.read_text() or "tomllib" in log.read_text()
+
+
+@pytest.mark.parametrize("command", ["autopull", "autopush"])
+def test_auto_command_typed_error_strips_terminal_escapes(tmp_path, monkeypatch, command):
+    """Typed config errors are plain stderr sinks, not Rich renderers."""
+    from mind_meld.errors import ConfigError
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[device]\n")
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+    _redirect_sidecar(monkeypatch, tmp_path)
+    evil = "bad\x1b]52;c;ZXZpbA==\x07config"
+
+    def fail_load_config():
+        raise ConfigError(evil)
+
+    monkeypatch.setattr(cli_module, "load_config", fail_load_config)
+
+    result = runner.invoke(app, [command])
+
+    assert result.exit_code == 0
+    assert "\x1b" not in (result.stderr or "")
+    assert "ZXZpbA==" not in (result.stderr or "")
+    assert "badconfig" in (result.stderr or "")
 
 
 def test_autopush_surfaces_corrupt_config(tmp_path, monkeypatch):
@@ -621,7 +646,11 @@ def test_autopull_writes_breadcrumb_on_success(tmp_path, monkeypatch):
     assert "timestamp" in data
 
 
-def test_autopull_writes_breadcrumb_on_lock_held(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("command", "verb"),
+    [("autopull", "pull"), ("autopush", "push")],
+)
+def test_auto_command_writes_breadcrumb_on_lock_held(tmp_path, monkeypatch, command, verb):
     """LockError still silent-exits but now leaves a 'lock-held' breadcrumb."""
     _setup_real_config(tmp_path, monkeypatch)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -633,12 +662,14 @@ def test_autopull_writes_breadcrumb_on_lock_held(tmp_path, monkeypatch):
 
     monkeypatch.setattr("mind_meld.cli.acquire_lock", boom)
 
-    r = runner.invoke(app, ["autopull"])
+    r = runner.invoke(app, [command])
     assert r.exit_code == 0
     assert r.stdout == ""  # silent to Claude
     crumb = iso / "last-autorun.json"
     assert crumb.exists()
-    assert json.loads(crumb.read_text())["outcome"] == "lock-held"
+    data = json.loads(crumb.read_text())
+    assert data["verb"] == verb
+    assert data["outcome"] == "lock-held"
 
 
 def test_mm_status_surfaces_breadcrumb(tmp_path, monkeypatch):
@@ -959,6 +990,11 @@ def _setup_events_tail_config(tmp_path, monkeypatch):
       is the honest default for these tests.
     """
     storage_dir = tmp_path / "storage"
+    # Automatic root discovery intentionally looks under the user's home.
+    # Keep these behavior tests independent of the developer's real corpus.
+    isolated_home = tmp_path / "isolated-home"
+    isolated_home.mkdir()
+    monkeypatch.setattr(_mm_events.Path, "home", classmethod(lambda cls: isolated_home))
     config_path = tmp_path / "config.toml"
     src = tmp_path / "claude"
     _populate_claude(src)
@@ -1051,6 +1087,31 @@ def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkey
     payload = json.loads((iso / "last-autorun.json").read_text())
     assert payload["outcome"] == "degraded", payload
     assert "budget" in payload.get("detail", "")
+
+
+def test_autopush_breadcrumb_degraded_when_root_discovery_is_partial(tmp_path, monkeypatch):
+    """Partial root discovery is forensic, but must reach mm status safely."""
+    from mind_meld import token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _config, **_kwargs: _mm_events.GitRootDiscovery(
+            (), (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True
+        ),
+    )
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "degraded", payload
+    assert payload["detail"] == (
+        "git repository discovery hit its time budget: this retro capture may omit repositories. "
+        "A later substantive push will retry"
+    )
+    assert str(tmp_path) not in payload["detail"]
 
 
 def test_autopush_breadcrumb_degraded_when_token_cache_cold(tmp_path, monkeypatch):

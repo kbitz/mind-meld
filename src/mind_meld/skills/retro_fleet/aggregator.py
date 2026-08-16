@@ -65,10 +65,11 @@ import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from heapq import nsmallest
 from pathlib import Path
 
 from mind_meld import events as mm_events
-from mind_meld import identity, safety, token_usage
+from mind_meld import host_usage, identity, safety, token_usage
 
 # ---------------------------------------------------------------------------
 # Constants — kept in lockstep with mm's source-of-truth values.
@@ -127,9 +128,23 @@ MAX_THEMES = 3
 for "up to 3" — this enforces it at render time so a misbehaving caller
 can't blow up the card height."""
 
+MAX_TOKEN_COVERAGE_PEER_NAMES = 5
+"""Maximum affected-peer names rendered in the token-coverage Note."""
+
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
 """Usable content width inside the card. Themes/noteworthy strings
 longer than this are truncated with an ellipsis suffix at render time."""
+
+MODEL_FAMILY_ROWS: tuple[tuple[str, str], ...] = (
+    ("claude", "Claude"),
+    ("codex", "Codex"),
+    ("grok", "Grok"),
+    ("other", "Unclassified"),
+)
+"""Fixed display order for the canonical ``host_usage.host_family`` buckets."""
+
+MODEL_COVERAGE_LINE = "Coverage: Claude Code session snapshots only"
+"""Literal source-coverage line for the second-pass MODELS card block."""
 
 
 # ---------------------------------------------------------------------------
@@ -1338,6 +1353,50 @@ def _format_token_count(n: int) -> str:
     return str(n)
 
 
+def _safe_aggregate_token_int(x: object) -> int:
+    """Normalize a model-bucket field without re-clamping valid fleet sums.
+
+    ``_merge_token_window`` clamps each peer field before adding it to a
+    fleet-wide bucket, so a valid aggregate can exceed ``_MAX_SAFE_TOKENS``.
+    Direct callers still receive the regular tolerant conversion for strings
+    and malformed values; only already-numeric aggregate totals bypass the
+    per-peer cap.
+    """
+    if isinstance(x, int) and not isinstance(x, bool):
+        return max(0, x)
+    return _safe_int(x)
+
+
+def _aggregate_model_families(tokens_by_model: object) -> list[tuple[str, int]]:
+    """Return nonzero token totals in canonical model-family display order.
+
+    ``tokens_by_model`` is normally populated by ``_merge_token_window``,
+    which hardens peer-controlled counters. ``SessionsAggregate`` is also a
+    public dataclass used directly by tests and library callers, so this
+    presentation helper repeats that small defensive boundary instead of
+    trusting hand-built values. Synthetic, blank, malformed, and zero-total
+    inputs never create apparent model usage.
+    """
+    if not isinstance(tokens_by_model, dict):
+        return []
+
+    totals = {family: 0 for family, _label in MODEL_FAMILY_ROWS}
+    for model, bucket in tokens_by_model.items():
+        if not isinstance(model, str) or not model.strip():
+            continue
+        if model in token_usage.COST_EXCLUDED_MODELS or not isinstance(bucket, dict):
+            continue
+
+        total = sum(
+            _safe_aggregate_token_int(bucket.get(field)) for field in token_usage.TOKEN_FIELDS
+        )
+        if total <= 0:
+            continue
+        totals[host_usage.host_family(model)] += total
+
+    return [(label, totals[family]) for family, label in MODEL_FAMILY_ROWS if totals[family] > 0]
+
+
 def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
     """Append the v0.11.14+ token-usage block to ``lines``. Renders ONLY when
     the fleet has any token data this window — otherwise no-op (clean
@@ -1607,6 +1666,56 @@ def _card_line(content: str) -> str:
     return f"║  {safe.ljust(CARD_INNER_WIDTH)}  ║"
 
 
+def _token_coverage_peers(sessions: SessionsAggregate) -> set[str]:
+    """Return every peer whose snapshot cannot support complete model totals."""
+    return sessions.pre_v2_peers | sessions.pre_token_peers
+
+
+def _format_coverage_peer_names(peers: set[str]) -> str:
+    """Render a bounded, deterministic, terminal-safe peer-name summary."""
+    shown = sorted(
+        nsmallest(
+            MAX_TOKEN_COVERAGE_PEER_NAMES,
+            (
+                label
+                for peer in peers
+                if isinstance(peer, str)
+                for label in (_safe_short(peer),)
+                if label
+            ),
+        )
+    )
+    if not shown:
+        return f"{len(peers)} peer(s)"
+    summary = ", ".join(shown)
+    if len(peers) > len(shown):
+        summary += f" (+{len(peers) - len(shown)} more)"
+    return summary
+
+
+def _render_models_block(sessions: SessionsAggregate) -> list[str]:
+    """Render the second-pass card's observed-model usage block.
+
+    Family names classify observed model IDs. They do not assert fleet-host
+    coverage; the literal source line and optional incomplete-coverage warning
+    make that distinction visible in a screenshot shared without the body.
+    """
+    out = [_card_line("MODELS")]
+    rows = _aggregate_model_families(sessions.tokens_by_model)
+    if rows:
+        for family, total in rows:
+            out.append(_card_line(f"{family}: {_format_token_count(total)} tokens"))
+    else:
+        out.append(_card_line("No model usage observed in available snapshots"))
+
+    out.append(_card_line(MODEL_COVERAGE_LINE))
+    coverage_peers = _token_coverage_peers(sessions)
+    if coverage_peers:
+        incomplete = f"Model-token coverage incomplete: {len(coverage_peers)} peer(s); see Notes"
+        out.append(_card_line(incomplete))
+    return out
+
+
 def _format_loc_short(n: int) -> str:
     """Compact LOC formatting for the card. ``3247`` → ``3.2k``,
     ``142_000`` → ``142k``. Plain digit string under 1000."""
@@ -1666,6 +1775,10 @@ def _render_ascii_card(
             f"-{_format_loc_short(data.git.deletions)} LOC{streak_part}"
         )
     )
+    out.append(_card_line(f"{data.git.pull_requests} detected GitHub PR references"))
+    out.append(_card_line(""))
+
+    out.extend(_render_models_block(data.sessions))
     out.append(_card_line(""))
 
     if noteworthy:
@@ -1856,7 +1969,8 @@ def format_retro(
 
     Section layout (post-v0.12.0):
 
-    * (Optional) ASCII card with stats + NOTEWORTHY + TOP WORK themes.
+    * (Optional) ASCII card with global stats, observed model-family usage,
+      source coverage, NOTEWORTHY, and TOP WORK themes.
     * Header — date range + activity-across-N-machines line.
     * Trends vs last retro — delta block when a prior snapshot exists.
     * Code shipped — commits, LOC, top repos, commit-type mix, peak hours,
@@ -2001,12 +2115,18 @@ def format_retro(
             f"Sessions count incomplete: {n_pre} peer(s) on pre-v0.11.0 — upgrade for "
             f"accurate session totals."
         )
-    if data.sessions.pre_token_peers:
-        n_token = len(data.sessions.pre_token_peers)
+    token_coverage_peers = _token_coverage_peers(data.sessions)
+    if token_coverage_peers:
+        coverage_reasons: list[str] = []
+        if data.sessions.pre_v2_peers:
+            coverage_reasons.append("pre-v0.11.0 session schema")
+        if data.sessions.pre_token_peers:
+            coverage_reasons.append("pre-v0.11.14 OR cold token cache")
         notes.append(
-            f"Tokens incomplete: {n_token} peer(s) on pre-v0.11.14 OR with cold token "
-            f"cache — upgrade and/or run `mm push` on those machines for accurate "
-            f"token totals."
+            f"Tokens incomplete on {_format_coverage_peer_names(token_coverage_peers)}: "
+            f"{' + '.join(coverage_reasons)} — run "
+            "`mm push` on those machines; upgrade if the warning persists for accurate "
+            "token totals."
         )
     if data.skills.pre_skills_peers:
         n_skills = len(data.skills.pre_skills_peers)

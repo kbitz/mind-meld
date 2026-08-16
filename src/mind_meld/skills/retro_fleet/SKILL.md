@@ -49,6 +49,13 @@ two often enough to look janky in screenshots; routing the card through
 Python's deterministic padding solves it without making the card content
 dumber.
 
+The `MODELS` block is also a **second-pass share-card feature**. The first
+pass remains useful raw markdown and deliberately has no card. Its rows group
+observed model IDs from Claude Code session snapshots; they do not claim
+fleet-host or vendor adoption, and an omitted family means unobserved rather
+than zero. The card states that source coverage directly and points to Notes
+when token coverage is incomplete.
+
 ## Step 1: refresh fleet state
 
 Push first, then pull. `_run_events_tail` only fires on push, so today's
@@ -158,6 +165,13 @@ Then continue with Step 5 in the same message. The card is paste-ready
 for iMessage / Slack / email; the body is for readers who want the
 deeper data.
 
+The card's `N detected GitHub PR references` line is global delivery context,
+not a model-family metric or verified merge status. It appears once above
+`MODELS`, including when the count is zero. When the card says
+`Model-token coverage incomplete: N peer(s); see Notes`, treat the family rows
+as a partial subtotal: the Notes identify affected peers and tell you to run
+`mm push`, then upgrade if the warning persists.
+
 ## Step 5: write the praise / level-up / focus narrative
 
 The card is the shareable artifact. The conversation is where the
@@ -195,9 +209,10 @@ section is omitted when there is nothing to surface):
 - `Sessions count incomplete: N peer(s) on pre-v0.11.0` — those peers still
   emit v=1 sessions snapshots (delta semantics). Their session totals are
   honestly omitted instead of double-counted.
-- `Tokens incomplete: N peer(s) on pre-v0.11.14 OR with cold token cache` —
-  those peers' v=2 snapshots omit ``tokens_by_day``. Run `mm push` on the
-  named peers to rebuild the cache.
+- `Tokens incomplete on <peers>: pre-v0.11.0 session schema and/or
+  pre-v0.11.14 OR cold token cache` — those peers cannot provide complete
+  model-token totals. Run `mm push` on the named peers to rebuild the cache,
+  then upgrade if the warning persists.
 - `Skills incomplete: N peer(s) on pre-v0.11.27 OR with cold token cache` —
   those peers' v=2 snapshots omit ``skills_by_day``. Run `mm push` on the
   named peers (warms the token cache and re-emits the field), or upgrade
