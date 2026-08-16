@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.31] - 2026-08-16
+
+**Conflict review now has one terminal-safe diff renderer and one compatibility path for the retired `b` / `both` choice.**
+
+### Changed
+
+- **Shared conflict presentation and normalization.** Inline pull and `mm resolve` retain their established 60- and 80-line review windows, respectively, while using the same terminal-safe rendering, binary-diff hint, overflow treatment, and exact-match legacy skip-alias behavior.
+
 ## [0.12.30] - 2026-08-16
 
 **Mind Meld can now collect completed OpenCode usage locally through a read-only metadata projection, without inspecting conversation content.**
