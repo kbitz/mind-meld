@@ -1269,17 +1269,8 @@ def _prompt_conflict_choice(
     caller to write to ``local_path``. For all other choices
     ``merged_bytes`` is ``None``.
     """
-    import difflib
+    from mind_meld import conflictdiff
 
-    from mind_meld.conflictdiff import (
-        count_divergent_lines,
-        render_banner,
-        render_capped_diff,
-        render_prompt,
-        render_time_line,
-        render_verdict,
-    )
-    from mind_meld.merge import lcs_merge
     # Stat local for the timestamp display. Best-effort: a failed stat just
     # renders "unknown". The remote side has NO on-disk file at this inline
     # site, so its created/birthtime is genuinely unavailable -- only the
@@ -1356,7 +1347,7 @@ def _prompt_conflict_choice(
 
     # Shared rendering owns terminal-safe peer content, but inline pull keeps
     # its historical 60-entry consent window (mm resolve uses 80).
-    for renderable in render_capped_diff(diff, cap=60):
+    for renderable in conflictdiff.render_capped_diff(diff, cap=60):
         console.print(renderable)
 
     # The conflict file is not on disk yet at this site -- _apply_conflict
