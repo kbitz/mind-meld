@@ -1,3 +1,5 @@
+<!-- /autoplan restore point: /Users/kb/.gstack/projects/kbitz-mind-meld/kbitz-extract-event-capture-autoplan-restore-20260815-143545.md -->
+
 # Roadmap
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
@@ -386,6 +388,10 @@ Child symlinks are now local routing rather than sync content: generic walkers o
 ### Group 16: cli.py decomposition ✓ Shipped (v0.12.21)
 
 - Track 16A — _shipped (v0.12.21): remove the unused collector, extract six cohesive modules, tighten isolation and routing gates, and update release documentation._
+
+### Track 17B: Shared event capture ✓ Shipped (v0.12.25)
+
+- Track 17B — _shipped (v0.12.25): extracted one private event-snapshot path for push and init while retaining their separate policies, writes, and budgets._
 
 ### Track 17D: Honest GC reaper dry-runs ✓ Shipped (v0.12.23)
 

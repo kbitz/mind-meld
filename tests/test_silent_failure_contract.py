@@ -1154,6 +1154,7 @@ def test_autopush_breadcrumb_degraded_when_token_cache_is_locked(tmp_path, monke
     payload = json.loads((iso / "last-autorun.json").read_text())
     assert payload["outcome"] == "degraded", payload
     assert "locked" in payload.get("detail", "")
+    assert "tokens and skills are missing" in payload.get("detail", "")
 
 
 def test_autopush_breadcrumb_joins_multiple_degradations(tmp_path, monkeypatch):

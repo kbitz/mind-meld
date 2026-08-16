@@ -23,11 +23,33 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable, Literal
 
 from mind_meld import __version__, events, identity, token_usage, upgrade
 from mind_meld.safety import safe_str
+
+CacheLockMode = Literal["warn", "block"] | None
+
+
+@dataclass
+class CaptureResult:
+    """Data produced by the shared event-capture path.
+
+    This contract intentionally excludes token-cache warming, identity work,
+    notices, terminal events, and writes. Push and init have different policy
+    for each of those concerns; sharing them here would reintroduce the
+    coupling this helper is meant to remove.
+    """
+
+    git_rows: list[dict]
+    session_rows: list[dict]
+    discovery_errors: list[str]
+    walk_exceeded_budget: bool
+    warn_lock_unavailable: bool
+    token_cache_requested: bool
 
 
 def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
@@ -93,6 +115,77 @@ def _decide_token_walk_policy(
     return True
 
 
+def _capture_event_snapshots(
+    config: dict,
+    claude_paths: list[Path],
+    device_id: str,
+    *,
+    since: datetime,
+    budget_ms: int,
+    prepare_token_cache: Callable[[], CacheLockMode],
+) -> CaptureResult:
+    """Capture device-stamped git and session snapshot rows without writing.
+
+    Callers retain token-cache policy in ``prepare_token_cache``; it runs after
+    the bounded git walk and returns whether token data is available and, when
+    it is, whether contention should warn or block. The cache context stays
+    open for every Claude root, preserving the token cache's read/modify/write
+    lock contract without holding it across git subprocess work. The session
+    deadline begins after caller-owned preparation.
+    """
+    roots, discovery_errors = events.discover_git_roots(config)
+    git_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
+    for row in git_rows:
+        row["device"] = device_id
+
+    token_cache_mode = prepare_token_cache()
+    deadline = time.monotonic() + budget_ms / 1000.0
+    projects: list[dict] = []
+    warn_lock_unavailable = False
+
+    def walk_sessions(token_cache_files: dict | None) -> None:
+        for claude_dir in claude_paths:
+            for row in events.walk_session_metadata(
+                claude_dir,
+                since=since,
+                deadline_monotonic=deadline,
+                token_cache_files=token_cache_files,
+            ):
+                projects.extend(row.get("projects", []))
+
+    if token_cache_mode is None:
+        walk_sessions(None)
+    elif claude_paths:
+        with token_usage.lock_and_get_files(token_cache_mode) as files_dict:
+            # Only warn-mode contention is a caller-visible fact. A blocking
+            # lock normally cannot yield None, and init has no degradation
+            # breadcrumb to return even if a defensive implementation does.
+            warn_lock_unavailable = token_cache_mode == "warn" and files_dict is None
+            walk_sessions(files_dict)
+
+    walk_done = time.monotonic()
+    session_rows: list[dict] = []
+    if claude_paths:
+        session_rows.append(
+            {
+                "v": events.EVENTS_SCHEMA_VERSION,
+                "type": "sessions-snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "device": device_id,
+                "projects": projects,
+            }
+        )
+
+    return CaptureResult(
+        git_rows=git_rows,
+        session_rows=session_rows,
+        discovery_errors=discovery_errors,
+        walk_exceeded_budget=walk_done > deadline,
+        warn_lock_unavailable=warn_lock_unavailable,
+        token_cache_requested=token_cache_mode is not None,
+    )
+
+
 def _run_events_tail(
     config: dict,
     sources: list[dict],
@@ -140,90 +233,28 @@ def _run_events_tail(
         budget_ms = (
             events.WALK_TIME_BUDGET_AUTOPUSH_MS if quiet else events.WALK_TIME_BUDGET_INTERACTIVE_MS
         )
-        deadline = time.monotonic() + budget_ms / 1000.0
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-
-        roots, errs = events.discover_git_roots(config)
         since = events.last_push_ts(events_dir, device_id)
 
-        g_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
-        for r in g_rows:
-            r["device"] = device_id
-
         claude_paths = _enabled_claude_paths(sources)
-        # Token cache wiring (v0.11.14+).
-        # Step 1: decide whether to aggregate tokens this push (handles cold-
-        # cache warm internally). Returns False on autopush + cold + no
-        # detected upgrade transition — caller skips the token aggregation.
-        do_token_walk = _decide_token_walk_policy(claude_paths, quiet=quiet)
-        # Warm may have consumed several seconds. Refresh the deadline so
-        # the session-metadata walk gets its full advertised budget instead
-        # of an already-expired one (Codex outside-voice review caught this
-        # — pre-fix, first interactive push / upgrade autopush could emit
-        # an empty `projects: []` snapshot when warm ate the original
-        # deadline).
-        deadline = time.monotonic() + budget_ms / 1000.0
 
-        agg_projects: list[dict] = []
-        if do_token_walk:
-            # Step 2: hold the token cache flock across the walk so
-            # walk_session_metadata's per-file mutations to files dict are
-            # captured atomically. "warn" mode under autopush degrades
-            # gracefully on contention (`files is None`, no token
-            # aggregation this push); "block" under interactive (user is
-            # waiting anyway). Cache-shape invariants (version + files
-            # isinstance) are owned by token_usage.lock_and_get_files.
-            mode = "warn" if quiet else "block"
-            with token_usage.lock_and_get_files(mode) as files_dict:
-                if files_dict is None:
-                    # Warn-mode contention. `do_token_walk` stays True, so
-                    # the gate below cannot see this — but the user-visible
-                    # outcome is IDENTICAL to the cold-cache case: every
-                    # project ships without tokens_by_day or skills_by_day,
-                    # and latest-snapshot-wins then replaces the prior
-                    # complete data with it. Caught by Codex + the
-                    # maintainability specialist during /review; the
-                    # invariant this function documents says every
-                    # degradation MUST reach the returned list, and this
-                    # one previously reached only a stderr warning.
-                    degradations.append("token cache was locked, so tokens and skills are missing")
-                for claude_dir in claude_paths:
-                    for row in events.walk_session_metadata(
-                        claude_dir,
-                        since=since,
-                        deadline_monotonic=deadline,
-                        token_cache_files=files_dict,
-                    ):
-                        agg_projects.extend(row.get("projects", []))
-        else:
-            for claude_dir in claude_paths:
-                for row in events.walk_session_metadata(
-                    claude_dir,
-                    since=since,
-                    deadline_monotonic=deadline,
-                    token_cache_files=None,
-                ):
-                    agg_projects.extend(row.get("projects", []))
-        # Budget check covers the session-metadata WALK — snapshot the clock
-        # HERE, before the self-bounded identity gather (≤10s worst case, 7d
-        # TTL) and the event write. (The git walk above self-bounds via its
-        # own total_budget_ms; this deadline was reset after it.) Pre-v0.12.9
-        # the check sat after gather_local_identities, so a cold identity
-        # refresh masqueraded as "events tail budget exceeded" even when the
-        # walk finished in ~200ms. The gather announces itself separately via
-        # `refreshing identity cache (one-off)`. See events-retro.md inv. 4.
-        walk_done = time.monotonic()
-        s_rows: list[dict] = []
-        if claude_paths:
-            s_rows.append(
-                {
-                    "v": events.EVENTS_SCHEMA_VERSION,
-                    "type": "sessions-snapshot",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "device": device_id,
-                    "projects": agg_projects,
-                }
-            )
+        def prepare_tail_token_cache() -> CacheLockMode:
+            # Token cache wiring (v0.11.14+). This remains wrapper policy:
+            # cold-cache warming and its notices must happen after the git
+            # walk, just as they did before extraction.
+            do_token_walk = _decide_token_walk_policy(claude_paths, quiet=quiet)
+            if not do_token_walk:
+                return None
+            return "warn" if quiet else "block"
+
+        capture = _capture_event_snapshots(
+            config,
+            claude_paths,
+            device_id,
+            since=since,
+            budget_ms=budget_ms,
+            prepare_token_cache=prepare_tail_token_cache,
+        )
 
         source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
         # Fleet-wide author-email trust set (v0.11.17). gather_local_identities
@@ -239,16 +270,22 @@ def _run_events_tail(
             device=device_id,
             mm_version=__version__,
             sources=source_names,
-            discovery_errors=errs,
+            discovery_errors=capture.discovery_errors,
             local_emails=local_emails,
         )
         # CT-4 invariant: mm-push event LAST so a partial write doesn't
         # advance the next-push cursor.
-        events.write_push_event(events_dir, device_id, [*g_rows, *s_rows, mm_event])
+        events.write_push_event(
+            events_dir,
+            device_id,
+            [*capture.git_rows, *capture.session_rows, mm_event],
+        )
 
-        if walk_done > deadline:
+        if capture.walk_exceeded_budget:
             sys.stderr.write("mm: notice: events tail budget exceeded\n")
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
+        if capture.warn_lock_unavailable:
+            degradations.append("token cache was locked, so tokens and skills are missing")
         # `claude_paths` gate is load-bearing: `_decide_token_walk_policy`
         # ALSO returns False when there is no enabled claude source at all
         # (`if not claude_paths: return False`). That is a config shape, not
@@ -259,7 +296,7 @@ def _run_events_tail(
         # False causes (cold cache on autopush, cache stat/parse OSError,
         # inline warm raised) all mean the same thing to the user: this
         # push published no token or skill data.
-        if claude_paths and not do_token_walk:
+        if claude_paths and not capture.token_cache_requested:
             degradations.append("token walk skipped, so tokens and skills are missing")
     except Exception as e:
         sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
@@ -295,7 +332,6 @@ def _run_events_backfill(
         return
     try:
         budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
-        deadline = time.monotonic() + budget_ms / 1000.0
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
 
         # Explicit 30-day window. last_push_ts() returns the same value
@@ -303,17 +339,15 @@ def _run_events_backfill(
         # backfill semantics legible without chasing a default.
         since = datetime.now(timezone.utc) - timedelta(days=events.INITIAL_CURSOR_LOOKBACK_DAYS)
 
-        roots, _errs = events.discover_git_roots(config)
-        g_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
-        for r in g_rows:
-            r["device"] = device_id
-
         claude_paths = _enabled_claude_paths(sources)
 
-        # Warm the token cache inline at init (v0.11.14+). One-time cost
-        # at init time — kb already accepts init takes a few seconds.
-        # Subsequent pushes inherit a warm cache.
-        if claude_paths:
+        def prepare_backfill_token_cache() -> CacheLockMode:
+            # Warm the token cache inline at init (v0.11.14+). One-time cost
+            # at init time — kb already accepts init takes a few seconds.
+            # Subsequent pushes inherit a warm cache. Keep this after the git
+            # walk so a discovery failure retains its former no-warm behavior.
+            if not claude_paths:
+                return None
             try:
                 token_usage.warm_token_cache_inline(claude_paths)
             except Exception as e:
@@ -321,50 +355,18 @@ def _run_events_backfill(
                     f"mm: notice: token cache warm at init failed: "
                     f"{type(e).__name__}: {safe_str(e)}\n"
                 )
+            return "block"
 
-        # Refresh deadline after warm — the warm can spend ~5s, which
-        # would otherwise leave an already-expired deadline for the
-        # session-metadata walk and produce an empty `projects: []`
-        # backfill on fresh installs (Codex outside-voice review caught
-        # this; matches the same fix in `_run_events_tail`).
-        deadline = time.monotonic() + budget_ms / 1000.0
+        capture = _capture_event_snapshots(
+            config,
+            claude_paths,
+            device_id,
+            since=since,
+            budget_ms=budget_ms,
+            prepare_token_cache=prepare_backfill_token_cache,
+        )
 
-        agg_projects: list[dict] = []
-        # Hold the token cache lock across the walk so per-jsonl mutations
-        # persist as part of the same R/M/W. Init is interactive, so use
-        # blocking mode. Cache-shape invariants are owned by
-        # token_usage.lock_and_get_files.
-        if claude_paths:
-            with token_usage.lock_and_get_files("block") as files_dict:
-                for claude_dir in claude_paths:
-                    for row in events.walk_session_metadata(
-                        claude_dir,
-                        since=since,
-                        deadline_monotonic=deadline,
-                        token_cache_files=files_dict,
-                    ):
-                        agg_projects.extend(row.get("projects", []))
-        # Budget check covers the session-metadata WALK (mirrors
-        # _run_events_tail; the git walk above self-bounds via total_budget_ms)
-        # — snapshot the clock HERE, before the deliberate
-        # identity.refresh_identity_cache(force=True) warm below. That refresh
-        # ALWAYS runs at init and can spend ~10s on a cold gather; counting it
-        # against the walk budget made "events backfill budget exceeded" fire
-        # on essentially every init. See docs/invariants/events-retro.md inv. 4.
-        walk_done = time.monotonic()
-        s_rows: list[dict] = []
-        if claude_paths:
-            s_rows.append(
-                {
-                    "v": events.EVENTS_SCHEMA_VERSION,
-                    "type": "sessions-snapshot",
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "device": device_id,
-                    "projects": agg_projects,
-                }
-            )
-
-        rows_to_write = [*g_rows, *s_rows]
+        rows_to_write = [*capture.git_rows, *capture.session_rows]
         if rows_to_write:
             events.write_push_event(events_dir, device_id, rows_to_write)
 
@@ -379,7 +381,7 @@ def _run_events_backfill(
                 f"{type(e).__name__}: {safe_str(e)}\n"
             )
 
-        if walk_done > deadline:
+        if capture.walk_exceeded_budget:
             sys.stderr.write("mm: notice: events backfill budget exceeded\n")
     except Exception as e:
         sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")

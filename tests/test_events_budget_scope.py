@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from mind_meld import events as _mm_events
 from mind_meld import events_tail
@@ -44,7 +45,127 @@ def _stub_fast_walks(monkeypatch):
     )
 
 
+class TestSharedCapturePath:
+    def test_captures_all_claude_roots_under_one_post_git_lock(self, tmp_path, monkeypatch):
+        """The shared core is data-only and preserves the cache lock's
+        lifetime: discover + git complete first, then one lock covers every
+        Claude root's mutable token-cache walk."""
+        claude_a = tmp_path / "claude-a"
+        claude_b = tmp_path / "claude-b"
+        claude_a.mkdir()
+        claude_b.mkdir()
+        trace: list[str] = []
+        cache_files: dict = {}
+
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda _config: trace.append("discover") or ([], ["probe failed"]),
+        )
+
+        def fake_git_walk(roots, since, total_budget_ms):
+            trace.append("git")
+            return [
+                {
+                    "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                    "type": "git-snapshot",
+                    "ts": "2026-01-01T00:00:00+00:00",
+                    "device": "",
+                    "projects": [],
+                    "skipped": [],
+                }
+            ]
+
+        monkeypatch.setattr(_mm_events, "walk_git_projects", fake_git_walk)
+
+        @contextmanager
+        def fake_lock(mode):
+            assert mode == "block"
+            trace.append("lock-enter")
+            yield cache_files
+            trace.append("lock-exit")
+
+        monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_lock)
+
+        def fake_session_walk(claude_dir, since, **kwargs):
+            assert kwargs["token_cache_files"] is cache_files
+            trace.append(f"session-{claude_dir.name}")
+            return [{"projects": [{"name": claude_dir.name}]}]
+
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", fake_session_walk)
+
+        def should_not_run(*args, **kwargs):
+            raise AssertionError("the capture core must not write or gather identities")
+
+        monkeypatch.setattr(_mm_events, "write_push_event", should_not_run)
+        monkeypatch.setattr(_mm_identity, "gather_local_identities", should_not_run)
+        monkeypatch.setattr(_mm_identity, "refresh_identity_cache", should_not_run)
+
+        result = events_tail._capture_event_snapshots(
+            {},
+            [claude_a, claude_b],
+            "dev-a",
+            since=datetime.now(timezone.utc),
+            budget_ms=500,
+            prepare_token_cache=lambda: trace.append("prepare") or "block",
+        )
+
+        assert trace == [
+            "discover",
+            "git",
+            "prepare",
+            "lock-enter",
+            "session-claude-a",
+            "session-claude-b",
+            "lock-exit",
+        ]
+        assert result.discovery_errors == ["probe failed"]
+        assert result.git_rows[0]["device"] == "dev-a"
+        assert result.session_rows[0]["device"] == "dev-a"
+        assert result.session_rows[0]["projects"] == [
+            {"name": "claude-a"},
+            {"name": "claude-b"},
+        ]
+
+
 class TestEventsTailBudgetScope:
+    def test_slow_token_warm_does_not_consume_session_budget(self, tmp_path, monkeypatch, capsys):
+        """Interactive cache warm can take seconds, but the advertised
+        session-walk budget starts after that caller-owned preparation."""
+        events_root = tmp_path / "events_root"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        sources = _make_sources(events_root, claude_dir)
+        config = {"sync": {"sources": sources}}
+
+        _stub_fast_walks(monkeypatch)
+        monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", lambda *args, **kwargs: [])
+        monkeypatch.setattr(_mm_token_usage, "is_cache_cold", lambda: True)
+
+        def slow_warm(paths):
+            time.sleep(0.12)
+
+        monkeypatch.setattr(_mm_token_usage, "warm_token_cache_inline", slow_warm)
+
+        @contextmanager
+        def fake_lock(mode):
+            assert mode == "block"
+            yield {}
+
+        monkeypatch.setattr(_mm_token_usage, "lock_and_get_files", fake_lock)
+        monkeypatch.setattr(
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True: [],
+        )
+
+        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
+
+        err = capsys.readouterr().err
+        assert "events tail failed" not in err
+        assert "events tail budget exceeded" not in err
+
     def test_slow_identity_gather_does_not_trip_notice(self, tmp_path, monkeypatch, capsys):
         """A cold identity refresh that outlasts the interactive budget must
         NOT emit `events tail budget exceeded` — the walk itself was fast.

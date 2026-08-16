@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.25] - 2026-08-15
+
+**`mm push` and `mm init` now capture their fleet-retro snapshots through the same path, so the two flows stay in lockstep without changing their existing behavior.**
+
+### Changed
+
+- **Shared event capture for push and init.** Git discovery, bounded git capture, device stamping, session snapshot assembly, cache-lock lifetime, and walk-budget measurement now live in one private seam. Push keeps its token-cache policy, identity capture, `mm-push` row, and degradation breadcrumb; init keeps its 30-day backfill, token/identity warming, and snapshot-only write.
+
+- **Pinned the refactor's edge cases.** Regression coverage now proves cache warming and identity work do not consume the session budget, one lock spans every enabled Claude root, cache contention remains visible to unattended autopush, and init passes the same explicit cursor to both git and session capture.
+
 ## [0.12.24] - 2026-08-15
 
 **The bundled `retro-fleet` skill installer now tells the truth about every supported agent instead of letting one partial failure disappear behind another success.** Claude Code, Codex, and OpenCode each receive an independent outcome, and `mm install-skills` exits nonzero whenever an available agent could not be installed safely.
