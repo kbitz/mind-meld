@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.24] - 2026-08-15
+
+**The bundled `retro-fleet` skill installer now tells the truth about every supported agent instead of letting one partial failure disappear behind another success.** Claude Code, Codex, and OpenCode each receive an independent outcome, and `mm install-skills` exits nonzero whenever an available agent could not be installed safely.
+
+### Changed
+
+- **Descriptor-driven three-agent installation.** A single call-time target registry now carries every agent root, skills directory, display name, and marker pair. The installer returns one ordered result per agent: `installed`, `unchanged`, `unavailable`, `conflict`, or `failed`.
+- **Agent availability and repair gates share one predicate.** An absent agent root is skipped; an installed agent whose `skills/` directory is missing is immediately eligible for repair even with a fresh legacy marker. Dry runs perform no source resolution or filesystem mutation.
+- **`mm install-skills` reports partial installs precisely.** Successful agents remain visible alongside conflicts and failures, all user-facing filesystem paths are terminal-safe, and any available conflict or failure returns exit code 1.
+
+### Fixed
+
+- **A dangling skill symlink is never unlinked automatically.** It is now a conflict that requires a deliberate user removal. This preserves the installer’s no-clobber guarantee if a concurrent process replaces the dangling link with a file or foreign symlink.
+- **A skill-installer regression cannot abort `mm init` or `mm push`.** Both load-bearing flows retain a forensic notice boundary and continue their normal initialization or event-backfill work.
+
+### Tests
+
+- Added outcome, partial-install, gate, dangling-link no-clobber, CLI exit, and init/push exception-containment regression coverage for all three targets.
 ## [0.12.23] - 2026-08-15
 
 **`mm gc --dry-run` now shows exactly what retention cleanup would attempt without touching the files it inspects.** Preview temporary upload remnants, stale event files, stale token-cache entries, and, with `--conflicts`, stale conflict sidecars before deletion.

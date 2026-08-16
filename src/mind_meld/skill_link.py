@@ -20,9 +20,12 @@ installer branches.
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from mind_meld.safety import safe_str
 
@@ -118,8 +121,8 @@ _OPENCODE_SKILL_LINK_CONFLICT_MARKER = "opencode-skill-link-conflict"
 # `config.CONFIG_DIR` is `Path.home() / ...` frozen at import and that is
 # exactly the hazard Track 15B deleted two constants for.
 #
-# NOT the table-driven `_SKILL_TARGETS` consolidation Track 17A owns -- the six
-# wrappers deliberately stay as they are. This is only the seam isolation needs.
+# The descriptor registry below is derived from this seam on every call, so
+# tests can redirect the three roots without freezing a developer's real HOME.
 SKILL_ROOTS: tuple[str, str, str] = (
     "~/.claude/skills",
     "~/.codex/skills",
@@ -127,69 +130,165 @@ SKILL_ROOTS: tuple[str, str, str] = (
 )
 
 
-def _ensure_retro_skill_link(*, dry_run: bool = False) -> None:
-    """Group 8 / Track 8A symlink self-heal for the retro-fleet skill.
+SkillInstallStatus = Literal["installed", "unchanged", "unavailable", "conflict", "failed"]
 
-    Three states (cross-model #3 from /plan-eng-review uses a 2-marker gate
-    so deliberate-conflict skips don't spam stderr forever):
 
-    * **success** — target absent OR target is a correct symlink at our
-      skill source. Idempotent. Touch ``skill-link-checked`` marker.
-    * **conflict-skip** — target exists as a real file or wrong symlink.
-      Don't clobber the user's file. Emit ``mm: notice:`` once per 24h
-      (gated by ``skill-link-conflict`` marker). User can ``rm`` to take
-      mm's version.
-    * **transient-failure** — TOCTOU FileExistsError, PermissionError on
-      read-only ~/.claude, OSError on a filesystem without symlink
-      support. CQ#1 forensic-only contract: emit ``mm: notice:``,
-      return, leave both markers alone so next push retries.
+@dataclass(frozen=True)
+class SkillTarget:
+    """One supported agent's retro-fleet installation contract.
 
-    Dangling-symlink branch (Test review #1 IRON-RULE pin from
-    /plan-eng-review): a symlink whose target was deleted (e.g., after
-    ``pipx reinstall`` rebuilt the venv at a different path) is unlinked
-    and replaced. Pre-fix, ``target.is_symlink() and target.resolve() ==
-    src.resolve()`` skipped this case because resolve() returns the bad
-    path; the second branch then matched ``target.is_symlink()`` and
-    routed into "exists, don't replace" — silent permanent broken state.
-
-    Called from ``mm init`` (always, no gate) and ``_push_core`` HEAD
-    (24h-TTL gated). Both gates are read with ``os.stat`` wrapped in
-    try/except (TODO#3 critical-gap fix: EACCES on the marker dir must
-    fail-open so push doesn't crash).
+    ``SKILL_ROOTS`` intentionally stays patchable for test isolation. These
+    descriptors are therefore built at call time instead of freezing paths at
+    import time.
     """
-    _ensure_retro_skill_link_at(
-        Path(SKILL_ROOTS[0]).expanduser() / _SKILL_LINK_NAME,
-        success_marker=_SKILL_LINK_SUCCESS_MARKER,
-        conflict_marker=_SKILL_LINK_CONFLICT_MARKER,
-        dry_run=dry_run,
+
+    display_name: str
+    agent_root: Path
+    skills_dir: Path
+    success_marker: str
+    conflict_marker: str
+
+    @property
+    def target(self) -> Path:
+        return self.skills_dir / _SKILL_LINK_NAME
+
+
+@dataclass(frozen=True)
+class SkillInstallResult:
+    """The observed outcome of one descriptor-driven install attempt."""
+
+    descriptor: SkillTarget
+    status: SkillInstallStatus
+    skill_src: Path | None = None
+    reason: str | None = None
+
+    @property
+    def target(self) -> Path:
+        return self.descriptor.target
+
+
+def _skill_target_descriptors() -> tuple[SkillTarget, ...]:
+    """Return fresh descriptors so patched roots and ``$HOME`` take effect."""
+    entries = (
+        ("Claude Code", _SKILL_LINK_SUCCESS_MARKER, _SKILL_LINK_CONFLICT_MARKER),
+        ("Codex", _CODEX_SKILL_LINK_SUCCESS_MARKER, _CODEX_SKILL_LINK_CONFLICT_MARKER),
+        ("OpenCode", _OPENCODE_SKILL_LINK_SUCCESS_MARKER, _OPENCODE_SKILL_LINK_CONFLICT_MARKER),
+    )
+    return tuple(
+        SkillTarget(
+            display_name=display_name,
+            agent_root=(skills_dir := Path(root).expanduser()).parent,
+            skills_dir=skills_dir,
+            success_marker=success_marker,
+            conflict_marker=conflict_marker,
+        )
+        for root, (display_name, success_marker, conflict_marker) in zip(SKILL_ROOTS, entries)
     )
 
 
-def _ensure_codex_retro_skill_link(*, dry_run: bool = False) -> None:
-    """Install the bundled retro-fleet skill for Codex when it is present."""
-    _ensure_retro_skill_link_at(
-        Path(SKILL_ROOTS[1]).expanduser() / _SKILL_LINK_NAME,
-        success_marker=_CODEX_SKILL_LINK_SUCCESS_MARKER,
-        conflict_marker=_CODEX_SKILL_LINK_CONFLICT_MARKER,
-        dry_run=dry_run,
+def _reason(error: BaseException) -> str:
+    """Return the safe, stable failure detail surfaced by the CLI."""
+    return f"{type(error).__name__}: {safe_str(error)}"
+
+
+def _ensure_retro_skill_link(*, dry_run: bool = False) -> SkillInstallResult | None:
+    """Compatibility adapter for Claude Code's descriptor-driven installer."""
+    return _ensure_skill_target(_skill_target_descriptors()[0], dry_run=dry_run)
+
+
+def _ensure_codex_retro_skill_link(*, dry_run: bool = False) -> SkillInstallResult | None:
+    """Compatibility adapter for Codex's descriptor-driven installer."""
+    return _ensure_skill_target(_skill_target_descriptors()[1], dry_run=dry_run)
+
+
+def _ensure_opencode_retro_skill_link(*, dry_run: bool = False) -> SkillInstallResult | None:
+    """Compatibility adapter for OpenCode's descriptor-driven installer."""
+    return _ensure_skill_target(_skill_target_descriptors()[2], dry_run=dry_run)
+
+
+def _ensure_retro_skill_links(*, dry_run: bool = False) -> tuple[SkillInstallResult, ...]:
+    """Best-effort install for all three supported agent roots.
+
+    Results are complete and ordered Claude Code, Codex, OpenCode. Expected
+    filesystem failures are values, never exceptions, so init and push keep
+    their best-effort contract while ``mm install-skills`` can report truthfully.
+    """
+    if dry_run:
+        return ()
+
+    descriptors = _skill_target_descriptors()
+    results: list[SkillInstallResult | None] = [None] * len(descriptors)
+    available: list[tuple[int, SkillTarget]] = []
+
+    for index, descriptor in enumerate(descriptors):
+        if _is_real_agent_dir_under_pytest(descriptor.target):
+            _refuse_real_home_under_pytest(descriptor.target)
+            results[index] = SkillInstallResult(
+                descriptor,
+                "failed",
+                reason="refused to write a real agent directory from a test",
+            )
+            continue
+        try:
+            availability, failure = _agent_root_availability(descriptor)
+        except Exception as error:
+            results[index] = _failed_result(descriptor, "availability check", error)
+            continue
+        if availability == "unavailable":
+            results[index] = SkillInstallResult(descriptor, "unavailable")
+        elif availability == "failed":
+            results[index] = _failed_result(descriptor, "availability check", failure)
+        else:
+            available.append((index, descriptor))
+
+    if available:
+        try:
+            skill_src = _resolve_retro_skill_source_once()
+        except Exception as error:
+            for index, descriptor in available:
+                results[index] = _failed_result(descriptor, "skill source resolution", error)
+        else:
+            for index, descriptor in available:
+                try:
+                    results[index] = _install_available_skill_target(descriptor, skill_src)
+                except Exception as error:
+                    results[index] = _failed_result(descriptor, "installation", error)
+
+    return tuple(
+        result
+        if result is not None
+        else _failed_result(
+            descriptor,
+            "installation",
+            RuntimeError("installer produced no outcome"),
+        )
+        for descriptor, result in zip(descriptors, results)
     )
 
 
-def _ensure_opencode_retro_skill_link(*, dry_run: bool = False) -> None:
-    """Install the bundled retro-fleet skill for OpenCode when it is present."""
-    _ensure_retro_skill_link_at(
-        Path(SKILL_ROOTS[2]).expanduser() / _SKILL_LINK_NAME,
-        success_marker=_OPENCODE_SKILL_LINK_SUCCESS_MARKER,
-        conflict_marker=_OPENCODE_SKILL_LINK_CONFLICT_MARKER,
-        dry_run=dry_run,
-    )
+def _ensure_skill_target(
+    descriptor: SkillTarget, *, dry_run: bool = False
+) -> SkillInstallResult | None:
+    """Run the legacy one-agent adapter without weakening its safety rules."""
+    if dry_run:
+        return None
+    if _is_real_agent_dir_under_pytest(descriptor.target):
+        _refuse_real_home_under_pytest(descriptor.target)
+        return None
 
-
-def _ensure_retro_skill_links(*, dry_run: bool = False) -> None:
-    """Best-effort install for every supported global skill directory."""
-    _ensure_retro_skill_link(dry_run=dry_run)
-    _ensure_codex_retro_skill_link(dry_run=dry_run)
-    _ensure_opencode_retro_skill_link(dry_run=dry_run)
+    try:
+        availability, failure = _agent_root_availability(descriptor)
+    except Exception as error:
+        return _failed_result(descriptor, "availability check", error)
+    if availability == "unavailable":
+        return SkillInstallResult(descriptor, "unavailable")
+    if availability == "failed":
+        return _failed_result(descriptor, "availability check", failure)
+    try:
+        skill_src = _resolve_retro_skill_source_once()
+    except Exception as error:
+        return _failed_result(descriptor, "skill source resolution", error)
+    return _install_available_skill_target(descriptor, skill_src)
 
 
 def _ensure_retro_skill_link_at(
@@ -198,90 +297,109 @@ def _ensure_retro_skill_link_at(
     success_marker: str,
     conflict_marker: str,
     dry_run: bool = False,
-) -> None:
-    """Install the bundled skill at one agent-specific target.
+) -> SkillInstallResult | None:
+    """Backward-compatible one-target entry point used by safety tests."""
+    descriptor = SkillTarget(
+        display_name="Claude Code",
+        agent_root=target.parent.parent,
+        skills_dir=target.parent,
+        success_marker=success_marker,
+        conflict_marker=conflict_marker,
+    )
+    return _ensure_skill_target(descriptor, dry_run=dry_run)
 
-    Claude Code, Codex, and OpenCode discover the same Agent Skills format
-    from different global directories. Keeping target-specific markers separate
-    means a missing installation of one agent never suppresses another's repair.
-    """
-    if dry_run:
-        return
 
-    if _is_real_agent_dir_under_pytest(target):
-        _refuse_real_home_under_pytest(target)
-        return
+def _agent_root_availability(
+    descriptor: SkillTarget,
+) -> tuple[Literal["available", "unavailable", "failed"], OSError | None]:
+    """Probe the root without treating I/O errors as an absent agent."""
+    try:
+        info = descriptor.agent_root.stat()
+    except FileNotFoundError:
+        return "unavailable", None
+    except OSError as error:
+        return "failed", error
+    if not stat.S_ISDIR(info.st_mode):
+        return "failed", NotADirectoryError(f"{descriptor.agent_root} is not a directory")
+    return "available", None
 
-    skills_dir = target.parent
-    agent_dir = skills_dir.parent
-    if not agent_dir.exists():
-        # Silent skip — the agent is not installed. Touching the success marker
-        # would suppress retries if the user installs it later in the day.
-        return
-    if not skills_dir.exists():
+
+def _failed_result(
+    descriptor: SkillTarget, operation: str, error: BaseException | None
+) -> SkillInstallResult:
+    """Create and emit a forensic failure result without aborting callers."""
+    reason = _reason(error) if error is not None else "unknown failure"
+    sys.stderr.write(
+        f"mm: notice: {descriptor.display_name} retro-fleet {operation} failed: {reason}\n"
+    )
+    return SkillInstallResult(descriptor, "failed", reason=reason)
+
+
+def _resolve_retro_skill_source_once() -> Path:
+    """Resolve and validate the shared directory once per plural run."""
+    skill_src = _resolve_retro_skill_src()
+    source_info = skill_src.stat()
+    if not stat.S_ISDIR(source_info.st_mode):
+        raise NotADirectoryError(f"{skill_src} is not a directory")
+    return skill_src.resolve(strict=True)
+
+
+def _install_available_skill_target(descriptor: SkillTarget, skill_src: Path) -> SkillInstallResult:
+    """Install one link after its agent root and shared source are known good."""
+    target = descriptor.target
+    try:
+        skills_info = descriptor.skills_dir.stat()
+    except FileNotFoundError:
         try:
-            skills_dir.mkdir(mode=0o700)
-        except OSError as e:
-            sys.stderr.write(
-                f"mm: notice: retro-fleet skills directory setup failed: "
-                f"{type(e).__name__}: {safe_str(e)}\n"
+            descriptor.skills_dir.mkdir(mode=0o700)
+        except OSError as error:
+            return _failed_result(descriptor, "skills directory setup", error)
+    except OSError as error:
+        return _failed_result(descriptor, "skills directory inspection", error)
+    else:
+        if not stat.S_ISDIR(skills_info.st_mode):
+            return _failed_result(
+                descriptor,
+                "skills directory inspection",
+                NotADirectoryError(f"{descriptor.skills_dir} is not a directory"),
             )
-            return
 
     try:
-        skill_src = _resolve_retro_skill_src()
-    except Exception as e:
-        sys.stderr.write(
-            f"mm: notice: retro-fleet skill source unresolvable: "
-            f"{type(e).__name__}: {safe_str(e)}\n"
-        )
-        return
+        target_info = target.lstat()
+    except FileNotFoundError:
+        target_info = None
+    except OSError as error:
+        return _failed_result(descriptor, "target inspection", error)
 
-    # Branch 1: dangling symlink → unlink + recreate.
-    # Path.exists() returns False on a dangling symlink while is_symlink()
-    # returns True. This branch was missing in the original /plan-eng-review
-    # design and is REGRESSION-class for pipx-reinstall recovery.
-    if target.is_symlink() and not target.exists():
-        try:
-            target.unlink()
-        except OSError as e:
-            sys.stderr.write(
-                f"mm: notice: retro-fleet skill dangling-link cleanup failed: "
-                f"{type(e).__name__}: {safe_str(e)}\n"
-            )
-            return
-        # Fall through to symlink_to creation below.
-    # Branch 2: target is a correct, intact symlink to our source → no-op.
-    elif target.is_symlink() and target.exists():
-        try:
-            if target.resolve() == skill_src.resolve():
-                _touch_marker(success_marker)
-                return
-        except OSError:
-            # resolve() can raise on a path with permission issues — fall
-            # through to the conflict-skip branch.
-            pass
-        # Wrong target — user's own symlink elsewhere. Conflict-skip.
-        _emit_conflict_notice(target, conflict_marker=conflict_marker)
-        return
-    # Branch 3: a real file or directory at the target → conflict-skip.
-    elif target.exists():
-        _emit_conflict_notice(target, conflict_marker=conflict_marker)
-        return
+    if target_info is not None:
+        if stat.S_ISLNK(target_info.st_mode):
+            try:
+                resolved_target = target.resolve(strict=True)
+            except FileNotFoundError:
+                # Do not unlink a dangling path. Another process could replace
+                # it between resolution and cleanup, and unlinking would then
+                # clobber the user's file or foreign symlink. A manual remove
+                # is deliberate and preserves the installer no-clobber rule.
+                _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
+                return SkillInstallResult(descriptor, "conflict", skill_src=skill_src)
+            except Exception as error:
+                return _failed_result(descriptor, "target resolution", error)
+            else:
+                if resolved_target == skill_src:
+                    _touch_marker(descriptor.success_marker)
+                    return SkillInstallResult(descriptor, "unchanged", skill_src=skill_src)
+                _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
+                return SkillInstallResult(descriptor, "conflict", skill_src=skill_src)
+        else:
+            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
+            return SkillInstallResult(descriptor, "conflict", skill_src=skill_src)
 
-    # Branch 4: target is absent (or just unlinked from dangling branch above).
-    # Create the symlink.
     try:
         target.symlink_to(skill_src)
-    except OSError as e:
-        # CQ#1: TOCTOU FileExistsError, EACCES, EPERM, ENOTSUP — forensic
-        # only. Don't crash push; don't touch markers; next push retries.
-        sys.stderr.write(
-            f"mm: notice: retro-fleet skill link install failed: "
-            f"{type(e).__name__}: {safe_str(e)}\n"
-        )
-        return
-    _touch_marker(success_marker)
+    except OSError as error:
+        return _failed_result(descriptor, "link install", error)
+    _touch_marker(descriptor.success_marker)
+    return SkillInstallResult(descriptor, "installed", skill_src=skill_src)
 
 
 def _resolve_retro_skill_src() -> Path:
@@ -374,39 +492,45 @@ def _skill_link_check_due() -> bool:
     True) so the installer runs and emits its own notice. The conflict
     marker is consulted separately by ``_emit_conflict_notice``.
     """
-    return _skill_link_check_due_at(
-        Path(SKILL_ROOTS[0]).expanduser() / _SKILL_LINK_NAME,
-        success_marker=_SKILL_LINK_SUCCESS_MARKER,
-    )
+    return _skill_link_check_due_for(_skill_target_descriptors()[0])
 
 
 def _codex_skill_link_check_due() -> bool:
     """Return whether Codex's retro-fleet skill needs a self-heal attempt."""
-    target = Path(SKILL_ROOTS[1]).expanduser() / _SKILL_LINK_NAME
-    if not target.parent.exists():
-        return False
-    return _skill_link_check_due_at(
-        target,
-        success_marker=_CODEX_SKILL_LINK_SUCCESS_MARKER,
-    )
+    return _skill_link_check_due_for(_skill_target_descriptors()[1])
 
 
 def _opencode_skill_link_check_due() -> bool:
     """Return whether OpenCode's retro-fleet skill needs a self-heal attempt."""
-    target = Path(SKILL_ROOTS[2]).expanduser() / _SKILL_LINK_NAME
-    if not target.parent.exists():
-        return False
-    return _skill_link_check_due_at(
-        target,
-        success_marker=_OPENCODE_SKILL_LINK_SUCCESS_MARKER,
-    )
+    return _skill_link_check_due_for(_skill_target_descriptors()[2])
 
 
 def _skill_links_check_due() -> bool:
     """Return whether any supported agent's retro-fleet link has drifted."""
-    return (
-        _skill_link_check_due() or _codex_skill_link_check_due() or _opencode_skill_link_check_due()
-    )
+    return any(_skill_link_check_due_for(descriptor) for descriptor in _skill_target_descriptors())
+
+
+def _skill_link_check_due_for(descriptor: SkillTarget) -> bool:
+    """Return whether one descriptor needs a repair attempt.
+
+    A missing agent root is the only quiet skip. A present root with no skills
+    directory is immediately due, and every other inspection failure fails
+    open so the plural installer can leave a forensic notice.
+    """
+    availability, _failure = _agent_root_availability(descriptor)
+    if availability == "unavailable":
+        return False
+    if availability == "failed":
+        return True
+    try:
+        skills_info = descriptor.skills_dir.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return True
+    if not stat.S_ISDIR(skills_info.st_mode):
+        return True
+    return _skill_link_check_due_at(descriptor.target, success_marker=descriptor.success_marker)
 
 
 def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
@@ -414,12 +538,11 @@ def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
     if not _marker_is_fresh(success_marker):
         return True
     try:
-        if not target.is_symlink():
+        target_info = target.lstat()
+        if not stat.S_ISLNK(target_info.st_mode):
             return True
-        if not target.exists():
-            return True  # dangling
-        skill_src = _resolve_retro_skill_src()
-        if target.resolve() != skill_src.resolve():
+        skill_src = _resolve_retro_skill_source_once()
+        if target.resolve(strict=True) != skill_src:
             return True  # wrong target (e.g. stale workspace path)
     except Exception:
         return True
@@ -438,37 +561,15 @@ def skill_targets() -> tuple[Path, ...]:
     Re-resolved per call (``expanduser`` reads ``$HOME`` at call time) so a test
     that moves HOME moves the targets with it.
     """
-    return tuple(Path(parent).expanduser() / _SKILL_LINK_NAME for parent in SKILL_ROOTS)
-
-
-def classify_targets(targets: tuple[Path, ...], skill_src: Path) -> tuple[list[Path], list[Path]]:
-    """Split ``targets`` into ``(installed, conflicts)`` against ``skill_src``.
-
-    ``installed`` = a symlink resolving to ``skill_src``. ``conflicts`` =
-    anything else that exists (a real file, or a symlink pointing elsewhere).
-    A target that does not exist at all appears in NEITHER list — that is the
-    missing third bucket Track 17A adds; do not fix it here.
-    """
-    installed: list[Path] = []
-    conflicts: list[Path] = []
-    for target in targets:
-        if target.is_symlink() and target.exists():
-            try:
-                if target.resolve() == skill_src.resolve():
-                    installed.append(target)
-                    continue
-            except OSError:
-                pass
-        if target.exists() or target.is_symlink():
-            conflicts.append(target)
-    return installed, conflicts
+    return tuple(descriptor.target for descriptor in _skill_target_descriptors())
 
 
 __all__ = [
     "SKILL_LINK_TTL_SECONDS",
     "SKILL_ROOTS",
+    "SkillInstallResult",
+    "SkillTarget",
     "_refuse_real_home_under_pytest",
-    "classify_targets",
     "skill_targets",
     "_codex_skill_link_check_due",
     "_ensure_codex_retro_skill_link",

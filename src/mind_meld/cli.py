@@ -2665,7 +2665,12 @@ def init() -> None:
     # (no 24h gate here — first-install pass should always try). Idempotent
     # if the user already has a correct symlink. Conflicts emit a one-line
     # notice; failures are forensic-only.
-    skill_link._ensure_retro_skill_links(dry_run=False)
+    try:
+        skill_link._ensure_retro_skill_links(dry_run=False)
+    except Exception as e:
+        stderr_console.print(
+            f"mm: notice: retro-fleet skill installation failed: {type(e).__name__}: {safe_str(e)}"
+        )
 
     # Init-time event backfill (v0.11.8). Captures the past 30 days of git
     # commits + a full sessions inventory so retro-fleet works immediately
@@ -2898,8 +2903,15 @@ def _push_core(
     # 24h-TTL — the marker stat is the entire hot-path cost on the steady-
     # state push (~1 syscall). dry_run gates the install too (preview
     # contract; mirrors _ensure_device_registered).
-    if not dry_run and skill_link._skill_links_check_due():
-        skill_link._ensure_retro_skill_links(dry_run=False)
+    if not dry_run:
+        try:
+            if skill_link._skill_links_check_due():
+                skill_link._ensure_retro_skill_links(dry_run=False)
+        except Exception as e:
+            stderr_console.print(
+                f"mm: notice: retro-fleet skill installation failed: "
+                f"{type(e).__name__}: {safe_str(e)}"
+            )
 
     # Build local manifest (v2 with sources)
     sources = get_sources(config)
@@ -5495,47 +5507,51 @@ def install_skills_cmd() -> None:
     contents of ``~/.local/pipx/venvs/mind-meld/`` in place, so the link
     auto-updates on every ``pipx upgrade mind-meld``.
     """
-    targets = skill_link.skill_targets()
-    available_targets = tuple(target for target in targets if target.parent.parent.exists())
-    if not available_targets:
+    results = skill_link._ensure_retro_skill_links(dry_run=False)
+    available = False
+    failed = False
+
+    for result in results:
+        descriptor = result.descriptor
+        target = safe_str(str(result.target))
+        agent_root = safe_str(str(descriptor.agent_root))
+        skill_src = safe_str(str(result.skill_src)) if result.skill_src is not None else "unknown"
+        if result.status == "installed":
+            available = True
+            typer.echo(f"Installed: {descriptor.display_name}: {target} -> {skill_src}")
+        elif result.status == "unchanged":
+            available = True
+            typer.echo(
+                f"Installed (already correct): {descriptor.display_name}: {target} -> {skill_src}"
+            )
+        elif result.status == "unavailable":
+            typer.echo(f"Unavailable: {descriptor.display_name} ({agent_root} is absent)")
+        elif result.status == "conflict":
+            available = True
+            failed = True
+            typer.echo(
+                f"mm: error: {descriptor.display_name}: {target} exists and is not mm's symlink; "
+                f"remove it and re-run (mm's source is {skill_src})",
+                err=True,
+            )
+        else:
+            available = True
+            failed = True
+            typer.echo(
+                f"mm: error: {descriptor.display_name}: {target} installation failed: "
+                f"{result.reason}",
+                err=True,
+            )
+
+    if not available:
         typer.echo(
             "mm: error: no Claude Code, Codex, or OpenCode skills directory exists; "
             "install an agent first",
             err=True,
         )
         raise typer.Exit(code=1)
-
-    try:
-        skill_src = skill_link._resolve_retro_skill_src()
-    except Exception as e:
-        typer.echo(
-            f"mm: error: skill source unresolvable: {type(e).__name__}: {safe_str(e)}",
-            err=True,
-        )
-        raise typer.Exit(code=1) from e
-
-    skill_link._ensure_retro_skill_links(dry_run=False)
-
-    installed, conflicts = skill_link.classify_targets(available_targets, skill_src)
-
-    if installed:
-        for target in installed:
-            typer.echo(f"Installed: {target} -> {skill_src}")
-        if not conflicts:
-            return
-
-    for target in conflicts:
-        typer.echo(
-            f"mm: error: {target} exists and is not mm's symlink; "
-            f"remove it and re-run (mm's source is {skill_src})",
-            err=True,
-        )
-    if not conflicts:
-        typer.echo(
-            "mm: error: install did not complete (see stderr above for details)",
-            err=True,
-        )
-    raise typer.Exit(code=1)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 # ── retro-fleet ───────────────────────────────────────────────────────
