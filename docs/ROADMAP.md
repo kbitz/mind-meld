@@ -120,16 +120,6 @@ _produces: Additive host-usage snapshot rows from tail and init-backfill._
 - **Write tail and backfill snapshots** — preserve cold-cache and dry-run omission semantics. _events_tail.py, ~75 lines._ (M)
 - **Pin active-day attribution inputs** — keep cwd-only sessions token-visible but unattributable. _events.py + tests, ~30 lines._ (S)
 
-##### Track 19B: Finish small resolveflow cleanup after the rendering seam
-_3 tasks . ~75 LOC . low risk . 2 files_
-_blocked-by: Track 18B_
-_touches: src/mind_meld/resolveflow.py, tests/test_conflict_copy.py_
-_read-first: docs/invariants/conflicts.md_
-_produces: A flatter resolve loop with no obsolete local-import workaround._
-- **Remove the redundant merge else** — flatten the already-continued branch. _resolveflow.py, ~15 lines (del)._ (S)
-- **Hoist residual local imports** — remove the three obsolete cycle-workaround imports found in review. _resolveflow.py, ~30 lines._ (S)
-- **Protect dispatch behavior** — retain binary-merge and failure-accounting pins. _tests, ~30 lines._ (S)
-
 #### Group 20: Host snapshot contract
 
 _Depends on: Group 19_
@@ -202,7 +192,6 @@ Group 18: Use the new seams ∥ first model-card slice
 
 Group 19: Host snapshot writer ∥ resolve-flow hygiene
   +-- Track 19A ........... ~M . 3 tasks
-  +-- Track 19B ........... ~S . 3 tasks
 
 Group 20: Host snapshot contract
   +-- Track 20A ........... ~S . 2 tasks
@@ -214,7 +203,7 @@ Group 22: Model-card PR attribution
   +-- Track 22A ........... ~M . 2 tasks
 ```
 
-**Total: 0 phases . 6 groups . 13 tracks remaining.**
+**Total: 0 phases . 6 groups . 12 tracks remaining.**
 
 ---
 
@@ -380,6 +369,10 @@ Child symlinks are now local routing rather than sync content: generic walkers o
 ### Track 18B: Centralize conflict diff rendering and choice normalization ✓ Shipped (v0.12.31)
 
 - Track 18B — _shipped (v0.12.31): one capped terminal-safe renderer and one compatibility-choice normalization path, with the existing 60- and 80-entry prompt windows preserved. 3 tasks shipped._
+
+### Track 19B: Finish small resolveflow cleanup after the rendering seam ✓ Shipped (v0.12.32)
+
+- Track 19B — _shipped (v0.12.32): hoisted the resolver's residual manifest imports, flattened the already-continued merge branch, corrected the skip-default safety contract, and pinned continuation after a failed first merge write._
 
 ### Track 17B: Shared event capture ✓ Shipped (v0.12.25)
 

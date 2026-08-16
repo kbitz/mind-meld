@@ -57,6 +57,8 @@ from mind_meld.devices import lookup_device_by_short_id
 from mind_meld.errors import StorageError
 from mind_meld.manifest import (
     CONFLICT_INFIX,
+    CONFLICT_V0_PREFIX,
+    SYNCED_SUBDIRS,
     is_conflict_filename,
     is_pre_inversion_conflict_filename,
     parse_conflict_device_short,
@@ -96,8 +98,6 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     """
     src_type = src_cfg.get("type", "claude")
     if src_type == "claude":
-        from mind_meld.manifest import SYNCED_SUBDIRS
-
         projects = base_path / "projects"
         if not projects.exists():
             return []
@@ -188,10 +188,6 @@ def _migrate_pre_inversion_conflict(path: Path) -> Path:
     renaming there would race with autopull's own discovery walk
     (codex-2 #5).
     """
-    from mind_meld.manifest import (
-        CONFLICT_V0_PREFIX,
-    )
-
     name = path.name
     if is_pre_inversion_conflict_filename(name):
         return path
@@ -490,10 +486,6 @@ def _resolve_interactive_loop(
     in one pass).
     """
 
-    from mind_meld.manifest import (
-        is_pre_inversion_conflict_filename,
-    )
-
     devices = devices or []
     sources_by_name = sources_by_name or {}
     resolved = 0
@@ -696,8 +688,8 @@ def _resolve_interactive_loop(
         # Concrete-action prompt copy. Filenames pre-sanitized via safe_str
         # since render_prompt does plain f-string interpolation. (m)erge
         # is offered when the LCS attempt succeeded (binary content sets
-        # merge_available=False); the default key flips to (m) when the
-        # merged result is clean -- the user just hits Enter to accept.
+        # merge_available=False). (s)kip remains the default key even for a
+        # clean merge, so the user must explicitly choose (m)erge.
         # Pass semantic local/remote line counts so render_prompt can
         # annotate (l)ocal / (r)emote with the consequential drop count.
         # Suppress the counts on empty-diff (binary) so the annotation
@@ -861,39 +853,35 @@ def _resolve_interactive_loop(
                     "skipped (both files left on disk)[/dim]"
                 )
                 continue
+            try:
+                fsutil.atomic_write_bytes(canonical, merged_bytes, fsync=False)
+            except (OSError, StorageError) as e:
+                console.print(
+                    f"  [red]merge write failed:[/red] {safe_str(canonical.name)} — {safe_str(e)}"
+                )
+                failed += 1
+                continue
+            # Sidecar unlink is best-effort: canonical already holds the
+            # merged bytes, so a unlink failure is cosmetic. Stale
+            # sidecars get reaped by `mm gc --conflicts` (30d TTL).
+            try:
+                cpath.unlink()
+            except OSError as e:
+                print(
+                    f"mm: warning: merged result written; sidecar unlink "
+                    f"failed: {safe_str(cpath.name)} — {safe_str(e)}",
+                    file=sys.stderr,
+                )
+            if merge_conflicts == 0:
+                console.print(f"  [cyan]merged[/cyan] {safe_str(canonical.name)} (clean LCS merge)")
             else:
-                try:
-                    fsutil.atomic_write_bytes(canonical, merged_bytes, fsync=False)
-                except (OSError, StorageError) as e:
-                    console.print(
-                        f"  [red]merge write failed:[/red] {safe_str(canonical.name)} — "
-                        f"{safe_str(e)}"
-                    )
-                    failed += 1
-                    continue
-                # Sidecar unlink is best-effort: canonical already holds the
-                # merged bytes, so a unlink failure is cosmetic. Stale
-                # sidecars get reaped by `mm gc --conflicts` (30d TTL).
-                try:
-                    cpath.unlink()
-                except OSError as e:
-                    print(
-                        f"mm: warning: merged result written; sidecar unlink "
-                        f"failed: {safe_str(cpath.name)} — {safe_str(e)}",
-                        file=sys.stderr,
-                    )
-                if merge_conflicts == 0:
-                    console.print(
-                        f"  [cyan]merged[/cyan] {safe_str(canonical.name)} (clean LCS merge)"
-                    )
-                else:
-                    console.print(
-                        f"  [cyan]merged[/cyan] {safe_str(canonical.name)} "
-                        f"(contains {merge_conflicts} <<<<<<< region"
-                        f"{'s' if merge_conflicts != 1 else ''}; "
-                        f"resolve in editor)"
-                    )
-                resolved += 1
+                console.print(
+                    f"  [cyan]merged[/cyan] {safe_str(canonical.name)} "
+                    f"(contains {merge_conflicts} <<<<<<< region"
+                    f"{'s' if merge_conflicts != 1 else ''}; "
+                    f"resolve in editor)"
+                )
+            resolved += 1
         elif choice in ("p", "promote"):
             # Keep BOTH: rename the sidecar to its own first-class filename.
             # Per-mode naming -- post-inversion sidecar holds the peer's

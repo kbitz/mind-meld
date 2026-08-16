@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.12.32] - 2026-08-16
+## [0.12.33] - 2026-08-16
 
 **Pushes now publish aggregate non-Claude host token usage to the fleet, for the hosts you actually enabled, and only when the sweep can be trusted.**
 
@@ -21,6 +21,18 @@ All notable changes to Mind Meld will be documented in this file.
 ### Fixed
 
 - **Withheld host snapshots reach `mm status`.** An incomplete sweep appends a safe `degraded` breadcrumb naming only the reader and reason class, and states that content sync and git/session capture are unaffected.
+
+## [0.12.32] - 2026-08-16
+
+**Conflict resolution now keeps its safety contract clear: merge remains an explicit choice, and a failed merge still lets you resolve the next file.**
+
+### Changed
+
+- **Clearer resolver maintenance seam.** The resolver now uses its existing manifest dependency consistently, with flatter merge control flow and matching invariants that preserve the skip-by-default prompt policy.
+
+### Fixed
+
+- **Merge failure progression is pinned.** A failed write leaves its conflict untouched and continues to the next conflict instead of risking a false successful resolution.
 
 ## [0.12.31] - 2026-08-16
 

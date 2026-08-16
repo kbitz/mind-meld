@@ -3242,6 +3242,57 @@ class TestResolveMergeGuards:
         assert canonical.read_bytes() == b"a\nb\n", "canonical unchanged on write failure"
         assert conflict.exists()
 
+    def test_merge_write_failure_advances_to_next_conflict(self, tmp_path, monkeypatch) -> None:
+        """The failed first merge stays unresolved while the second one succeeds.
+
+        The write-error ``continue`` must advance the outer conflict walk. Without
+        it, the first failed merge would fall through to unlink its sidecar and be
+        counted as resolved despite its canonical bytes never being written.
+        """
+        first_canonical = tmp_path / "first.md"
+        first_canonical.write_bytes(b"a\nb\n")
+        first_conflict = tmp_path / "first.sync-conflict-20260421-143055-devA1234.md"
+        first_conflict.write_bytes(b"a\nb\nc\n")
+        second_canonical = tmp_path / "second.md"
+        second_canonical.write_bytes(b"one\ntwo\n")
+        second_conflict = tmp_path / "second.sync-conflict-20260421-143055-devA1234.md"
+        second_conflict.write_bytes(b"one\ntwo\nthree\n")
+
+        prompts = 0
+
+        def choose_merge(*_args, **_kwargs):
+            nonlocal prompts
+            prompts += 1
+            return "m"
+
+        monkeypatch.setattr(typer, "prompt", choose_merge)
+        real_write = resolveflow.fsutil.atomic_write_bytes
+        writes = 0
+
+        def fail_first_write(*args, **kwargs):
+            nonlocal writes
+            writes += 1
+            if writes == 1:
+                raise OSError("disk full")
+            return real_write(*args, **kwargs)
+
+        monkeypatch.setattr(resolveflow.fsutil, "atomic_write_bytes", fail_first_write)
+
+        resolved, failed = resolveflow._resolve_interactive_loop(
+            [
+                ("s1", first_conflict, first_canonical),
+                ("s1", second_conflict, second_canonical),
+            ]
+        )
+
+        assert prompts == 2
+        assert writes == 2
+        assert (resolved, failed) == (1, 1)
+        assert first_canonical.read_bytes() == b"a\nb\n"
+        assert first_conflict.exists()
+        assert second_canonical.read_bytes() == b"one\ntwo\nthree\n"
+        assert not second_conflict.exists()
+
 
 class TestMigrationWarningIsSanitized:
     def test_rename_failure_warning_strips_terminal_escapes(
