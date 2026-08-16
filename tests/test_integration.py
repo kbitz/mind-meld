@@ -8,6 +8,7 @@ import sys
 import textwrap
 import time
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from mind_meld import cli as cli_module
 from mind_meld import config as config_module
 from mind_meld import crypto as crypto_module
 from mind_meld import events as _mm_events
-from mind_meld import fsutil, synclog
+from mind_meld import events_tail, fsutil, synclog
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import (
@@ -3531,7 +3532,7 @@ class TestTrack7BEventsTail:
         self._activate(monkeypatch, config)
 
         # Break events.discover_git_roots so the tail blows up.
-        def _boom(_config):
+        def _boom(_config, **_kwargs):
             raise RuntimeError("synthetic walk failure")
 
         monkeypatch.setattr(_mm_events, "discover_git_roots", _boom)
@@ -3584,6 +3585,90 @@ class TestTrack7BEventsTail:
         third_rows = self._read_events(first[0])
         assert len(third_rows) > len(second_rows), "events tail did not fire on a substantive push"
         assert third_rows[-1]["type"] == "mm-push"
+
+    def test_noop_across_utc_keeps_cursor_for_later_git_catchup(self, tmp_path, monkeypatch):
+        """A date rollover does not manufacture an event or lose idle commits.
+
+        The local source stays unchanged while an external configured repo
+        receives a commit. The empty day-two push must leave the day-one
+        cursor intact; a later unrelated source change then captures that
+        commit exactly once.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        self._seed_claude(claude_a)
+        self._bootstrap(storage_dir)
+        register_device(LocalBackend(storage_dir), "dev-a", "A")
+
+        repo = tmp_path / "retro-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True
+        )
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "seed.txt").write_text("seed")
+        subprocess.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True)
+
+        config_path = self._make_config_with_events(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        config = config_module.load_config(config_path)
+        config["retro"] = {"repo_roots": [str(repo)]}
+        save_config(config, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        self._activate(monkeypatch, config_path)
+
+        class FrozenDatetime(datetime):
+            current = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current if tz is not None else cls.current.replace(tzinfo=None)
+
+        monkeypatch.setattr(_mm_events, "datetime", FrozenDatetime)
+        monkeypatch.setattr(events_tail, "datetime", FrozenDatetime)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        first_files = self._events_files(self._events_dir(tmp_path))
+        assert len(first_files) == 1
+        first_rows = self._read_events(first_files[0])
+        first_cursor = [row for row in first_rows if row["type"] == "mm-push"][-1]["ts"]
+
+        FrozenDatetime.current = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
+        (repo / "idle.txt").write_text("idle")
+        subprocess.run(["git", "-C", str(repo), "add", "idle.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "idle"], check=True)
+        idle_sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        # No synced source changed: no day-two event file and no new cursor.
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        assert self._events_files(self._events_dir(tmp_path)) == first_files
+        assert [row for row in self._read_events(first_files[0]) if row["type"] == "mm-push"][-1][
+            "ts"
+        ] == first_cursor
+
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "trigger.md").write_text(
+            "substantive"
+        )
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        rows = [
+            row
+            for event_file in self._events_files(self._events_dir(tmp_path))
+            for row in self._read_events(event_file)
+        ]
+        captured_shas = [
+            commit["sha"]
+            for row in rows
+            if row.get("type") == "git-snapshot"
+            for project in row.get("projects", [])
+            for commit in project.get("commits", [])
+        ]
+        assert captured_shas.count(idle_sha) == 1
 
     def test_events_tail_filters_mm_events_from_sources_field(self, tmp_path, monkeypatch):
         """Codex C7: mm-events source name MUST NOT appear in the

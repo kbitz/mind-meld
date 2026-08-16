@@ -2,6 +2,40 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.28] - 2026-08-16
+
+**Fleet-retro capture now honors a small, independent root-discovery budget without pretending an incomplete scan is complete.**
+
+### Changed
+
+- **Bounded, call-scoped git-root discovery.** Push and init reuse one immutable discovery result across snapshot capture and identity gathering. Autopush receives a 50 ms budget and interactive push/init receive 100 ms; successful roots remain usable when the deadline expires, while incomplete observation stays visible in the forensic event and unattended status breadcrumb.
+
+- **No fabricated content heartbeat.** An empty push, including after a UTC rollover, leaves the retro cursor and events untouched. The next substantive push captures the full idle interval exactly once; local autorun freshness still means only that the hook ran.
+
+### Fixed
+
+- **Incomplete identity observation cannot poison the cache.** A partial root result can contribute identities to its current event, but never rewrites the seven-day identity cache or its freshness marker, so a later complete refresh can prune removed identities.
+
+## [0.12.27] - 2026-08-16
+
+**Project instructions now have one shared source for Claude Code, Codex, OpenCode, and Grok Build.**
+
+### Changed
+
+- **Multi-host instruction layout.** `AGENTS.md` is now the canonical project instruction file, while `CLAUDE.md` is a relative symlink to it. Existing instruction text is unchanged.
+
+## [0.12.26] - 2026-08-16
+
+**Mind Meld now treats every peer-reachable diagnostic as literal terminal text, so a synced value cannot rewrite your clipboard, clear your screen, or spoof Rich formatting while you inspect a failure.**
+
+### Fixed
+
+- **Terminal-safe final renderers.** Remaining Rich and plain-stderr sinks now strip terminal control sequences and escape markup at display time, including status rows, dropped-device warnings, typed unattended-hook errors, event discovery failures, and mm-events bootstrap warnings. Raw exception context remains available in private forensic logs.
+
+- **Unattended commands keep their distinct truth.** `autopull` and `autopush` share setup, lock, and error handling without collapsing their verb-specific outcomes. Regression coverage preserves quiet missing-config and lock paths, fleet refusal, no-sources, and degraded-tail reporting.
+
+- **Init no longer acts on stale observations.** Source prompts use one filesystem detection snapshot for their copy and default, and crypto bootstrap losers re-fetch then reject missing or corrupt race winners instead of trusting the stale pre-race result.
+
 ## [0.12.25] - 2026-08-15
 
 **`mm push` and `mm init` now capture their fleet-retro snapshots through the same path, so the two flows stay in lockstep without changing their existing behavior.**
