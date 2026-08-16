@@ -20,6 +20,25 @@ All notable changes to Mind Meld will be documented in this file.
 ### Tests
 
 - Added outcome, partial-install, gate, dangling-link no-clobber, CLI exit, and init/push exception-containment regression coverage for all three targets.
+## [0.12.23] - 2026-08-15
+
+**`mm gc --dry-run` now shows exactly what retention cleanup would attempt without touching the files it inspects.** Preview temporary upload remnants, stale event files, stale token-cache entries, and, with `--conflicts`, stale conflict sidecars before deletion.
+
+### Fixed
+
+- **Truthful retention previews and outcomes.** Every executed reaper emits a stable result line, including zero counts and planned token-cache repairs. Apply mode distinguishes successful deletions from failed or skipped work; use `mm gc -v`, fix permissions or locks, then rerun if a reaper needs attention. Token-cache inspection holds a shared read-only lock and never creates, rewrites, re-permissions, or normalizes the cache during preview.
+
+- **Best-effort reapers no longer overstate cleanup.** Temporary, event, and conflict deletions count only after `unlink()` succeeds. A failed cleanup does not prevent the remaining reapers or orphan-blob GC from running. `mm push` keeps its concise auto-GC output.
+
+## [0.12.22] - 2026-08-15
+
+### Added
+
+- Retro snapshots now record distinct, repository-qualified GitHub pull requests
+  from supported squash/rebase and merge commit subjects. The metric shares the
+  existing author, time-window, and commit-dedup eligibility rules; malformed
+  subjects and remotes are rejected. It is additive storage for the next retro
+  presentation track, not an API-backed throughput or trend metric.
 
 ## [0.12.21] - 2026-08-15
 

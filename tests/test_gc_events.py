@@ -19,6 +19,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from mind_meld import token_usage
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
@@ -67,7 +68,7 @@ class TestGcOldEventFiles:
         cfg = _config_with_events(tmp_path, events_root)
 
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 1
+        assert reaped.deleted == 1
         assert not old_file.exists()
 
     def test_files_younger_than_90d_are_kept(self, tmp_path):
@@ -78,7 +79,7 @@ class TestGcOldEventFiles:
         cfg = _config_with_events(tmp_path, events_root)
 
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 0
+        assert reaped.deleted == 0
         assert keep.exists()
 
     def test_threshold_boundary_at_90d_exact(self, tmp_path):
@@ -89,7 +90,7 @@ class TestGcOldEventFiles:
         f = _make_events_file(events_dir, "dev-a", boundary)
         cfg = _config_with_events(tmp_path, events_root)
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 1
+        assert reaped.deleted == 1
         assert not f.exists()
 
     def test_reap_by_filename_date_not_mtime(self, tmp_path):
@@ -108,18 +109,26 @@ class TestGcOldEventFiles:
 
         cfg = _config_with_events(tmp_path, events_root)
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 1, "filename date must override misleading mtime"
+        assert reaped.deleted == 1, "filename date must override misleading mtime"
 
-    def test_dry_run_does_not_unlink(self, tmp_path):
+    def test_dry_run_does_not_unlink(self, tmp_path: Path):
         events_root = tmp_path / "events_root"
         events_dir = events_root / "events"
-        old = datetime.now(timezone.utc) - timedelta(days=120)
+        now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        old = now - timedelta(days=120)
         old_file = _make_events_file(events_dir, "dev-a", old)
+        old_file.write_bytes(b"event bytes must remain exact")
+        old_file.chmod(0o640)
+        before = old_file.stat()
         cfg = _config_with_events(tmp_path, events_root)
 
-        reaped = _gc_old_event_files(cfg, dry_run=True, verbose=False)
-        assert reaped == 1, "dry_run still reports the count"
+        reaped = _gc_old_event_files(cfg, dry_run=True, verbose=False, now=now)
+        assert reaped.candidates == 1, "dry_run still reports the count"
         assert old_file.exists(), "dry_run must NOT unlink"
+        assert old_file.read_bytes() == b"event bytes must remain exact"
+        after = old_file.stat()
+        assert after.st_mode & 0o777 == before.st_mode & 0o777
+        assert after.st_mtime_ns == before.st_mtime_ns
 
     def test_verbose_prints_per_file(self, tmp_path, capsys):
         events_root = tmp_path / "events_root"
@@ -139,7 +148,7 @@ class TestGcOldEventFiles:
         # the source out OR _gc_old_event_files's is_dir guard catches it.
         cfg = _config_with_events(tmp_path, events_root)
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 0
+        assert reaped.deleted == 0
 
     def test_no_mm_events_source_is_noop(self, tmp_path):
         """User who hasn't migrated config: no mm-events source → 0
@@ -154,7 +163,7 @@ class TestGcOldEventFiles:
             "crypto": {"argon2_memory_kb": MEMORY_KB},
         }
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 0
+        assert reaped.deleted == 0
 
     def test_non_jsonl_files_left_alone(self, tmp_path):
         """Only files matching <device>-YYYY-MM-DD.jsonl are reaped.
@@ -172,7 +181,7 @@ class TestGcOldEventFiles:
 
         cfg = _config_with_events(tmp_path, events_root)
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 1
+        assert reaped.deleted == 1
         assert not old_file.exists()
         assert (events_dir / "README.md").exists()
         assert (events_dir / "garbage.jsonl").exists()
@@ -186,7 +195,7 @@ class TestGcOldEventFiles:
         old_file = _make_events_file(custom_dir, "dev-a", old)
         cfg = _config_with_events(tmp_path, custom_root)
         reaped = _gc_old_event_files(cfg, dry_run=False, verbose=False)
-        assert reaped == 1
+        assert reaped.deleted == 1
         assert not old_file.exists()
 
 
@@ -266,6 +275,64 @@ class TestGcEventsIronRule:
         assert any(old_file.name in path for path in tombstones.keys()), (
             f"reaper-driven tombstone missing; tombstones={list(tombstones.keys())}"
         )
+
+
+class TestGcDryRunRetentionReport:
+    def test_dry_run_conflicts_reports_every_reaper_without_mutation(self, tmp_path, monkeypatch):
+        storage_dir = tmp_path / "storage"
+        events_root = tmp_path / "events_root"
+        events_dir = events_root / "events"
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+
+        old = datetime.now(timezone.utc) - timedelta(days=120)
+        old_event = _make_events_file(events_dir, "dev-a", old)
+        old_conflict = events_dir / "notes.sync-conflict-20260101-120000-peer0001.jsonl"
+        old_conflict.write_text("conflict")
+        ancient = (datetime.now(timezone.utc) - timedelta(days=31)).timestamp()
+        os.utime(old_conflict, (ancient, ancient))
+        tmp_file = storage_dir / "data" / "dev-a" / "tmp-upload.tmp"
+        tmp_file.parent.mkdir(parents=True)
+        tmp_file.write_bytes(b"tmp bytes")
+        stale_cache_path = tmp_path / "missing.jsonl"
+        token_usage.CACHE_PATH.write_text(
+            '{"version":1,"files":{"' + str(stale_cache_path) + '":{"by_day":{"2020-01-01":{}}}}}'
+        )
+        watched = (old_event, old_conflict, tmp_file, token_usage.CACHE_PATH)
+        before = {path: (path.read_bytes(), path.stat()) for path in watched}
+
+        config_path = tmp_path / "config.toml"
+        cfg = _config_with_events(tmp_path, events_root)
+        cfg["storage"] = {"path": str(storage_dir)}
+        save_config(cfg, config_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["gc", "--dry-run", "--conflicts"])
+
+        assert result.exit_code == 0, result.output
+        assert "Temporary files dry-run: candidates=1 repairs=0 skipped=0" in result.output
+        assert "Events dry-run: candidates=1 repairs=0 skipped=0" in result.output
+        assert "Token cache dry-run: candidates=1 repairs=0 skipped=0" in result.output
+        assert "Conflicts dry-run: candidates=1 repairs=0 skipped=0" in result.output
+        for path, (contents, stat) in before.items():
+            after = path.stat()
+            assert path.read_bytes() == contents
+            assert after.st_mode == stat.st_mode
+            assert after.st_mtime_ns == stat.st_mtime_ns
+
+        without_conflicts = runner.invoke(app, ["gc", "--dry-run"])
+        assert without_conflicts.exit_code == 0, without_conflicts.output
+        assert "Conflicts dry-run:" not in without_conflicts.output
+
+    def test_gc_help_describes_complete_dry_run_scope(self) -> None:
+        result = runner.invoke(app, ["gc", "--help"])
+
+        assert result.exit_code == 0, result.output
+        assert "Preview orphan blobs" in result.output
+        assert "retention cleanup" in result.output
+        assert "deleting" in result.output
 
 
 class TestGcEventsOfflinePeerSuppression:

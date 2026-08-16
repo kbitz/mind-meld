@@ -48,16 +48,6 @@ _produces: An isolated, incremental Codex usage reader and the canonical host-fa
 - **Read Codex cumulative session totals** — use the final `token_count` event per rollout. _host_usage.py + fixture, ~80 lines._ (M)
 - **Store incremental state separately** — isolate host-token cache from Claude session-token cache. _host_usage.py + tests, ~50 lines._ (S)
 
-##### Track 17D: Make every GC reaper testable and dry-run honest
-_3 tasks . ~150 LOC . medium risk . 3 files_
-_touches: src/mind_meld/retention.py, tests/test_gc_events.py, tests/test_conflict_copy.py_
-_out: 18B_
-_read-first: docs/invariants/events-retro.md_
-_produces: Mutation-backed coverage and truthful `mm gc --dry-run` counts._
-- **Add tests before behavior changes** — cover token-cache and temporary-file reapers through their mutation boundaries. _tests, ~70 lines._ (M)
-- **Normalize dry-run reporting** — count would-be token-cache removals without mutation. _retention.py, ~35 lines._ (S)
-- **Keep reaper counts trustworthy** — pin event and conflict counts across dry-run and real deletion. _tests, ~45 lines._ (S)
-
 ##### Track 17E: Add PR identity to the retro aggregate
 _2 tasks . ~55 LOC . low risk . 2 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_retro_fleet_aggregator.py_
@@ -85,7 +75,7 @@ _produces: Sanitized peer output and shared auto-command control flow._
 
 ##### Track 18B: Centralize conflict diff rendering and choice normalization
 _3 tasks . ~100 LOC . low risk . 4 files_
-_blocked-by: Track 17D_
+_blocked-by: Group 17 completion (Tracks 17A–C, 17E; Track 17D shipped in v0.12.23)_
 _touches: src/mind_meld/resolveflow.py, src/mind_meld/conflictdiff.py, tests/test_conflictdiff.py, tests/test_conflict_copy.py_
 _out: 19B_
 _read-first: docs/invariants/conflicts.md_
@@ -211,7 +201,6 @@ Group 17: Stabilize post-extraction seams
   +-- Track 17A ........... ~M . 4 tasks
   +-- Track 17B ........... ~M . 2 tasks
   +-- Track 17C ........... ~M . 3 tasks
-  +-- Track 17D ........... ~M . 3 tasks
   +-- Track 17E ........... ~S . 2 tasks
 
 Group 18: Use the new seams ∥ first model-card slice
@@ -235,7 +224,7 @@ Group 22: Model-card PR attribution
   +-- Track 22A ........... ~M . 2 tasks
 ```
 
-**Total: 0 phases . 6 groups . 15 tracks remaining.**
+**Total: 0 phases . 6 groups . 14 tracks remaining.**
 
 ---
 
@@ -397,3 +386,7 @@ Child symlinks are now local routing rather than sync content: generic walkers o
 ### Group 16: cli.py decomposition ✓ Shipped (v0.12.21)
 
 - Track 16A — _shipped (v0.12.21): remove the unused collector, extract six cohesive modules, tighten isolation and routing gates, and update release documentation._
+
+### Track 17D: Honest GC reaper dry-runs ✓ Shipped (v0.12.23)
+
+- Track 17D — _shipped (v0.12.23): make every retention reaper plan before mutation, make token-cache preview read-only under a shared lock, report candidates and failures truthfully, and pin dry-run byte/metadata preservation plus partial-delete behavior._
