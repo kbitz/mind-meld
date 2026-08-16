@@ -1837,6 +1837,39 @@ class TestPromptSources:
         # survives indirection AND contains the new config.yaml exclude.
         assert "config.yaml" in gstack["exclude_patterns"]
 
+    def test_init_uses_one_detection_snapshot_per_user_source(self, monkeypatch) -> None:
+        """Prompt copy and default must share one filesystem observation."""
+        from mind_meld import cli as cli_module
+
+        probes: list[str] = []
+
+        class CountingPath:
+            def __init__(self, value: str):
+                self.value = value
+
+            def expanduser(self):
+                return self
+
+            def exists(self) -> bool:
+                probes.append(self.value)
+                return True
+
+        prompts: list[tuple[str, bool]] = []
+
+        def confirm(prompt: str, *, default: bool) -> bool:
+            prompts.append((prompt, default))
+            return False
+
+        monkeypatch.setattr(cli_module, "Path", CountingPath)
+        monkeypatch.setattr(cli_module.typer, "confirm", confirm)
+
+        _prompt_sources()
+
+        user_sources = [s for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
+        assert len(probes) == len(user_sources)
+        assert all(default is True for _prompt, default in prompts)
+        assert all("detected" in prompt for prompt, _default in prompts)
+
 
 class TestRegisterAndSave:
     """_register_and_save — device register → config write → keyring store.
@@ -2182,6 +2215,33 @@ class TestBootstrapOrVerifyCrypto:
         assert rs == winner_salt
         assert mk == 1024
         assert kc == winner_keycheck
+
+    @pytest.mark.parametrize("status", ["missing", "corrupt"])
+    def test_first_device_lost_race_refuses_non_ok_winner(self, monkeypatch, status: str) -> None:
+        """A bootstrap loser must re-fetch and refuse a missing/corrupt winner."""
+        import typer
+
+        from mind_meld import cli as cli_module
+        from mind_meld.crypto import CryptoInitFetch
+
+        monkeypatch.setattr(
+            cli_module,
+            "bootstrap_crypto_init",
+            lambda *args, **kwargs: (_ for _ in ()).throw(StorageError("concurrent put")),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "fetch_crypto_init",
+            lambda _backend: CryptoInitFetch(status=status),
+        )
+
+        with pytest.raises(typer.Exit):
+            _bootstrap_or_verify_crypto(
+                backend=None,
+                passphrase="pw",
+                is_first_device=True,
+                fetch=CryptoInitFetch(status="missing"),
+            )
 
 
 class TestDownloadAndApplyPathTraversalGuard:

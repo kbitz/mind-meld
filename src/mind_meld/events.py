@@ -62,6 +62,7 @@ from urllib.parse import urlsplit
 
 from mind_meld import fsutil, token_usage
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES
+from mind_meld.safety import strip_terminal_escapes
 
 # ---------------------------------------------------------------------------
 # Module-level named constants (C3). Track 7B imports the budget pair to
@@ -627,7 +628,8 @@ def walk_git_projects(
                     skipped.append({"path": str(root), "reason": "budget_abort"})
     except Exception as e:
         sys.stderr.write(
-            f"mm: notice: walk_git_projects whole-walk failure ({type(e).__name__}: {e})\n"
+            "mm: notice: walk_git_projects whole-walk failure "
+            f"({type(e).__name__}: {strip_terminal_escapes(str(e))})\n"
         )
     finally:
         # Don't wait for orphaned subprocesses: they'll be killed on process
