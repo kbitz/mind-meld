@@ -10,6 +10,11 @@ reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
 
 ## Unprocessed
 
-(none)
+- **GC plan-and-apply unification** — consider a machine-readable outcome that
+  includes orphan blobs only when automation/audit export creates a real
+  consumer; Track 17D intentionally limits its outcome seam to retention.
+- **Tmp reaper age policy** — retain immediate, device-scoped crash cleanup
+  unless evidence shows active writes can be swept; do not add an age gate as
+  incidental Track 17D scope.
 
-_Last drained 2026-08-15: two items placed in Tracks 17D and 19B; two P4 items deferred to `docs/ROADMAP.md` Future._
+_Last updated 2026-08-15 by Track 17D autoplan review._

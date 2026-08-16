@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.12.22] - 2026-08-15
+## [0.12.25] - 2026-08-15
 
 **`mm push` and `mm init` now capture their fleet-retro snapshots through the same path, so the two flows stay in lockstep without changing their existing behavior.**
 
@@ -11,6 +11,44 @@ All notable changes to Mind Meld will be documented in this file.
 - **Shared event capture for push and init.** Git discovery, bounded git capture, device stamping, session snapshot assembly, cache-lock lifetime, and walk-budget measurement now live in one private seam. Push keeps its token-cache policy, identity capture, `mm-push` row, and degradation breadcrumb; init keeps its 30-day backfill, token/identity warming, and snapshot-only write.
 
 - **Pinned the refactor's edge cases.** Regression coverage now proves cache warming and identity work do not consume the session budget, one lock spans every enabled Claude root, cache contention remains visible to unattended autopush, and init passes the same explicit cursor to both git and session capture.
+
+## [0.12.24] - 2026-08-15
+
+**The bundled `retro-fleet` skill installer now tells the truth about every supported agent instead of letting one partial failure disappear behind another success.** Claude Code, Codex, and OpenCode each receive an independent outcome, and `mm install-skills` exits nonzero whenever an available agent could not be installed safely.
+
+### Changed
+
+- **Descriptor-driven three-agent installation.** A single call-time target registry now carries every agent root, skills directory, display name, and marker pair. The installer returns one ordered result per agent: `installed`, `unchanged`, `unavailable`, `conflict`, or `failed`.
+- **Agent availability and repair gates share one predicate.** An absent agent root is skipped; an installed agent whose `skills/` directory is missing is immediately eligible for repair even with a fresh legacy marker. Dry runs perform no source resolution or filesystem mutation.
+- **`mm install-skills` reports partial installs precisely.** Successful agents remain visible alongside conflicts and failures, all user-facing filesystem paths are terminal-safe, and any available conflict or failure returns exit code 1.
+
+### Fixed
+
+- **A dangling skill symlink is never unlinked automatically.** It is now a conflict that requires a deliberate user removal. This preserves the installer’s no-clobber guarantee if a concurrent process replaces the dangling link with a file or foreign symlink.
+- **A skill-installer regression cannot abort `mm init` or `mm push`.** Both load-bearing flows retain a forensic notice boundary and continue their normal initialization or event-backfill work.
+
+### Tests
+
+- Added outcome, partial-install, gate, dangling-link no-clobber, CLI exit, and init/push exception-containment regression coverage for all three targets.
+## [0.12.23] - 2026-08-15
+
+**`mm gc --dry-run` now shows exactly what retention cleanup would attempt without touching the files it inspects.** Preview temporary upload remnants, stale event files, stale token-cache entries, and, with `--conflicts`, stale conflict sidecars before deletion.
+
+### Fixed
+
+- **Truthful retention previews and outcomes.** Every executed reaper emits a stable result line, including zero counts and planned token-cache repairs. Apply mode distinguishes successful deletions from failed or skipped work; use `mm gc -v`, fix permissions or locks, then rerun if a reaper needs attention. Token-cache inspection holds a shared read-only lock and never creates, rewrites, re-permissions, or normalizes the cache during preview.
+
+- **Best-effort reapers no longer overstate cleanup.** Temporary, event, and conflict deletions count only after `unlink()` succeeds. A failed cleanup does not prevent the remaining reapers or orphan-blob GC from running. `mm push` keeps its concise auto-GC output.
+
+## [0.12.22] - 2026-08-15
+
+### Added
+
+- Retro snapshots now record distinct, repository-qualified GitHub pull requests
+  from supported squash/rebase and merge commit subjects. The metric shares the
+  existing author, time-window, and commit-dedup eligibility rules; malformed
+  subjects and remotes are rejected. It is additive storage for the next retro
+  presentation track, not an API-backed throughput or trend metric.
 
 ## [0.12.21] - 2026-08-15
 

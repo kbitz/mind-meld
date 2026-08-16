@@ -195,6 +195,10 @@ class GitAggregate:
     additions: int = 0
     deletions: int = 0
     repos_by_count: dict[str, int] = field(default_factory=dict)
+    # Distinct, accepted GitHub PR references inferred from supported commit
+    # subjects. Repository qualification prevents ``#123`` in two projects
+    # from collapsing into one PR in a fleet aggregate.
+    pull_request_identities: set[tuple[str, int]] = field(default_factory=set)
     # Consecutive local-day commit streak ending at (or one day before)
     # ``until``. Computed from the FULL events buffer regardless of the
     # retro window — a 7d retro on a 30-day streak shows 30. Capped in
@@ -210,6 +214,11 @@ class GitAggregate:
     ship: ShipOfWeek = field(default_factory=ShipOfWeek)
     # Empty unless window_days >= 14. Sorted oldest -> newest.
     weekly: list[WeeklyBucket] = field(default_factory=list)
+
+    @property
+    def pull_requests(self) -> int:
+        """Number of distinct detected PR identities in this aggregate."""
+        return len(self.pull_request_identities)
 
 
 @dataclass
@@ -472,6 +481,46 @@ def _classify_commit_subject(subject: object) -> str:
     return kw if kw in _COMMIT_TYPE_KEYWORDS else "other"
 
 
+_PR_SUBJECT_LEN_CAP = 256
+"""Maximum accepted commit-subject length for PR extraction.
+
+Unlike conventional-commit classification, PR recognition needs to validate the
+whole subject so an attacker cannot hide a matching suffix after an inspected prefix.
+Subjects over this cap are deliberately not recognized.
+"""
+
+
+_SQUASH_PR_SUBJECT_RE = re.compile(r".+ \(#([1-9][0-9]*)\)")
+"""GitHub squash/rebase subject, e.g. ``docs: update roadmap (#114)``."""
+
+
+_MERGE_PR_SUBJECT_RE = re.compile(r"Merge pull request #([1-9][0-9]*) from [^\r\n]+")
+"""GitHub merge-commit subject, e.g. ``Merge pull request #114 from kb/topic``."""
+
+
+def _extract_github_pr_number(subject: object) -> int | None:
+    """Return a supported GitHub PR number from a bounded commit subject.
+
+    The retro's event stream is peer-supplied input, not a GitHub API response.
+    Recognition is therefore intentionally narrow: exact, single-line GitHub squash
+    and merge subject shapes with ASCII, positive numbers only. Every other value is
+    an unrecognized subject rather than an error.
+    """
+    if not isinstance(subject, str) or not subject or len(subject) > _PR_SUBJECT_LEN_CAP:
+        return None
+    for pattern in (_SQUASH_PR_SUBJECT_RE, _MERGE_PR_SUBJECT_RE):
+        match = pattern.fullmatch(subject)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def _is_repository_identity(remote: str) -> bool:
+    """Return whether a canonical remote includes a whitespace-free host and path."""
+    host, separator, path = remote.partition("/")
+    return bool(host and separator and path) and not any(char.isspace() for char in remote)
+
+
 _BURST_GAP_MINUTES = 45
 """Threshold for splitting commits into bursts. Industry-standard 45-min
 gap; smaller values over-split, larger values stitch lunch-then-resume
@@ -604,6 +653,14 @@ def aggregate_git(
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
+
+                # PRs inherit the same author, window, and commit-dedup
+                # eligibility as the personal-retro aggregate. An empty or
+                # malformed remote is not stable enough to qualify a PR ID.
+                pr_number = _extract_github_pr_number(c.get("subject"))
+                if _is_repository_identity(remote) and pr_number is not None:
+                    out.pull_request_identities.add((remote, pr_number))
+
                 add = _safe_int(c.get("add"))
                 dlt = _safe_int(c.get("del"))
                 out.commits += 1
@@ -2052,6 +2109,7 @@ def _retro_to_snapshot(data: RetroData) -> dict:
             "commits": data.git.commits,
             "additions": data.git.additions,
             "deletions": data.git.deletions,
+            "pull_requests": data.git.pull_requests,
             "streak_days": data.git.streak_days,
             "sessions": data.sessions.total_sessions,
             "tokens_total": (

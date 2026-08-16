@@ -326,7 +326,9 @@ mm status [--source NAME]   # show local vs remote state, pending changes
 mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
 mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
                                              # annotates modified files as write / merge / skip / conflict
-mm gc [--conflicts]         # delete orphaned blobs; with --conflicts, also reap .sync-conflict-* files >30d
+mm gc [--dry-run] [--conflicts]
+                            # delete orphaned blobs and local retention data; --dry-run previews candidates without mutation
+                            # with --conflicts, also reap .sync-conflict-* files >30d
 mm sources                  # list configured sync sources with status
 mm conflicts                # list unresolved .sync-conflict-* files across sources
 mm resolve [PATH]           # interactively resolve conflict files (unified diff + pick winner)
@@ -337,7 +339,7 @@ mm disable-source NAME [--force]   # turn a configured sync source OFF for this 
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
-mm install-skills           # install / re-install the retro-fleet skill symlink for Claude Code, Codex, and OpenCode (force-runs the same self-heal mm init / mm push invoke automatically)
+mm install-skills           # check/install the retro-fleet skill link for Claude Code, Codex, and OpenCode; reports each target and never overwrites a dangling or foreign link
 mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N] [--format jsonl|table]
                             # query the per-file pull/push history log
 mm retro-fleet [WINDOW] [--no-author-filter]
@@ -406,7 +408,7 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 7. Reap `mm-events` files older than `EVENTS_RETENTION_DAYS` (90). Always-on fleet policy, not opt-in.
 8. Reap `session-tokens.json` cache entries whose underlying jsonl is gone, or whose most recent `by_day` key is more than 90 days old.
 9. With `--conflicts`, also reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30).
-10. Supports `--dry-run` (list what would be deleted without deleting). **Coverage is uneven today:** the blob and event reapers report honestly, `_gc_old_conflict_files` prints its `would delete` lines but never increments its counter under `--dry-run` (so it always reports `would reap 0`), and `_gc_token_cache` skips enumeration entirely and prints `dry-run; skipping`. Both gaps are ROADMAP Track 17D; do not treat the current output as the contract.
+10. Supports `--dry-run`: each executed retention reaper selects the same candidates as apply mode, prints a stable summary (including zero counts), and makes no deletion or cache write. Token-cache preview holds a shared read-only lock, so inspecting a missing or malformed cache never creates, rewrites, re-permissions, or normalizes it. Apply mode counts a deletion only after it succeeds and reports failed or skipped work separately; use `mm gc -v` for safe per-path detail. `--conflicts` opts into the conflict-sidecar reaper in both modes.
 11. Release lockfile.
 12. Print summary (blobs deleted, bytes freed).
 

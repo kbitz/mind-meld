@@ -77,11 +77,16 @@ import re
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict
 
-from mind_meld.lockedjson import locked_json_rmw
+from mind_meld.lockedjson import (
+    LockedJsonSnapshot,
+    locked_json_rmw,
+    locked_json_snapshot,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1577,54 +1582,172 @@ def _iter_subagent_jsonls(session_dir: Path) -> Iterable[Path]:
         return
 
 
-def gc_cache_entries(*, max_age_s: float = 90 * 24 * 3600) -> int:
-    """Reap cache entries whose underlying jsonl no longer exists OR whose
-    most recent ``by_day`` key is older than ``max_age_s``.
+@dataclass(frozen=True)
+class TokenCacheGcPlan:
+    """Immutable stale-entry and normalization plan for session-token cache GC."""
 
-    Returns the number of entries reaped. Called from ``mm gc`` (cli
-    side wires this in).
+    stale_keys: tuple[str, ...] = ()
+    reset_root: bool = False
+    reset_files: bool = False
+    extra_root_keys: tuple[str, ...] = ()
+    skipped_reason: str | None = None
 
-    Routes through ``lock_and_get_files`` so the version-check + ``files``-
-    isinstance-check normalization lives in ONE place. ``mm gc`` is a
-    user-invoked maintenance command — ``"block"`` mode is the right
-    choice (wait for contention rather than skip cleanup); a future
-    contributor copy-pasting from ``_run_events_tail``'s ``"warn"`` mode
-    would silently make ``mm gc`` a no-op under contention.
+    @property
+    def repairs(self) -> int:
+        return int(self.reset_root or self.reset_files) + len(self.extra_root_keys)
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.stale_keys or self.repairs)
+
+
+@dataclass(frozen=True)
+class TokenCacheGcResult:
+    """Actual outcome of applying a ``TokenCacheGcPlan``."""
+
+    plan: TokenCacheGcPlan
+    write_error: OSError | None = None
+
+    @property
+    def candidates(self) -> int:
+        return len(self.plan.stale_keys)
+
+    @property
+    def deleted(self) -> int:
+        return 0 if self.write_error is not None else self.candidates
+
+    @property
+    def failed(self) -> int:
+        return self.candidates if self.write_error is not None else 0
+
+    @property
+    def repairs_applied(self) -> int:
+        return 0 if self.write_error is not None else self.plan.repairs
+
+    @property
+    def repairs_failed(self) -> int:
+        return self.plan.repairs if self.write_error is not None else 0
+
+
+def plan_cache_entries(
+    *,
+    max_age_s: float = 90 * 24 * 3600,
+    now: datetime | None = None,
+) -> TokenCacheGcPlan:
+    """Read the token cache without mutation and return its GC plan.
+
+    A missing cache is intentionally a no-op: preview must not create it, and
+    apply has nothing useful to repair. Other malformed cache states become an
+    explicit repair plan so callers can report them before applying anything.
     """
-    cutoff_iso = (datetime.now(timezone.utc).date()).isoformat()
-    # max_age_s converted to days for the by_day comparison.
+    now = now or datetime.now(timezone.utc)
+    with locked_json_snapshot(CACHE_PATH) as snapshot:
+        return _plan_cache_entries(snapshot, max_age_s=max_age_s, now=now)
+
+
+def reap_cache_entries(
+    *,
+    max_age_s: float = 90 * 24 * 3600,
+    now: datetime | None = None,
+) -> TokenCacheGcResult:
+    """Apply a token-cache GC plan and report actual persistence success.
+
+    The initial read-only plan avoids opening a missing/fresh cache for R/M/W.
+    If work is needed, the cache is re-planned under the exclusive lock so a
+    concurrent update cannot turn a preview's stale plan into a blind write.
+    """
+    now = now or datetime.now(timezone.utc)
+    initial_plan = plan_cache_entries(max_age_s=max_age_s, now=now)
+    if not initial_plan.has_changes:
+        return TokenCacheGcResult(plan=initial_plan)
+
+    with locked_json_rmw(
+        CACHE_PATH,
+        default_factory=_empty_cache,
+        on_contention="block",
+        contention_warning="token cache contended; skipping token GC",
+    ) as ljson:
+        if not ljson.is_locked:
+            return TokenCacheGcResult(plan=TokenCacheGcPlan(skipped_reason="lock_failed"))
+        snapshot = LockedJsonSnapshot(
+            data=ljson.data if ljson.read_state == "valid" else None,
+            state=ljson.read_state,
+            error=ljson.read_error,
+        )
+        plan = _plan_cache_entries(snapshot, max_age_s=max_age_s, now=now)
+        if not plan.has_changes:
+            ljson.write_on_exit = False
+            return TokenCacheGcResult(plan=plan)
+        _apply_cache_gc_plan(ljson.data, plan)
+
+    return TokenCacheGcResult(plan=plan, write_error=ljson.write_error)
+
+
+def gc_cache_entries(*, max_age_s: float = 90 * 24 * 3600) -> int:
+    """Compatibility wrapper returning successful stale-entry deletions.
+
+    Callers that need candidate, repair, and persistence details should use
+    ``plan_cache_entries`` / ``reap_cache_entries`` instead.
+    """
+    return reap_cache_entries(max_age_s=max_age_s).deleted
+
+
+def _plan_cache_entries(
+    snapshot: LockedJsonSnapshot,
+    *,
+    max_age_s: float,
+    now: datetime,
+) -> TokenCacheGcPlan:
+    if snapshot.state == "missing":
+        return TokenCacheGcPlan()
+    if snapshot.state in ("empty", "malformed", "non_dict"):
+        return TokenCacheGcPlan(reset_root=True)
+    if snapshot.state != "valid" or snapshot.data is None:
+        return TokenCacheGcPlan(skipped_reason=snapshot.state)
+
+    root = snapshot.data
+    if root.get("version") != CACHE_VERSION:
+        return TokenCacheGcPlan(reset_root=True)
+    extra_root_keys = tuple(k for k in root if k not in ("version", "files"))
+    files = root.get("files")
+    if not isinstance(files, dict):
+        return TokenCacheGcPlan(extra_root_keys=extra_root_keys, reset_files=True)
+
+    cutoff_iso = now.date().isoformat()
     max_days = int(max_age_s / 86400)
-    reaped = 0
-    # block: mm gc waits for contention by design (see docstring above).
-    with lock_and_get_files("block") as files:
-        if files is None:
-            # Block mode never yields None in practice (flock blocks until
-            # acquired). Defensive zero return preserves the prior contract.
-            return 0
-        keep: dict[str, Any] = {}
-        for key, entry in files.items():
-            if not isinstance(entry, dict):
-                reaped += 1
-                continue
-            if not Path(key).exists():
-                reaped += 1
-                continue
-            by_day = entry.get("by_day") or {}
-            if not isinstance(by_day, dict) or not by_day:
-                reaped += 1
-                continue
-            most_recent = max(by_day.keys())
-            if _days_between(most_recent, cutoff_iso) > max_days:
-                reaped += 1
-                continue
-            keep[key] = entry
-        # In-place mutation: lock_and_get_files yields the `files` sub-dict,
-        # not the cache root. Replacing via assignment would not persist —
-        # the wrapper writes back ljson.data, of which `files` is a
-        # reference. clear()+update() preserves the reference identity.
-        files.clear()
-        files.update(keep)
-    return reaped
+    stale_keys: list[str] = []
+    for key, entry in files.items():
+        if not isinstance(entry, dict):
+            stale_keys.append(key)
+            continue
+        if not Path(key).exists():
+            stale_keys.append(key)
+            continue
+        by_day = entry.get("by_day") or {}
+        if not isinstance(by_day, dict) or not by_day:
+            stale_keys.append(key)
+            continue
+        most_recent = max(by_day.keys())
+        if _days_between(most_recent, cutoff_iso) > max_days:
+            stale_keys.append(key)
+    return TokenCacheGcPlan(stale_keys=tuple(stale_keys), extra_root_keys=extra_root_keys)
+
+
+def _apply_cache_gc_plan(root: dict[str, Any], plan: TokenCacheGcPlan) -> None:
+    if plan.reset_root:
+        root.clear()
+        root.update(_empty_cache())
+        return
+    for key in plan.extra_root_keys:
+        root.pop(key, None)
+    if plan.reset_files:
+        root["files"] = {}
+        return
+    files = root.get("files")
+    if not isinstance(files, dict):
+        return
+    for key in plan.stale_keys:
+        files.pop(key, None)
 
 
 def _days_between(a_iso: str, b_iso: str) -> int:
@@ -1650,6 +1773,8 @@ __all__ = [
     "SkillBuckets",
     "TAIL_MSG_ID_LOOKBACK",
     "TOKEN_FIELDS",
+    "TokenCacheGcPlan",
+    "TokenCacheGcResult",
     "Usage",
     "JsonlSegment",
     "estimate_cost",
@@ -1664,6 +1789,8 @@ __all__ = [
     "merge_skill_days",
     "merge_token_days",
     "merge_usage_bucket",
+    "plan_cache_entries",
+    "reap_cache_entries",
     "model_family",
     "parse_usage",
     "resolve_prices",

@@ -267,6 +267,35 @@ class TestInitWiring:
         assert cfg_dev_id == called_dev_id, "device_id must match config"
         assert n_sources >= 1, "sources list must not be empty"
 
+    def test_init_continues_when_skill_installer_raises(self, tmp_path, monkeypatch):
+        """The optional installer must not abort init or suppress backfill."""
+        from typer.testing import CliRunner
+
+        from mind_meld.cli import app
+
+        runner = CliRunner()
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
+
+        def installer_failure(dry_run=False):
+            raise RuntimeError("simulated installer regression")
+
+        backfill_calls: list[str] = []
+        monkeypatch.setattr("mind_meld.skill_link._ensure_retro_skill_links", installer_failure)
+        monkeypatch.setattr(
+            "mind_meld.events_tail._run_events_backfill",
+            lambda _config, _sources, device_id: backfill_calls.append(device_id),
+        )
+
+        storage = tmp_path / "icloud"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+
+        assert result.exit_code == 0, result.output
+        assert backfill_calls, "init must continue to the events backfill"
+        assert "retro-fleet skill installation failed" in result.output
+
 
 class TestEventsDirIsolation:
     """Regression pin for the conftest `_isolate_mm_events_path` fixture.

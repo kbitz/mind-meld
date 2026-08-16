@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from mind_meld import lockedjson
 from mind_meld import token_usage as tu
 
 # ---------------------------------------------------------------------------
@@ -1052,6 +1053,83 @@ class TestWarmTokenCacheInline:
 
 
 class TestGcCacheEntries:
+    def test_preview_missing_cache_does_not_create_it(self) -> None:
+        assert not tu.CACHE_PATH.exists()
+
+        plan = tu.plan_cache_entries(now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        assert plan.stale_keys == ()
+        assert plan.repairs == 0
+        assert not tu.CACHE_PATH.exists()
+
+    def test_preview_preserves_noncanonical_cache_bytes_and_metadata(self, tmp_path: Path) -> None:
+        missing_jsonl = tmp_path / "missing.jsonl"
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        original = json.dumps(
+            {
+                "version": tu.CACHE_VERSION,
+                "files": {str(missing_jsonl): {"by_day": {"2020-01-01": {}}}},
+                "future_field": "leave untouched during preview",
+            },
+            separators=(",", ":"),
+        ).encode()
+        tu.CACHE_PATH.write_bytes(original)
+        tu.CACHE_PATH.chmod(0o640)
+        before = tu.CACHE_PATH.stat()
+
+        plan = tu.plan_cache_entries(now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        after = tu.CACHE_PATH.stat()
+        assert plan.stale_keys == (str(missing_jsonl),)
+        assert plan.repairs == 1
+        assert tu.CACHE_PATH.read_bytes() == original
+        assert after.st_mode & 0o777 == before.st_mode & 0o777
+        assert after.st_mtime_ns == before.st_mtime_ns
+
+    def test_preview_and_apply_share_frozen_stale_selection(self, tmp_path: Path) -> None:
+        live_jsonl = tmp_path / "live.jsonl"
+        live_jsonl.touch()
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": tu.CACHE_VERSION,
+                    "files": {str(live_jsonl): {"by_day": {"2020-01-01": {}}}},
+                }
+            )
+        )
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        preview = tu.plan_cache_entries(now=now)
+        applied = tu.reap_cache_entries(now=now)
+
+        assert preview.stale_keys == (str(live_jsonl),)
+        assert applied.plan.stale_keys == preview.stale_keys
+        assert applied.candidates == 1
+        assert applied.deleted == 1
+        assert self._read_disk_cache()["files"] == {}
+
+    def test_apply_reports_cache_write_failure(self, tmp_path: Path, monkeypatch) -> None:
+        missing_jsonl = tmp_path / "missing.jsonl"
+        tu.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": tu.CACHE_VERSION,
+                    "files": {str(missing_jsonl): {"by_day": {"2020-01-01": {}}}},
+                }
+            )
+        )
+        failure = OSError("disk full")
+        monkeypatch.setattr(lockedjson, "_write_json", lambda _fd, _data: failure)
+
+        result = tu.reap_cache_entries(now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+        assert result.candidates == 1
+        assert result.deleted == 0
+        assert result.failed == 1
+        assert result.write_error is failure
+
     def test_reaps_entries_with_missing_jsonl(self, tmp_path: Path) -> None:
         # Populate cache via warm.
         claude_dir = tmp_path / "claude"

@@ -164,7 +164,8 @@ OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immed
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
-| `mm gc` | Delete orphaned blobs |
+| `mm gc` | Delete orphaned blobs and run local retention cleanup |
+| `mm gc --dry-run` | Preview orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete `.sync-conflict-*` files older than 30 days |
 | `mm sources` | List configured sync sources |
 | `mm log` | Query the per-file pull/push history. Filter with `--source`, `--since`, `--action {written\|merged\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push}`, `--limit`; `--format {jsonl\|table}` |
@@ -173,7 +174,7 @@ OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immed
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. |
-| `mm install-skills` | Force-install (or repair) the `retro-fleet` skill symlink for Claude Code, Codex, and OpenCode. The push-time self-heal handles this automatically; this is the explicit knob for fresh-machine setup or post-cleanup recovery. |
+| `mm install-skills` | Force-check the `retro-fleet` skill link for Claude Code, Codex, and OpenCode. It installs only missing links and reports every agent's outcome; conflicts, including dangling or foreign links, are never overwritten. Use it for fresh-machine setup or after deliberately removing a stale link. |
 
 ### Syncing gstack
 
@@ -270,7 +271,7 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 Session jsonls only ever grow, so from v0.12.15 each push re-reads only the bytes appended since the last one rather than the whole file. That's what stopped `mm push` periodically printing `mm: notice: events tail budget exceeded` on machines with a lot of large sessions. If your token cache has gone stale from long-deleted workspaces, `mm gc` reaps those entries and shrinks what every push has to read.
 
-The skill is auto-installed on `mm init` — at `~/.claude/skills/retro-fleet` for Claude Code, and at the Codex and OpenCode equivalents (see [Codex and OpenCode Integration](#codex-and-opencode-integration)) — and self-heals every push (24h-TTL gated, a handful of syscalls per agent in steady state) so a `pipx reinstall` rebuild can't leave you with a dangling symlink. Each agent's link is tracked separately, so a deliberate skip on one never suppresses repair of another. If you already have your own file at one of those paths, mm leaves it alone and prints a one-time `mm: notice:` so you know.
+The skill is auto-installed on `mm init` — at `~/.claude/skills/retro-fleet` for Claude Code, and at the Codex and OpenCode equivalents (see [Codex and OpenCode Integration](#codex-and-opencode-integration)) — and each push can create a missing link (24h-TTL gated, a handful of syscalls per available agent in steady state). Each agent's link is tracked separately, so a problem on one never suppresses checks for another. A dangling or foreign link is a deliberate no-clobber conflict: Mind Meld never unlinks it automatically, because another process could replace it with your file. Remove that link yourself, then run `mm install-skills` (or wait for the next push) to create the bundled one.
 
 **Caveats the output is honest about:**
 
