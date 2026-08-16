@@ -1269,6 +1269,8 @@ def _prompt_conflict_choice(
     caller to write to ``local_path``. For all other choices
     ``merged_bytes`` is ``None``.
     """
+    from mind_meld import conflictdiff
+
     # Stat local for the timestamp display. Best-effort: a failed stat just
     # renders "unknown". The remote side has NO on-disk file at this inline
     # site, so its created/birthtime is genuinely unavailable -- only the
@@ -1343,21 +1345,10 @@ def _prompt_conflict_choice(
             f"{k} total diff lines.[/dim]"
         )
 
-    if diff:
-        for line in diff[:60]:
-            # Diff lines carry peer-controlled bytes (file contents).
-            # Use safe_text() so Rich strips terminal escapes (CSI/OSC/DCS)
-            # AND defangs markup -- Text() alone passes raw escapes through.
-            if line.startswith("+") and not line.startswith("+++"):
-                console.print(safe_text(line, style="green"))
-            elif line.startswith("-") and not line.startswith("---"):
-                console.print(safe_text(line, style="red"))
-            else:
-                console.print(safe_text(line))
-        if len(diff) > 60:
-            console.print(f"  [dim]...({len(diff) - 60} more diff lines)[/dim]")
-    else:
-        console.print("  [dim](files differ but text diff is empty \u2014 likely binary)[/dim]")
+    # Shared rendering owns terminal-safe peer content, but inline pull keeps
+    # its historical 60-entry consent window (mm resolve uses 80).
+    for renderable in conflictdiff.render_capped_diff(diff, cap=60):
+        console.print(renderable)
 
     # The conflict file is not on disk yet at this site -- _apply_conflict
     # writes it AFTER this function returns "keep-both" -- so render_prompt's
@@ -1386,16 +1377,9 @@ def _prompt_conflict_choice(
     prompt_default = "s"
     choice = typer.prompt("Choice", default=prompt_default, show_default=False).strip().lower()
 
-    # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both"
-    # which is exactly the on-disk effect of (s)kip today. Map through
-    # with a one-time notice so users learn the new letter.
-    if choice in ("b", "both"):
-        print(
-            "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward "
-            "(alias removed at 1.0).",
-            file=sys.stderr,
-        )
-        choice = "s"
+    # Shared compatibility policy maps only exact b/both values and emits the
+    # existing notice. Inline's c/f fallback remains its existing local policy.
+    choice = resolveflow._normalize_legacy_skip_choice_and_warn(choice)
 
     if choice in ("l", "local", "keep-canonical"):
         return "keep-canonical", None

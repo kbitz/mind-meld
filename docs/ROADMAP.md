@@ -75,17 +75,6 @@ _produces: Sanitized peer output and shared auto-command control flow._
 - **Remove remaining function-local reimports** — retain only proven cycle boundaries. _cli.py, ~40 lines._ (S)
 - **Collapse duplicate source walks and race handling** — preserve substantive-change and crypto-race contracts. _cli.py + tests, ~45 lines._ (S)
 
-##### Track 18B: Centralize conflict diff rendering and choice normalization
-_3 tasks . ~100 LOC . low risk . 4 files_
-_blocked-by: Group 17 completion (Tracks 17A–C, 17E; Track 17D shipped in v0.12.23)_
-_touches: src/mind_meld/resolveflow.py, src/mind_meld/conflictdiff.py, tests/test_conflictdiff.py, tests/test_conflict_copy.py_
-_out: 19B_
-_read-first: docs/invariants/conflicts.md_
-_produces: One capped renderer and one compatibility-choice normalization path._
-- **Extract the diff renderer** — move the colored, capped diff loop to `conflictdiff`. _conflictdiff.py, ~45 lines._ (S)
-- **Normalize compatibility choices once** — retain `b` and `both` through the pre-1.0 line but centralize the mapping. _resolveflow.py, ~25 lines._ (S)
-- **Pin both prompts** — prove the common cap and compatibility behavior. _tests, ~30 lines._ (S)
-
 ##### Track 18C: Budget root discovery and define no-op heartbeat behavior
 _2 tasks . ~85 LOC . medium risk . 3 files_
 _blocked-by: Track 17B_
@@ -207,7 +196,6 @@ Group 17: Stabilize post-extraction seams
 
 Group 18: Use the new seams ∥ first model-card slice
   +-- Track 18A ........... ~M . 4 tasks
-  +-- Track 18B ........... ~S . 3 tasks
   +-- Track 18C ........... ~M . 2 tasks
   +-- Track 18D ........... ~M . 2 tasks
   +-- Track 18E ........... ~M . 2 tasks
@@ -226,7 +214,7 @@ Group 22: Model-card PR attribution
   +-- Track 22A ........... ~M . 2 tasks
 ```
 
-**Total: 0 phases . 6 groups . 14 tracks remaining.**
+**Total: 0 phases . 6 groups . 13 tracks remaining.**
 
 ---
 
@@ -388,6 +376,10 @@ Child symlinks are now local routing rather than sync content: generic walkers o
 ### Group 16: cli.py decomposition ✓ Shipped (v0.12.21)
 
 - Track 16A — _shipped (v0.12.21): remove the unused collector, extract six cohesive modules, tighten isolation and routing gates, and update release documentation._
+
+### Track 18B: Centralize conflict diff rendering and choice normalization ✓ Shipped (v0.12.31)
+
+- Track 18B — _shipped (v0.12.31): one capped terminal-safe renderer and one compatibility-choice normalization path, with the existing 60- and 80-entry prompt windows preserved. 3 tasks shipped._
 
 ### Track 17B: Shared event capture ✓ Shipped (v0.12.25)
 

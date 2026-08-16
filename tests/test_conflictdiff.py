@@ -21,6 +21,7 @@ from mind_meld.conflictdiff import (
     format_ts,
     newer_side,
     render_banner,
+    render_capped_diff,
     render_prompt,
     render_time_line,
     render_verdict,
@@ -279,6 +280,59 @@ class TestRenderBanner:
         # peer_name is irrelevant on the LOCAL side; banner ignores it.
         assert "from kb-mbp" not in rendered
         assert "unknown peer" not in rendered
+
+
+class TestRenderCappedDiff:
+    def test_empty_diff_shows_existing_binary_hint(self) -> None:
+        rendered = render_capped_diff([], cap=60)
+
+        assert [line.plain for line in rendered] == [
+            "  (files differ but text diff is empty — likely binary)"
+        ]
+        assert str(rendered[0].style) == "dim"
+
+    def test_styles_content_but_not_unified_diff_headers(self) -> None:
+        rendered = render_capped_diff(
+            ["--- local notes.md", "+++ remote notes.md", "-old", "+new", " context"], cap=5
+        )
+
+        assert [line.plain for line in rendered] == [
+            "--- local notes.md",
+            "+++ remote notes.md",
+            "-old",
+            "+new",
+            " context",
+        ]
+        assert str(rendered[0].style) == ""
+        assert str(rendered[1].style) == ""
+        assert str(rendered[2].style) == "red"
+        assert str(rendered[3].style) == "green"
+        assert str(rendered[4].style) == ""
+
+    def test_cap_counts_raw_entries_and_reports_exact_overflow(self) -> None:
+        diff = [" header", "-old", "+new", " context"]
+
+        assert [line.plain for line in render_capped_diff(diff, cap=0)] == [
+            "  ...(4 more diff lines)"
+        ]
+        assert [line.plain for line in render_capped_diff(diff, cap=2)] == [
+            " header",
+            "-old",
+            "  ...(2 more diff lines)",
+        ]
+        assert [line.plain for line in render_capped_diff(diff, cap=4)] == diff
+
+    def test_defangs_terminal_escapes_and_preserves_literal_markup(self) -> None:
+        rendered = render_capped_diff(
+            ["+safe\x1b]52;c;ZXZpbA==\x07 [bold]literal[/bold]", "-old\x1b[2Jline"], cap=2
+        )
+
+        assert rendered[0].plain == "+safe [bold]literal[/bold]"
+        assert rendered[1].plain == "-oldline"
+        assert "\x1b" not in rendered[0].plain
+        assert "\x1b" not in rendered[1].plain
+        assert str(rendered[0].style) == "green"
+        assert str(rendered[1].style) == "red"
 
 
 class TestCountDivergentLines:

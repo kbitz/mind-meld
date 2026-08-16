@@ -46,6 +46,7 @@ from mind_meld.conflictdiff import (
     format_age_delta,
     newer_side,
     render_banner,
+    render_capped_diff,
     render_prompt,
     render_time_line,
     render_verdict,
@@ -61,7 +62,26 @@ from mind_meld.manifest import (
     parse_conflict_device_short,
 )
 from mind_meld.merge import lcs_merge
-from mind_meld.safety import safe_str, safe_text
+from mind_meld.safety import safe_str
+
+_LEGACY_SKIP_ALIAS_NOTICE = (
+    "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward (alias removed at 1.0)."
+)
+
+
+def _normalize_legacy_skip_choice_and_warn(choice: str) -> str:
+    """Map only the retired ``b`` / ``both`` aliases to skip and warn.
+
+    This is deliberately a side-effecting compatibility helper: both prompt
+    sites must preserve the exact stderr notice while one authority owns the
+    exact-match rule. Callers normalize casing and whitespace before calling.
+    All other input, including ``back`` / ``browse`` / ``between`` and the
+    resolver-only legacy ``c`` / ``f`` policy, stays untouched.
+    """
+    if choice in ("b", "both"):
+        print(_LEGACY_SKIP_ALIAS_NOTICE, file=sys.stderr)
+        return "s"
+    return choice
 
 
 def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
@@ -667,21 +687,11 @@ def _resolve_interactive_loop(
                 f"{k} total diff lines.[/dim]"
             )
 
-        if diff:
-            # Diff CONTENT is peer-controlled bytes — render via safe_text()
-            # so Rich strips terminal escapes (CSI/OSC/DCS) AND defangs
-            # markup. Text() alone passes raw escapes through.
-            for line in diff[:80]:
-                if line.startswith("+") and not line.startswith("+++"):
-                    console.print(safe_text(line, style="green"))
-                elif line.startswith("-") and not line.startswith("---"):
-                    console.print(safe_text(line, style="red"))
-                else:
-                    console.print(safe_text(line))
-            if len(diff) > 80:
-                console.print(f"  [dim]...({len(diff) - 80} more diff lines)[/dim]")
-        else:
-            console.print("  [dim](files differ but text diff is empty — likely binary)[/dim]")
+        # Rendering is shared so both consent surfaces keep the same terminal
+        # safety and color contract. The cap remains resolve-specific: this
+        # post-pull walk has historically shown 80 raw unified-diff entries.
+        for renderable in render_capped_diff(diff, cap=80):
+            console.print(renderable)
 
         # Concrete-action prompt copy. Filenames pre-sanitized via safe_str
         # since render_prompt does plain f-string interpolation. (m)erge
@@ -771,19 +781,10 @@ def _resolve_interactive_loop(
                     )
                     continue
 
-            # Pre-1.0 deprecation alias: `b` / `both` used to mean "keep both
-            # files; no change" which is exactly what `(s)kip` does today. No
-            # silent-data-loss risk in mapping it through; emit a notice once
-            # so users learn the new letter, then perform skip semantics.
-            # Exact-match: "back"/"browse"/"between" must NOT silently trip
-            # the alias.
-            if choice in ("b", "both"):
-                print(
-                    "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward "
-                    "(alias removed at 1.0).",
-                    file=sys.stderr,
-                )
-                choice = "s"
+            # Map only the retired b/both compatibility aliases after the
+            # resolver-specific c/f and newer policies above. The shared
+            # helper emits the existing stderr notice on an exact match.
+            choice = _normalize_legacy_skip_choice_and_warn(choice)
             break
 
         # Exact-match dispatch (not startswith): "leave" / "lookup" must

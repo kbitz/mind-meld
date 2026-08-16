@@ -526,7 +526,7 @@ Pull re-reads local hash and mtime at apply time so the decision reflects the ac
 
 Default flipped from `b` to `s` in v0.11.1; `b` / `both` aliased with one-time stderr notice until 1.0. The prior `c` / `f` letters from pre-v0.9.0 remain loud-rejected (real silent-data-loss risk pre-inversion). Since v0.12.8 the default key is **always** `(s)kip` at both sites — Enter never auto-accepts a merge, and since v0.12.10 it never auto-accepts a recency guess either.
 
-The shared leaf renderers (`render_prompt`, `render_banner`, `count_divergent_lines`, `format_ts`, `format_age_delta`, `newer_side`, `render_time_line`, `render_verdict`) live in `conflictdiff.py`; site-level dispatch over the four canonical-exists × inversion-mode shapes stays at each call site.
+The shared leaf renderers (`render_prompt`, `render_banner`, `render_capped_diff`, `count_divergent_lines`, `format_ts`, `format_age_delta`, `newer_side`, `render_time_line`, `render_verdict`) live in `conflictdiff.py`; site-level dispatch over the four canonical-exists × inversion-mode shapes stays at each call site.
 
 **Post-hoc resolution commands:**
 
