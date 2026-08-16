@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.27] - 2026-08-16
+
+**Project instructions now have one shared source for Claude Code, Codex, OpenCode, and Grok Build.**
+
+### Changed
+
+- **Multi-host instruction layout.** `AGENTS.md` is now the canonical project instruction file, while `CLAUDE.md` is a relative symlink to it. Existing instruction text is unchanged.
+
 ## [0.12.26] - 2026-08-16
 
 **Mind Meld now treats every peer-reachable diagnostic as literal terminal text, so a synced value cannot rewrite your clipboard, clear your screen, or spoof Rich formatting while you inspect a failure.**
