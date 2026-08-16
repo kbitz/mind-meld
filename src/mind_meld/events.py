@@ -55,9 +55,10 @@ from concurrent.futures import (
 from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
 )
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypedDict
+from typing import Callable, TypedDict
 from urllib.parse import urlsplit
 
 from mind_meld import fsutil, token_usage
@@ -71,6 +72,8 @@ from mind_meld.config import MM_INTERNAL_SOURCE_NAMES
 INITIAL_CURSOR_LOOKBACK_DAYS = 30
 WALK_TIME_BUDGET_INTERACTIVE_MS = 500
 WALK_TIME_BUDGET_AUTOPUSH_MS = 250
+ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS = 100
+ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS = 50
 MAX_GIT_WORKERS = 8
 PER_REPO_TIMEOUT_FLOOR_MS = 200
 PER_REPO_TIMEOUT_CAP_MS = 2000
@@ -102,6 +105,27 @@ _GIT_LOG_FORMAT = "%x1e%H%x09%cI%x09%ae%x09%s"
 """Record-separator (\\x1e) prefix + tab-delimited fields:
 SHA, commit-date (ISO 8601), author email, subject. Commit date matches
 `git log --since` filter window (CT-13)."""
+
+
+@dataclass(frozen=True)
+class GitRootDiscovery:
+    """A call-scoped, partially-successful git-root discovery result.
+
+    ``roots`` and ``errors`` are immutable so capture and identity can share
+    the same observation without a module cache. Iteration remains compatible
+    with the historic ``roots, errors = discover_git_roots(config)`` form.
+    """
+
+    roots: tuple[Path, ...]
+    errors: tuple[str, ...]
+    exceeded: bool = False
+
+    def __iter__(self):
+        yield list(self.roots)
+        yield list(self.errors)
+
+
+GIT_ROOT_DISCOVERY_BUDGET_ERROR = "git root discovery exceeded its time budget"
 
 
 # ---------------------------------------------------------------------------
@@ -272,75 +296,105 @@ def _strip_dot_git(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def discover_git_roots(config: dict) -> tuple[list[Path], list[str]]:
-    """Discover git repo roots via gstack + claude + manual probers.
+def discover_git_roots(
+    config: dict,
+    *,
+    deadline_monotonic: float | None = None,
+) -> GitRootDiscovery:
+    """Discover git roots with one cooperative, call-scoped deadline.
 
-    Returns ``(roots, errors)``. ``roots`` are deduped via ``Path.resolve()``
-    (handles APFS case-mismatched paths). ``errors`` is a forensic trail —
-    distinguishing "no repos configured" (clean machine) from "discovery
-    broke" (CT-11). Adopters wire the ``errors`` list into the mm-push
-    event's ``discovery_errors`` field so the fleet retro shows the
-    breakage breadcrumb.
+    A complete result is distinct from an incomplete empty observation:
+    exceeded is true and GIT_ROOT_DISCOVERY_BUDGET_ERROR is present whenever
+    the deadline cuts discovery short. The deadline is cooperative: it is
+    checked before each filesystem, JSONL, and validation step, but cannot
+    interrupt an individual operating-system filesystem call already running.
 
-    Probers (each may individually fail; we always run all of them):
-      1. gstack:  ``~/.gstack/projects/*/repo-mode.json`` when the gstack
-                  source is enabled in the resolved sources.
-      2. claude:  read the ``cwd`` field from the most recent jsonl in
-                  ``~/.claude/projects/<encoded>/`` when the claude source
-                  is enabled. Authoritative — avoids the lossy `-`-encoding
-                  reverse engineering.
-      3. manual:  ``config["retro"]["repo_roots"]: list[str]`` — escape
-                  hatch + override.
-
-    Filter: keep only paths where ``git rev-parse --show-toplevel`` succeeds
-    (CT-1). Worktrees have ``.git`` as a FILE, not a directory — Conductor
-    workspaces are worktrees and must not be silently excluded.
+    Existing callers may continue to unpack the result as roots, errors.
+    New callers should retain and pass the result itself so a same-invocation
+    identity refresh does not rediscover roots.
     """
+    if deadline_monotonic is None:
+        deadline_monotonic = time.monotonic() + ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS / 1000.0
+
     errors: list[str] = []
-    candidates: list[Path] = []
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    exceeded = False
 
-    enabled_sources = _enabled_source_names(config)
+    def deadline_expired() -> bool:
+        return time.monotonic() >= deadline_monotonic
 
-    if "gstack" in enabled_sources:
-        try:
-            candidates.extend(_probe_gstack())
-        except Exception as e:
-            errors.append(f"gstack prober: {type(e).__name__}: {e}")
+    def mark_exceeded() -> None:
+        nonlocal exceeded
+        exceeded = True
 
-    if "claude" in enabled_sources:
-        try:
-            candidates.extend(_probe_claude())
-        except Exception as e:
-            errors.append(f"claude prober: {type(e).__name__}: {e}")
+    def validate(candidates: list[Path]) -> bool:
+        """Validate candidates in order. Return false if the deadline ends."""
+        for candidate in candidates:
+            if deadline_expired():
+                mark_exceeded()
+                return False
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if deadline_expired():
+                mark_exceeded()
+                return False
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                mark_exceeded()
+                return False
+            if _is_git_toplevel(resolved, timeout_s=remaining):
+                roots.append(resolved)
+            if deadline_expired():
+                mark_exceeded()
+                return False
+        return True
 
+    # Explicit roots take precedence over automatic registries: a large stale
+    # host corpus must not starve the user-configured escape hatch.
     try:
-        manual = (config.get("retro", {}) or {}).get("repo_roots") or []
-        candidates.extend(Path(p).expanduser() for p in manual if isinstance(p, str))
+        manual_raw = (config.get("retro", {}) or {}).get("repo_roots") or []
+        manual_candidates: list[Path] = []
+        for raw in manual_raw:
+            if deadline_expired():
+                mark_exceeded()
+                break
+            if isinstance(raw, str):
+                manual_candidates.append(Path(raw).expanduser())
+        if not exceeded:
+            validate(manual_candidates)
     except Exception as e:
         errors.append(f"manual prober: {type(e).__name__}: {e}")
 
-    # Dedup via Path.resolve(). Paths that don't exist still resolve (they
-    # just point at a non-existent target); the git-toplevel filter below
-    # is what drops them.
-    seen: set[Path] = set()
-    deduped: list[Path] = []
-    for c in candidates:
+    enabled_sources = set() if exceeded or deadline_expired() else _enabled_source_names(config)
+    probers: list[tuple[str, Callable[..., list[Path]]]] = []
+    if "gstack" in enabled_sources:
+        probers.append(("gstack", _probe_gstack))
+    if "claude" in enabled_sources:
+        probers.append(("claude", _probe_claude))
+
+    for name, prober in probers:
+        if exceeded or deadline_expired():
+            mark_exceeded()
+            break
         try:
-            r = c.resolve()
-        except OSError:
+            candidates = prober(deadline_monotonic=deadline_monotonic)
+        except Exception as e:
+            errors.append(f"{name} prober: {type(e).__name__}: {e}")
             continue
-        if r in seen:
-            continue
-        seen.add(r)
-        deduped.append(r)
+        if not validate(candidates):
+            break
 
-    # Filter: keep paths that are inside a git toplevel (per CT-1).
-    roots: list[Path] = []
-    for p in deduped:
-        if _is_git_toplevel(p):
-            roots.append(p)
-
-    return roots, errors
+    if deadline_expired():
+        mark_exceeded()
+    if exceeded:
+        errors.append(GIT_ROOT_DISCOVERY_BUDGET_ERROR)
+    return GitRootDiscovery(tuple(roots), tuple(errors), exceeded)
 
 
 def _enabled_source_names(config: dict) -> set[str]:
@@ -362,121 +416,120 @@ def _enabled_source_names(config: dict) -> set[str]:
     return {n for n in names if isinstance(n, str) and n not in disabled}
 
 
-def _probe_gstack() -> list[Path]:
-    """Read ~/.gstack/projects/*/repo-mode.json and extract repo_root paths.
-
-    Best-effort per file: malformed JSON or missing field skips that
-    project, keeps walking. Empty list on no gstack dir.
-    """
+def _probe_gstack(*, deadline_monotonic: float | None = None) -> list[Path]:
+    """Read gstack project metadata until the shared deadline expires."""
     base = Path.home() / ".gstack" / "projects"
-    if not base.exists():
+    if _deadline_expired(deadline_monotonic) or not base.exists():
         return []
     out: list[Path] = []
     try:
-        slugs = list(base.iterdir())
-    except OSError:
-        return []
-    for slug_dir in slugs:
-        rmf = slug_dir / "repo-mode.json"
-        if not rmf.is_file():
-            continue
-        try:
-            data = json.loads(rmf.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        # gstack writes repo_root as a direct field; tolerate alternates.
-        for key in ("repo_root", "repo_path", "root"):
-            v = data.get(key) if isinstance(data, dict) else None
-            if isinstance(v, str) and v:
-                out.append(Path(v).expanduser())
+        slug_dirs = iter(base.iterdir())
+        while not _deadline_expired(deadline_monotonic):
+            try:
+                slug_dir = next(slug_dirs)
+            except StopIteration:
                 break
+            rmf = slug_dir / "repo-mode.json"
+            if not rmf.is_file() or _deadline_expired(deadline_monotonic):
+                continue
+            try:
+                data = json.loads(rmf.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if _deadline_expired(deadline_monotonic):
+                break
+            for key in ("repo_root", "repo_path", "root"):
+                value = data.get(key) if isinstance(data, dict) else None
+                if isinstance(value, str) and value:
+                    out.append(Path(value).expanduser())
+                    break
+    except OSError:
+        return out
     return out
 
 
-def _probe_claude() -> list[Path]:
-    """Walk ~/.claude/projects/<encoded>/ and read each project's `cwd`
-    field from its most recent .jsonl session file.
-
-    Reading `cwd` from session content avoids the lossy `-`-encoding reverse
-    engineering (which can't disambiguate `-` vs `/` on paths containing
-    hyphens). Authoritative source.
-    """
+def _probe_claude(*, deadline_monotonic: float | None = None) -> list[Path]:
+    """Read Claude project cwd evidence until the shared deadline expires."""
     base = Path.home() / ".claude" / "projects"
-    if not base.exists():
+    if _deadline_expired(deadline_monotonic) or not base.exists():
         return []
     out: list[Path] = []
     try:
-        project_dirs = list(base.iterdir())
+        project_dirs = iter(base.iterdir())
+        while not _deadline_expired(deadline_monotonic):
+            try:
+                proj_dir = next(project_dirs)
+            except StopIteration:
+                break
+            if not proj_dir.is_dir() or _deadline_expired(deadline_monotonic):
+                continue
+            cwd = _read_cwd_from_latest_jsonl(proj_dir, deadline_monotonic=deadline_monotonic)
+            if cwd:
+                out.append(Path(cwd).expanduser())
+            if _deadline_expired(deadline_monotonic):
+                break
     except OSError:
-        return []
-    for proj_dir in project_dirs:
-        if not proj_dir.is_dir():
-            continue
-        cwd = _read_cwd_from_latest_jsonl(proj_dir)
-        if cwd:
-            out.append(Path(cwd).expanduser())
+        return out
     return out
 
 
-def _read_cwd_from_latest_jsonl(proj_dir: Path) -> str | None:
-    """Find a `cwd` field in the most recent .jsonl session file. Falls
-    back to older files if the newest is empty/corrupt.
+def _read_cwd_from_latest_jsonl(
+    proj_dir: Path,
+    *,
+    deadline_monotonic: float | None = None,
+) -> str | None:
+    """Find a cwd in the newest readable JSONL before the shared deadline.
 
-    BINARY mode via ``token_usage.iter_bounded_lines`` (v0.12.16) — the same
-    primitive ``walk_jsonl_segment`` uses on this corpus. Two independent
-    reasons, both load-bearing:
-
-      * Text mode decodes in ~8KB CHUNKS, not per line, so a single invalid
-        UTF-8 byte falling in the first chunk raised ``UnicodeDecodeError``
-        (a ``ValueError``, NOT an ``OSError``, so the guard below never
-        caught it) straight past ``_scan_one_project`` and
-        ``walk_session_metadata`` into ``_run_events_tail``'s wrapper —
-        losing the ENTIRE events tail on every push until the file changed.
-        Chunked decoding is also why a `cwd` on line 1 did not protect
-        against a bad byte on line 2.
-      * ``for line in f`` lets Python extend its buffer to newline-or-EOF,
-        so one pathological multi-GB line could OOM the push.
-        ``iter_bounded_lines`` caps each read at ``MAX_JSONL_LINE_BYTES``.
-
-    ``json.loads`` accepts bytes directly, and both malformed JSON and
-    invalid UTF-8 surface as ``ValueError`` — so a bad byte now costs the
-    one line it sits on, not the walk.
-
-    Call this AT MOST ONCE per project. See the hoist note in
-    ``_scan_one_project``: it scans the whole directory, so putting it back
-    inside a per-file loop reintroduces an O(N^2) read.
+    Binary bounded-line reading keeps malformed UTF-8 and pathological lines
+    local to one record. The deadline is checked before each directory, file,
+    and line operation; a call already in progress remains cooperative.
     """
+    if _deadline_expired(deadline_monotonic):
+        return None
+    jsonls: list[tuple[float, Path]] = []
     try:
-        jsonls = sorted(
-            (p for p in proj_dir.iterdir() if p.suffix == ".jsonl"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        candidates = iter(proj_dir.iterdir())
+        while not _deadline_expired(deadline_monotonic):
+            try:
+                candidate = next(candidates)
+            except StopIteration:
+                break
+            if candidate.suffix != ".jsonl":
+                continue
+            try:
+                jsonls.append((candidate.stat().st_mtime, candidate))
+            except OSError:
+                continue
     except OSError:
         return None
-    for jl in jsonls:
+    if _deadline_expired(deadline_monotonic):
+        return None
+    jsonls.sort(key=lambda pair: pair[0], reverse=True)
+    for _mtime, jsonl_path in jsonls:
+        if _deadline_expired(deadline_monotonic):
+            return None
         try:
-            with open(jl, "rb") as f:
-                for raw, _end in token_usage.iter_bounded_lines(
-                    f,
-                    str(jl),
-                    0,
-                    label="session cwd reader",
-                    # One-shot read: no resume point, so a final record with
-                    # no trailing newline is DATA, not a partial write. The
-                    # default (False) discards it and would silently return
-                    # None for a session whose only line isn't terminated
-                    # yet — a regression against the old text-mode reader.
-                    yield_final_partial=True,
-                ):
+            with open(jsonl_path, "rb") as file_handle:
+                lines = iter(
+                    token_usage.iter_bounded_lines(
+                        file_handle,
+                        str(jsonl_path),
+                        0,
+                        label="session cwd reader",
+                        yield_final_partial=True,
+                    )
+                )
+                while not _deadline_expired(deadline_monotonic):
+                    try:
+                        raw, _end = next(lines)
+                    except StopIteration:
+                        break
                     stripped = raw.strip()
                     if not stripped:
                         continue
                     try:
                         obj = json.loads(stripped)
                     except ValueError:
-                        # JSONDecodeError (malformed) and UnicodeDecodeError
-                        # (invalid utf-8) are both ValueError subclasses.
                         continue
                     cwd = obj.get("cwd") if isinstance(obj, dict) else None
                     if isinstance(cwd, str) and cwd:
@@ -486,28 +539,27 @@ def _read_cwd_from_latest_jsonl(proj_dir: Path) -> str | None:
     return None
 
 
-def _is_git_toplevel(path: Path) -> bool:
-    """Return True iff `git -C path rev-parse --show-toplevel` returns
-    `path` itself (resolved). Worktrees succeed; non-git dirs fail. This
-    handles `.git`-as-FILE (worktrees) and `.git`-as-DIRECTORY uniformly
-    (CT-1 — a `.git/`-dir-existence check would silently exclude Conductor
-    workspaces, which are themselves worktrees)."""
-    if not path.is_dir():
+def _deadline_expired(deadline_monotonic: float | None) -> bool:
+    return deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
+
+
+def _is_git_toplevel(path: Path, *, timeout_s: float | None = None) -> bool:
+    """Return true when git resolves path itself as a repository toplevel."""
+    if timeout_s is not None and timeout_s <= 0:
         return False
     try:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=2 if timeout_s is None else timeout_s,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
     if result.returncode != 0:
         return False
     try:
-        toplevel = Path(result.stdout.strip()).resolve()
-        return toplevel == path.resolve()
+        return Path(result.stdout.strip()).resolve() == path.resolve()
     except OSError:
         return False
 

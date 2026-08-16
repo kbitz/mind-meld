@@ -128,7 +128,7 @@ class TestRunEventsBackfill:
         sources = _make_sources(events_root, claude_dir)
         config = {"sync": {"sources": sources}}
 
-        def boom(_config):
+        def boom(_config, **_kwargs):
             raise RuntimeError("synthetic walk failure")
 
         monkeypatch.setattr(_mm_events, "discover_git_roots", boom)
@@ -192,7 +192,11 @@ class TestRunEventsBackfill:
             ]
 
         monkeypatch.setattr(_mm_events, "walk_git_projects", fake_walk)
-        monkeypatch.setattr(_mm_events, "discover_git_roots", lambda _c: ([], []))
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda _c, **_kwargs: _mm_events.GitRootDiscovery((), (), False),
+        )
         monkeypatch.setattr(_mm_token_usage, "warm_token_cache_inline", lambda paths: None)
 
         @contextmanager

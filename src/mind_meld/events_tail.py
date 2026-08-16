@@ -33,6 +33,11 @@ from mind_meld.safety import safe_str
 
 CacheLockMode = Literal["warn", "block"] | None
 
+_ROOT_DISCOVERY_DEGRADATION = (
+    "git repository discovery hit its time budget: this retro capture may omit repositories. "
+    "A later substantive push will retry"
+)
+
 
 @dataclass
 class CaptureResult:
@@ -46,6 +51,7 @@ class CaptureResult:
 
     git_rows: list[dict]
     session_rows: list[dict]
+    root_discovery: events.GitRootDiscovery
     discovery_errors: list[str]
     walk_exceeded_budget: bool
     warn_lock_unavailable: bool
@@ -123,6 +129,7 @@ def _capture_event_snapshots(
     since: datetime,
     budget_ms: int,
     prepare_token_cache: Callable[[], CacheLockMode],
+    root_discovery_budget_ms: int | None = None,
 ) -> CaptureResult:
     """Capture device-stamped git and session snapshot rows without writing.
 
@@ -133,7 +140,17 @@ def _capture_event_snapshots(
     lock contract without holding it across git subprocess work. The session
     deadline begins after caller-owned preparation.
     """
-    roots, discovery_errors = events.discover_git_roots(config)
+    if root_discovery_budget_ms is None:
+        root_discovery_budget_ms = (
+            events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+            if budget_ms <= events.WALK_TIME_BUDGET_AUTOPUSH_MS
+            else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
+        )
+    root_discovery = events.discover_git_roots(
+        config,
+        deadline_monotonic=time.monotonic() + root_discovery_budget_ms / 1000.0,
+    )
+    roots, discovery_errors = root_discovery
     git_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
     for row in git_rows:
         row["device"] = device_id
@@ -179,6 +196,7 @@ def _capture_event_snapshots(
     return CaptureResult(
         git_rows=git_rows,
         session_rows=session_rows,
+        root_discovery=root_discovery,
         discovery_errors=discovery_errors,
         walk_exceeded_budget=walk_done > deadline,
         warn_lock_unavailable=warn_lock_unavailable,
@@ -213,8 +231,9 @@ def _run_events_tail(
     the load-bearing invariants: head-position single-call-site (Codex C4
     — branch-fragility-free, one-push-lag-free), dry_run no-op (preview
     contract), mm-events-resolved gate (covers fresh / migrated / un-
-    migrated configs uniformly, Codex C1), and the autopush 250ms /
-    interactive 500ms wall-clock budget. The "budget exceeded" notice
+    migrated configs uniformly, Codex C1), the independent 50ms autopush /
+    100ms interactive root-discovery budget, and the 250ms / 500ms walk
+    budgets. The "budget exceeded" notice
     reports on the session-metadata walk (the git walk self-bounds via its
     own total_budget_ms); the snapshot is taken before the self-bounded
     identity gather so a cold 7d-TTL identity refresh no longer masquerades
@@ -253,6 +272,11 @@ def _run_events_tail(
             device_id,
             since=since,
             budget_ms=budget_ms,
+            root_discovery_budget_ms=(
+                events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+                if quiet
+                else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
+            ),
             prepare_token_cache=prepare_tail_token_cache,
         )
 
@@ -265,7 +289,10 @@ def _run_events_tail(
         # as `local_emails: []` (explicit empty) when this machine has no
         # configured identities — distinguishable from "pre-v0.11.17 peer
         # with no field at all" so the aggregator can choose its fallback.
-        local_emails = identity.gather_local_identities(allow_refresh=True)
+        local_emails = identity.gather_local_identities(
+            allow_refresh=True,
+            root_discovery=capture.root_discovery,
+        )
         mm_event = events.make_mm_push_event(
             device=device_id,
             mm_version=__version__,
@@ -281,6 +308,9 @@ def _run_events_tail(
             [*capture.git_rows, *capture.session_rows, mm_event],
         )
 
+        if capture.root_discovery.exceeded:
+            sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
+            degradations.append(_ROOT_DISCOVERY_DEGRADATION)
         if capture.walk_exceeded_budget:
             sys.stderr.write("mm: notice: events tail budget exceeded\n")
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
@@ -363,6 +393,7 @@ def _run_events_backfill(
             device_id,
             since=since,
             budget_ms=budget_ms,
+            root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
             prepare_token_cache=prepare_backfill_token_cache,
         )
 
@@ -374,7 +405,10 @@ def _run_events_backfill(
         # First push after init then has hot identity data and emits no
         # slow-path notice. Failure is forensic-only — backfill proceeds.
         try:
-            identity.refresh_identity_cache(force=True)
+            identity.refresh_identity_cache(
+                force=True,
+                root_discovery=capture.root_discovery,
+            )
         except Exception as e:
             sys.stderr.write(
                 f"mm: notice: identity cache warm at init failed: "
@@ -383,6 +417,11 @@ def _run_events_backfill(
 
         if capture.walk_exceeded_budget:
             sys.stderr.write("mm: notice: events backfill budget exceeded\n")
+        if capture.root_discovery.exceeded:
+            sys.stderr.write(
+                "mm: notice: git repository discovery hit its time budget: "
+                "initial retro capture may omit repositories. A later substantive push will retry\n"
+            )
     except Exception as e:
         sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")
 

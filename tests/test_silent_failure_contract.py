@@ -959,6 +959,11 @@ def _setup_events_tail_config(tmp_path, monkeypatch):
       is the honest default for these tests.
     """
     storage_dir = tmp_path / "storage"
+    # Automatic root discovery intentionally looks under the user's home.
+    # Keep these behavior tests independent of the developer's real corpus.
+    isolated_home = tmp_path / "isolated-home"
+    isolated_home.mkdir()
+    monkeypatch.setattr(_mm_events.Path, "home", classmethod(lambda cls: isolated_home))
     config_path = tmp_path / "config.toml"
     src = tmp_path / "claude"
     _populate_claude(src)
@@ -1051,6 +1056,31 @@ def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkey
     payload = json.loads((iso / "last-autorun.json").read_text())
     assert payload["outcome"] == "degraded", payload
     assert "budget" in payload.get("detail", "")
+
+
+def test_autopush_breadcrumb_degraded_when_root_discovery_is_partial(tmp_path, monkeypatch):
+    """Partial root discovery is forensic, but must reach mm status safely."""
+    from mind_meld import token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _config, **_kwargs: _mm_events.GitRootDiscovery(
+            (), (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True
+        ),
+    )
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "degraded", payload
+    assert payload["detail"] == (
+        "git repository discovery hit its time budget: this retro capture may omit repositories. "
+        "A later substantive push will retry"
+    )
+    assert str(tmp_path) not in payload["detail"]
 
 
 def test_autopush_breadcrumb_degraded_when_token_cache_cold(tmp_path, monkeypatch):
