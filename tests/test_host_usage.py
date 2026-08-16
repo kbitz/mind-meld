@@ -506,10 +506,40 @@ class TestGrokUsage:
         grok_cache, _ = isolated_adapter_caches
         assert hu.read_grok_usage(tmp_path / "absent") == hu.HostUsageResult({}, complete=True)
         expired = hu.read_grok_usage(tmp_path / "absent", deadline=time.monotonic() - 0.001)
-        assert expired == hu.HostUsageResult(
-            {}, complete=False, reason="deadline"
-        )
+        assert expired == hu.HostUsageResult({}, complete=False, reason="deadline")
         assert grok_cache.exists()
+
+    @pytest.mark.parametrize("source_kind", ["file", "symlink"])
+    def test_rejects_non_directory_or_symlink_session_roots(
+        self,
+        source_kind: str,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "sessions"
+        if source_kind == "file":
+            root.write_text("transcript sentinel", encoding="utf-8")
+        else:
+            target = tmp_path / "real-sessions"
+            target.mkdir()
+            root.symlink_to(target, target_is_directory=True)
+
+        result = hu.read_grok_usage(root)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+        assert not isolated_adapter_caches[0].exists()
+
+    def test_filesystem_error_is_incomplete_without_creating_a_cache(
+        self, isolated_adapter_caches: tuple[Path, Path]
+    ) -> None:
+        class UnreadableRoot:
+            def exists(self) -> bool:
+                raise OSError("unreadable source")
+
+        result = hu.read_grok_usage(UnreadableRoot())  # type: ignore[arg-type]
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="io_error")
+        assert not isolated_adapter_caches[0].exists()
 
 
 class TestOpenCodeUsage:
@@ -625,3 +655,119 @@ class TestOpenCodeUsage:
         _write_opencode_database(root, [zero_response])
 
         assert hu.read_opencode_usage(root).reason == "unsupported"
+
+    def test_direct_database_path_and_empty_directory_are_complete(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        database = _write_opencode_database(root, [_opencode_message()])
+
+        direct = hu.read_opencode_usage(database)
+        empty = hu.read_opencode_usage(tmp_path / "empty")
+
+        assert direct.hosts["codex"]["2025-08-15"]["input"] == 120
+        assert empty == hu.HostUsageResult({}, complete=True)
+        assert isolated_adapter_caches[1].exists()
+
+    def test_symlink_root_and_changed_database_are_incomplete_without_a_cache(
+        self,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "real-opencode"
+        database = _write_opencode_database(target, [_opencode_message()])
+        root = tmp_path / "opencode"
+        root.symlink_to(target, target_is_directory=True)
+        assert hu.read_opencode_usage(root).reason == "stale"
+
+        before = database.stat()
+        regular_stat = hu._regular_stat
+        calls = 0
+
+        def mutate_before_final_stat(path: Path) -> os.stat_result:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1))
+            return regular_stat(path)
+
+        monkeypatch.setattr(hu, "_regular_stat", mutate_before_final_stat)
+        result = hu.read_opencode_usage(target)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="stale")
+        assert not isolated_adapter_caches[1].exists()
+
+    def test_malformed_json_and_duplicate_terminal_ids_are_incomplete(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        malformed_root = tmp_path / "malformed"
+        malformed_database = _write_opencode_database(malformed_root, [])
+        connection = sqlite3.connect(malformed_database)
+        try:
+            connection.execute("INSERT INTO message (data) VALUES (?)", ('{"id":',))
+            connection.commit()
+        finally:
+            connection.close()
+        assert hu.read_opencode_usage(malformed_root).reason == "malformed"
+
+        duplicate_root = tmp_path / "duplicate"
+        _write_opencode_database(
+            duplicate_root,
+            [_opencode_message(), _opencode_message()],
+        )
+        result = hu.read_opencode_usage(duplicate_root)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="malformed")
+        assert not isolated_adapter_caches[1].exists()
+
+    @pytest.mark.parametrize(
+        ("completed", "expected_day"),
+        [
+            ("2025-08-15T00:00:01Z", "2025-08-15"),
+            (1_755_216_001, "2025-08-15"),
+            ("2025-08-15T00:00:01", None),
+            ("not-a-timestamp", None),
+        ],
+    )
+    def test_completion_timestamp_variants_are_attributed_or_refused(
+        self,
+        completed: object,
+        expected_day: str | None,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "opencode"
+        _write_opencode_database(root, [_opencode_message(completed=completed)])
+
+        result = hu.read_opencode_usage(root)
+
+        if expected_day is None:
+            assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+            assert not isolated_adapter_caches[1].exists()
+        else:
+            assert result.hosts["codex"][expected_day]["input"] == 120
+
+    def test_error_rows_are_excluded_and_cache_contention_is_incomplete(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        errored = _opencode_message("message-error", input_tokens=999)
+        errored["error"] = {"name": "provider_error"}
+        _write_opencode_database(root, [_opencode_message(), errored])
+
+        result = hu.read_opencode_usage(root)
+
+        assert result.hosts["codex"]["2025-08-15"]["input"] == 120
+        opencode_cache = isolated_adapter_caches[1]
+        cache_before = opencode_cache.read_bytes()
+        fd = os.open(str(opencode_cache), os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            locked = hu.read_opencode_usage(root, deadline=time.monotonic() + 1.0)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert locked == hu.HostUsageResult({}, complete=False, reason="locked")
+        assert opencode_cache.read_bytes() == cache_before

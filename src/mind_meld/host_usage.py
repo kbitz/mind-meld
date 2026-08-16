@@ -343,9 +343,12 @@ def _read_opencode_database(path: Path, deadline: float) -> list[_Terminal]:
         connection.execute("PRAGMA busy_timeout = 0")
         connection.set_progress_handler(lambda: int(_expired(deadline)), 1000)
         connection.execute("BEGIN")
-        tables = {row[0] for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message'"
-        )}
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message'"
+            )
+        }
         if tables != {"message"}:
             raise _ReadFailure("unsupported")
         columns = {row[1] for row in connection.execute("PRAGMA table_info(message)")}
@@ -395,13 +398,16 @@ def _read_opencode_database(path: Path, deadline: float) -> list[_Terminal]:
             ) = row
             if role != "assistant" or error is not None:
                 raise _ReadFailure("malformed")
-            if _is_zero_opencode_ledger(
-                input_tokens,
-                output,
-                reasoning,
-                cache_read,
-                cache_create,
-            ) and finish is None:
+            if (
+                _is_zero_opencode_ledger(
+                    input_tokens,
+                    output,
+                    reasoning,
+                    cache_read,
+                    cache_create,
+                )
+                and finish is None
+            ):
                 continue
             terminal = _opencode_terminal(
                 message_id,
