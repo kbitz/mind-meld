@@ -36,6 +36,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `devices.py` | Device registry, short-id generation and lookup |
 | `events.py` | mm-events log: git-root discovery, git/session walkers, budgets |
 | `token_usage.py` | Session-jsonl walker, token + skill caches, pricing, incremental resume |
+| `host_usage.py` | Local Codex rollout reader, host-family classifier, and isolated host-token cache |
 | `identity.py` | Author-email set behind a flock-guarded 7d-TTL cache |
 | `merge.py` | Merge dispatch (`.jsonl`, `MEMORY.md`) + `lcs_merge` 3-way merge |
 | `upgrade.py` | Self-upgrade check, nudge, transition hook |
@@ -139,6 +140,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
 | `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
+| `host_usage.py` | `docs/invariants/events-retro.md` |
 | `token_usage.py:PRICING` / `MODEL_FAMILY_TIERS` / `resolve_prices` / `model_family` / `estimate_cost` / `_CACHE_WRITE_MULT` | `docs/invariants/events-retro.md` (cost-estimation section) |
 | `token_usage.py:walk_jsonl_segment` / `walk_jsonl_buckets` / `iter_bounded_lines` / `_drain_to_newline` / `get_or_compute` / `_resume_plan` / `head_fingerprint` / `head_probe_len` / `_carry_tail_ids` / `merge_token_days` / `merge_skill_days` / `TAIL_MSG_ID_LOOKBACK` / `_HEAD_PROBE_BYTES` / `_MAX_TAIL_MSG_ID_LEN` | `docs/invariants/events-retro.md` (incremental-resume section) |
 | `aggregator.py:_render_token_block` / `_unpriced_token_summary` / `_short_model_name` / `_format_usd` | `docs/invariants/events-retro.md` (cost-estimation section) |
