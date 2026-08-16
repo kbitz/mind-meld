@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.28] - 2026-08-16
+
+**Fleet-retro capture now honors a small, independent root-discovery budget without pretending an incomplete scan is complete.**
+
+### Changed
+
+- **Bounded, call-scoped git-root discovery.** Push and init reuse one immutable discovery result across snapshot capture and identity gathering. Autopush receives a 50 ms budget and interactive push/init receive 100 ms; successful roots remain usable when the deadline expires, while incomplete observation stays visible in the forensic event and unattended status breadcrumb.
+
+- **No fabricated content heartbeat.** An empty push, including after a UTC rollover, leaves the retro cursor and events untouched. The next substantive push captures the full idle interval exactly once; local autorun freshness still means only that the hook ran.
+
+### Fixed
+
+- **Incomplete identity observation cannot poison the cache.** A partial root result can contribute identities to its current event, but never rewrites the seven-day identity cache or its freshness marker, so a later complete refresh can prune removed identities.
+
 ## [0.12.27] - 2026-08-16
 
 **Project instructions now have one shared source for Claude Code, Codex, OpenCode, and Grok Build.**
