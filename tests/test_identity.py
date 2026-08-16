@@ -22,7 +22,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mind_meld import identity
+from mind_meld import events, identity
 
 # ---------------------------------------------------------------------------
 # Helpers — fake subprocess.run dispatch by command prefix.
@@ -613,6 +613,82 @@ class TestFleetIntegration:
 # ---------------------------------------------------------------------------
 # Lock discipline (v0.11.19) — flock released during slow subprocess gather.
 # ---------------------------------------------------------------------------
+
+
+class TestIncompleteDiscoveryIdentityCache:
+    def _write_stale_cache(self, emails: list[str]) -> dict:
+        payload = {
+            "version": identity.CACHE_VERSION,
+            "refreshed_at": _isoformat(
+                datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 60)
+            ),
+            "emails": emails,
+        }
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(json.dumps(payload))
+        return payload
+
+    def test_incomplete_result_returns_union_without_refreshing_cache(self, monkeypatch):
+        before = self._write_stale_cache(["old@example.com"])
+        result = events.GitRootDiscovery((), ("budget",), True)
+        received: list[object] = []
+
+        def gather(*, root_discovery=None):
+            received.append(root_discovery)
+            return ["new@example.com"]
+
+        monkeypatch.setattr(identity, "_do_full_gather", gather)
+        emails = identity.gather_local_identities(root_discovery=result)
+
+        assert emails == ["new@example.com", "old@example.com"]
+        assert received == [result]
+        assert json.loads(identity.CACHE_PATH.read_text()) == before
+
+    def test_later_complete_result_prunes_after_incomplete_union(self, monkeypatch):
+        before = self._write_stale_cache(["old@example.com"])
+        incomplete = events.GitRootDiscovery((), ("budget",), True)
+        complete = events.GitRootDiscovery((), (), False)
+
+        monkeypatch.setattr(
+            identity,
+            "_do_full_gather",
+            lambda *, root_discovery=None: ["new@example.com"],
+        )
+        assert identity.gather_local_identities(root_discovery=incomplete) == [
+            "new@example.com",
+            "old@example.com",
+        ]
+        assert json.loads(identity.CACHE_PATH.read_text()) == before
+
+        assert identity.refresh_identity_cache(root_discovery=complete) == ["new@example.com"]
+        stored = json.loads(identity.CACHE_PATH.read_text())
+        assert stored["emails"] == ["new@example.com"]
+        assert stored["refreshed_at"] != before["refreshed_at"]
+
+    def test_incomplete_force_refresh_does_not_overwrite_cache(self, monkeypatch):
+        before = self._write_stale_cache(["old@example.com"])
+        incomplete = events.GitRootDiscovery((), ("budget",), True)
+        monkeypatch.setattr(
+            identity,
+            "_do_full_gather",
+            lambda *, root_discovery=None: ["new@example.com"],
+        )
+
+        emails = identity.refresh_identity_cache(force=True, root_discovery=incomplete)
+        assert emails == ["new@example.com", "old@example.com"]
+        assert json.loads(identity.CACHE_PATH.read_text()) == before
+
+    def test_supplied_result_skips_a_second_discovery(self, monkeypatch):
+        self._write_stale_cache([])
+        supplied = events.GitRootDiscovery((Path("/repo"),), (), False)
+        monkeypatch.setattr(
+            identity,
+            "_do_full_gather",
+            lambda *, root_discovery=None: ["new@example.com"],
+        )
+
+        emails = identity.gather_local_identities(root_discovery=supplied)
+        assert emails == ["new@example.com"]
 
 
 class TestLockDiscipline:

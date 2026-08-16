@@ -252,6 +252,103 @@ class TestDiscoverGitRoots:
         assert roots == []
         assert any("gstack prober" in e for e in errors)
 
+    def test_result_is_immutable_and_two_unpack_compatible(self, tmp_path):
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        result = events.discover_git_roots(
+            {"sync": {"sources": []}, "retro": {"repo_roots": [str(repo)]}}
+        )
+        roots, errors = result
+        assert result.roots == (repo.resolve(),)
+        assert roots == [repo.resolve()]
+        assert errors == []
+        assert result.exceeded is False
+
+    def test_manual_roots_validate_before_automatic_probes(self, tmp_path, monkeypatch):
+        manual = tmp_path / "manual"
+        automatic = tmp_path / "automatic"
+        manual.mkdir()
+        automatic.mkdir()
+        validated: list[Path] = []
+
+        monkeypatch.setattr(
+            events,
+            "_probe_gstack",
+            lambda **_kwargs: [automatic],
+        )
+
+        def validate(path, *, timeout_s=None):
+            validated.append(path)
+            return True
+
+        monkeypatch.setattr(events, "_is_git_toplevel", validate)
+        result = events.discover_git_roots(
+            {
+                "sync": {"sources": [{"name": "gstack"}]},
+                "retro": {"repo_roots": [str(manual)]},
+            },
+            deadline_monotonic=time.monotonic() + 1,
+        )
+        assert list(result.roots) == [manual.resolve(), automatic.resolve()]
+        assert validated == [manual.resolve(), automatic.resolve()]
+
+    def test_expired_deadline_does_not_start_validation(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        called = False
+
+        def validate(path, *, timeout_s=None):
+            nonlocal called
+            called = True
+            return True
+
+        monkeypatch.setattr(events, "_is_git_toplevel", validate)
+        result = events.discover_git_roots(
+            {"sync": {"sources": []}, "retro": {"repo_roots": [str(repo)]}},
+            deadline_monotonic=time.monotonic() - 1,
+        )
+        assert result.roots == ()
+        assert result.exceeded is True
+        assert events.GIT_ROOT_DISCOVERY_BUDGET_ERROR in result.errors
+        assert called is False
+
+    def test_validation_receives_exact_remaining_deadline(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        timeouts: list[float] = []
+        monkeypatch.setattr(events.time, "monotonic", lambda: 100.0)
+        monkeypatch.setattr(
+            events,
+            "_is_git_toplevel",
+            lambda _path, *, timeout_s=None: timeouts.append(timeout_s) or True,
+        )
+        result = events.discover_git_roots(
+            {"sync": {"sources": []}, "retro": {"repo_roots": [str(repo)]}},
+            deadline_monotonic=100.05,
+        )
+        assert result.exceeded is False
+        assert timeouts == [pytest.approx(0.05)]
+
+    def test_claude_probe_stops_after_deadline_between_projects(self, tmp_path, monkeypatch):
+        base = tmp_path / ".claude" / "projects"
+        first = base / "first"
+        second = base / "second"
+        first.mkdir(parents=True)
+        second.mkdir()
+        clock = [0.0]
+        seen: list[Path] = []
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
+
+        def read_cwd(project, *, deadline_monotonic=None):
+            seen.append(project)
+            clock[0] = 2.0
+            return str(tmp_path / "repo")
+
+        monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", read_cwd)
+        assert events._probe_claude(deadline_monotonic=1.0) == [tmp_path / "repo"]
+        assert seen == [first]
+
 
 # ---------------------------------------------------------------------------
 # T0/T3 — _parse_git_log_numstat (empty, merge, binary, rename)

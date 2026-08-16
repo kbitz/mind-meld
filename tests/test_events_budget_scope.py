@@ -37,7 +37,11 @@ def _make_sources(events_root, claude_dir=None) -> list[dict]:
 
 def _stub_fast_walks(monkeypatch):
     """git discovery + git walk return instantly with nothing."""
-    monkeypatch.setattr(_mm_events, "discover_git_roots", lambda _c: ([], []))
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _c, **_kwargs: _mm_events.GitRootDiscovery((), (), False),
+    )
     monkeypatch.setattr(
         _mm_events,
         "walk_git_projects",
@@ -60,7 +64,10 @@ class TestSharedCapturePath:
         monkeypatch.setattr(
             _mm_events,
             "discover_git_roots",
-            lambda _config: trace.append("discover") or ([], ["probe failed"]),
+            lambda _config, **_kwargs: (
+                trace.append("discover")
+                or _mm_events.GitRootDiscovery((), ("probe failed",), False)
+            ),
         )
 
         def fake_git_walk(roots, since, total_budget_ms):
@@ -157,7 +164,7 @@ class TestEventsTailBudgetScope:
         monkeypatch.setattr(
             _mm_identity,
             "gather_local_identities",
-            lambda *, allow_refresh=True: [],
+            lambda *, allow_refresh=True, root_discovery=None: [],
         )
 
         events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
@@ -176,7 +183,7 @@ class TestEventsTailBudgetScope:
 
         _stub_fast_walks(monkeypatch)
 
-        def slow_gather(*, allow_refresh=True):
+        def slow_gather(*, allow_refresh=True, root_discovery=None):
             # 0.7s > the 500ms interactive budget. Happens AFTER walk_done.
             time.sleep(0.7)
             return []
@@ -206,7 +213,9 @@ class TestEventsTailBudgetScope:
         # else-branch (no flock); identity gather instant so only the walk is slow.
         monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda paths, *, quiet: False)
         monkeypatch.setattr(
-            _mm_identity, "gather_local_identities", lambda *, allow_refresh=True: []
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None: [],
         )
 
         def slow_walk(claude_dir, **kwargs):
@@ -231,7 +240,7 @@ class TestEventsBackfillBudgetScope:
 
         _stub_fast_walks(monkeypatch)
 
-        def slow_refresh(*, force=False):
+        def slow_refresh(*, force=False, root_discovery=None):
             time.sleep(0.7)  # > 500ms backfill budget
             return []
 
@@ -255,7 +264,11 @@ class TestEventsBackfillBudgetScope:
         _stub_fast_walks(monkeypatch)
         monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
         monkeypatch.setattr(_mm_token_usage, "warm_token_cache_inline", lambda paths: None)
-        monkeypatch.setattr(_mm_identity, "refresh_identity_cache", lambda *, force=False: [])
+        monkeypatch.setattr(
+            _mm_identity,
+            "refresh_identity_cache",
+            lambda *, force=False, root_discovery=None: [],
+        )
 
         @contextmanager
         def fake_lock(mode):
@@ -273,3 +286,103 @@ class TestEventsBackfillBudgetScope:
         events_tail._run_events_backfill(config, sources, "dev-a")
 
         assert "events backfill budget exceeded" in capsys.readouterr().err
+
+
+class TestRootDiscoveryHandoffAndDegradation:
+    def test_tail_passes_exact_discovery_to_identity_once(self, tmp_path, monkeypatch):
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root)
+        config = {"sync": {"sources": sources}}
+        discovery = _mm_events.GitRootDiscovery((), (), False)
+        received: list[object] = []
+        writes: list[list[dict]] = []
+
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda _config, **_kwargs: discovery,
+        )
+        monkeypatch.setattr(_mm_events, "walk_git_projects", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None: (
+                received.append(root_discovery) or []
+            ),
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "write_push_event",
+            lambda _events_dir, _device, rows: writes.append(rows),
+        )
+
+        assert (
+            events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False) == []
+        )
+        assert received == [discovery]
+        assert len(writes) == 1
+
+    def test_partial_tail_is_forensic_and_status_visible(self, tmp_path, monkeypatch, capsys):
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root)
+        config = {"sync": {"sources": sources}}
+        discovery = _mm_events.GitRootDiscovery(
+            (), (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True
+        )
+        writes: list[list[dict]] = []
+
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda _config, **_kwargs: discovery,
+        )
+        monkeypatch.setattr(_mm_events, "walk_git_projects", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None: [],
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "write_push_event",
+            lambda _events_dir, _device, rows: writes.append(rows),
+        )
+
+        degradations = events_tail._run_events_tail(
+            config, sources, "dev-a", dry_run=False, quiet=True
+        )
+        assert degradations == [events_tail._ROOT_DISCOVERY_DEGRADATION]
+        assert "mm: notice: " + events_tail._ROOT_DISCOVERY_DEGRADATION in capsys.readouterr().err
+        assert writes[0][-1]["discovery_errors"] == [_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR]
+
+    def test_partial_backfill_notices_without_creating_mm_push(self, tmp_path, monkeypatch, capsys):
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root)
+        config = {"sync": {"sources": sources}}
+        discovery = _mm_events.GitRootDiscovery(
+            (), (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True
+        )
+        writes: list[list[dict]] = []
+        received: list[object] = []
+
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda _config, **_kwargs: discovery,
+        )
+        monkeypatch.setattr(_mm_events, "walk_git_projects", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            _mm_identity,
+            "refresh_identity_cache",
+            lambda *, force=False, root_discovery=None: received.append(root_discovery) or [],
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "write_push_event",
+            lambda _events_dir, _device, rows: writes.append(rows),
+        )
+
+        events_tail._run_events_backfill(config, sources, "dev-a")
+        assert received == [discovery]
+        assert writes == []
+        assert "initial retro capture may omit repositories" in capsys.readouterr().err
