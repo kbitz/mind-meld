@@ -10,8 +10,10 @@
 families** on one MODELS card. It does not treat them as interchangeable
 **sync trees**. Session transcripts stay local on every host.
 
-This is the product contract that 21A made visible: `mm enable-source grok`
-is a usage-consent bit so it cannot be read as "sync my Grok folder."
+Track 21A established the local usage-consent bit. Track 22B extends the
+same `mm enable-source grok` verb with a narrow, Claude-shaped customization
+source: `skills/`, `commands/`, and `rules/` only. It never walks the Grok
+home root or session transcripts.
 
 ## Why this exists
 
@@ -31,7 +33,7 @@ either upload prompts or mint a fake `grok` sync source.
 | Capability | Claude | Codex | OpenCode | Grok |
 |---|---|---|---|---|
 | Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render |
-| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted agents / commands / modes / plugins / skills / tools / `AGENTS.md` | None today. New design; see Plan B |
+| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted agents / commands / modes / plugins / skills / tools / `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` |
 | Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No |
 | `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | `~/.config/opencode/skills` | Not installed. New design; see Plan C |
 | Session / transcript sync | Never | Never | Never | Never |
@@ -46,7 +48,9 @@ credentials or chat. Grok's installed root is the opposite mix.
 ```text
 18D  strict Grok terminal-ledger reader + private cache
   |
-21A  local consent bit; no grok [[sync.sources]] row; all-or-nothing snapshot
+21A  local consent bit + all-or-nothing snapshot
+  |
+22B  allowlisted Grok customization source; same enable/disable verb
   |
 22A  aggregator accepts latest complete host snapshot per device
   |
@@ -54,9 +58,9 @@ credentials or chat. Grok's installed root is the opposite mix.
 ```
 
 - **18D** equals Codex `read_codex_usage`, not Claude `walk_session_metadata`.
-- **21A** equals "opt in to read local usage," not `mm enable-source codex`.
-  Codex can share a name with its sync source because that source is a
-  real allowlist. Grok cannot.
+- **21A** introduced the local usage opt-in. **22B** makes `grok` a real,
+  hardcoded allowlist too; source-enabled is consent, while the 21A bit stays
+  as a compatibility OR for prior opt-ins.
 - **22A/23A** are the card-level interchangeability. Until they land,
   a published Grok snapshot is encrypted fleet data that retro does not
   yet render.
@@ -82,9 +86,9 @@ were absent on that install. They are not a reason to walk the root.
 `config.toml` can carry MCP and model settings the same way Codex's
 whole-file config is refused.
 
-`mm enable-source grok` stays a usage bit on purpose. A later
-customization source must use a **different name**. Reusing `grok`
-would smash the 21A contract.
+`mm enable-source grok` now adds the narrow `type: "grok"` source and keeps
+the 21A usage bit enabled. Reusing the one name is safe because the walker
+cannot be widened with `include_dirs` and never enters the home root.
 
 ## What we still do not walk
 
@@ -112,22 +116,21 @@ unknown, not zero.
 
 This is the answer to "why can't I see Grok next to Claude and Codex?"
 
-### Plan B — Allowlisted Grok customizations (new design)
+### Plan B — Allowlisted Grok customizations (shipped: Track 22B)
 
-**Not 18D. Not 21A.** A future generic source, after a dedicated
-allowlist review.
+**Not 18D. Not 21A.** Track 22B shipped the reviewed customization source.
 
-Working name: `grok-custom`. Forbidden name: `grok`.
+Source name: `grok`. Type: `grok`. Same DEFAULT_SOURCES shape as Claude (`name` / `path` / `type`). The walker hardcodes the allowlist — there is no user-editable `include_dirs` to widen onto sessions.
 
-Candidate first cut, mirroring Codex/OpenCode:
+Shipped allowlist:
 
 | Include | Why it is a candidate | Open question |
 |---|---|---|
-| `skills/` | Documented user skill tree; same shape as Codex | Generated / vendor skill links must be excluded like `skills/gstack-*` |
-| `commands/` | Documented user slash-command tree | Confirm no session-derived files land here |
-| `rules/` | Home-level `*.md` rules (`$GROK_HOME/rules/`) | Confirm no secrets |
+| `skills/` | Documented user skill tree; same shape as Codex | Generated host links and every nested symlink are excluded |
+| `commands/` | Documented user slash-command tree | Only this tree is walked |
+| `rules/` | Home-level `*.md` rules (`$GROK_HOME/rules/`) | Only this tree is walked |
 
-Needs a live-tree inspection before any of these ship:
+Still excluded pending a separate review:
 
 - `hooks/` — scripts and HTTP endpoints; may embed tokens
 - `plugins/` — Codex syncs plugins; Grok auto-trusts `~/.grok/plugins/`,
@@ -141,10 +144,9 @@ Never include: `sessions/`, `auth.json`, `mcp_credentials.json`,
 Repo-level `.grok/` and `AGENTS.md` stay git-tracked, the same way
 Claude's project `CLAUDE.md` is not an mm source.
 
-Ship gate: a written allowlist in `DEFAULT_SOURCES`, a config-load
-refusal if anyone names a sync source `grok`, and tests that a
-fixture containing `sessions/` and `auth.json` uploads zero of those
-paths.
+The ship gate was a written allowlist in `DEFAULT_SOURCES`, a hardcoded
+walker, and tests proving that `sessions/`, `auth.json`, `config.toml`, and a
+nested `skills/<link> → sessions/` upload zero files.
 
 ### Plan C — Grok `retro-fleet` skill link (new design)
 
@@ -158,7 +160,8 @@ is on, so a fleet that only uses Claude's skill dir already shares
 `retro-fleet`. Plan C is for Grok-only machines and for installs that
 disabled Claude compat.
 
-Do not invent a Grok sync source to make the installer "complete."
+Do not widen the shipped source or invent another Grok sync source to make the
+installer "complete."
 
 ### Explicitly not planned
 
@@ -168,7 +171,7 @@ Do not invent a Grok sync source to make the installer "complete."
   source. 18D already refuses those.
 - A Codex/Grok `sessions-snapshot` built by decoding cwd paths.
 - Estimating Grok or Codex subscription/API cost from host counters.
-- Treating `mm enable-source grok` as file sync, ever.
+- Treating `mm enable-source grok` as whole-home or session-file sync.
 
 ## Sequencing
 
@@ -177,14 +180,15 @@ Group 18 (18D)     reader              ← shipped v0.12.34
     ↓
 Group 21 (21A)     consent + publish   ← shipped v0.12.34
     ↓
+Track 22B           Grok customization source   ← shipped
+    ↓
 Group 22 / 23      card
     ↓
-Plan B / Plan C    only after 21A's grok-is-not-a-source pin is on main
+Plan C              Grok skill link
 ```
 
-Plan B and Plan C are independent of each other. Neither is a
-prerequisite for 22A/23A. Do not park them inside 18D or 21A if
-review comments ask for "parity."
+Plan C is independent of the usage-card work. It is not a prerequisite for
+22A/23A, and it does not widen the shipped source.
 
 ## Pointers
 

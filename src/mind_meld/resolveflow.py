@@ -58,6 +58,7 @@ from mind_meld.errors import StorageError
 from mind_meld.manifest import (
     CONFLICT_INFIX,
     CONFLICT_V0_PREFIX,
+    GROK_SYNCED_SUBDIRS,
     SYNCED_SUBDIRS,
     is_conflict_filename,
     is_pre_inversion_conflict_filename,
@@ -94,6 +95,7 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     when the claude source only syncs memory/ and todos/).
 
     - claude type: projects/<any>/memory, projects/<any>/todos
+    - grok type: skills, commands, rules at the source root
     - generic type: include_dirs (relative to source root)
     """
     src_type = src_cfg.get("type", "claude")
@@ -109,6 +111,13 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
                 candidate = project_dir / sub
                 if candidate.exists():
                     dirs.append(candidate)
+        return dirs
+    if src_type == "grok":
+        dirs = []
+        for sub in GROK_SYNCED_SUBDIRS:
+            candidate = base_path / sub
+            if candidate.is_dir() and not candidate.is_symlink():
+                dirs.append(candidate)
         return dirs
     # generic: include_dirs (resolved) + base for single-file includes
     dirs = []

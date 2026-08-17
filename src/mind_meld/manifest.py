@@ -156,6 +156,18 @@ EXCLUDED = [
 # Everything else (sessions, settings, etc.) is either git-tracked or ephemeral.
 SYNCED_SUBDIRS = ["memory", "todos"]
 
+# Grok user-home customization trees. Hardcoded the same way Claude's
+# walker hardcodes memory/todos — not user-editable include_dirs, so a
+# config edit cannot widen the walk to sessions/ or auth.json.
+# Inspected 2026-08-17 against Grok 1.0.4 user-guide + live ~/.grok.
+GROK_SYNCED_SUBDIRS = ["skills", "commands", "rules"]
+# Generated host links are per-machine routing, matching Codex/OpenCode.
+GROK_EXCLUDE_PATTERNS = [
+    "skills/gstack-*",
+    "skills/log-work/*",
+    "skills/retro-fleet/*",
+]
+
 
 def mtime_from_manifest(iso_str: str) -> datetime:
     """Parse a manifest mtime ISO-8601 string to a timezone-aware UTC datetime.
@@ -355,6 +367,89 @@ def walk_claude_source(
     return files
 
 
+def _has_symlink_below_root(path: Path, base: Path) -> bool:
+    """True if any path component strictly below ``base`` is a symlink.
+
+    Stops a nested ``skills/<name> -> ../sessions`` dir-link from publishing
+    session files under an allowlisted prefix. The top-level include dir is
+    checked separately by the grok walker.
+    """
+    try:
+        current = path
+        while current != base and current != current.parent:
+            if current.is_symlink():
+                return True
+            current = current.parent
+    except OSError:
+        return True
+    return False
+
+
+def walk_grok_source(
+    source_config: dict[str, Any],
+    max_file_size: int = 52_428_800,
+    on_skip: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Walk a Grok home and build the files dict.
+
+    Scans only the hardcoded customization dirs at the source root
+    (``GROK_SYNCED_SUBDIRS``). Sessions, credentials, vendor trees, and
+    ``config.toml`` are never entered. Missing dirs are a no-op.
+    """
+    base = Path(source_config["path"]).expanduser().resolve()
+    if not base.exists():
+        return {}
+
+    extra = source_config.get("exclude_patterns") or []
+    exclude_patterns = [*GROK_EXCLUDE_PATTERNS, *extra]
+
+    files: dict[str, dict[str, Any]] = {}
+    collected_paths: list[Path] = []
+
+    for dir_name in GROK_SYNCED_SUBDIRS:
+        scan_dir = base / dir_name
+        if scan_dir.is_symlink():
+            if on_skip:
+                on_skip(str(scan_dir), "symlink")
+            continue
+        if not scan_dir.exists() or not scan_dir.is_dir():
+            continue
+        for path in scan_dir.rglob("*"):
+            if path.is_file():
+                collected_paths.append(path)
+
+    collected_paths.sort(
+        key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
+    )
+    seen: set[tuple[int, int]] = set()
+    for path in collected_paths:
+        if path.is_symlink() or _has_symlink_below_root(path, base):
+            if on_skip:
+                on_skip(str(path), "symlink")
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        # A hard link can make a credential or session file reachable from an
+        # allowlisted directory without introducing a symlink component.  The
+        # Grok boundary is privacy-critical, so accept only singly-linked
+        # regular files rather than trying to infer every other inode path.
+        if st.st_nlink > 1:
+            if on_skip:
+                on_skip(str(path), "hardlink")
+            continue
+        identity = (st.st_dev, st.st_ino)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
+            rel, info = result
+            files[rel] = info
+
+    return files
+
+
 def walk_generic_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
@@ -461,6 +556,7 @@ def walk_source(
     Args:
         source_config: Dict with at least "type" and "path" keys.
             type="claude" -> walk_claude_source
+            type="grok" -> walk_grok_source
             type="generic" -> walk_generic_source
         max_file_size: Skip files larger than this (bytes).
         on_skip: Optional callback(path, reason) for skipped files.
@@ -478,6 +574,8 @@ def walk_source(
             on_skip,
             exclude_patterns=source_config.get("exclude_patterns"),
         )
+    elif source_type == "grok":
+        files = walk_grok_source(source_config, max_file_size, on_skip)
     elif source_type == "generic":
         files = walk_generic_source(source_config, max_file_size, on_skip)
     else:
