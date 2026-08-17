@@ -202,7 +202,7 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 
 | Layer | Coverage |
 |---|---|
-| `tests/test_config.py` | absent/true/false/malformed Grok consent; command and status behavior; no `grok` sync source |
+| `tests/test_config.py` | Grok source name/type boundaries, hardcoded-walker config shape, and retained usage-consent compatibility |
 | `tests/test_host_usage.py` | strict v1 terminal acceptance, multi-model totals, UTC attribution, replay/conflicting duplicate handling, malformed/content/incomplete/stale/deadline/cache-resume cases |
 | `tests/test_host_usage_snapshot.py` | Grok consent gate, warm dispatch, all-or-nothing omission, and closed breadcrumb semantics |
 | `tests/test_events.py` | serialized snapshot has only canonical aggregate fields and remains capped to 90 UTC days |
@@ -213,11 +213,14 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 
 | File | Change |
 |---|---|
-| `src/mind_meld/config.py` | Validate local Grok usage consent without widening sync sources. |
-| `src/mind_meld/cli.py` | Add consent commands/status copy. |
-| `src/mind_meld/events_tail.py` | Apply consent, dispatch Grok warm safely, preserve all-or-nothing capture. |
+| `src/mind_meld/config.py` | Validate the local Grok usage bit and the Track 22B `type: "grok"` source without permitting a wider walk. |
+| `src/mind_meld/cli.py` | Manage the scoped source and retained usage bit through one enable/disable verb and status copy. |
+| `src/mind_meld/manifest.py` | Walk only hardcoded `skills/`, `commands/`, and `rules/`, rejecting child links and hard links. |
+| `src/mind_meld/resolveflow.py` | Limit Grok conflict discovery to the same hardcoded directories. |
+| `src/mind_meld/events_tail.py` | Gate Grok usage on the source or retained bit, dispatch warm safely, and preserve all-or-nothing capture. |
 | `src/mind_meld/host_usage.py` | Strict v1 reader, per-turn accounting, fingerprinted incremental cache. |
 | `src/mind_meld/skills/retro_fleet/aggregator.py` | Consume latest accepted host snapshots and render coverage-aware family totals. |
+| `docs/invariants/sync.md` | Record the hard-link and scoped Grok source boundary. |
 | `docs/invariants/events-retro.md` | Record the Grok v1 reader, consent, cache, and consumer contracts. |
 | `README.md` | Document opt-in Grok capture and update the former no-ledger caveat. |
 | focused test modules above | Synthetic metadata-only fixtures and regression pins. |

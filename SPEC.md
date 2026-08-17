@@ -338,10 +338,11 @@ mm resolve [PATH]           # interactively resolve conflict files (unified diff
 mm autopull                 # silent pull for Claude Code (one-line output, never prompts)
 mm autopush                 # silent push for Claude Code (one-line output, never prompts)
 mm enable-source NAME       # turn a configured sync source ON for this machine
-                            # NAME=grok is usage consent only (Track 21A): sets
-                            # [retro].grok_host_usage, creates no sync source
+                            # NAME=grok adds its scoped skills/ commands/ rules/
+                            # source and keeps [retro].grok_host_usage enabled
 mm disable-source NAME [--force]   # turn a configured sync source OFF for this machine; --force accepts unknown names (forward-compat for not-yet-shipped sources)
-                            # NAME=grok clears the usage bit, not a manifest source
+                            # NAME=grok disables that scoped source and clears
+                            # its retained usage-consent compatibility bit
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
