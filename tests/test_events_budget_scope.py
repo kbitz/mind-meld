@@ -115,6 +115,9 @@ class TestSharedCapturePath:
             since=datetime.now(timezone.utc),
             budget_ms=500,
             prepare_token_cache=lambda: trace.append("prepare") or "block",
+            # No host sources enabled → no host readers consented to, so the
+            # sweep touches nothing and this stays a git+session pin.
+            host_readers=(),
         )
 
         assert trace == [
@@ -384,5 +387,9 @@ class TestRootDiscoveryHandoffAndDegradation:
 
         events_tail._run_events_backfill(config, sources, "dev-a")
         assert received == [discovery]
-        assert writes == []
+        # The healthy (completed-empty) host row is the only thing to write
+        # here — git returned nothing and there is no claude source. The
+        # load-bearing half of this pin is the absence of `mm-push`, not the
+        # absence of writes.
+        assert [row["type"] for rows in writes for row in rows] == ["host-usage-snapshot"]
         assert "initial retro capture may omit repositories" in capsys.readouterr().err

@@ -1184,6 +1184,187 @@ class TestMmPushEventLocalEmails:
         assert parsed["local_emails"] == ["kb@example.com", "kb-work@example.com"]
 
 
+def _u(input_tokens: int = 0):
+    return {"input": input_tokens, "cache_create": 0, "cache_read": 0, "output": 0}
+
+
+_SRC = ("codex", "grok", "opencode")
+"""A "everything was consulted" source list for tests that are not about
+`token_sources` itself."""
+
+
+class TestMakeHostUsageSnapshot:
+    """Track 19A — the additive ``host-usage-snapshot`` wire shape.
+
+    The constructor is pure and combines nothing but COMPLETED reader output:
+    ``host_usage`` stays the sole payload and model-family authority, and the
+    all-or-nothing decision belongs to ``events_tail`` (pinned there).
+    """
+
+    def _hosts(self) -> dict:
+        return {
+            "codex": {
+                "2026-08-15": {"input": 10, "cache_create": 1, "cache_read": 2, "output": 3},
+                "2026-08-14": {"input": 40, "cache_create": 0, "cache_read": 0, "output": 5},
+            },
+            "grok": {
+                "2026-08-15": {"input": 7, "cache_create": 0, "cache_read": 0, "output": 1},
+            },
+        }
+
+    def test_exact_envelope_and_fields(self):
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            hosts=self._hosts(),
+            token_sources=_SRC,
+            ts=datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
+        )
+        assert set(ev) == {
+            "v",
+            "type",
+            "ts",
+            "device",
+            "token_sources",
+            "hosts",
+            "active_days",
+        }
+        assert ev["type"] == "host-usage-snapshot"
+        assert ev["device"] == "dev-a"
+        assert ev["ts"] == "2026-08-15T12:00:00+00:00"
+
+    def test_type_is_additive_no_schema_bump(self):
+        """Legacy consumers already skip unknown event types, so the new row
+        rides the existing v=2 schema. A bump would make every pre-19A peer
+        look like it regressed."""
+        ev = events.make_host_usage_snapshot(device="dev-a", token_sources=_SRC, hosts={})
+        assert ev["v"] == events.EVENTS_SCHEMA_VERSION == 2
+
+    def test_token_sources_is_the_per_push_subset_not_the_constant(self):
+        """Names which hosts were actually CONSULTED. Serializing the built-in
+        constant instead would claim coverage the sweep did not have, and would
+        make "this host reported nothing" and "this host was never consulted"
+        (not enabled, or no usage ledger in its store) indistinguishable."""
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=("codex",), hosts=self._hosts()
+        )
+        assert ev["token_sources"] == ["codex"]
+        assert ev["token_sources"] != list(events.HOST_USAGE_TOKEN_SOURCES)
+
+    def test_no_consulted_sources_is_an_explicit_empty_list(self):
+        """A machine with no host sources enabled still emits a row: absence of
+        the ROW means "something failed", so it must not also mean "nothing was
+        enabled"."""
+        ev = events.make_host_usage_snapshot(device="dev-a", token_sources=(), hosts={})
+        assert ev["token_sources"] == []
+        assert ev["hosts"] == {}
+
+    def test_active_days_is_the_sorted_deduped_union(self):
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=self._hosts()
+        )
+        assert ev["active_days"] == ["2026-08-14", "2026-08-15"]
+
+    def test_completed_empty_scan_is_an_explicit_empty_snapshot(self):
+        """A machine with no Codex/Grok/OpenCode data emits ``hosts: {}`` —
+        a real fact. The omission case (incomplete) writes NO row at all, so
+        the two are never confused on the wire."""
+        ev = events.make_host_usage_snapshot(device="dev-a", token_sources=_SRC, hosts={})
+        assert ev["hosts"] == {}
+        assert ev["active_days"] == []
+
+    def test_reader_buckets_pass_through_unchanged(self):
+        """Canonicality: no second classifier, no model parsing, no ``cwd``
+        or project attribution. What the readers produced is what ships."""
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=self._hosts()
+        )
+        assert ev["hosts"] == self._hosts()
+
+    def test_payload_is_copied_from_the_caller(self):
+        """The tail keeps merging into its own dict; a built row must not
+        change underneath it."""
+        hosts = self._hosts()
+        ev = events.make_host_usage_snapshot(device="dev-a", token_sources=_SRC, hosts=hosts)
+        hosts["codex"]["2026-08-15"]["input"] = 999_999
+        hosts["other"] = {"2026-08-15": {"input": 1}}
+        assert ev["hosts"]["codex"]["2026-08-15"]["input"] == 10
+        assert "other" not in ev["hosts"]
+
+    def test_payload_is_capped_at_the_most_recent_days(self):
+        """The readers aggregate the WHOLE local corpus — no `since` on the
+        rollout walk, no date predicate on the OpenCode query — so without a
+        cap this row carries the machine's entire lifetime of host activity,
+        again on every substantive push, into a synced file that is re-uploaded
+        whole. Every sibling is already bounded (git rows by `since`,
+        tokens_by_day by MAX_BY_DAY_DAYS, day files by EVENTS_RETENTION_DAYS)."""
+        hosts = {
+            "codex": {f"2026-{m:02d}-{d:02d}": _u(1) for m in (1, 2, 3) for d in range(1, 29)},
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=hosts, max_days=5
+        )
+
+        assert ev["active_days"] == [
+            "2026-03-24",
+            "2026-03-25",
+            "2026-03-26",
+            "2026-03-27",
+            "2026-03-28",
+        ]
+        assert list(ev["hosts"]["codex"]) == ev["active_days"], (
+            "active_days is derived AFTER the cap, so it can never advertise a "
+            "day the payload dropped"
+        )
+
+    def test_cap_defaults_to_the_same_window_as_claude_tokens(self):
+        from mind_meld import token_usage
+
+        hosts = {
+            "codex": {f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}": _u(1) for i in range(95)}
+        }
+        ev = events.make_host_usage_snapshot(device="dev-a", token_sources=_SRC, hosts=hosts)
+        assert len(ev["active_days"]) == token_usage.MAX_BY_DAY_DAYS == 90
+
+    def test_cap_keeps_the_union_window_not_a_per_family_window(self):
+        """Capping each family separately would give each host a different
+        window and make cross-host day totals incomparable."""
+        hosts = {
+            "codex": {"2026-08-10": _u(1), "2026-08-11": _u(1), "2026-08-12": _u(1)},
+            "grok": {"2026-08-12": _u(9)},
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=hosts, max_days=2
+        )
+
+        assert ev["active_days"] == ["2026-08-11", "2026-08-12"]
+        assert list(ev["hosts"]["codex"]) == ["2026-08-11", "2026-08-12"]
+        assert ev["hosts"]["grok"] == {"2026-08-12": _u(9)}
+
+    def test_family_emptied_by_the_cap_is_dropped_entirely(self):
+        """An empty family map would read as "this host reported nothing in
+        the window", which is a different claim from "not in this window"."""
+        hosts = {
+            "codex": {"2026-08-12": _u(1)},
+            "grok": {"2026-01-01": _u(5)},
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=hosts, max_days=1
+        )
+
+        assert set(ev["hosts"]) == {"codex"}
+
+    def test_jsonl_round_trip(self, tmp_path):
+        events_dir = tmp_path / "events"
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=self._hosts()
+        )
+        events.write_push_event(events_dir, "dev-a", [ev])
+        parsed = json.loads(next(iter(events_dir.glob("*.jsonl"))).read_text().strip())
+        assert parsed["type"] == "host-usage-snapshot"
+        assert parsed["hosts"] == self._hosts()
+        assert parsed["active_days"] == ["2026-08-14", "2026-08-15"]
+
+
 class TestWriteOrderTransactionalPin:
     def test_partial_write_does_not_advance_cursor(self, tmp_path):
         """CT-4: mm-push event MUST be LAST. If the caller crashes between

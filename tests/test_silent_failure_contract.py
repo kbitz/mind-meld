@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
 from mind_meld import events as _mm_events
+from mind_meld import host_usage as _mm_host_usage
 from mind_meld import token_usage as _mm_token_usage
 from mind_meld.cli import app
 from mind_meld.config import save_config
@@ -1216,6 +1217,38 @@ def test_autopush_breadcrumb_degraded_when_token_cache_is_locked(tmp_path, monke
     assert payload["outcome"] == "degraded", payload
     assert "locked" in payload.get("detail", "")
     assert "tokens and skills are missing" in payload.get("detail", "")
+
+
+def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, monkeypatch):
+    """Fifth degradation site (Track 19A): an incomplete host-usage scan.
+
+    The unattended-hook user never sees the `mm: notice:` line, so the
+    omission has to reach `mm status`. The detail must also make clear WHICH
+    subsystem lost data — a bare `degraded` on a machine whose Grok store is
+    (correctly) refused would read as content-sync failure, which is exactly
+    the misleading-signal class v0.12.16 exists to remove.
+    """
+    from mind_meld import token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_grok_usage",
+        lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+    )
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["outcome"] == "degraded", payload
+    assert payload["detail"] == (
+        "host-usage snapshot skipped (grok unsupported) — "
+        "content sync and git/session capture unaffected"
+    )
+    # Safe by construction: no path, transcript, query, or exception text.
+    assert str(tmp_path) not in payload["detail"]
+    assert str(Path.home()) not in payload["detail"]
 
 
 def test_autopush_breadcrumb_joins_multiple_degradations(tmp_path, monkeypatch):

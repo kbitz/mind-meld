@@ -3,16 +3,17 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READER`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_marker_dir` / `SKILL_ROOTS`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files`
-- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*`
+- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
+- `src/mind_meld/host_usage.py` — `read_codex_usage` / `warm_host_cache_inline` / `_scan_codex_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`.
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy).
 
 ---
 
@@ -91,6 +92,224 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
 **Retention dry-runs are plan-only (Track 17D).** Every retention reaper selects candidates before applying I/O. `mm gc --dry-run` uses that same selection but must not unlink a file, write a cache, or change metadata, and it prints one stable result line for every reaper it executes. The token-cache plan reads under `lockedjson`'s shared read-only snapshot; apply re-plans under the exclusive R/M/W lock so a preview never leaks a stale plan into a write. Failed deletes count as failures, not cleanup, and one best-effort failure never prevents the other reapers or orphan-blob GC from continuing.
 
 **Initial cursor lookback (Codex C9).** `last_push_ts(events_dir, device_id)` returns `now - INITIAL_CURSOR_LOOKBACK_DAYS` (30) when no prior `mm-push` event exists. New fleet members joining mid-quarter scan back 30 days of git history; older context is invisible to retro until a manual backfill. Document the bound in skill output: "First-run window: last 30 days of activity. Older history is intentionally outside the retro window."
+
+## Host-usage snapshot capture (load-bearing, Track 19A)
+
+The tail publishes the local Codex / Grok / OpenCode readers as one additive
+`host-usage-snapshot` row. `host_usage` stays the sole reader and
+model-family authority; `events.make_host_usage_snapshot` is a pure
+constructor; `events_tail._capture_host_usage` owns the timing and the
+all-or-nothing decision. No `EVENTS_SCHEMA_VERSION` bump — legacy consumers
+already skip unknown types.
+
+**All-or-nothing for FAILURES (premise confirmed 2026-08-16).** A row is
+written only when every reader the sweep CONSULTED returned `complete=True`.
+Any read that failed omits the WHOLE row — no partial totals, no zero
+placeholder — and the scan short-circuits at the first failure. Publishing a
+total that silently omits real usage is worse than publishing nothing. The
+consumer side follows: an ABSENT row means "unknown", never zero.
+
+**But an ABSENT source is not a failure (premise revised 2026-08-16).** The
+original reading treated Grok's refusal as a failure, which meant that merely
+having Grok installed made the row unpublishable — forever, on that machine.
+Measured live before the revision: `read_grok_usage` returns in 0.039ms and
+discarded a complete 6.4B-token Codex scan on every push, while pinning
+`mm status` at `degraded` permanently and so destroying that breadcrumb as a
+signal for real sync degradation — the exact failure mode the `claude_paths`
+guard a few lines away exists to prevent.
+
+`_HOST_ABSENT_REASONS` (today: `no_metadata_ledger`) marks a store that, by
+design, holds no metadata-only usage ledger and never will. That reader is
+dropped from `token_sources` and the sweep continues. **This is deliberately
+not keyed on `unsupported`:** Codex returns `unsupported` for a ledger it
+cannot attribute and OpenCode for a malformed row, which both mean "real usage
+is here and I could not read it" — those keep the veto. Getting that
+distinction backwards silently under-reports the fleet.
+
+**Host readers are consent-gated on their sync source.** `HOST_READER_SOURCE_GATE`
+maps each reader to the source name whose being enabled authorizes it, and
+`_default_host_readers(sources)` returns only those. A user who declined the
+`codex` source does not get `~/.codex/sessions` parsed — matching
+`_enabled_claude_paths`, which has always gated the Claude walk this way. Grok
+is ungated because it opens nothing (it stats a directory and reports whether a
+ledger could exist) and mind-meld has no `grok` source to gate on.
+
+**`token_sources` is therefore per-push, not the constant.**
+`events.HOST_USAGE_TOKEN_SOURCES` is the universe of readers; a row carries the
+subset that actually contributed. That is what lets a consumer tell "this host
+reported nothing" from "this host was never consulted". A machine with no host
+sources enabled still emits a row with `token_sources: []` — absence of the ROW
+has to keep meaning "something failed".
+
+**`hosts: {}` is a fact, not a fallback.** A completed scan on a machine with
+no host data writes an explicit empty snapshot and emits no notice or
+breadcrumb. That is the ONLY empty shape on the wire, so it can never be
+confused with the omission case — which writes nothing at all.
+
+**Its own deadline, started after `walk_done`.**
+`HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500), passed
+explicitly to every reader. Two halves, both load-bearing: capture begins
+AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
+redefine the session-walk notice, and the deadline is FRESH rather than the
+walk's leftovers — reusing `deadline` would make the row vanish exactly on the
+busy machines where it is most interesting. No caller may fall through to
+`host_usage.DEFAULT_READ_BUDGET_S` (5s), which is 20x an entire autopush walk
+budget spent on optional analytics.
+
+**Codex and OpenCode collide by design.** OpenCode classifies GPT models into
+the same canonical `codex` family, so two readers can return the same
+`(family, UTC day)` bucket. They are summed with
+`token_usage.merge_usage_bucket`, never shallow-updated — an update would drop
+whichever reader ran first, silently.
+
+**A reader exception is contained in `_capture_host_usage`, not at the outer
+guard.** The tail's `try/except` would also discard the git and session rows
+already captured and the terminal `mm-push` with them, so an unreadable host
+store would cost the retro its real content AND rewind the cursor into a
+30-day re-walk on every subsequent push. Reader exceptions normalize to the
+same incomplete outcome as a returned `complete=False`.
+
+**The notice text is a closed vocabulary.** `_host_skip_phrase` names only the
+reader and the reason class — never a path, transcript, SQL, model id, or
+exception string. Reasons outside `host_usage.Reason` normalize to
+`unavailable`. `unsupported` NEVER promises a retry (it is a standing property
+of the host's storage); every other reason may. The phrase deliberately
+contains no `; `, which is the separator `autopush` joins breadcrumb reasons
+with.
+
+**Tail appends a degradation; init prints only.** Same rule as every other
+tail degradation: `_run_events_tail` writes the `mm: notice:` AND appends the
+phrase to its returned list, because an unattended hook's stderr reaches
+nobody and `mm status` is the only surface the user reads. It is NOT
+rate-limited — it describes the CURRENT state, and no-op pushes never reach
+the tail at all, so a stale `success` would be the misleading outcome.
+`_run_events_backfill` has no `mm-push` row and no autorun breadcrumb, so it
+emits the notice alone.
+
+**Row order.** Tail: git rows, sessions row, optional host row, `mm-push`
+LAST (CT-4 unchanged). Backfill: git rows, sessions row, optional host row,
+and never an `mm-push`.
+
+**Zero work when there is nothing to say.** Dry-run, an unresolved/disabled
+`mm-events` source, and a no-op push all return before capture, so no reader
+opens a host store or touches a host cache. Pinned in
+`tests/test_host_usage_snapshot.py` and `tests/test_integration.py`.
+
+**Reader tolerance: an ordinary Codex shape must never refuse the store.**
+One unreadable rollout fails the WHOLE `_scan_codex_root`, and all-or-nothing
+then publishes nothing — so the blast radius of a too-strict reader is the
+entire feature, on every machine, forever. Measured on a live 452-rollout
+Mac before the fix: **167 rollouts (37%) failed** and `read_codex_usage`
+returned `unsupported` in 5 ms, having died on the first file. Two shapes are
+therefore skipped rather than refused:
+
+- a `token_count` whose `payload.info` is null or absent — Codex's
+  start-of-turn marker, present in 33% of rollouts, carrying no ledger;
+- a ledger that precedes the first `turn_context` (no model yet). Totals are
+  cumulative, so a later attributable record restates it. Live sessions open
+  this way.
+
+The discriminator is empty-marker vs broken-ledger, and it is load-bearing in
+BOTH directions. A ledger that was seen and could not be attributed to any
+model still refuses (`saw_usage_ledger`), because dropping it would
+under-report real usage — pinned by `test_missing_model_before_token_is_
+incomplete`. A present-but-non-dict `info` still refuses. A rollout with no
+ledger at all contributes nothing to the aggregate (see the `no_ledger` cache
+entry below for how it is stored). Post-fix on the same corpus: 440 OK, 15
+no-ledger, 0 failures, 6.4B tokens across 37 active days. Pinned by
+`test_host_usage.py::TestOrdinaryCodexShapesAreNotRefused`.
+
+**Cache persistence is DECOUPLED from result validity.** "May this scan be
+published?" and "did we learn something durable about individual files?" are
+different questions, and conflating them made a large corpus unable to
+bootstrap: `_scan_codex_root` discarded its staged entries on any abort, so
+every bounded scan re-parsed the same prefix, expired in the same place, and
+threw it away — measured as six consecutive scans and **zero bytes cached** on
+a 452-rollout Mac. `read_codex_usage` now commits what it staged even when the
+result is incomplete. This is sound because each entry is a complete,
+fingerprinted parse of ONE stable file, revalidated against dev/ino/size/mtime
+plus a head+tail digest before it is ever trusted; partial-across-the-scan is
+not partial-within-a-file.
+
+Two rules make it safe, and the older `test_2am_regression_*` pin still holds
+for both. A COMPLETE pass replaces the map — that is what prunes entries for
+deleted rollouts. A PARTIAL pass must MERGE (`{**cached, **staged}`): replacing
+would delete every entry it never reached and the cache would thrash between
+prefixes instead of converging, and pruning on a directory listing it never
+finished would delete entries for files that were never absent. Entries for
+files deleted during a run of partial passes linger until the next complete
+pass; they are inert, because aggregation walks the DISK, never the cache. A
+scan that staged nothing still escapes via `_NoCacheCommit` rather than
+rewriting the file. Measured after the fix: an autopush-only machine converges
+in **3 pushes** (264 → 361 → 440 files cached) with no interactive command.
+
+**A day bucket is not a day's spend, and it mutates.** The readers report a
+CUMULATIVE total per session file and attribute the whole total to the UTC day
+of that file's LAST record. A bucket therefore means "lifetime totals of every
+session that last touched this machine on that day" — 63 of 440 rollouts on a
+real corpus land on a day they did not start, and one day carried 3.4B tokens
+because 91 sessions collapsed onto it. Resuming an old session moves its entire
+total into a new day, so a FIXED day's value can DECREASE between consecutive
+snapshots. The only safe consumption is latest-row-per-device as a
+point-in-time view; diffing, summing, or charting `active_days` as a time
+series all produce wrong numbers. Track 20A owns locking this down — it is
+recorded now because no consumer exists yet and the shape is still cheap to
+change.
+
+**The payload is capped at `MAX_BY_DAY_DAYS`, because the readers are not.**
+`_iter_rollouts` has no `since` and the OpenCode query has no date predicate,
+so `hosts` is the machine's LIFETIME activity unless the writer bounds it —
+and it would be re-serialized into a synced, content-addressed day file on
+every substantive push, growing linearly with calendar time forever. Every
+sibling is already bounded (git rows by `since`, `tokens_by_day` by the same
+`MAX_BY_DAY_DAYS`, day files by `EVENTS_RETENTION_DAYS`); this row escaped all
+three. The cap is applied to the UNION of days, not per family — a per-family
+cap would give each host a different window and make cross-host day totals
+incomparable — and `active_days` is derived AFTER it, so it can never
+advertise a day the payload dropped.
+
+**A ledger-less rollout is cached as identity-only, not skipped.** Caching
+nothing for it looks harmless and is not: those files are then re-parsed on
+EVERY scan forever, so a corpus whose ledger-less files alone outcost the
+250ms budget can never reach a complete pass — the cache is fully warm and the
+scan still expires, permanently. The `no_ledger` entry carries identity and
+fingerprint ONLY; `_aggregate` skips it (a synthetic model would bucket `""`
+into the `other` family) and `_validated_entry` strips any day/model/usage
+riding along behind the flag. `_resumable_entry` refuses it too: resuming past
+its offset would meet the file's first ledger with no remembered
+`turn_context`, and `_read_rollout` would refuse that as unattributable —
+turning a file that just gained its first response into a whole-store refusal.
+Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
+
+**The warm is gated on a FAILED bounded attempt AND on the failing reader.**
+`warm_host_cache_inline` warms CODEX ONLY (`WARMABLE_HOST_READER`), so a
+`deadline` charged to any other reader cannot be helped by it. Without the
+reader half of the gate an interactive push pays bounded-attempt + up to 5s
+warm + bounded-retry — ~6s, on every push, forever, still publishing nothing.
+A cold scan does not fit the per-capture budget (573 ms vs 250/500 ms), so
+`_capture_event_snapshots` may retry once after `warm_host_cache_inline`, but
+ONLY when the first attempt returned reason `deadline` — the only reason a warm
+can fix. Gating this way costs nothing on the happy path, needs no persisted
+"have I warmed?" marker, and cannot misfire on a machine that legitimately has
+no host data: that machine's first attempt COMPLETES, so it never warms. An
+entry-count predicate would have asked exactly that machine to warm on every
+push forever.
+
+`warm_host_cache` is supplied by the wrapper and is `None` on autopush — an
+unattended hook never spends seconds on optional analytics; it converges via
+partial commits instead. Interactive push and init supply it. The published row
+always comes from a BOUNDED capture, warm or not, so the warm never becomes a
+back door around the explicit-deadline rule. Measured on a cold interactive
+push: 501 ms bounded miss + 154 ms warm (cheap precisely because the failed
+attempt cached most of the corpus) + 28 ms retry = 683 ms once, then ~35 ms per
+push forever after.
+
+**Tests must never read a real host store.** `conftest._isolate_host_usage`
+redirects all three reader roots and all three caches per test; tests needing
+data monkeypatch the reader functions. Without it the suite's result would
+depend on which agents are installed on the machine running it — a developer
+with `~/.grok/sessions` would see the healthy-tail control pin in
+`test_silent_failure_contract.py` fail locally while CI stayed green.
 
 ## Init-time event backfill (v0.11.8)
 

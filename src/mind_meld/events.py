@@ -1,12 +1,16 @@
 """Per-push event capture for fleet-aware retro (Group 7 — Track 7A).
 
 Every push appends 1 + N + M events to a per-device daily JSONL file under
-the mm-events synced source. Three event types per push:
+the mm-events synced source. Four event types per push:
 
   - mm-push           one per push, the cursor anchor for the next push
   - git-snapshot      per-repo commit metadata (deduped fleet-wide by canonical
                       remote URL + sha at retro render time)
   - sessions-snapshot per-project Claude Code session metadata
+  - host-usage-snapshot  OPTIONAL (Track 19A): aggregate non-Claude host token
+                      totals per (family, UTC day). All-or-nothing — the row is
+                      absent entirely when any host reader came back incomplete,
+                      so absence means "unknown", never zero.
 
 The events log itself is the cursor (no separate cursor file): the most
 recent `mm-push` event's `ts` answers "since when do I scan?" on the next
@@ -28,12 +32,15 @@ empty push report a phantom "1 file uploaded" (the events file itself)
 and ship that row to peers; the gate eliminates that churn while
 keeping the cursor accurate (no-op pushes never advanced it anyway).
 
-Init-time backfill. cli.py's `_run_events_backfill` runs at the end of
-`mm init` and writes a 30-day git-snapshot + full sessions-snapshot, but
-NO mm-push event. Lets retro-fleet work immediately after init without
-waiting for the first push. The aggregator dedups commits via
-(canonical_remote_url, sha), so the first real push re-walking the same
-30-day window is harmless.
+Init-time backfill. `events_tail._run_events_backfill` (moved out of cli.py in
+Track 16A) runs at the end of `mm init` and writes a 30-day git-snapshot, a
+full sessions-snapshot, and the optional host-usage-snapshot, but NO mm-push
+event. Lets retro-fleet work immediately after init without waiting for the
+first push. The aggregator dedups commits via (canonical_remote_url, sha), so
+the first real push re-walking the same 30-day window is harmless. Note the
+host row is NOT a 30-day slice like its siblings: the readers aggregate the
+whole local corpus, so the row carries the most recent `MAX_BY_DAY_DAYS` days
+regardless of the backfill window.
 
 Schema (v=1, total=False — forward-compat readers tolerate unknown fields):
 see TypedDict definitions below.
@@ -58,7 +65,7 @@ from concurrent.futures import (
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, TypedDict
+from typing import Callable, Sequence, TypedDict
 from urllib.parse import urlsplit
 
 from mind_meld import fsutil, token_usage
@@ -224,6 +231,62 @@ class MmPushEvent(TypedDict, total=False):
     # absent on pre-v0.11.17 peers; aggregator falls back to local gather
     # for those rows. See mind_meld.identity.
     local_emails: list[str]
+
+
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "opencode")
+"""Every built-in host reader, in the fixed order ``events_tail`` invokes them.
+
+This is the FULL set — the universe of readers that can exist. A row's
+``token_sources`` is the per-push SUBSET that actually contributed, which is
+what lets a consumer tell "this host reported nothing" apart from "this host
+was never consulted" (not enabled as a sync source, or its store holds no usage
+ledger). Do not serialize this constant into a row; see
+``make_host_usage_snapshot``."""
+
+
+class HostUsageSnapshot(TypedDict, total=False):
+    """Aggregate non-Claude host token totals (Track 19A, additive on v=2).
+
+    ``hosts`` is a canonical ``host_usage.HostTokens`` map,
+    ``{host_family: {UTC-day: Usage}}``, structurally typed here so ``events``
+    keeps no dependency on the reader module — ``host_usage`` remains the sole
+    payload and model-family authority. This row carries no ``cwd``, project
+    attribution, model IDs outside the canonical family buckets, or per-source
+    status.
+
+    All-or-nothing by construction: a row exists only when EVERY reader in
+    ``token_sources`` completed. ``hosts == {}`` is therefore a real completed
+    empty scan, never a stand-in for a scan that failed — an incomplete sweep
+    omits the whole row (``host_usage.HostUsageResult`` draws that line;
+    ``events_tail`` is the caller that honors it). A consumer must treat an
+    ABSENT row as "unknown", never as zero.
+
+    **A day bucket is NOT "tokens spent that day", and it is NOT stable across
+    snapshots.** Read this before building anything on it. Each host session
+    file reports a CUMULATIVE total, and the reader attributes that whole total
+    to the UTC day of the file's LAST record. So a bucket is "the lifetime
+    totals of every session that last touched this machine on that day" —
+    measured on a real corpus, 63 of 440 rollouts land on a different day than
+    they started, and one day showed 3.4B tokens because 91 sessions' lifetimes
+    collapsed onto it. Resuming an old session MOVES its entire total into the
+    new day, so a fixed day's value can DECREASE between two consecutive
+    snapshots.
+
+    The only safe read is: take the LATEST row per device and use it as a
+    point-in-time view. Do NOT diff two snapshots, sum them, or treat
+    ``active_days`` as a per-day activity series. ``active_days`` names the days
+    present in ``hosts``, nothing more. (Track 20A owns locking this contract
+    down; it is documented here because no consumer exists yet and the shape is
+    still cheap to change.)
+    """
+
+    v: int
+    type: str
+    ts: str
+    device: str
+    token_sources: list[str]
+    hosts: dict[str, dict[str, token_usage.Usage]]
+    active_days: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -1200,3 +1263,75 @@ def make_mm_push_event(
     if local_emails is not None:
         event["local_emails"] = list(local_emails)
     return event
+
+
+def make_host_usage_snapshot(
+    *,
+    device: str,
+    hosts: dict[str, dict[str, token_usage.Usage]],
+    token_sources: Sequence[str],
+    ts: datetime | None = None,
+    max_days: int = token_usage.MAX_BY_DAY_DAYS,
+) -> HostUsageSnapshot:
+    """Construct a ``host-usage-snapshot`` row from COMPLETED reader output.
+
+    Pure: the caller (``events_tail._capture_event_snapshots``) has already
+    established that every reader it CONSULTED returned ``complete=True`` and
+    has merged their ``hosts`` maps. This function adds no classification of
+    its own — it does not parse model IDs, consult a session's ``cwd``,
+    attribute activity to a project, or invent a bucket for a host that
+    reported none. ``host_usage`` owns all of that.
+
+    ``token_sources`` is the per-push list of readers that actually
+    contributed, NOT the built-in set: a host the user has not enabled as a
+    sync source is never read, and one whose store cannot hold a usage ledger
+    is dropped. Emitting the full constant instead would claim coverage the
+    sweep did not have, and would make "this host reported nothing" and "this
+    host was never consulted" indistinguishable on the wire.
+
+    No ``EVENTS_SCHEMA_VERSION`` bump: the type is additive and every existing
+    consumer already skips event types it does not know.
+
+    **The payload is capped at the most recent ``max_days`` UTC days.** The
+    host readers aggregate the WHOLE local corpus — ``_iter_rollouts`` has no
+    ``since`` and the OpenCode query has no date predicate — so without this
+    the row would carry the machine's entire lifetime of host activity, and
+    would carry it again on every substantive push, into a synced
+    content-addressed file that is re-uploaded whole. Every sibling is already
+    bounded: git rows by ``since``, ``tokens_by_day`` by the same
+    ``MAX_BY_DAY_DAYS``, and the day files themselves by
+    ``retention.EVENTS_RETENTION_DAYS``. Measured unbounded on a real machine
+    at 37 days / 4,147 bytes after five months, growing linearly forever.
+
+    ``active_days`` is the sorted union of the UTC-day keys across families —
+    the canonical day inputs a later consumer needs, derived here so it is not
+    re-derived (differently) per renderer, and derived AFTER the cap so it can
+    never advertise a day the payload dropped. The payload is copied so a
+    caller that keeps merging into its own dict cannot mutate an already-built
+    row.
+    """
+    payload: dict[str, dict[str, token_usage.Usage]] = {
+        family: {day: dict(usage) for day, usage in days.items()}  # type: ignore[misc]
+        for family, days in hosts.items()
+    }
+    # Cap on the UNION of days, not per family: capping each family separately
+    # would keep a different window per host and make cross-host day totals
+    # incomparable. ISO-8601 dates lex-sort as they date-sort (same reasoning
+    # as `token_usage._trim_by_day`).
+    all_days = sorted({day for days in payload.values() for day in days}, reverse=True)
+    if len(all_days) > max_days:
+        keep = set(all_days[:max_days])
+        payload = {
+            family: {day: usage for day, usage in days.items() if day in keep}
+            for family, days in payload.items()
+        }
+        payload = {family: days for family, days in payload.items() if days}
+    return {
+        "v": EVENTS_SCHEMA_VERSION,
+        "type": "host-usage-snapshot",
+        "ts": (ts or datetime.now(timezone.utc)).isoformat(),
+        "device": device,
+        "token_sources": list(token_sources),
+        "hosts": payload,
+        "active_days": sorted({day for days in payload.values() for day in days}),
+    }

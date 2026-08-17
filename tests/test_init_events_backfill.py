@@ -21,6 +21,8 @@ import pytest
 
 from mind_meld import events, events_tail
 from mind_meld import events as _mm_events
+from mind_meld import host_usage as _mm_host_usage
+from mind_meld import identity as _mm_identity
 from mind_meld import token_usage as _mm_token_usage
 
 
@@ -51,12 +53,23 @@ def _seed_claude_with_repo(claude_dir: Path, repo_dir: Path) -> None:
     )
 
 
-def _make_sources(events_root: Path, claude_dir: Path | None) -> list[dict]:
+def _make_sources(
+    events_root: Path,
+    claude_dir: Path | None,
+    *,
+    hosts: tuple[str, ...] = (),
+) -> list[dict]:
     """Construct the resolved-sources list shape that `_run_events_backfill`
-    expects (output of ``get_sources(config)``)."""
+    expects (output of ``get_sources(config)``).
+
+    ``hosts`` names host sources to enable — the host readers are consent-gated
+    on them, so a test that expects the codex/opencode readers to run must
+    enable them here."""
     sources: list[dict] = []
     if claude_dir is not None:
         sources.append({"name": "claude", "path": str(claude_dir), "type": "claude"})
+    for host in hosts:
+        sources.append({"name": host, "path": str(events_root / host), "type": "generic"})
     sources.append(
         {
             "name": "mm-events",
@@ -226,6 +239,133 @@ class TestRunEventsBackfill:
             f"since must be ~now-30d, got delta={delta}s vs target={target}s"
         )
         assert captured["session_since"] == since
+
+
+class TestBackfillHostSnapshot:
+    """Track 19A — init shares the tail's host capture, but keeps its own
+    failure policy: one safe notice, no ``mm-push`` row, no autorun
+    breadcrumb (init has neither)."""
+
+    def _stub(self, monkeypatch, *, codex=None, grok=None, opencode=None, calls=None):
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda _c, **_kw: _mm_events.GitRootDiscovery((), (), False),
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "walk_git_projects",
+            lambda roots, since, total_budget_ms: [
+                {
+                    "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                    "type": "git-snapshot",
+                    "ts": "2026-08-15T00:00:00+00:00",
+                    "device": "",
+                    "projects": [],
+                    "skipped": [],
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            _mm_identity,
+            "refresh_identity_cache",
+            lambda *, force=False, root_discovery=None: [],
+        )
+        monkeypatch.setattr(_mm_token_usage, "warm_token_cache_inline", lambda paths: None)
+        monkeypatch.setattr(_mm_events, "walk_session_metadata", lambda *a, **kw: [])
+
+        def reader(name, result):
+            def read(*, deadline):
+                if calls is not None:
+                    calls.append(name)
+                return result
+
+            return read
+
+        empty = _mm_host_usage.HostUsageResult({}, complete=True)
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", reader("codex", codex or empty))
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", reader("grok", grok or empty))
+        monkeypatch.setattr(
+            _mm_host_usage, "read_opencode_usage", reader("opencode", opencode or empty)
+        )
+
+    def test_row_order_is_git_sessions_host_and_never_mm_push(self, tmp_path, monkeypatch):
+        events_root = tmp_path / "events_root"
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        sources = _make_sources(events_root, claude_dir, hosts=("codex",))
+        self._stub(
+            monkeypatch,
+            codex=_mm_host_usage.HostUsageResult(
+                {
+                    "codex": {
+                        "2026-08-15": {"input": 5, "cache_create": 0, "cache_read": 0, "output": 1}
+                    }
+                },
+                complete=True,
+            ),
+        )
+
+        events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
+
+        rows = _read_events(sorted((events_root / "events").glob("*.jsonl"))[0])
+        assert [r["type"] for r in rows] == [
+            "git-snapshot",
+            "sessions-snapshot",
+            "host-usage-snapshot",
+        ]
+        assert rows[-1]["hosts"] == {
+            "codex": {"2026-08-15": {"input": 5, "cache_create": 0, "cache_read": 0, "output": 1}}
+        }
+        assert rows[-1]["device"] == "dev-a"
+
+    def test_host_row_ships_without_any_claude_source(self, tmp_path, monkeypatch):
+        """A Codex-or-OpenCode-only machine still contributes host activity,
+        even though it has no Claude sessions to snapshot."""
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None)
+        self._stub(monkeypatch)
+
+        events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
+
+        rows = _read_events(sorted((events_root / "events").glob("*.jsonl"))[0])
+        types = [r["type"] for r in rows]
+        assert types == ["git-snapshot", "host-usage-snapshot"]
+        assert rows[-1]["hosts"] == {}, "a completed empty scan is a fact, not a failure"
+
+    def test_incomplete_scan_omits_the_row_with_one_safe_notice(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root, claude_dir=None)
+        self._stub(
+            monkeypatch,
+            grok=_mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+        )
+
+        events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
+
+        rows = _read_events(sorted((events_root / "events").glob("*.jsonl"))[0])
+        assert [r["type"] for r in rows] == ["git-snapshot"]
+        err = capsys.readouterr().err
+        assert err.count("host-usage snapshot skipped") == 1
+        assert (
+            "mm: notice: host-usage snapshot skipped (grok unsupported) — "
+            "content sync and git/session capture unaffected\n" in err
+        )
+        assert "retry" not in err, "unsupported storage is permanent — never promise a retry"
+        assert "events backfill failed" not in err
+
+    def test_absent_mm_events_source_touches_no_host_reader(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        sources = [{"name": "claude", "path": str(claude_dir), "type": "claude"}]
+        calls: list[str] = []
+        self._stub(monkeypatch, calls=calls)
+
+        events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
+
+        assert calls == []
 
 
 class TestInitWiring:

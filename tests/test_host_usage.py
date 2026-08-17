@@ -204,12 +204,255 @@ class TestCodexFixture:
     def test_missing_model_before_token_is_incomplete(
         self, isolated_cache: Path, tmp_path: Path
     ) -> None:
+        """A ledger we saw and could attribute to NOTHING still refuses the
+        store. Silently dropping it would under-report real usage — the
+        opposite failure from the tolerated no-ledger shapes below."""
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-no-context.jsonl", [_token(10)])
 
         result = hu.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+
+
+class TestOrdinaryCodexShapesAreNotRefused:
+    """Refusing a routine shape costs the WHOLE store, not one file.
+
+    Measured on a real 452-rollout machine before this fix: 167 rollouts (37%)
+    failed, the scan died on the first one in 5ms, and Track 19A's all-or-
+    nothing caller therefore published nothing at all while `mm status` sat at
+    `degraded (codex unsupported)` — permanently, since `unsupported` is
+    classified as never-retry. These pins are the regression guard.
+    """
+
+    def _null_info_token(self, timestamp: str = "2026-08-15T00:00:00Z") -> dict:
+        """Codex's start-of-turn marker: a token_count with `info: null`."""
+        return {
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": None},
+        }
+
+    def test_null_info_token_count_is_skipped_not_fatal(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """33% of rollouts on a live machine carried one of these."""
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-null-info.jsonl",
+            [_context(), self._null_info_token(), _token(42, output=7)],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 42
+        assert result.hosts["codex"]["2026-08-15"]["output"] == 7
+
+    def test_absent_info_key_is_treated_like_null(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        marker = {
+            "timestamp": "2026-08-15T00:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count"},
+        }
+        _write_rollout(root, "rollout-no-info-key.jsonl", [_context(), marker, _token(5)])
+
+        assert hu.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 5
+
+    def test_present_but_malformed_info_is_still_fatal(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """The discriminator is empty-marker vs broken-ledger. Widening the
+        skip to "any info I can't parse" would let real usage vanish."""
+        root = tmp_path / "sessions"
+        broken = {
+            "timestamp": "2026-08-15T00:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": "not-a-dict"},
+        }
+        _write_rollout(root, "rollout-broken-info.jsonl", [_context(), broken])
+
+        assert hu.read_codex_usage(root).reason == "unsupported"
+
+    def test_ledger_before_first_turn_context_is_skipped(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Live sessions open with token_counts before the first turn_context.
+        Totals are cumulative, so the later attributable record restates them
+        — the early prefix is droppable, not fatal."""
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-early-ledger.jsonl",
+            [_token(10), _token(20), _context("gpt-5"), _token(30, output=4)],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        # The LAST attributable cumulative total wins — never a sum.
+        assert result.hosts["codex"]["2026-08-15"] == {
+            "input": 30,
+            "cache_create": 0,
+            "cache_read": 0,
+            "output": 4,
+        }
+
+    def test_rollout_with_no_ledger_contributes_nothing(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """An abandoned session has no tokens. That is a fact about the file,
+        not a reason to refuse every other rollout in the store."""
+        root = tmp_path / "sessions"
+        _write_rollout(root, "rollout-abandoned.jsonl", [_context()])
+        _write_rollout(root, "rollout-real.jsonl", [_context(), _token(99)])
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 99
+
+    def test_one_abandoned_rollout_does_not_hide_the_whole_store(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """The exact production failure: a single unreadable file anywhere in
+        the tree zeroed fleet host analytics. Sorted discovery put the
+        offender first, so `_scan_codex_root` died before reading anything."""
+        root = tmp_path / "sessions"
+        _write_rollout(root, "rollout-aaa-abandoned.jsonl", [_context()])
+        for i in range(5):
+            _write_rollout(root, f"rollout-zzz-{i}.jsonl", [_context(), _token(10)])
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 50
+
+    def test_marker_only_rollout_is_no_ledger_not_a_refusal(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """An aborted turn leaves markers and nothing else.
+
+        This is the mutation guard for the whole fix: moving
+        ``saw_usage_ledger = True`` one line up (above the `_carries_usage`
+        gate) reintroduces the 37%-refusal outage, and every other tolerance
+        test still passes because they all pair a marker with a real ledger.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-aaa-marker-only.jsonl",
+            [_context(), self._null_info_token(), self._null_info_token()],
+        )
+        # No turn_context at all: still a marker, still not a ledger.
+        _write_rollout(root, "rollout-bbb-bare-marker.jsonl", [self._null_info_token()])
+        _write_rollout(root, "rollout-zzz-real.jsonl", [_context(), _token(11)])
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True, result
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 11
+        # All three are cached — the two marker-only files as no-ledger entries
+        # so they stop costing a full re-parse on every scan.
+        cached = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
+        assert len(cached) == 3
+        no_ledger = [e for e in cached.values() if e.get("no_ledger")]
+        assert len(no_ledger) == 2
+        for entry in no_ledger:
+            assert "day" not in entry and "model" not in entry and "usage" not in entry
+
+    @pytest.mark.parametrize("info", [{}, {"total_token_usage": {}}])
+    def test_empty_info_is_a_broken_ledger_not_a_marker(
+        self, isolated_cache: Path, tmp_path: Path, info: dict
+    ) -> None:
+        """Pins the boundary next to the tolerated null marker: `info: {}` is
+        a dict, so it is a ledger we saw and could not parse — fatal. If Codex
+        ever emits `{}` as a start-of-turn marker, THIS is the test that has
+        to change, deliberately."""
+        root = tmp_path / "sessions"
+        record = {
+            "timestamp": "2026-08-15T00:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": info},
+        }
+        _write_rollout(root, "rollout-empty-info.jsonl", [_context(), record])
+
+        assert hu.read_codex_usage(root).reason == "unsupported"
+
+    def test_broken_ledger_before_any_turn_context_is_still_fatal(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """The model-attribution `continue` runs before `_terminal_from_record`,
+        so a non-dict `info` arriving first used to slip past the refusal the
+        docstring promised. Refusal now happens in `_carries_usage`."""
+        root = tmp_path / "sessions"
+        broken = {
+            "timestamp": "2026-08-15T00:00:00Z",
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": "not-a-dict"},
+        }
+        _write_rollout(root, "rollout-early-broken.jsonl", [broken, _context(), _token(10)])
+
+        assert hu.read_codex_usage(root).reason == "unsupported"
+
+    def test_no_ledger_rollout_caches_identity_only_and_hits_next_scan(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ledger-less rollout is cached as identity + fingerprint ONLY.
+
+        It carries no day/model/usage, so `_aggregate` can never fabricate a
+        family bucket from it — and an unchanged one is a cache hit rather
+        than a full re-parse, which is what keeps a corpus converging.
+        """
+        root = tmp_path / "sessions"
+        abandoned = _write_rollout(root, "rollout-abandoned.jsonl", [_context()])
+        _write_rollout(root, "rollout-real.jsonl", [_context(), _token(1)])
+
+        first = hu.read_codex_usage(root)
+        assert first.complete is True
+        assert set(first.hosts) == {"codex"}, "a no-ledger file must not create a bucket"
+
+        entry = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"][
+            hu._cache_key(abandoned)
+        ]
+        assert entry["no_ledger"] is True
+        assert "day" not in entry and "model" not in entry and "usage" not in entry
+
+        # Unchanged on the next scan → cache hit, not a re-parse.
+        monkeypatch.setattr(
+            hu, "_read_full_rollout", lambda *a, **k: pytest.fail("no-ledger file was re-parsed")
+        )
+        second = hu.read_codex_usage(root)
+        assert second.complete is True
+        assert second.hosts == first.hosts
+
+    def test_hand_edited_no_ledger_entry_cannot_smuggle_totals(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """`_aggregate` skips on the flag, so validation must strip anything
+        riding along behind it rather than trusting the pair."""
+        root = tmp_path / "sessions"
+        abandoned = _write_rollout(root, "rollout-abandoned.jsonl", [_context()])
+        assert hu.read_codex_usage(root).complete is True
+
+        cache = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        cache["files"][hu._cache_key(abandoned)].update(
+            {
+                "day": "2026-08-15",
+                "model": "gpt-5",
+                "usage": {"input": 10**9, "cache_create": 0, "cache_read": 0, "output": 0},
+            }
+        )
+        isolated_cache.write_text(json.dumps(cache), encoding="utf-8")
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts == {}, "smuggled totals must not reach the aggregate"
 
 
 class TestCacheLifecycle:
@@ -366,12 +609,29 @@ class TestCacheLifecycle:
     def test_2am_regression_partial_scan_never_replaces_or_prunes_cache(
         self, isolated_cache: Path, tmp_path: Path
     ) -> None:
+        """Both hazards in this pin's name still hold; byte-equality does not.
+
+        A partial pass must not REPLACE the map (that drops every entry it
+        never reached) and must not PRUNE on an incomplete view of the
+        directory (a file it never listed is not a file that was deleted).
+        Merging preserves both.
+
+        What a partial pass may now do is KEEP the per-file progress it
+        verified. Refusing to was safe but non-convergent: on a 452-rollout
+        machine every bounded scan re-parsed the same prefix, expired in the
+        same place, and discarded it — six consecutive scans, zero bytes
+        cached, so the corpus could never bootstrap. Each staged entry is a
+        complete, fingerprinted parse of one stable file and is revalidated
+        against dev/ino/size/mtime plus a head+tail digest before it is ever
+        trusted, so keeping it cannot make a later total wrong.
+        """
         root = tmp_path / "sessions"
         rollout_a = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
         rollout_b = _write_rollout(root, "rollout-b.jsonl", [_context(), _token(100)])
         first = hu.read_codex_usage(root)
         assert first.hosts["codex"]["2026-08-15"]["input"] == 300
-        cache_before = isolated_cache.read_bytes()
+        keys_before = set(json.loads(isolated_cache.read_text(encoding="utf-8"))["files"])
+        key_a, key_b = hu._cache_key(rollout_a), hu._cache_key(rollout_b)
 
         _write_rollout(root, "rollout-a.jsonl", [_context(), _token(400)])
         rollout_b.unlink()
@@ -380,13 +640,198 @@ class TestCacheLifecycle:
         incomplete = hu.read_codex_usage(root)
 
         assert incomplete == hu.HostUsageResult({}, complete=False, reason="partial")
-        assert isolated_cache.read_bytes() == cache_before
+        files_after = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
+        # NOT replaced, NOT pruned: b was unlinked and never re-listed, and its
+        # entry survives this incomplete pass untouched.
+        assert set(files_after) == keys_before
+        assert files_after[key_b]["usage"]["input"] == 100
+        # ...but a's verified re-parse is kept, which is the convergence half.
+        assert files_after[key_a]["usage"]["input"] == 400
+        # A surviving entry for a deleted file is inert: aggregation walks the
+        # DISK, never the cache, so b cannot contribute to any total.
+        assert incomplete.hosts == {}
 
         (root / "2026" / "08" / "14" / "rollout-c.jsonl").unlink()
         stable = hu.read_codex_usage(root)
         assert stable.complete is True
         assert stable.hosts["codex"]["2026-08-15"]["input"] == 400
         assert rollout_a.exists()
+        # Pruning is the COMPLETE pass's job, and it happened here.
+        assert set(json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]) == {key_a}
+
+    def test_cold_corpus_converges_across_bounded_scans(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A corpus too large for one bounded scan must still bootstrap.
+
+        Before partial commits, this loop ran forever: each scan parsed the
+        same prefix, expired, and threw it away. The acceptance bar is not
+        merely "it finishes" — it is that the converged result equals what a
+        single unbounded scan produces.
+        """
+
+        class _FakeTime:
+            now = 1_000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(hu, "time", clock)
+
+        root = tmp_path / "sessions"
+        for i in range(10):
+            _write_rollout(root, f"rollout-{i:02d}.jsonl", [_context(), _token(10 + i)])
+
+        real_full_read = hu._read_full_rollout
+        parses: list[int] = [0]
+
+        def timed_full_read(path: Path, before: object, deadline: float):
+            parses[0] += 1
+            clock.now += 0.1  # each cold parse costs 100ms of fake wall clock
+            return real_full_read(path, before, deadline)
+
+        monkeypatch.setattr(hu, "_read_full_rollout", timed_full_read)
+
+        cached_entries, attempts, result = [], 0, None
+        while attempts < 20:
+            attempts += 1
+            result = hu.read_codex_usage(root, deadline=clock.now + 0.25)
+            cached_entries.append(len(json.loads(isolated_cache.read_text())["files"]))
+            if result.complete:
+                break
+
+        assert result is not None and result.complete is True, "cold corpus never converged"
+        assert attempts > 1, "budget too generous — this pin proves nothing in one pass"
+        assert cached_entries == sorted(cached_entries), (
+            f"cache must never lose ground between bounded scans: {cached_entries}"
+        )
+        # Not "exactly 10": the file in flight when the budget expires has
+        # already been read, but `_fingerprint` then refuses to spend more I/O,
+        # so it is re-parsed next scan. That waste is bounded at ONE file per
+        # scan and is the deliberate price of checking the deadline everywhere.
+        # The bound is what matters — the bug was re-parsing the whole prefix
+        # every scan, which would put this in the 10*attempts range.
+        assert parses[0] <= 10 + attempts, (
+            f"at most one in-flight parse may be wasted per scan: "
+            f"{parses[0]} parses over {attempts} scans of 10 files"
+        )
+        assert parses[0] < 10 * attempts, "the prefix is being re-parsed every scan"
+        # The bar: converged-incremental is identical to one unbounded scan.
+        assert result.hosts["codex"]["2026-08-15"]["input"] == sum(10 + i for i in range(10))
+
+    def test_complete_scan_that_overran_its_budget_still_commits_the_cache(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one commit path with no other pin: the scan finished, then the
+        budget expired. Refusing to publish is unchanged; throwing the work
+        away as well is what non-convergence was made of."""
+        root = tmp_path / "sessions"
+        _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
+
+        real_scan = hu._scan_codex_root
+        blown = {"on": False}
+        real_expired = hu._expired
+
+        def scan_then_blow_the_budget(source_root, cached_files, deadline):
+            outcome = real_scan(source_root, cached_files, deadline)
+            blown["on"] = True
+            return outcome
+
+        monkeypatch.setattr(hu, "_scan_codex_root", scan_then_blow_the_budget)
+        monkeypatch.setattr(hu, "_expired", lambda d: blown["on"] or real_expired(d))
+
+        result = hu.read_codex_usage(root)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
+        files = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
+        assert len(files) == 1, "a complete-but-overbudget scan must still keep its work"
+
+        # ...and the work counts: the next in-budget scan re-parses nothing.
+        monkeypatch.setattr(hu, "_expired", real_expired)
+        monkeypatch.setattr(hu, "_scan_codex_root", real_scan)
+        monkeypatch.setattr(
+            hu, "_read_full_rollout", lambda *a, **k: pytest.fail("prefix was re-parsed")
+        )
+        assert hu.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 200
+
+    def test_uncacheable_rollouts_do_not_block_convergence(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ledger-less rollouts are cached identity-only, so their cost is paid
+        ONCE rather than on every scan. Sorted first, they are exactly where an
+        uncached re-parse would starve the budget forever — remove the
+        `no_ledger` entry and this loop never converges."""
+
+        class _FakeTime:
+            now = 1_000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(hu, "time", clock)
+
+        root = tmp_path / "sessions"
+        for i in range(4):  # sort AHEAD of the real ones
+            _write_rollout(root, f"rollout-aaa-{i:02d}.jsonl", [_context()])
+        for i in range(6):
+            _write_rollout(root, f"rollout-zzz-{i:02d}.jsonl", [_context(), _token(10 + i)])
+
+        real_full_read = hu._read_full_rollout
+
+        def timed_full_read(path, before, deadline):
+            clock.now += 0.1
+            return real_full_read(path, before, deadline)
+
+        monkeypatch.setattr(hu, "_read_full_rollout", timed_full_read)
+
+        attempts, result = 0, None
+        while attempts < 20:
+            attempts += 1
+            result = hu.read_codex_usage(root, deadline=clock.now + 0.25)
+            if result.complete:
+                break
+
+        assert result is not None and result.complete is True, (
+            "uncacheable rollouts starved the budget: the corpus never converged"
+        )
+        assert result.hosts["codex"]["2026-08-15"]["input"] == sum(10 + i for i in range(6))
+
+    def test_warm_host_cache_inline_actually_populates_the_cache(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Every caller test mocks this away, so its one piece of real logic —
+        turning a relative budget into an ABSOLUTE monotonic deadline — is
+        otherwise unpinned. `deadline=budget_s` would make every warm an
+        instant no-op and every mocked test would still pass."""
+        root = tmp_path / "sessions"
+        _write_rollout(root, "rollout-warm.jsonl", [_context(), _token(77)])
+
+        result = hu.warm_host_cache_inline(root)
+
+        assert result.complete is True, result
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 77
+        assert json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
+
+    def test_non_canonical_day_in_a_cached_entry_is_rejected(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """A cached `day` becomes a KEY in a synced row since Track 19A.
+        `fromisoformat` alone would accept a datetime carrying this machine's
+        UTC offset — a per-machine identifier the row must never carry."""
+        root = tmp_path / "sessions"
+        path = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
+        assert hu.read_codex_usage(root).complete is True
+
+        cache = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        cache["files"][hu._cache_key(path)]["day"] = "2026-08-15T23:59:59-07:00"
+        isolated_cache.write_text(json.dumps(cache), encoding="utf-8")
+
+        # Rejected as a cache hit -> re-parsed -> canonical day restored.
+        assert hu.read_codex_usage(root).hosts["codex"] == {
+            "2026-08-15": {"input": 200, "cache_create": 0, "cache_read": 0, "output": 0}
+        }
 
     def test_deleted_rollout_is_pruned_after_complete_discovery(
         self, isolated_cache: Path, tmp_path: Path
@@ -495,7 +940,11 @@ class TestGrokUsage:
 
         result = hu.read_grok_usage(root)
 
-        assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+        # `no_metadata_ledger`, NOT `unsupported`: the store simply holds no
+        # metadata-only ledger and never will. A caller may treat that as "this
+        # source is not installed"; treating a genuine read FAILURE that way
+        # would silently under-report real usage.
+        assert result == hu.HostUsageResult({}, complete=False, reason="no_metadata_ledger")
         grok_cache, opencode_cache = isolated_adapter_caches
         assert not grok_cache.exists()
         assert not opencode_cache.exists()
@@ -589,7 +1038,10 @@ class TestOpenCodeUsage:
 
         result = hu.read_opencode_usage(root)
 
-        assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+        # Legacy message files are whole-transcript blobs with no metadata-only
+        # projection — the same standing-property category as Grok, not a
+        # failed read. See `Reason`.
+        assert result == hu.HostUsageResult({}, complete=False, reason="no_metadata_ledger")
 
     def test_migration_schema_drift_and_busy_database_are_incomplete(
         self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
