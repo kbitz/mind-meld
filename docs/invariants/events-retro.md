@@ -103,11 +103,14 @@ all-or-nothing decision. No `EVENTS_SCHEMA_VERSION` bump — legacy consumers
 already skip unknown types.
 
 **All-or-nothing for FAILURES (premise confirmed 2026-08-16).** A row is
-written only when every reader the sweep CONSULTED returned `complete=True`.
-Any read that failed omits the WHOLE row — no partial totals, no zero
-placeholder — and the scan short-circuits at the first failure. Publishing a
-total that silently omits real usage is worse than publishing nothing. The
-consumer side follows: an ABSENT row means "unknown", never zero.
+written only when every reader the sweep CONSULTED either returned
+`complete=True` or reported a reason in `_HOST_ABSENT_REASONS`. The latter
+means the source cannot supply a metadata-only ledger, so it is excluded from
+coverage and the sweep continues. Any other incomplete read omits the WHOLE
+row — no partial totals, no zero placeholder — and the scan short-circuits at
+the first failure. Publishing a total that silently omits real usage is worse
+than publishing nothing. The consumer side follows: an ABSENT row means
+"unknown", never zero.
 
 **But an ABSENT source is not a failure (premise revised 2026-08-16).** The
 original reading treated Grok's refusal as a failure, which meant that merely
@@ -143,8 +146,65 @@ has to keep meaning "something failed".
 
 **`hosts: {}` is a fact, not a fallback.** A completed scan on a machine with
 no host data writes an explicit empty snapshot and emits no notice or
-breadcrumb. That is the ONLY empty shape on the wire, so it can never be
-confused with the omission case — which writes nothing at all.
+breadcrumb. It is the ONLY empty ``hosts`` shape on the wire, but its meaning
+is always scoped by that same row's ``token_sources``: a nonempty list says
+those completed sources observed no host data; an empty list says no source
+contributed. Neither form is fleet-wide zero. The omission case writes nothing
+at all.
+
+### Track 20A consumer handoff: complete, coverage-aware snapshots
+
+Track 20A locks this existing writer shape for its future consumer; it does
+not add a parser, status row, schema bump, or producer-side validation. A
+consumer uses only **accepted** rows and holds one complete, whole-device view
+per device.
+
+- An absent ``host-usage-snapshot`` row is no new complete observation. It is
+  never zero, never a state update, and never evidence of a specific cause:
+  the writer may have been incomplete, legacy, no-op, dry-run, or writing
+  init backfill (which has no ``mm-push`` anchor). Do not infer a failure from
+  an absent row or correlate it to a later ``mm-push``.
+- A complete later row replaces the entire accepted view for that device.
+  There is no per-source carry-forward: Codex and OpenCode can already merge
+  into one ``codex`` family, so the wire lacks the source-to-family precision
+  required to merge partial observations safely.
+- ``ts`` is the snapshot's sole supported ``as_of`` signal. A retained row is
+  a last-known-good point-in-time view, not a claim that host state is current.
+  Renderers must keep its coverage and ``as_of`` context rather than reducing
+  an empty or uncovered row to a bare zero.
+
+**Eligibility is all-or-nothing.** Track 21 accepts a row only when all known
+core fields are valid:
+
+- ``v`` is the current event-schema integer, ``type`` is
+  ``host-usage-snapshot``, ``ts`` is a timezone-aware ISO-8601 timestamp, and
+  ``device`` is a nonempty string. The current short-device-id convention is
+  not itself a UUID-format parser requirement.
+- ``token_sources`` is an order-preserving, duplicate-free subsequence of
+  ``HOST_USAGE_TOKEN_SOURCES``. A nonempty ``hosts`` payload requires a
+  nonempty ``token_sources``; ``hosts == {}`` with ``token_sources == []`` is
+  valid and means no source contributed.
+- ``hosts`` is either ``{}`` or only canonical, nonempty host-family maps.
+  Every key is a real UTC ``YYYY-MM-DD`` date; every bucket contains exactly
+  the four ``TOKEN_FIELDS`` as non-boolean integers in ``[0, 2**53]``; and the
+  post-cap union contains no more than ``MAX_BY_DAY_DAYS`` days.
+- ``active_days`` is derived convenience metadata, not an authority: it must
+  equal the sorted post-cap union of UTC-day keys in ``hosts`` exactly.
+
+Unknown additive **top-level** fields are ignored for forward compatibility.
+Unknown nested families, malformed days or buckets, invalid known core fields,
+or an ``active_days`` mismatch invalidate the whole row; a consumer retains an
+earlier accepted row for that device rather than salvaging partial totals.
+
+**Deterministic selection.** For each device, compare accepted rows by parsed
+UTC instant and select the greatest. On an exact instant tie, compare the
+lexicographically greatest stable compact JSON serialization (sorted keys,
+fixed separators) of only the normalized known-core projection: ``v``,
+``type``, normalized-UTC ``ts``, ``device``, ``token_sources``, ``hosts``, and
+``active_days``. Additive top-level fields are deliberately excluded, so they
+cannot change a winner they otherwise leave semantically unchanged. A
+clock-backdated row remains older by ``as_of``; JSONL encounter order is not a
+safe physical-time signal.
 
 **Its own deadline, started after `walk_done`.**
 `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500), passed
@@ -252,9 +312,8 @@ because 91 sessions collapsed onto it. Resuming an old session moves its entire
 total into a new day, so a FIXED day's value can DECREASE between consecutive
 snapshots. The only safe consumption is latest-row-per-device as a
 point-in-time view; diffing, summing, or charting `active_days` as a time
-series all produce wrong numbers. Track 20A owns locking this down — it is
-recorded now because no consumer exists yet and the shape is still cheap to
-change.
+series all produce wrong numbers. Track 20A locks this contract above, before
+Track 21 adds the first consumer.
 
 **The payload is capped at `MAX_BY_DAY_DAYS`, because the readers are not.**
 `_iter_rollouts` has no `since` and the OpenCode query has no date predicate,

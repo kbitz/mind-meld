@@ -606,6 +606,91 @@ class TestTailWiring:
         ]
         assert f"mm: notice: {degradations[0]}" in capsys.readouterr().err
 
+    def test_complete_omitted_then_complete_empty_preserves_wire_history(
+        self, tmp_path, monkeypatch
+    ):
+        """The future consumer sees only completed observations.
+
+        A failed middle capture must not write a synthetic zero or erase the
+        prior complete row. A later completed empty scan is a new whole-device
+        observation with its own coverage, not a carry-forward of the warm
+        row's sources.
+        """
+        events_root = tmp_path / "events_root"
+        _stub_fast_walks(monkeypatch)
+
+        warm_sources = _sources(events_root, hosts=("codex",))
+        _stub_hosts(
+            monkeypatch,
+            codex=_complete({"codex": {"2026-08-15": _usage(9)}}),
+        )
+        assert (
+            events_tail._run_events_tail(
+                {"sync": {"sources": warm_sources}},
+                warm_sources,
+                "dev-a",
+                dry_run=False,
+                quiet=True,
+            )
+            == []
+        )
+
+        _stub_hosts(monkeypatch, grok=_incomplete("unsupported"))
+        omitted_degradations = events_tail._run_events_tail(
+            {"sync": {"sources": warm_sources}},
+            warm_sources,
+            "dev-a",
+            dry_run=False,
+            quiet=True,
+        )
+        assert omitted_degradations == [
+            "host-usage snapshot skipped (grok unsupported) — "
+            "content sync and git/session capture unaffected"
+        ]
+
+        empty_sources = _sources(events_root, hosts=())
+        _stub_hosts(monkeypatch, grok=_incomplete("no_metadata_ledger"))
+        assert (
+            events_tail._run_events_tail(
+                {"sync": {"sources": empty_sources}},
+                empty_sources,
+                "dev-a",
+                dry_run=False,
+                quiet=True,
+            )
+            == []
+        )
+
+        rows = _rows(events_root)
+        host_rows = [row for row in rows if row["type"] == "host-usage-snapshot"]
+        assert len(host_rows) == 2
+        assert all(row["ts"] for row in host_rows)
+        assert [{key: value for key, value in row.items() if key != "ts"} for row in host_rows] == [
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "host-usage-snapshot",
+                "device": "dev-a",
+                "token_sources": ["codex", "grok"],
+                "hosts": {"codex": {"2026-08-15": _usage(9)}},
+                "active_days": ["2026-08-15"],
+            },
+            {
+                "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                "type": "host-usage-snapshot",
+                "device": "dev-a",
+                "token_sources": [],
+                "hosts": {},
+                "active_days": [],
+            },
+        ]
+        assert [row["type"] for row in rows] == [
+            "host-usage-snapshot",
+            "mm-push",
+            "mm-push",
+            "host-usage-snapshot",
+            "mm-push",
+        ]
+
     def test_reader_exception_does_not_lose_the_mm_push_row(self, tmp_path, monkeypatch):
         """The cursor must still advance: a broken host store cannot make the
         next push re-walk 30 days of git history."""
