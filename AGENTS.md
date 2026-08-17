@@ -167,5 +167,7 @@ If you're touching multiple areas (e.g., adding a new field to mm-push event tha
 See SPEC.md for full architecture and data model. Two sections of it are deliberately historical and say so inline: the `## Project Structure` tree and `## Implementation Order` are the original v1 build plan. **The Source Layout table above is the authoritative current module map**, not SPEC's tree or its `### Module Architecture` diagram (core sync path only).
 See docs/designs/mind-meld-v1.md for design decisions from spec review.
 See docs/designs/sync-gstack-context.md for multi-source sync design (gstack support).
+See docs/designs/host-parity.md for Claude / Codex / Grok interchangeability (usage card vs sync vs sessions snapshot).
+See docs/designs/grok-build-usage-reader.md for the Grok v1 usage reader and 21A consent bit.
 See docs/invariants/ for per-topic load-bearing invariants (sync, conflicts, init-devices, events-retro, auto-upgrade).
 See docs/ROADMAP.md for the state-organized execution plan, docs/TODOS.md for the deferred-work inbox, and docs/PROGRESS.md for the per-release row (CI-enforced — see the PROGRESS row convention above). docs/archive/ holds superseded design docs.

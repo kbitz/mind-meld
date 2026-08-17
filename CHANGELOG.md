@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.34.1] - 2026-08-17
+
+**Host interchangeability is now a written contract: Claude, Codex, and Grok share one usage card, not one sync tree, and session transcripts stay local on every host.**
+
+### Added
+
+- **Host-parity design.** `docs/designs/host-parity.md` names what 18D/21A already are, why `~/.grok` is not a sync source, and the three follow-ups: MODELS-card rows (22A/23A), a later `grok-custom` allowlist (never named `grok`), and a Grok `retro-fleet` skill-link target. Codex/Grok sessions-snapshot and transcript sync stay refused.
+
+### Changed
+
+- **SPEC and invariants now match that contract.** Goal 8, the enable-source grok note, source-type list, events-retro consent pin, and the Claude-only sessions-snapshot section all point at host-parity so a later track cannot mint a fake `grok` sync source or put encoded cwd on the wire.
+- **Current plan is Groups 22 and 23.** Host snapshot merge and grok-custom in parallel, then MODELS card and Grok skill-link. The host-parity inbox is drained.
+
 ## [0.12.34] - 2026-08-17
 
 **`mm enable-source grok` now publishes this Mac's Grok Build token totals on the same encrypted host snapshot as Codex — without syncing session files.**

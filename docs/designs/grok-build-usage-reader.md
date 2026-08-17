@@ -230,7 +230,10 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 - A daemon, polling agent, server, cloud billing/API integration, or headless
   export command.
 - Syncing `.grok` sessions, `config.toml`, credentials, logs, worktrees,
-  prompts, tool output, or chat history.
+  prompts, tool output, or chat history. A later allowlisted customization
+  source is `docs/designs/host-parity.md` Plan B and must not be named `grok`.
+- A Codex/Grok `sessions-snapshot`, or uploading session transcripts. That is
+  not a missed 18D task; see host-parity.md.
 - Parsing `signals.json`, transcript streams, or context-window totals as a
   fallback.
 - Historical cost estimates or billing reconciliation for Grok.
