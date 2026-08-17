@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.34] - 2026-08-17
+
+**`mm enable-source grok` now publishes this Mac's Grok Build token totals on the same encrypted host snapshot as Codex — without syncing session files.**
+
+### Added
+
+- **Opt-in Grok v1 usage reader.** After `mm enable-source grok`, attended `mm push` and `mm init` read only `turn_completed` terminal records from local `updates.jsonl` (under `GROK_HOME/sessions` or `~/.grok/sessions`). Each accepted turn is a per-prompt total; `reasoningTokens` stay inside `output`. Session files, prompts, and chat history never leave the Mac.
+- **Usage-only enable/disable.** `mm enable-source grok` / `mm disable-source grok` flip `[retro].grok_host_usage`. They do not add a `[[sync.sources]]` row. A config that already has a source named `grok` is refused at load.
+
+### Changed
+
+- **First-success Grok misses no longer take Codex hostage.** Until a consented scan has seen at least one `updates.jsonl`, a Grok `deadline` / lock / I/O miss drops Grok and still publishes the other hosts. After that first success, those reasons veto the whole snapshot again. `malformed` / `unsupported` / `stale` always veto when Grok was invoked.
+
+### Fixed
+
+- **Unknown Grok terminal keys fail closed.** An extra non-content field on `turn_completed` withholds the host snapshot instead of publishing a complete row that silently omitted every real turn.
+- **Grok oversize notices no longer print session paths.** Encoded cwd and session ids stay off stderr.
+
 ## [0.12.33] - 2026-08-16
 
 **Pushes now publish aggregate non-Claude host token usage to the fleet, for the hosts you actually enabled, and only when the sweep can be trusted.**

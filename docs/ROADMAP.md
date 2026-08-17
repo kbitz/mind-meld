@@ -8,12 +8,10 @@ State-organized execution plan: **In Progress** / **Current Plan** / **Future** 
 
 ## In Progress
 
-#### Group 18: Finish the non-Claude host-usage foundation
+#### Group 18: Finish the non-Claude host-usage foundation ✓ Shipped (v0.12.26–v0.12.34)
 
-The host reader, model-family card baseline, root budgets, and CLI safety work
-have landed. Grok is the one remaining collector: its v1 local terminal ledger
-now has a verified no-daemon path. First prove the strict local reader, then
-wire its opt-in capture to the already-shipped snapshot writer.
+The host reader, model-family card baseline, root budgets, CLI safety work,
+and the Grok v1 terminal-usage reader have landed.
 
 ##### Track 18A: Finish the post-decomposition CLI safety sweep ✓ Shipped (v0.12.26)
 
@@ -23,28 +21,14 @@ wire its opt-in capture to the already-shipped snapshot writer.
 
 ##### Track 18E: Render model-family rows from existing data ✓ Shipped (v0.12.29)
 
-##### Track 18D: Read Grok Build's v1 terminal usage ledger
-_3 tasks . ~260 LOC . high risk . 4 files_
-_touches: src/mind_meld/host_usage.py, docs/invariants/events-retro.md, tests/test_host_usage.py, tests/fixtures/host_sessions/grok/_
-_session: fresh · effort: high · attach: @src/mind_meld/host_usage.py, @tests/test_host_usage.py, @docs/designs/grok-build-usage-reader.md · verify: pytest tests/test_host_usage.py -q_
-- **Prove the terminal-record semantics in a sanitized fixture** — establish per-prompt accounting and the non-double-counted reasoning mapping before accepting the format. _fixture + tests, ~55 lines._ (M)
-- **Parse and cache only strict completed-turn metadata** — read bounded `updates.jsonl` terminal ledgers, validate counters/model/timestamp, and persist opaque resumable state only. _host_usage.py + tests, ~155 lines._ (L)
-- **Pin failure, replay, and privacy behavior** — reject uncertainty, content-bearing shapes, changing files, duplicate conflicts, and cache leaks. _host_usage.py + tests/docs, ~50 lines._ (M)
+##### Track 18D: Read Grok Build's v1 terminal usage ledger ✓ Shipped (v0.12.34)
 
 ---
 
 ## Current Plan
-#### Group 21: Opt in and publish Grok usage snapshots
+#### Group 21: Opt in and publish Grok usage snapshots ✓ Shipped (v0.12.34)
 
-_Depends on: Group 18_
-
-##### Track 21A: Gate and publish trusted Grok usage
-_3 tasks . ~190 LOC . high risk . 7 files_
-_touches: src/mind_meld/config.py, src/mind_meld/cli.py, src/mind_meld/events_tail.py, README.md, tests/test_config.py, tests/test_source_toggle.py, tests/test_host_usage_snapshot.py_
-_session: fresh · effort: high · attach: @src/mind_meld/events_tail.py, @tests/test_host_usage_snapshot.py, @docs/designs/grok-build-usage-reader.md · verify: pytest tests/test_config.py tests/test_source_toggle.py tests/test_host_usage_snapshot.py -q_
-- **Add explicit local Grok consent** — validate `[retro.host_usage].grok`, expose narrow enable/disable commands, and show the setting in status without creating a Grok sync source. _config.py, cli.py, tests, ~80 lines._ (M)
-- **Gate the reader and warm it safely** — never open Grok data without consent, allow attended cache warm/retry only, and leave autopush bounded. _events_tail.py + tests, ~70 lines._ (M)
-- **Document the live boundary** — replace the old no-ledger caveat with the v1 opt-in and all-or-nothing snapshot behavior. _README.md + tests, ~40 lines._ (S)
+##### Track 21A: Gate and publish trusted Grok usage ✓ Shipped (v0.12.34)
 
 #### Group 22: Fleet host-snapshot aggregation
 
@@ -73,8 +57,6 @@ _session: fresh · effort: medium · attach: @src/mind_meld/skills/retro_fleet/a
 A Group may launch when every Group in its `←` set has landed; document order is priority, not a gate.
 
 ```
-- Group 18 ← {17}
-- Group 21 ← {18}
 - Group 22 ← {20, 21}
 - Group 23 ← {22}
 ```
@@ -82,12 +64,6 @@ A Group may launch when every Group in its `←` set has landed; document order 
 Track detail per group:
 
 ```
-Group 18: Finish the non-Claude host-usage foundation (in progress)
-  +-- Track 18D ........... ~L . 3 tasks
-
-Group 21: Opt in and publish Grok usage snapshots
-  +-- Track 21A ........... ~M . 3 tasks
-
 Group 22: Fleet host-snapshot aggregation
   +-- Track 22A ........... ~M . 3 tasks
 
@@ -95,7 +71,7 @@ Group 23: Coverage-aware host usage in the model card
   +-- Track 23A ........... ~M . 3 tasks
 ```
 
-**Total: 0 phases . 4 groups . 4 tracks remaining.**
+**Total: 0 phases . 2 groups . 2 tracks remaining.**
 
 ---
 
