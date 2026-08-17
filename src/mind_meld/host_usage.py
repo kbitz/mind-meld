@@ -477,7 +477,7 @@ def _scan_grok_root(
 
     staged: dict[str, Any] = {}
     learned = False
-    for session_id, path in ledgers:
+    for workspace, session_id, path in ledgers:
         if _expired(deadline):
             return _incomplete("deadline"), staged, learned, True
         key = _cache_key(path)
@@ -488,9 +488,9 @@ def _scan_grok_root(
             if entry is None:
                 resume = _grok_resumable_entry(path, before, existing, deadline)
                 entry = (
-                    _resume_grok_file(path, session_id, before, resume, deadline)
+                    _resume_grok_file(path, workspace, session_id, before, resume, deadline)
                     if resume is not None
-                    else _read_full_grok_file(path, session_id, before, deadline)
+                    else _read_full_grok_file(path, workspace, session_id, before, deadline)
                 )
                 learned = True
             staged[key] = entry
@@ -506,7 +506,7 @@ def _scan_grok_root(
 
 
 def _iter_grok_ledgers(root: Path, deadline: float):
-    """Yield ``(session_id, updates.jsonl)`` for session dirs under ``root``."""
+    """Yield ``(workspace, session_id, updates.jsonl)`` under ``root``."""
     if _expired(deadline):
         raise _ReadFailure("deadline")
     try:
@@ -522,7 +522,7 @@ def _iter_grok_ledgers(root: Path, deadline: float):
                     continue
                 candidate = session / "updates.jsonl"
                 if _is_regular_non_symlink(candidate):
-                    yield session.name, candidate
+                    yield workspace.name, session.name, candidate
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
 
@@ -574,21 +574,26 @@ def _grok_resumable_entry(
 
 
 def _read_full_grok_file(
-    path: Path, session_id: str, before: os.stat_result, deadline: float
+    path: Path,
+    workspace: str,
+    session_id: str,
+    before: os.stat_result,
+    deadline: float,
 ) -> dict[str, Any]:
-    turns = _read_grok_file(path, session_id, 0, {}, before, deadline)
+    turns = _read_grok_file(path, workspace, session_id, 0, {}, before, deadline)
     return _grok_file_entry(path, before, deadline, turns)
 
 
 def _resume_grok_file(
     path: Path,
+    workspace: str,
     session_id: str,
     before: os.stat_result,
     entry: dict[str, Any],
     deadline: float,
 ) -> dict[str, Any]:
     prior = {turn["key"]: turn for turn in entry["turns"]}
-    turns = _read_grok_file(path, session_id, entry["offset"], prior, before, deadline)
+    turns = _read_grok_file(path, workspace, session_id, entry["offset"], prior, before, deadline)
     return _grok_file_entry(path, before, deadline, turns)
 
 
@@ -609,6 +614,7 @@ def _grok_file_entry(
 
 def _read_grok_file(
     path: Path,
+    workspace: str,
     session_id: str,
     start_offset: int,
     prior: dict[str, dict[str, Any]],
@@ -637,7 +643,7 @@ def _read_grok_file(
                     record = json.loads(raw)
                 except (TypeError, ValueError, UnicodeDecodeError) as exc:
                     raise _ReadFailure("malformed") from exc
-                accepted = _grok_turns_from_record(record, session_id)
+                accepted = _grok_turns_from_record(record, workspace, session_id)
                 if accepted is None:
                     continue
                 for key, turn in accepted:
@@ -658,7 +664,7 @@ def _read_grok_file(
 
 
 def _grok_turns_from_record(
-    record: Any, session_id: str
+    record: Any, workspace: str, session_id: str
 ) -> list[tuple[str, dict[str, Any]]] | None:
     if not isinstance(record, dict):
         raise _ReadFailure("malformed")
@@ -691,7 +697,6 @@ def _grok_turns_from_record(
         raise _ReadFailure("unsupported")
     _validate_grok_counters(usage)
     accepted: list[tuple[str, dict[str, Any]]] = []
-    multi = len(models) > 1
     for model, entry in models.items():
         if not isinstance(model, str) or not model:
             raise _ReadFailure("unsupported")
@@ -700,7 +705,7 @@ def _grok_turns_from_record(
         if not isinstance(entry, dict):
             raise _ReadFailure("unsupported")
         counters = _validate_grok_counters(entry)
-        model_key = _grok_terminal_key(session_id, f"{prompt_id}\0{model}" if multi else prompt_id)
+        model_key = _grok_terminal_key(workspace, session_id, prompt_id, model)
         accepted.append(
             (model_key, {"key": model_key, "day": day, "model": model, "usage": counters})
         )
@@ -734,8 +739,8 @@ def _grok_outer_day(value: Any) -> str:
     return _utc_day(value)
 
 
-def _grok_terminal_key(session_id: str, prompt_id: str) -> str:
-    return hashlib.sha256(f"{session_id}\0{prompt_id}".encode()).hexdigest()
+def _grok_terminal_key(workspace: str, session_id: str, prompt_id: str, model: str) -> str:
+    return hashlib.sha256(f"{workspace}\0{session_id}\0{prompt_id}\0{model}".encode()).hexdigest()
 
 
 def _validated_grok_entry(value: Any) -> dict[str, Any] | None:

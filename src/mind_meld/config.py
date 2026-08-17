@@ -259,6 +259,12 @@ def _validate_sources(sources: Any) -> None:
                     f"got {type(src[field]).__name__}."
                 )
         name = src["name"]
+        if name == "grok":
+            raise ConfigError(
+                "config: grok is a usage-only name, not a sync source. "
+                "Remove the [[sync.sources]] row named grok. "
+                "Use 'mm enable-source grok' to publish local token totals."
+            )
         if name in seen_names:
             raise ConfigError(f"config: duplicate source name '{name}'.")
         seen_names.add(name)

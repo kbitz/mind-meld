@@ -153,8 +153,10 @@ to the UTC day of the outer timestamp. `reasoningTokens` must be a bounded
 subset of `outputTokens` and is never added twice. The private
 `grok-host-tokens.json` cache stores opaque file keys, fingerprints, offsets,
 hashed terminal keys, model IDs, and aggregate counters — never paths,
-prompt IDs, or conversation bytes. Equal duplicate `(session, prompt_id)`
-records count once; conflicting duplicates refuse the store.
+prompt IDs, or conversation bytes. Equal duplicate
+`(workspace, session, prompt_id, model)` records count once; conflicting
+duplicates refuse the store. The model is always part of the key so a
+later multi-model restatement of the same prompt cannot double-count.
 
 **First-success carve-out (Track 21A).** Until this machine has completed a
 consented Grok scan that observed at least one `updates.jsonl`, a Grok

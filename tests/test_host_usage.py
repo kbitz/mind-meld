@@ -1099,6 +1099,68 @@ class TestGrokUsage:
 
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
 
+    def test_multi_model_turn_counts_each_model_once(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        record = json.loads(_grok_turn())
+        usage = record["params"]["update"]["usage"]
+        usage["modelUsage"]["gpt-5"] = {
+            "inputTokens": 4,
+            "outputTokens": 2,
+            "reasoningTokens": 0,
+            "cachedReadTokens": 0,
+            "cacheCreationTokens": 0,
+            "totalTokens": 6,
+        }
+        _write_grok_session(root, lines=[json.dumps(record) + "\n"])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+        assert result.hosts["codex"]["2026-08-14"]["input"] == 4
+
+    def test_single_then_multi_model_replay_does_not_double_count(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        first = _grok_turn()
+        replay = json.loads(first)
+        replay["params"]["update"]["usage"]["modelUsage"]["gpt-5"] = {
+            "inputTokens": 4,
+            "outputTokens": 2,
+            "reasoningTokens": 0,
+            "cachedReadTokens": 0,
+            "cacheCreationTokens": 0,
+            "totalTokens": 6,
+        }
+        _write_grok_session(root, lines=[first, json.dumps(replay) + "\n"])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+        assert result.hosts["codex"]["2026-08-14"]["input"] == 4
+
+    def test_same_session_name_in_two_workspaces_does_not_refuse(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        _write_grok_session(root, workspace="proj-a", session=session, lines=[_grok_turn()])
+        _write_grok_session(
+            root,
+            workspace="proj-b",
+            session=session,
+            lines=[_grok_turn(input_tokens=7, output=3, reasoning=1, cache_read=0, cache_create=0)],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 17
+
     def test_extra_non_content_key_on_terminal_is_unsupported(
         self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
     ) -> None:

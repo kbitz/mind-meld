@@ -1491,3 +1491,21 @@ class TestGrokHostUsageConfig:
 
     def test_grok_is_not_a_default_sync_source(self):
         assert "grok" not in [s["name"] for s in DEFAULT_SOURCES]
+
+    def test_grok_sync_source_row_is_config_error(self):
+        with pytest.raises(ConfigError, match="usage-only"):
+            _validate(
+                {
+                    "device": {"id": "abc123", "name": "Mac"},
+                    "storage": {"path": "/tmp"},
+                    "sync": {
+                        "sources": [
+                            {
+                                "name": "grok",
+                                "path": "~/.grok",
+                                "type": "generic",
+                            }
+                        ]
+                    },
+                }
+            )

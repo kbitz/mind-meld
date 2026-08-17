@@ -346,18 +346,15 @@ class TestGrokUsageConsent:
         assert on_disk["sync"]["disabled_sources"] == ["gstack"]
 
     def test_enable_source_grok_refuses_an_existing_sync_row(self, cfg, isolated_seen_sources):
-        from mind_meld.config import load_config, save_config
+        from mind_meld.config import _validate, load_config
+        from mind_meld.errors import ConfigError
 
         config = load_config(cfg)
         config["sync"]["sources"].append(
             {"name": "grok", "path": "/tmp/not-a-real-grok", "type": "generic"}
         )
-        save_config(config, cfg)
-
-        result = runner.invoke(app, ["enable-source", "grok"])
-        assert result.exit_code == 1
-        assert "usage-only" in result.output
-        assert "not synced" in result.output
+        with pytest.raises(ConfigError, match="usage-only"):
+            _validate(config)
 
     def test_grok_is_a_known_usage_only_name(self):
         _validate_source_name("grok", {"sync": {"sources": []}}, force=False)
