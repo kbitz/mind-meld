@@ -267,10 +267,10 @@ def test_every_changelog_version_has_a_progress_row() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     progress = (ROOT / "docs" / "PROGRESS.md").read_text(encoding="utf-8")
 
-    released = re.findall(r"^## \[(\d+\.\d+\.\d+)\]", changelog, re.M)
+    released = re.findall(r"^## \[(\d+\.\d+\.\d+(?:\.\d+)?)\]", changelog, re.M)
     assert len(released) > 20, "CHANGELOG parse found suspiciously few releases"
 
-    charted = set(re.findall(r"^\|\s*(\d+\.\d+\.\d+)\s*\|", progress, re.M))
+    charted = set(re.findall(r"^\|\s*(\d+\.\d+\.\d+(?:\.\d+)?)\s*\|", progress, re.M))
 
     # Enforced from 0.11.0 forward. Running this gate for the first time turned
     # up nine OLDER gaps too -- 0.10.3, 0.10.2, 0.10.0, 0.9.6, 0.9.5, 0.8.8,
