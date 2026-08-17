@@ -65,11 +65,11 @@ _HOST_UNKNOWN_REASON = "unavailable"
 _HOST_ABSENT_REASONS = frozenset({"no_metadata_ledger"})
 """Reasons that mean "this source is not installed", not "this read failed".
 
-A store that exposes no metadata-only usage ledger (Grok's transcript stream,
-OpenCode's legacy message files) can never produce data on this machine. That
-is a known, permanent ABSENCE — categorically unlike a failed read — so the
-sweep drops the reader from ``token_sources`` and carries on with the rest
-rather than vetoing the whole snapshot.
+A store that exposes no metadata-only usage ledger (closed-default Grok
+consent, OpenCode's legacy message files) can never produce data on this
+machine. That is a known, permanent ABSENCE — categorically unlike a failed
+read — so the sweep drops the reader from ``token_sources`` and carries on
+with the rest rather than vetoing the whole snapshot.
 
 This is deliberately NOT keyed on ``unsupported``. Codex returns ``unsupported``
 when it finds a ledger it cannot attribute, and OpenCode when a row is
@@ -78,8 +78,8 @@ publishing without them would silently under-report. They keep the veto.
 
 Pinned as a SUBSET of ``_HOST_READ_REASONS`` by
 ``test_absent_reasons_are_real_reader_reasons``: a rename on the
-``host_usage.Reason`` side would otherwise empty this set silently and turn
-every Grok machine back into a total veto."""
+``host_usage.Reason`` side would otherwise empty this set silently and treat
+an honest absence as a total veto."""
 
 _HOST_PERMANENT_REASONS = frozenset({"unsupported"})
 """Failure reasons a later push cannot fix, so the notice must not promise a
@@ -107,8 +107,6 @@ whose whole premise is scoped, opt-in sync."""
 WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok"})
 """Readers with an incremental cache a warm can populate. OpenCode's
 adapter cache stores no totals and is not warmable."""
-WARMABLE_HOST_READER = "codex"
-"""Back-compat alias for the Codex warm pin. Prefer ``WARMABLE_HOST_READERS``."""
 
 _GROK_PRE_SUCCESS_TRANSIENTS: frozenset[str] = frozenset(
     {"deadline", "locked", "busy", "io_error", "partial", "unavailable"}
@@ -503,9 +501,10 @@ def _capture_event_snapshots(
         # hostage. Remap AFTER warm so a deadline can still trigger a Grok
         # warm. Pre-invoke expiry (`invoked=False`) stays a sweep veto.
         remaining = tuple((name, read) for name, read in host_readers if name != "grok")
-        host_capture = _capture_host_usage(
-            remaining, deadline=time.monotonic() + host_budget_ms / 1000.0
-        )
+        if remaining:
+            host_capture = _capture_host_usage(
+                remaining, deadline=time.monotonic() + host_budget_ms / 1000.0
+            )
     host_rows: list[dict] = []
     if host_capture.hosts is not None:
         host_rows.append(

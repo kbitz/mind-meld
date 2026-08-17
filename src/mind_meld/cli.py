@@ -4422,7 +4422,7 @@ def status(
     grok_on = grok_host_usage_enabled(config)
     grok_present = False
     try:
-        grok_present = _host_usage.GROK_SESSIONS_PATH.exists()
+        grok_present = _host_usage.grok_sessions_root().exists()
     except OSError:
         grok_present = False
     if grok_on or grok_present:
@@ -5186,11 +5186,16 @@ def _set_grok_host_usage(config: dict, *, enabled: bool) -> None:
             "Grok session files are not synced."
         )
     current = grok_host_usage_enabled(config)
-    if current is enabled:
+    disabled = list((config.get("sync", {}) or {}).get("disabled_sources", []) or [])
+    leftover = "grok" in disabled
+    if current is enabled and not leftover:
         state = "enabled" if enabled else "disabled"
         console.print(f"[dim]Grok usage capture is already {state}.[/dim]")
         return
-    patch_config_on_disk({"retro": {"grok_host_usage": enabled}})
+    updates: dict[str, dict[str, Any]] = {"retro": {"grok_host_usage": enabled}}
+    if leftover:
+        updates["sync"] = {"disabled_sources": [name for name in disabled if name != "grok"]}
+    patch_config_on_disk(updates)
     if enabled:
         console.print("[green]Enabled Grok usage capture on this device.[/green]")
         console.print(
@@ -5243,7 +5248,7 @@ def disable_source(
     except ConfigError as e:
         _error(str(e))
 
-    if name in _USAGE_ONLY_NAMES:
+    if name == "grok":
         _set_grok_host_usage(config, enabled=False)
         return
 
@@ -5283,7 +5288,7 @@ def enable_source(
     except ConfigError as e:
         _error(str(e))
 
-    if name in _USAGE_ONLY_NAMES:
+    if name == "grok":
         _set_grok_host_usage(config, enabled=True)
         return
 

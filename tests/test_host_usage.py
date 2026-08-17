@@ -1099,6 +1099,16 @@ class TestGrokUsage:
 
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
 
+    def test_extra_non_content_key_on_terminal_is_unsupported(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(extra_update={"durationMs": 12})])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.reason == "unsupported"
+
     def test_content_bearing_turn_is_ignored(
         self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
     ) -> None:

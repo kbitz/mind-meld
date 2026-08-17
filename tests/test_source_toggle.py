@@ -329,6 +329,22 @@ class TestGrokUsageConsent:
         assert on_disk["retro"]["repo_roots"] == ["~/src"]
         assert on_disk["retro"]["grok_host_usage"] is True
 
+    def test_enable_source_grok_scrubs_leftover_disabled_sources(self, cfg, isolated_seen_sources):
+        import tomllib
+
+        from mind_meld.config import load_config, save_config
+
+        config = load_config(cfg)
+        config["sync"]["disabled_sources"] = ["gstack", "grok"]
+        save_config(config, cfg)
+
+        result = runner.invoke(app, ["enable-source", "grok"])
+        assert result.exit_code == 0, result.output
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert on_disk["retro"]["grok_host_usage"] is True
+        assert on_disk["sync"]["disabled_sources"] == ["gstack"]
+
     def test_enable_source_grok_refuses_an_existing_sync_row(self, cfg, isolated_seen_sources):
         from mind_meld.config import load_config, save_config
 

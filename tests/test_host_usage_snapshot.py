@@ -114,6 +114,23 @@ class TestReaderOrchestration:
         grok_only = events_tail._default_host_readers([], grok_consented=True)
         assert [n for n, _ in grok_only] == ["grok"]
 
+    def test_consented_grok_reader_passes_consented_true(self, monkeypatch):
+        seen: dict[str, bool] = {}
+
+        def read(*, deadline, consented=False):
+            seen["consented"] = consented
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", read)
+        readers = events_tail._default_host_readers([], grok_consented=True)
+        readers[0][1](deadline=1_000.0)
+        assert seen == {"consented": True}
+
+    def test_pre_success_transients_are_real_reader_reasons(self):
+        assert events_tail._GROK_PRE_SUCCESS_TRANSIENTS <= (
+            events_tail._HOST_READ_REASONS | {events_tail._HOST_UNKNOWN_REASON}
+        )
+
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with
         no consent check at all."""
@@ -815,6 +832,20 @@ class TestTailWiring:
             grok=_incomplete("deadline"),
         )
         monkeypatch.setattr(_mm_host_usage, "grok_completed_once", lambda: True)
+
+        degradations = events_tail._run_events_tail(
+            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+        )
+
+        assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
+        assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
+
+    def test_pre_success_grok_only_keeps_the_veto(self, tmp_path, monkeypatch):
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=())
+        _stub_fast_walks(monkeypatch)
+        _stub_hosts(monkeypatch, grok=_incomplete("deadline"))
+        monkeypatch.setattr(_mm_host_usage, "grok_completed_once", lambda: False)
 
         degradations = events_tail._run_events_tail(
             _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True

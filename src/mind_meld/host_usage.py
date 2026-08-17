@@ -1,7 +1,9 @@
 """Private, local-only host-usage readers.
 
-Track 17C currently supports Codex rollout logs at
-``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``. A rollout's last supported
+Track 17C supports Codex rollout logs at
+``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``. Track 18D adds a consented
+Grok reader for ``updates.jsonl`` terminal records under ``GROK_HOME/sessions``
+(else ``~/.grok/sessions``). A rollout's last supported
 ``event_msg`` / ``payload.type == "token_count"`` record is cumulative, so it
 *replaces* the previous total for that file; summing every token-count record
 would double-count. The model is the most recent preceding
@@ -332,7 +334,8 @@ def grok_completed_once() -> bool:
     return isinstance(data, dict) and data.get("complete_once") is True
 
 
-def _default_grok_sessions_root() -> Path:
+def grok_sessions_root() -> Path:
+    """Resolve the Grok sessions directory at call time."""
     env = os.environ.get("GROK_HOME")
     if env:
         return Path(env).expanduser() / "sessions"
@@ -352,7 +355,7 @@ def read_grok_usage(
     """
     if not consented:
         return _incomplete("no_metadata_ledger")
-    source_root = root if root is not None else _default_grok_sessions_root()
+    source_root = root if root is not None else grok_sessions_root()
     read_deadline = deadline if deadline is not None else time.monotonic() + DEFAULT_READ_BUDGET_S
     if _expired(read_deadline):
         return _incomplete("deadline")
@@ -619,7 +622,7 @@ def _read_grok_file(
             fp.seek(start_offset)
             for raw, end_offset in iter_bounded_lines(
                 fp,
-                str(path),
+                _cache_key(path),
                 start_offset,
                 label="grok usage walker",
             ):
@@ -670,7 +673,7 @@ def _grok_turns_from_record(
     if _GROK_CONTENT_FIELDS & update.keys():
         return None
     if set(update) != _GROK_TERMINAL_KEYS:
-        return None
+        raise _ReadFailure("unsupported")
     day = _grok_outer_day(record.get("timestamp"))
     prompt_id = update.get("prompt_id")
     if not isinstance(prompt_id, str) or not prompt_id:
@@ -819,7 +822,7 @@ def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
         elif has_legacy:
             # Legacy message files contain complete session content. There is
             # no metadata-only projection, so do not deserialize transcripts —
-            # same standing-property category as Grok, not a failed read.
+            # a standing property of the source, not a failed read.
             return _incomplete("no_metadata_ledger")
         else:
             return HostUsageResult({}, complete=True)
@@ -1455,8 +1458,8 @@ def _empty_cache() -> dict[str, Any]:
 def _empty_adapter_cache() -> dict[str, int]:
     """Schema marker for non-incremental adapter lock files.
 
-    Keeping this intentionally content-free means an interrupted Grok or
-    OpenCode scan cannot cause the next successful scan to replay stale usage.
+    Keeping this intentionally content-free means an interrupted OpenCode
+    scan cannot cause the next successful scan to replay stale usage.
     """
     return {"version": CACHE_VERSION}
 
@@ -1615,6 +1618,7 @@ __all__ = [
     "DEFAULT_READ_BUDGET_S",
     "GROK_CACHE_PATH",
     "GROK_SESSIONS_PATH",
+    "grok_sessions_root",
     "HostFamily",
     "HostTokens",
     "HostUsageResult",
