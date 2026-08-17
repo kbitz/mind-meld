@@ -8,70 +8,85 @@ State-organized execution plan: **In Progress** / **Current Plan** / **Future** 
 
 ## In Progress
 
-#### Group 18: Finish the non-Claude host-usage foundation ✓ Shipped (v0.12.26–v0.12.34)
-
-The host reader, model-family card baseline, root budgets, CLI safety work,
-and the Grok v1 terminal-usage reader have landed.
-
-##### Track 18A: Finish the post-decomposition CLI safety sweep ✓ Shipped (v0.12.26)
-
-##### Track 18B: Centralize conflict diff rendering and choice normalization ✓ Shipped (v0.12.31)
-
-##### Track 18C: Budget root discovery and define no-op heartbeat behavior ✓ Shipped (v0.12.28)
-
-##### Track 18E: Render model-family rows from existing data ✓ Shipped (v0.12.29)
-
-##### Track 18D: Read Grok Build's v1 terminal usage ledger ✓ Shipped (v0.12.34)
+_(none)_
 
 ---
 
 ## Current Plan
-#### Group 21: Opt in and publish Grok usage snapshots ✓ Shipped (v0.12.34)
 
-##### Track 21A: Gate and publish trusted Grok usage ✓ Shipped (v0.12.34)
-
-#### Group 22: Fleet host-snapshot aggregation
-
-_Depends on: Group 20, Group 21_
+#### Group 22: Host snapshot merge ∥ Grok customization source
 
 ##### Track 22A: Merge accepted host snapshots into the retro result
 _3 tasks . ~150 LOC . medium risk . 3 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, docs/invariants/events-retro.md, tests/test_retro_fleet_aggregator.py_
+_out: 22B, 23A, 23B_
+_read-first: docs/invariants/events-retro.md_
+_produces: latest complete host snapshot per device, window-sliced, with coverage_
 _session: fresh · effort: high · attach: @src/mind_meld/skills/retro_fleet/aggregator.py, @tests/test_retro_fleet_aggregator.py, @docs/invariants/events-retro.md · verify: pytest tests/test_retro_fleet_aggregator.py -q_
-- **Accept only whole, valid device views** — validate the host-snapshot wire contract and select the latest complete row per device without per-source carry-forward. _aggregator.py + tests, ~65 lines._ (M)
-- **Slice and merge host usage by window** — retain host-family UTC buckets independently of Claude session tokens, then merge selected device views. _aggregator.py + tests, ~50 lines._ (M)
-- **Carry coverage forward honestly** — expose consulted sources and snapshot `as_of` state so absence, opt-out, and stale observations never become zero. _aggregator.py + invariant/tests, ~35 lines._ (S)
+- **Accept only whole, valid device views** -- validate the host-snapshot wire contract and select the latest complete row per device without per-source carry-forward. _aggregator.py + tests, ~65 lines._ (M)
+- **Slice and merge host usage by window** -- retain host-family UTC buckets independently of Claude session tokens, then merge selected device views. _aggregator.py + tests, ~50 lines._ (M)
+- **Carry coverage forward honestly** -- expose consulted sources and snapshot as_of state so absence, opt-out, and stale observations never become zero. _aggregator.py + invariant/tests, ~35 lines._ (S)
 
-#### Group 23: Coverage-aware host usage in the model card
+##### Track 22B: Add a grok-custom allowlisted sync source
+_3 tasks . ~140 LOC . high risk . 6 files_
+_touches: src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_source_toggle.py, docs/invariants/sync.md, README.md_
+_out: 22A, 23B_
+_read-first: docs/designs/host-parity.md, src/mind_meld/config.py_
+_produces: grok-custom DEFAULT_SOURCES allowlist; grok remains a usage-only name_
+_session: fresh · effort: high · attach: @src/mind_meld/config.py, @tests/test_config.py, @docs/designs/host-parity.md · verify: pytest tests/test_config.py tests/test_source_toggle.py -q_
+- **Lock the allowlist from a live GROK_HOME inspect** -- include only skills/, commands/, and rules/; leave hooks/ and plugins/ out until inspected. _design + config comments, ~20 lines._ (S)
+- **Add grok-custom to DEFAULT_SOURCES** -- generated-skill excludes matching Codex; a sync source named grok stays a ConfigError. _config.py, cli.py, tests, ~80 lines._ (M)
+- **Pin a mixed fixture uploads nothing secret** -- sessions/, auth.json, config.toml, chat_history.jsonl, logs, and worktrees stay off the wire. _tests, ~40 lines._ (S)
+
+#### Group 23: MODELS card coverage ∥ Grok skill-link
+_Depends on: Group 22_
 
 ##### Track 23A: Render Claude and host model families without false precision
 _3 tasks . ~110 LOC . medium risk . 3 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
+_blocked-by: Track 22A_
+_out: 23B_
+_read-first: 22A, docs/invariants/events-retro.md_
+_produces: MODELS card with Claude session totals beside coverage-aware host families_
 _session: fresh · effort: medium · attach: @src/mind_meld/skills/retro_fleet/aggregator.py, @src/mind_meld/skills/retro_fleet/SKILL.md, @tests/test_retro_fleet_aggregator.py · verify: pytest tests/test_retro_fleet_aggregator.py -q_
-- **Compose a display-only family view** — show Claude session totals beside Codex/Grok/other host totals without feeding host values into Claude API cost estimation. _aggregator.py + tests, ~45 lines._ (S)
-- **Name coverage in the card and narrative** — replace the Claude-only claim with concise snapshot coverage, missing-device, opt-out, and freshness context. _aggregator.py + SKILL.md + tests, ~45 lines._ (S)
-- **Preserve the card contract** — keep width, deterministic ordering, and all existing Claude-only fallback behavior pinned. _aggregator.py + tests, ~20 lines._ (S)
+- **Compose a display-only family view** -- show Claude session totals beside Codex/Grok/other host totals without feeding host values into Claude API cost estimation. _aggregator.py + tests, ~45 lines._ (S)
+- **Name coverage in the card and narrative** -- replace the Claude-only claim with concise snapshot coverage, missing-device, opt-out, and freshness context. _aggregator.py + SKILL.md + tests, ~45 lines._ (S)
+- **Preserve the card contract** -- keep width, deterministic ordering, and all existing Claude-only fallback behavior pinned. _aggregator.py + tests, ~20 lines._ (S)
+
+##### Track 23B: Install retro-fleet into Grok skills
+_2 tasks . ~100 LOC . medium risk . 4 files_
+_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py, docs/invariants/events-retro.md_
+_blocked-by: Track 22A, Track 22B_
+_out: 23A_
+_read-first: 22A, 22B, docs/designs/host-parity.md, src/mind_meld/skill_link.py_
+_produces: fourth SkillTarget at GROK_HOME/skills; no grok sync source_
+_session: fresh · effort: medium · attach: @src/mind_meld/skill_link.py, @tests/test_skill_link.py · verify: pytest tests/test_skill_link.py -q_
+- **Add a Grok SkillTarget** -- resolve GROK_HOME/skills at call time with own 24h markers and the no-clobber state machine. _skill_link.py + tests, ~70 lines._ (M)
+- **Report the fourth target** -- mm install-skills lists Grok; do not create a grok sync source. _cli.py + events-retro.md + tests, ~30 lines._ (S)
 
 ### Execution Map
 
-A Group may launch when every Group in its `←` set has landed; document order is priority, not a gate.
+A Group may launch when every Group in its `←` set has landed, regardless
+of document order; document order is priority, not a gate.
 
 ```
-- Group 22 ← {20, 21}
+- Group 22 ← {}
 - Group 23 ← {22}
 ```
 
 Track detail per group:
 
 ```
-Group 22: Fleet host-snapshot aggregation
+Group 22: Host snapshot merge ∥ Grok customization source
   +-- Track 22A ........... ~M . 3 tasks
+  +-- Track 22B ........... ~M . 3 tasks
 
-Group 23: Coverage-aware host usage in the model card
+Group 23: MODELS card coverage ∥ Grok skill-link
   +-- Track 23A ........... ~M . 3 tasks
+  +-- Track 23B ........... ~S . 2 tasks
 ```
 
-**Total: 0 phases . 2 groups . 2 tracks remaining.**
+**Total: 0 phases . 2 groups . 4 tracks remaining.**
 
 ---
 
@@ -118,6 +133,7 @@ Group 23: Coverage-aware host usage in the model card
 - **Active host-session degradation policy** — consider skipping a stale or partial final rollout when its next completed record restates usage; preserve all-or-nothing publication until that proof exists. _Source: unprocessed host-usage follow-up 2026-08-17._
 - **Warm host-scan scaling** — revisit fingerprint-every-file cost with a measured corpus before the 250 ms autopush budget becomes user-visible. _Source: unprocessed host-cache follow-up 2026-08-17._
 - **Machine-readable GC outcomes** — expose orphan-blob outcomes only when an automation or audit consumer needs them; Track 17D's reaper scope stays as shipped. _Source: unprocessed GC follow-up 2026-08-17._
+- **Do not add a Codex or Grok sessions-snapshot** — Claude's sessions-snapshot walk stays Claude-only. Codex rollouts and Grok session dirs are not a metadata-only project ledger; encoded cwd is a path and must not go on the wire. Promote only if a host ships a metadata-only project index. Session-transcript sync stays refused for every host. _Source: [manual] host-parity 2026-08-17._
 
 ## Shipped
 
@@ -254,3 +270,18 @@ Child symlinks are now local routing rather than sync content: generic walkers o
 ### Group 20: Host snapshot wire contract ✓ Shipped (unreleased)
 
 - Track 20A — _shipped: documented and pinned the complete, coverage-aware snapshot contract that distinguishes omission from an explicit empty observation._
+
+### Group 18: Finish the non-Claude host-usage foundation ✓ Shipped (v0.12.26–v0.12.34)
+
+The host reader, model-family card baseline, root budgets, CLI safety work,
+and the Grok v1 terminal-usage reader have landed.
+
+- Track 18A — _shipped (v0.12.26): post-decomposition CLI safety sweep._
+- Track 18B — _shipped (v0.12.31): centralize conflict diff rendering and choice normalization._
+- Track 18C — _shipped (v0.12.28): budget root discovery and no-op heartbeat behavior._
+- Track 18E — _shipped (v0.12.29): render model-family rows from existing data._
+- Track 18D — _shipped (v0.12.34): read Grok Build's v1 terminal usage ledger._
+
+### Group 21: Opt in and publish Grok usage snapshots ✓ Shipped (v0.12.34)
+
+- Track 21A — _shipped (v0.12.34): gate and publish trusted Grok usage. `mm enable-source grok` is a usage bit, not a sync source._
