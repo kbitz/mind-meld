@@ -22,6 +22,7 @@ Claude Code stores sessions, todos, artifacts, and tool results locally in `~/.c
 5. **Single binary feel** — Python CLI installed via `pipx`, zero config to start.
 6. **Open-source and forkable** — MIT-licensed, clean codebase, no proprietary dependencies.
 7. **Newcomer-friendly docs** — a first-time user with no context should go from `pip install` to working sync by following the README alone.
+8. **Host-interchangeable retro usage** — Claude session totals and Codex/Grok host snapshots appear as labeled families on one MODELS card. Usage consent is not file sync. See [Host Interchangeability](#host-interchangeability).
 
 ## Non-Goals
 
@@ -29,6 +30,8 @@ Claude Code stores sessions, todos, artifacts, and tool results locally in `~/.c
 - Multi-user collaboration or sharing sessions between users.
 - GUI or web interface.
 - Cross-platform support (Mac-only — uses iCloud Drive).
+- Syncing host session transcripts (Claude, Codex, OpenCode, or Grok).
+- Walking a host home directory that mixes credentials and chat as a sync source.
 
 ---
 
@@ -335,7 +338,10 @@ mm resolve [PATH]           # interactively resolve conflict files (unified diff
 mm autopull                 # silent pull for Claude Code (one-line output, never prompts)
 mm autopush                 # silent push for Claude Code (one-line output, never prompts)
 mm enable-source NAME       # turn a configured sync source ON for this machine
+                            # NAME=grok is usage consent only (Track 21A): sets
+                            # [retro].grok_host_usage, creates no sync source
 mm disable-source NAME [--force]   # turn a configured sync source OFF for this machine; --force accepts unknown names (forward-compat for not-yet-shipped sources)
+                            # NAME=grok clears the usage bit, not a manifest source
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
@@ -563,7 +569,7 @@ Each sync source has a type that determines how files are discovered:
 SYNCED_SUBDIRS = ["memory", "todos"]
 ```
 
-**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for sources like `~/.gstack` where specific directories and config files need syncing but the rest should be ignored.
+**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for `~/.gstack` and for the Codex / OpenCode customization allowlists. There is no `grok` generic source; see [Host Interchangeability](#host-interchangeability).
 
 ### Excluded Patterns
 
@@ -676,8 +682,16 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 ### Source Types
 
-- **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present.
-- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively and picks up `include_files` at the source root. Used for `~/.gstack` and other structured data directories.
+- **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
+- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex / OpenCode customization allowlists.
+
+Default generic sources (see `config.py:DEFAULT_SOURCES`):
+
+- **`gstack` / `gstack-extend` / `mm-events`** — structured activity and the fleet event log.
+- **`codex`** — `skills/`, `plugins/`, `AGENTS.md`. Not `config.toml` (credentials). Not `sessions/`.
+- **`opencode`** — agents / commands / modes / plugins / skills / tools / `AGENTS.md`. Whole-file config stays local.
+
+**`grok` is not a source type and not a `[[sync.sources]]` name.** Track 21A reserves that token as local usage consent (`[retro].grok_host_usage`). A future customization allowlist must use a different name (`grok-custom` in the current plan). See [Host Interchangeability](#host-interchangeability).
 
 ### JSONL Merge on Pull
 
@@ -708,6 +722,39 @@ v2 manifests carry a `sources` dict keyed by source name. Compat with older on-d
 - **Deletions** during pull are scoped to the selected source.
 - **Sync logs** are written only for the claude source. Generic sources don't produce sync logs.
 - **GC** iterates `sources.*.files` in all manifests (with a backward-compat shim for v1 manifests).
+
+---
+
+## Host Interchangeability
+
+Claude, Codex, OpenCode, and Grok are peers for **fleet usage display**, not for **home-directory sync**. The design and the remaining work live in `docs/designs/host-parity.md`. This section is the product contract.
+
+### What "parity" means
+
+| If someone asks for… | The answer |
+|---|---|
+| Grok (or Codex) rows next to Claude on the MODELS card | Tracks 22A / 23A. 18D is the Grok reader; 21A is consent + publish. |
+| Grok skills / home rules roaming across Macs | New design (Plan B). There is no safe root-level allowlist on `~/.grok` today, and the source **must not** be named `grok`. |
+| `retro-fleet` installed into `~/.grok/skills` | New design (Plan C). A `skill_link` target, not a sync source. |
+| Uploading Grok / Codex / Claude sessions | No. Claude does not sync `~/.claude/projects/**/*.jsonl` either. |
+
+### Why `~/.grok` is not a sync source
+
+Grok's installed root mixes `auth.json`, `config.toml`, session streams (`updates.jsonl` is not a metadata-only ledger), chat history, plans, tool output, logs, and worktrees. Codex and OpenCode only became sources after an explicit customization allowlist existed. Walking `~/.grok` as `include_dirs: ["."]` would upload prompts.
+
+`mm enable-source grok` is therefore a usage bit: it authorizes the 18D reader to open completed-turn records and publish the encrypted host snapshot. It does not append a `[[sync.sources]]` row and must refuse one named `grok` at config load.
+
+### What the events tail still does not walk
+
+Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill names). Codex and Grok do not. Their session files are not a metadata-only project ledger, and an encoded cwd on disk is a path, not something that goes on the wire. That gap is documented, not a missed 18D task. Do not close it by decoding host paths.
+
+### Planned follow-ups (not 18D / 21A)
+
+1. **Plan A (scheduled):** Groups 22 and 23 render accepted host snapshots beside Claude totals, with coverage, not false zeros.
+2. **Plan B (future):** a `grok-custom` generic source whose allowlist is inspected before ship (`skills/`, `commands/`, `rules/` are the candidates). Never `sessions/`, credentials, or `config.toml`.
+3. **Plan C (future):** add `~/.grok/skills` as a fourth `skill_link` target. Independent of Plan B.
+
+Execution order: 18D → 21A → 22A/23A → B/C. B and C wait until the `grok`-is-not-a-source pin is on main.
 
 ---
 

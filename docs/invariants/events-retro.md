@@ -141,7 +141,11 @@ bound into the sweep passes `read_grok_usage(..., consented=True)`. The
 function itself defaults to `consented=False` and does not stat or open
 `~/.grok`. Empty sources plus no opt-in must yield no Grok reader — if that
 list is ever `["grok"]` again, a file-opening reader will parse session
-updates with no bit flip.
+updates with no bit flip. Do not "complete" that gate by adding a `grok`
+sync source. Host interchangeability vs Claude is
+`docs/designs/host-parity.md`: 22A/23A put totals on the MODELS card; a
+Grok customization source and a Grok skill-link target are later designs;
+session-transcript sync and a Codex/Grok `sessions-snapshot` are not planned.
 
 **Grok v1 terminal ledger (Track 18D).** When consented, `read_grok_usage`
 walks `GROK_HOME/sessions` (else `~/.grok/sessions`) and reads only regular
@@ -420,6 +424,12 @@ with `~/.grok/sessions` would see the healthy-tail control pin in
 **No subcommand, no marker.** `mm backfill-events` was considered but deferred — the existing `_run_events_tail` already covers the "user pushed at least once" steady state, and `mm init` runs once per machine so a marker file would prevent re-runs that are otherwise harmless. If a future use case (post-retention refresh, pre-Group-7 migration assistant) needs explicit invocation, expose the helper as a subcommand then; today's surface area is intentionally minimal.
 
 ## Sessions snapshot v=2 full-inventory (load-bearing, v0.11.0)
+
+This walk is Claude-only. Codex rollouts and Grok session directories are
+not a metadata-only project ledger; their encoded cwd is a path and does
+not go on the wire. Do not extend `walk_session_metadata` to those trees
+to chase host parity. Usage interchangeability is Groups 18/21/22/23;
+see `docs/designs/host-parity.md`.
 
 `EVENTS_SCHEMA_VERSION` bumped 1 → 2 in Group 8. Pre-v0.11.0, `walk_session_metadata` filtered jsonls by `mtime >= since_ts` — each snapshot was a DELTA. Naive sum of v=1 snapshots double-counted any chat that was touched across pushes; latest-only-wins undercounted by losing prior windows. Codex outside-voice review caught the trap during `/plan-eng-review` for Group 8 (cross-model tension #1).
 
