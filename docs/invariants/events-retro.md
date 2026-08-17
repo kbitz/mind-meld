@@ -312,9 +312,8 @@ because 91 sessions collapsed onto it. Resuming an old session moves its entire
 total into a new day, so a FIXED day's value can DECREASE between consecutive
 snapshots. The only safe consumption is latest-row-per-device as a
 point-in-time view; diffing, summing, or charting `active_days` as a time
-series all produce wrong numbers. Track 20A owns locking this down — it is
-recorded now because no consumer exists yet and the shape is still cheap to
-change.
+series all produce wrong numbers. Track 20A locks this contract above, before
+Track 21 adds the first consumer.
 
 **The payload is capped at `MAX_BY_DAY_DAYS`, because the readers are not.**
 `_iter_rollouts` has no `since` and the OpenCode query has no date predicate,
