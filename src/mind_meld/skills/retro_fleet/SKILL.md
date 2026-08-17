@@ -31,8 +31,10 @@ hands you a screenshot-quality ASCII card up front for sharing.
 
 mind-meld's `_run_events_tail` writes per-device daily JSONL files at
 `~/.local/share/mind-meld/events/<device>-<YYYY-MM-DD>.jsonl` on every push.
-Three event types: `mm-push`, `git-snapshot`, `sessions-snapshot`. Files
-sync fleet-wide via the `mm-events` source.
+Three event types drive the rendered retro: `mm-push`, `git-snapshot`,
+`sessions-snapshot`. A fourth type, `host-usage-snapshot`, is accepted as
+last-known-good host inventory per device (Track 22A) and is **not**
+rendered as window spend. Files sync fleet-wide via the `mm-events` source.
 
 This skill orchestrates a **two-pass flow**:
 

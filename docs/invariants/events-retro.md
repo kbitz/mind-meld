@@ -9,7 +9,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
-- `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
+- `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
@@ -239,6 +239,34 @@ fixed separators) of only the normalized known-core projection: ``v``,
 cannot change a winner they otherwise leave semantically unchanged. A
 clock-backdated row remains older by ``as_of``; JSONL encounter order is not a
 safe physical-time signal.
+
+### Track 22A consumer: last-known-good inventory
+
+The aggregator is the first consumer of accepted host-usage-snapshot
+rows. The acceptor lives in ``aggregator._accept_host_usage_snapshot``,
+not in the writer. A complete later row replaces the entire device view;
+there is no per-source carry-forward.
+
+The winning row is kept **whole**. Day keys are last-touch lifetime
+totals, not tokens spent in the retro window. Do not slice those days
+to ``[since, until]`` and do not sum devices into a fleet spend map.
+``HostDeviceSnapshot.lifetime_by_family`` is inventory as of ``as_of``.
+
+Coverage fields are the only honest zero-prevention:
+``by_device``, ``consulted``, ``as_of``, ``stale``, ``future_dated``,
+``devices_without_accepted_row``, ``rejected``. There is no fleet
+``consulted_sources`` union — one Grok-opted-in Mac must not mark the
+fleet Grok-covered.
+
+Host totals never enter Claude cost estimation or snapshot
+``metrics.tokens_total``.
+
+Allowed 23A read: iterate ``by_device`` and print ``consulted`` +
+``as_of`` + ``current``. Forbidden: summing
+``lifetime_by_family[family][day]`` buckets as "tokens this window."
+
+``mm retro-fleet --dump-host-usage`` is the forensic hatch. It prints
+the inventory JSON and skips the markdown retro.
 
 **Its own deadline, started after `walk_done`.**
 `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500), passed

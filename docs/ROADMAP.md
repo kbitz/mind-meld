@@ -21,10 +21,10 @@ _3 tasks . ~150 LOC . medium risk . 3 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, docs/invariants/events-retro.md, tests/test_retro_fleet_aggregator.py_
 _out: 22B, 23A, 23B_
 _read-first: docs/invariants/events-retro.md_
-_produces: latest complete host snapshot per device, window-sliced, with coverage_
+_produces: latest complete host snapshot per device as last-known-good inventory, with coverage_
 _session: fresh · effort: high · attach: @src/mind_meld/skills/retro_fleet/aggregator.py, @tests/test_retro_fleet_aggregator.py, @docs/invariants/events-retro.md · verify: pytest tests/test_retro_fleet_aggregator.py -q_
 - **Accept only whole, valid device views** -- validate the host-snapshot wire contract and select the latest complete row per device without per-source carry-forward. _aggregator.py + tests, ~65 lines._ (M)
-- **Slice and merge host usage by window** -- retain host-family UTC buckets independently of Claude session tokens, then merge selected device views. _aggregator.py + tests, ~50 lines._ (M)
+- **Keep whole views; do not invent window spend** -- retain each winning row's host-family day maps whole. Do not slice last-touch lifetime totals into a 7-day spend figure. _aggregator.py + tests, ~50 lines._ (M)
 - **Carry coverage forward honestly** -- expose consulted sources and snapshot as_of state so absence, opt-out, and stale observations never become zero. _aggregator.py + invariant/tests, ~35 lines._ (S)
 
 ##### Track 22B: Add a grok-custom allowlisted sync source

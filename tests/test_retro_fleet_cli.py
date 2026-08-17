@@ -46,6 +46,20 @@ class TestRetroFleetCommand:
         assert result.exit_code == 0, result.output
         assert captured["argv"] == ["30d"]
 
+    def test_dump_host_usage_flag_forwarded(self, monkeypatch):
+        from mind_meld.cli import app
+
+        captured: dict = {}
+
+        def _fake_main(argv):
+            captured["argv"] = list(argv)
+            return 0
+
+        monkeypatch.setattr("mind_meld.skills.retro_fleet.aggregator.main", _fake_main)
+        result = self._runner().invoke(app, ["retro-fleet", "7d", "--dump-host-usage"])
+        assert result.exit_code == 0, result.output
+        assert captured["argv"] == ["7d", "--dump-host-usage"]
+
     def test_no_author_filter_flag_forwarded(self, monkeypatch):
         from mind_meld.cli import app
 
