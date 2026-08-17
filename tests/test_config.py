@@ -12,6 +12,7 @@ from mind_meld.config import (
     _validate_exclude_patterns,
     _validate_sources,
     get_sources,
+    grok_host_usage_enabled,
     load_config,
     patch_config_on_disk,
     save_config,
@@ -1460,3 +1461,51 @@ class TestMmEventsSource:
             )
         finally:
             share.chmod(0o755)
+
+
+class TestGrokHostUsageConfig:
+    def test_absent_and_false_are_disabled(self):
+        assert grok_host_usage_enabled({}) is False
+        assert grok_host_usage_enabled({"retro": {}}) is False
+        assert grok_host_usage_enabled({"retro": {"grok_host_usage": False}}) is False
+        assert grok_host_usage_enabled({"retro": {"grok_host_usage": True}}) is True
+
+    def test_non_bool_is_config_error(self):
+        with pytest.raises(ConfigError, match="grok_host_usage must be a boolean"):
+            _validate(
+                {
+                    "device": {"id": "abc123", "name": "Mac"},
+                    "storage": {"path": "/tmp"},
+                    "retro": {"grok_host_usage": "yes"},
+                }
+            )
+
+    def test_unknown_retro_keys_are_not_rejected(self):
+        _validate(
+            {
+                "device": {"id": "abc123", "name": "Mac"},
+                "storage": {"path": "/tmp"},
+                "retro": {"author_emails": ["a@example.com"], "grok_host_usage": True},
+            }
+        )
+
+    def test_grok_is_not_a_default_sync_source(self):
+        assert "grok" not in [s["name"] for s in DEFAULT_SOURCES]
+
+    def test_grok_sync_source_row_is_config_error(self):
+        with pytest.raises(ConfigError, match="usage-only"):
+            _validate(
+                {
+                    "device": {"id": "abc123", "name": "Mac"},
+                    "storage": {"path": "/tmp"},
+                    "sync": {
+                        "sources": [
+                            {
+                                "name": "grok",
+                                "path": "~/.grok",
+                                "type": "generic",
+                            }
+                        ]
+                    },
+                }
+            )

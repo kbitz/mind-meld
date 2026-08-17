@@ -59,6 +59,7 @@ from mind_meld.config import (
     MM_INTERNAL_SOURCE_NAMES,
     get_default_source,
     get_sources,
+    grok_host_usage_enabled,
     load_config,
     patch_config_on_disk,
     save_config,
@@ -4416,6 +4417,24 @@ def status(
             f"or [bold]mm disable-source {safe_str(name)}[/bold] to dismiss."
         )
 
+    from mind_meld import host_usage as _host_usage
+
+    grok_on = grok_host_usage_enabled(config)
+    grok_present = False
+    try:
+        grok_present = _host_usage.grok_sessions_root().exists()
+    except OSError:
+        grok_present = False
+    if grok_on or grok_present:
+        if grok_on:
+            console.print("  Grok usage capture: enabled")
+        else:
+            console.print(
+                "  Grok usage capture: disabled — "
+                "run [bold]mm enable-source grok[/bold] to publish Grok token totals "
+                "(does not sync session files)."
+            )
+
     # Per-source breakdown
     total_local = 0
     total_remote = 0
@@ -5115,6 +5134,9 @@ def sources() -> None:
 
 # ── enable-source / disable-source / reconfigure-sources ──────────────
 
+_USAGE_ONLY_NAMES: frozenset[str] = frozenset({"grok"})
+"""Known enable-source names that flip local usage consent, not sync."""
+
 
 def _known_source_names(config: dict) -> list[str]:
     """Sorted union of explicit-config names and DEFAULT_SOURCES names.
@@ -5125,7 +5147,7 @@ def _known_source_names(config: dict) -> list[str]:
     """
     explicit = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
     defaults = [s["name"] for s in DEFAULT_SOURCES]
-    return sorted(set(explicit) | set(defaults))
+    return sorted(set(explicit) | set(defaults) | _USAGE_ONLY_NAMES)
 
 
 def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
@@ -5152,6 +5174,38 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
         "Use --force to accept a name not yet known to mm "
         "(forward-compat for not-yet-shipped sources)."
     )
+
+
+def _set_grok_host_usage(config: dict, *, enabled: bool) -> None:
+    """Persist Grok usage consent without touching sync.sources."""
+    raw_sources = (config.get("sync", {}) or {}).get("sources", []) or []
+    explicit = [s for s in raw_sources if isinstance(s, dict)]
+    if any(s.get("name") == "grok" for s in explicit):
+        _error(
+            "grok is a usage-only name; remove the sync source named grok first. "
+            "Grok session files are not synced."
+        )
+    current = grok_host_usage_enabled(config)
+    disabled = list((config.get("sync", {}) or {}).get("disabled_sources", []) or [])
+    leftover = "grok" in disabled
+    if current is enabled and not leftover:
+        state = "enabled" if enabled else "disabled"
+        console.print(f"[dim]Grok usage capture is already {state}.[/dim]")
+        return
+    updates: dict[str, dict[str, Any]] = {"retro": {"grok_host_usage": enabled}}
+    if leftover:
+        updates["sync"] = {"disabled_sources": [name for name in disabled if name != "grok"]}
+    patch_config_on_disk(updates)
+    if enabled:
+        console.print("[green]Enabled Grok usage capture on this device.[/green]")
+        console.print(
+            "[dim]Reads terminal token totals from local Grok session updates. "
+            "Session files are not synced. Prompts never leave the Mac.[/dim]"
+        )
+        console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
+    else:
+        console.print("[green]Disabled Grok usage capture on this device.[/green]")
+        console.print("[dim]Run 'mm enable-source grok' to turn this back on.[/dim]")
 
 
 def _record_seen(names: list[str]) -> None:
@@ -5194,6 +5248,10 @@ def disable_source(
     except ConfigError as e:
         _error(str(e))
 
+    if name == "grok":
+        _set_grok_host_usage(config, enabled=False)
+        return
+
     sync = dict(config.get("sync", {}) or {})
     disabled = list(sync.get("disabled_sources", []) or [])
     if name in disabled:
@@ -5229,6 +5287,10 @@ def enable_source(
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
         _error(str(e))
+
+    if name == "grok":
+        _set_grok_host_usage(config, enabled=True)
+        return
 
     sync = dict(config.get("sync", {}) or {})
     disabled = list(sync.get("disabled_sources", []) or [])

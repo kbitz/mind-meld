@@ -48,8 +48,8 @@ usage can appear in the card.
 | Question | Decision |
 |---|---|
 | Collection model | Scan local persisted terminal records during `mm init` and substantive `mm push`; no resident process. |
-| Consent | Add a local, explicit `[retro.host_usage] grok = true` setting, controlled by `mm enable-host-usage grok` / `mm disable-host-usage grok`. Absent means false. |
-| Why not a zero-file `grok` sync source? | It would create an empty remote manifest source, generate legacy unknown-source noise, and misleadingly imply that Grok files are synced. |
+| Consent | Add a local, explicit `[retro].grok_host_usage = true` setting, controlled by `mm enable-source grok` / `mm disable-source grok`. Absent means false. Flat bool, not a nested table: `patch_config_on_disk` cannot nest-patch. |
+| Why not a zero-file `grok` sync source? | It would create an empty remote manifest source, generate legacy unknown-source noise, and misleadingly imply that Grok files are synced. `grok` is a usage-only name on the existing enable/disable commands. |
 | Data sent to the fleet | Existing encrypted `host-usage-snapshot` aggregate only: canonical model family, UTC day, four token counters, active-day coverage, and source name. |
 | Unknown or changed Grok format | Fail closed. Omit the entire host snapshot rather than publish a partial Grok total. |
 | Cost | Do not estimate Grok subscription/API cost in this work. Usage volume and cost are different claims. |
@@ -57,7 +57,9 @@ usage can appear in the card.
 The new consent is intentionally separate from `sync.sources`: Codex and
 OpenCode already have safe customization sources, but Grok's installed root
 contains credentials and session state rather than a safe, durable
-customization subtree. A usage-only toggle is the honest surface.
+customization subtree. Reusing `mm enable-source grok` keeps one verb; the
+implementation early-returns before writing `disabled_sources` or a
+`[[sync.sources]]` row.
 
 ## Reader contract
 
@@ -154,9 +156,10 @@ latest accepted snapshot per device in retro-fleet
 MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 ```
 
-1. Extend config validation and add the two host-usage consent commands. Show
-   enabled/disabled Grok usage capture in `mm status`; do not add Grok to
-   `DEFAULT_SOURCES` or sync any `.grok` path.
+1. Extend config validation and reuse `mm enable-source grok` /
+   `mm disable-source grok` for the usage bit. Show enabled/disabled Grok
+   usage capture in `mm status`; do not add Grok to `DEFAULT_SOURCES` or
+   sync any `.grok` path.
 2. Change the reader gate so Grok is not invoked unless the local consent is
    true. Codex and OpenCode remain gated by their existing enabled sources.
 3. Replace `_scan_grok_root` with the strict reader and migrate its marker-only

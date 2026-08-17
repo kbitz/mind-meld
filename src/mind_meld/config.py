@@ -210,6 +210,14 @@ def _validate(config: dict[str, Any]) -> None:
         if "disabled_sources" in sync:
             _validate_disabled_sources(sync["disabled_sources"])
 
+    retro = config.get("retro")
+    if isinstance(retro, dict) and "grok_host_usage" in retro:
+        if not isinstance(retro["grok_host_usage"], bool):
+            raise ConfigError(
+                "config: retro.grok_host_usage must be a boolean, "
+                f"got {type(retro['grok_host_usage']).__name__}."
+            )
+
 
 def _apply_defaults(config: dict[str, Any]) -> None:
     """Fill in optional fields with defaults."""
@@ -251,6 +259,12 @@ def _validate_sources(sources: Any) -> None:
                     f"got {type(src[field]).__name__}."
                 )
         name = src["name"]
+        if name == "grok":
+            raise ConfigError(
+                "config: grok is a usage-only name, not a sync source. "
+                "Remove the [[sync.sources]] row named grok. "
+                "Use 'mm enable-source grok' to publish local token totals."
+            )
         if name in seen_names:
             raise ConfigError(f"config: duplicate source name '{name}'.")
         seen_names.add(name)
@@ -297,6 +311,16 @@ def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
                 f"config: source '{source_name}' exclude_patterns[{j}] must be "
                 f"a string, got {type(pat).__name__}."
             )
+
+
+def grok_host_usage_enabled(config: dict[str, Any]) -> bool:
+    """True only when ``[retro].grok_host_usage`` is the boolean ``true``.
+
+    Absent table, absent key, or any other value is false. This is usage
+    consent, not a sync source.
+    """
+    retro = config.get("retro")
+    return isinstance(retro, dict) and retro.get("grok_host_usage") is True
 
 
 def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:

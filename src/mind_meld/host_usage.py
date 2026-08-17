@@ -1,7 +1,9 @@
 """Private, local-only host-usage readers.
 
-Track 17C currently supports Codex rollout logs at
-``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``. A rollout's last supported
+Track 17C supports Codex rollout logs at
+``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``. Track 18D adds a consented
+Grok reader for ``updates.jsonl`` terminal records under ``GROK_HOME/sessions``
+(else ``~/.grok/sessions``). A rollout's last supported
 ``event_msg`` / ``payload.type == "token_count"`` record is cumulative, so it
 *replaces* the previous total for that file; summing every token-count record
 would double-count. The model is the most recent preceding
@@ -61,7 +63,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-from mind_meld.lockedjson import locked_json_rmw
+from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.token_usage import (
     TOKEN_FIELDS,
     Usage,
@@ -84,8 +86,12 @@ DEFAULT_READ_BUDGET_S = 5.0
 _HEAD_PROBE_BYTES = 4096
 _TAIL_PROBE_BYTES = 4096
 _MAX_MODEL_ID_BYTES = 256
+_MAX_PROMPT_ID_BYTES = 256
 _MAX_COUNTER = 2**53
 _OPENCODE_SUCCESS_FINISHES = frozenset({"content-filter", "length", "stop", "tool-calls"})
+_GROK_STOPS = frozenset({"end_turn", "cancelled"})
+_GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
+_GROK_TERMINAL_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
 _CANONICAL_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _YEAR_PART = re.compile(r"^\d{4}$")
 _MONTH_OR_DAY_PART = re.compile(r"^\d{2}$")
@@ -291,6 +297,7 @@ def warm_host_cache_inline(
     root: Path | None = None,
     *,
     budget_s: float = DEFAULT_READ_BUDGET_S,
+    reader: str = "codex",
 ) -> HostUsageResult:
     """Populate the host cache under a generous one-off budget.
 
@@ -301,33 +308,94 @@ def warm_host_cache_inline(
     visibly, on an attended command instead. Mirrors
     ``token_usage.warm_token_cache_inline``.
 
-    Only Codex has an incremental cache to warm today: Grok is refused outright
-    and OpenCode's adapter cache is a lock namespace with no stored totals.
+    ``reader`` selects which incremental cache to warm. Codex and Grok have
+    one; OpenCode's adapter cache stores no totals and is not warmable.
 
     The result is returned for tests and callers that want it, but the point is
     the side effect. Callers must still publish from a bounded capture, so this
     never becomes a back door around the explicit-deadline rule.
     """
-    return read_codex_usage(root, deadline=time.monotonic() + budget_s)
+    deadline = time.monotonic() + budget_s
+    if reader == "grok":
+        return read_grok_usage(root, deadline=deadline, consented=True)
+    return read_codex_usage(root, deadline=deadline)
+
+
+def grok_completed_once() -> bool:
+    """True after a consented scan finished and saw at least one ledger file.
+
+    Missing, corrupt, or lock-contended cache is pre-success (fail safe).
+    """
+    try:
+        with locked_json_snapshot(GROK_CACHE_PATH) as snap:
+            data = snap.data
+    except OSError:
+        return False
+    return isinstance(data, dict) and data.get("complete_once") is True
+
+
+def grok_sessions_root() -> Path:
+    """Resolve the Grok sessions directory at call time."""
+    env = os.environ.get("GROK_HOME")
+    if env:
+        return Path(env).expanduser() / "sessions"
+    return GROK_SESSIONS_PATH
 
 
 def read_grok_usage(
     root: Path | None = None,
     *,
     deadline: float | None = None,
+    consented: bool = False,
 ) -> HostUsageResult:
-    """Return a safe omission until Grok exposes a metadata-only usage ledger.
+    """Read completed Grok turn totals from ``updates.jsonl`` terminal records.
 
-    Grok's persisted session source is a transcript stream, so this adapter
-    intentionally refuses it rather than reading conversation or tool content.
+    Closed by default: ``consented=False`` does not stat or open the store.
+    A caller that has the local opt-in must pass ``consented=True``.
     """
-    source_root = root if root is not None else GROK_SESSIONS_PATH
+    if not consented:
+        return _incomplete("no_metadata_ledger")
+    source_root = root if root is not None else grok_sessions_root()
     read_deadline = deadline if deadline is not None else time.monotonic() + DEFAULT_READ_BUDGET_S
-    return _read_with_adapter_lock(
-        GROK_CACHE_PATH,
-        read_deadline,
-        lambda: _scan_grok_root(source_root, read_deadline),
-    )
+    if _expired(read_deadline):
+        return _incomplete("deadline")
+
+    try:
+        with locked_json_rmw(
+            GROK_CACHE_PATH,
+            mode=0o600,
+            default_factory=_empty_grok_cache,
+            retry_intervals=(),
+            on_contention="warn",
+            contention_warning="host token adapter cache was locked; skipping host usage scan",
+        ) as locked:
+            if not locked.is_locked:
+                return _incomplete("locked")
+            if _expired(read_deadline):
+                raise _NoCacheCommit(_incomplete("deadline"))
+
+            cached_files = _cached_files(locked.data)
+            prior_complete = locked.data.get("complete_once") is True
+            result, staged_files, learned, saw_files = _scan_grok_root(
+                source_root, cached_files, read_deadline
+            )
+            if not learned and not result.complete:
+                raise _NoCacheCommit(result)
+            complete_once = prior_complete or (result.complete and saw_files)
+            locked.data = {
+                "version": CACHE_VERSION,
+                "complete_once": complete_once,
+                "files": staged_files if result.complete else {**cached_files, **staged_files},
+            }
+            if not result.complete:
+                return result
+            if _expired(read_deadline):
+                return _incomplete("deadline")
+            return result
+    except _NoCacheCommit as aborted:
+        return aborted.result
+    except OSError:
+        return _incomplete("io_error")
 
 
 def read_opencode_usage(
@@ -358,12 +426,11 @@ def _read_with_adapter_lock(
     deadline: float,
     reader: Any,
 ) -> HostUsageResult:
-    """Give every adapter an independent 0600 lock without sharing totals.
+    """Give OpenCode an independent 0600 lock without sharing totals.
 
-    Grok and OpenCode intentionally do not reuse Codex's append-only cache:
-    neither source has a verified generation token. The tiny cache is solely a
-    separate lock namespace today, leaving room for a schema-versioned cache
-    only after its invalidation contract is proven.
+    OpenCode has no verified generation token, so it does not reuse Codex's
+    append-only cache. The tiny cache is solely a separate lock namespace
+    today. Grok has its own incremental cache in ``read_grok_usage``.
     """
     if _expired(deadline):
         return _incomplete("deadline")
@@ -393,21 +460,344 @@ def _read_with_adapter_lock(
         return _incomplete("io_error")
 
 
-def _scan_grok_root(root: Path, deadline: float) -> HostUsageResult:
+def _empty_grok_cache() -> dict[str, Any]:
+    return {"version": CACHE_VERSION, "complete_once": False, "files": {}}
+
+
+def _scan_grok_root(
+    root: Path,
+    cached_files: dict[str, Any],
+    deadline: float,
+) -> tuple[HostUsageResult, dict[str, Any], bool, bool]:
+    """Returns ``(result, staged, learned, saw_files)``."""
+    try:
+        ledgers = list(_iter_grok_ledgers(root, deadline))
+    except _ReadFailure as failure:
+        return _incomplete(failure.reason), {}, False, False
+
+    staged: dict[str, Any] = {}
+    learned = False
+    for workspace, session_id, path in ledgers:
+        if _expired(deadline):
+            return _incomplete("deadline"), staged, learned, True
+        key = _cache_key(path)
+        try:
+            before = _regular_stat(path)
+            existing = cached_files.get(key)
+            entry = _grok_cache_hit(path, before, existing, deadline)
+            if entry is None:
+                resume = _grok_resumable_entry(path, before, existing, deadline)
+                entry = (
+                    _resume_grok_file(path, workspace, session_id, before, resume, deadline)
+                    if resume is not None
+                    else _read_full_grok_file(path, workspace, session_id, before, deadline)
+                )
+                learned = True
+            staged[key] = entry
+        except _ReadFailure as failure:
+            return _incomplete(failure.reason), staged, learned, True
+
+    return (
+        HostUsageResult(_aggregate_grok(staged.values()), complete=True),
+        staged,
+        learned,
+        bool(ledgers),
+    )
+
+
+def _iter_grok_ledgers(root: Path, deadline: float):
+    """Yield ``(workspace, session_id, updates.jsonl)`` under ``root``."""
     if _expired(deadline):
-        return _incomplete("deadline")
+        raise _ReadFailure("deadline")
     try:
         if not root.exists():
-            return HostUsageResult({}, complete=True)
+            return
         if root.is_symlink() or not root.is_dir():
-            return _incomplete("unsupported")
-    except OSError:
-        return _incomplete("io_error")
-    # Grok's persisted session source is a conversation/tool-call stream. It
-    # contains no separately allowlisted terminal usage ledger, so inspecting
-    # it would breach this reader's metadata-only boundary. This is a standing
-    # property of the store, not a failed read — see `Reason`.
-    return _incomplete("no_metadata_ledger")
+            raise _ReadFailure("unsupported")
+        for workspace in _sorted_children(root, deadline):
+            if not _is_directory(workspace):
+                continue
+            for session in _sorted_children(workspace, deadline):
+                if not _is_directory(session):
+                    continue
+                candidate = session / "updates.jsonl"
+                if _is_regular_non_symlink(candidate):
+                    yield workspace.name, session.name, candidate
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
+
+
+def _grok_cache_hit(
+    path: Path,
+    before: os.stat_result,
+    existing: Any,
+    deadline: float,
+) -> dict[str, Any] | None:
+    entry = _validated_grok_entry(existing)
+    if entry is None:
+        return None
+    if not _same_cache_metadata(entry, before):  # type: ignore[arg-type]
+        return None
+    fingerprint = _fingerprint(path, before, deadline)
+    if not _same_fingerprint(entry, fingerprint):  # type: ignore[arg-type]
+        return None
+    if not _same_source(before, _regular_stat(path)):
+        raise _ReadFailure("stale")
+    return entry
+
+
+def _grok_resumable_entry(
+    path: Path,
+    source: os.stat_result,
+    existing: Any,
+    deadline: float,
+) -> dict[str, Any] | None:
+    entry = _validated_grok_entry(existing)
+    if entry is None:
+        return None
+    if entry["dev"] != source.st_dev or entry["ino"] != source.st_ino:
+        return None
+    if source.st_size <= entry["size"]:
+        return None
+    if entry["head_len"] != min(entry["size"], _HEAD_PROBE_BYTES) or entry["tail_len"] != min(
+        entry["size"], _TAIL_PROBE_BYTES
+    ):
+        return None
+    if _digest_range(path, 0, entry["head_len"], deadline) != entry["head"]:
+        return None
+    old_tail_start = entry["size"] - entry["tail_len"]
+    if _digest_range(path, old_tail_start, entry["tail_len"], deadline) != entry["tail"]:
+        return None
+    if not _same_source(source, _regular_stat(path)):
+        raise _ReadFailure("stale")
+    return entry
+
+
+def _read_full_grok_file(
+    path: Path,
+    workspace: str,
+    session_id: str,
+    before: os.stat_result,
+    deadline: float,
+) -> dict[str, Any]:
+    turns = _read_grok_file(path, workspace, session_id, 0, {}, before, deadline)
+    return _grok_file_entry(path, before, deadline, turns)
+
+
+def _resume_grok_file(
+    path: Path,
+    workspace: str,
+    session_id: str,
+    before: os.stat_result,
+    entry: dict[str, Any],
+    deadline: float,
+) -> dict[str, Any]:
+    prior = {turn["key"]: turn for turn in entry["turns"]}
+    turns = _read_grok_file(path, workspace, session_id, entry["offset"], prior, before, deadline)
+    return _grok_file_entry(path, before, deadline, turns)
+
+
+def _grok_file_entry(
+    path: Path, before: os.stat_result, deadline: float, turns: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    after = _regular_stat(path)
+    if not _same_source(before, after):
+        raise _ReadFailure("stale")
+    fingerprint = _fingerprint(path, after, deadline)
+    if not _same_source(after, _regular_stat(path)):
+        raise _ReadFailure("stale")
+    return {
+        **_identity_fields(after, fingerprint),
+        "turns": [turns[key] for key in sorted(turns)],
+    }
+
+
+def _read_grok_file(
+    path: Path,
+    workspace: str,
+    session_id: str,
+    start_offset: int,
+    prior: dict[str, dict[str, Any]],
+    before: os.stat_result,
+    deadline: float,
+) -> dict[str, dict[str, Any]]:
+    turns = dict(prior)
+    last_offset = start_offset
+    try:
+        with path.open("rb") as fp:
+            fp.seek(start_offset)
+            for raw, end_offset in iter_bounded_lines(
+                fp,
+                _cache_key(path),
+                start_offset,
+                label="grok usage walker",
+            ):
+                if _expired(deadline):
+                    raise _ReadFailure("deadline")
+                last_offset = end_offset
+                if raw == b"":
+                    raise _ReadFailure("malformed")
+                if not raw.strip():
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (TypeError, ValueError, UnicodeDecodeError) as exc:
+                    raise _ReadFailure("malformed") from exc
+                accepted = _grok_turns_from_record(record, workspace, session_id)
+                if accepted is None:
+                    continue
+                for key, turn in accepted:
+                    existing = turns.get(key)
+                    if existing is None:
+                        turns[key] = turn
+                        continue
+                    if existing == turn:
+                        continue
+                    raise _ReadFailure("unsupported")
+            if fp.tell() != last_offset:
+                raise _ReadFailure("partial")
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
+    if not _same_source(before, _regular_stat(path)):
+        raise _ReadFailure("stale")
+    return turns
+
+
+def _grok_turns_from_record(
+    record: Any, workspace: str, session_id: str
+) -> list[tuple[str, dict[str, Any]]] | None:
+    if not isinstance(record, dict):
+        raise _ReadFailure("malformed")
+    params = record.get("params")
+    if not isinstance(params, dict):
+        return None
+    update = params.get("update")
+    if not isinstance(update, dict):
+        return None
+    if update.get("sessionUpdate") != "turn_completed":
+        return None
+    if _GROK_CONTENT_FIELDS & update.keys():
+        return None
+    if set(update) != _GROK_TERMINAL_KEYS:
+        raise _ReadFailure("unsupported")
+    day = _grok_outer_day(record.get("timestamp"))
+    prompt_id = update.get("prompt_id")
+    if not isinstance(prompt_id, str) or not prompt_id:
+        raise _ReadFailure("unsupported")
+    if len(prompt_id.encode("utf-8")) > _MAX_PROMPT_ID_BYTES:
+        raise _ReadFailure("unsupported")
+    stop = update.get("stop_reason")
+    if not isinstance(stop, str) or stop not in _GROK_STOPS:
+        raise _ReadFailure("unsupported")
+    usage = update.get("usage")
+    if not isinstance(usage, dict):
+        raise _ReadFailure("unsupported")
+    models = usage.get("modelUsage")
+    if not isinstance(models, dict) or not models:
+        raise _ReadFailure("unsupported")
+    _validate_grok_counters(usage)
+    accepted: list[tuple[str, dict[str, Any]]] = []
+    for model, entry in models.items():
+        if not isinstance(model, str) or not model:
+            raise _ReadFailure("unsupported")
+        if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
+            raise _ReadFailure("unsupported")
+        if not isinstance(entry, dict):
+            raise _ReadFailure("unsupported")
+        counters = _validate_grok_counters(entry)
+        model_key = _grok_terminal_key(workspace, session_id, prompt_id, model)
+        accepted.append(
+            (model_key, {"key": model_key, "day": day, "model": model, "usage": counters})
+        )
+    return accepted
+
+
+def _validate_grok_counters(usage: dict[str, Any]) -> Usage:
+    output = _grok_counter(usage, "outputTokens")
+    reasoning = _grok_counter(usage, "reasoningTokens")
+    if reasoning > output:
+        raise _ReadFailure("unsupported")
+    _grok_counter(usage, "totalTokens")
+    return {
+        "input": _grok_counter(usage, "inputTokens"),
+        "cache_create": _grok_counter(usage, "cacheCreationTokens"),
+        "cache_read": _grok_counter(usage, "cachedReadTokens"),
+        "output": output,
+    }
+
+
+def _grok_counter(usage: dict[str, Any], key: str) -> int:
+    if key not in usage:
+        raise _ReadFailure("unsupported")
+    value = usage[key]
+    if not _is_valid_counter(value):
+        raise _ReadFailure("unsupported")
+    return value
+
+
+def _grok_outer_day(value: Any) -> str:
+    return _utc_day(value)
+
+
+def _grok_terminal_key(workspace: str, session_id: str, prompt_id: str, model: str) -> str:
+    return hashlib.sha256(f"{workspace}\0{session_id}\0{prompt_id}\0{model}".encode()).hexdigest()
+
+
+def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    integer_keys = ("dev", "ino", "size", "mtime_ns", "head_len", "tail_len", "offset")
+    if any(not _is_nonnegative_int(value.get(key)) for key in integer_keys):
+        return None
+    if value["offset"] != value["size"]:
+        return None
+    if not isinstance(value.get("head"), str) or not isinstance(value.get("tail"), str):
+        return None
+    turns = value.get("turns")
+    if not isinstance(turns, list):
+        return None
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            return None
+        key = turn.get("key")
+        if not isinstance(key, str) or len(key) != 64 or key in seen:
+            return None
+        seen.add(key)
+        model = turn.get("model")
+        day = turn.get("day")
+        usage = turn.get("usage")
+        if not isinstance(model, str) or not model:
+            return None
+        if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
+            return None
+        if not isinstance(day, str) or not _CANONICAL_DAY.fullmatch(day):
+            return None
+        if not isinstance(usage, dict):
+            return None
+        if any(not _is_valid_counter(usage.get(field)) for field in TOKEN_FIELDS):
+            return None
+        normalized.append(
+            {
+                "key": key,
+                "day": day,
+                "model": model,
+                "usage": {field: usage[field] for field in TOKEN_FIELDS},
+            }
+        )
+    return {**_identity_fields_from(value), "turns": normalized}
+
+
+def _aggregate_grok(entries: Any) -> HostTokens:
+    hosts: HostTokens = {}
+    for entry in entries:
+        for turn in entry.get("turns", ()) if isinstance(entry, dict) else ():
+            family = host_family(turn["model"])
+            days = hosts.setdefault(family, {})
+            bucket = days.setdefault(turn["day"], zero_model_bucket())
+            merge_usage_bucket(bucket, turn["usage"])
+    return hosts
 
 
 def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
@@ -437,7 +827,7 @@ def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
         elif has_legacy:
             # Legacy message files contain complete session content. There is
             # no metadata-only projection, so do not deserialize transcripts —
-            # same standing-property category as Grok, not a failed read.
+            # a standing property of the source, not a failed read.
             return _incomplete("no_metadata_ledger")
         else:
             return HostUsageResult({}, complete=True)
@@ -1073,8 +1463,8 @@ def _empty_cache() -> dict[str, Any]:
 def _empty_adapter_cache() -> dict[str, int]:
     """Schema marker for non-incremental adapter lock files.
 
-    Keeping this intentionally content-free means an interrupted Grok or
-    OpenCode scan cannot cause the next successful scan to replay stale usage.
+    Keeping this intentionally content-free means an interrupted OpenCode
+    scan cannot cause the next successful scan to replay stale usage.
     """
     return {"version": CACHE_VERSION}
 
@@ -1233,6 +1623,7 @@ __all__ = [
     "DEFAULT_READ_BUDGET_S",
     "GROK_CACHE_PATH",
     "GROK_SESSIONS_PATH",
+    "grok_sessions_root",
     "HostFamily",
     "HostTokens",
     "HostUsageResult",
@@ -1242,6 +1633,7 @@ __all__ = [
     # its entire user-visible reason vocabulary from `get_args(Reason)`.
     "Reason",
     "host_family",
+    "grok_completed_once",
     "read_codex_usage",
     "read_grok_usage",
     "read_opencode_usage",

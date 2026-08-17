@@ -3,11 +3,11 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READER`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_marker_dir` / `SKILL_ROOTS`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/host_usage.py` — `read_codex_usage` / `warm_host_cache_inline` / `_scan_codex_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
+- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES`
@@ -129,13 +129,43 @@ cannot attribute and OpenCode for a malformed row, which both mean "real usage
 is here and I could not read it" — those keep the veto. Getting that
 distinction backwards silently under-reports the fleet.
 
-**Host readers are consent-gated on their sync source.** `HOST_READER_SOURCE_GATE`
-maps each reader to the source name whose being enabled authorizes it, and
-`_default_host_readers(sources)` returns only those. A user who declined the
-`codex` source does not get `~/.codex/sessions` parsed — matching
-`_enabled_claude_paths`, which has always gated the Claude walk this way. Grok
-is ungated because it opens nothing (it stats a directory and reports whether a
-ledger could exist) and mind-meld has no `grok` source to gate on.
+**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex and
+OpenCode to the source name whose being enabled authorizes them.
+`_default_host_readers(sources, grok_consented=...)` returns only those.
+A user who declined the `codex` source does not get `~/.codex/sessions`
+parsed — matching `_enabled_claude_paths`. Grok is **not** a sync source:
+`HOST_READER_SOURCE_GATE["grok"]` stays `None` so it is not confused with a
+`[[sync.sources]]` row. Consent is the second filter: include Grok only when
+`[retro].grok_host_usage` is true (`mm enable-source grok`). The callable
+bound into the sweep passes `read_grok_usage(..., consented=True)`. The
+function itself defaults to `consented=False` and does not stat or open
+`~/.grok`. Empty sources plus no opt-in must yield no Grok reader — if that
+list is ever `["grok"]` again, a file-opening reader will parse session
+updates with no bit flip.
+
+**Grok v1 terminal ledger (Track 18D).** When consented, `read_grok_usage`
+walks `GROK_HOME/sessions` (else `~/.grok/sessions`) and reads only regular
+non-symlink `updates.jsonl` files directly under a session directory. It
+accepts a line only when `params.update` is exactly the `turn_completed`
+projection (`prompt_id`, `sessionUpdate`, `stop_reason`, `usage`) with no
+content-bearing fields. Each accepted record is a per-prompt total attributed
+to the UTC day of the outer timestamp. `reasoningTokens` must be a bounded
+subset of `outputTokens` and is never added twice. The private
+`grok-host-tokens.json` cache stores opaque file keys, fingerprints, offsets,
+hashed terminal keys, model IDs, and aggregate counters — never paths,
+prompt IDs, or conversation bytes. Equal duplicate
+`(workspace, session, prompt_id, model)` records count once; conflicting
+duplicates refuse the store. The model is always part of the key so a
+later multi-model restatement of the same prompt cannot double-count.
+
+**First-success carve-out (Track 21A).** Until this machine has completed a
+consented Grok scan that observed at least one `updates.jsonl`, a Grok
+`deadline` / `locked` / `busy` / `io_error` / `partial` / `unavailable`
+(returned by the reader, not a pre-invoke sweep expiry) drops Grok and still
+publishes Codex/OpenCode. After `complete_once` is set on the Grok cache,
+those reasons veto the whole snapshot again. `malformed` / `unsupported` /
+`stale` always veto when Grok was invoked. Warm Grok on a Grok `deadline`
+before applying the carve-out; autopush never warms.
 
 **`token_sources` is therefore per-push, not the constant.**
 `events.HOST_USAGE_TOKEN_SOURCES` is the universe of readers; a row carries the
@@ -341,10 +371,11 @@ turning a file that just gained its first response into a whole-store refusal.
 Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
-`warm_host_cache_inline` warms CODEX ONLY (`WARMABLE_HOST_READER`), so a
-`deadline` charged to any other reader cannot be helped by it. Without the
-reader half of the gate an interactive push pays bounded-attempt + up to 5s
-warm + bounded-retry — ~6s, on every push, forever, still publishing nothing.
+`warm_host_cache_inline(reader=...)` warms Codex or Grok
+(`WARMABLE_HOST_READERS`). A `deadline` charged to OpenCode cannot be helped
+by it. Without the reader half of the gate an interactive push pays
+bounded-attempt + up to 5s warm + bounded-retry — ~6s, on every push, forever,
+still publishing nothing.
 A cold scan does not fit the per-capture budget (573 ms vs 250/500 ms), so
 `_capture_event_snapshots` may retry once after `warm_host_cache_inline`, but
 ONLY when the first attempt returned reason `deadline` — the only reason a warm
