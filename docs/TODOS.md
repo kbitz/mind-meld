@@ -36,11 +36,4 @@ reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
   will cross the 250ms autopush budget at roughly 4,500 rollouts. Consider
   bypassing fingerprints for files older than the last complete scan, keying on
   `(dev, ino)`, or bounding `_iter_rollouts` by date directory.
-- **Host day buckets are mutable lifetime snapshots** — a
-  `host-usage-snapshot` bucket is the lifetime total of every session last
-  touched on that UTC day, not that day's spend. Resuming an old session moves
-  its whole total, so historical buckets can decrease. Only
-  latest-row-per-device is safe; Track 20A must lock the wire contract before
-  Track 21A renders `active_days` as a time series.
-
-_Last updated 2026-08-16 by Track 19A follow-up._
+_Last updated 2026-08-16 by Track 20A ship._

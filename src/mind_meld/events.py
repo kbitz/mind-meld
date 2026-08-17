@@ -254,12 +254,13 @@ class HostUsageSnapshot(TypedDict, total=False):
     attribution, model IDs outside the canonical family buckets, or per-source
     status.
 
-    All-or-nothing by construction: a row exists only when EVERY reader in
-    ``token_sources`` completed. ``hosts == {}`` is therefore a real completed
-    empty scan, never a stand-in for a scan that failed — an incomplete sweep
-    omits the whole row (``host_usage.HostUsageResult`` draws that line;
-    ``events_tail`` is the caller that honors it). A consumer must treat an
-    ABSENT row as "unknown", never as zero.
+    All-or-nothing by construction: a row exists only when EVERY reader named
+    in ``token_sources`` completed. ``hosts == {}`` is a real completed empty
+    observation only for that row's coverage; ``token_sources == []`` means no
+    reader contributed, never fleet-wide zero. An incomplete sweep omits the
+    whole row (``host_usage.HostUsageResult`` draws that line; ``events_tail``
+    honors it). An ABSENT row is no new complete observation — not a zero, not
+    a state update, and not proof of a particular failure.
 
     **A day bucket is NOT "tokens spent that day", and it is NOT stable across
     snapshots.** Read this before building anything on it. Each host session
@@ -272,12 +273,13 @@ class HostUsageSnapshot(TypedDict, total=False):
     new day, so a fixed day's value can DECREASE between two consecutive
     snapshots.
 
-    The only safe read is: take the LATEST row per device and use it as a
-    point-in-time view. Do NOT diff two snapshots, sum them, or treat
-    ``active_days`` as a per-day activity series. ``active_days`` names the days
-    present in ``hosts``, nothing more. (Track 20A owns locking this contract
-    down; it is documented here because no consumer exists yet and the shape is
-    still cheap to change.)
+    The only safe read is the latest ACCEPTED row per device as a whole,
+    point-in-time ``as_of`` view. It replaces the prior device view; a consumer
+    cannot carry forward individual sources because the payload deliberately
+    merges some readers into one family. Do NOT diff snapshots, sum them, or
+    treat ``active_days`` as a per-day activity series. ``active_days`` names
+    the days present in ``hosts``, nothing more. The complete acceptance and
+    deterministic-selection rules live in ``docs/invariants/events-retro.md``.
     """
 
     v: int
