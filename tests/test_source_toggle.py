@@ -282,6 +282,72 @@ class TestEnableSource:
         assert added == get_default_source(source_name)
 
 
+class TestGrokUsageConsent:
+    def test_enable_source_grok_writes_flat_bit_not_a_sync_row(self, cfg, isolated_seen_sources):
+        import tomllib
+
+        from mind_meld.config import DEFAULT_SOURCES, grok_host_usage_enabled
+
+        result = runner.invoke(app, ["enable-source", "grok"])
+        assert result.exit_code == 0, result.output
+        assert "Enabled Grok usage capture" in result.output
+        assert "not synced" in result.output
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert on_disk["retro"]["grok_host_usage"] is True
+        assert grok_host_usage_enabled(on_disk) is True
+        assert "grok" not in [s["name"] for s in on_disk["sync"]["sources"]]
+        assert "grok" not in (on_disk["sync"].get("disabled_sources") or [])
+        assert "grok" not in [s["name"] for s in DEFAULT_SOURCES]
+
+        again = runner.invoke(app, ["enable-source", "grok"])
+        assert again.exit_code == 0
+        assert "already enabled" in again.output
+
+        off = runner.invoke(app, ["disable-source", "grok"])
+        assert off.exit_code == 0, off.output
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert on_disk["retro"]["grok_host_usage"] is False
+        assert "grok" not in (on_disk["sync"].get("disabled_sources") or [])
+
+    def test_enable_source_grok_preserves_existing_retro_keys(self, cfg, isolated_seen_sources):
+        import tomllib
+
+        from mind_meld.config import load_config, save_config
+
+        config = load_config(cfg)
+        config["retro"] = {"author_emails": ["a@example.com"], "repo_roots": ["~/src"]}
+        save_config(config, cfg)
+
+        result = runner.invoke(app, ["enable-source", "grok"])
+        assert result.exit_code == 0, result.output
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert on_disk["retro"]["author_emails"] == ["a@example.com"]
+        assert on_disk["retro"]["repo_roots"] == ["~/src"]
+        assert on_disk["retro"]["grok_host_usage"] is True
+
+    def test_enable_source_grok_refuses_an_existing_sync_row(self, cfg, isolated_seen_sources):
+        from mind_meld.config import load_config, save_config
+
+        config = load_config(cfg)
+        config["sync"]["sources"].append(
+            {"name": "grok", "path": "/tmp/not-a-real-grok", "type": "generic"}
+        )
+        save_config(config, cfg)
+
+        result = runner.invoke(app, ["enable-source", "grok"])
+        assert result.exit_code == 1
+        assert "usage-only" in result.output
+        assert "not synced" in result.output
+
+    def test_grok_is_a_known_usage_only_name(self):
+        _validate_source_name("grok", {"sync": {"sources": []}}, force=False)
+        assert "grok" in _known_source_names({})
+
+
 # ── mm sources display ────────────────────────────────────────────────
 
 
@@ -350,6 +416,38 @@ class TestStatusBreadcrumbs:
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0
         assert "Disabled sources" not in result.output
+        assert "Grok usage capture" not in result.output
+
+    def test_grok_status_when_enabled_or_present(self, cfg, isolated_seen_sources, monkeypatch):
+        from mind_meld import crypto
+        from mind_meld import host_usage as _host_usage
+        from mind_meld.crypto import bootstrap_crypto_init
+        from mind_meld.devices import register_device
+        from mind_meld.storage.local import LocalBackend
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "test-passphrase")
+
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        backend = LocalBackend(on_disk["storage"]["path"])
+        bootstrap_crypto_init(backend, "test-passphrase", argon2_memory_kb=1024)
+        register_device(backend, "abc123", "MacBook")
+        crypto.clear_crypto_session()
+
+        enabled = runner.invoke(app, ["enable-source", "grok"])
+        assert enabled.exit_code == 0, enabled.output
+        shown = runner.invoke(app, ["status"])
+        assert shown.exit_code == 0, shown.output
+        assert "Grok usage capture: enabled" in shown.output
+
+        runner.invoke(app, ["disable-source", "grok"])
+        _host_usage.GROK_SESSIONS_PATH.mkdir(parents=True)
+        present = runner.invoke(app, ["status"])
+        assert present.exit_code == 0, present.output
+        assert "Grok usage capture: disabled" in present.output
+        assert "mm enable-source grok" in present.output
 
 
 # ── _filter_disabled_sources ─────────────────────────────────────────

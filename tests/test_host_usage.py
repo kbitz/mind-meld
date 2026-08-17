@@ -931,32 +931,306 @@ class TestFailureAndTraversalContracts:
         assert result == hu.HostUsageResult({}, complete=True)
 
 
+def _write_grok_session(
+    root: Path,
+    *,
+    workspace: str = "workspace",
+    session: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    lines: list[str] | None = None,
+) -> Path:
+    session_dir = root / workspace / session
+    session_dir.mkdir(parents=True)
+    path = session_dir / "updates.jsonl"
+    path.write_text("".join(lines or []), encoding="utf-8")
+    return path
+
+
+def _grok_turn(
+    *,
+    ts: int = 1786731043,
+    prompt_id: str = "11111111-1111-1111-1111-111111111111",
+    stop: str = "end_turn",
+    input_tokens: int = 10,
+    output: int = 6,
+    reasoning: int = 2,
+    cache_read: int = 3,
+    cache_create: int = 1,
+    model: str = "grok-4",
+    extra_update: dict | None = None,
+) -> str:
+    usage = {
+        "inputTokens": input_tokens,
+        "outputTokens": output,
+        "reasoningTokens": reasoning,
+        "cachedReadTokens": cache_read,
+        "cacheCreationTokens": cache_create,
+        "totalTokens": input_tokens + output,
+        "numTurns": 1,
+        "modelUsage": {
+            model: {
+                "inputTokens": input_tokens,
+                "outputTokens": output,
+                "reasoningTokens": reasoning,
+                "cachedReadTokens": cache_read,
+                "cacheCreationTokens": cache_create,
+                "totalTokens": input_tokens + output,
+            }
+        },
+    }
+    update = {
+        "prompt_id": prompt_id,
+        "sessionUpdate": "turn_completed",
+        "stop_reason": stop,
+        "usage": usage,
+    }
+    if extra_update:
+        update.update(extra_update)
+    return (
+        json.dumps(
+            {
+                "method": "session/update",
+                "timestamp": ts,
+                "params": {"update": update},
+            }
+        )
+        + "\n"
+    )
+
+
 class TestGrokUsage:
-    def test_refuses_persisted_conversation_stream_without_reading_it(
+    def test_closed_default_does_not_open_the_store(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+    ) -> None:
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "workspace", root / "workspace")
+        opened: list[Path] = []
+        real_open = Path.open
+
+        def spy(self, *args, **kwargs):
+            opened.append(self)
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", spy)
+
+        result = hu.read_grok_usage(root)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="no_metadata_ledger")
+        assert opened == []
+        assert not isolated_adapter_caches[0].exists()
+
+    def test_fixture_turn_is_a_per_prompt_total_with_reasoning_inside_output(
         self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "workspace", root / "workspace")
 
-        result = hu.read_grok_usage(root)
+        result = hu.read_grok_usage(root, consented=True)
 
-        # `no_metadata_ledger`, NOT `unsupported`: the store simply holds no
-        # metadata-only ledger and never will. A caller may treat that as "this
-        # source is not installed"; treating a genuine read FAILURE that way
-        # would silently under-report real usage.
-        assert result == hu.HostUsageResult({}, complete=False, reason="no_metadata_ledger")
-        grok_cache, opencode_cache = isolated_adapter_caches
-        assert not grok_cache.exists()
-        assert not opencode_cache.exists()
+        assert result.complete is True
+        assert result.hosts == {
+            "grok": {
+                "2026-08-14": {
+                    "input": 10,
+                    "cache_create": 1,
+                    "cache_read": 3,
+                    "output": 6,
+                }
+            }
+        }
+        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        dumped = json.dumps(cache)
+        assert "11111111-1111-1111-1111-111111111111" not in dumped
+        assert "prompt_id" not in dumped
+        assert str(root) not in dumped
+
+    def test_two_turns_are_summed_not_replaced(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn(input_tokens=100, output=10, reasoning=3, cache_read=0, cache_create=0),
+                _grok_turn(
+                    ts=1786817443,
+                    prompt_id="22222222-2222-2222-2222-222222222222",
+                    input_tokens=20,
+                    output=4,
+                    reasoning=1,
+                    cache_read=0,
+                    cache_create=0,
+                ),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        days = result.hosts["grok"]
+        assert days["2026-08-14"]["input"] == 100
+        assert days["2026-08-15"]["input"] == 20
+        assert days["2026-08-14"]["output"] == 10
+        assert days["2026-08-15"]["output"] == 4
+
+    def test_replayed_equal_prompt_counts_once(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        line = _grok_turn()
+        _write_grok_session(root, lines=[line, line])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+
+    def test_conflicting_duplicate_prompt_refuses(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn(input_tokens=10, output=6, reasoning=2),
+                _grok_turn(input_tokens=99, output=6, reasoning=2),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+
+    def test_content_bearing_turn_is_ignored(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn(extra_update={"content": "do-not-read"}),
+                _grok_turn(prompt_id="22222222-2222-2222-2222-222222222222"),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+
+    def test_reasoning_above_output_is_unsupported(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(output=2, reasoning=5)])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.reason == "unsupported"
+
+    def test_incomplete_final_line_is_partial(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        path = _write_grok_session(root, lines=[_grok_turn()])
+        path.write_bytes(path.read_bytes() + b'{"method":"session/update"')
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.reason == "partial"
 
     def test_absent_root_and_expired_deadline_preserve_empty_vs_incomplete(
         self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
     ) -> None:
         grok_cache, _ = isolated_adapter_caches
-        assert hu.read_grok_usage(tmp_path / "absent") == hu.HostUsageResult({}, complete=True)
-        expired = hu.read_grok_usage(tmp_path / "absent", deadline=time.monotonic() - 0.001)
+        assert hu.read_grok_usage(tmp_path / "absent", consented=True) == hu.HostUsageResult(
+            {}, complete=True
+        )
+        expired = hu.read_grok_usage(
+            tmp_path / "absent", deadline=time.monotonic() - 0.001, consented=True
+        )
         assert expired == hu.HostUsageResult({}, complete=False, reason="deadline")
         assert grok_cache.exists()
+        assert json.loads(grok_cache.read_text(encoding="utf-8"))["complete_once"] is False
+
+    def test_complete_scan_that_saw_files_sets_complete_once(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "workspace", root / "workspace")
+
+        hu.read_grok_usage(root, consented=True)
+
+        assert hu.grok_completed_once() is True
+
+    def test_empty_ledger_is_completed_zero_and_arms_complete_once(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result == hu.HostUsageResult({}, complete=True)
+        assert hu.grok_completed_once() is True
+
+    def test_appended_turn_resumes_and_sums(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        path = _write_grok_session(root, lines=[_grok_turn()])
+        first = hu.read_grok_usage(root, consented=True)
+        assert first.hosts["grok"]["2026-08-14"]["input"] == 10
+
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + _grok_turn(
+                ts=1786817443,
+                prompt_id="22222222-2222-2222-2222-222222222222",
+                input_tokens=20,
+                output=4,
+                reasoning=1,
+                cache_read=0,
+                cache_create=0,
+            ),
+            encoding="utf-8",
+        )
+        second = hu.read_grok_usage(root, consented=True)
+
+        assert second.complete is True
+        assert second.hosts["grok"]["2026-08-14"]["input"] == 10
+        assert second.hosts["grok"]["2026-08-15"]["input"] == 20
+
+    def test_cancelled_stop_is_accepted_and_unknown_stop_is_not(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(stop="cancelled")])
+        assert hu.read_grok_usage(root, consented=True).complete is True
+
+        other = tmp_path / "other"
+        _write_grok_session(other, lines=[_grok_turn(stop="interrupted")])
+        assert hu.read_grok_usage(other, consented=True).reason == "unsupported"
+
+    def test_iso_timestamp_is_attributed_to_utc_day(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(ts="2026-08-14T23:00:00Z")])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+
+    def test_grok_home_env_selects_the_sessions_root(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+    ) -> None:
+        home = tmp_path / "custom-grok"
+        shutil.copytree(FIXTURES / "grok" / "workspace", home / "sessions" / "workspace")
+        monkeypatch.setenv("GROK_HOME", str(home))
+
+        result = hu.read_grok_usage(consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
 
     @pytest.mark.parametrize("source_kind", ["file", "symlink"])
     def test_rejects_non_directory_or_symlink_session_roots(
@@ -973,10 +1247,9 @@ class TestGrokUsage:
             target.mkdir()
             root.symlink_to(target, target_is_directory=True)
 
-        result = hu.read_grok_usage(root)
+        result = hu.read_grok_usage(root, consented=True)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
-        assert not isolated_adapter_caches[0].exists()
 
     def test_filesystem_error_is_incomplete_without_creating_a_cache(
         self, isolated_adapter_caches: tuple[Path, Path]
@@ -985,10 +1258,9 @@ class TestGrokUsage:
             def exists(self) -> bool:
                 raise OSError("unreadable source")
 
-        result = hu.read_grok_usage(UnreadableRoot())  # type: ignore[arg-type]
+        result = hu.read_grok_usage(UnreadableRoot(), consented=True)  # type: ignore[arg-type]
 
         assert result == hu.HostUsageResult({}, complete=False, reason="io_error")
-        assert not isolated_adapter_caches[0].exists()
 
 
 class TestOpenCodeUsage:

@@ -228,6 +228,7 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     from mind_meld import host_usage as _host_usage
 
     root = tmp_path / "_isolated_hosts"
+    monkeypatch.delenv("GROK_HOME", raising=False)
     monkeypatch.setattr(_host_usage, "CODEX_SESSIONS_PATH", root / "codex" / "sessions")
     monkeypatch.setattr(_host_usage, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
     monkeypatch.setattr(_host_usage, "OPENCODE_DATA_PATH", root / "opencode")

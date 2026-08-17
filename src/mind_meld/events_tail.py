@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence, get_args
 
 from mind_meld import __version__, events, host_usage, identity, token_usage, upgrade
+from mind_meld.config import grok_host_usage_enabled
 from mind_meld.safety import safe_str
 
 CacheLockMode = Literal["warn", "block"] | None
@@ -87,10 +88,9 @@ they just do it permanently."""
 
 HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     "codex": "codex",
-    # The Grok reader opens nothing — it stats a directory and reports whether
-    # a ledger could exist — so it needs no consent gate, and mind-meld has no
-    # `grok` source to gate it on. Its outcome is handled by
-    # `_HOST_ABSENT_REASONS` instead.
+    # Grok is not gated on a sync source (`None`). Consent is a second
+    # filter on `_default_host_readers(..., grok_consented=)`. Do not put
+    # `"grok"` here — that would require a sync source we refuse to create.
     "grok": None,
     "opencode": "opencode",
 }
@@ -104,11 +104,15 @@ their totals published to the fleet. Only aggregates ever crossed the boundary,
 but "we read it unless you read the README" is the wrong default for a tool
 whose whole premise is scoped, opt-in sync."""
 
+WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok"})
+"""Readers with an incremental cache a warm can populate. OpenCode's
+adapter cache stores no totals and is not warmable."""
 WARMABLE_HOST_READER = "codex"
-"""The only reader with an incremental cache a warm can populate. Grok is
-refused outright and OpenCode's adapter cache stores no totals, so a
-``deadline`` charged to either of them is not warmable and must not trigger
-the multi-second warm path."""
+"""Back-compat alias for the Codex warm pin. Prefer ``WARMABLE_HOST_READERS``."""
+
+_GROK_PRE_SUCCESS_TRANSIENTS: frozenset[str] = frozenset(
+    {"deadline", "locked", "busy", "io_error", "partial", "unavailable"}
+)
 
 
 @dataclass(frozen=True)
@@ -135,6 +139,8 @@ class HostUsageCapture:
     never invoked, and one whose store can never hold a ledger is dropped. Both
     are honest absences, and the row says so rather than implying every built-in
     reader was consulted."""
+    invoked: bool = True
+    """False when the sweep expired before calling the failing reader."""
 
     @property
     def complete(self) -> bool:
@@ -227,29 +233,34 @@ def _decide_token_walk_policy(
     return True
 
 
-def _default_host_readers(sources: list[dict]) -> tuple[tuple[str, HostReader], ...]:
+def _default_host_readers(
+    sources: list[dict],
+    *,
+    grok_consented: bool = False,
+) -> tuple[tuple[str, HostReader], ...]:
     """The built-in readers the user has CONSENTED to, in their fixed order.
 
     A reader whose host is not an enabled sync source is not invoked at all —
-    see ``HOST_READER_SOURCE_GATE``. ``sources`` is the resolved
-    ``get_sources(config)`` list, the same input ``_enabled_claude_paths``
-    reads, so enabling/disabling a host source moves both walks together.
+    see ``HOST_READER_SOURCE_GATE``. Grok is not a sync source: it is included
+    only when ``grok_consented`` is true, bound to ``consented=True``.
 
     Module-qualified lookups on purpose (CLAUDE.md's dead-alias rule in
     reverse): a from-import would bind this module's own global, so a test
     patching ``host_usage.read_codex_usage`` would never reach it.
     """
     enabled = {s.get("name") for s in sources if isinstance(s.get("name"), str)}
-    built_in: tuple[tuple[str, HostReader], ...] = (
-        ("codex", host_usage.read_codex_usage),
-        ("grok", host_usage.read_grok_usage),
-        ("opencode", host_usage.read_opencode_usage),
-    )
-    return tuple(
-        (name, read)
-        for name, read in built_in
-        if HOST_READER_SOURCE_GATE.get(name) is None or HOST_READER_SOURCE_GATE[name] in enabled
-    )
+    chosen: list[tuple[str, HostReader]] = []
+    if HOST_READER_SOURCE_GATE["codex"] in enabled:
+        chosen.append(("codex", host_usage.read_codex_usage))
+    if grok_consented:
+
+        def _read_grok(*, deadline: float) -> host_usage.HostUsageResult:
+            return host_usage.read_grok_usage(deadline=deadline, consented=True)
+
+        chosen.append(("grok", _read_grok))
+    if HOST_READER_SOURCE_GATE["opencode"] in enabled:
+        chosen.append(("opencode", host_usage.read_opencode_usage))
+    return tuple(chosen)
 
 
 def _capture_host_usage(
@@ -284,7 +295,7 @@ def _capture_host_usage(
     contributed: list[str] = []
     for name, read in readers:
         if now() >= deadline:
-            return HostUsageCapture(None, name, "deadline")
+            return HostUsageCapture(None, name, "deadline", invoked=False)
         try:
             result = read(deadline=deadline)
         except Exception as e:
@@ -317,7 +328,7 @@ def _capture_host_usage(
     return HostUsageCapture(merged, token_sources=tuple(contributed))
 
 
-def _warm_host_cache_with_notice() -> bool:
+def _warm_host_cache_with_notice(reader: str = "codex") -> bool:
     """Telegraph and run the one-off host-cache warm. Never raises.
 
     Returns whether the warm actually COMPLETED. That return value is the
@@ -338,7 +349,7 @@ def _warm_host_cache_with_notice() -> bool:
         f"{host_usage.DEFAULT_READ_BUDGET_S:.0f}s)...\n"
     )
     try:
-        return host_usage.warm_host_cache_inline().complete
+        return host_usage.warm_host_cache_inline(reader=reader).complete
     except Exception as e:
         sys.stderr.write(
             f"mm: notice: host usage cache warm failed: {type(e).__name__}: {safe_str(e)}\n"
@@ -373,7 +384,7 @@ def _capture_event_snapshots(
     host_readers: Sequence[tuple[str, HostReader]],
     root_discovery_budget_ms: int | None = None,
     host_budget_ms: int | None = None,
-    warm_host_cache: Callable[[], bool] | None = None,
+    warm_host_cache: Callable[[str], bool] | None = None,
 ) -> CaptureResult:
     """Capture device-stamped git, session, and host snapshot rows without writing.
 
@@ -464,7 +475,7 @@ def _capture_event_snapshots(
     if (
         warm_host_cache is not None
         and host_capture.reason == "deadline"
-        and host_capture.reader == WARMABLE_HOST_READER
+        and host_capture.reader in WARMABLE_HOST_READERS
     ):
         # Warm-and-retry, and ONLY after a bounded attempt has already proven
         # the cache is too cold to fit. Gating on the failure instead of on a
@@ -473,20 +484,28 @@ def _capture_event_snapshots(
         # has no host data — that machine's first attempt completes, so it
         # never warms. `deadline` is also the only reason a warm can fix.
         #
-        # The reader gate matters as much as the reason: `warm_host_cache_inline`
-        # warms CODEX ONLY. A `deadline` charged to any other reader cannot be
-        # helped by it, so without this the push would pay bounded-attempt +
-        # up to 5s warm + bounded-retry (~6s worst case) on EVERY interactive
-        # push, forever, and still publish nothing.
-        #
         # Retry ONLY if the warm finished. A corpus large enough to outgrow the
-        # warm's own budget keeps reporting (deadline, codex) forever, so both
+        # warm's own budget keeps reporting (deadline, reader) forever, so both
         # halves of the gate above keep passing and the reader gate alone does
         # not bound the repeat cost — the warm's own outcome does.
-        if warm_host_cache():
+        if warm_host_cache(host_capture.reader):
             host_capture = _capture_host_usage(
                 host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
             )
+    if (
+        host_capture.hosts is None
+        and host_capture.reader == "grok"
+        and host_capture.invoked
+        and host_capture.reason in _GROK_PRE_SUCCESS_TRANSIENTS
+        and not host_usage.grok_completed_once()
+    ):
+        # First-success carve-out: a cold Grok miss must not take Codex
+        # hostage. Remap AFTER warm so a deadline can still trigger a Grok
+        # warm. Pre-invoke expiry (`invoked=False`) stays a sweep veto.
+        remaining = tuple((name, read) for name, read in host_readers if name != "grok")
+        host_capture = _capture_host_usage(
+            remaining, deadline=time.monotonic() + host_budget_ms / 1000.0
+        )
     host_rows: list[dict] = []
     if host_capture.hosts is not None:
         host_rows.append(
@@ -593,7 +612,9 @@ def _run_events_tail(
             # scan now keeps its per-file progress.
             warm_host_cache=None if quiet else _warm_host_cache_with_notice,
             prepare_token_cache=prepare_tail_token_cache,
-            host_readers=_default_host_readers(sources),
+            host_readers=_default_host_readers(
+                sources, grok_consented=grok_host_usage_enabled(config)
+            ),
         )
 
         source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
@@ -732,7 +753,9 @@ def _run_events_backfill(
             # hot cache, exactly as it does for tokens.
             warm_host_cache=_warm_host_cache_with_notice,
             prepare_token_cache=prepare_backfill_token_cache,
-            host_readers=_default_host_readers(sources),
+            host_readers=_default_host_readers(
+                sources, grok_consented=grok_host_usage_enabled(config)
+            ),
         )
 
         rows_to_write = [*capture.git_rows, *capture.session_rows, *capture.host_rows]

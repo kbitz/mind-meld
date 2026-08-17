@@ -1232,6 +1232,11 @@ def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, m
 
     iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
     token_usage.warm_token_cache_inline([claude_root])
+    from mind_meld.config import CONFIG_PATH, load_config, save_config
+
+    cfg = load_config(CONFIG_PATH)
+    cfg["retro"] = {"grok_host_usage": True}
+    save_config(cfg, CONFIG_PATH)
     monkeypatch.setattr(
         _mm_host_usage,
         "read_grok_usage",

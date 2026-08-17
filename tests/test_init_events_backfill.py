@@ -275,7 +275,7 @@ class TestBackfillHostSnapshot:
         monkeypatch.setattr(_mm_events, "walk_session_metadata", lambda *a, **kw: [])
 
         def reader(name, result):
-            def read(*, deadline):
+            def read(*, deadline, consented=False):
                 if calls is not None:
                     calls.append(name)
                 return result
@@ -343,7 +343,11 @@ class TestBackfillHostSnapshot:
             grok=_mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
         )
 
-        events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
+        events_tail._run_events_backfill(
+            {"sync": {"sources": sources}, "retro": {"grok_host_usage": True}},
+            sources,
+            "dev-a",
+        )
 
         rows = _read_events(sorted((events_root / "events").glob("*.jsonl"))[0])
         assert [r["type"] for r in rows] == ["git-snapshot"]

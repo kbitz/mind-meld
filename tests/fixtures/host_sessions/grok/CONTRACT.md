@@ -1,21 +1,25 @@
-# Grok usage-source contract (census 2026-08-16)
+# Grok usage-source contract (census 2026-08-17)
 
-Grok's documented persisted source is
-`~/.grok/sessions/<encoded-workspace>/<session-id>/updates.jsonl`. It is the
-authoritative conversation and tool-call stream. It is not an allowlisted
-usage source: reading it would deserialize prompts, responses, tool inputs, or
-tool outputs.
+Grok 1.0.4 persists sessions at `~/.grok/sessions/<encoded-cwd>/<session-id>/`.
+`updates.jsonl` is the authoritative update stream. A completed turn is a
+terminal metadata record:
 
-The documented headless `end` record has usage fields, but it is stdout
-protocol output rather than a persisted metadata ledger. It also does not
-carry enough stable model/timestamp information for the session reader to
-attribute mixed-model usage safely. `signals.json` contains context-window
-signals, not a billable per-turn accounting ledger; `logs/unified.jsonl` is an
-internal log and remains forbidden. The adapter therefore returns the stable
-`unsupported` diagnostic whenever the persisted session root exists, and a
-completed empty result only when the root is absent.
+```text
+timestamp (timezone-aware, unix seconds or ISO-8601)
+params.update.sessionUpdate == "turn_completed"
+params.update.prompt_id
+params.update.stop_reason
+params.update.usage.{input,output,reasoning,cachedRead,cacheCreation}Tokens
+params.update.usage.modelUsage.<model-id>  (same counters)
+```
 
-Re-census only when Grok publishes a separately persisted, metadata-only,
-versioned ledger with terminal status, UTC completion timestamp, model ID, and
-the four required counters. Fixture provenance: this fixture contains no real
-session content, identifiers, prompts, responses, tool data, or credentials.
+The terminal record contains none of `content`, `rawInput`, or `rawOutput`.
+Those appear on other update shapes and are ignored. `chat_history.jsonl`,
+`signals.json`, `summary.json`, and logs remain forbidden.
+
+Each accepted record is a per-prompt total, not a session-cumulative
+restatement. `reasoningTokens` is a bounded subset of `outputTokens` and is
+never added a second time.
+
+Fixture provenance: this fixture contains no real session content,
+identifiers, prompts, responses, tool data, or credentials.
