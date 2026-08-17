@@ -8,202 +8,94 @@ State-organized execution plan: **In Progress** / **Current Plan** / **Future** 
 
 ## In Progress
 
-(none)
+#### Group 18: Finish the non-Claude host-usage foundation
+
+The host reader, model-family card baseline, root budgets, and CLI safety work
+have landed. Grok is the one remaining collector: its v1 local terminal ledger
+now has a verified no-daemon path. First prove the strict local reader, then
+wire its opt-in capture to the already-shipped snapshot writer.
+
+##### Track 18A: Finish the post-decomposition CLI safety sweep ✓ Shipped (v0.12.26)
+
+##### Track 18B: Centralize conflict diff rendering and choice normalization ✓ Shipped (v0.12.31)
+
+##### Track 18C: Budget root discovery and define no-op heartbeat behavior ✓ Shipped (v0.12.28)
+
+##### Track 18E: Render model-family rows from existing data ✓ Shipped (v0.12.29)
+
+##### Track 18D: Read Grok Build's v1 terminal usage ledger
+_3 tasks . ~260 LOC . high risk . 4 files_
+_touches: src/mind_meld/host_usage.py, docs/invariants/events-retro.md, tests/test_host_usage.py, tests/fixtures/host_sessions/grok/_
+_session: fresh · effort: high · attach: @src/mind_meld/host_usage.py, @tests/test_host_usage.py, @docs/designs/grok-build-usage-reader.md · verify: pytest tests/test_host_usage.py -q_
+- **Prove the terminal-record semantics in a sanitized fixture** — establish per-prompt accounting and the non-double-counted reasoning mapping before accepting the format. _fixture + tests, ~55 lines._ (M)
+- **Parse and cache only strict completed-turn metadata** — read bounded `updates.jsonl` terminal ledgers, validate counters/model/timestamp, and persist opaque resumable state only. _host_usage.py + tests, ~155 lines._ (L)
+- **Pin failure, replay, and privacy behavior** — reject uncertainty, content-bearing shapes, changing files, duplicate conflicts, and cache leaks. _host_usage.py + tests/docs, ~50 lines._ (M)
 
 ---
 
 ## Current Plan
-
-The next batch begins from the v0.12.21 six-module `cli.py` extraction. Groups are launch batches emitted by `roadmap-pack`; document order is priority, while the Execution Map is the launch gate.
-
-#### Group 17: Stabilize post-extraction seams
-
-_Depends on: none_
-
-##### Track 17A: Complete the three-agent skill installer
-_4 tasks . ~140 LOC . medium risk . 3 files_
-_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py_
-_out: 18A_
-_read-first: docs/invariants/events-retro.md_
-_produces: One target registry and truthful per-agent installation results._
-- **Table-drive agent targets** — make one target record own path, markers, and display name. _skill_link.py, ~50 lines._ (S)
-- **Align repair gates with installation** — use the installed-agent predicate in every gate. _skill_link.py, ~25 lines._ (S)
-- **Report partial installs honestly** — add the missing failure bucket and non-zero command exit. _skill_link.py, cli.py, ~35 lines._ (S)
-- **Pin composition and notices** — cover gate/installer behavior and target-specific failures. _tests, ~30 lines._ (S)
-
-##### Track 17B: Extract the shared event-capture path
-_2 tasks . ~100 LOC . medium risk . 3 files_
-_touches: src/mind_meld/events_tail.py, tests/test_events_budget_scope.py, tests/test_init_events_backfill.py_
-_out: 18C_
-_read-first: docs/invariants/events-retro.md_
-_produces: One capture seam shared by push-tail and init-backfill._
-- **Extract one capture primitive** — share gates, deadline setup, and snapshot assembly between tail and backfill. _events_tail.py, ~80 lines._ (M)
-- **Remove duplicated token-cache looping** — preserve cache-lock semantics with one loop shape. _events_tail.py, ~20 lines._ (S)
-
-##### Track 17C: Build the host-usage cache and Codex walker
-_3 tasks . ~170 LOC . high risk . 3 files_
-_touches: src/mind_meld/host_usage.py, tests/test_host_usage.py, tests/fixtures/host_sessions/_
-_out: 18D, 18E_
-_read-first: docs/invariants/events-retro.md_
-_produces: An isolated, incremental Codex usage reader and the canonical host-family classifier._
-- **Define host families and buckets** — make `host_usage` the only classifier authority. _host_usage.py, ~40 lines._ (S)
-- **Read Codex cumulative session totals** — use the final `token_count` event per rollout. _host_usage.py + fixture, ~80 lines._ (M)
-- **Store incremental state separately** — isolate host-token cache from Claude session-token cache. _host_usage.py + tests, ~50 lines._ (S)
-
-##### Track 17E: Add PR identity to the retro aggregate
-_2 tasks . ~55 LOC . low risk . 2 files_
-_touches: src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_retro_fleet_aggregator.py_
-_out: 18E_
-_read-first: docs/invariants/events-retro.md_
-_produces: Deduplicated pull-request totals in the aggregate and snapshot metrics._
-- **Extract PR numbers from commit subjects** — support the GitHub forms used by the repository. _aggregator.py, ~30 lines._ (S)
-- **Persist aggregate PR metrics** — add compatible snapshot fields and pins. _aggregator.py + tests, ~25 lines._ (S)
-
-#### Group 18: Use the new seams ∥ first model-card slice
-
-_Depends on: Group 17_
-
-##### Track 18A: Finish the post-decomposition CLI safety sweep
-_4 tasks . ~220 LOC . medium risk . 5 files_
-_blocked-by: Track 17A_
-_touches: src/mind_meld/cli.py, src/mind_meld/events.py, src/mind_meld/config.py, tests/test_safe_str.py, tests/test_silent_failure_contract.py_
-_out: 19A_
-_read-first: CLAUDE.md, docs/invariants/events-retro.md_
-_produces: Sanitized peer output and shared auto-command control flow._
-- **Sanitize remaining peer-controlled output** — close CLI, events, and config print sites with escape-injection pins. _src + tests, ~45 lines._ (S)
-- **Unify auto-command setup and tails** — remove duplicated setup and exception-tail control flow. _cli.py, ~90 lines._ (S)
-- **Remove remaining function-local reimports** — retain only proven cycle boundaries. _cli.py, ~40 lines._ (S)
-- **Collapse duplicate source walks and race handling** — preserve substantive-change and crypto-race contracts. _cli.py + tests, ~45 lines._ (S)
-
-##### Track 18C: Budget root discovery and define no-op heartbeat behavior
-_2 tasks . ~85 LOC . medium risk . 3 files_
-_blocked-by: Track 17B_
-_touches: src/mind_meld/events_tail.py, tests/test_events_budget_scope.py, tests/test_events.py_
-_out: 19A_
-_read-first: docs/invariants/events-retro.md_
-_produces: A call-scoped root-discovery cache with explicit no-op event policy._
-- **Memoize and budget git-root discovery** — keep the cache call-scoped and report discovery degradation. _events_tail.py, ~55 lines._ (S)
-- **Settle the substantive-change heartbeat** — make the no-op daily-event policy explicit and test it. _events_tail.py + tests, ~30 lines._ (S)
-
-##### Track 18D: Read Grok Build and OpenCode usage
-_2 tasks . ~130 LOC . high risk . 3 files_
-_blocked-by: Track 17C_
-_touches: src/mind_meld/host_usage.py, tests/test_host_usage.py, tests/fixtures/host_sessions/_
-_out: 19A_
-_read-first: docs/invariants/events-retro.md_
-_produces: Fault-tolerant Grok and OpenCode usage adapters._
-- **Add the Grok completed-turn reader** — ignore context-window totals and unfinished sessions. _host_usage.py + fixture, ~70 lines._ (M)
-- **Add the OpenCode read-only reader** — tolerate missing or busy databases. _host_usage.py + tests, ~60 lines._ (S)
-
-##### Track 18E: Render model-family rows from existing data
-_2 tasks . ~115 LOC . medium risk . 3 files_
-_blocked-by: Track 17C, Track 17E_
-_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
-_out: 21A_
-_read-first: docs/invariants/events-retro.md_
-_produces: A width-pinned MODELS card baseline with token and PR totals._
-- **Use the host-usage classifier in the aggregator** — avoid a second model-family authority. _aggregator.py, ~30 lines._ (S)
-- **Render the MODELS card baseline** — update output and skill copy within the width contract. _aggregator.py + skill + tests, ~85 lines._ (M)
-
-#### Group 19: Host snapshot writer ∥ resolve-flow hygiene
+#### Group 21: Opt in and publish Grok usage snapshots
 
 _Depends on: Group 18_
 
-##### Track 19A: Emit host-usage snapshots from the event tail
-_3 tasks . ~150 LOC . medium risk . 4 files_
-_blocked-by: Track 18A, Track 18C, Track 18D_
-_touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, tests/test_events.py, tests/test_init_events_backfill.py_
-_out: 20A_
-_read-first: docs/invariants/events-retro.md_
-_produces: Additive host-usage snapshot rows from tail and init-backfill._
-- **Define the additive snapshot schema** — include token sources, hosts, and canonical active days. _events.py, ~45 lines._ (S)
-- **Write tail and backfill snapshots** — preserve cold-cache and dry-run omission semantics. _events_tail.py, ~75 lines._ (M)
-- **Pin active-day attribution inputs** — keep cwd-only sessions token-visible but unattributable. _events.py + tests, ~30 lines._ (S)
+##### Track 21A: Gate and publish trusted Grok usage
+_3 tasks . ~190 LOC . high risk . 7 files_
+_touches: src/mind_meld/config.py, src/mind_meld/cli.py, src/mind_meld/events_tail.py, README.md, tests/test_config.py, tests/test_source_toggle.py, tests/test_host_usage_snapshot.py_
+_session: fresh · effort: high · attach: @src/mind_meld/events_tail.py, @tests/test_host_usage_snapshot.py, @docs/designs/grok-build-usage-reader.md · verify: pytest tests/test_config.py tests/test_source_toggle.py tests/test_host_usage_snapshot.py -q_
+- **Add explicit local Grok consent** — validate `[retro.host_usage].grok`, expose narrow enable/disable commands, and show the setting in status without creating a Grok sync source. _config.py, cli.py, tests, ~80 lines._ (M)
+- **Gate the reader and warm it safely** — never open Grok data without consent, allow attended cache warm/retry only, and leave autopush bounded. _events_tail.py + tests, ~70 lines._ (M)
+- **Document the live boundary** — replace the old no-ledger caveat with the v1 opt-in and all-or-nothing snapshot behavior. _README.md + tests, ~40 lines._ (S)
 
-#### Group 20: Host snapshot contract
+#### Group 22: Fleet host-snapshot aggregation
 
-_Depends on: Group 19_
+_Depends on: Group 20, Group 21_
 
-##### Track 20A: Lock the host snapshot wire contract
-_2 tasks . ~70 LOC . low risk . 3 files_
-_blocked-by: Track 19A_
-_touches: tests/test_events.py, tests/test_init_events_backfill.py, docs/invariants/events-retro.md_
-_out: 21A_
-_read-first: docs/invariants/events-retro.md_
-_produces: A documented D4 contract that distinguishes omitted from empty snapshots._
-- **Pin omission versus empty snapshots** — prevent a cold push from erasing a warm result. _tests, ~45 lines._ (S)
-- **Document the wire invariants** — record source-specific counting and budget behavior. _docs, ~25 lines._ (S)
-
-#### Group 21: Fleet host aggregation
-
-_Depends on: Group 18, Group 20_
-
-##### Track 21A: Merge host snapshots into the retro result
-_3 tasks . ~95 LOC . medium risk . 3 files_
-_blocked-by: Track 18E, Track 20A_
-_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
-_out: 22A_
-_read-first: docs/invariants/events-retro.md_
-_produces: Latest-present host results, Claude-only pricing, and honest fleet-gap notes._
-- **Select the latest present host snapshot** — avoid warm-then-cold erasure. _aggregator.py, ~40 lines._ (S)
-- **Keep Claude pricing isolated** — maintain a sibling host-token map. _aggregator.py, ~30 lines._ (S)
-- **Explain mixed-fleet gaps** — distinguish no snapshot from an explicit empty one. _aggregator.py + skill + tests, ~25 lines._ (S)
-
-#### Group 22: Model-card PR attribution
-
-_Depends on: Group 21_
-
-##### Track 22A: Attribute PRs and complete the model card
-_2 tasks . ~90 LOC . medium risk . 3 files_
-_blocked-by: Track 21A_
+##### Track 22A: Merge accepted host snapshots into the retro result
+_3 tasks . ~150 LOC . medium risk . 3 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, docs/invariants/events-retro.md, tests/test_retro_fleet_aggregator.py_
-_read-first: docs/invariants/events-retro.md_
-_produces: Model-card PR attribution with explicit unknown and mixed outcomes._
-- **Attribute each PR by same-day host activity** — render unknown and mixed outcomes honestly. _aggregator.py, ~50 lines._ (S)
-- **Finish card rows and metrics** — preserve width and additive snapshot compatibility. _aggregator.py + tests + docs, ~40 lines._ (S)
+_session: fresh · effort: high · attach: @src/mind_meld/skills/retro_fleet/aggregator.py, @tests/test_retro_fleet_aggregator.py, @docs/invariants/events-retro.md · verify: pytest tests/test_retro_fleet_aggregator.py -q_
+- **Accept only whole, valid device views** — validate the host-snapshot wire contract and select the latest complete row per device without per-source carry-forward. _aggregator.py + tests, ~65 lines._ (M)
+- **Slice and merge host usage by window** — retain host-family UTC buckets independently of Claude session tokens, then merge selected device views. _aggregator.py + tests, ~50 lines._ (M)
+- **Carry coverage forward honestly** — expose consulted sources and snapshot `as_of` state so absence, opt-out, and stale observations never become zero. _aggregator.py + invariant/tests, ~35 lines._ (S)
+
+#### Group 23: Coverage-aware host usage in the model card
+
+##### Track 23A: Render Claude and host model families without false precision
+_3 tasks . ~110 LOC . medium risk . 3 files_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
+_session: fresh · effort: medium · attach: @src/mind_meld/skills/retro_fleet/aggregator.py, @src/mind_meld/skills/retro_fleet/SKILL.md, @tests/test_retro_fleet_aggregator.py · verify: pytest tests/test_retro_fleet_aggregator.py -q_
+- **Compose a display-only family view** — show Claude session totals beside Codex/Grok/other host totals without feeding host values into Claude API cost estimation. _aggregator.py + tests, ~45 lines._ (S)
+- **Name coverage in the card and narrative** — replace the Claude-only claim with concise snapshot coverage, missing-device, opt-out, and freshness context. _aggregator.py + SKILL.md + tests, ~45 lines._ (S)
+- **Preserve the card contract** — keep width, deterministic ordering, and all existing Claude-only fallback behavior pinned. _aggregator.py + tests, ~20 lines._ (S)
 
 ### Execution Map
 
 A Group may launch when every Group in its `←` set has landed; document order is priority, not a gate.
 
 ```
-- Group 17 ← {}
 - Group 18 ← {17}
-- Group 19 ← {18}
-- Group 20 ← {19}
-- Group 21 ← {18, 20}
-- Group 22 ← {21}
+- Group 21 ← {18}
+- Group 22 ← {20, 21}
+- Group 23 ← {22}
 ```
 
 Track detail per group:
 
 ```
-Group 17: Stabilize post-extraction seams
-  +-- Track 17A ........... ~M . 4 tasks
-  +-- Track 17B ........... ~M . 2 tasks
-  +-- Track 17C ........... ~M . 3 tasks
-  +-- Track 17E ........... ~S . 2 tasks
+Group 18: Finish the non-Claude host-usage foundation (in progress)
+  +-- Track 18D ........... ~L . 3 tasks
 
-Group 18: Use the new seams ∥ first model-card slice
-  +-- Track 18A ........... ~M . 4 tasks
-  +-- Track 18C ........... ~M . 2 tasks
-  +-- Track 18D ........... ~M . 2 tasks
-  +-- Track 18E ........... ~M . 2 tasks
-
-Group 19: Host snapshot writer ∥ resolve-flow hygiene
-  +-- Track 19A ........... ~M . 3 tasks
-
-Group 20: Host snapshot contract
-  +-- Track 20A ........... ~S . 2 tasks
-
-Group 21: Fleet host aggregation
+Group 21: Opt in and publish Grok usage snapshots
   +-- Track 21A ........... ~M . 3 tasks
 
-Group 22: Model-card PR attribution
-  +-- Track 22A ........... ~M . 2 tasks
+Group 22: Fleet host-snapshot aggregation
+  +-- Track 22A ........... ~M . 3 tasks
+
+Group 23: Coverage-aware host usage in the model card
+  +-- Track 23A ........... ~M . 3 tasks
 ```
 
-**Total: 0 phases . 6 groups . 12 tracks remaining.**
+**Total: 0 phases . 4 groups . 4 tracks remaining.**
 
 ---
 
@@ -212,7 +104,7 @@ Group 22: Model-card PR attribution
 - **cli.py micro-cleanups** — retain only the unresolved `_resolve_mm_events_dir` and status-enum follow-up; Track 18A owns the import and `_empty_outcomes` portions.
 - **`_resolve_interactive_loop` decomposition** — collector removal fired its old trigger, but the 630-line function still needs a dedicated discovery/design pass before code commitment.
 - **Two-machine test bootstrap duplication** — consolidate the repeated setup only when adjacent test work touches both modules.
-- **Cold-cache budget leftovers** — retain identity-refresh and per-jsonl deadline concerns; Track 18C owns root discovery.
+- **Cold-cache budget leftovers** — revisit identity-refresh and per-jsonl deadline concerns only with fresh measurements; root discovery is shipped.
 - **identity.py micro-DRY and token-cache pins** — keep as low-priority hygiene.
 - **v0.11.17 doc-drift cleanup** — re-evaluate only with an invariant-doc pass.
 - **Incremental-resume accepted divergences** — act only on evidence from a corpus census.
@@ -246,6 +138,10 @@ Group 22: Model-card PR attribution
 - **CT-4 enforcement and short-write handling** — storage-boundary hardening outside this batch.
 - **Residual Track 16A coverage gaps** — three defensive or theoretical cases from the ship audit. _Source: [ship] coverage audit 2026-08-15._
 - **Pre-0.11 PROGRESS backfill** — nine historical release rows; the parity gate already prevents recurrence. _Source: [ship] 2026-08-15._
+- **Host-usage cache GC reaper** — extend `mm gc` and its dry-run path to remove stale Codex, Grok, and OpenCode cache entries without weakening complete-pass pruning. _Source: unprocessed host-cache follow-up 2026-08-17._
+- **Active host-session degradation policy** — consider skipping a stale or partial final rollout when its next completed record restates usage; preserve all-or-nothing publication until that proof exists. _Source: unprocessed host-usage follow-up 2026-08-17._
+- **Warm host-scan scaling** — revisit fingerprint-every-file cost with a measured corpus before the 250 ms autopush budget becomes user-visible. _Source: unprocessed host-cache follow-up 2026-08-17._
+- **Machine-readable GC outcomes** — expose orphan-blob outcomes only when an automation or audit consumer needs them; Track 17D's reaper scope stays as shipped. _Source: unprocessed GC follow-up 2026-08-17._
 
 ## Shipped
 
@@ -366,18 +262,19 @@ Child symlinks are now local routing rather than sync content: generic walkers o
 
 - Track 16A — _shipped (v0.12.21): remove the unused collector, extract six cohesive modules, tighten isolation and routing gates, and update release documentation._
 
-### Track 18B: Centralize conflict diff rendering and choice normalization ✓ Shipped (v0.12.31)
+### Group 17: Post-extraction and host-reader foundations ✓ Shipped (v0.12.22–v0.12.25)
 
-- Track 18B — _shipped (v0.12.31): one capped terminal-safe renderer and one compatibility-choice normalization path, with the existing 60- and 80-entry prompt windows preserved. 3 tasks shipped._
+- Track 17A — _shipped (v0.12.24): descriptor-driven Claude/Codex/OpenCode skill installation with truthful partial results._
+- Track 17B — _shipped (v0.12.25): one private event-capture path shared by push and init while retaining their separate policies, writes, and budgets._
+- Track 17C — _shipped (v0.12.24): canonical host-family classification, isolated incremental Codex usage cache, and bounded local reader._
+- Track 17D — _shipped (v0.12.23): retention reapers plan before mutation, including byte/metadata-preserving dry-run coverage._
+- Track 17E — _shipped (v0.12.22): distinct repository-qualified GitHub PR identity in retro aggregation._
 
-### Track 19B: Finish small resolveflow cleanup after the rendering seam ✓ Shipped (v0.12.32)
+### Group 19: Host snapshot writer and resolver hygiene ✓ Shipped (v0.12.32–v0.12.33)
 
-- Track 19B — _shipped (v0.12.32): hoisted the resolver's residual manifest imports, flattened the already-continued merge branch, corrected the skip-default safety contract, and pinned continuation after a failed first merge write._
+- Track 19A — _shipped (v0.12.33): additive, all-or-nothing host-usage snapshots from the event tail and init backfill._
+- Track 19B — _shipped (v0.12.32): resolver continuation and skip-default cleanup following the rendering seam._
 
-### Track 17B: Shared event capture ✓ Shipped (v0.12.25)
+### Group 20: Host snapshot wire contract ✓ Shipped (unreleased)
 
-- Track 17B — _shipped (v0.12.25): extracted one private event-snapshot path for push and init while retaining their separate policies, writes, and budgets._
-
-### Track 17D: Honest GC reaper dry-runs ✓ Shipped (v0.12.23)
-
-- Track 17D — _shipped (v0.12.23): make every retention reaper plan before mutation, make token-cache preview read-only under a shared lock, report candidates and failures truthfully, and pin dry-run byte/metadata preservation plus partial-delete behavior._
+- Track 20A — _shipped: documented and pinned the complete, coverage-aware snapshot contract that distinguishes omission from an explicit empty observation._
