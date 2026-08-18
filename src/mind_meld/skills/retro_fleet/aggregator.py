@@ -36,6 +36,10 @@ Aggregation rules:
   present but empty (``{}``) are NOT flagged — empty signals "no Skill
   usage in window", a content signal, not a version signal (D4 from
   /plan-eng-review 2026-05-06; semantic widened 2026-05-10).
+* Host inventory (Track 22A): latest complete ``host-usage-snapshot`` per
+  device as a last-known-good view. Day maps stay whole (lifetime last-
+  touch totals). They are not window-sliced and not merged into a fleet
+  spend total. See ``aggregate_host_usage``.
 * mm-push: count by (device).
 * Phantom-event filter: when ``mm devices --format=json`` succeeds, intersect
   event-producing IDs with the registered fleet so de-registered or test-
@@ -64,9 +68,10 @@ import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from heapq import nsmallest
 from pathlib import Path
+from typing import Literal, get_args
 
 from mind_meld import events as mm_events
 from mind_meld import host_usage, identity, safety, token_usage
@@ -339,6 +344,81 @@ class PriorRetroDelta:
     streak_days: int = 0
 
 
+_HOST_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+"""Canonical UTC day key. ``date.fromisoformat`` alone accepts week dates
+and datetimes; 20A requires exact ``YYYY-MM-DD``."""
+
+_HOST_FAMILIES: frozenset[str] = frozenset(get_args(host_usage.HostFamily))
+_HOST_FUTURE_SKEW = timedelta(hours=24)
+"""``as_of`` more than this past ``until`` is rejected, not selected."""
+
+HostRejectReason = Literal[
+    "unsupported_schema",
+    "naive_timestamp",
+    "invalid_token_sources",
+    "invalid_day",
+    "invalid_counter",
+    "active_days_mismatch",
+    "not_object",
+    "future_timestamp",
+]
+
+
+@dataclass(frozen=True)
+class HostReject:
+    """Why one ``host-usage-snapshot`` line was not accepted.
+
+    ``device`` is empty when the device field itself was unusable.
+    Reasons are a closed vocabulary — never a peer-controlled string.
+    """
+
+    device: str
+    reason: HostRejectReason
+
+
+@dataclass
+class HostDeviceSnapshot:
+    """Last-known-good host inventory for one device.
+
+    ``lifetime_by_family`` is the winning row's ``hosts`` map, whole.
+    It is inventory as of ``as_of``, not tokens spent in the retro window.
+    """
+
+    device: str
+    as_of: datetime
+    consulted: tuple[str, ...]
+    lifetime_by_family: dict[str, dict[str, dict[str, int]]]
+    stale: bool
+    future_dated: bool
+
+    @property
+    def current(self) -> bool:
+        return not self.stale and not self.future_dated
+
+
+@dataclass
+class HostUsageInventory:
+    """Per-device host-usage views. Not a fleet spend total."""
+
+    by_device: dict[str, HostDeviceSnapshot] = field(default_factory=dict)
+    devices_without_accepted_row: frozenset[str] = field(default_factory=frozenset)
+    rejected: tuple[HostReject, ...] = ()
+
+    @property
+    def rejected_rows(self) -> int:
+        return len(self.rejected)
+
+
+@dataclass(frozen=True)
+class _AcceptedHostRow:
+    device: str
+    as_of: datetime
+    consulted: tuple[str, ...]
+    lifetime_by_family: dict[str, dict[str, dict[str, int]]]
+    active_days: tuple[str, ...]
+    tie_key: str
+
+
 @dataclass
 class RetroData:
     window_days: int
@@ -363,6 +443,7 @@ class RetroData:
     # ``main()`` from disk; unset (has_prior=False) for the first retro of
     # a given window or when the snapshot dir doesn't exist yet.
     prior: PriorRetroDelta = field(default_factory=PriorRetroDelta)
+    host_inventory: HostUsageInventory = field(default_factory=HostUsageInventory)
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +864,248 @@ def _safe_int(x: object) -> int:
         except ValueError:
             return 0
     return 0
+
+
+def _host_counter_ok(value: object) -> bool:
+    """Same predicate as ``host_usage._is_valid_counter``. Local so the
+    aggregator does not treat a private reader helper as a public API.
+    Never route peer host fields through ``_safe_int`` — that clamps
+    ``True`` / ``"-1"`` into a legal view."""
+    return host_usage._is_valid_counter(value)
+
+
+def _parse_aware_ts(ts: object) -> datetime | None:
+    """Timezone-aware ISO-8601 only. Naive strings fail (unlike ``_parse_iso``)."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def _token_sources_subsequence(raw: object) -> list[str] | None:
+    if not isinstance(raw, list):
+        return None
+    universe = mm_events.HOST_USAGE_TOKEN_SOURCES
+    seen: set[str] = set()
+    ui = 0
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or item in seen:
+            return None
+        seen.add(item)
+        while ui < len(universe) and universe[ui] != item:
+            ui += 1
+        if ui >= len(universe):
+            return None
+        ui += 1
+        out.append(item)
+    return out
+
+
+def _canonical_day_key(key: object) -> str | None:
+    if not isinstance(key, str) or not _HOST_DAY_RE.fullmatch(key):
+        return None
+    try:
+        parsed = date.fromisoformat(key)
+    except ValueError:
+        return None
+    if parsed.isoformat() != key:
+        return None
+    return key
+
+
+def _copy_usage_bucket(bucket: object) -> dict[str, int] | None:
+    if not isinstance(bucket, dict):
+        return None
+    if set(bucket) != set(token_usage.TOKEN_FIELDS):
+        return None
+    out: dict[str, int] = {}
+    for field_name in token_usage.TOKEN_FIELDS:
+        value = bucket[field_name]
+        if not _host_counter_ok(value):
+            return None
+        out[field_name] = value
+    return out
+
+
+def _accept_hosts_payload(
+    raw: object,
+) -> tuple[dict[str, dict[str, dict[str, int]]], tuple[str, ...]] | HostRejectReason:
+    if not isinstance(raw, dict):
+        return "not_object"
+    if any(not isinstance(family, str) or family not in _HOST_FAMILIES for family in raw):
+        return "invalid_counter"
+    copied: dict[str, dict[str, dict[str, int]]] = {}
+    days: set[str] = set()
+    for family, day_map in raw.items():
+        if not isinstance(day_map, dict) or not day_map:
+            return "invalid_counter"
+        family_days: dict[str, dict[str, int]] = {}
+        for day_key, bucket in day_map.items():
+            day = _canonical_day_key(day_key)
+            if day is None:
+                return "invalid_day"
+            usage = _copy_usage_bucket(bucket)
+            if usage is None:
+                return "invalid_counter"
+            family_days[day] = usage
+            days.add(day)
+        copied[family] = family_days
+    if len(days) > token_usage.MAX_BY_DAY_DAYS:
+        return "invalid_day"
+    return copied, tuple(sorted(days))
+
+
+def _tie_break_key(
+    *,
+    as_of: datetime,
+    device: str,
+    consulted: tuple[str, ...],
+    hosts: dict[str, dict[str, dict[str, int]]],
+    active_days: tuple[str, ...],
+) -> str:
+    core = {
+        "active_days": list(active_days),
+        "device": device,
+        "hosts": hosts,
+        "token_sources": list(consulted),
+        "ts": as_of.isoformat(),
+        "type": "host-usage-snapshot",
+        "v": 2,
+    }
+    return json.dumps(core, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
+    """Validate one ``host-usage-snapshot`` row. Callers pre-filter on type."""
+    if not isinstance(ev, dict):
+        return HostReject(device="", reason="not_object")
+    device_raw = ev.get("device")
+    device = device_raw.strip() if isinstance(device_raw, str) else ""
+    v = ev.get("v")
+    if v != 2 or type(v) is not int:
+        return HostReject(device=device, reason="unsupported_schema")
+    if ev.get("type") != "host-usage-snapshot":
+        return HostReject(device=device, reason="not_object")
+    if not device:
+        return HostReject(device="", reason="not_object")
+    as_of = _parse_aware_ts(ev.get("ts"))
+    if as_of is None:
+        return HostReject(device=device, reason="naive_timestamp")
+    consulted_list = _token_sources_subsequence(ev.get("token_sources"))
+    if consulted_list is None:
+        return HostReject(device=device, reason="invalid_token_sources")
+    hosts_result = _accept_hosts_payload(ev.get("hosts"))
+    if isinstance(hosts_result, str):
+        return HostReject(device=device, reason=hosts_result)
+    hosts, day_union = hosts_result
+    if hosts and not consulted_list:
+        return HostReject(device=device, reason="invalid_token_sources")
+    active_raw = ev.get("active_days")
+    if not isinstance(active_raw, list) or active_raw != list(day_union):
+        return HostReject(device=device, reason="active_days_mismatch")
+    consulted = tuple(consulted_list)
+    return _AcceptedHostRow(
+        device=device,
+        as_of=as_of,
+        consulted=consulted,
+        lifetime_by_family=hosts,
+        active_days=day_union,
+        tie_key=_tie_break_key(
+            as_of=as_of,
+            device=device,
+            consulted=consulted,
+            hosts=hosts,
+            active_days=day_union,
+        ),
+    )
+
+
+def _row_replaces(candidate: _AcceptedHostRow, incumbent: _AcceptedHostRow) -> bool:
+    if candidate.as_of != incumbent.as_of:
+        return candidate.as_of > incumbent.as_of
+    return candidate.tie_key > incumbent.tie_key
+
+
+def aggregate_host_usage(
+    events: Iterable[dict],
+    *,
+    since: datetime,
+    until: datetime,
+    registered_ids: frozenset[str] | None,
+) -> HostUsageInventory:
+    """Latest complete host snapshot per device. No window-spend merge.
+
+    ``registered_ids is None`` keeps every accepted view.
+    ``registered_ids == frozenset()`` drops every view (registry is empty).
+    Do not write ``if registered_ids:``.
+    """
+    latest: dict[str, _AcceptedHostRow] = {}
+    rejected: list[HostReject] = []
+    for ev in events:
+        if ev.get("type") != "host-usage-snapshot":
+            continue
+        result = _accept_host_usage_snapshot(ev)
+        if isinstance(result, HostReject):
+            rejected.append(result)
+            continue
+        if result.as_of > until + _HOST_FUTURE_SKEW:
+            rejected.append(HostReject(device=result.device, reason="future_timestamp"))
+            continue
+        prior = latest.get(result.device)
+        if prior is None or _row_replaces(result, prior):
+            latest[result.device] = result
+
+    if registered_ids is None:
+        kept = latest
+        missing: frozenset[str] = frozenset()
+    else:
+        kept = {device: row for device, row in latest.items() if device in registered_ids}
+        missing = frozenset(d for d in registered_ids if d not in kept)
+
+    by_device: dict[str, HostDeviceSnapshot] = {}
+    for device, row in kept.items():
+        by_device[device] = HostDeviceSnapshot(
+            device=device,
+            as_of=row.as_of,
+            consulted=row.consulted,
+            lifetime_by_family={
+                family: {day: dict(bucket) for day, bucket in days.items()}
+                for family, days in row.lifetime_by_family.items()
+            },
+            stale=row.as_of < since,
+            future_dated=row.as_of > until,
+        )
+    return HostUsageInventory(
+        by_device=by_device,
+        devices_without_accepted_row=missing,
+        rejected=tuple(rejected),
+    )
+
+
+def _dump_host_inventory(inventory: HostUsageInventory) -> str:
+    payload = {
+        "by_device": {
+            device: {
+                "as_of": snap.as_of.isoformat(),
+                "consulted": list(snap.consulted),
+                "current": snap.current,
+                "future_dated": snap.future_dated,
+                "lifetime_by_family": snap.lifetime_by_family,
+                "stale": snap.stale,
+            }
+            for device, snap in sorted(inventory.by_device.items())
+        },
+        "devices_without_accepted_row": sorted(inventory.devices_without_accepted_row),
+        "rejected": [{"device": row.device, "reason": row.reason} for row in inventory.rejected],
+        "rejected_rows": inventory.rejected_rows,
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1265,16 +1588,25 @@ def aggregate(
     # back to the raw set only when the registry is unavailable so a
     # transient `mm devices` failure never zeros the retro.
     if devices_known is not None:
-        registered_ids = {
+        registered_ids = frozenset(
             d.get("device_id")
             for d in devices_known_list
             if isinstance(d, dict) and isinstance(d.get("device_id"), str)
-        }
+        )
         devices_in_events = raw_devices_in_events & registered_ids
         unregistered = len(raw_devices_in_events - registered_ids)
+        host_registered: frozenset[str] | None = registered_ids
     else:
         devices_in_events = raw_devices_in_events
         unregistered = 0
+        host_registered = None
+
+    host_inventory = aggregate_host_usage(
+        events,
+        since=since,
+        until=until,
+        registered_ids=host_registered,
+    )
 
     return RetroData(
         window_days=window_days,
@@ -1293,6 +1625,7 @@ def aggregate(
         skipped_per_source=dict(skip_counter),
         skipped_lines=sum(skip_counter.values()),
         window_exceeds_retention=window_days > EVENTS_RETENTION_DAYS,
+        host_inventory=host_inventory,
     )
 
 
@@ -2563,6 +2896,14 @@ def main(argv: list[str] | None = None) -> int:
             "Useful for the second pass (the first pass already saved)."
         ),
     )
+    parser.add_argument(
+        "--dump-host-usage",
+        action="store_true",
+        help=(
+            "Forensic JSON of accepted host inventory, missing devices, "
+            "and reject reasons. Skips the markdown retro and snapshot save."
+        ),
+    )
     args = parser.parse_args(argv)
 
     events_dir = _resolve_events_dir()
@@ -2587,6 +2928,10 @@ def main(argv: list[str] | None = None) -> int:
     # Persist a snapshot for next time. Skipped on the second pass so a
     # single retro session doesn't write twice (the first-pass save is
     # the canonical record for trend deltas).
+    if args.dump_host_usage:
+        sys.stdout.write(_dump_host_inventory(data.host_inventory))
+        return 0
+
     has_card_input = bool(args.theme) or bool(args.noteworthy) or bool(args.name)
     if not args.no_save and not has_card_input:
         _save_snapshot(data, retros_dir)

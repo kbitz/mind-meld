@@ -5700,6 +5700,12 @@ def retro_fleet_cmd(
             "Used by the skill on the second pass to avoid double-writes."
         ),
     ),
+    dump_host_usage: bool = typer.Option(
+        False,
+        "--dump-host-usage",
+        hidden=True,
+        help="Forensic JSON of accepted host inventory (Track 22A).",
+    ),
 ) -> None:
     """Render fleet retrospective markdown to stdout.
 
@@ -5738,6 +5744,8 @@ def retro_fleet_cmd(
         argv.extend(["--name", name])
     if no_save:
         argv.append("--no-save")
+    if dump_host_usage:
+        argv.append("--dump-host-usage")
     raise typer.Exit(code=_aggregator_main(argv))
 
 

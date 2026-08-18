@@ -4280,3 +4280,475 @@ class TestSnapshotPruning:
         weird.write_text("{}")
         aggregator._prune_old_snapshots(tmp_path)
         assert weird.exists()
+
+
+# ---------------------------------------------------------------------------
+# Track 22A — host-usage-snapshot consumer
+# ---------------------------------------------------------------------------
+
+
+def _usage(n: int = 1) -> dict:
+    return {"input": n, "cache_create": 0, "cache_read": 0, "output": 0}
+
+
+def _host_event(
+    device: str,
+    ts: str,
+    *,
+    token_sources: tuple[str, ...] = ("codex",),
+    hosts: dict | None = None,
+    extra: dict | None = None,
+) -> dict:
+    if hosts is None:
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+    days = sorted({day for family in hosts.values() for day in family})
+    ev = {
+        "v": 2,
+        "type": "host-usage-snapshot",
+        "ts": ts,
+        "device": device,
+        "token_sources": list(token_sources),
+        "hosts": hosts,
+        "active_days": days,
+    }
+    if extra:
+        ev.update(extra)
+    return ev
+
+
+def _accepted(ev: dict):
+    result = aggregator._accept_host_usage_snapshot(ev)
+    assert isinstance(result, aggregator._AcceptedHostRow), result
+    return result
+
+
+class TestHostSnapshotAcceptance:
+    TS = "2026-04-28T12:00:00+00:00"
+
+    def test_valid_complete_row_accepted(self):
+        row = _accepted(_host_event("dev-a", self.TS))
+        assert row.device == "dev-a"
+        assert row.consulted == ("codex",)
+        assert "2026-04-20" in row.lifetime_by_family["codex"]
+
+    def test_empty_hosts_and_sources_accepted(self):
+        ev = _host_event("dev-a", self.TS, token_sources=(), hosts={})
+        ev["active_days"] = []
+        row = _accepted(ev)
+        assert row.lifetime_by_family == {}
+        assert row.consulted == ()
+
+    def test_naive_ts_rejected(self):
+        ev = _host_event("dev-a", "2026-04-28T12:00:00")
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "naive_timestamp"
+
+    def test_token_sources_out_of_order_rejected(self):
+        ev = _host_event("dev-a", self.TS, token_sources=("grok", "codex"))
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_token_sources_duplicate_rejected(self):
+        ev = _host_event("dev-a", self.TS, token_sources=("codex", "codex"))
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_unknown_token_source_rejected(self):
+        ev = _host_event("dev-a", self.TS, token_sources=("windsurf",))
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_nonempty_hosts_empty_sources_rejected(self):
+        ev = _host_event("dev-a", self.TS, token_sources=())
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_unknown_family_rejected(self):
+        ev = _host_event("dev-a", self.TS, hosts={"windsurf": {"2026-04-20": _usage(1)}})
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_counter"
+
+    def test_invalid_days_rejected(self):
+        for day in ("2026-02-30", "20260815", "2026-W33-5", "2026-1-02"):
+            ev = _host_event("dev-a", self.TS, hosts={"codex": {day: _usage(1)}})
+            result = aggregator._accept_host_usage_snapshot(ev)
+            assert isinstance(result, aggregator.HostReject), day
+            assert result.reason == "invalid_day", day
+
+    def test_bool_token_field_rejected_not_clamped(self):
+        bucket = {"input": True, "cache_create": 0, "cache_read": 0, "output": 0}
+        ev = _host_event("dev-a", self.TS, hosts={"codex": {"2026-04-20": bucket}})
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_counter"
+
+    def test_max_counter_accepted_overflow_rejected(self):
+        ok = _host_event(
+            "dev-a",
+            self.TS,
+            hosts={"codex": {"2026-04-20": {**_usage(0), "input": 2**53}}},
+        )
+        assert isinstance(aggregator._accept_host_usage_snapshot(ok), aggregator._AcceptedHostRow)
+        bad = _host_event(
+            "dev-a",
+            self.TS,
+            hosts={"codex": {"2026-04-20": {**_usage(0), "input": 2**53 + 1}}},
+        )
+        result = aggregator._accept_host_usage_snapshot(bad)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_counter"
+
+    def test_zero_bucket_accepted(self):
+        ev = _host_event("dev-a", self.TS, hosts={"codex": {"2026-04-20": _usage(0)}})
+        assert isinstance(aggregator._accept_host_usage_snapshot(ev), aggregator._AcceptedHostRow)
+
+    def test_empty_family_map_rejected(self):
+        ev = _host_event("dev-a", self.TS, hosts={"codex": {}})
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_counter"
+
+    def test_float_schema_rejected(self):
+        ev = _host_event("dev-a", self.TS)
+        ev["v"] = 2.0
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "unsupported_schema"
+
+    def test_active_days_mismatch_rejected(self):
+        ev = _host_event("dev-a", self.TS)
+        ev["active_days"] = ["2026-04-21"]
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "active_days_mismatch"
+
+    def test_unknown_top_level_field_ignored(self):
+        ev = _host_event("dev-a", self.TS, extra={"note": "peer additive"})
+        assert isinstance(aggregator._accept_host_usage_snapshot(ev), aggregator._AcceptedHostRow)
+
+    def test_wrong_schema_rejected(self):
+        ev = _host_event("dev-a", self.TS)
+        ev["v"] = 1
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "unsupported_schema"
+
+    def test_host_counter_predicate_matches_reader(self):
+        from mind_meld import host_usage
+
+        samples = [0, 1, 2**53, 2**53 + 1, -1, True, False, 1.0, "10", None]
+        for sample in samples:
+            assert aggregator._host_counter_ok(sample) == host_usage._is_valid_counter(sample)
+
+
+class TestHostSnapshotSelection:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _agg(self, events, registered=None):
+        return aggregator.aggregate_host_usage(
+            events,
+            since=self.SINCE,
+            until=self.UNTIL,
+            registered_ids=registered,
+        )
+
+    def test_later_row_replaces_whole_view(self):
+        t1 = _host_event(
+            "dev-a",
+            "2026-04-22T12:00:00+00:00",
+            token_sources=("codex",),
+            hosts={"codex": {"2026-04-20": _usage(9)}},
+        )
+        t2 = _host_event(
+            "dev-a",
+            "2026-04-27T12:00:00+00:00",
+            token_sources=("opencode",),
+            hosts={"codex": {"2026-04-26": _usage(1)}},
+        )
+        inv = self._agg([t1, t2])
+        snap = inv.by_device["dev-a"]
+        assert snap.consulted == ("opencode",)
+        assert "2026-04-20" not in snap.lifetime_by_family.get("codex", {})
+        assert "2026-04-26" in snap.lifetime_by_family["codex"]
+
+    def test_invalid_later_row_keeps_earlier(self):
+        t1 = _host_event("dev-a", "2026-04-22T12:00:00+00:00")
+        t2 = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        t2["v"] = 1
+        inv = self._agg([t1, t2])
+        assert inv.by_device["dev-a"].as_of.day == 22
+        assert inv.rejected_rows == 1
+
+    def test_equal_ts_uses_lex_greatest_core_json(self):
+        ts = "2026-04-27T12:00:00+00:00"
+        a = _host_event(
+            "dev-a",
+            ts,
+            token_sources=("codex",),
+            hosts={"codex": {"2026-04-20": _usage(1)}},
+        )
+        b = _host_event(
+            "dev-a",
+            ts,
+            token_sources=("codex", "grok"),
+            hosts={"codex": {"2026-04-20": _usage(1)}},
+        )
+        key_a = _accepted(a).tie_key
+        key_b = _accepted(b).tie_key
+        expected = ("codex",) if key_a > key_b else ("codex", "grok")
+        assert key_a != key_b
+        assert self._agg([a, b]).by_device["dev-a"].consulted == expected
+        assert self._agg([b, a]).by_device["dev-a"].consulted == expected
+
+    def test_additive_field_does_not_change_tie(self):
+        ts = "2026-04-27T12:00:00+00:00"
+        a = _host_event("dev-a", ts)
+        b = _host_event("dev-a", ts, extra={"zzz": "noise"})
+        assert self._agg([a, b]).by_device["dev-a"].consulted == ("codex",)
+        assert self._agg([b, a]).by_device["dev-a"].consulted == ("codex",)
+
+    def test_clock_backdated_later_in_file_loses(self):
+        newer = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        older = _host_event("dev-a", "2026-04-22T12:00:00+00:00")
+        inv = self._agg([newer, older])
+        assert inv.by_device["dev-a"].as_of.day == 27
+
+    def test_older_than_since_is_stale_not_missing(self):
+        ev = _host_event("dev-a", "2026-04-10T12:00:00+00:00")
+        inv = self._agg([ev], registered=frozenset({"dev-a"}))
+        assert inv.by_device["dev-a"].stale is True
+        assert "dev-a" not in inv.devices_without_accepted_row
+
+
+class TestHostSnapshotNoWindowSpend:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def test_out_of_window_day_keys_retained(self):
+        ev = _host_event(
+            "dev-a",
+            "2026-04-27T12:00:00+00:00",
+            hosts={
+                "codex": {
+                    "2026-03-01": _usage(9),
+                    "2026-04-22": _usage(1),
+                }
+            },
+        )
+        inv = aggregator.aggregate_host_usage(
+            [ev], since=self.SINCE, until=self.UNTIL, registered_ids=None
+        )
+        days = set(inv.by_device["dev-a"].lifetime_by_family["codex"])
+        assert days == {"2026-03-01", "2026-04-22"}
+
+    def test_two_devices_not_summed(self):
+        a = _host_event(
+            "dev-a",
+            "2026-04-27T12:00:00+00:00",
+            hosts={"codex": {"2026-04-22": _usage(3)}},
+        )
+        b = _host_event(
+            "dev-b",
+            "2026-04-27T13:00:00+00:00",
+            hosts={"codex": {"2026-04-22": _usage(4)}},
+        )
+        inv = aggregator.aggregate_host_usage(
+            [a, b], since=self.SINCE, until=self.UNTIL, registered_ids=None
+        )
+        assert inv.by_device["dev-a"].lifetime_by_family["codex"]["2026-04-22"]["input"] == 3
+        assert inv.by_device["dev-b"].lifetime_by_family["codex"]["2026-04-22"]["input"] == 4
+        assert not hasattr(inv, "consulted_sources")
+        assert not hasattr(inv, "hosts")
+
+    def test_writer_round_trip_accepted(self):
+        from mind_meld import events
+
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts={"codex": {"2026-04-20": _usage(4)}},
+            ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+        )
+        raw = json.loads(json.dumps(row))
+        assert isinstance(aggregator._accept_host_usage_snapshot(raw), aggregator._AcceptedHostRow)
+
+    def test_mutating_input_does_not_change_view(self):
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        inv = aggregator.aggregate_host_usage(
+            [ev], since=self.SINCE, until=self.UNTIL, registered_ids=None
+        )
+        ev["hosts"]["codex"]["2026-04-20"]["input"] = 99
+        assert inv.by_device["dev-a"].lifetime_by_family["codex"]["2026-04-20"]["input"] == 5
+
+    def test_host_rows_do_not_change_format_or_cost(self, tmp_path, monkeypatch):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        host = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        session = {
+            "v": 2,
+            "type": "sessions-snapshot",
+            "ts": "2026-04-27T12:00:00+00:00",
+            "device": "dev-a",
+            "projects": [
+                {
+                    "claude_dir": "-tmp-proj",
+                    "source_root": "/Users/kb/.claude",
+                    "sessions": 1,
+                    "last_session_at": "2026-04-27T12:00:00+00:00",
+                    "tokens_by_day": {
+                        "2026-04-27": {
+                            "input": 10,
+                            "cache_create": 0,
+                            "cache_read": 0,
+                            "output": 2,
+                            "by_model": {
+                                "claude-opus-5": {
+                                    "input": 10,
+                                    "cache_create": 0,
+                                    "cache_read": 0,
+                                    "output": 2,
+                                }
+                            },
+                        }
+                    },
+                }
+            ],
+        }
+        (events_dir / "dev-a-2026-04-27.jsonl").write_text(
+            json.dumps(session) + "\n" + json.dumps(host) + "\n"
+        )
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+        with_host = aggregator.aggregate(
+            events_dir=events_dir,
+            window_days=14,
+            author_emails=frozenset(),
+            now=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+        )
+        (events_dir / "dev-a-2026-04-27.jsonl").write_text(json.dumps(session) + "\n")
+        without = aggregator.aggregate(
+            events_dir=events_dir,
+            window_days=14,
+            author_emails=frozenset(),
+            now=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+        )
+        assert aggregator.format_retro(with_host) == aggregator.format_retro(without)
+        assert (
+            aggregator._retro_to_snapshot(with_host)["metrics"]["tokens_total"]
+            == (aggregator._retro_to_snapshot(without)["metrics"]["tokens_total"])
+        )
+        assert with_host.sessions.tokens_by_model == without.sessions.tokens_by_model
+        assert with_host.host_inventory.by_device
+        assert not without.host_inventory.by_device
+
+
+class TestHostSnapshotCoverage:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _agg(self, events, registered):
+        return aggregator.aggregate_host_usage(
+            events,
+            since=self.SINCE,
+            until=self.UNTIL,
+            registered_ids=registered,
+        )
+
+    def test_missing_registered_device_listed(self):
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        inv = self._agg([ev], frozenset({"dev-a", "dev-b"}))
+        assert "dev-b" in inv.devices_without_accepted_row
+        assert "dev-b" not in inv.by_device
+
+    def test_codex_only_does_not_imply_grok(self):
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00", token_sources=("codex",))
+        inv = self._agg([ev], None)
+        assert "grok" not in inv.by_device["dev-a"].consulted
+
+    def test_unregistered_dropped_when_registry_up(self):
+        ev = _host_event("ghost", "2026-04-27T12:00:00+00:00")
+        inv = self._agg([ev], frozenset({"dev-a"}))
+        assert "ghost" not in inv.by_device
+        assert "dev-a" in inv.devices_without_accepted_row
+
+    def test_one_grok_device_is_not_fleet_flag(self):
+        ev = _host_event(
+            "dev-a",
+            "2026-04-27T12:00:00+00:00",
+            token_sources=("codex", "grok"),
+        )
+        inv = self._agg([ev], frozenset({"dev-a", "dev-b"}))
+        assert not hasattr(inv, "consulted_sources")
+        assert inv.by_device["dev-a"].consulted == ("codex", "grok")
+        assert "dev-b" in inv.devices_without_accepted_row
+
+    def test_two_valid_rows_zero_rejects(self):
+        a = _host_event("dev-a", "2026-04-22T12:00:00+00:00")
+        b = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        inv = self._agg([a, b], None)
+        assert inv.rejected_rows == 0
+
+    def test_non_host_events_are_not_rejects(self):
+        push = {
+            "v": 2,
+            "type": "mm-push",
+            "ts": "2026-04-27T12:00:00+00:00",
+            "device": "dev-a",
+        }
+        inv = self._agg([push], None)
+        assert inv.rejected_rows == 0
+
+    def test_registry_none_vs_empty(self):
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        keep = self._agg([ev], None)
+        drop = self._agg([ev], frozenset())
+        assert "dev-a" in keep.by_device
+        assert keep.devices_without_accepted_row == frozenset()
+        assert drop.by_device == {}
+        assert drop.devices_without_accepted_row == frozenset()
+
+    def test_exactly_at_since_is_not_stale(self):
+        ev = _host_event("dev-a", "2026-04-21T00:00:00+00:00")
+        inv = self._agg([ev], None)
+        assert inv.by_device["dev-a"].stale is False
+        assert inv.by_device["dev-a"].current is True
+
+    def test_near_future_is_future_dated_not_fresh(self):
+        ev = _host_event("dev-a", "2026-04-28T18:00:00+00:00")
+        inv = self._agg([ev], None)
+        snap = inv.by_device["dev-a"]
+        assert snap.future_dated is True
+        assert snap.current is False
+
+    def test_far_future_rejected(self):
+        ev = _host_event("dev-a", "2099-01-01T00:00:00+00:00")
+        inv = self._agg([ev], None)
+        assert "dev-a" not in inv.by_device
+        assert inv.rejected[0].reason == "future_timestamp"
+
+
+class TestDumpHostUsage:
+    def test_dump_flag_skips_markdown_and_snapshot(self, tmp_path, monkeypatch, capsys):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        retros_dir = tmp_path / "retros"
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        (events_dir / "dev-a.jsonl").write_text(json.dumps(ev) + "\n")
+        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
+        monkeypatch.setenv("MM_RETROS_DIR", str(retros_dir))
+        monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset())
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+        rc = aggregator.main(["7d", "--dump-host-usage"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        assert "dev-a" in payload["by_device"]
+        assert "# Retro" not in out
+        assert "MM_THEMES_PROMPT" not in out
+        assert not retros_dir.exists() or list(retros_dir.glob("*.json")) == []

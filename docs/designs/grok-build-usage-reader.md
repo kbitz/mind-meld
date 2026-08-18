@@ -164,10 +164,11 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
    one reader to an explicit set of warmable readers.
 4. Update the host-snapshot aggregation path in
    `skills/retro_fleet/aggregator.py`: validate every accepted wire row using
-   the invariant contract, select the newest complete row per device, slice
-   its UTC buckets to the requested retro window, and retain `token_sources`
-   and `as_of` coverage. Never carry an older Grok slice into a newer partial
-   device view.
+   the invariant contract, select the newest complete row per device, retain
+   its UTC buckets whole as last-known-good inventory, and preserve
+   `token_sources` and `as_of` coverage. Never slice those lifetime
+   last-touch totals to the requested retro window, sum them into fleet spend,
+   or carry an older Grok view into a newer partial device view.
 5. Keep host totals separate from `SessionsAggregate.tokens_by_model`, which
    is the Claude-only cost input. Render family rows from a combined display
    view, label the two sources, do not price host totals, and state missing or
@@ -192,9 +193,10 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
    this against serialized cache and event rows.
 6. A cache-cold large fixture obeys the 250/500 ms deadline, preserves
    per-file progress, and converges after bounded pushes or one attended warm.
-7. `retro-fleet` selects only complete latest snapshots, renders Grok totals
-   inside the requested window, and labels unavailable/stale/disabled device
-   coverage without converting it to zero.
+7. `retro-fleet` selects only complete latest snapshots, retains Grok totals
+   as whole last-known-good inventory, and labels unavailable, stale, or
+   disabled device coverage without converting it to zero or presenting it as
+   requested-window spend.
 8. Existing Codex, OpenCode, Claude-only token/cost, encryption, retention,
    and no-daemon behavior remain unchanged.
 
@@ -206,7 +208,7 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 | `tests/test_host_usage.py` | strict v1 terminal acceptance, multi-model totals, UTC attribution, replay/conflicting duplicate handling, malformed/content/incomplete/stale/deadline/cache-resume cases |
 | `tests/test_host_usage_snapshot.py` | Grok consent gate, warm dispatch, all-or-nothing omission, and closed breadcrumb semantics |
 | `tests/test_events.py` | serialized snapshot has only canonical aggregate fields and remains capped to 90 UTC days |
-| `tests/test_retro_fleet_aggregator.py` | accepted-row validation/selection, day-window slicing, host coverage gaps, and MODELS card labels |
+| `tests/test_retro_fleet_aggregator.py` | accepted-row validation/selection, whole-view/no-window-slice/no-fleet-spend isolation, host coverage gaps, and MODELS card labels |
 | isolation fixtures | redirect Grok root and cache for every test; no test may touch a real `~/.grok` store |
 
 ## Files

@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.36] - 2026-08-18
+
+**Fleet retros now retain each device's latest complete host-usage snapshot as inventory, so host totals stay truthful without masquerading as window spend.**
+
+### Added
+
+- **Last-known-good host inventory.** `retro-fleet` accepts strict `host-usage-snapshot` rows and preserves the newest complete per-device view, including source coverage and staleness state. Host-family day maps remain lifetime last-touch totals; they are never sliced or summed into fleet spend.
+- **Forensic host-inventory dump.** Hidden `mm retro-fleet --dump-host-usage` prints the inventory JSON and exits before rendering the Markdown retro, giving operators a safe way to inspect accepted snapshots.
+
+### Fixed
+
+- **Fleet-retro isolation.** Host inventory cannot affect Claude session totals, cost estimates, the existing MODELS card, or the normal retro output and prompt sidecar.
+
 ## [0.12.35] - 2026-08-17
 
 **Mind Meld can now sync your Grok customizations with `mm enable-source grok`, without syncing Grok sessions, credentials, or prompts.**
