@@ -3982,12 +3982,16 @@ class TestAsciiCard:
             "+1.0k / -200 LOC · 37-day streak",
             "2 detected GitHub PR references",
             "",
-            "MODELS",
+            # v0.12.37: provenance moved into the header and the separate
+            # "Coverage: …" line was deleted. A line saying "only" that scopes
+            # just the rows above it contradicts the AGENT LOGS block below it.
+            "MODELS (Claude Code sessions)",
             "Claude: 1.1k tokens",
             "Codex: 10 tokens",
             "Unclassified: 9 tokens",
-            "Coverage: Claude Code session snapshots only",
             "Model-token coverage incomplete: 2 peer(s); see Notes",
+            # No AGENT LOGS block: this baseline has no accepted host snapshot,
+            # the one state where mm genuinely knows nothing.
             "",
             "NOTEWORTHY",
             "something noteworthy",
@@ -4004,9 +4008,13 @@ class TestAsciiCard:
         data = self._baseline()
         out = aggregator.format_retro(data, name="kb")
 
-        assert "MODELS" in out
-        assert "No model usage observed in available snapshots" in out
-        assert aggregator.MODEL_COVERAGE_LINE in out
+        assert "MODELS (Claude Code sessions)" in out
+        # Scoped empty state: the unscoped pre-v0.12.37 string ("No model usage
+        # observed in available snapshots") becomes false the moment the AGENT
+        # LOGS block reports a family beside it.
+        assert "No Claude Code model usage observed" in out
+        assert "No model usage observed in available snapshots" not in out
+        assert not hasattr(aggregator, "MODEL_COVERAGE_LINE")
         assert "0 detected GitHub PR references" in out
         assert "MM_THEMES_PROMPT" not in out
 
@@ -4638,12 +4646,52 @@ class TestHostSnapshotNoWindowSpend:
             author_emails=frozenset(),
             now=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
         )
-        assert aggregator.format_retro(with_host) == aggregator.format_retro(without)
+
+        # v0.12.37 DELIBERATELY loosens this from whole-output equality: 23A
+        # renders an "## Agent activity" body section and an AGENT LOGS card
+        # block, so identical output is no longer the contract. What 22A
+        # actually protects — that host data never leaks into Claude session
+        # totals, cost, or the trend snapshot — is asserted directly instead,
+        # plus a positive check that the agent section is the ONLY difference.
+        def _strip_agent_section(text: str) -> list[str]:
+            """Drop the `## Agent activity` section, up to the next `## `."""
+            out, skipping = [], False
+            for line in text.splitlines():
+                if line.startswith("## Agent activity"):
+                    skipping = True
+                    continue
+                if skipping:
+                    if line.startswith("## "):
+                        skipping = False
+                    else:
+                        continue
+                out.append(line)
+            return out
+
+        with_text = aggregator.format_retro(with_host)
+        without_text = aggregator.format_retro(without)
+        assert with_text != without_text, "host inventory should now render something"
+        assert "## Agent activity" in with_text
+        assert "## Agent activity" not in without_text
+        # Removing ONLY the agent section must reproduce the host-free output
+        # exactly. That is the precise form of the old whole-output equality:
+        # host data may add its own section and may change nothing else.
+        assert _strip_agent_section(with_text) == _strip_agent_section(without_text)
+
+        # The five isolation guardrails.
+        token_with: list[str] = []
+        token_without: list[str] = []
+        aggregator._render_token_block(token_with, with_host.sessions)
+        aggregator._render_token_block(token_without, without.sessions)
+        assert token_with == token_without
         assert (
             aggregator._retro_to_snapshot(with_host)["metrics"]["tokens_total"]
             == (aggregator._retro_to_snapshot(without)["metrics"]["tokens_total"])
         )
         assert with_host.sessions.tokens_by_model == without.sessions.tokens_by_model
+        assert aggregator._aggregate_model_families(
+            with_host.sessions.tokens_by_model
+        ) == aggregator._aggregate_model_families(without.sessions.tokens_by_model)
         assert with_host.host_inventory.by_device
         assert not without.host_inventory.by_device
 

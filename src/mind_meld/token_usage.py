@@ -410,6 +410,44 @@ def merge_usage_bucket(target: dict[str, Any], src: dict[str, Any]) -> None:
         target[k] = base + add
 
 
+def sum_bucket(bucket: dict[str, Any]) -> int:
+    """Total the four ``TOKEN_FIELDS`` of ONE already-validated usage bucket.
+
+    Lives here, beside ``TOKEN_FIELDS`` and ``merge_usage_bucket``, so
+    "adding a 5th token field is a one-line change to ``TOKEN_FIELDS``"
+    keeps holding for summing too.
+
+    **Deliberately NOT shared with the aggregator's
+    ``_aggregate_model_families``, which sums the same four fields.** That
+    looks like the same operation and is not, because the two callers sit on
+    opposite sides of a trust boundary:
+
+    * ``_aggregate_model_families`` reads ``SessionsAggregate.tokens_by_model``,
+      a PUBLIC dataclass field that tests and library callers hand-build, so it
+      wraps every field in ``_safe_int``-style coercion on purpose.
+    * This helper's callers read ``HostDeviceSnapshot.lifetime_by_family``,
+      which ``_accept_hosts_payload`` already proved is exactly
+      ``TOKEN_FIELDS`` with non-bool ints in ``[0, _MAX_COUNTER]``.
+
+    Merging them would make the strict path inherit the tolerant path's
+    wrapper, and — the real risk — a later hardening added for the tolerant
+    caller (clamping to ``_MAX_SAFE_TOKENS``, say) would then silently cap
+    accepted host totals. Two postures, two functions, both visible.
+
+    Type-defensive only, never value-clamping: a non-dict or a non-int field
+    contributes 0 rather than raising, matching ``merge_usage_bucket``'s
+    reasoning that one poisoned key must not take down an entire render.
+    """
+    if not isinstance(bucket, dict):
+        return 0
+    total = 0
+    for k in TOKEN_FIELDS:
+        value = bucket.get(k, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            total += value
+    return total
+
+
 def merge_by_model(
     target_by_model: dict[str, Usage],
     src_by_model: dict[str, Usage],
