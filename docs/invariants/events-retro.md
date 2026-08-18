@@ -246,10 +246,60 @@ rows. The acceptor lives in ``aggregator._accept_host_usage_snapshot``,
 not in the writer. A complete later row replaces the entire device view;
 there is no per-source carry-forward.
 
-The winning row is kept **whole**. Day keys are last-touch lifetime
-totals, not tokens spent in the retro window. Do not slice those days
-to ``[since, until]`` and do not sum devices into a fleet spend map.
-``HostDeviceSnapshot.lifetime_by_family`` is inventory as of ``as_of``.
+The winning row is kept **whole**. ``HostDeviceSnapshot.lifetime_by_family``
+is inventory as of ``as_of``, and **do not sum devices into a fleet spend map**
+(see the disjointness note below).
+
+**What a day key actually is (corrected in v0.12.37 — the pre-v0.12.37 wording
+here said "day keys are last-touch lifetime totals", which is wrong and it
+mis-designed Track 23A).** Each *rollout file* contributes ONE cumulative
+terminal total, keyed to **that file's** last-touch UTC day
+(``host_usage._read_rollout`` → ``_terminal_from_record`` → ``_aggregate``
+merging into ``hosts[family][thatDay]``). So a bucket holds *the cumulative
+totals of every session that last touched this machine on that day* — a per-day
+distribution, not one lifetime figure smeared across days. Measured on a real
+corpus: 65 populated day keys across a 140-day span with 75 gap days.
+
+Two consequences a consumer must carry, and they pull in opposite directions:
+
+- **A window slice of MAGNITUDE over-counts at the recent edge.** Resuming a
+  session restates its whole cumulative total onto its new last-touch day, so
+  the newest bucket is inflated (measured: 34% of a machine's lifetime landed on
+  the snapshot day). Label such a column *"tokens from sessions last active in
+  this window"*, never "spend".
+- **A count of active DAYS under-counts, and is therefore a LOWER BOUND.** The
+  same restatement *erases* the old day key, so a day that had real activity can
+  vanish. Five weekday sessions resumed on Saturday collapse to one active day,
+  and a fixed window can report FEWER days when re-rendered later. Word it as an
+  observation (``seen on N days``), never as a census, and never diff or chart it
+  — the writer-side note above already forbids treating ``active_days`` as a time
+  series.
+
+**Neither is a fleet spend total, and a fleet SUM is separately forbidden**
+because device ledgers are not provably disjoint: ``device_id`` lives in local
+``config.toml`` while the host stores (``~/.codex/sessions``,
+``~/.grok/sessions``) sit outside every mm sync source, so they move between
+Macs only by OS-level migration. Migrate a home directory, run ``mm init``
+fresh, and two device ids carry overlapping history with no signal the
+aggregator could detect. A **day-set union** across devices is safe precisely
+because set union is idempotent under duplicated corpora; a token sum is not.
+
+**Day keys are UTC calendar days; the card header is LOCAL.**
+``_render_ascii_card`` builds its date range from ``since.astimezone().date()``
+while day keys are UTC, so the two disagree by a full day when the retro runs
+late in the evening in a negative-offset zone (verified). The in-window day
+filter is an inclusive UTC-date span, hence a strict superset of the instant
+window every other card number uses, and its numerator can reach
+``window_days + 1``. **Render no ratio against it** — a denominator would
+visibly contradict the header. That is why v0.12.37 dropped the denominator
+rather than clamping the numerator.
+
+A snapshot cannot have observed activity later than it was taken, but **nothing
+enforces that on the wire**: the acceptor validates day-key format and ``ts``
+independently and never relates them, so a backdated peer can ship an ``as_of``
+before the window WITH in-window day keys (verified constructible). A consumer
+must clamp to ``min(until, as_of)`` rather than trusting the property; that also
+subsumes the stale case.
 
 Coverage fields are the only honest zero-prevention:
 ``by_device``, ``consulted``, ``as_of``, ``stale``, ``future_dated``,
@@ -260,9 +310,91 @@ fleet Grok-covered.
 Host totals never enter Claude cost estimation or snapshot
 ``metrics.tokens_total``.
 
-Allowed 23A read: iterate ``by_device`` and print ``consulted`` +
-``as_of`` + ``current``. Forbidden: summing
-``lifetime_by_family[family][day]`` buckets as "tokens this window."
+### Track 23A renderer contract
+
+The card carries **rhythm**; the body carries **magnitude**. That split is the
+whole design, and it follows from the two consequences above: a day count can
+only understate, while a magnitude can overstate without bound and inverts over
+time (measured, at the time of writing: 6.9B Claude tokens over 7 days beside
+2.2B Codex over 140 — same order of magnitude, so nothing cues the reader that
+the bases differ, and the lifetime figure keeps growing while the weekly one
+does not).
+
+- **Card, `AGENT LOGS` block** (`_agent_rhythm_view` + `_render_agent_block`):
+  per-family count of distinct in-window UTC days, unioned across machines, one
+  family per line, plus an `N of M machines with agent activity` scope in the
+  header. **No token magnitude in any state.** The block is omitted only when
+  **zero** snapshots were accepted; when snapshots exist but nothing was active
+  it still renders, so the provenance count cannot vanish exactly when it
+  matters.
+- **Rows are MODEL FAMILIES, not agents.** The row carries no per-source status
+  and `host_usage.host_family` buckets by model-id prefix, so the Codex and
+  OpenCode readers both land GPT in the `codex` family. `AGENT_FAMILY_ROWS`
+  labels them accordingly (`Codex models`), and labels the legal `claude` family
+  `Claude (via agents)` so it cannot be confused with the MODELS block's own
+  `Claude` row. Its keys must stay equal to `MODEL_FAMILY_ROWS` and
+  `_HOST_FAMILIES`; a test pins all three, because divergence would both
+  silently drop host families AND raise `KeyError` out of
+  `_aggregate_model_families`, taking down the whole render.
+- **Body, `## Agent activity`** (`_render_agent_inventory`): one row per
+  `(machine, model family)`, never per `(machine, agent)`. Columns are
+  `Tokens (last 90 active days)` — the writer caps the payload at
+  `MAX_BY_DAY_DAYS`, so "lifetime" is false past 90 active days (verified: 91 in,
+  90 kept, oldest silently dropped) — and `Tokens in this window`. A row for
+  every known machine, including `no snapshot`. An accepted-but-idle machine
+  renders **`0`, not `—`**: zero is known data, `—` means unavailable. Rows are
+  capped (`MAX_AGENT_INVENTORY_MACHINES`) because the registry is loaded
+  wholesale and uncapped. Which readers ran is reported per machine, below the
+  table, never per row.
+- **State strings are display strings**, never raw fields: `current` /
+  `current, no agent activity observed` / `last seen before window` /
+  `clock ahead (<=24h)` / `no snapshot`. The skew band really is ≤24h and the
+  boundary itself is accepted (the rejection test is `>`).
+- **Absence is never silent.** `_agent_coverage_notes` names the cause with a
+  remedy every time the block is quiet: no snapshot yet, no reader contributed,
+  all snapshots stale, or nothing active. `token_sources` is per-push
+  contribution state, so the second case may mean no source is enabled **or**
+  that each selected reader had no attributable local ledger; the renderer must
+  state that ambiguity rather than falsely diagnosing consent. A vanished block
+  must never be the diagnostic interface — seven distinct causes would otherwise
+  render identically as nothing.
+- **The rejected breadcrumb counts DEVICES, not rows.** `aggregate_host_usage`
+  applies no window filter to rejects (only accepted rows are compared against
+  `until`), so one malformed writer 89 days ago would light a row-count
+  breadcrumb on every 7d retro until retention reaped the file. Window-scoping
+  the rejects themselves is impossible for a `naive_timestamp` reject, where the
+  timestamp IS the malformed field.
+- **The HOST acceptor reads `events.EVENTS_SCHEMA_VERSION`**, never a hardcoded
+  `2` — both in `_accept_host_usage_snapshot`'s version check and in
+  `_tie_break_key`'s normalized projection, so the two cannot disagree about the
+  version one of them just validated. With a literal, the first bump would make
+  mm reject its own freshly written rows fleet-wide and light the rejected
+  breadcrumb everywhere at once.
+  **Scoped to the host path on purpose.** `aggregate_sessions` still compares
+  against its own local `V2_SCHEMA_VERSION = 2` literal, because the v=1 → v=2
+  sessions transition has *semantics* attached (v=1 rows carry delta semantics
+  and are deliberately counted as `pre_v2_peers` contributing zero, not merely
+  "a different version"). Pointing it at the writer's constant would silently
+  reclassify every fresh `sessions-snapshot` on the next bump. If sessions ever
+  needs a v=3, that is a migration with its own compatibility decision, not a
+  constant swap — do not "fix" the inconsistency by unifying them.
+- **Isolation, pinned by test.** Host data reaches exactly two render sites and
+  nothing else: not `sessions.tokens_by_model`, not
+  `_aggregate_model_families`, not `estimate_cost`, not
+  `_unpriced_token_summary`, not `_render_token_block`, not `PriorRetroDelta`,
+  not `_retro_to_snapshot`. `token_usage.sum_bucket` is deliberately NOT shared
+  with `_aggregate_model_families`: the two callers sit on opposite sides of a
+  trust boundary, and a later hardening for the tolerant caller would otherwise
+  silently cap accepted host totals.
+- **No card-level change gate is possible.** `main` renders the card iff
+  `has_card_input` and saves a snapshot iff **not** `has_card_input`, so the
+  card's only available baseline is a snapshot written seconds earlier from the
+  identical corpus. Any "changed since last retro" gating on the card is dead
+  code by construction; deltas belong to the save-enabled first pass.
+
+Forbidden: summing `lifetime_by_family[family][day]` buckets as "tokens this
+window", summing across machines at all, and rendering any ratio against the
+in-window day count.
 
 ``mm retro-fleet --dump-host-usage`` is the forensic hatch. It prints
 the inventory JSON and skips the markdown retro.

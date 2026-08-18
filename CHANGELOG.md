@@ -2,6 +2,30 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.37] - 2026-08-18
+
+**Fleet retros now show which coding agents you actually used, as activity rhythm rather than token counts, because a token count from an agent log cannot be honestly compared to a Claude session total.**
+
+### Added
+
+- **`AGENT LOGS` share-card block.** Reports per-model-family activity rhythm from local Codex, Grok, and OpenCode logs — `Codex models: seen on 5 days` — plus `N of M machines with agent activity`. One family per line, no token magnitude in any state. Rows are canonical model families rather than agents, because the synced snapshot carries no reader-to-family attribution; the Codex and OpenCode readers both classify GPT models into the same family, and a Claude model run through OpenCode renders as `Claude (via agents)` so it can never be confused with the Claude Code row above it.
+- **`## Agent activity` body table.** Per-machine `Tokens (last 90 active days)` and `Tokens in this window`, with a row for every known machine including those that have never published a snapshot. Never summed across machines: device ledgers are not provably disjoint, since a home-directory migration plus a fresh `mm init` yields two device ids carrying overlapping history with no signal mm could detect. Cross-machine rhythm uses a day-set union instead, which is idempotent under exactly that duplication.
+- **Named causes instead of a silent gap.** When the block is quiet, `## Notes` says which of no-snapshot / no-reader-contribution / all-stale / nothing-active applies, and what to do about it. An empty contributor list may mean no enabled source or no attributable local ledger, so the note names that ambiguity instead of guessing. A vanished block is never the diagnostic.
+
+### Changed
+
+- **`MODELS` block states its own provenance in the header** (`MODELS (Claude Code sessions)`), and the separate `Coverage:` line is gone. A line saying "only" that scopes just the rows above it would contradict the sibling block below it. Its empty state is scoped to match (`No Claude Code model usage observed`).
+- **`mm enable-source` documents the consent coupling.** Enabling `codex`, `grok`, or `opencode` also authorizes that host's local usage reader, which is the `AGENT LOGS` block's only precondition and was previously undiscoverable from the CLI.
+- **`retro-fleet` checks its own version before reporting an absence.** A stale `mm` renders a valid-looking retro with no `AGENT LOGS` block, which is indistinguishable from no activity; the skill now reads `mm --version` first.
+
+### Fixed
+
+- **The host-snapshot acceptor no longer hardcodes the schema version.** It read a literal `2` while the writer used `EVENTS_SCHEMA_VERSION`, so the first bump would have made mm reject its own freshly written rows fleet-wide.
+- **`docs/invariants/events-retro.md` no longer mischaracterizes host day keys.** They were documented as "last-touch lifetime totals"; each rollout file actually contributes one cumulative terminal keyed to that file's last-touch day, making the map a per-day distribution. The corrected text names both consequences: a window slice of magnitude over-counts at the recent edge, and a count of active days is a lower bound because resuming a session erases the earlier key.
+- **Rhythm counts ignore backdated snapshots.** Day keys are clamped to `min(until, as_of)`, so a peer shipping an old `as_of` alongside in-window day keys — accepted by the wire contract, and verified constructible — cannot inject activity.
+- **The rejected-snapshot breadcrumb counts machines, not rows,** because rejects are not window-scoped: one malformed writer would otherwise light a row count on every 7-day retro until 90-day retention reaped the file.
+- **Documented that `## Trends vs last retro` only reaches the first-pass output.** README and the skill both described it as appearing on repeat runs.
+
 ## [0.12.36] - 2026-08-18
 
 **Fleet retros now retain each device's latest complete host-usage snapshot as inventory, so host totals stay truthful without masquerading as window spend.**

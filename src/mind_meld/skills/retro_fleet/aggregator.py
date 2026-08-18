@@ -136,6 +136,23 @@ can't blow up the card height."""
 MAX_TOKEN_COVERAGE_PEER_NAMES = 5
 """Maximum affected-peer names rendered in the token-coverage Note."""
 
+MAX_AGENT_INVENTORY_MACHINES = 12
+"""Cap on rendered agent-inventory rows. ``get_known_devices`` loads the device
+registry wholesale and returns every record uncapped, and when that read FAILS
+``aggregate_host_usage`` keeps every accepted view instead, so row count is
+bounded only by however many distinct device ids appear across the retained event
+window. ``_safe_short`` bounds each id's LENGTH, never the row COUNT, so a corrupt
+or hostile peer registry would otherwise produce an enormous Markdown table and an
+enormous LLM prompt. Same reasoning as ``MAX_TOKEN_COVERAGE_PEER_NAMES``, sized
+larger because a real fleet legitimately has more machines than a warning wants to
+name. Rows are ordered by information content BEFORE this cap applies, so a
+no-snapshot machine can never evict one that has data."""
+
+HOST_SNAPSHOT_MIN_VERSION = "v0.12.32"
+"""First mm release whose event tail publishes ``host-usage-snapshot`` rows. Named
+once because it appears in several user-facing remedies; a machine below it cannot
+contribute agent-log activity no matter how often it pushes."""
+
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
 """Usable content width inside the card. Themes/noteworthy strings
 longer than this are truncated with an ellipsis suffix at render time."""
@@ -148,8 +165,29 @@ MODEL_FAMILY_ROWS: tuple[tuple[str, str], ...] = (
 )
 """Fixed display order for the canonical ``host_usage.host_family`` buckets."""
 
-MODEL_COVERAGE_LINE = "Coverage: Claude Code session snapshots only"
-"""Literal source-coverage line for the second-pass MODELS card block."""
+AGENT_FAMILY_ROWS: tuple[tuple[str, str], ...] = (
+    ("claude", "Claude (via agents)"),
+    ("codex", "Codex models"),
+    ("grok", "Grok models"),
+    ("other", "Unclassified models"),
+)
+"""Same canonical families as ``MODEL_FAMILY_ROWS``, labelled for the AGENT LOGS
+block. Two separate label sets on purpose, for two reasons:
+
+1. **A row here is a MODEL FAMILY, not an agent.** The wire carries no
+   reader-to-family attribution at all (``events.HostUsageSnapshot``: the row
+   has "no ... per-source status"), and ``host_usage.host_family`` buckets by
+   model-id prefix, so the Codex and OpenCode readers both land GPT models in
+   the ``codex`` family. Labelling these rows "Codex"/"Grok" bare would claim an
+   attribution the data cannot support; the trailing "models" says what they are.
+2. **``claude`` is a legal host family**, so OpenCode running a ``claude-*``
+   model renders a Claude row here — directly below the MODELS block's own
+   ``Claude`` row, meaning something different. ``Claude (via agents)``
+   disambiguates rather than relying on block headers to carry a collision the
+   labels created.
+
+Keys must stay identical to ``MODEL_FAMILY_ROWS`` and ``_HOST_FAMILIES``;
+``tests/test_retro_fleet_aggregator.py`` pins all three sets equal."""
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +445,51 @@ class HostUsageInventory:
     @property
     def rejected_rows(self) -> int:
         return len(self.rejected)
+
+    @property
+    def rejected_devices(self) -> int:
+        """Distinct devices with at least one rejected row.
+
+        The breadcrumb counts DEVICES, not rows, because
+        ``aggregate_host_usage`` applies no window filter to rejects — only
+        accepted rows are compared against ``until`` — so a single malformed
+        writer 89 days ago would otherwise light a row-count breadcrumb on
+        every 7d retro until retention reaped the file. Window-scoping the
+        rejects themselves is not universally possible: for a
+        ``naive_timestamp`` reject the timestamp IS the malformed field, so
+        there is no instant to filter on. Counting devices bounds the noise
+        to the number of actually-broken peers, which is the number an
+        operator can act on.
+        """
+        return len({row.device for row in self.rejected if row.device})
+
+
+@dataclass(frozen=True)
+class AgentRhythmView:
+    """In-window agent-log activity rhythm for the card. Carries NO magnitude.
+
+    Four live fields by design. An earlier draft carried nine; the denominator,
+    the numerator clamp, and the change-gate were all deleted during review, and
+    with them ``window_days``, ``devices_consulted_nothing``,
+    ``devices_without_snapshot``, ``rejected_rows``, and ``rejected_reasons``.
+    Those last four are body concerns and ``HostUsageInventory`` already exposes
+    them, so copying them into a CARD view would create a second source of truth
+    for a body string.
+
+    ``rows`` is deliberately not named ``active_days``: the wire already uses
+    ``active_days`` for a ``list[str]`` of UTC day keys
+    (``events.make_host_usage_snapshot``), and two same-named fields of
+    different types in one codebase is how a future reader gets it wrong.
+    """
+
+    rows: tuple[tuple[str, int], ...] = ()
+    machines_with_activity: int = 0
+    machines_known: int | None = None
+    snapshots_accepted: int = 0
+
+    @property
+    def any_activity(self) -> bool:
+        return bool(self.rows)
 
 
 @dataclass(frozen=True)
@@ -976,7 +1059,10 @@ def _tie_break_key(
         "token_sources": list(consulted),
         "ts": as_of.isoformat(),
         "type": "host-usage-snapshot",
-        "v": 2,
+        # Same constant the acceptor compares against, for the same reason: a
+        # literal here would make the tie-break projection disagree with the
+        # version it just validated the moment the schema bumps.
+        "v": mm_events.EVENTS_SCHEMA_VERSION,
     }
     return json.dumps(core, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -988,7 +1074,14 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
     device_raw = ev.get("device")
     device = device_raw.strip() if isinstance(device_raw, str) else ""
     v = ev.get("v")
-    if v != 2 or type(v) is not int:
+    # Read the writer's constant, never a literal. With a hardcoded `2` the
+    # FIRST `EVENTS_SCHEMA_VERSION` bump would make mm reject its OWN freshly
+    # written rows, fleet-wide, and light the rejected-snapshot breadcrumb
+    # everywhere at once. The `type(v) is not int` half matters more now than it
+    # did against a literal `2`: `True == 2` was already False, but once the
+    # comparison target is a constant, a future `EVENTS_SCHEMA_VERSION == 1`
+    # would let `True` satisfy `v != VERSION` and slip through as a valid row.
+    if v != mm_events.EVENTS_SCHEMA_VERSION or type(v) is not int:
         return HostReject(device=device, reason="unsupported_schema")
     if ev.get("type") != "host-usage-snapshot":
         return HostReject(device=device, reason="not_object")
@@ -2030,23 +2123,435 @@ def _render_models_block(sessions: SessionsAggregate) -> list[str]:
     """Render the second-pass card's observed-model usage block.
 
     Family names classify observed model IDs. They do not assert fleet-host
-    coverage; the literal source line and optional incomplete-coverage warning
-    make that distinction visible in a screenshot shared without the body.
+    coverage.
+
+    **Provenance lives in the HEADER, not in a following line.** The pre-v0.12.37
+    block appended a literal ``MODEL_COVERAGE_LINE`` ("Coverage: Claude Code
+    session snapshots only"). Once the sibling AGENT LOGS block exists, a line
+    saying "only" that scopes just the rows ABOVE it reads as a contradiction of
+    the block below it, and rewording it to say so cost more characters than the
+    header parenthetical does — while introducing the word "row", which appears
+    nowhere else on the card. Scoping in the header is unconditional, costs no
+    line, and cannot drift away from the rows it describes.
     """
-    out = [_card_line("MODELS")]
+    out = [_card_line("MODELS (Claude Code sessions)")]
     rows = _aggregate_model_families(sessions.tokens_by_model)
     if rows:
         for family, total in rows:
             out.append(_card_line(f"{family}: {_format_token_count(total)} tokens"))
     else:
-        out.append(_card_line("No model usage observed in available snapshots"))
+        # Scoped to Claude Code on purpose: the unscoped pre-v0.12.37 string
+        # ("No model usage observed in available snapshots") becomes FALSE the
+        # moment the AGENT LOGS block reports a family beside it.
+        out.append(_card_line("No Claude Code model usage observed"))
 
-    out.append(_card_line(MODEL_COVERAGE_LINE))
     coverage_peers = _token_coverage_peers(sessions)
     if coverage_peers:
         incomplete = f"Model-token coverage incomplete: {len(coverage_peers)} peer(s); see Notes"
         out.append(_card_line(incomplete))
     return out
+
+
+def _window_day_keys(since: datetime, until: datetime) -> tuple[str, str]:
+    """Inclusive UTC day-key bounds for a window, as comparable strings.
+
+    Day keys are ``YYYY-MM-DD`` UTC and fixed-width, so lexical comparison IS
+    date comparison. The span is a strict SUPERSET of the instant window every
+    other card number uses: ``since`` is a mid-day instant, day keys have no
+    sub-day resolution, so up to ~24h of pre-window activity is counted as an
+    active day.
+
+    That is the right filter (there is no finer signal on the wire) and it is
+    load-bearing that NO RATIO is rendered against it. The numerator can reach
+    ``window_days + 1``, which is exactly the number of inclusive dates the card
+    header prints — so a ratio would visibly contradict the header. Compounding
+    it, the header is built from ``.astimezone()`` (LOCAL) while these keys are
+    UTC, so the two can disagree by a full day when the retro runs late in the
+    evening in a negative-offset zone. Do not reintroduce a denominator here.
+    """
+    return since.date().isoformat(), until.date().isoformat()
+
+
+def _agent_rhythm_view(
+    inventory: object,
+    *,
+    since: datetime,
+    until: datetime,
+    machines_known: int | None,
+) -> AgentRhythmView:
+    """Per-family count of distinct in-window UTC days with agent activity.
+
+    **Why days and not tokens.** Cross-machine rhythm is a UNION of day keys, and
+    set union is idempotent under duplicate corpora. Migrating a Mac's home
+    directory and running ``mm init`` fresh gives two ``device_id``s carrying
+    overlapping history — the host stores live outside every mm sync source, so
+    they move only by OS-level migration — and the aggregator has no signal that
+    could detect the overlap. A summed token total would be silently wrong and
+    unfalsifiable; a day-set union is simply unaffected.
+
+    **The count is a LOWER BOUND, not a census.** ``docs/invariants/events-retro.md``:
+    resuming a session moves its entire cumulative total onto a new last-touch
+    day, so a day key can DISAPPEAR between snapshots ("63 of 440 rollouts on a
+    real corpus land on a day they did not start"). Five weekday sessions resumed
+    on Saturday collapse to one active day. The error is one-directional — it can
+    only understate — which is why the rendered copy says "seen on N days" rather
+    than asserting a count, and why nothing diffs or charts this value.
+
+    Day keys are clamped to ``min(until, as_of)`` so a snapshot can never report
+    activity later than its own observation. The acceptor validates day-key
+    FORMAT and ``ts`` independently and never relates them, so a backdated peer
+    can otherwise ship ``as_of`` well before the window WITH in-window day keys —
+    verified constructible. The clamp makes the property true by arithmetic and
+    subsumes the stale case: ``as_of < since`` then yields zero in-window days.
+    """
+    if not isinstance(inventory, HostUsageInventory):
+        return AgentRhythmView(machines_known=machines_known)
+
+    lo, hi = _window_day_keys(since, until)
+    union: dict[str, set[str]] = {}
+    machines_with_activity = 0
+
+    for snap in inventory.by_device.values():
+        if not isinstance(snap, HostDeviceSnapshot):
+            continue
+        families = snap.lifetime_by_family
+        if not isinstance(families, dict):
+            continue
+        ceiling = _snapshot_day_ceiling(snap, hi)
+        active_here = False
+        for family, days in families.items():
+            if family not in _HOST_FAMILIES or not isinstance(days, dict):
+                continue
+            for day, bucket in days.items():
+                # Mirror _aggregate_model_families' `if total <= 0: continue`.
+                # An all-zero bucket is a real accepted shape (zero is a valid
+                # counter and the writer does not drop zero buckets), and
+                # rendering it would be absence-as-zero from the other side.
+                if token_usage.sum_bucket(bucket) <= 0:
+                    continue
+                if lo <= day <= ceiling:
+                    union.setdefault(family, set()).add(day)
+                    active_here = True
+        machines_with_activity += 1 if active_here else 0
+
+    rows = tuple(
+        (label, len(union[family])) for family, label in AGENT_FAMILY_ROWS if union.get(family)
+    )
+    return AgentRhythmView(
+        rows=rows,
+        machines_with_activity=machines_with_activity,
+        machines_known=machines_known,
+        snapshots_accepted=len(inventory.by_device),
+    )
+
+
+def _render_agent_block(view: AgentRhythmView) -> list[str]:
+    """Render the card's AGENT LOGS block. Never carries a token magnitude.
+
+    Its own block rather than extra rows inside MODELS: readers scan blocks
+    semantically rather than type-checking units, so adjacency plus differing
+    units is not enough to stop "Claude 6.5B vs Codex 5" being read as a
+    comparison. A CAPS header matching every sibling block costs one line and
+    makes the mistake structurally unavailable.
+
+    **Omitted only when no snapshot was ever accepted** — the one state where mm
+    genuinely knows nothing. Omitting it whenever there is merely no ACTIVITY
+    would destroy the ``N of M machines`` provenance count exactly when it
+    matters, and would make "all machines reported, nobody used an agent" look
+    identical to "mm has no idea". One family per line, unconditionally: a joined
+    line reaches 96 characters at four families against a 58-char budget and
+    ``_card_line`` would silently truncate a metric.
+    """
+    if view.snapshots_accepted <= 0:
+        return []
+
+    n = view.machines_with_activity
+    if view.machines_known is None:
+        # Registry read failed. Render a visibly weaker claim rather than a
+        # denominator of None; format_retro already notes the cause.
+        scope = f"{n} machine{'' if n == 1 else 's'} with agent activity"
+    else:
+        scope = f"{n} of {view.machines_known} machines with agent activity"
+    out = [_card_line(f"AGENT LOGS ({scope})")]
+
+    if not view.any_activity:
+        out.append(_card_line("No agent activity this window"))
+        return out
+    for label, days in view.rows:
+        out.append(_card_line(f"{label}: seen on {days} day{'' if days == 1 else 's'}"))
+    return out
+
+
+def _snapshot_day_ceiling(snap: HostDeviceSnapshot, window_hi: str) -> str:
+    """Upper day-key bound for one snapshot: ``min(window end, its own as_of)``.
+
+    Load-bearing, and shared by both agent renderers so an edit to one cannot
+    silently drop it from the other. The acceptor validates day-key FORMAT and
+    ``ts`` independently and never relates them, so a backdated peer can ship an
+    ``as_of`` before the window WITH in-window day keys (verified constructible).
+    Clamping here makes "a snapshot cannot report activity later than it was
+    taken" true by arithmetic instead of by assumption, and subsumes the stale
+    case: ``as_of < since`` then yields no in-window day at all.
+    """
+    return min(window_hi, snap.as_of.date().isoformat())
+
+
+def _agent_state_label(snap: HostDeviceSnapshot, *, has_window_activity: bool) -> str:
+    """Reader-facing state string. Never a raw field name.
+
+    ``future_dated`` printed raw reads as a broken clock; the acceptor already
+    rejects anything beyond ``until + _HOST_FUTURE_SKEW``, so the band is at most
+    24h and the boundary itself is ACCEPTED (the test is ``>``), hence ``<=24h``.
+    ``stale`` means "last observed before this window", not "unreliable".
+
+    ``has_window_activity`` is IN-WINDOW activity, not retained activity. Gating
+    it on the retained total instead would make this string unreachable for a
+    machine whose only activity predates the window, and would put the State
+    column at odds with the card's ``N of M machines with agent activity`` count,
+    which is itself in-window.
+    """
+    if snap.future_dated:
+        return "clock ahead (<=24h)"
+    if snap.stale:
+        return "last seen before window"
+    if not has_window_activity:
+        return "current, no agent activity observed"
+    return "current"
+
+
+def _render_agent_inventory(
+    data: RetroData,
+) -> list[str]:
+    """Per-machine agent-log magnitude. The body, never the card.
+
+    This is the read ``docs/invariants/events-retro.md`` names as allowed for a
+    23A consumer: iterate ``by_device`` and print ``consulted`` + ``as_of`` +
+    ``current``. One row per (machine, model family) rather than per (machine,
+    agent), because the wire carries no reader-to-family attribution — the Codex
+    and OpenCode readers both classify GPT into the ``codex`` family, so an
+    agent-grained row would either double-count or erase a reader. Which readers
+    ran is therefore reported per MACHINE, below the table.
+
+    No cross-machine sum is ever formed here, which is what makes magnitude safe
+    in this section at all.
+    """
+    inventory = data.host_inventory
+    if not isinstance(inventory, HostUsageInventory):
+        return []
+    if not inventory.by_device and not inventory.devices_without_accepted_row:
+        return []
+
+    lo, hi = _window_day_keys(data.since, data.until)
+    known_ids: list[str] = [
+        d.get("device_id", "")
+        for d in data.fleet.devices_known_list
+        if isinstance(d, dict) and isinstance(d.get("device_id"), str) and d.get("device_id")
+    ]
+    # Every machine mm knows about, plus every machine with an accepted snapshot,
+    # plus the ones the inventory explicitly recorded as having none — so the
+    # table reconciles without the reader doing arithmetic against prose.
+    candidates = (
+        set(known_ids) | set(inventory.by_device) | set(inventory.devices_without_accepted_row)
+    )
+    if not candidates:
+        return []
+
+    # ORDER BY INFORMATION CONTENT, then cap. Sorting alphabetically and
+    # truncating would let a dozen no-snapshot machines evict the only machine
+    # that actually has data — on a 13-machine fleet the table rendered twelve
+    # `no snapshot` rows, zero data rows, and dropped the readers line entirely,
+    # while the card simultaneously said "1 of 13 machines with agent activity".
+    # The cap exists to bound a hostile registry, not to decide what matters.
+    def _rank(device: str) -> tuple[int, str]:
+        snap = inventory.by_device.get(device)
+        if snap is None or not isinstance(snap, HostDeviceSnapshot):
+            return (2, device)  # no usable snapshot
+        families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
+        has_data = any(
+            token_usage.sum_bucket(b) > 0
+            for days in families.values()
+            if isinstance(days, dict)
+            for b in days.values()
+        )
+        return (0 if has_data else 1, device)
+
+    ordered = sorted(candidates, key=_rank)
+    shown, omitted = ordered[:MAX_AGENT_INVENTORY_MACHINES], ordered[MAX_AGENT_INVENTORY_MACHINES:]
+
+    rows: list[str] = []
+    readers: list[str] = []
+    for device in shown:
+        label = _safe_short(device) or "(unnamed)"
+        snap = inventory.by_device.get(device)
+        # Mirror _agent_rhythm_view's guard: by_device is a public dataclass
+        # field, so a hand-built inventory can carry a non-snapshot value.
+        # Without this the whole retro render dies on an AttributeError.
+        if not isinstance(snap, HostDeviceSnapshot):
+            rows.append(f"| {label} | — | — | no snapshot | — | — |")
+            continue
+        # `consulted` is a closed vocabulary after the acceptor, but this
+        # dataclass is public and hand-built in tests, so defang it the same
+        # way the device id one line up is defanged. Unsanitized it can inject
+        # a markdown bullet or a live ANSI escape into LLM-consumed output.
+        consulted = ", ".join(_safe_short(str(c)) for c in snap.consulted) or "none"
+        readers.append(f"{label} {consulted}")
+        families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
+        ceiling = _snapshot_day_ceiling(snap, hi)
+        as_of = snap.as_of.date().isoformat()
+        emitted = False
+        for family, family_label in AGENT_FAMILY_ROWS:
+            days = families.get(family)
+            if not isinstance(days, dict):
+                continue
+            retained = 0
+            in_window = 0
+            for day, bucket in days.items():
+                total = token_usage.sum_bucket(bucket)
+                if total <= 0:
+                    continue
+                retained += total
+                if lo <= day <= ceiling:
+                    in_window += total
+            if retained <= 0:
+                continue
+            state = _agent_state_label(snap, has_window_activity=in_window > 0)
+            rows.append(
+                f"| {label} | {family_label} | {as_of} | {state} "
+                f"| {_format_token_count(retained)} | {_format_token_count(in_window)} |"
+            )
+            emitted = True
+        if not emitted:
+            # Accepted snapshot, nothing observed. `0` not `—`: zero is KNOWN
+            # data here, whereas `—` means unavailable, and conflating them is
+            # the absence-as-zero error in reverse.
+            state = _agent_state_label(snap, has_window_activity=False)
+            rows.append(f"| {label} | — | {as_of} | {state} | 0 | 0 |")
+
+    cap = token_usage.MAX_BY_DAY_DAYS
+    out = [
+        "## Agent activity",
+        "",
+        "Per-machine diagnostic counters; not weekly spend and never safe to sum across machines.",
+        "",
+        f"| Machine | Model family | Snapshot (UTC) | State | Tokens (last {cap} active days) "
+        "| Tokens in this window |",
+        "|---|---|---|---|---|---|",
+    ]
+    out.extend(rows)
+    out.append("")
+    if readers:
+        # "no reader contributed" is exactly what an empty `token_sources` says.
+        # "not authorized" would overclaim: the wire cannot distinguish an
+        # unenabled source from an uninstalled host from a reader that was
+        # dropped as absent, and asserting one of those three would be the same
+        # class of false precision this whole block exists to avoid.
+        out.append(f"- Readers per machine (`none` = no reader contributed): {'; '.join(readers)}.")
+    if omitted:
+        out.append(f"- (+{len(omitted)} more machines omitted; those with data are shown first.)")
+    out.append(
+        "- *A resumed session restates its whole total onto its last-active day, so the "
+        "final column is inflated at the recent edge and day counts elsewhere are lower "
+        f"bounds. Counters cover at most the {cap} most recent active UTC days.*"
+    )
+    out.append("")
+    return out
+
+
+def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = None) -> list[str]:
+    """Name why the AGENT LOGS block is quiet, with a remedy for each cause.
+
+    Ordered most-actionable first. Each line follows the product's established
+    problem/cause/fix shape ("run `mm push` on those machines; upgrade if the
+    warning persists") rather than describing a state and stopping.
+
+    ``view`` is the same ``AgentRhythmView`` the card rendered. Pass it whenever
+    one exists: two independent construction sites with hand-copied keyword
+    arguments can silently disagree about whether there was activity, which would
+    put the card and this Notes line in direct contradiction. Recomputing is a
+    correctness hazard first and a (negligible, sub-millisecond) cost second.
+    """
+    inventory = data.host_inventory
+    if not isinstance(inventory, HostUsageInventory):
+        return []
+
+    notes: list[str] = []
+    snaps = [s for s in inventory.by_device.values() if isinstance(s, HostDeviceSnapshot)]
+
+    if not snaps:
+        if inventory.devices_without_accepted_row:
+            notes.append(
+                f"No agent-log snapshots yet from "
+                f"{len(inventory.devices_without_accepted_row)} machine(s) — run `mm push` "
+                f"there, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
+            )
+        else:
+            # Reachable whenever the device registry is unavailable:
+            # `aggregate_host_usage` sets `missing = frozenset()` when
+            # `registered_ids is None`. Without this branch the card block, the
+            # body section AND the notes are all empty, so a vanished block
+            # becomes the only diagnostic — exactly what the contract forbids.
+            notes.append(
+                "No agent-log snapshots were accepted from any machine — run `mm push` on "
+                f"each Mac, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
+            )
+    else:
+        if view is None:
+            view = _agent_rhythm_view(
+                inventory,
+                since=data.since,
+                until=data.until,
+                machines_known=data.fleet.devices_known,
+            )
+        any_reader = any(s.consulted for s in snaps)
+        if not any_reader:
+            # `token_sources` records readers that contributed to THIS push,
+            # not readers merely selected by the consent gate. An empty list
+            # can therefore mean no source is enabled OR that every selected
+            # reader had no attributable metadata ledger; do not misdiagnose
+            # the latter as a consent failure.
+            notes.append(
+                "No agent-log reader contributed on any machine. If no source is enabled, "
+                "enable with `mm enable-source codex` (or `grok`, `opencode`) and run "
+                "`mm push`; readers with no attributable local ledger are also omitted."
+            )
+        elif not view.any_activity:
+            if all(s.stale for s in snaps):
+                notes.append(
+                    "Agent-log snapshots all predate this window — run `mm push` on those "
+                    "machines for current agent activity."
+                )
+            else:
+                notes.append(
+                    "No agent activity observed in this window. Counts are lower bounds: "
+                    "resuming a session moves its whole total onto a later day."
+                )
+        if inventory.devices_without_accepted_row:
+            notes.append(
+                f"{len(inventory.devices_without_accepted_row)} machine(s) have no agent-log "
+                f"snapshot (unknown, not zero) — run `mm push` there, and upgrade any "
+                f"machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
+            )
+
+    # Named devices and unidentified rows are counted separately. `HostReject.device`
+    # is empty when the device field itself was unusable, so gating the whole
+    # breadcrumb on a named-device count would let a peer writing a blank device
+    # plus a malformed row light nothing at all.
+    named = inventory.rejected_devices
+    unnamed = sum(1 for row in inventory.rejected if not row.device)
+    if named or unnamed:
+        # Reasons are scoped to match the counts they sit beside, so the number
+        # and the reason list can never describe different row sets.
+        reasons = ", ".join(sorted({row.reason for row in inventory.rejected}))
+        who = []
+        if named:
+            who.append(f"{named} machine(s)")
+        if unnamed:
+            who.append(f"{unnamed} unidentified row(s)")
+        notes.append(
+            f"Agent-log snapshots from {' plus '.join(who)} were rejected "
+            f"({reasons}) — upgrade those machines; a version mismatch is the usual cause."
+        )
+    return notes
 
 
 def _format_loc_short(n: int) -> str:
@@ -2067,6 +2572,7 @@ def _render_ascii_card(
     name: str | None,
     themes: list[str],
     noteworthy: str,
+    agent_view: AgentRhythmView,
 ) -> list[str]:
     """Render the screenshot-friendly ASCII card. Pure padding — every
     line is forced to the same width so the right border aligns. LLM-
@@ -2113,6 +2619,11 @@ def _render_ascii_card(
 
     out.extend(_render_models_block(data.sessions))
     out.append(_card_line(""))
+
+    agent_block = _render_agent_block(agent_view)
+    if agent_block:
+        out.extend(agent_block)
+        out.append(_card_line(""))
 
     if noteworthy:
         out.append(_card_line("NOTEWORTHY"))
@@ -2318,10 +2829,27 @@ def format_retro(
     lines: list[str] = []
     notes: list[str] = []
 
+    # Built ONCE and shared by the card block and the coverage notes, so the two
+    # can never disagree about whether there was agent activity this window.
+    agent_view = _agent_rhythm_view(
+        data.host_inventory,
+        since=data.since,
+        until=data.until,
+        machines_known=data.fleet.devices_known,
+    )
+
     themes_list = list(themes) if themes else []
     has_card_input = bool(themes_list) or bool(noteworthy) or bool(name)
     if has_card_input:
-        lines.extend(_render_ascii_card(data, name=name, themes=themes_list, noteworthy=noteworthy))
+        lines.extend(
+            _render_ascii_card(
+                data,
+                name=name,
+                themes=themes_list,
+                noteworthy=noteworthy,
+                agent_view=agent_view,
+            )
+        )
         lines.append("")
 
     # Header date matches the card's local-time framing — using
@@ -2431,6 +2959,9 @@ def format_retro(
         lines.append(f"- {formatted}")
     lines.append("")
 
+    # Agent-log inventory (per machine, never summed across machines).
+    lines.extend(_render_agent_inventory(data))
+
     # mm sync activity.
     lines.append("## mm sync activity")
     lines.append(
@@ -2479,6 +3010,12 @@ def format_retro(
             f"{_format_token_count(unpriced_tokens)} tokens from {unpriced_models} unpriced "
             f"model(s) excluded from cost estimate."
         )
+    # Agent-log diagnostics. The card block goes quiet in several distinct
+    # states; a vanished block must never BE the diagnostic, so name the cause
+    # here every time, with its remedy. Without this, "no agent activity", "no
+    # snapshot yet", "no reader contributed", "all snapshots stale" and "snapshots
+    # rejected" are indistinguishable to the reader.
+    notes.extend(_agent_coverage_notes(data, view=agent_view))
     if data.fleet.unregistered_event_devices:
         notes.append(
             f"{data.fleet.unregistered_event_devices} unregistered device id(s) had "

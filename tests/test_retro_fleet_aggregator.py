@@ -22,10 +22,11 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
-from mind_meld import retention
+from mind_meld import host_usage, retention
 from mind_meld.skills.retro_fleet import aggregator
 
 # ---------------------------------------------------------------------------
@@ -3982,12 +3983,16 @@ class TestAsciiCard:
             "+1.0k / -200 LOC · 37-day streak",
             "2 detected GitHub PR references",
             "",
-            "MODELS",
+            # v0.12.37: provenance moved into the header and the separate
+            # "Coverage: …" line was deleted. A line saying "only" that scopes
+            # just the rows above it contradicts the AGENT LOGS block below it.
+            "MODELS (Claude Code sessions)",
             "Claude: 1.1k tokens",
             "Codex: 10 tokens",
             "Unclassified: 9 tokens",
-            "Coverage: Claude Code session snapshots only",
             "Model-token coverage incomplete: 2 peer(s); see Notes",
+            # No AGENT LOGS block: this baseline has no accepted host snapshot,
+            # the one state where mm genuinely knows nothing.
             "",
             "NOTEWORTHY",
             "something noteworthy",
@@ -4004,9 +4009,13 @@ class TestAsciiCard:
         data = self._baseline()
         out = aggregator.format_retro(data, name="kb")
 
-        assert "MODELS" in out
-        assert "No model usage observed in available snapshots" in out
-        assert aggregator.MODEL_COVERAGE_LINE in out
+        assert "MODELS (Claude Code sessions)" in out
+        # Scoped empty state: the unscoped pre-v0.12.37 string ("No model usage
+        # observed in available snapshots") becomes false the moment the AGENT
+        # LOGS block reports a family beside it.
+        assert "No Claude Code model usage observed" in out
+        assert "No model usage observed in available snapshots" not in out
+        assert not hasattr(aggregator, "MODEL_COVERAGE_LINE")
         assert "0 detected GitHub PR references" in out
         assert "MM_THEMES_PROMPT" not in out
 
@@ -4638,12 +4647,57 @@ class TestHostSnapshotNoWindowSpend:
             author_emails=frozenset(),
             now=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
         )
-        assert aggregator.format_retro(with_host) == aggregator.format_retro(without)
+
+        # v0.12.37 DELIBERATELY loosens this from whole-output equality: 23A
+        # renders an "## Agent activity" body section and an AGENT LOGS card
+        # block, so identical output is no longer the contract. What 22A
+        # actually protects — that host data never leaks into Claude session
+        # totals, cost, or the trend snapshot — is asserted directly instead,
+        # plus a positive check that the agent section is the ONLY difference.
+        def _strip_agent_section(text: str) -> list[str]:
+            """Drop everything the agent-log feature owns: its body section and
+            its own coverage Notes lines. Both are legitimately part of the
+            feature; what must NOT move is any Claude-side line."""
+            out, skipping = [], False
+            for line in text.splitlines():
+                if line.startswith("## Agent activity"):
+                    skipping = True
+                    continue
+                if skipping:
+                    if line.startswith("## "):
+                        skipping = False
+                    else:
+                        continue
+                if line.startswith("- ") and "agent" in line.lower():
+                    continue
+                out.append(line)
+            return out
+
+        with_text = aggregator.format_retro(with_host)
+        without_text = aggregator.format_retro(without)
+        assert with_text != without_text, "host inventory should now render something"
+        assert "## Agent activity" in with_text
+        assert "## Agent activity" not in without_text
+        # Removing everything the agent feature owns must reproduce the host-free
+        # output exactly. That is the precise form of the old whole-output
+        # equality: host data may add its own section and its own notes, and may
+        # change nothing else.
+        assert _strip_agent_section(with_text) == _strip_agent_section(without_text)
+
+        # The five isolation guardrails.
+        token_with: list[str] = []
+        token_without: list[str] = []
+        aggregator._render_token_block(token_with, with_host.sessions)
+        aggregator._render_token_block(token_without, without.sessions)
+        assert token_with == token_without
         assert (
             aggregator._retro_to_snapshot(with_host)["metrics"]["tokens_total"]
             == (aggregator._retro_to_snapshot(without)["metrics"]["tokens_total"])
         )
         assert with_host.sessions.tokens_by_model == without.sessions.tokens_by_model
+        assert aggregator._aggregate_model_families(
+            with_host.sessions.tokens_by_model
+        ) == aggregator._aggregate_model_families(without.sessions.tokens_by_model)
         assert with_host.host_inventory.by_device
         assert not without.host_inventory.by_device
 
@@ -4752,3 +4806,717 @@ class TestDumpHostUsage:
         assert "# Retro" not in out
         assert "MM_THEMES_PROMPT" not in out
         assert not retros_dir.exists() or list(retros_dir.glob("*.json")) == []
+
+
+def _snap(
+    device: str,
+    as_of: datetime,
+    *,
+    families: dict | None = None,
+    consulted: tuple[str, ...] = ("codex",),
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> aggregator.HostDeviceSnapshot:
+    """Build a HostDeviceSnapshot directly, so rhythm tests never touch a clock."""
+    ref_since = since or datetime(2026, 4, 21, tzinfo=timezone.utc)
+    ref_until = until or datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+    return aggregator.HostDeviceSnapshot(
+        device=device,
+        as_of=as_of,
+        consulted=consulted,
+        lifetime_by_family={} if families is None else families,
+        stale=as_of < ref_since,
+        future_dated=as_of > ref_until,
+    )
+
+
+class TestAgentRhythmView:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _view(self, snaps, *, machines_known=3, missing=frozenset(), rejected=()):
+        inv = aggregator.HostUsageInventory(
+            by_device={s.device: s for s in snaps},
+            devices_without_accepted_row=missing,
+            rejected=rejected,
+        )
+        return aggregator._agent_rhythm_view(
+            inv, since=self.SINCE, until=self.UNTIL, machines_known=machines_known
+        )
+
+    def test_family_label_set_matches_the_canonical_families(self):
+        """The three family authorities are defined independently. If they ever
+        diverge, accepted host data is silently dropped from the card AND
+        `_aggregate_model_families` raises KeyError, taking down the whole
+        render. Three lines that protect both."""
+        model_keys = {key for key, _ in aggregator.MODEL_FAMILY_ROWS}
+        agent_keys = {key for key, _ in aggregator.AGENT_FAMILY_ROWS}
+        assert model_keys == agent_keys == set(aggregator._HOST_FAMILIES)
+        assert set(aggregator._HOST_FAMILIES) == set(get_args(host_usage.HostFamily))
+
+    def test_agent_labels_never_collide_with_model_labels(self):
+        """`claude` is a legal host family, so OpenCode on a claude-* model would
+        otherwise put two identical `Claude` rows on one card meaning different
+        things."""
+        model_labels = {label for _, label in aggregator.MODEL_FAMILY_ROWS}
+        agent_labels = {label for _, label in aggregator.AGENT_FAMILY_ROWS}
+        assert not (model_labels & agent_labels)
+
+    def test_counts_distinct_in_window_days_in_canonical_order(self):
+        view = self._view(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={
+                        "grok": {"2026-04-22": _usage(3)},
+                        "codex": {"2026-04-22": _usage(1), "2026-04-24": _usage(1)},
+                    },
+                )
+            ]
+        )
+        assert view.rows == (("Codex models", 2), ("Grok models", 1))
+        assert view.machines_with_activity == 1
+        assert view.any_activity is True
+
+    def test_cross_machine_union_is_idempotent_under_duplicate_corpora(self):
+        """The property that justified rhythm over magnitude: migrating a Mac's
+        home directory and re-initing yields two device ids with overlapping
+        history, undetectably. A summed total would double; a day-set union does
+        not move."""
+        day = {"codex": {"2026-04-22": _usage(7)}}
+        one = self._view([_snap("dev-a", self.UNTIL, families=day)])
+        two = self._view(
+            [
+                _snap("dev-a", self.UNTIL, families=day),
+                _snap("dev-b", self.UNTIL, families=dict(day)),
+            ]
+        )
+        assert one.rows == (("Codex models", 1),)
+        assert two.rows == (("Codex models", 1),)
+        assert two.machines_with_activity == 2
+
+    def test_all_zero_bucket_is_omitted_not_rendered_as_zero(self):
+        """Zero is a valid counter and the writer does not drop all-zero buckets,
+        so key presence is not activity."""
+        zero = {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0}
+        view = self._view([_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": zero}})])
+        assert view.rows == ()
+        assert view.machines_with_activity == 0
+        assert aggregator._render_agent_block(view) == [
+            aggregator._card_line("AGENT LOGS (0 of 3 machines with agent activity)"),
+            aggregator._card_line("No agent activity this window"),
+        ]
+
+    def test_window_edges_are_inclusive(self):
+        lo = self.SINCE.date().isoformat()
+        hi = self.UNTIL.date().isoformat()
+        for day in (lo, hi):
+            view = self._view([_snap("dev-a", self.UNTIL, families={"codex": {day: _usage(1)}})])
+            assert view.rows == (("Codex models", 1),), day
+
+    def test_days_outside_the_window_do_not_count(self):
+        for day in ("2026-04-20", "2026-04-29"):
+            view = self._view([_snap("dev-a", self.UNTIL, families={"codex": {day: _usage(1)}})])
+            assert view.rows == (), day
+
+    def test_stale_snapshot_with_in_window_day_contributes_nothing(self):
+        """A backdated peer can ship as_of well before the window WITH in-window
+        day keys: the acceptor validates day-key FORMAT and `ts` independently
+        and never relates them. Verified constructible. The clamp to
+        min(until, as_of) makes the property true by arithmetic."""
+        stale = _snap(
+            "dev-a",
+            datetime(2026, 3, 1, tzinfo=timezone.utc),
+            families={"codex": {"2026-04-22": _usage(500)}},
+        )
+        assert stale.stale is True
+        view = self._view([stale])
+        assert view.rows == ()
+        assert view.machines_with_activity == 0
+
+    def test_day_keys_after_as_of_are_clamped(self):
+        snap = _snap(
+            "dev-a",
+            datetime(2026, 4, 23, tzinfo=timezone.utc),
+            families={"codex": {"2026-04-22": _usage(1), "2026-04-26": _usage(1)}},
+        )
+        view = self._view([snap])
+        assert view.rows == (("Codex models", 1),)
+
+    def test_resumed_session_collapse_makes_the_count_drop(self):
+        """The residual imprecision, pinned. Resuming a session moves its whole
+        total onto a new last-touch day and ERASES the old key, so the same
+        window can report fewer days later. One-directional (only understates),
+        which is why the copy says "seen on N days" rather than asserting a
+        count."""
+        before = self._view(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={
+                        "codex": {
+                            "2026-04-22": _usage(10),
+                            "2026-04-23": _usage(10),
+                            "2026-04-24": _usage(10),
+                        }
+                    },
+                )
+            ]
+        )
+        # Same real work, all three sessions resumed on the 24th.
+        after = self._view(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(30)}})]
+        )
+        assert before.rows == (("Codex models", 3),)
+        assert after.rows == (("Codex models", 1),)
+
+    def test_unknown_family_on_the_wire_is_ignored(self):
+        view = self._view(
+            [_snap("dev-a", self.UNTIL, families={"gemini": {"2026-04-22": _usage(9)}})]
+        )
+        assert view.rows == ()
+
+    def test_non_inventory_input_yields_no_activity(self):
+        for bad in (None, {}, "nope", 42):
+            view = aggregator._agent_rhythm_view(
+                bad, since=self.SINCE, until=self.UNTIL, machines_known=3
+            )
+            assert view.rows == ()
+            assert view.any_activity is False
+            assert aggregator._render_agent_block(view) == []
+
+    def test_view_carries_no_magnitude(self):
+        """Structural guarantee: nothing on the card view can be a token count."""
+        view = self._view(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(999_999)}})]
+        )
+        assert view.rows == (("Codex models", 1),)
+        assert set(view.__dataclass_fields__) == {
+            "rows",
+            "machines_with_activity",
+            "machines_known",
+            "snapshots_accepted",
+        }
+        assert "999" not in "".join(aggregator._render_agent_block(view))
+
+
+class TestAgentBlockRendering:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _block(self, rows, *, machines_known=3, with_activity=1, accepted=1):
+        view = aggregator.AgentRhythmView(
+            rows=rows,
+            machines_with_activity=with_activity,
+            machines_known=machines_known,
+            snapshots_accepted=accepted,
+        )
+        return aggregator._render_agent_block(view)
+
+    def test_block_omitted_only_when_no_snapshot_was_accepted(self):
+        assert self._block((("Codex models", 5),), accepted=0) == []
+        assert self._block((), accepted=1) != []
+
+    def test_empty_but_covered_keeps_the_provenance_count(self):
+        """Omitting on no-activity would destroy the `N of M machines` count
+        exactly when it matters, and make "everyone reported, nobody used an
+        agent" identical to "mm knows nothing"."""
+        lines = self._block((), with_activity=0)
+        assert "AGENT LOGS (0 of 3 machines with agent activity)" in lines[0]
+        assert "No agent activity this window" in lines[1]
+
+    def test_one_family_per_line_never_truncates(self):
+        """A joined 4-family line reaches 96 chars against a 58-char budget and
+        `_card_line` would silently eat a metric. Two-digit counts are the normal
+        case for a 30d window, three-digit reachable via the cross-machine union."""
+        rows = tuple(
+            (label, n) for (_key, label), n in zip(aggregator.AGENT_FAMILY_ROWS, (90, 90, 90, 90))
+        )
+        lines = self._block(rows)
+        assert len(lines) == 1 + len(aggregator.AGENT_FAMILY_ROWS)
+        for line in lines:
+            assert len(line) == aggregator.CARD_WIDTH
+            assert "…" not in line, f"content lost to truncation: {line}"
+        for _key, label in aggregator.AGENT_FAMILY_ROWS:
+            assert any(label in line for line in lines), label
+
+    def test_registry_unavailable_drops_the_denominator(self):
+        lines = self._block((("Codex models", 5),), machines_known=None)
+        assert "1 machine with agent activity" in lines[0]
+        assert "None" not in "".join(lines)
+
+    def test_singular_grammar(self):
+        one = self._block((("Codex models", 1),), with_activity=1, machines_known=1)
+        assert "seen on 1 day" in one[1]
+        assert "seen on 1 days" not in one[1]
+        assert "1 of 1 machines" in one[0]
+
+    def test_every_state_holds_the_card_width(self):
+        states = [
+            self._block((), accepted=1),
+            self._block((("Codex models", 5),)),
+            self._block((("Codex models", 5),), machines_known=None),
+            self._block(
+                tuple((label, 12) for _k, label in aggregator.AGENT_FAMILY_ROWS),
+            ),
+        ]
+        for lines in states:
+            for line in lines:
+                assert len(line) == aggregator.CARD_WIDTH
+
+
+class TestAgentCoverageNotes:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _data(self, snaps, *, missing=frozenset(), rejected=(), devices_known=3):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(devices_known=devices_known)
+        data.host_inventory = aggregator.HostUsageInventory(
+            by_device={s.device: s for s in snaps},
+            devices_without_accepted_row=missing,
+            rejected=rejected,
+        )
+        return data
+
+    def test_no_reader_contribution_names_the_ambiguous_state_and_next_step(self):
+        """An empty token_sources list means no reader contributed, not that no
+        source is enabled: absent-ledger readers are deliberately omitted too."""
+        notes = aggregator._agent_coverage_notes(
+            self._data([_snap("dev-a", self.UNTIL, consulted=())])
+        )
+        assert any(
+            "No agent-log reader contributed" in n
+            and "If no source is enabled" in n
+            and "mm enable-source codex" in n
+            and "no attributable local ledger" in n
+            for n in notes
+        )
+
+    def test_configured_fleet_is_never_nagged(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data([_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})])
+        )
+        assert not any("enable-source" in n for n in notes)
+
+    def test_no_activity_names_the_lower_bound(self):
+        notes = aggregator._agent_coverage_notes(self._data([_snap("dev-a", self.UNTIL)]))
+        assert any("lower bounds" in n for n in notes)
+
+    def test_all_stale_says_so(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data([_snap("dev-a", datetime(2026, 3, 1, tzinfo=timezone.utc))])
+        )
+        assert any("predate this window" in n for n in notes)
+
+    def test_missing_snapshot_is_unknown_not_zero(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data(
+                [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})],
+                missing=frozenset({"dev-z"}),
+            )
+        )
+        assert any("unknown, not zero" in n for n in notes)
+
+    def test_rejected_counts_devices_not_rows(self):
+        """`aggregate_host_usage` applies no window filter to rejects, so a
+        row-count breadcrumb from one broken writer would stay lit for the whole
+        90-day retention."""
+        rejected = tuple(
+            aggregator.HostReject(device="dev-bad", reason="unsupported_schema") for _ in range(40)
+        )
+        data = self._data([_snap("dev-a", self.UNTIL)], rejected=rejected)
+        assert data.host_inventory.rejected_rows == 40
+        assert data.host_inventory.rejected_devices == 1
+        notes = aggregator._agent_coverage_notes(data)
+        assert any("from 1 machine(s) were rejected" in n for n in notes)
+
+    def test_rejected_breadcrumb_fires_even_with_no_card_block(self):
+        data = self._data(
+            [], rejected=(aggregator.HostReject(device="dev-bad", reason="invalid_day"),)
+        )
+        notes = aggregator._agent_coverage_notes(data)
+        assert any("were rejected" in n for n in notes)
+
+
+class TestAgentInventoryBody:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _data(self, snaps, *, known_ids=(), missing=frozenset()):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(
+            devices_known=len(known_ids) or None,
+            devices_known_list=[{"device_id": d, "device_name": d} for d in known_ids],
+        )
+        data.host_inventory = aggregator.HostUsageInventory(
+            by_device={s.device: s for s in snaps},
+            devices_without_accepted_row=missing,
+        )
+        return data
+
+    def test_three_row_shapes(self):
+        body = "\n".join(
+            aggregator._render_agent_inventory(
+                self._data(
+                    [
+                        _snap(
+                            "dev-a",
+                            self.UNTIL,
+                            families={"codex": {"2026-04-22": _usage(10)}},
+                        ),
+                        _snap("dev-b", self.UNTIL, consulted=("grok",)),
+                    ],
+                    known_ids=("dev-a", "dev-b", "dev-c"),
+                )
+            )
+        )
+        assert "| dev-a | Codex models | 2026-04-28 | current | 10 | 10 |" in body
+        # Accepted but nothing observed: 0 is KNOWN data, `—` means unavailable.
+        assert "| dev-b | — | 2026-04-28 | current, no agent activity observed | 0 | 0 |" in body
+        assert "| dev-c | — | — | no snapshot | — | — |" in body
+        assert (
+            "Readers per machine (`none` = no reader contributed): dev-a codex; dev-b grok." in body
+        )
+
+    def test_state_strings_are_never_raw_field_names(self):
+        body = "\n".join(
+            aggregator._render_agent_inventory(
+                self._data(
+                    [
+                        _snap(
+                            "dev-old",
+                            datetime(2026, 3, 1, tzinfo=timezone.utc),
+                            families={"codex": {"2026-02-28": _usage(1)}},
+                        ),
+                        _snap(
+                            "dev-fut",
+                            datetime(2026, 4, 28, 20, tzinfo=timezone.utc),
+                            families={"codex": {"2026-04-28": _usage(1)}},
+                        ),
+                    ],
+                    known_ids=("dev-old", "dev-fut"),
+                )
+            )
+        )
+        assert "last seen before window" in body
+        assert "clock ahead (<=24h)" in body
+        assert "future_dated" not in body
+        assert "stale" not in body
+
+    def test_rows_are_capped_and_the_omission_is_stated(self):
+        n = aggregator.MAX_AGENT_INVENTORY_MACHINES + 4
+        ids = tuple(f"dev-{i:03d}" for i in range(n))
+        body = "\n".join(
+            aggregator._render_agent_inventory(
+                self._data(
+                    [
+                        _snap(d, self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})
+                        for d in ids
+                    ],
+                    known_ids=ids,
+                )
+            )
+        )
+        assert body.count("| dev-") == aggregator.MAX_AGENT_INVENTORY_MACHINES
+        assert "(+4 more machines omitted; those with data are shown first.)" in body
+
+    def test_hostile_device_id_cannot_break_the_markdown_table(self):
+        body = "\n".join(
+            aggregator._render_agent_inventory(
+                self._data(
+                    [
+                        _snap(
+                            "a|b\x1b[31m`x`",
+                            self.UNTIL,
+                            families={"codex": {"2026-04-22": _usage(1)}},
+                        )
+                    ],
+                    known_ids=(),
+                )
+            )
+        )
+        rows = [ln for ln in body.splitlines() if ln.startswith("| dev") or ln.startswith("| a")]
+        for row in rows:
+            assert row.count("|") == 7, f"pipe count changed by a peer id: {row}"
+        assert "\x1b" not in body
+
+    def test_omitted_entirely_when_nothing_is_known(self):
+        assert aggregator._render_agent_inventory(self._data([])) == []
+
+    def test_retained_and_window_columns_differ(self):
+        body = "\n".join(
+            aggregator._render_agent_inventory(
+                self._data(
+                    [
+                        _snap(
+                            "dev-a",
+                            self.UNTIL,
+                            families={
+                                "codex": {
+                                    "2026-04-01": _usage(1000),  # outside the window
+                                    "2026-04-22": _usage(7),  # inside
+                                }
+                            },
+                        )
+                    ],
+                    known_ids=("dev-a",),
+                )
+            )
+        )
+        assert "| 1.0k | 7 |" in body
+
+
+class TestAgentBlockReachesTheCard:
+    """The AGENT LOGS block wiring inside `_render_ascii_card`, not the helpers.
+
+    Every other agent test calls `_agent_rhythm_view` / `_render_agent_block`
+    directly with a hand-built view, which left the wiring itself unpinned:
+    deleting the whole 12-line block from `_render_ascii_card` kept 2500 tests
+    green. These tests fail if that wiring, its window arguments, its
+    `machines_known` source, or its position ever regress.
+    """
+
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _data(self, snaps, *, known_ids=("dev-a", "dev-b"), missing=frozenset()):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(
+            devices_known=len(known_ids),
+            devices_known_list=[{"device_id": d, "device_name": d} for d in known_ids],
+        )
+        data.host_inventory = aggregator.HostUsageInventory(
+            by_device={s.device: s for s in snaps},
+            devices_without_accepted_row=missing,
+        )
+        return data
+
+    def _card(self, out):
+        return [line for line in out.splitlines() if line.startswith("║")]
+
+    def test_agent_block_renders_inside_the_card_between_models_and_noteworthy(self):
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})]
+        )
+        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
+        card = self._card(out)
+        hits = [i for i, line in enumerate(card) if "AGENT LOGS" in line]
+        assert hits, "AGENT LOGS never reached the rendered card"
+        i = hits[0]
+        assert any("MODELS" in line for line in card[:i]), "AGENT LOGS rendered above MODELS"
+        assert any("NOTEWORTHY" in line for line in card[i:]), (
+            "AGENT LOGS rendered below NOTEWORTHY"
+        )
+        assert any("Codex models: seen on 1 day" in line for line in card)
+
+    def test_denominator_comes_from_the_fleet_registry(self):
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})],
+            known_ids=("dev-a", "dev-b", "dev-c"),
+        )
+        out = aggregator.format_retro(data, name="kb")
+        assert "AGENT LOGS (1 of 3 machines with agent activity)" in out
+
+    def test_window_bounds_come_from_the_retro_data(self):
+        """A day inside the snapshot but outside the window must not be counted,
+        which only holds if the card passes data.since/data.until through."""
+        data = self._data(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={"codex": {"2026-03-01": _usage(9999)}},
+                )
+            ]
+        )
+        out = aggregator.format_retro(data, name="kb")
+        assert "AGENT LOGS (0 of 2 machines with agent activity)" in out
+        assert "No agent activity this window" in out
+        assert "seen on" not in out
+
+    def test_no_agent_block_on_the_first_pass(self):
+        """First pass has no card at all, so the block must not leak into it."""
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})]
+        )
+        out = aggregator.format_retro(data)
+        assert "╔" not in out
+        assert "AGENT LOGS" not in out
+
+    def test_card_holds_its_width_with_the_agent_block_present(self):
+        data = self._data(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={
+                        key: {"2026-04-24": _usage(5)} for key, _ in aggregator.AGENT_FAMILY_ROWS
+                    },
+                )
+            ]
+        )
+        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
+        card = [line for line in out.splitlines() if line.startswith(("╔", "╠", "╚", "║"))]
+        assert {len(line) for line in card} == {aggregator.CARD_WIDTH}
+        assert "…" not in "\n".join(
+            line for line in card if "models:" in line or "AGENT LOGS" in line
+        )
+
+    def test_no_card_line_carries_a_host_token_magnitude(self):
+        data = self._data(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={"codex": {"2026-04-24": _usage(123_456_789)}},
+                )
+            ]
+        )
+        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
+        card = "\n".join(self._card(out))
+        assert "123" not in card
+        assert "123.5M" not in card
+        # The magnitude belongs to the body, and only the body.
+        assert "123.5M" in out
+
+
+class TestAgentInventoryHardening:
+    """Guards for the paths a hand-built or hostile inventory can reach."""
+
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _data(self, by_device, *, known_ids=(), missing=frozenset()):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(
+            devices_known=len(known_ids) or None,
+            devices_known_list=[{"device_id": d} for d in known_ids],
+        )
+        data.host_inventory = aggregator.HostUsageInventory(
+            by_device=by_device, devices_without_accepted_row=missing
+        )
+        return data
+
+    def test_cap_keeps_machines_that_have_data(self):
+        """Ordering by information content before capping. Alphabetical order
+        plus truncation let a dozen empty machines evict the only one with
+        data, and took the readers line with it."""
+        n = aggregator.MAX_AGENT_INVENTORY_MACHINES
+        empty = tuple(f"aaa-{i:03d}" for i in range(n))
+        snap = _snap("zzz-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(5000)}})
+        body = "\n".join(
+            aggregator._render_agent_inventory(
+                self._data({"zzz-a": snap}, known_ids=empty + ("zzz-a",))
+            )
+        )
+        assert "zzz-a" in body, "the only machine with data was evicted by the cap"
+        assert "| zzz-a | Codex models |" in body
+        assert "Readers per machine" in body
+
+    def test_non_snapshot_value_does_not_crash_the_render(self):
+        data = self._data({"dev-a": {"not": "a snapshot"}}, known_ids=("dev-a",))
+        body = aggregator._render_agent_inventory(data)  # must not raise
+        assert "| dev-a | — | — | no snapshot | — | — |" in "\n".join(body)
+        assert aggregator._agent_coverage_notes(data) is not None
+
+    def test_consulted_names_are_sanitized_like_device_ids(self):
+        snap = _snap(
+            "dev-a",
+            self.UNTIL,
+            consulted=("codex\n- INJECTED BULLET", "gr|ok\x1b[31m"),
+            families={"codex": {"2026-04-24": _usage(5)}},
+        )
+        body = "\n".join(
+            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+        )
+        assert "\n- INJECTED BULLET" not in body
+        assert "\x1b" not in body
+        readers_line = [ln for ln in body.splitlines() if "Readers per machine" in ln][0]
+        assert readers_line.count("|") == 0
+
+    def test_missing_devices_render_rows_not_an_empty_table(self):
+        body = aggregator._render_agent_inventory(
+            self._data({}, known_ids=(), missing=frozenset({"dev-x", "dev-y"}))
+        )
+        rows = [
+            ln
+            for ln in body
+            if ln.startswith("| ") and not ln.startswith("| Machine") and not ln.startswith("|---")
+        ]
+        assert len(rows) == 2, f"header rendered with no rows: {body}"
+        assert all("no snapshot" in row for row in rows)
+
+    def test_body_clamps_in_window_days_to_as_of(self):
+        """The body's own clamp, distinct from the rhythm view's. Every other
+        body test uses as_of == UNTIL, where the clamp is inert."""
+        snap = _snap(
+            "dev-a",
+            datetime(2026, 4, 24, tzinfo=timezone.utc),
+            families={"codex": {"2026-04-23": _usage(1), "2026-04-27": _usage(1000)}},
+        )
+        body = "\n".join(
+            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+        )
+        assert "| 1.0k | 1 |" in body, body
+
+    def test_state_reflects_in_window_activity_not_retained(self):
+        """A machine whose only activity predates the window is `current` with a
+        zero in-window column, and the State column must agree with the card's
+        in-window activity count rather than with the retained total."""
+        snap = _snap("dev-a", self.UNTIL, families={"codex": {"2026-03-01": _usage(500)}})
+        body = "\n".join(
+            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+        )
+        assert "current, no agent activity observed" in body
+        assert "| 500 | 0 |" in body
+
+    def test_no_snapshots_and_no_missing_still_names_a_cause(self):
+        """Reachable whenever the device registry read fails: `missing` is empty
+        and `by_device` is empty, so without this the card block, the body and
+        the notes are ALL silent."""
+        data = self._data({}, known_ids=())
+        assert aggregator._render_agent_inventory(data) == []
+        notes = aggregator._agent_coverage_notes(data)
+        assert notes, "block vanished with no diagnostic note"
+        assert any("No agent-log snapshots were accepted" in n for n in notes)
+
+    def test_unidentified_rejects_still_light_the_breadcrumb(self):
+        data = self._data({}, known_ids=("dev-a",))
+        data.host_inventory = aggregator.HostUsageInventory(
+            rejected=(aggregator.HostReject(device="", reason="not_object"),)
+        )
+        notes = aggregator._agent_coverage_notes(data)
+        assert any("1 unidentified row(s) were rejected" in n for n in notes)
+
+    def test_version_floor_is_named_from_the_constant(self):
+        data = self._data({}, known_ids=("dev-a",), missing=frozenset({"dev-a"}))
+        notes = aggregator._agent_coverage_notes(data)
+        assert any(aggregator.HOST_SNAPSHOT_MIN_VERSION in n for n in notes)
+
+
+class TestAcceptorSchemaConstant:
+    def test_acceptor_follows_the_writer_constant(self, monkeypatch):
+        """A hardcoded literal here would make mm reject its own freshly written
+        rows fleet-wide on the first schema bump."""
+        from mind_meld import events as mm_events
+
+        monkeypatch.setattr(mm_events, "EVENTS_SCHEMA_VERSION", 3)
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        ev["v"] = 3
+        assert isinstance(aggregator._accept_host_usage_snapshot(ev), aggregator._AcceptedHostRow)
+        ev["v"] = 2
+        assert aggregator._accept_host_usage_snapshot(ev).reason == "unsupported_schema"
+        ev["v"] = True
+        assert aggregator._accept_host_usage_snapshot(ev).reason == "unsupported_schema"
+
+    def test_tie_break_projection_uses_the_same_constant(self, monkeypatch):
+        from mind_meld import events as mm_events
+
+        monkeypatch.setattr(mm_events, "EVENTS_SCHEMA_VERSION", 3)
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        ev["v"] = 3
+        row = aggregator._accept_host_usage_snapshot(ev)
+        assert '"v":3' in row.tie_key

@@ -5291,6 +5291,11 @@ def enable_source(
     DEFAULT_SOURCES but absent from the user's [[sync.sources]] (e.g.
     a freshly-shipped codex source that didn't auto-enable), append the
     default config so the source actually starts syncing.
+
+    Enabling `codex`, `grok`, or `opencode` ALSO authorizes that host's local
+    usage reader, whose activity shows up in the `retro-fleet` AGENT LOGS
+    block. That consent coupling is the feature's only switch, so it is stated
+    here at the point of decision (see HOST_READER_SOURCE_GATE).
     """
     config = _get_config()
     try:

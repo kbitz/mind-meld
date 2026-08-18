@@ -129,6 +129,59 @@ class TestTokenFieldsAndFactories:
         assert b["input"] == 0
 
 
+class TestSumBucket:
+    """`sum_bucket` is the leaf the agent-log renderers total buckets with.
+
+    Deliberately NOT shared with `aggregator._aggregate_model_families`, which
+    sums the same four fields on the other side of a trust boundary. These tests
+    pin the contract that keeps them separable: type-defensive, never
+    value-clamping, and driven entirely by `TOKEN_FIELDS`.
+    """
+
+    def test_sums_only_token_fields(self) -> None:
+        bucket = {f: 1 for f in tu.TOKEN_FIELDS}
+        bucket["bogus"] = 1000
+        assert tu.sum_bucket(bucket) == len(tu.TOKEN_FIELDS)
+
+    def test_adding_a_field_to_token_fields_is_the_only_change_needed(self) -> None:
+        assert tu.sum_bucket({f: 2 for f in tu.TOKEN_FIELDS}) == 2 * len(tu.TOKEN_FIELDS)
+
+    def test_missing_fields_contribute_zero(self) -> None:
+        assert tu.sum_bucket({"input": 7}) == 7
+        assert tu.sum_bucket({}) == 0
+
+    def test_non_dict_is_zero_not_a_raise(self) -> None:
+        for bad in (None, "9", 9, [1, 2], object()):
+            assert tu.sum_bucket(bad) == 0  # type: ignore[arg-type]
+
+    def test_bools_are_excluded(self) -> None:
+        """`True` is an int in Python; counting it would let a malformed bucket
+        inflate a total by 1 per field."""
+        assert tu.sum_bucket({"input": True, "output": 2}) == 2
+
+    def test_non_int_values_contribute_zero(self) -> None:
+        assert tu.sum_bucket({"input": "10", "output": 3}) == 3
+        assert tu.sum_bucket({"input": 1.5, "output": 3}) == 3
+        assert tu.sum_bucket({"input": None, "output": 3}) == 3
+
+    def test_values_are_never_clamped(self) -> None:
+        """Docstring promises type-defence only. A negative is summed as-is
+        rather than silently dropped, so this cannot disagree with
+        `merge_usage_bucket`, which it cites as its model."""
+        assert tu.sum_bucket({"input": -5, "output": 3}) == -2
+        big = {"input": 2**53, "cache_create": 0, "cache_read": 0, "output": 0}
+        assert tu.sum_bucket(big) == 2**53
+
+    def test_agrees_with_merge_usage_bucket(self) -> None:
+        src = {"input": 3, "cache_create": 5, "cache_read": 7, "output": 11}
+        target = tu.zero_model_bucket()
+        tu.merge_usage_bucket(target, src)
+        assert tu.sum_bucket(src) == sum(target[f] for f in tu.TOKEN_FIELDS)
+
+    def test_exported(self) -> None:
+        assert "sum_bucket" in tu.__all__
+
+
 class TestMergeUsageBucket:
     def test_empty_src_no_op(self) -> None:
         target = tu.zero_model_bucket()
