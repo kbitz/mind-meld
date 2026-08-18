@@ -1815,7 +1815,7 @@ class TestPromptSources:
         so it appears in the result list alongside claude."""
         from mind_meld import cli as cli_module
 
-        responses = iter([True, False, False, False, False])
+        responses = iter([True, False, False, False, False, False])
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["claude", "mm-events"]
@@ -1826,7 +1826,7 @@ class TestPromptSources:
         auto-includes without prompting (mm-internal infrastructure)."""
         from mind_meld import cli as cli_module
 
-        responses = iter([False, True, False, False, False])
+        responses = iter([False, True, False, False, False, False])
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["mm-events", "gstack"]
@@ -1850,9 +1850,19 @@ class TestPromptSources:
             def expanduser(self):
                 return self
 
+            def __truediv__(self, child: str):
+                return CountingPath(f"{self.value}/{child}")
+
             def exists(self) -> bool:
                 probes.append(self.value)
                 return True
+
+            def is_dir(self) -> bool:
+                probes.append(self.value)
+                return True
+
+            def is_symlink(self) -> bool:
+                return False
 
         prompts: list[tuple[str, bool]] = []
 

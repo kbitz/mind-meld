@@ -138,6 +138,42 @@ class TestPushPullRoundTrip:
             pulled = (claude_b / rel).read_bytes()
             assert original == pulled, f"Mismatch: {rel}"
 
+    def test_enable_grok_preserves_legacy_claude_manifest_on_next_push(self, tmp_path, monkeypatch):
+        """Materializing Grok must not turn legacy Claude content into tombstones."""
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / "machine_a" / ".claude"
+        self._populate_claude(claude_dir)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        config_path = self._make_config(tmp_path, storage_dir, claude_dir, "dev-a", "A")
+        config = config_module.load_config(config_path)
+        config["sync"].pop("sources")
+        config["sync"]["claude_dir"] = str(claude_dir)
+        save_config(config, config_path)
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        home = tmp_path / "home"
+        (home / ".grok").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        enabled = runner.invoke(app, ["enable-source", "grok"])
+        assert enabled.exit_code == 0, enabled.output
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "changed after enabling grok"
+        )
+
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        assert (
+            "projects/-Users-kb-myapp/memory/user_role.md" in remote["sources"]["claude"]["files"]
+        )
+        assert not [key for key in remote["tombstones"] if key.startswith("claude:")]
+
     def test_deletion_not_propagated_in_additive_model(self, tmp_path, monkeypatch):
         """Delete on A, push, pull to B — B preserves its local copy (additive model)."""
         storage_dir = tmp_path / "storage"
@@ -2144,7 +2180,7 @@ class TestAutoCommands:
 
         # Inputs match TestInitFlow pattern: storage, device name, passphrase,
         # confirm passphrase, then source prompts (Y claude, all others n).
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         # Init should complete despite the keyring write failure.
         assert result.exit_code == 0, result.output
@@ -2758,7 +2794,7 @@ class TestInitFlow:
         # Inputs: storage path, device name, passphrase, confirm passphrase,
         # then per-source prompts (claude Y, all others n) — we
         # need at least one source enabled for init to succeed.
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "bootstrapped" in result.output
@@ -2772,6 +2808,46 @@ class TestInitFlow:
             cfg = tomllib.load(f)
         assert "root_salt_fp" in cfg["crypto"]
         assert cfg["crypto"]["argon2_memory_kb"] == 65_536
+
+    @pytest.mark.parametrize(
+        ("customization_dir", "grok_enabled"),
+        [(None, False), ("skills", True), ("commands", True), ("rules", True)],
+    )
+    def test_init_grok_default_requires_customization_dir(
+        self, tmp_path, monkeypatch, customization_dir, grok_enabled
+    ):
+        """A stock Grok root is not consent; any allowlisted tree is default-Y."""
+        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        grok_root = home / ".grok"
+        grok_root.mkdir()
+        if customization_dir is not None:
+            (grok_root / customization_dir).mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(
+            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+        )
+        monkeypatch.setattr("mind_meld.events_tail._run_events_backfill", lambda *_args: None)
+
+        grok_defaults: list[bool] = []
+
+        def confirm(prompt: str, *, default: bool) -> bool:
+            if "'grok'" in prompt:
+                grok_defaults.append(default)
+            return "'claude'" in prompt or default
+
+        monkeypatch.setattr("mind_meld.cli.typer.confirm", confirm)
+        storage = tmp_path / "icloud"
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw123\npw123\n")
+        assert result.exit_code == 0, result.output
+        assert grok_defaults == [grok_enabled]
+
+        with open(cfg_path, "rb") as f:
+            config = tomllib.load(f)
+        source_names = [source["name"] for source in config["sync"]["sources"]]
+        assert ("grok" in source_names) is grok_enabled
+        assert config.get("retro", {}).get("grok_host_usage") is not True
 
     def test_refuses_if_no_sources_enabled(self, tmp_path, monkeypatch):
         """User declines every source prompt → init refuses to finish.
@@ -2795,7 +2871,7 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # Decline every user-facing source.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code != 0, result.output
         assert "no sync sources enabled" in result.output
@@ -2816,13 +2892,13 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # First attempt: refuse all, leaves mm-crypto-init orphan.
-        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\nn\nn\n"
+        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\nn\nn\nn\n"
         result1 = runner.invoke(app, ["init"], input=stdin1)
         assert result1.exit_code != 0
 
         # Second attempt: same passphrase, accept claude. Takes the
         # second-device path against the orphaned bootstrap.
-        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\nn\nn\nn\n"
+        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\nn\nn\nn\nn\n"
         result2 = runner.invoke(app, ["init"], input=stdin2)
         assert result2.exit_code == 0, result2.output
         assert "Verified passphrase against existing mm-crypto-init" in result2.output
@@ -2841,7 +2917,7 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # Decline claude, accept gstack, decline the other sources.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -2864,7 +2940,7 @@ class TestInitFlow:
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -2908,7 +2984,7 @@ class TestInitFlow:
 
         # Second-device init: only 1 passphrase prompt (single, no confirm),
         # then per-source prompts (claude Y, all others n).
-        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
@@ -3015,7 +3091,7 @@ class TestInitTwoTierGuard:
 
         # Inputs: storage path, orphan-confirm y, device name, passphrase,
         # per-source (claude Y, all others n).
-        stdin = f"{storage}\ny\nMac B\npw-shared\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\ny\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # existing_device_id is None (no prior config in this test), so the
@@ -3088,7 +3164,7 @@ class TestInitTwoTierGuard:
         # After BRICK, init continues on the first-device path:
         # device name, passphrase, confirm passphrase, per-source
         # (claude Y, all others n).
-        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # New mm-crypto-init bootstrapped.
@@ -3102,7 +3178,7 @@ class TestInitTwoTierGuard:
 
         self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         # No orphan or BRICK output polluted the happy path.
@@ -3127,7 +3203,7 @@ class TestInitTwoTierGuard:
             json.dumps({"device_id": "stale", "device_name": "stale-dev"}).encode(),
         )
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         # BRICK did NOT fire (no typed token consumed from stdin).
         assert result.exit_code == 0, result.output

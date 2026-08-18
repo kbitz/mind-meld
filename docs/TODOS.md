@@ -10,8 +10,8 @@ reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
 
 ## Unprocessed
 
-No unprocessed items. Host-parity inbox drained 2026-08-17: grok-custom
-allowlist → Track 22B; Grok skill-link → Track 23B; Codex/Grok
+No unprocessed items. Host-parity inbox drained 2026-08-17: Grok allowlist
+shipped in Track 22B; Grok skill-link → Track 23B; Codex/Grok
 sessions-snapshot refuse → Future.
 
 _Last updated 2026-08-17 by roadmap regeneration._

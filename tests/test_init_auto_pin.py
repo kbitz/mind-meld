@@ -188,7 +188,7 @@ class TestInitWiring:
 
         storage = tmp_path / "icloud"
         # storage path, device name, passphrase x2, claude=Y, all other sources=n
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
 

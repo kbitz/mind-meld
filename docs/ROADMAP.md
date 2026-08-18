@@ -27,17 +27,6 @@ _session: fresh · effort: high · attach: @src/mind_meld/skills/retro_fleet/agg
 - **Slice and merge host usage by window** -- retain host-family UTC buckets independently of Claude session tokens, then merge selected device views. _aggregator.py + tests, ~50 lines._ (M)
 - **Carry coverage forward honestly** -- expose consulted sources and snapshot as_of state so absence, opt-out, and stale observations never become zero. _aggregator.py + invariant/tests, ~35 lines._ (S)
 
-##### Track 22B: Add a grok-custom allowlisted sync source
-_3 tasks . ~140 LOC . high risk . 6 files_
-_touches: src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_source_toggle.py, docs/invariants/sync.md, README.md_
-_out: 22A, 23B_
-_read-first: docs/designs/host-parity.md, src/mind_meld/config.py_
-_produces: grok-custom DEFAULT_SOURCES allowlist; grok remains a usage-only name_
-_session: fresh · effort: high · attach: @src/mind_meld/config.py, @tests/test_config.py, @docs/designs/host-parity.md · verify: pytest tests/test_config.py tests/test_source_toggle.py -q_
-- **Lock the allowlist from a live GROK_HOME inspect** -- include only skills/, commands/, and rules/; leave hooks/ and plugins/ out until inspected. _design + config comments, ~20 lines._ (S)
-- **Add grok-custom to DEFAULT_SOURCES** -- generated-skill excludes matching Codex; a sync source named grok stays a ConfigError. _config.py, cli.py, tests, ~80 lines._ (M)
-- **Pin a mixed fixture uploads nothing secret** -- sessions/, auth.json, config.toml, chat_history.jsonl, logs, and worktrees stay off the wire. _tests, ~40 lines._ (S)
-
 #### Group 23: MODELS card coverage ∥ Grok skill-link
 _Depends on: Group 22_
 
@@ -56,13 +45,13 @@ _session: fresh · effort: medium · attach: @src/mind_meld/skills/retro_fleet/a
 ##### Track 23B: Install retro-fleet into Grok skills
 _2 tasks . ~100 LOC . medium risk . 4 files_
 _touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py, docs/invariants/events-retro.md_
-_blocked-by: Track 22A, Track 22B_
+_blocked-by: Track 22A_
 _out: 23A_
 _read-first: 22A, 22B, docs/designs/host-parity.md, src/mind_meld/skill_link.py_
-_produces: fourth SkillTarget at GROK_HOME/skills; no grok sync source_
+_produces: fourth SkillTarget at GROK_HOME/skills; no additional Grok sync source_
 _session: fresh · effort: medium · attach: @src/mind_meld/skill_link.py, @tests/test_skill_link.py · verify: pytest tests/test_skill_link.py -q_
 - **Add a Grok SkillTarget** -- resolve GROK_HOME/skills at call time with own 24h markers and the no-clobber state machine. _skill_link.py + tests, ~70 lines._ (M)
-- **Report the fourth target** -- mm install-skills lists Grok; do not create a grok sync source. _cli.py + events-retro.md + tests, ~30 lines._ (S)
+- **Report the fourth target** -- mm install-skills lists Grok; do not create an additional Grok sync source. _cli.py + events-retro.md + tests, ~30 lines._ (S)
 
 ### Execution Map
 
@@ -79,7 +68,6 @@ Track detail per group:
 ```
 Group 22: Host snapshot merge ∥ Grok customization source
   +-- Track 22A ........... ~M . 3 tasks
-  +-- Track 22B ........... ~M . 3 tasks
 
 Group 23: MODELS card coverage ∥ Grok skill-link
   +-- Track 23A ........... ~M . 3 tasks
@@ -284,4 +272,9 @@ and the Grok v1 terminal-usage reader have landed.
 
 ### Group 21: Opt in and publish Grok usage snapshots ✓ Shipped (v0.12.34)
 
-- Track 21A — _shipped (v0.12.34): gate and publish trusted Grok usage. `mm enable-source grok` is a usage bit, not a sync source._
+- Track 21A — _shipped (v0.12.34): gate and publish trusted Grok usage. At 21A, `mm enable-source grok` was usage-only; Track 22B later added its scoped sync source._
+
+### Track 22B: Add a Grok sync source (Claude-shaped) ✓ Shipped (v0.12.35)
+
+- `mm enable-source grok` adds the one scoped `type = "grok"` source and retains the 21A host-usage consent bit.
+- The walker syncs only `skills/`, `commands/`, and `rules/`; sessions, credentials, config, bundled files, and child links remain local.

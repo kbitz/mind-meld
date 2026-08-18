@@ -2221,14 +2221,15 @@ def _prompt_source_toggle(
     Single source of truth for the prompt copy + default-Y/N rule. Used
     by `_prompt_sources` (init flow) and `reconfigure_sources` (eng-review
     D5). `current_state` is the default answer:
-      - init: whether the path exists on disk (kept-as-is per eng-review D1)
+      - init: whether the source has a qualifying on-disk tree (Grok requires
+        one of its hardcoded customization dirs, not merely ~/.grok)
       - reconfigure: whether the source is currently active in config
     """
     name = source["name"]
     path_str = str(source.get("path", ""))
     if path_str:
         if detected is None:
-            detected = Path(path_str).expanduser().exists()
+            detected = _source_path_is_detected(source)
         detection_label = "detected" if detected else "not detected"
         prompt = f"Sync '{name}' source at {path_str}? ({detection_label})"
     else:
@@ -2236,14 +2237,34 @@ def _prompt_source_toggle(
     return typer.confirm(prompt, default=current_state)
 
 
+def _source_path_is_detected(source: dict[str, Any]) -> bool:
+    """Return whether a source has the on-disk state that warrants a Y default.
+
+    A Grok home exists even on an install with no user customizations, so its
+    root is not an activation or usage-consent signal. Its three hardcoded
+    customization trees are. Explicitly configured Grok sources remain valid
+    when those trees are absent; this helper controls only prompt defaults and
+    labels.
+    """
+    path_str = str(source.get("path", ""))
+    if not path_str:
+        return False
+    root = Path(path_str).expanduser()
+    if source.get("type") == "grok" or source.get("name") == "grok":
+        return _config_module.grok_customization_dirs_exist(root)
+    return root.exists()
+
+
 def _prompt_sources() -> list[dict[str, Any]]:
     """Prompt for each known source type; return the enabled entries.
 
     User-facing sources (claude, gstack) become a Y/n prompt via
-    `_prompt_source_toggle`. Default is Y when the path exists on disk,
-    N otherwise — nudges users toward only-enabling-what-they-have
-    without making it impossible to enable a source whose directory
-    doesn't exist yet (e.g. new machine, same project about to be cloned).
+    `_prompt_source_toggle`. Default is Y when the qualifying source tree
+    exists on disk, N otherwise — Grok requires one of its hardcoded
+    customization dirs because its root always contains local session state.
+    This nudges users toward only-enabling-what-they-have without making it
+    impossible to enable a source whose directory doesn't exist yet (e.g. new
+    machine, same project about to be cloned).
 
     mm-internal sources (mm-events, Group 7+) auto-include without
     prompting — they're mm-owned infrastructure for fleet-wide features
@@ -2261,8 +2282,7 @@ def _prompt_sources() -> list[dict[str, Any]]:
             if src is not None:
                 enabled.append(src)
             continue
-        path_str = str(default["path"])
-        exists = Path(path_str).expanduser().exists()
+        exists = _source_path_is_detected(default)
         if _prompt_source_toggle(default, current_state=exists, detected=exists):
             src = get_default_source(default["name"])
             if src is not None:
@@ -4419,7 +4439,8 @@ def status(
 
     from mind_meld import host_usage as _host_usage
 
-    grok_on = grok_host_usage_enabled(config)
+    grok_source_on = any(s.get("name") == "grok" for s in sources_configs)
+    grok_on = grok_source_on or grok_host_usage_enabled(config)
     grok_present = False
     try:
         grok_present = _host_usage.grok_sessions_root().exists()
@@ -4431,8 +4452,8 @@ def status(
         else:
             console.print(
                 "  Grok usage capture: disabled — "
-                "run [bold]mm enable-source grok[/bold] to publish Grok token totals "
-                "(does not sync session files)."
+                "run [bold]mm enable-source grok[/bold] to sync Grok customizations "
+                "and publish token totals (session files stay local)."
             )
 
     # Per-source breakdown
@@ -5134,9 +5155,6 @@ def sources() -> None:
 
 # ── enable-source / disable-source / reconfigure-sources ──────────────
 
-_USAGE_ONLY_NAMES: frozenset[str] = frozenset({"grok"})
-"""Known enable-source names that flip local usage consent, not sync."""
-
 
 def _known_source_names(config: dict) -> list[str]:
     """Sorted union of explicit-config names and DEFAULT_SOURCES names.
@@ -5147,7 +5165,7 @@ def _known_source_names(config: dict) -> list[str]:
     """
     explicit = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
     defaults = [s["name"] for s in DEFAULT_SOURCES]
-    return sorted(set(explicit) | set(defaults) | _USAGE_ONLY_NAMES)
+    return sorted(set(explicit) | set(defaults))
 
 
 def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
@@ -5176,26 +5194,17 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
     )
 
 
-def _set_grok_host_usage(config: dict, *, enabled: bool) -> None:
-    """Persist Grok usage consent without touching sync.sources."""
-    raw_sources = (config.get("sync", {}) or {}).get("sources", []) or []
-    explicit = [s for s in raw_sources if isinstance(s, dict)]
-    if any(s.get("name") == "grok" for s in explicit):
-        _error(
-            "grok is a usage-only name; remove the sync source named grok first. "
-            "Grok session files are not synced."
-        )
+def _set_grok_host_usage(config: dict, *, enabled: bool, quiet: bool = False) -> None:
+    """Persist Grok usage consent. Does not touch sync.sources."""
     current = grok_host_usage_enabled(config)
-    disabled = list((config.get("sync", {}) or {}).get("disabled_sources", []) or [])
-    leftover = "grok" in disabled
-    if current is enabled and not leftover:
-        state = "enabled" if enabled else "disabled"
-        console.print(f"[dim]Grok usage capture is already {state}.[/dim]")
+    if current is enabled:
+        if not quiet:
+            state = "enabled" if enabled else "disabled"
+            console.print(f"[dim]Grok usage capture is already {state}.[/dim]")
         return
-    updates: dict[str, dict[str, Any]] = {"retro": {"grok_host_usage": enabled}}
-    if leftover:
-        updates["sync"] = {"disabled_sources": [name for name in disabled if name != "grok"]}
-    patch_config_on_disk(updates)
+    patch_config_on_disk({"retro": {"grok_host_usage": enabled}})
+    if quiet:
+        return
     if enabled:
         console.print("[green]Enabled Grok usage capture on this device.[/green]")
         console.print(
@@ -5248,18 +5257,19 @@ def disable_source(
     except ConfigError as e:
         _error(str(e))
 
-    if name == "grok":
-        _set_grok_host_usage(config, enabled=False)
-        return
-
     sync = dict(config.get("sync", {}) or {})
     disabled = list(sync.get("disabled_sources", []) or [])
     if name in disabled:
+        if name == "grok":
+            _set_grok_host_usage(config, enabled=False, quiet=True)
         console.print(f"[dim]Source '{name}' is already disabled.[/dim]")
         return
 
     disabled.append(name)
-    patch_config_on_disk({"sync": {"disabled_sources": sorted(disabled)}})
+    updates: dict[str, dict[str, Any]] = {"sync": {"disabled_sources": sorted(disabled)}}
+    if name == "grok":
+        updates["retro"] = {"grok_host_usage": False}
+    patch_config_on_disk(updates)
     _record_seen([name])
 
     console.print(f"[green]Disabled source '{name}' on this device.[/green]")
@@ -5288,13 +5298,10 @@ def enable_source(
     except ConfigError as e:
         _error(str(e))
 
-    if name == "grok":
-        _set_grok_host_usage(config, enabled=True)
-        return
-
     sync = dict(config.get("sync", {}) or {})
     disabled = list(sync.get("disabled_sources", []) or [])
     explicit_sources = list(sync.get("sources", []) or [])
+    has_explicit_sources = "sources" in sync
     explicit_names = [s["name"] for s in explicit_sources]
     default_names = [s["name"] for s in DEFAULT_SOURCES]
 
@@ -5304,11 +5311,22 @@ def enable_source(
         disabled.remove(name)
         updates["disabled_sources"] = sorted(disabled)
 
+    # Grok must be materialized even when its customization dirs are not
+    # present yet: explicit enable is consent.  In a legacy config, first
+    # preserve the resolved source set before writing sync.sources.  An
+    # explicit list takes priority over legacy claude_dir/default fallback;
+    # writing only Grok here would make the existing sources disappear and
+    # eventually produce their deletion tombstones.
+    if name == "grok" and not has_explicit_sources:
+        explicit_sources = get_sources(config)
+        explicit_names = [s["name"] for s in explicit_sources]
+        updates["sources"] = explicit_sources
+
     # If the user has explicit sources and this name isn't among them,
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
     # has effect (auto-detect doesn't fire when explicit sources are set).
-    needs_explicit_append = (
-        explicit_sources and name not in explicit_names and name in default_names
+    needs_explicit_append = name not in explicit_names and (
+        name == "grok" or (explicit_sources and name in default_names)
     )
     if needs_explicit_append:
         default = get_default_source(name)
@@ -5319,14 +5337,27 @@ def enable_source(
     if not updates:
         # Already enabled and configured — no-op message.
         if name in explicit_names or (not explicit_sources and name in default_names):
+            if name == "grok":
+                _set_grok_host_usage(config, enabled=True, quiet=True)
             console.print(f"[dim]Source '{name}' is already enabled.[/dim]")
             return
 
     if updates:
-        patch_config_on_disk({"sync": updates})
+        config_updates: dict[str, dict[str, Any]] = {"sync": updates}
+        if name == "grok":
+            config_updates["retro"] = {"grok_host_usage": True}
+        patch_config_on_disk(config_updates)
+
+    if name == "grok" and not updates:
+        _set_grok_host_usage(config, enabled=True, quiet=True)
 
     _record_seen([name])
     console.print(f"[green]Enabled source '{name}' on this device.[/green]")
+    if name == "grok":
+        console.print(
+            "[dim]Syncs ~/.grok skills/, commands/, and rules/ only. "
+            "Session files are not synced. Prompts never leave the Mac.[/dim]"
+        )
 
 
 @app.command(name="reconfigure-sources")
@@ -5380,10 +5411,24 @@ def reconfigure_sources() -> None:
     try:
         for item in ordered:
             iname = item["name"]
+            detected = _source_path_is_detected(item)
+            default_active = iname in default_names
+            if iname == "grok":
+                # A bare ~/.grok contains session state and credentials on
+                # every Grok install. It must not become a default-Y source
+                # or authorize the separate usage reader.
+                default_active = detected
             currently_active = (
-                iname in explicit_names or (not explicit_sources and iname in default_names)
+                iname in explicit_names or (not explicit_sources and default_active)
             ) and iname not in disabled
-            answered = _prompt_source_toggle(item, current_state=currently_active)
+            if iname == "grok":
+                # A pre-22B usage-only opt-in is durable consent.  Keep it
+                # default-on in this explicit reconfigure flow even when the
+                # Grok customization dirs are absent, unless the user says N.
+                currently_active = currently_active or grok_host_usage_enabled(config)
+            answered = _prompt_source_toggle(
+                item, current_state=currently_active, detected=detected
+            )
             existing = next((s for s in explicit_sources if s["name"] == iname), None)
             if answered:
                 # Source on: ensure in [[sync.sources]] (use existing for
@@ -5408,7 +5453,10 @@ def reconfigure_sources() -> None:
     if new_explicit_sources:
         updates["sources"] = new_explicit_sources
 
-    patch_config_on_disk({"sync": updates})
+    grok_on = (
+        any(s.get("name") == "grok" for s in new_explicit_sources) and "grok" not in new_disabled
+    )
+    patch_config_on_disk({"sync": updates, "retro": {"grok_host_usage": grok_on}})
 
     # Mark every name as seen — reconfigure is the explicit acknowledgment
     # surface, so even sources the user re-confirmed should not surface as

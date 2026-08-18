@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.35] - 2026-08-17
+
+**Mind Meld can now sync your Grok customizations with `mm enable-source grok`, without syncing Grok sessions, credentials, or prompts.**
+
+### Added
+
+- **Scoped Grok sync source.** The source is limited to `~/.grok/skills/`, `commands/`, and `rules/`. Grok session data, `auth.json`, `config.toml`, bundled files, and linked or hard-linked files stay local.
+
+### Changed
+
+- **One Grok opt-in, with a compatibility bridge.** Enabling Grok adds its one `[[sync.sources]]` row and keeps the existing host-usage opt-in enabled, so prior usage-only consent continues to publish token totals. Fresh installs and legacy fallback only default Grok on when an allowed customization directory exists; a bare `~/.grok` is never consent.
+- **Source management preserves existing sync.** Enabling Grok from a legacy configuration materializes the current source set before adding Grok, so existing Claude content remains synced instead of becoming deletion tombstones.
+
+### Fixed
+
+- **Strict Grok source boundaries.** Source aliases cannot bypass the hardcoded allowlist, and reconfiguring sources no longer clears a prior Grok usage opt-in by accepting defaults.
+
 ## [0.12.34.1] - 2026-08-17
 
 **Host interchangeability is now a written contract: Claude, Codex, and Grok share one usage card, not one sync tree, and session transcripts stay local on every host.**

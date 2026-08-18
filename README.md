@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, and OpenCode.
+Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, OpenCode, and Grok.
 
 ## Install
 
@@ -127,7 +127,7 @@ Mind Meld treats Codex and OpenCode as first-class peers of Claude Code:
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`.
 - `opencode` syncs `~/.config/opencode/` customizations: rules, agents, commands, modes, plugins, skills, and tools.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` / `opencode.json{,c}` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
-- Enabling the `codex` or `opencode` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. Grok is the same verb, different backend: `mm enable-source grok` opts this Mac into reading terminal token totals from local `updates.jsonl` records and publishing them in the same encrypted host-usage snapshot. It does **not** add a Grok sync source and never uploads session files. Prompts, tool output, and chat history stay on the Mac.
+- Enabling the `codex` or `opencode` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. `mm enable-source grok` is the same verb: it adds a scoped Grok source (`skills/`, `commands/`, and `rules/` only — same idea as Claude's `memory/` + `todos/`) and opts this Mac into reading terminal token totals from local `updates.jsonl` records. Session files, prompts, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill installs for Claude Code, Codex, and OpenCode when you run `mm init`, `mm push`, or `mm install-skills`. OpenCode's Claude compatibility remains useful for existing gstack skills, but its own skill link works even when compatibility is disabled.
 
 Symlinks inside any sync source are local routing, not portable content: Mind Meld does not upload them and leaves existing local links untouched on pull, including dangling links and linked directories. A source root itself may be a symlink.

@@ -36,12 +36,10 @@ the same counter family. The terminal record contains none of `content`,
 `rawInput`, or `rawOutput`; those appear on other update shapes and are out of
 scope.
 
-Today `host_usage.read_grok_usage()` returns `no_metadata_ledger`, so the
-writer deliberately omits Grok from `token_sources`.
-`events_tail._default_host_readers()` still calls it without consent only
-because that current implementation does not open the store. The fleet
-consumer does not yet accept `host-usage-snapshot` rows, so no non-Claude host
-usage can appear in the card.
+The original pre-18D reader returned `no_metadata_ledger`; the shipped reader
+now accepts only the metadata-only terminal projection. It runs only when the
+Grok source is enabled or the retained 21A bit is true. The fleet consumer
+still controls whether accepted host-usage snapshots render on the card.
 
 ## Decisions
 
@@ -49,17 +47,17 @@ usage can appear in the card.
 |---|---|
 | Collection model | Scan local persisted terminal records during `mm init` and substantive `mm push`; no resident process. |
 | Consent | Add a local, explicit `[retro].grok_host_usage = true` setting, controlled by `mm enable-source grok` / `mm disable-source grok`. Absent means false. Flat bool, not a nested table: `patch_config_on_disk` cannot nest-patch. |
-| Why not a zero-file `grok` sync source? | It would create an empty remote manifest source, generate legacy unknown-source noise, and misleadingly imply that Grok files are synced. `grok` is a usage-only name on the existing enable/disable commands. |
+| Why not a zero-file `grok` sync source? | A zero-file source would mint an empty remote manifest and imply whole-home sync. Track 22B added a real Claude-shaped `type: "grok"` walker (`skills/` / `commands/` / `rules/` only) instead. |
 | Data sent to the fleet | Existing encrypted `host-usage-snapshot` aggregate only: canonical model family, UTC day, four token counters, active-day coverage, and source name. |
 | Unknown or changed Grok format | Fail closed. Omit the entire host snapshot rather than publish a partial Grok total. |
 | Cost | Do not estimate Grok subscription/API cost in this work. Usage volume and cost are different claims. |
 
-The new consent is intentionally separate from `sync.sources`: Codex and
-OpenCode already have safe customization sources, but Grok's installed root
-contains credentials and session state rather than a safe, durable
-customization subtree. Reusing `mm enable-source grok` keeps one verb; the
-implementation early-returns before writing `disabled_sources` or a
-`[[sync.sources]]` row.
+Track 22B supersedes the source part of this original 21A design: `grok` is
+now a real, Claude-shaped `[[sync.sources]]` row whose walker is hardcoded to
+`skills/`, `commands/`, and `rules/`. Reusing `mm enable-source grok` still
+keeps one verb, now both adding that scoped source and retaining the
+`[retro].grok_host_usage` compatibility bit. The source is never a root walk:
+credentials, session state, and whole-file configuration remain local.
 
 ## Reader contract
 
@@ -156,12 +154,11 @@ latest accepted snapshot per device in retro-fleet
 MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 ```
 
-1. Extend config validation and reuse `mm enable-source grok` /
-   `mm disable-source grok` for the usage bit. Show enabled/disabled Grok
-   usage capture in `mm status`; do not add Grok to `DEFAULT_SOURCES` or
-   sync any `.grok` path.
-2. Change the reader gate so Grok is not invoked unless the local consent is
-   true. Codex and OpenCode remain gated by their existing enabled sources.
+1. Add the local `[retro].grok_host_usage` bit behind `mm enable-source grok`
+   / `mm disable-source grok`. Track 22B later added the same-name,
+   hardcoded `type: "grok"` source and keeps this bit as a compatibility OR.
+2. Change the reader gate so Grok is not invoked unless the source or local
+   compatibility bit authorizes it. Codex and OpenCode remain source-gated.
 3. Replace `_scan_grok_root` with the strict reader and migrate its marker-only
    cache to the versioned incremental form. Generalize the warm dispatch from
    one reader to an explicit set of warmable readers.
@@ -205,7 +202,7 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 
 | Layer | Coverage |
 |---|---|
-| `tests/test_config.py` | absent/true/false/malformed Grok consent; command and status behavior; no `grok` sync source |
+| `tests/test_config.py` | Grok source name/type boundaries, hardcoded-walker config shape, and retained usage-consent compatibility |
 | `tests/test_host_usage.py` | strict v1 terminal acceptance, multi-model totals, UTC attribution, replay/conflicting duplicate handling, malformed/content/incomplete/stale/deadline/cache-resume cases |
 | `tests/test_host_usage_snapshot.py` | Grok consent gate, warm dispatch, all-or-nothing omission, and closed breadcrumb semantics |
 | `tests/test_events.py` | serialized snapshot has only canonical aggregate fields and remains capped to 90 UTC days |
@@ -216,11 +213,14 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 
 | File | Change |
 |---|---|
-| `src/mind_meld/config.py` | Validate local Grok usage consent without widening sync sources. |
-| `src/mind_meld/cli.py` | Add consent commands/status copy. |
-| `src/mind_meld/events_tail.py` | Apply consent, dispatch Grok warm safely, preserve all-or-nothing capture. |
+| `src/mind_meld/config.py` | Validate the local Grok usage bit and the Track 22B `type: "grok"` source without permitting a wider walk. |
+| `src/mind_meld/cli.py` | Manage the scoped source and retained usage bit through one enable/disable verb and status copy. |
+| `src/mind_meld/manifest.py` | Walk only hardcoded `skills/`, `commands/`, and `rules/`, rejecting child links and hard links. |
+| `src/mind_meld/resolveflow.py` | Limit Grok conflict discovery to the same hardcoded directories. |
+| `src/mind_meld/events_tail.py` | Gate Grok usage on the source or retained bit, dispatch warm safely, and preserve all-or-nothing capture. |
 | `src/mind_meld/host_usage.py` | Strict v1 reader, per-turn accounting, fingerprinted incremental cache. |
 | `src/mind_meld/skills/retro_fleet/aggregator.py` | Consume latest accepted host snapshots and render coverage-aware family totals. |
+| `docs/invariants/sync.md` | Record the hard-link and scoped Grok source boundary. |
 | `docs/invariants/events-retro.md` | Record the Grok v1 reader, consent, cache, and consumer contracts. |
 | `README.md` | Document opt-in Grok capture and update the former no-ledger caveat. |
 | focused test modules above | Synthetic metadata-only fixtures and regression pins. |
@@ -230,8 +230,8 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 - A daemon, polling agent, server, cloud billing/API integration, or headless
   export command.
 - Syncing `.grok` sessions, `config.toml`, credentials, logs, worktrees,
-  prompts, tool output, or chat history. A later allowlisted customization
-  source is `docs/designs/host-parity.md` Plan B and must not be named `grok`.
+  prompts, tool output, or chat history. The shipped `grok` source walks only
+  `skills/`, `commands/`, and `rules/`; see `docs/designs/host-parity.md`.
 - A Codex/Grok `sessions-snapshot`, or uploading session transcripts. That is
   not a missed 18D task; see host-parity.md.
 - Parsing `signals.json`, transcript streams, or context-window totals as a
