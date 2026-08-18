@@ -351,10 +351,13 @@ does not).
   `clock ahead (<=24h)` / `no snapshot`. The skew band really is ≤24h and the
   boundary itself is accepted (the rejection test is `>`).
 - **Absence is never silent.** `_agent_coverage_notes` names the cause with a
-  remedy every time the block is quiet: no snapshot yet, no reader enabled
-  anywhere, all snapshots stale, or nothing active. A vanished block must never
-  be the diagnostic interface — seven distinct causes would otherwise render
-  identically as nothing.
+  remedy every time the block is quiet: no snapshot yet, no reader contributed,
+  all snapshots stale, or nothing active. `token_sources` is per-push
+  contribution state, so the second case may mean no source is enabled **or**
+  that each selected reader had no attributable local ledger; the renderer must
+  state that ambiguity rather than falsely diagnosing consent. A vanished block
+  must never be the diagnostic interface — seven distinct causes would otherwise
+  render identically as nothing.
 - **The rejected breadcrumb counts DEVICES, not rows.** `aggregate_host_usage`
   applies no window filter to rejects (only accepted rows are compared against
   `until`), so one malformed writer 89 days ago would light a row-count

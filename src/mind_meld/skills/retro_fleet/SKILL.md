@@ -85,8 +85,10 @@ support:
    moves its whole total onto a later day and erases the earlier key, so a
    week of daily use can report a single day. It can only ever understate.
 3. **An absent or empty block is not zero.** The body always names the cause
-   (no snapshot yet, no reader enabled, all snapshots stale, nothing active)
-   with a remedy. Read the cause; do not infer one.
+   (no snapshot yet, no reader contributed, all snapshots stale, nothing active)
+   with a remedy. An empty contributor list can mean no source is enabled or
+   that every selected reader had no attributable local ledger; read the note
+   instead of inferring which one occurred.
 
 ## Step 1: refresh fleet state
 
@@ -268,11 +270,11 @@ section is omitted when there is nothing to surface):
 - `Requested Nd window exceeds the 90-day events retention.` — user asked
   for a window longer than `EVENTS_RETENTION_DAYS`. Older days are reaped
   by `mm gc` and not in the data.
-- `No agent logs are being read on any machine. Enable with mm enable-source
-  codex (or grok, opencode)…` — mm is publishing agent-log snapshots but no
-  reader is authorized anywhere. This is the feature's precondition, and
-  enabling one of those sources is the whole fix. Fires only when *no*
-  machine has a reader, so it can never nag an already-configured fleet.
+- `No agent-log reader contributed on any machine…` — the row's contributor
+  list is empty. That can mean no source is enabled, or that each selected
+  reader had no attributable local ledger; it cannot distinguish the two.
+  Enable one of those sources if needed, then run `mm push`; do not report a
+  consent failure as a fact.
 - `No agent activity observed in this window. Counts are lower bounds…` —
   readers ran and found nothing dated inside the window. Report it as
   observed-nothing, not as zero usage.

@@ -5081,13 +5081,19 @@ class TestAgentCoverageNotes:
         )
         return data
 
-    def test_capable_but_unconfigured_points_at_enable_source(self):
-        """The only pointer to the feature's precondition: `mm enable-source
-        --help` describes file syncing and never mentions the usage reader."""
+    def test_no_reader_contribution_names_the_ambiguous_state_and_next_step(self):
+        """An empty token_sources list means no reader contributed, not that no
+        source is enabled: absent-ledger readers are deliberately omitted too."""
         notes = aggregator._agent_coverage_notes(
             self._data([_snap("dev-a", self.UNTIL, consulted=())])
         )
-        assert any("mm enable-source codex" in n for n in notes)
+        assert any(
+            "No agent-log reader contributed" in n
+            and "If no source is enabled" in n
+            and "mm enable-source codex" in n
+            and "no attributable local ledger" in n
+            for n in notes
+        )
 
     def test_configured_fleet_is_never_nagged(self):
         notes = aggregator._agent_coverage_notes(
@@ -5172,7 +5178,7 @@ class TestAgentInventoryBody:
         assert "| dev-b | — | 2026-04-28 | current, no agent activity observed | 0 | 0 |" in body
         assert "| dev-c | — | — | no snapshot | — | — |" in body
         assert (
-            "Readers per machine (`none` = no reader authorized): dev-a codex; dev-b grok." in body
+            "Readers per machine (`none` = no reader contributed): dev-a codex; dev-b grok." in body
         )
 
     def test_state_strings_are_never_raw_field_names(self):

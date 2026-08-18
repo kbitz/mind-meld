@@ -2440,7 +2440,12 @@ def _render_agent_inventory(
     out.extend(rows)
     out.append("")
     if readers:
-        out.append(f"- Readers per machine (`none` = no reader authorized): {'; '.join(readers)}.")
+        # "no reader contributed" is exactly what an empty `token_sources` says.
+        # "not authorized" would overclaim: the wire cannot distinguish an
+        # unenabled source from an uninstalled host from a reader that was
+        # dropped as absent, and asserting one of those three would be the same
+        # class of false precision this whole block exists to avoid.
+        out.append(f"- Readers per machine (`none` = no reader contributed): {'; '.join(readers)}.")
     if omitted:
         out.append(f"- (+{len(omitted)} more machines omitted; those with data are shown first.)")
     out.append(
@@ -2499,14 +2504,15 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             )
         any_reader = any(s.consulted for s in snaps)
         if not any_reader:
-            # Capable but unconfigured: mm is publishing snapshots and no reader
-            # is authorized on any machine. This is the ONLY pointer to the
-            # feature's precondition; `mm enable-source --help` describes file
-            # syncing and never mentions the usage reader.
+            # `token_sources` records readers that contributed to THIS push,
+            # not readers merely selected by the consent gate. An empty list
+            # can therefore mean no source is enabled OR that every selected
+            # reader had no attributable metadata ledger; do not misdiagnose
+            # the latter as a consent failure.
             notes.append(
-                "No agent logs are being read on any machine. Enable with "
-                "`mm enable-source codex` (or `grok`, `opencode`) — that also "
-                "authorizes the host's local usage reader."
+                "No agent-log reader contributed on any machine. If no source is enabled, "
+                "enable with `mm enable-source codex` (or `grok`, `opencode`) and run "
+                "`mm push`; readers with no attributable local ledger are also omitted."
             )
         elif not view.any_activity:
             if all(s.stale for s in snaps):
@@ -3007,7 +3013,7 @@ def format_retro(
     # Agent-log diagnostics. The card block goes quiet in several distinct
     # states; a vanished block must never BE the diagnostic, so name the cause
     # here every time, with its remedy. Without this, "no agent activity", "no
-    # snapshot yet", "no reader enabled", "all snapshots stale" and "snapshots
+    # snapshot yet", "no reader contributed", "all snapshots stale" and "snapshots
     # rejected" are indistinguishable to the reader.
     notes.extend(_agent_coverage_notes(data, view=agent_view))
     if data.fleet.unregistered_event_devices:
