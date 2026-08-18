@@ -136,6 +136,23 @@ can't blow up the card height."""
 MAX_TOKEN_COVERAGE_PEER_NAMES = 5
 """Maximum affected-peer names rendered in the token-coverage Note."""
 
+MAX_AGENT_INVENTORY_MACHINES = 12
+"""Cap on rendered agent-inventory rows. ``get_known_devices`` loads the device
+registry wholesale and returns every record uncapped, and when that read FAILS
+``aggregate_host_usage`` keeps every accepted view instead, so row count is
+bounded only by however many distinct device ids appear across the retained event
+window. ``_safe_short`` bounds each id's LENGTH, never the row COUNT, so a corrupt
+or hostile peer registry would otherwise produce an enormous Markdown table and an
+enormous LLM prompt. Same reasoning as ``MAX_TOKEN_COVERAGE_PEER_NAMES``, sized
+larger because a real fleet legitimately has more machines than a warning wants to
+name. Rows are ordered by information content BEFORE this cap applies, so a
+no-snapshot machine can never evict one that has data."""
+
+HOST_SNAPSHOT_MIN_VERSION = "v0.12.32"
+"""First mm release whose event tail publishes ``host-usage-snapshot`` rows. Named
+once because it appears in several user-facing remedies; a machine below it cannot
+contribute agent-log activity no matter how often it pushes."""
+
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
 """Usable content width inside the card. Themes/noteworthy strings
 longer than this are truncated with an ellipsis suffix at render time."""
@@ -1042,7 +1059,10 @@ def _tie_break_key(
         "token_sources": list(consulted),
         "ts": as_of.isoformat(),
         "type": "host-usage-snapshot",
-        "v": 2,
+        # Same constant the acceptor compares against, for the same reason: a
+        # literal here would make the tie-break projection disagree with the
+        # version it just validated the moment the schema bumps.
+        "v": mm_events.EVENTS_SCHEMA_VERSION,
     }
     return json.dumps(core, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -1057,8 +1077,10 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
     # Read the writer's constant, never a literal. With a hardcoded `2` the
     # FIRST `EVENTS_SCHEMA_VERSION` bump would make mm reject its OWN freshly
     # written rows, fleet-wide, and light the rejected-snapshot breadcrumb
-    # everywhere at once. `type(v) is not int` still excludes `True`, which
-    # `== 2` would otherwise let through as `1`.
+    # everywhere at once. The `type(v) is not int` half matters more now than it
+    # did against a literal `2`: `True == 2` was already False, but once the
+    # comparison target is a constant, a future `EVENTS_SCHEMA_VERSION == 1`
+    # would let `True` satisfy `v != VERSION` and slip through as a valid row.
     if v != mm_events.EVENTS_SCHEMA_VERSION or type(v) is not int:
         return HostReject(device=device, reason="unsupported_schema")
     if ev.get("type") != "host-usage-snapshot":
@@ -2195,8 +2217,7 @@ def _agent_rhythm_view(
         families = snap.lifetime_by_family
         if not isinstance(families, dict):
             continue
-        # A snapshot cannot have observed activity after it was taken.
-        ceiling = min(hi, snap.as_of.date().isoformat())
+        ceiling = _snapshot_day_ceiling(snap, hi)
         active_here = False
         for family, days in families.items():
             if family not in _HOST_FAMILIES or not isinstance(days, dict):
@@ -2261,31 +2282,39 @@ def _render_agent_block(view: AgentRhythmView) -> list[str]:
     return out
 
 
-MAX_AGENT_INVENTORY_MACHINES = 12
-"""Cap on rendered agent-inventory rows. ``get_known_devices`` loads the device
-registry wholesale and returns every record uncapped, and when that read FAILS
-``aggregate_host_usage`` keeps every accepted view instead, so row count is
-bounded only by however many distinct device ids appear across 90 days of
-retained events. ``_safe_short`` bounds each id's LENGTH, never the row COUNT, so
-a corrupt or hostile peer registry would otherwise produce an enormous Markdown
-table and an enormous LLM prompt. Same reasoning as
-``MAX_TOKEN_COVERAGE_PEER_NAMES``, sized larger because a real fleet legitimately
-has more machines than a warning wants to name."""
+def _snapshot_day_ceiling(snap: HostDeviceSnapshot, window_hi: str) -> str:
+    """Upper day-key bound for one snapshot: ``min(window end, its own as_of)``.
+
+    Load-bearing, and shared by both agent renderers so an edit to one cannot
+    silently drop it from the other. The acceptor validates day-key FORMAT and
+    ``ts`` independently and never relates them, so a backdated peer can ship an
+    ``as_of`` before the window WITH in-window day keys (verified constructible).
+    Clamping here makes "a snapshot cannot report activity later than it was
+    taken" true by arithmetic instead of by assumption, and subsumes the stale
+    case: ``as_of < since`` then yields no in-window day at all.
+    """
+    return min(window_hi, snap.as_of.date().isoformat())
 
 
-def _agent_state_label(snap: HostDeviceSnapshot, *, active: bool) -> str:
+def _agent_state_label(snap: HostDeviceSnapshot, *, has_window_activity: bool) -> str:
     """Reader-facing state string. Never a raw field name.
 
     ``future_dated`` printed raw reads as a broken clock; the acceptor already
     rejects anything beyond ``until + _HOST_FUTURE_SKEW``, so the band is at most
     24h and the boundary itself is ACCEPTED (the test is ``>``), hence ``<=24h``.
     ``stale`` means "last observed before this window", not "unreliable".
+
+    ``has_window_activity`` is IN-WINDOW activity, not retained activity. Gating
+    it on the retained total instead would make this string unreachable for a
+    machine whose only activity predates the window, and would put the State
+    column at odds with the card's ``N of M machines with agent activity`` count,
+    which is itself in-window.
     """
     if snap.future_dated:
         return "clock ahead (<=24h)"
     if snap.stale:
         return "last seen before window"
-    if not active:
+    if not has_window_activity:
         return "current, no agent activity observed"
     return "current"
 
@@ -2316,12 +2345,37 @@ def _render_agent_inventory(
     known_ids: list[str] = [
         d.get("device_id", "")
         for d in data.fleet.devices_known_list
-        if isinstance(d, dict) and isinstance(d.get("device_id"), str)
+        if isinstance(d, dict) and isinstance(d.get("device_id"), str) and d.get("device_id")
     ]
-    # Every machine mm knows about, so the table reconciles without the reader
-    # doing arithmetic against prose. Registry-read failure leaves
-    # devices_known_list empty; fall back to the accepted snapshots.
-    ordered = sorted(set(known_ids) | set(inventory.by_device)) or sorted(inventory.by_device)
+    # Every machine mm knows about, plus every machine with an accepted snapshot,
+    # plus the ones the inventory explicitly recorded as having none — so the
+    # table reconciles without the reader doing arithmetic against prose.
+    candidates = (
+        set(known_ids) | set(inventory.by_device) | set(inventory.devices_without_accepted_row)
+    )
+    if not candidates:
+        return []
+
+    # ORDER BY INFORMATION CONTENT, then cap. Sorting alphabetically and
+    # truncating would let a dozen no-snapshot machines evict the only machine
+    # that actually has data — on a 13-machine fleet the table rendered twelve
+    # `no snapshot` rows, zero data rows, and dropped the readers line entirely,
+    # while the card simultaneously said "1 of 13 machines with agent activity".
+    # The cap exists to bound a hostile registry, not to decide what matters.
+    def _rank(device: str) -> tuple[int, str]:
+        snap = inventory.by_device.get(device)
+        if snap is None or not isinstance(snap, HostDeviceSnapshot):
+            return (2, device)  # no usable snapshot
+        families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
+        has_data = any(
+            token_usage.sum_bucket(b) > 0
+            for days in families.values()
+            if isinstance(days, dict)
+            for b in days.values()
+        )
+        return (0 if has_data else 1, device)
+
+    ordered = sorted(candidates, key=_rank)
     shown, omitted = ordered[:MAX_AGENT_INVENTORY_MACHINES], ordered[MAX_AGENT_INVENTORY_MACHINES:]
 
     rows: list[str] = []
@@ -2329,27 +2383,40 @@ def _render_agent_inventory(
     for device in shown:
         label = _safe_short(device) or "(unnamed)"
         snap = inventory.by_device.get(device)
-        if snap is None:
+        # Mirror _agent_rhythm_view's guard: by_device is a public dataclass
+        # field, so a hand-built inventory can carry a non-snapshot value.
+        # Without this the whole retro render dies on an AttributeError.
+        if not isinstance(snap, HostDeviceSnapshot):
             rows.append(f"| {label} | — | — | no snapshot | — | — |")
             continue
-        consulted = ", ".join(snap.consulted) if snap.consulted else "none"
+        # `consulted` is a closed vocabulary after the acceptor, but this
+        # dataclass is public and hand-built in tests, so defang it the same
+        # way the device id one line up is defanged. Unsanitized it can inject
+        # a markdown bullet or a live ANSI escape into LLM-consumed output.
+        consulted = ", ".join(_safe_short(str(c)) for c in snap.consulted) or "none"
         readers.append(f"{label} {consulted}")
         families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
-        ceiling = min(hi, snap.as_of.date().isoformat())
+        ceiling = _snapshot_day_ceiling(snap, hi)
         as_of = snap.as_of.date().isoformat()
         emitted = False
         for family, family_label in AGENT_FAMILY_ROWS:
             days = families.get(family)
             if not isinstance(days, dict):
                 continue
-            retained = sum(token_usage.sum_bucket(b) for b in days.values())
-            in_window = sum(
-                token_usage.sum_bucket(b) for day, b in days.items() if lo <= day <= ceiling
-            )
+            retained = 0
+            in_window = 0
+            for day, bucket in days.items():
+                total = token_usage.sum_bucket(bucket)
+                if total <= 0:
+                    continue
+                retained += total
+                if lo <= day <= ceiling:
+                    in_window += total
             if retained <= 0:
                 continue
+            state = _agent_state_label(snap, has_window_activity=in_window > 0)
             rows.append(
-                f"| {label} | {family_label} | {as_of} | {_agent_state_label(snap, active=True)} "
+                f"| {label} | {family_label} | {as_of} | {state} "
                 f"| {_format_token_count(retained)} | {_format_token_count(in_window)} |"
             )
             emitted = True
@@ -2357,40 +2424,46 @@ def _render_agent_inventory(
             # Accepted snapshot, nothing observed. `0` not `—`: zero is KNOWN
             # data here, whereas `—` means unavailable, and conflating them is
             # the absence-as-zero error in reverse.
-            rows.append(
-                f"| {label} | — | {as_of} | {_agent_state_label(snap, active=False)} | 0 | 0 |"
-            )
+            state = _agent_state_label(snap, has_window_activity=False)
+            rows.append(f"| {label} | — | {as_of} | {state} | 0 | 0 |")
 
+    cap = token_usage.MAX_BY_DAY_DAYS
     out = [
         "## Agent activity",
         "",
         "Per-machine diagnostic counters; not weekly spend and never safe to sum across machines.",
         "",
-        "| Machine | Model family | Snapshot (UTC) | State | Tokens (last 90 active days) "
+        f"| Machine | Model family | Snapshot (UTC) | State | Tokens (last {cap} active days) "
         "| Tokens in this window |",
         "|---|---|---|---|---|---|",
     ]
     out.extend(rows)
     out.append("")
     if readers:
-        out.append(f"- Readers that ran, per machine: {'; '.join(readers)}.")
+        out.append(f"- Readers per machine (`none` = no reader authorized): {'; '.join(readers)}.")
     if omitted:
-        out.append(f"- (+{len(omitted)} more machines omitted.)")
+        out.append(f"- (+{len(omitted)} more machines omitted; those with data are shown first.)")
     out.append(
         "- *A resumed session restates its whole total onto its last-active day, so the "
         "final column is inflated at the recent edge and day counts elsewhere are lower "
-        "bounds. Counters cover at most the 90 most recent active UTC days.*"
+        f"bounds. Counters cover at most the {cap} most recent active UTC days.*"
     )
     out.append("")
     return out
 
 
-def _agent_coverage_notes(data: RetroData) -> list[str]:
+def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = None) -> list[str]:
     """Name why the AGENT LOGS block is quiet, with a remedy for each cause.
 
     Ordered most-actionable first. Each line follows the product's established
     problem/cause/fix shape ("run `mm push` on those machines; upgrade if the
     warning persists") rather than describing a state and stopping.
+
+    ``view`` is the same ``AgentRhythmView`` the card rendered. Pass it whenever
+    one exists: two independent construction sites with hand-copied keyword
+    arguments can silently disagree about whether there was activity, which would
+    put the card and this Notes line in direct contradiction. Recomputing is a
+    correctness hazard first and a (negligible, sub-millisecond) cost second.
     """
     inventory = data.host_inventory
     if not isinstance(inventory, HostUsageInventory):
@@ -2398,21 +2471,32 @@ def _agent_coverage_notes(data: RetroData) -> list[str]:
 
     notes: list[str] = []
     snaps = [s for s in inventory.by_device.values() if isinstance(s, HostDeviceSnapshot)]
-    view = _agent_rhythm_view(
-        inventory,
-        since=data.since,
-        until=data.until,
-        machines_known=data.fleet.devices_known,
-    )
 
     if not snaps:
         if inventory.devices_without_accepted_row:
             notes.append(
                 f"No agent-log snapshots yet from "
                 f"{len(inventory.devices_without_accepted_row)} machine(s) — run `mm push` "
-                f"there, and upgrade any machine below mm v0.12.32."
+                f"there, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
+            )
+        else:
+            # Reachable whenever the device registry is unavailable:
+            # `aggregate_host_usage` sets `missing = frozenset()` when
+            # `registered_ids is None`. Without this branch the card block, the
+            # body section AND the notes are all empty, so a vanished block
+            # becomes the only diagnostic — exactly what the contract forbids.
+            notes.append(
+                "No agent-log snapshots were accepted from any machine — run `mm push` on "
+                f"each Mac, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
     else:
+        if view is None:
+            view = _agent_rhythm_view(
+                inventory,
+                since=data.since,
+                until=data.until,
+                machines_known=data.fleet.devices_known,
+            )
         any_reader = any(s.consulted for s in snaps)
         if not any_reader:
             # Capable but unconfigured: mm is publishing snapshots and no reader
@@ -2425,7 +2509,7 @@ def _agent_coverage_notes(data: RetroData) -> list[str]:
                 "authorizes the host's local usage reader."
             )
         elif not view.any_activity:
-            if snaps and all(s.stale for s in snaps):
+            if all(s.stale for s in snaps):
                 notes.append(
                     "Agent-log snapshots all predate this window — run `mm push` on those "
                     "machines for current agent activity."
@@ -2439,14 +2523,26 @@ def _agent_coverage_notes(data: RetroData) -> list[str]:
             notes.append(
                 f"{len(inventory.devices_without_accepted_row)} machine(s) have no agent-log "
                 f"snapshot (unknown, not zero) — run `mm push` there, and upgrade any "
-                f"machine below mm v0.12.32."
+                f"machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
 
-    rejected_devices = inventory.rejected_devices
-    if rejected_devices:
+    # Named devices and unidentified rows are counted separately. `HostReject.device`
+    # is empty when the device field itself was unusable, so gating the whole
+    # breadcrumb on a named-device count would let a peer writing a blank device
+    # plus a malformed row light nothing at all.
+    named = inventory.rejected_devices
+    unnamed = sum(1 for row in inventory.rejected if not row.device)
+    if named or unnamed:
+        # Reasons are scoped to match the counts they sit beside, so the number
+        # and the reason list can never describe different row sets.
         reasons = ", ".join(sorted({row.reason for row in inventory.rejected}))
+        who = []
+        if named:
+            who.append(f"{named} machine(s)")
+        if unnamed:
+            who.append(f"{unnamed} unidentified row(s)")
         notes.append(
-            f"Agent-log snapshots from {rejected_devices} machine(s) were rejected "
+            f"Agent-log snapshots from {' plus '.join(who)} were rejected "
             f"({reasons}) — upgrade those machines; a version mismatch is the usual cause."
         )
     return notes
@@ -2470,6 +2566,7 @@ def _render_ascii_card(
     name: str | None,
     themes: list[str],
     noteworthy: str,
+    agent_view: AgentRhythmView,
 ) -> list[str]:
     """Render the screenshot-friendly ASCII card. Pure padding — every
     line is forced to the same width so the right border aligns. LLM-
@@ -2517,14 +2614,7 @@ def _render_ascii_card(
     out.extend(_render_models_block(data.sessions))
     out.append(_card_line(""))
 
-    agent_block = _render_agent_block(
-        _agent_rhythm_view(
-            data.host_inventory,
-            since=data.since,
-            until=data.until,
-            machines_known=data.fleet.devices_known,
-        )
-    )
+    agent_block = _render_agent_block(agent_view)
     if agent_block:
         out.extend(agent_block)
         out.append(_card_line(""))
@@ -2733,10 +2823,27 @@ def format_retro(
     lines: list[str] = []
     notes: list[str] = []
 
+    # Built ONCE and shared by the card block and the coverage notes, so the two
+    # can never disagree about whether there was agent activity this window.
+    agent_view = _agent_rhythm_view(
+        data.host_inventory,
+        since=data.since,
+        until=data.until,
+        machines_known=data.fleet.devices_known,
+    )
+
     themes_list = list(themes) if themes else []
     has_card_input = bool(themes_list) or bool(noteworthy) or bool(name)
     if has_card_input:
-        lines.extend(_render_ascii_card(data, name=name, themes=themes_list, noteworthy=noteworthy))
+        lines.extend(
+            _render_ascii_card(
+                data,
+                name=name,
+                themes=themes_list,
+                noteworthy=noteworthy,
+                agent_view=agent_view,
+            )
+        )
         lines.append("")
 
     # Header date matches the card's local-time framing — using
@@ -2902,7 +3009,7 @@ def format_retro(
     # here every time, with its remedy. Without this, "no agent activity", "no
     # snapshot yet", "no reader enabled", "all snapshots stale" and "snapshots
     # rejected" are indistinguishable to the reader.
-    notes.extend(_agent_coverage_notes(data))
+    notes.extend(_agent_coverage_notes(data, view=agent_view))
     if data.fleet.unregistered_event_devices:
         notes.append(
             f"{data.fleet.unregistered_event_devices} unregistered device id(s) had "

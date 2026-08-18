@@ -436,14 +436,19 @@ def sum_bucket(bucket: dict[str, Any]) -> int:
 
     Type-defensive only, never value-clamping: a non-dict or a non-int field
     contributes 0 rather than raising, matching ``merge_usage_bucket``'s
-    reasoning that one poisoned key must not take down an entire render.
+    reasoning that one poisoned key must not take down an entire render. Values
+    are summed as-is — no cap, no floor — so callers see the real total. Accepted
+    host buckets are already non-negative by construction
+    (``host_usage._is_valid_counter``), and silently dropping negatives here
+    would make this helper disagree with ``merge_usage_bucket``, which it cites
+    as its model.
     """
     if not isinstance(bucket, dict):
         return 0
     total = 0
     for k in TOKEN_FIELDS:
         value = bucket.get(k, 0)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        if isinstance(value, int) and not isinstance(value, bool):
             total += value
     return total
 
@@ -1842,6 +1847,7 @@ __all__ = [
     "parse_usage",
     "resolve_prices",
     "slice_window",
+    "sum_bucket",
     "walk_jsonl_buckets",
     "walk_jsonl_segment",
     "warm_token_cache_inline",

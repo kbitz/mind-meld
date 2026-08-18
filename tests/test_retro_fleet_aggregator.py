@@ -4655,7 +4655,9 @@ class TestHostSnapshotNoWindowSpend:
         # totals, cost, or the trend snapshot — is asserted directly instead,
         # plus a positive check that the agent section is the ONLY difference.
         def _strip_agent_section(text: str) -> list[str]:
-            """Drop the `## Agent activity` section, up to the next `## `."""
+            """Drop everything the agent-log feature owns: its body section and
+            its own coverage Notes lines. Both are legitimately part of the
+            feature; what must NOT move is any Claude-side line."""
             out, skipping = [], False
             for line in text.splitlines():
                 if line.startswith("## Agent activity"):
@@ -4666,6 +4668,8 @@ class TestHostSnapshotNoWindowSpend:
                         skipping = False
                     else:
                         continue
+                if line.startswith("- ") and "agent" in line.lower():
+                    continue
                 out.append(line)
             return out
 
@@ -4674,9 +4678,10 @@ class TestHostSnapshotNoWindowSpend:
         assert with_text != without_text, "host inventory should now render something"
         assert "## Agent activity" in with_text
         assert "## Agent activity" not in without_text
-        # Removing ONLY the agent section must reproduce the host-free output
-        # exactly. That is the precise form of the old whole-output equality:
-        # host data may add its own section and may change nothing else.
+        # Removing everything the agent feature owns must reproduce the host-free
+        # output exactly. That is the precise form of the old whole-output
+        # equality: host data may add its own section and its own notes, and may
+        # change nothing else.
         assert _strip_agent_section(with_text) == _strip_agent_section(without_text)
 
         # The five isolation guardrails.
@@ -5166,7 +5171,9 @@ class TestAgentInventoryBody:
         # Accepted but nothing observed: 0 is KNOWN data, `—` means unavailable.
         assert "| dev-b | — | 2026-04-28 | current, no agent activity observed | 0 | 0 |" in body
         assert "| dev-c | — | — | no snapshot | — | — |" in body
-        assert "Readers that ran, per machine: dev-a codex; dev-b grok." in body
+        assert (
+            "Readers per machine (`none` = no reader authorized): dev-a codex; dev-b grok." in body
+        )
 
     def test_state_strings_are_never_raw_field_names(self):
         body = "\n".join(
@@ -5208,7 +5215,7 @@ class TestAgentInventoryBody:
             )
         )
         assert body.count("| dev-") == aggregator.MAX_AGENT_INVENTORY_MACHINES
-        assert "(+4 more machines omitted.)" in body
+        assert "(+4 more machines omitted; those with data are shown first.)" in body
 
     def test_hostile_device_id_cannot_break_the_markdown_table(self):
         body = "\n".join(
@@ -5254,3 +5261,256 @@ class TestAgentInventoryBody:
             )
         )
         assert "| 1.0k | 7 |" in body
+
+
+class TestAgentBlockReachesTheCard:
+    """The AGENT LOGS block wiring inside `_render_ascii_card`, not the helpers.
+
+    Every other agent test calls `_agent_rhythm_view` / `_render_agent_block`
+    directly with a hand-built view, which left the wiring itself unpinned:
+    deleting the whole 12-line block from `_render_ascii_card` kept 2500 tests
+    green. These tests fail if that wiring, its window arguments, its
+    `machines_known` source, or its position ever regress.
+    """
+
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _data(self, snaps, *, known_ids=("dev-a", "dev-b"), missing=frozenset()):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(
+            devices_known=len(known_ids),
+            devices_known_list=[{"device_id": d, "device_name": d} for d in known_ids],
+        )
+        data.host_inventory = aggregator.HostUsageInventory(
+            by_device={s.device: s for s in snaps},
+            devices_without_accepted_row=missing,
+        )
+        return data
+
+    def _card(self, out):
+        return [line for line in out.splitlines() if line.startswith("║")]
+
+    def test_agent_block_renders_inside_the_card_between_models_and_noteworthy(self):
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})]
+        )
+        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
+        card = self._card(out)
+        hits = [i for i, line in enumerate(card) if "AGENT LOGS" in line]
+        assert hits, "AGENT LOGS never reached the rendered card"
+        i = hits[0]
+        assert any("MODELS" in line for line in card[:i]), "AGENT LOGS rendered above MODELS"
+        assert any("NOTEWORTHY" in line for line in card[i:]), (
+            "AGENT LOGS rendered below NOTEWORTHY"
+        )
+        assert any("Codex models: seen on 1 day" in line for line in card)
+
+    def test_denominator_comes_from_the_fleet_registry(self):
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})],
+            known_ids=("dev-a", "dev-b", "dev-c"),
+        )
+        out = aggregator.format_retro(data, name="kb")
+        assert "AGENT LOGS (1 of 3 machines with agent activity)" in out
+
+    def test_window_bounds_come_from_the_retro_data(self):
+        """A day inside the snapshot but outside the window must not be counted,
+        which only holds if the card passes data.since/data.until through."""
+        data = self._data(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={"codex": {"2026-03-01": _usage(9999)}},
+                )
+            ]
+        )
+        out = aggregator.format_retro(data, name="kb")
+        assert "AGENT LOGS (0 of 2 machines with agent activity)" in out
+        assert "No agent activity this window" in out
+        assert "seen on" not in out
+
+    def test_no_agent_block_on_the_first_pass(self):
+        """First pass has no card at all, so the block must not leak into it."""
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})]
+        )
+        out = aggregator.format_retro(data)
+        assert "╔" not in out
+        assert "AGENT LOGS" not in out
+
+    def test_card_holds_its_width_with_the_agent_block_present(self):
+        data = self._data(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={
+                        key: {"2026-04-24": _usage(5)} for key, _ in aggregator.AGENT_FAMILY_ROWS
+                    },
+                )
+            ]
+        )
+        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
+        card = [line for line in out.splitlines() if line.startswith(("╔", "╠", "╚", "║"))]
+        assert {len(line) for line in card} == {aggregator.CARD_WIDTH}
+        assert "…" not in "\n".join(
+            line for line in card if "models:" in line or "AGENT LOGS" in line
+        )
+
+    def test_no_card_line_carries_a_host_token_magnitude(self):
+        data = self._data(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={"codex": {"2026-04-24": _usage(123_456_789)}},
+                )
+            ]
+        )
+        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
+        card = "\n".join(self._card(out))
+        assert "123" not in card
+        assert "123.5M" not in card
+        # The magnitude belongs to the body, and only the body.
+        assert "123.5M" in out
+
+
+class TestAgentInventoryHardening:
+    """Guards for the paths a hand-built or hostile inventory can reach."""
+
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _data(self, by_device, *, known_ids=(), missing=frozenset()):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(
+            devices_known=len(known_ids) or None,
+            devices_known_list=[{"device_id": d} for d in known_ids],
+        )
+        data.host_inventory = aggregator.HostUsageInventory(
+            by_device=by_device, devices_without_accepted_row=missing
+        )
+        return data
+
+    def test_cap_keeps_machines_that_have_data(self):
+        """Ordering by information content before capping. Alphabetical order
+        plus truncation let a dozen empty machines evict the only one with
+        data, and took the readers line with it."""
+        n = aggregator.MAX_AGENT_INVENTORY_MACHINES
+        empty = tuple(f"aaa-{i:03d}" for i in range(n))
+        snap = _snap("zzz-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(5000)}})
+        body = "\n".join(
+            aggregator._render_agent_inventory(
+                self._data({"zzz-a": snap}, known_ids=empty + ("zzz-a",))
+            )
+        )
+        assert "zzz-a" in body, "the only machine with data was evicted by the cap"
+        assert "| zzz-a | Codex models |" in body
+        assert "Readers per machine" in body
+
+    def test_non_snapshot_value_does_not_crash_the_render(self):
+        data = self._data({"dev-a": {"not": "a snapshot"}}, known_ids=("dev-a",))
+        body = aggregator._render_agent_inventory(data)  # must not raise
+        assert "| dev-a | — | — | no snapshot | — | — |" in "\n".join(body)
+        assert aggregator._agent_coverage_notes(data) is not None
+
+    def test_consulted_names_are_sanitized_like_device_ids(self):
+        snap = _snap(
+            "dev-a",
+            self.UNTIL,
+            consulted=("codex\n- INJECTED BULLET", "gr|ok\x1b[31m"),
+            families={"codex": {"2026-04-24": _usage(5)}},
+        )
+        body = "\n".join(
+            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+        )
+        assert "\n- INJECTED BULLET" not in body
+        assert "\x1b" not in body
+        readers_line = [ln for ln in body.splitlines() if "Readers per machine" in ln][0]
+        assert readers_line.count("|") == 0
+
+    def test_missing_devices_render_rows_not_an_empty_table(self):
+        body = aggregator._render_agent_inventory(
+            self._data({}, known_ids=(), missing=frozenset({"dev-x", "dev-y"}))
+        )
+        rows = [
+            ln
+            for ln in body
+            if ln.startswith("| ") and not ln.startswith("| Machine") and not ln.startswith("|---")
+        ]
+        assert len(rows) == 2, f"header rendered with no rows: {body}"
+        assert all("no snapshot" in row for row in rows)
+
+    def test_body_clamps_in_window_days_to_as_of(self):
+        """The body's own clamp, distinct from the rhythm view's. Every other
+        body test uses as_of == UNTIL, where the clamp is inert."""
+        snap = _snap(
+            "dev-a",
+            datetime(2026, 4, 24, tzinfo=timezone.utc),
+            families={"codex": {"2026-04-23": _usage(1), "2026-04-27": _usage(1000)}},
+        )
+        body = "\n".join(
+            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+        )
+        assert "| 1.0k | 1 |" in body, body
+
+    def test_state_reflects_in_window_activity_not_retained(self):
+        """A machine whose only activity predates the window is `current` with a
+        zero in-window column, and the State column must agree with the card's
+        in-window activity count rather than with the retained total."""
+        snap = _snap("dev-a", self.UNTIL, families={"codex": {"2026-03-01": _usage(500)}})
+        body = "\n".join(
+            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+        )
+        assert "current, no agent activity observed" in body
+        assert "| 500 | 0 |" in body
+
+    def test_no_snapshots_and_no_missing_still_names_a_cause(self):
+        """Reachable whenever the device registry read fails: `missing` is empty
+        and `by_device` is empty, so without this the card block, the body and
+        the notes are ALL silent."""
+        data = self._data({}, known_ids=())
+        assert aggregator._render_agent_inventory(data) == []
+        notes = aggregator._agent_coverage_notes(data)
+        assert notes, "block vanished with no diagnostic note"
+        assert any("No agent-log snapshots were accepted" in n for n in notes)
+
+    def test_unidentified_rejects_still_light_the_breadcrumb(self):
+        data = self._data({}, known_ids=("dev-a",))
+        data.host_inventory = aggregator.HostUsageInventory(
+            rejected=(aggregator.HostReject(device="", reason="not_object"),)
+        )
+        notes = aggregator._agent_coverage_notes(data)
+        assert any("1 unidentified row(s) were rejected" in n for n in notes)
+
+    def test_version_floor_is_named_from_the_constant(self):
+        data = self._data({}, known_ids=("dev-a",), missing=frozenset({"dev-a"}))
+        notes = aggregator._agent_coverage_notes(data)
+        assert any(aggregator.HOST_SNAPSHOT_MIN_VERSION in n for n in notes)
+
+
+class TestAcceptorSchemaConstant:
+    def test_acceptor_follows_the_writer_constant(self, monkeypatch):
+        """A hardcoded literal here would make mm reject its own freshly written
+        rows fleet-wide on the first schema bump."""
+        from mind_meld import events as mm_events
+
+        monkeypatch.setattr(mm_events, "EVENTS_SCHEMA_VERSION", 3)
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        ev["v"] = 3
+        assert isinstance(aggregator._accept_host_usage_snapshot(ev), aggregator._AcceptedHostRow)
+        ev["v"] = 2
+        assert aggregator._accept_host_usage_snapshot(ev).reason == "unsupported_schema"
+        ev["v"] = True
+        assert aggregator._accept_host_usage_snapshot(ev).reason == "unsupported_schema"
+
+    def test_tie_break_projection_uses_the_same_constant(self, monkeypatch):
+        from mind_meld import events as mm_events
+
+        monkeypatch.setattr(mm_events, "EVENTS_SCHEMA_VERSION", 3)
+        ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
+        ev["v"] = 3
+        row = aggregator._accept_host_usage_snapshot(ev)
+        assert '"v":3' in row.tie_key

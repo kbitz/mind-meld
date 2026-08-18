@@ -361,9 +361,20 @@ does not).
   breadcrumb on every 7d retro until retention reaped the file. Window-scoping
   the rejects themselves is impossible for a `naive_timestamp` reject, where the
   timestamp IS the malformed field.
-- **The acceptor reads `events.EVENTS_SCHEMA_VERSION`**, never a hardcoded `2`.
-  With a literal, the first bump would make mm reject its own freshly written
-  rows fleet-wide and light the rejected breadcrumb everywhere at once.
+- **The HOST acceptor reads `events.EVENTS_SCHEMA_VERSION`**, never a hardcoded
+  `2` — both in `_accept_host_usage_snapshot`'s version check and in
+  `_tie_break_key`'s normalized projection, so the two cannot disagree about the
+  version one of them just validated. With a literal, the first bump would make
+  mm reject its own freshly written rows fleet-wide and light the rejected
+  breadcrumb everywhere at once.
+  **Scoped to the host path on purpose.** `aggregate_sessions` still compares
+  against its own local `V2_SCHEMA_VERSION = 2` literal, because the v=1 → v=2
+  sessions transition has *semantics* attached (v=1 rows carry delta semantics
+  and are deliberately counted as `pre_v2_peers` contributing zero, not merely
+  "a different version"). Pointing it at the writer's constant would silently
+  reclassify every fresh `sessions-snapshot` on the next bump. If sessions ever
+  needs a v=3, that is a migration with its own compatibility decision, not a
+  constant swap — do not "fix" the inconsistency by unifying them.
 - **Isolation, pinned by test.** Host data reaches exactly two render sites and
   nothing else: not `sessions.tokens_by_model`, not
   `_aggregate_model_families`, not `estimate_cost`, not
