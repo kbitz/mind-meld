@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.12.36 | 2026-08-18 | **Fleet retros now retain each device's latest complete host-usage snapshot as inventory, so host totals stay truthful without masquerading as window spend.** |
 | 0.12.35 | 2026-08-17 | **Mind Meld can now sync your Grok customizations with `mm enable-source grok`, without syncing Grok sessions, credentials, or prompts.** |
 | 0.12.34.1 | 2026-08-17 | **Host interchangeability is now a written contract: Claude, Codex, and Grok share one usage card, not one sync tree, and session transcripts stay local on every host.** |
 | 0.12.34 | 2026-08-17 | **`mm enable-source grok` now publishes this Mac's Grok Build token totals on the same encrypted host snapshot as Codex — without syncing session files.** After the opt-in, attended push and init read only `turn_completed` terminal records from local `updates.jsonl`. A first-success Grok miss no longer takes Codex hostage; unknown terminal keys fail closed; oversize notices no longer print session paths. A `[[sync.sources]]` row named `grok` is refused at load. |
