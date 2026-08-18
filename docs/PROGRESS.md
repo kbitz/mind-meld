@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.12.37 | 2026-08-18 | **Fleet retros now show which coding agents you actually used, as activity rhythm rather than token counts, because a token count from an agent log cannot be honestly compared to a Claude session total.** |
 | 0.12.36 | 2026-08-18 | **Fleet retros now retain each device's latest complete host-usage snapshot as inventory, so host totals stay truthful without masquerading as window spend.** |
 | 0.12.35 | 2026-08-17 | **Mind Meld can now sync your Grok customizations with `mm enable-source grok`, without syncing Grok sessions, credentials, or prompts.** |
 | 0.12.34.1 | 2026-08-17 | **Host interchangeability is now a written contract: Claude, Codex, and Grok share one usage card, not one sync tree, and session transcripts stay local on every host.** |
