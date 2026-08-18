@@ -240,6 +240,12 @@ class TestDefaultSources:
             "skills/retro-fleet/*",
         ]
 
+    def test_grok_source_is_claude_shaped(self):
+        grok = next(s for s in DEFAULT_SOURCES if s["name"] == "grok")
+        assert grok == {"name": "grok", "path": "~/.grok", "type": "grok"}
+        assert "include_dirs" not in grok
+        assert "include_files" not in grok
+
     def test_generated_skill_excludes_preserve_hand_authored_skills(self):
         import fnmatch
 
@@ -576,11 +582,95 @@ class TestGetSources:
         assert "codex" in names
         assert "opencode" in names
 
+    def test_does_not_auto_detect_grok_when_only_home_exists(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (tmp_path / ".grok").mkdir()
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "claude_dir": str(claude_dir),
+            "max_file_size": 52_428_800,
+        }
+        names = [source["name"] for source in get_sources(config)]
+        assert "grok" not in names
+
+    def test_auto_detects_grok_when_a_customization_dir_exists(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (tmp_path / ".grok" / "skills").mkdir(parents=True)
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "claude_dir": str(claude_dir),
+            "max_file_size": 52_428_800,
+        }
+        names = [source["name"] for source in get_sources(config)]
+        assert "grok" in names
+
+    def test_default_sources_fallback_skips_grok_without_customization_dirs(
+        self, tmp_path, monkeypatch
+    ):
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".grok").mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config = self._base_config(tmp_path)
+        config["sync"] = {"max_file_size": 52_428_800}
+        names = [source["name"] for source in get_sources(config)]
+        assert "grok" not in names
+
     def test_validates_source_configs(self):
         """Missing required fields in a source should raise ConfigError."""
         bad_sources = [{"name": "oops"}]  # missing path and type
         with pytest.raises(ConfigError, match="missing required field"):
             _validate_sources(bad_sources)
+
+    def test_rejects_grok_generic_widening(self):
+        with pytest.raises(ConfigError, match="must use type 'grok'"):
+            _validate_sources(
+                [
+                    {
+                        "name": "grok",
+                        "path": "~/.grok",
+                        "type": "generic",
+                        "include_dirs": ["sessions"],
+                    }
+                ]
+            )
+
+    def test_rejects_grok_include_dirs(self):
+        with pytest.raises(ConfigError, match="does not support include_dirs"):
+            _validate_sources(
+                [
+                    {
+                        "name": "grok",
+                        "path": "~/.grok",
+                        "type": "grok",
+                        "include_dirs": ["sessions"],
+                    }
+                ]
+            )
+
+    @pytest.mark.parametrize("name", ["grok-custom", "alternate-grok"])
+    def test_rejects_grok_type_aliases(self, name):
+        with pytest.raises(ConfigError, match="reserved for source name 'grok'"):
+            _validate_sources(
+                [
+                    {
+                        "name": name,
+                        "path": "~/.grok",
+                        "type": "grok",
+                    }
+                ]
+            )
 
     def test_filters_out_nonexistent_paths(self, tmp_path):
         config = {
@@ -1489,23 +1579,22 @@ class TestGrokHostUsageConfig:
             }
         )
 
-    def test_grok_is_not_a_default_sync_source(self):
-        assert "grok" not in [s["name"] for s in DEFAULT_SOURCES]
+    def test_grok_is_a_default_sync_source(self):
+        assert any(s["name"] == "grok" and s["type"] == "grok" for s in DEFAULT_SOURCES)
 
-    def test_grok_sync_source_row_is_config_error(self):
-        with pytest.raises(ConfigError, match="usage-only"):
-            _validate(
-                {
-                    "device": {"id": "abc123", "name": "Mac"},
-                    "storage": {"path": "/tmp"},
-                    "sync": {
-                        "sources": [
-                            {
-                                "name": "grok",
-                                "path": "~/.grok",
-                                "type": "generic",
-                            }
-                        ]
-                    },
-                }
-            )
+    def test_grok_sync_source_row_is_allowed(self):
+        _validate(
+            {
+                "device": {"id": "abc123", "name": "Mac"},
+                "storage": {"path": "/tmp"},
+                "sync": {
+                    "sources": [
+                        {
+                            "name": "grok",
+                            "path": "~/.grok",
+                            "type": "grok",
+                        }
+                    ]
+                },
+            }
+        )

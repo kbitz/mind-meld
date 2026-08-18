@@ -3,7 +3,7 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests`
-- `src/mind_meld/manifest.py` — `walk_generic_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones`
+- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones`
 - `src/mind_meld/config.py` — the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
@@ -26,7 +26,10 @@ Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the
 Per-machine source toggle. `[sync].disabled_sources: list[str]` lists source
 names to skip on this device only (config.toml is per-machine, never synced).
 `get_sources()` filters by name after resolution and before the path-existence
-filter. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
+filter. The default `grok` source (`type: "grok"`) is Claude-shaped: the walker
+hardcodes `skills/`, `commands/`, and `rules/` at `~/.grok`. The fallback and
+auto-detect paths only activate it when one of those dirs exists — `~/.grok`
+itself is present on every Grok install and is not consent. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
 `mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
 (pre-disable codex before it ships).
@@ -117,6 +120,12 @@ Defense-in-depth: `_download_and_apply` ALSO checks `local_path.resolve(strict=F
 ## Symlink policy at the manifest and apply boundaries (load-bearing, v0.12.17)
 
 Symlinks **below** a source root are local routing, not synced content. A generic-source walk omits every symlinked file. The source root itself may be a symlink: users can locate an entire source through a link, and resolving that root remains valid. Do not weaken the rel-path traversal defense to admit child links.
+
+The Grok walker is stricter still: it rejects a candidate whose inode has more
+than one link. A hard link to `auth.json` or a session transcript inside an
+allowlisted `skills/` path has no symlink component, but would otherwise evade
+the scoped-source privacy boundary. Do not replace this conservative refusal
+with an inode-path search that can race the filesystem walk.
 
 The omission is tombstone-safe only because `_push_core` filters the recovered prior manifest through `_filter_symlinked_paths` before `generate_tombstones`. That filter removes matching file entries and tombstones using the current local source paths. It applies equally to normal fetches, sidecar recovery, and peer-fallback recovery, and protects existing explicit configurations that have not yet migrated to the default `exclude_patterns`. Never move it into `_fetch_remote_manifest`: `mm gc` must keep seeing raw manifests when retaining referenced blobs.
 

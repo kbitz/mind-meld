@@ -113,6 +113,9 @@ class TestReaderOrchestration:
         assert [n for n, _ in events_tail._default_host_readers([])] == []
         grok_only = events_tail._default_host_readers([], grok_consented=True)
         assert [n for n, _ in grok_only] == ["grok"]
+        grok_source = events_tail._default_host_readers(self._enabled("grok"))
+        assert [n for n, _ in grok_source] == ["grok"]
+        assert events_tail.HOST_READER_SOURCE_GATE["grok"] == "grok"
 
     def test_consented_grok_reader_passes_consented_true(self, monkeypatch):
         seen: dict[str, bool] = {}
@@ -123,6 +126,18 @@ class TestReaderOrchestration:
 
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", read)
         readers = events_tail._default_host_readers([], grok_consented=True)
+        readers[0][1](deadline=1_000.0)
+        assert seen == {"consented": True}
+
+    def test_source_authorized_grok_reader_passes_consented_true(self, monkeypatch):
+        seen: dict[str, bool] = {}
+
+        def read(*, deadline, consented=False):
+            seen["consented"] = consented
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", read)
+        readers = events_tail._default_host_readers(self._enabled("grok"))
         readers[0][1](deadline=1_000.0)
         assert seen == {"consented": True}
 

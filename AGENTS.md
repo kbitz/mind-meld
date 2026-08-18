@@ -13,7 +13,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - No API server. CLI talks directly to iCloud Drive via the local filesystem.
 - Single storage backend: local folder at `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`, synced by iCloud.
 - **End-to-end encrypted.** All synced data (manifests, artifacts, and allowlisted agent context) is encrypted client-side with AES-256-GCM before touching storage. The storage layer never sees plaintext. This is a hard invariant — no code path may write unencrypted sync data to storage.
-- **Scoped sync.** Built-in sources are allowlisted: Claude Code syncs its `memory/` and `todos/` project data; Codex and OpenCode sync their documented customizations. Session databases, credentials, and whole-file settings that may contain credentials stay local.
+- **Scoped sync.** Built-in sources are allowlisted: Claude Code syncs its `memory/` and `todos/` project data; Codex and OpenCode sync their documented customizations; Grok syncs only hardcoded `skills/`, `commands/`, and `rules/`. Session databases, credentials, and whole-file settings that may contain credentials stay local.
 - **Truth-based manifests.** Manifests are complete snapshots of local state. Deletions propagate automatically — no separate prune step.
 - **Conflict resolution.** Detects and resolves iCloud and Dropbox-style conflict copies on manifest files. For source files with divergent local edits, INVERTED in v0.9.2: local stays at canonical, REMOTE bytes go to `<stem>.sync-conflict-<ts>-<device>.<ext>` (Syncthing convention's actual direction — visible sidecar holds the surprising bytes). Mtime-skip: if the local file is newer than remote, pull leaves it alone. Pre-v0.9.2 conflict files are migrated to a `v0-` prefix on first lock-protected discovery (mm pull / mm resolve only); resolve dispatches by filename prefix (`v0-` = pre-inversion semantics, no prefix = post-inversion).
 - **Sync log.** After pull, writes `.mind-meld-log.md` per project so Claude Code knows what changed from other machines.
@@ -118,7 +118,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 |---|---|
 | `cli.py:_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests` | `docs/invariants/sync.md` |
 | `cli.py:_download_and_apply` / (rel_path + base_path concatenation site) | `docs/invariants/sync.md` |
-| `manifest.py:walk_generic_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` | `docs/invariants/sync.md` |
+| `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
 | `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) | `docs/invariants/sync.md` |

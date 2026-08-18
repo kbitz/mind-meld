@@ -686,6 +686,40 @@ class TestFindConflictFilesClaudeType:
         assert out_of_scope not in hit_paths, "scope should exclude sessions/"
 
 
+class TestFindConflictFilesGrokType:
+    def test_walks_only_hardcoded_customization_dirs(self, tmp_path: Path) -> None:
+        root = tmp_path / ".grok"
+        expected: set[Path] = set()
+        for directory in ("skills", "commands", "rules"):
+            target = root / directory / f"{directory}.sync-conflict-20260421-143055-devA1234.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"conflict")
+            expected.add(target)
+        session_conflict = root / "sessions" / "chat.sync-conflict-20260421-143055-devA1234.md"
+        session_conflict.parent.mkdir()
+        session_conflict.write_bytes(b"private")
+
+        hits = _find_conflict_files(
+            {"sync": {"sources": [{"name": "grok", "path": str(root), "type": "grok"}]}}
+        )
+        hit_paths = {path for _name, path, _canonical in hits}
+        assert hit_paths == expected
+        assert session_conflict not in hit_paths
+
+    def test_skips_symlinked_allowlist_dir_and_missing_dirs(self, tmp_path: Path) -> None:
+        root = tmp_path / ".grok"
+        sessions = root / "sessions"
+        sessions.mkdir(parents=True)
+        session_conflict = sessions / "chat.sync-conflict-20260421-143055-devA1234.md"
+        session_conflict.write_bytes(b"private")
+        (root / "skills").symlink_to(sessions, target_is_directory=True)
+
+        hits = _find_conflict_files(
+            {"sync": {"sources": [{"name": "grok", "path": str(root), "type": "grok"}]}}
+        )
+        assert hits == []
+
+
 class TestFindConflictFilesIncludeFiles:
     """Regression for the 2026-04-24 first-pull: a 286-file pull produced 6
     conflict copies, but `mm conflicts` listed only 5. The missing one was

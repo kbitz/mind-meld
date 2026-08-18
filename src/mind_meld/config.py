@@ -27,6 +27,7 @@ DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_CODEX_DIR = "~/.codex"
 DEFAULT_OPENCODE_DIR = "~/.config/opencode"
+DEFAULT_GROK_DIR = "~/.grok"
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
 )
@@ -144,6 +145,15 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         ],
         "exclude_patterns": ["skills/gstack-*", "skills/log-work/*", "skills/retro-fleet/*"],
     },
+    {
+        # Claude-shaped: name/path/type only. The walker hardcodes
+        # skills/, commands/, rules/ — not user-editable include_dirs —
+        # so a config edit cannot widen the walk onto sessions/ or
+        # auth.json. See manifest.GROK_SYNCED_SUBDIRS.
+        "name": "grok",
+        "path": DEFAULT_GROK_DIR,
+        "type": "grok",
+    },
 ]
 
 
@@ -259,12 +269,22 @@ def _validate_sources(sources: Any) -> None:
                     f"got {type(src[field]).__name__}."
                 )
         name = src["name"]
-        if name == "grok":
+        if src["type"] == "grok" and name != "grok":
             raise ConfigError(
-                "config: grok is a usage-only name, not a sync source. "
-                "Remove the [[sync.sources]] row named grok. "
-                "Use 'mm enable-source grok' to publish local token totals."
+                "config: type 'grok' is reserved for source name 'grok' so only its "
+                "hardcoded customization allowlist is walked."
             )
+        if name == "grok":
+            if src["type"] != "grok":
+                raise ConfigError(
+                    "config: source 'grok' must use type 'grok' so only its "
+                    "hardcoded customization allowlist is walked."
+                )
+            if "include_dirs" in src or "include_files" in src:
+                raise ConfigError(
+                    "config: source 'grok' does not support include_dirs or include_files; "
+                    "it syncs skills/, commands/, and rules/ only."
+                )
         if name in seen_names:
             raise ConfigError(f"config: duplicate source name '{name}'.")
         seen_names.add(name)
@@ -313,11 +333,30 @@ def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
             )
 
 
+def grok_customization_dirs_exist(root: Path) -> bool:
+    """True if any hardcoded Grok customization dir exists under ``root``.
+
+    ``~/.grok`` itself exists on every Grok install (sessions + auth).
+    That is not a signal that there is anything to roam.
+    """
+    from mind_meld.manifest import GROK_SYNCED_SUBDIRS
+
+    for name in GROK_SYNCED_SUBDIRS:
+        candidate = root / name
+        try:
+            if candidate.is_dir() and not candidate.is_symlink():
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def grok_host_usage_enabled(config: dict[str, Any]) -> bool:
     """True only when ``[retro].grok_host_usage`` is the boolean ``true``.
 
-    Absent table, absent key, or any other value is false. This is usage
-    consent, not a sync source.
+    Absent table, absent key, or any other value is false. Track 22B also
+    gates the Grok usage reader on the grok sync source being enabled;
+    this bit remains an OR so a 21A-only opt-in does not go dark.
     """
     retro = config.get("retro")
     return isinstance(retro, dict) and retro.get("grok_host_usage") is True
@@ -358,6 +397,13 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
         # .resolve() here keeps a cyclic user symlink (e.g. broken ~/.gstack)
         # from breaking get_sources for every command startup.
         sources = [{**src, "path": str(Path(src["path"]).expanduser())} for src in DEFAULT_SOURCES]
+        # ~/.grok exists on every Grok install. Only activate the default
+        # grok source when a hardcoded customization dir is present.
+        sources = [
+            s
+            for s in sources
+            if s.get("type") != "grok" or grok_customization_dirs_exist(Path(s["path"]))
+        ]
 
     # Auto-detect: append default gstack source if ~/.gstack exists but
     # no gstack source is already in the list.
@@ -399,8 +445,14 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
         for source_name, source_path in (
             ("codex", Path.home() / ".codex"),
             ("opencode", Path.home() / ".config" / "opencode"),
+            ("grok", Path.home() / ".grok"),
         ):
-            if source_path.exists() and not any(s["name"] == source_name for s in sources):
+            present = (
+                grok_customization_dirs_exist(source_path)
+                if source_name == "grok"
+                else source_path.exists()
+            )
+            if present and not any(s["name"] == source_name for s in sources):
                 default_source = get_default_source(source_name)
                 if default_source:
                     default_source["path"] = str(Path(default_source["path"]).expanduser())

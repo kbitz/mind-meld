@@ -88,10 +88,10 @@ they just do it permanently."""
 
 HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     "codex": "codex",
-    # Grok is not gated on a sync source (`None`). Consent is a second
-    # filter on `_default_host_readers(..., grok_consented=)`. Do not put
-    # `"grok"` here — that would require a sync source we refuse to create.
-    "grok": None,
+    # Grok is a real scoped sync source (Track 22B). Source-enabled is
+    # consent, matching Codex. The 21A [retro].grok_host_usage bit remains
+    # an OR so a prior usage-only opt-in does not go dark.
+    "grok": "grok",
     "opencode": "opencode",
 }
 """Which enabled sync source each reader's consent derives from.
@@ -239,8 +239,9 @@ def _default_host_readers(
     """The built-in readers the user has CONSENTED to, in their fixed order.
 
     A reader whose host is not an enabled sync source is not invoked at all —
-    see ``HOST_READER_SOURCE_GATE``. Grok is not a sync source: it is included
-    only when ``grok_consented`` is true, bound to ``consented=True``.
+    see ``HOST_READER_SOURCE_GATE``. Grok is included when the grok source is
+    enabled or when ``grok_consented`` is true (21A bit), bound to
+    ``consented=True``.
 
     Module-qualified lookups on purpose (CLAUDE.md's dead-alias rule in
     reverse): a from-import would bind this module's own global, so a test
@@ -250,7 +251,7 @@ def _default_host_readers(
     chosen: list[tuple[str, HostReader]] = []
     if HOST_READER_SOURCE_GATE["codex"] in enabled:
         chosen.append(("codex", host_usage.read_codex_usage))
-    if grok_consented:
+    if HOST_READER_SOURCE_GATE["grok"] in enabled or grok_consented:
 
         def _read_grok(*, deadline: float) -> host_usage.HostUsageResult:
             return host_usage.read_grok_usage(deadline=deadline, consented=True)

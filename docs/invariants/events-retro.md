@@ -129,23 +129,22 @@ cannot attribute and OpenCode for a malformed row, which both mean "real usage
 is here and I could not read it" — those keep the veto. Getting that
 distinction backwards silently under-reports the fleet.
 
-**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex and
+**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex, Grok, and
 OpenCode to the source name whose being enabled authorizes them.
 `_default_host_readers(sources, grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
-parsed — matching `_enabled_claude_paths`. Grok is **not** a sync source:
-`HOST_READER_SOURCE_GATE["grok"]` stays `None` so it is not confused with a
-`[[sync.sources]]` row. Consent is the second filter: include Grok only when
-`[retro].grok_host_usage` is true (`mm enable-source grok`). The callable
-bound into the sweep passes `read_grok_usage(..., consented=True)`. The
-function itself defaults to `consented=False` and does not stat or open
-`~/.grok`. Empty sources plus no opt-in must yield no Grok reader — if that
-list is ever `["grok"]` again, a file-opening reader will parse session
-updates with no bit flip. Do not "complete" that gate by adding a `grok`
-sync source. Host interchangeability vs Claude is
-`docs/designs/host-parity.md`: 22A/23A put totals on the MODELS card; a
-Grok customization source and a Grok skill-link target are later designs;
-session-transcript sync and a Codex/Grok `sessions-snapshot` are not planned.
+parsed — matching `_enabled_claude_paths`. Grok is a scoped sync source
+(`type: "grok"`, hardcoded `skills/` / `commands/` / `rules/`).
+`HOST_READER_SOURCE_GATE["grok"]` is `"grok"`. The 21A `[retro].grok_host_usage`
+bit remains an OR so a prior usage-only opt-in does not go dark.
+The callable bound into the sweep passes `read_grok_usage(..., consented=True)`.
+The function itself defaults to `consented=False` and does not stat or open
+`~/.grok`. Empty sources plus no opt-in and no bit must yield no Grok reader.
+The grok *file* walker never opens `sessions/`; the usage reader is a
+separate consented walk of `updates.jsonl` only. Host interchangeability vs
+Claude is `docs/designs/host-parity.md`: 22A/23A put totals on the MODELS
+card; a Grok skill-link target is later; session-transcript sync and a
+Codex/Grok `sessions-snapshot` are not planned.
 
 **Grok v1 terminal ledger (Track 18D).** When consented, `read_grok_usage`
 walks `GROK_HOME/sessions` (else `~/.grok/sessions`) and reads only regular
