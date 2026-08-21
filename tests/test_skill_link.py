@@ -200,7 +200,13 @@ class TestDanglingSymlink:
 
         assert target.is_symlink()
         assert not target.exists()
-        assert "not replacing" in capsys.readouterr().err
+        # The notice now names the real cause per status instead of one
+        # hardcoded "not replacing" for every branch. This link points at
+        # old-venv/skills/retro_fleet -- no `mind_meld` component -- so
+        # _legacy_shape is "other" and the installer classifies it `foreign`.
+        err = capsys.readouterr().err
+        assert "which is not mm's skill store" in err, err
+        assert "mm install-skills" in err, err
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +227,10 @@ class TestConflictSkip:
         # Notice emitted.
         captured = capsys.readouterr()
         assert "mm: notice:" in captured.err
-        assert "not mm's store link" in captured.err
+        # A real file at the target is `foreign`; the notice must say so and
+        # must NOT claim it is a broken mm link.
+        assert "which is not mm's skill store" in captured.err, captured.err
+        assert "move it aside" in captured.err, captured.err
 
     def test_wrong_symlink_target_not_clobbered(self, target, skill_src, _isolate_paths, capsys):
         # User pointed retro-fleet at their own skill dir.
@@ -891,6 +900,192 @@ class TestDurableStore:
         assert {result.status for result in results} == {"failed"}
         assert target.is_symlink()
         assert os.readlink(target) == prior
+
+    def test_version_bump_republishes_the_store(self, target, skill_src, monkeypatch):
+        """The mm-upgrade path -- the entire reason the store exists.
+
+        `_should_publish`'s pkg > store arm had no test: every other arm did.
+        Without this, `pipx upgrade mind-meld` could silently leave the three
+        agents executing the OLD SKILL.md and nothing would catch it.
+        """
+        skill_link._ensure_retro_skill_links()
+        store = skill_link._skill_store_dir()
+        assert (store / "SKILL.md").read_bytes() == (skill_src / "SKILL.md").read_bytes()
+
+        (skill_src / "SKILL.md").write_text("# v99 skill\n")
+        monkeypatch.setattr(skill_link, "__version__", "99.0.0")
+        skill_link._ensure_retro_skill_links()
+
+        assert (store / "SKILL.md").read_text() == "# v99 skill\n"
+        meta = skill_link._read_store_meta(store)
+        assert meta["skill_version"] == "99.0.0", meta
+
+    def test_install_skills_run_twice_is_idempotent(self, target, skill_src):
+        """Second run must report unchanged, not re-migrate.
+
+        The pre-existing idempotency pin linked the target at `skill_src`, so its
+        second run took the MIGRATE path and `"Installed" in output` matched the
+        wrong string. Point at the store and the guarantee is real.
+        """
+        first = skill_link._ensure_retro_skill_links(explicit=True)
+        assert first[0].status == "installed"
+        store = skill_link._skill_store_dir()
+        before = (store / "SKILL.md").stat().st_mtime_ns
+        prior_link = os.readlink(target)
+
+        second = skill_link._ensure_retro_skill_links(explicit=True)
+
+        assert second[0].status == "unchanged", second[0]
+        assert os.readlink(target) == prior_link
+        assert (store / "SKILL.md").stat().st_mtime_ns == before
+
+    def test_explicit_migrates_a_live_checkout_but_push_does_not(self, target, skill_src):
+        """The whole behavioral difference between `mm push` and `mm install-skills`.
+
+        Only the leave-alone direction was asserted; nothing proved the explicit
+        path actually migrates.
+        """
+        checkout = target.parent.parent / "co" / "src" / "mind_meld" / "skills" / "retro_fleet"
+        checkout.mkdir(parents=True)
+        target.symlink_to(checkout)
+
+        push = skill_link._ensure_retro_skill_links(explicit=False)
+        assert push[0].status == "unchanged"
+        assert push[0].reason == "live-checkout"
+        assert os.readlink(target) == str(checkout)
+
+        explicit = skill_link._ensure_retro_skill_links(explicit=True)
+        assert explicit[0].status == "installed"
+        assert explicit[0].reason == "migrated"
+        assert os.readlink(target) == str(skill_link._skill_store_dir())
+
+    def test_autopush_classifies_but_never_mutates(self, target, skill_src, capsys):
+        """allow_mutate=False is the mode autopush ships in. It had zero
+        deliberate coverage on any path where a link actually exists."""
+        foreign = target.parent / "somewhere-else"
+        foreign.mkdir()
+        target.symlink_to(foreign)
+        store = skill_link._skill_store_dir()
+
+        results = skill_link._ensure_retro_skill_links(allow_mutate=False)
+
+        assert os.readlink(target) == str(foreign), "autopush mutated agent config"
+        assert not (store / "SKILL.md").exists(), "autopush created the store"
+        assert results[0].status == "foreign"
+
+    def test_bad_utf8_in_store_meta_does_not_crash_diagnose(self, target, skill_src):
+        """`mm status` and `mm diag` call diagnose_skill_links() with NO enclosing
+        try. `_read_store_meta` does read_text(encoding="utf-8"), and
+        UnicodeDecodeError is a ValueError -- so one bad byte crashed both of the
+        commands you run to diagnose a broken link.
+        """
+        store = skill_link._skill_store_dir()
+        store.mkdir(parents=True, exist_ok=True)
+        (store / ".mm-skill.json").write_bytes(b'{"skill_\xff\xfeversion":"1"}')
+
+        assert skill_link._read_store_meta(store) is None
+        rows = skill_link.diagnose_skill_links()
+        assert len(rows) == 3
+
+    def test_symlink_loop_is_classified_not_crashed_on(self, target, skill_src):
+        """A looped link must classify identically on every supported Python.
+
+        3.11/3.12 raise RuntimeError from resolve(); 3.13+ raise OSError(ELOOP).
+        Before normalization the same filesystem state was a repairable
+        classification on 3.11 and a hard `failed` on the 3.13 CI runs -- and
+        the crash escaped diagnose_skill_links entirely.
+        """
+        target.symlink_to(target)
+
+        assert skill_link._symlink_lives(target) is False
+        rows = skill_link.diagnose_skill_links()
+        assert len(rows) == 3
+        assert rows[0]["status"] != "ok"
+
+    def test_dangling_foreign_link_is_reported_broken(self, target, skill_src):
+        """A dangling link to an unrecognized path is BROKEN from the agent's
+        view (dead skill entry), even though mm must not touch it. Collapsing it
+        into live `foreign` made the mm status allowlist silence a real break.
+        """
+        target.symlink_to(target.parent / "nowhere" / "gone")
+
+        rows = skill_link.diagnose_skill_links()
+        assert rows[0]["status"] == "foreign-dangling"
+        assert "foreign-dangling" in skill_link.BROKEN_SKILL_STATUSES
+
+    def test_notice_states_the_real_cause_for_a_dangling_store_link(
+        self, target, skill_src, capsys
+    ):
+        """REGRESSION: the push-path notice said "is not mm's store link" for
+        `dangling-ours` -- a link whose readlink byte-equals the store constant,
+        which is the very thing that PROVES it is mm's -- and told the user to
+        move it aside, the one action that stops mm repairing it.
+        """
+        store = skill_link._skill_store_dir()
+        target.symlink_to(store)
+
+        skill_link._ensure_retro_skill_links(allow_mutate=False)
+
+        err = capsys.readouterr().err
+        assert "is not mm's store link" not in err, err
+        assert "mm's symlink" in err, err
+        assert "store is missing" in err, err
+        assert "mm install-skills" in err, err
+
+    def test_classify_only_run_does_not_consume_the_notice_budget(self, target, skill_src, capsys):
+        """A run that cannot repair must not spend the 24h conflict marker.
+
+        autopush classifies with allow_mutate=False. If it touched the marker,
+        the interactive push that COULD repair the link would be silenced for
+        24h -- the notice budget spent by the run that does nothing.
+        """
+        store = skill_link._skill_store_dir()
+        target.symlink_to(store)
+        marker_dir = skill_link._marker_dir()
+
+        skill_link._ensure_retro_skill_links(allow_mutate=False)
+
+        markers = [p.name for p in marker_dir.iterdir()] if marker_dir.exists() else []
+        assert markers == [], markers
+
+        # ...and the notice still fires on the very next run, not suppressed.
+        capsys.readouterr()
+        skill_link._ensure_retro_skill_links(allow_mutate=False)
+        assert "mm install-skills" in capsys.readouterr().err
+
+    def test_user_authored_skill_md_is_never_overwritten(self, target, skill_src):
+        """REGRESSION: `SKILL.md` must not count as proof mm owns the store.
+
+        It is the canonical Agent Skills filename, so a user who hand-authored a
+        retro-fleet skill in the store path would have had it silently replaced:
+        a payload-only directory read as "owned", the sentinel got planted,
+        `_should_publish` saw `meta is None` and published. No backup, no notice.
+        """
+        store = skill_link._skill_store_dir()
+        store.mkdir(parents=True, exist_ok=True)
+        mine = store / "SKILL.md"
+        mine.write_text("# MY OWN HAND-WRITTEN SKILL\ndo not overwrite me\n")
+        before = mine.read_text()
+
+        results = skill_link._ensure_retro_skill_links()
+
+        assert mine.read_text() == before, "mm overwrote a user-authored SKILL.md"
+        assert not (store / ".mm-owned").exists(), "mm claimed a foreign store"
+        statuses = {r.status for r in results}
+        assert "failed" in statuses, statuses
+        assert not statuses & {"installed", "unchanged"}, statuses
+
+    def test_store_with_only_mm_metadata_is_still_owned(self, target, skill_src):
+        """The mm-namespaced sidecar still proves ownership, so a lost sentinel self-heals."""
+        store = skill_link._skill_store_dir()
+        store.mkdir(parents=True, exist_ok=True)
+        (store / ".mm-skill.json").write_text('{"schema": 1, "skill_version": "0.0.1"}')
+
+        results = skill_link._ensure_retro_skill_links()
+
+        assert (store / "SKILL.md").is_file()
+        assert (store / ".mm-owned").exists()
+        assert "failed" not in {r.status for r in results}
 
     def test_store_dir_symlink_to_real_dir_is_refused(self, target, skill_src, _isolate_paths):
         real = _isolate_paths / "elsewhere"

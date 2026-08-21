@@ -4392,10 +4392,17 @@ def status(
             "run [bold]mm migrate-config[/bold] to add."
         )
 
+    # Allowlist the BROKEN states, never a denylist of healthy ones. `ok`,
+    # `live-checkout` and `foreign` are all working-as-intended and permanent:
+    # a denylist reported the user's own deliberate dogfood link as broken on
+    # every `mm status`, forever, and pointed them at `mm install-skills`,
+    # which would have migrated it away. Same shape as the Grok refusal that
+    # pinned the breadcrumb at `degraded` and destroyed it as a signal. A
+    # denylist also defaults every FUTURE status to "broken".
     broken_skills = [
         row
         for row in skill_link.diagnose_skill_links()
-        if row.get("status") not in ("ok", "absent")
+        if row.get("status") in skill_link.BROKEN_SKILL_STATUSES
     ]
     if broken_skills:
         agents = ", ".join(safe_str(str(row.get("agent", ""))) for row in broken_skills)

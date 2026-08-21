@@ -19,6 +19,7 @@ installer branches.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -151,6 +152,17 @@ SkillInstallStatus = Literal[
     "failed",
 ]
 
+# The `diagnose_skill_links` statuses that mean mm's own link is wedged and mm
+# can act. `ok` / `live-checkout` (a deliberate dogfood link) / `foreign` (the
+# user's own file) / `absent` (agent not installed) are all working-as-intended
+# and must never be reported as broken. Consumed by `mm status`.
+BROKEN_SKILL_STATUSES = (
+    "dangling-ours",
+    "dangling-ours-legacy",
+    "foreign-dangling",
+    "error",
+)
+
 _STORE_PAYLOAD = "SKILL.md"
 _STORE_META = ".mm-skill.json"
 _STORE_SENTINEL = ".mm-owned"
@@ -249,7 +261,7 @@ def _read_store_meta(store: Path) -> dict | None:
     path = store / _STORE_META
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         return None
     try:
         data = json.loads(raw)
@@ -312,7 +324,13 @@ def _prepare_store_dir(store: Path) -> None:
         raise NotADirectoryError(f"refusing non-directory at skill store path {store}")
 
     names = {p.name for p in store.iterdir()}
-    owned = _STORE_SENTINEL in names or _STORE_META in names or _STORE_PAYLOAD in names
+    # Ownership is the SENTINEL (and mm's own namespaced metadata) -- never the
+    # payload. `SKILL.md` is the canonical Agent Skills filename, so a user who
+    # hand-authored a retro-fleet skill here would otherwise have it silently
+    # overwritten: a payload-only directory would read as "owned", the sentinel
+    # would be planted, `_should_publish` would see `meta is None` and publish,
+    # and their file would be gone with no backup and no notice.
+    owned = _STORE_SENTINEL in names or _STORE_META in names
     if names and not owned:
         raise FileExistsError(f"foreign non-empty skill store: {store}")
     if _STORE_SENTINEL not in names:
@@ -445,7 +463,15 @@ def _symlink_lives(target: Path) -> bool:
         return True
     except FileNotFoundError:
         return False
-    except OSError:
+    except RuntimeError:
+        # py3.11/3.12 raise RuntimeError("Symlink loop from ...") where 3.13+
+        # raise OSError(ELOOP). Normalize both to "not live" so all supported
+        # Pythons agree -- otherwise the same filesystem state is a repairable
+        # classification on 3.11 and a hard `failed` on the 3.13 CI runs.
+        return False
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return False
         raise
 
 
@@ -830,8 +856,9 @@ def _install_available_skill_target(
         return _failed_result(descriptor, "target inspection", error)
 
     if target_info is not None and not stat.S_ISLNK(target_info.st_mode):
-        _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
-        return SkillInstallResult(descriptor, "foreign", skill_src=skill_src, link_target=store)
+        outcome = SkillInstallResult(descriptor, "foreign", skill_src=skill_src, link_target=store)
+        _emit_status_notice(outcome, write=write)
+        return outcome
 
     if target_info is not None and stat.S_ISLNK(target_info.st_mode):
         try:
@@ -859,14 +886,18 @@ def _install_available_skill_target(
                     link_target=store,
                     reason="repaired dangling store link",
                 )
-            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
-            return SkillInstallResult(descriptor, status, skill_src=skill_src, link_target=store)
+            outcome = SkillInstallResult(descriptor, status, skill_src=skill_src, link_target=store)
+            _emit_status_notice(outcome, write=write)
+            return outcome
 
         resolved = target.resolve(strict=False)
         shape = _legacy_shape(resolved)
         if shape == "other":
-            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
-            return SkillInstallResult(descriptor, "foreign", skill_src=skill_src, link_target=store)
+            outcome = SkillInstallResult(
+                descriptor, "foreign", skill_src=skill_src, link_target=store
+            )
+            _emit_status_notice(outcome, write=write)
+            return outcome
         if lives and shape == "checkout" and not explicit:
             sys.stderr.write(
                 f"mm: notice: {safe_str(str(target))} is a live checkout skill link "
@@ -897,8 +928,9 @@ def _install_available_skill_target(
                     link_target=store,
                     reason="repaired dangling-ours-legacy",
                 )
-            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
-            return SkillInstallResult(descriptor, status, skill_src=skill_src, link_target=store)
+            outcome = SkillInstallResult(descriptor, status, skill_src=skill_src, link_target=store)
+            _emit_status_notice(outcome, write=write)
+            return outcome
         # live package, or explicit live checkout: migrate
         if write:
             try:
@@ -950,26 +982,26 @@ def _resolve_retro_skill_src() -> Path:
     return Path(str(importlib.resources.files("mind_meld") / "skills" / "retro_fleet"))
 
 
-def _emit_conflict_notice(
-    target: Path, *, conflict_marker: str = _SKILL_LINK_CONFLICT_MARKER
-) -> None:
-    """Notice once per 24h — gated by the conflict marker. Cross-model #3
-    from /plan-eng-review: per-push spam on a deliberate conflict is
-    hostile; the gate suppresses repeats."""
-    if _marker_is_fresh(conflict_marker):
+def _emit_status_notice(result: SkillInstallResult, *, write: bool) -> None:
+    """Notice once per 24h — gated by the conflict marker.
+
+    The text comes from ``render_skill_status``, so the push path and
+    ``mm install-skills`` state the SAME cause. The previous single hardcoded
+    string said "is not mm's store link" for every branch, including
+    ``dangling-ours`` -- a link that byte-equals the store constant and is
+    therefore provably mm's own -- and told the user to move it aside, which
+    is the one action that would have prevented mm repairing it.
+
+    ``write=False`` (dry-run / autopush classify-only) must NOT touch the
+    marker: a run that will never repair anything would otherwise consume the
+    24h notice budget, so the one run that COULD fix the link stays silent.
+    """
+    marker = result.descriptor.conflict_marker
+    if _marker_is_fresh(marker):
         return
-    dest = ""
-    try:
-        if target.is_symlink():
-            dest = os.readlink(target)
-    except OSError:
-        dest = ""
-    where = f" -> {safe_str(dest)}" if dest else ""
-    sys.stderr.write(
-        f"mm: notice: skill at {safe_str(str(target))}{where} is not mm's store link; "
-        f"not replacing (move it aside and run: mm install-skills)\n"
-    )
-    _touch_marker(conflict_marker)
+    sys.stderr.write(f"mm: notice: {render_skill_status(result)}\n")
+    if write:
+        _touch_marker(marker)
 
 
 def _marker_is_fresh(name: str) -> bool:
@@ -1032,7 +1064,7 @@ def _skill_link_check_due() -> bool:
 
     Any I/O or resolver error in the drift check fails open (returns
     True) so the installer runs and emits its own notice. The conflict
-    marker is consulted separately by ``_emit_conflict_notice``.
+    marker is consulted separately by ``_emit_status_notice``.
     """
     return _skill_link_check_due_for(_skill_target_descriptors()[0])
 
@@ -1150,55 +1182,77 @@ def diagnose_skill_links() -> list[dict[str, str]]:
         store_state = type(error).__name__
     meta = _read_store_meta(store)
     for descriptor in _skill_target_descriptors():
-        row = {
-            "agent": descriptor.display_name,
-            "target": str(descriptor.target),
-            "store": str(store),
-            "store_state": store_state,
-            "store_version": str(meta.get("skill_version", "")) if meta else "",
-        }
         try:
-            info = descriptor.target.lstat()
-        except FileNotFoundError:
-            row["status"] = "absent"
-            rows.append(row)
-            continue
-        except OSError as error:
-            row["status"] = "error"
-            row["detail"] = _reason(error)
-            rows.append(row)
-            continue
-        if not stat.S_ISLNK(info.st_mode):
-            row["status"] = "foreign"
-            row["detail"] = "not a symlink"
-            rows.append(row)
-            continue
-        try:
-            row["readlink"] = os.readlink(descriptor.target)
-        except OSError as error:
-            row["status"] = "error"
-            row["detail"] = _reason(error)
-            rows.append(row)
-            continue
-        if _points_at_store(descriptor.target, store):
-            row["status"] = "ok" if descriptor.target.exists() else "dangling-ours"
-        else:
-            try:
-                lives = _symlink_lives(descriptor.target)
-            except OSError:
-                lives = False
-            shape = _legacy_shape(descriptor.target.resolve(strict=False))
-            if not lives and shape in ("package", "checkout"):
-                row["status"] = "dangling-ours-legacy"
-            elif lives and shape == "checkout":
-                row["status"] = "live-checkout"
-            else:
-                row["status"] = "foreign"
-        rows.append(row)
+            rows.append(_diagnose_one(descriptor, store, store_state, meta))
+        except Exception as error:  # never crash `mm status` / `mm diag`
+            rows.append(
+                {
+                    "agent": descriptor.display_name,
+                    "target": str(descriptor.target),
+                    "store": str(store),
+                    "store_state": store_state,
+                    "status": "error",
+                    "detail": _reason(error),
+                }
+            )
     return rows
 
 
+def _diagnose_one(
+    descriptor: SkillTarget, store: Path, store_state: str, meta: dict | None
+) -> dict[str, str]:
+    """One descriptor's diagnose row. Raises; the caller turns that into `error`."""
+    row = {
+        "agent": descriptor.display_name,
+        "target": str(descriptor.target),
+        "store": str(store),
+        "store_state": store_state,
+        "store_version": str(meta.get("skill_version", "")) if meta else "",
+    }
+    try:
+        info = descriptor.target.lstat()
+    except FileNotFoundError:
+        row["status"] = "absent"
+        return row
+    except OSError as error:
+        row["status"] = "error"
+        row["detail"] = _reason(error)
+        return row
+    if not stat.S_ISLNK(info.st_mode):
+        row["status"] = "foreign"
+        row["detail"] = "not a symlink"
+        return row
+    try:
+        row["readlink"] = os.readlink(descriptor.target)
+    except OSError as error:
+        row["status"] = "error"
+        row["detail"] = _reason(error)
+        return row
+    if _points_at_store(descriptor.target, store):
+        row["status"] = "ok" if descriptor.target.exists() else "dangling-ours"
+    else:
+        try:
+            lives = _symlink_lives(descriptor.target)
+        except OSError:
+            lives = False
+        shape = _legacy_shape(descriptor.target.resolve(strict=False))
+        if not lives and shape in ("package", "checkout"):
+            row["status"] = "dangling-ours-legacy"
+        elif lives and shape == "checkout":
+            row["status"] = "live-checkout"
+        elif not lives:
+            # Dangling, but pointing somewhere mm does not recognize. Still
+            # BROKEN from the agent's view -- it sees a dead skill entry --
+            # even though mm must not touch it. Distinct from a live
+            # `foreign` link, which is a working deliberate choice.
+            row["status"] = "foreign-dangling"
+        else:
+            row["status"] = "foreign"
+    return row
+
+
 __all__ = [
+    "BROKEN_SKILL_STATUSES",
     "SKILL_LINK_TTL_SECONDS",
     "SKILL_ROOTS",
     "SkillInstallResult",

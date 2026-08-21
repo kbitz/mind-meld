@@ -1590,3 +1590,74 @@ class TestBreadcrumbStaleness:
         assert r.exit_code == 0, (r.stdout, r.stderr)
         assert "Last auto-push" in r.output
         assert "stale" not in r.output
+
+
+class TestSkillLinkStatusNag:
+    """`mm status`'s skill-link line must fire only on states mm can act on.
+
+    REGRESSION: the line originally used a DENYLIST (`status not in ("ok",
+    "absent")`), so `live-checkout` -- a deliberate dogfood link the installer
+    explicitly preserves and reports `unchanged` for -- and `foreign` -- the
+    user's own file, which mm must never touch -- were both reported broken on
+    every `mm status`, forever, with a remedy that would have migrated the
+    dogfood link away. Same shape as the Grok refusal that pinned the autopush
+    breadcrumb at `degraded` and destroyed it as a signal for real degradation.
+    """
+
+    def test_working_and_deliberate_states_are_not_broken(self) -> None:
+        from mind_meld import skill_link
+
+        for status in ("ok", "absent", "live-checkout", "foreign"):
+            assert status not in skill_link.BROKEN_SKILL_STATUSES, status
+
+    def test_wedged_states_are_broken(self) -> None:
+        from mind_meld import skill_link
+
+        for status in ("dangling-ours", "dangling-ours-legacy", "error"):
+            assert status in skill_link.BROKEN_SKILL_STATUSES, status
+
+    def test_status_filter_is_an_allowlist_not_a_denylist(self) -> None:
+        """A status invented by a later track must default to NOT-broken.
+
+        A denylist made every future status broken-by-default; Groups 25-27 add
+        rows and consent states, so the default has to be the safe one.
+        """
+        from mind_meld import skill_link
+
+        assert "some-future-status-26a-invents" not in skill_link.BROKEN_SKILL_STATUSES
+
+    def _row(self, status: str) -> list[dict[str, str]]:
+        return [
+            {
+                "agent": "Claude Code",
+                "target": "~/.claude/skills/retro-fleet",
+                "store": "~/.local/share/mind-meld/agent-skills/retro-fleet",
+                "store_state": "ok",
+                "status": status,
+            }
+        ]
+
+    @pytest.mark.parametrize("status", ["ok", "absent", "live-checkout", "foreign"])
+    def test_mm_status_stays_quiet_for_working_states(self, status, tmp_path, monkeypatch) -> None:
+        """BEHAVIORAL pin on the cli.py call site, not on the constant.
+
+        The three tests above pass even if cli.py is reverted to the denylist --
+        they only read the tuple. This one invokes `mm status` and would fail.
+        """
+        from mind_meld import cli as _cli
+
+        monkeypatch.setattr(_cli.skill_link, "diagnose_skill_links", lambda: self._row(status))
+        _setup_real_config(tmp_path, monkeypatch)
+        result = runner.invoke(app, ["status"])
+        assert "Skill links broken" not in result.output, (status, result.output)
+
+    @pytest.mark.parametrize(
+        "status", ["dangling-ours", "dangling-ours-legacy", "foreign-dangling", "error"]
+    )
+    def test_mm_status_nags_for_wedged_states(self, status, tmp_path, monkeypatch) -> None:
+        from mind_meld import cli as _cli
+
+        monkeypatch.setattr(_cli.skill_link, "diagnose_skill_links", lambda: self._row(status))
+        _setup_real_config(tmp_path, monkeypatch)
+        result = runner.invoke(app, ["status"])
+        assert "Skill links broken" in result.output, (status, result.output)
