@@ -283,6 +283,7 @@ def test_real_home_guard_fires(tmp_path: Path) -> None:
         Path("~/.codex/skills/retro-fleet").expanduser(),
         Path("~/.config/opencode/skills/retro-fleet").expanduser(),
         Path("~/.config/mind-meld").expanduser(),
+        Path("~/.local/share/mind-meld/agent-skills").expanduser(),
     ):
         assert skill_link._is_real_agent_dir_under_pytest(real), real
 
@@ -442,6 +443,14 @@ def test_skill_marker_dir_is_redirected_for_this_test() -> None:
     from mind_meld import skill_link
 
     assert skill_link._marker_dir() != Path("~/.config/mind-meld").expanduser()
+
+
+def test_skill_store_dir_is_redirected_for_this_test() -> None:
+    """Post-B: a store leak mutates the SKILL.md three agents execute."""
+    from mind_meld import skill_link
+
+    real = Path("~/.local/share/mind-meld/agent-skills/retro-fleet").expanduser()
+    assert skill_link._skill_store_dir() != real
 
 
 def test_sidecar_and_lock_are_redirected_for_this_test(tmp_path: Path) -> None:

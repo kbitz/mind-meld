@@ -401,7 +401,8 @@ class TestInitWiring:
         # Stub the skill link installer too — irrelevant to this test and
         # avoids touching ~/.claude.
         monkeypatch.setattr(
-            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+            "mind_meld.skill_link._ensure_retro_skill_links",
+            lambda *, dry_run=False, allow_mutate=True, explicit=False: (),
         )
 
         storage = tmp_path / "icloud"
@@ -426,7 +427,7 @@ class TestInitWiring:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
 
-        def installer_failure(dry_run=False):
+        def installer_failure(*, dry_run=False, allow_mutate=True, explicit=False):
             raise RuntimeError("simulated installer regression")
 
         backfill_calls: list[str] = []
@@ -443,6 +444,12 @@ class TestInitWiring:
         assert result.exit_code == 0, result.output
         assert backfill_calls, "init must continue to the events backfill"
         assert "retro-fleet skill installation failed" in result.output
+        # Pin the REAL exception, not whatever a drifted stub signature
+        # would raise from the argument binder.
+        # Rich wraps the console line, so match a substring that cannot span
+        # the wrap. The point is that it is the REAL RuntimeError, not a
+        # TypeError from a drifted stub signature.
+        assert "RuntimeError: simulated" in result.output
 
 
 class TestEventsDirIsolation:
@@ -484,7 +491,8 @@ class TestEventsDirIsolation:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         monkeypatch.setattr(
-            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+            "mind_meld.skill_link._ensure_retro_skill_links",
+            lambda *, dry_run=False, allow_mutate=True, explicit=False: (),
         )
 
         # Snapshot the real events dir pre-init so we can compare.

@@ -2826,7 +2826,8 @@ class TestInitFlow:
             (grok_root / customization_dir).mkdir()
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setattr(
-            "mind_meld.skill_link._ensure_retro_skill_links", lambda dry_run=False: None
+            "mind_meld.skill_link._ensure_retro_skill_links",
+            lambda *, dry_run=False, allow_mutate=True, explicit=False: (),
         )
         monkeypatch.setattr("mind_meld.events_tail._run_events_backfill", lambda *_args: None)
 

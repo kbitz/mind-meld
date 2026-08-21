@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.38] - 2026-08-21
+
+**Agent skill links now point at an mm-owned store instead of whichever interpreter ran `mm`, so a destroyed Conductor workspace or a Homebrew Python bump can no longer take retro-fleet offline.**
+
+### Changed
+
+- **Durable skill store.** `mm` copies `SKILL.md` (only) into `~/.local/share/mind-meld/agent-skills/retro-fleet/` and points the Claude Code, Codex, and OpenCode `retro-fleet` links at that constant path. The path does not move when you upgrade mm, switch between a pipx install and a development checkout, or delete a virtualenv.
+- **Links mm previously wrote are repaired by liveness.** A dangling link into a deleted install or workspace is re-pointed at the store. A *live* development-checkout link is left alone on `mm push` with a notice naming the remedy; `mm init` and `mm install-skills` re-point it. Anything mm did not write -- your own file, directory, or a symlink it does not recognize -- is never replaced.
+- **`mm autopush` classifies but does not rewrite agent config.** A first-of-its-kind mutation to three third-party config directories does not debut on an unattended hook. Run `mm push` or `mm install-skills` to repair.
+- **`mm diag` reports skill links.** Passphrase-free, one block, with raw `readlink` output and the store's published version. `mm status` prints one line only when a link is in a state mm can act on.
+- **`mm install-skills --help` no longer claims the link auto-updates on `pipx upgrade`.** Because the store is a copy rather than a link into the package, an upgrade no longer refreshes it instantly: the next `mm push` republishes on a version-then-hash compare, or run `mm install-skills` to do it now.
+
+### Fixed
+
+- **A wedged `retro-fleet` link is now a classified, repairable state** (`dangling-ours` / `dangling-ours-legacy`) instead of a generic "exists and is not mm's symlink" refusal that named neither the cause nor the fix. This was the actual outage: on a machine where mm had been run from a Conductor workspace, all three agent links pointed into a directory Conductor had since destroyed, and mm refused to repair them while reporting the user had planted their own file there.
+
 ## [0.12.37] - 2026-08-18
 
 **Fleet retros now show which coding agents you actually used, as activity rhythm rather than token counts, because a token count from an agent log cannot be honestly compared to a Claude session total.**

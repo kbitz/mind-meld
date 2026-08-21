@@ -163,7 +163,8 @@ OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immed
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
-| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h |
+| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h. Prints one extra line when a `retro-fleet` skill link is broken |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, and `retro-fleet` skill-link state for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
@@ -177,7 +178,7 @@ OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immed
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d --no-save > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. |
-| `mm install-skills` | Force-check the `retro-fleet` skill link for Claude Code, Codex, and OpenCode. It installs only missing links and reports every agent's outcome; conflicts, including dangling or foreign links, are never overwritten. Use it for fresh-machine setup or after deliberately removing a stale link. |
+| `mm install-skills` | Force-check the `retro-fleet` skill link for Claude Code, Codex, and OpenCode and report every agent's outcome. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. Use it for fresh-machine setup, or after a `pipx` reinstall or a deleted workspace. |
 
 ### Syncing gstack
 
@@ -278,7 +279,9 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 Session jsonls only ever grow, so from v0.12.15 each push re-reads only the bytes appended since the last one rather than the whole file. That's what stopped `mm push` periodically printing `mm: notice: events tail budget exceeded` on machines with a lot of large sessions. If your token cache has gone stale from long-deleted workspaces, `mm gc` reaps those entries and shrinks what every push has to read.
 
-The skill is auto-installed on `mm init` — at `~/.claude/skills/retro-fleet` for Claude Code, and at the Codex and OpenCode equivalents (see [Codex and OpenCode Integration](#codex-and-opencode-integration)) — and each push can create a missing link (24h-TTL gated, a handful of syscalls per available agent in steady state). Each agent's link is tracked separately, so a problem on one never suppresses checks for another. A dangling or foreign link is a deliberate no-clobber conflict: Mind Meld never unlinks it automatically, because another process could replace it with your file. Remove that link yourself, then run `mm install-skills` (or wait for the next push) to create the bundled one.
+**Where the skill lives (v0.12.38).** `mm` copies `SKILL.md` into a store it owns at `~/.local/share/mind-meld/agent-skills/retro-fleet/`, then points every agent's link at that one constant path — `~/.claude/skills/retro-fleet` for Claude Code, plus the Codex and OpenCode equivalents (see [Codex and OpenCode Integration](#codex-and-opencode-integration)). The store is machine-local and never synced. Before v0.12.38 each link pointed straight into whichever Python installation ran `mm`, so deleting a Conductor workspace or bumping a Homebrew Python took the skill offline with a dangling link and no way to repair it. The link target no longer moves. The store refreshes on a version-then-hash compare, so a new `SKILL.md` lands on the next `mm init`, `mm push`, or `mm install-skills` after a `pipx upgrade` — not in place during the upgrade itself.
+
+The link is created on `mm init` and re-checked by each push (24h-TTL gated, a handful of syscalls per available agent in steady state). Each agent is tracked separately, so a problem on one never suppresses checks for another. Mind Meld repairs its own links without being asked: a link that points at the store but dangles, and a leftover link into an old package or checkout that no longer resolves, are both re-pointed. A *live* checkout link — the development dogfood case — is left alone by push, and re-pointed by `mm init` or `mm install-skills`. A file of your own, or a symlink to somewhere Mind Meld does not recognize, is never touched: `mm diag` shows it with the `readlink` output and `mm install-skills` names the cause and the fix. `mm status` nags only about links Mind Meld could act on — a *live* entry of your own is a working deliberate choice and is never called broken, while a *dangling* one is, because the agent sees a dead skill entry either way. Background `mm autopush` classifies and warns but never rewrites agent config — run an interactive `mm push` or `mm install-skills` to actually repair a link.
 
 **Caveats the output is honest about:**
 
@@ -300,6 +303,56 @@ Managing conflicts:
 - `mm pull --conflict-mode fail` — preflight all files; if any would conflict, print the list and exit 3 (no writes) so CI can block on human review. Exit 3 is distinct from typer's usage-error exit 2, so a stale script still passing the removed `--no-prompt` flag can't be mistaken for a conflict refusal.
 - `mm gc --conflicts` — reap stale conflict files older than 30 days.
 - `mm diff` — predicts each modified file's pull outcome (write / merge / skip / conflict) before you run pull.
+
+## Troubleshooting
+
+**`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either.
+
+**`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
+
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` carries the whole row: store path, store state, and the store's published version. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own is not one of those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
+
+**`/retro-fleet` runs but errors out with `mm: command not found`.** The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
+
+**`mm status` says `stale — no autorun in Nh`.** Nothing has run `mm autopull` / `mm autopush` in 48 hours, so your agent's lifecycle hook is not firing. Check the `# Mind Meld` block is still in the global instructions file that agent actually reads.
+
+**`mm status` shows a `degraded` breadcrumb.** The sync itself succeeded; the `detail` field names which optional signal was lost. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync.
+
+**`mm push` prints `events tail budget exceeded`.** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
+
+**A file came back after you deleted it.** Deletions propagate via tombstones on the *next* push from the machine that deleted it. Push there, then pull elsewhere.
+
+**Conflicts you didn't expect.** `mm conflicts` lists them, `mm diff` predicts them before a pull, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
+
+## Uninstalling
+
+`pipx uninstall mind-meld` removes the `mm` command and nothing else. Everything below is deliberate — an uninstall should not delete your data or your synced fleet history — but the agent skill links and the skill store are worth knowing about:
+
+```bash
+pipx uninstall mind-meld
+
+# Agent skill links. These survive the uninstall by design (they point at the
+# store below, not at the deleted pipx venv), so each agent keeps offering
+# /retro-fleet even though the `mm` it shells out to is gone. This removes
+# only links that actually point at Mind Meld's store — an entry of your own
+# at that path is left alone, the same rule the installer follows.
+for l in ~/.claude/skills/retro-fleet ~/.codex/skills/retro-fleet ~/.config/opencode/skills/retro-fleet; do
+  [ "$(readlink "$l")" = "$HOME/.local/share/mind-meld/agent-skills/retro-fleet" ] && rm -f "$l"
+done
+
+# Local data: the skill store, the mm-events log, and saved retro snapshots.
+# If you ever hand-authored your own skill under agent-skills/retro-fleet/,
+# Mind Meld refused to publish over it — move it out before running this.
+rm -rf ~/.local/share/mind-meld
+
+# Config, device identity, caches, and TTL markers.
+rm -rf ~/.config/mind-meld
+
+# Keychain entry (service `mind-meld`, account `passphrase`).
+security delete-generic-password -s mind-meld -a passphrase
+```
+
+Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
 ## Architecture
 
