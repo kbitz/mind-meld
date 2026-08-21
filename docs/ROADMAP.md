@@ -14,25 +14,18 @@ _(none)_
 
 ## Current Plan
 
-#### Group 24: Skill-link classification ∥ retro trends
+#### Group 24: Skill-link classification
 
 ##### Track 24A: Classify the wedge and stop re-arming it
-_3 tasks . ~200 LOC . medium risk . 6 files_
-_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py, tests/test_init_auto_pin.py, tests/test_init_events_backfill.py, tests/test_integration.py_
-_out: 25A_
+_3 tasks . ~200 LOC . medium risk . 7 files_
+_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py, tests/test_init_auto_pin.py, tests/test_init_events_backfill.py, tests/test_integration.py, docs/invariants/events-retro.md_
+_out: 25A, 26A_
 _read-first: docs/invariants/events-retro.md, src/mind_meld/skill_link.py_
 _produces: a wedged link is classified by cause, and mm stops writing links that will dangle_
+_session: fresh · effort: high · attach: @src/mind_meld/skill_link.py, @tests/test_skill_link.py, @docs/invariants/events-retro.md · verify: pytest tests/test_skill_link.py -q_
 - **Refuse an ephemeral skill source** -- `_resolve_retro_skill_src()` resolves from whichever interpreter ran `mm`, so an editable install in a Conductor workspace bakes a path Conductor later destroys. Add a durability predicate, an `ephemeral-source` status, and record the resolved source so drift is detectable without a resolve. _skill_link.py + tests, ~90 lines._ (M)
-- **Split conflict into dangling-ours and foreign** -- one word currently covers four causes with four different remedies. Classify only; delete nothing. Rewrite both strings with cause, `readlink` output, and an exact remedy. _skill_link.py + cli.py + tests, ~80 lines._ (M)
+- **Split conflict into dangling-ours and foreign** -- one word currently covers four causes with four different remedies. Classify only; delete nothing. Rewrite both strings with cause, `readlink` output, and an exact remedy. Both tasks change the `SkillInstallStatus` set, so the invariant doc's status enumeration, its dangling/foreign state-machine lines, and its `install-skills` exit-code sentence all go stale in this track. _skill_link.py + cli.py + events-retro.md + tests, ~80 lines._ (M)
 - **Fix the four None installer stubs** -- `test_init_auto_pin.py`, `test_init_events_backfill.py` (two sites), and `test_integration.py` return `None` where the installer returns a tuple, so a future consumer would raise `TypeError` into the swallowing `except Exception`. _tests, ~30 lines._ (S)
-
-##### Track 24B: Make the trends section reach the shareable output
-_2 tasks . ~120 LOC . medium risk . 3 files_
-_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py_
-_read-first: src/mind_meld/skills/retro_fleet/aggregator.py_
-_produces: `## Trends vs last retro` renders on repeat runs, in the output the user keeps_
-- **Break the save/compare circularity** -- `main()` renders the card iff `has_card_input` and saves the snapshot iff **not** `has_card_input`, and SKILL.md's second pass also passes `--no-save`, so pass 2 can only compare against the snapshot pass 1 wrote seconds earlier from an identical corpus. Every delta is zero and the section is skipped. _aggregator.py + tests, ~80 lines._ (M)
-- **Re-point the docs at real behavior** -- once trends actually appear on repeat runs. _SKILL.md + tests, ~40 lines._ (S)
 
 #### Group 25: Wedge visibility
 _Depends on: Group 24_
@@ -41,66 +34,84 @@ _Depends on: Group 24_
 _3 tasks . ~150 LOC . low risk . 6 files_
 _touches: src/mind_meld/cli.py, README.md, docs/invariants/events-retro.md, tests/test_diag.py, tests/test_silent_failure_contract.py, tests/test_skill_link.py_
 _blocked-by: Track 24A_
-_out: 26A_
+_out: 27A_
 _read-first: 24A_
 _produces: a broken link is discoverable from `mm diag` in one step, with a copy-pasteable fix_
+_session: fresh · effort: medium · attach: @src/mind_meld/cli.py, @tests/test_diag.py, @tests/test_silent_failure_contract.py · verify: pytest tests/test_diag.py tests/test_silent_failure_contract.py -q_
 - **Skill links block in mm diag** -- `mm diag` is cheap, passphrase-free, and already the documented triage surface; it has no skill-link section today. `mm status` costs a passphrase, a crypto init, a full local manifest, and a remote fetch — too expensive to consult about an `lstat`. _cli.py + tests, ~70 lines._ (M)
 - **One mm status line only when broken** -- following the `_config_missing_recommended_excludes` precedent, and absorbing the deferred agent-coverage row. Never `events_degradations`: that field means the events tail lost data, `mm status` prints exactly one breadcrumb line, and a deliberate user file would pin it `degraded` forever while hiding real data loss. _cli.py + tests, ~50 lines._ (S)
-- **README troubleshooting section** -- symptom, cause, fix, with commands. The ephemeral-workspace cause is currently written down only in a Python docstring. _README.md + events-retro.md, ~30 lines._ (S)
+- **README troubleshooting section** -- symptom, cause, fix, with commands. The ephemeral-workspace cause is currently written down only in a Python docstring and in the invariant doc — both maintainer-facing; no user-facing surface carries it. _README.md + events-retro.md, ~30 lines._ (S)
 
-#### Group 26: Target-list hygiene
+#### Group 26: Retro trends
+_Depends on: Group 24, Group 25_
+
+##### Track 26A: Make the trends section reach the shareable output
+_2 tasks . ~120 LOC . medium risk . 5 files_
+_touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py, README.md, docs/invariants/events-retro.md_
+_blocked-by: Track 24A_
+_read-first: src/mind_meld/skills/retro_fleet/aggregator.py, docs/invariants/events-retro.md ("No card-level change gate is possible")_
+_produces: `## Trends vs last retro` renders on repeat runs, in the output the user keeps_
+_session: fresh · effort: medium · attach: @src/mind_meld/skills/retro_fleet/aggregator.py, @docs/invariants/events-retro.md, @README.md · verify: pytest tests/test_retro_fleet_aggregator.py -q_
+- **Break the save/compare circularity** -- `main()` renders the card iff `has_card_input` and saves the snapshot iff **not** `has_card_input`, and SKILL.md's second pass also passes `--no-save`, so pass 2 can only compare against the snapshot pass 1 wrote seconds earlier from an identical corpus. The delta set collapses to nothing and the section is skipped (`if not nonzero: return []`); a failed pass-1 save or a wall-clock `until` shift can leave a stray nonzero, so treat "always empty" as the overwhelming case rather than a guarantee. _aggregator.py + tests, ~80 lines._ (M)
+- **Overturn the invariant that says this is impossible** -- `docs/invariants/events-retro.md` currently states "No card-level change gate is possible" and "deltas belong to the save-enabled first pass" as a written invariant, and `README.md` states the first-pass-only behavior as a user-facing caveat. This track reverses both. Amend the invariant with the new baseline rule and delete the README caveat; do NOT land the code while the docs still say it cannot work. _SKILL.md + README.md + events-retro.md + tests, ~40 lines._ (S)
+
+#### Group 27: Target-list hygiene
 _Depends on: Group 25_
 
-##### Track 26A: De-landmine the target list
+##### Track 27A: De-landmine the target list
 _3 tasks . ~220 LOC . medium risk . 7 files_
-_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/conftest.py, tests/test_skill_link.py, tests/test_module_boundaries.py, CLAUDE.md, docs/invariants/events-retro.md_
+_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/conftest.py, tests/test_skill_link.py, tests/test_module_boundaries.py, AGENTS.md, docs/invariants/events-retro.md_
 _blocked-by: Track 25A_
-_out: 27A_
+_out: 28A_
 _read-first: 25A, tests/conftest.py_
 _produces: a new agent row cannot escape test isolation or the real-home guard_
+_session: fresh · effort: high · attach: @src/mind_meld/skill_link.py, @tests/conftest.py, @tests/test_module_boundaries.py · verify: pytest tests/test_skill_link.py tests/test_module_boundaries.py -q_
 - **Derive descriptors from one registry** -- keep a single patchable `name` to tilde-string mapping as the seam: `conftest._isolate_skill_links` redirects all roots with ONE `setattr` on `SKILL_ROOTS` and `test_module_boundaries` asserts that name, so a tuple of resolver callables would destroy the seam. Kill positional indexing and the fixed-arity annotation. _skill_link.py + cli.py, ~110 lines._ (M)
-- **Registry-derived test isolation** -- conftest roots and `_is_real_agent_dir_under_pytest` paths both derive from the registry, pinned by a synthetic extra row that must be covered with zero other edits. _conftest.py + tests, ~80 lines._ (M)
-- **Pin marker literals and prefix uniqueness** -- on-disk names are not a uniform prefix (`.skill-link-checked` has none), so the Claude row carries an empty prefix and the test asserts the literal strings. Assert prefix uniqueness so one agent's marker cannot authorize another's target. Keep `_ensure_retro_skill_link_at` — it is the only test proving the guard blocks the write rather than just printing. _tests + docs, ~30 lines._ (S)
+- **Registry-derived test isolation** -- conftest roots and `_is_real_agent_dir_under_pytest` paths both derive from the registry, pinned by a synthetic extra row that must be covered with zero other edits. The guard list carries a fourth entry that is NOT a skills root (`~/.config/mind-meld`, the marker dir); deriving purely from the registry would drop it, so keep it as an explicit extra. _conftest.py + tests, ~80 lines._ (M)
+- **Pin marker literals and prefix uniqueness** -- on-disk names are not a uniform prefix (`.skill-link-checked` has none), so the Claude row carries an empty prefix and the test asserts the literal strings. Assert prefix uniqueness so one agent's marker cannot authorize another's target. Keep `_ensure_retro_skill_link_at` — it is the only test proving the *installer* blocks the write rather than just printing (`test_touch_marker_refuses_the_real_config_dir` proves it for the marker path, so the claim is installer-specific). _tests + docs, ~30 lines._ (S)
 
-#### Group 27: Install consent
-_Depends on: Group 26_
-
-##### Track 27A: Gate the writes the way the reads are gated
-_2 tasks . ~160 LOC . medium risk . 6 files_
-_touches: src/mind_meld/config.py, src/mind_meld/cli.py, src/mind_meld/skill_link.py, tests/test_config.py, tests/test_skill_link.py, README.md_
-_blocked-by: Track 26A_
-_out: 28A_
-_read-first: 26A, src/mind_meld/events_tail.py_
-_produces: a user can decline mm writing into their agent config dirs_
-- **Skills auto-install opt-out** -- `HOST_READER_SOURCE_GATE` will not `stat` `~/.codex/sessions` without consent, but mm writes a symlink into `~/.codex/skills/` with none. Add the config key plus per-agent toggles, defaulted to today's behavior, and report "auto-install: disabled" rather than calling it degradation. _config.py + tests, ~90 lines._ (M)
-- **Pass consent into the installer** -- a `may_create` frozenset derived from `get_sources(config)`. Note `init` calls the installer BEFORE it resolves sources; that ordering has to flip. _cli.py + skill_link.py + tests, ~70 lines._ (M)
-
-#### Group 28: Repair authority
+#### Group 28: Install consent
 _Depends on: Group 27_
 
-##### Track 28A: Ownership-aware repair
-_3 tasks . ~240 LOC . high risk . 5 files_
-_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py, README.md, docs/invariants/events-retro.md_
+##### Track 28A: Gate the writes the way the reads are gated
+_2 tasks . ~160 LOC . medium risk . 7 files_
+_touches: src/mind_meld/config.py, src/mind_meld/cli.py, src/mind_meld/skill_link.py, tests/test_config.py, tests/test_skill_link.py, README.md, docs/invariants/events-retro.md_
 _blocked-by: Track 27A_
 _out: 29A_
-_read-first: 27A, src/mind_meld/lockedjson.py_
-_produces: mm can heal a link it provably wrote, and refuses everything else_
-- **Ledger-backed repair authority** -- a `readlink` tail plus a success marker proves only "points into some mind-meld tree" and "this target installed once"; neither binds the marker to the link, so a user's deliberate link into a second checkout would be deleted silently. Record the exact link text in a ledger via `lockedjson`; repair iff `os.readlink` byte-equals. _skill_link.py + tests, ~110 lines._ (M)
-- **Race-safe replace** -- `dir_fd` plus `O_NOFOLLOW` pins directory identity so a swapped ancestor cannot redirect the write, and an atomic rename removes the replace window. POSIX has no atomic "unlink iff still pointing here", so document the residual. Reject symlinked skills dirs and ancestors for every row, not just Grok. _skill_link.py + tests, ~90 lines._ (M)
-- **Repair verbs and the reversed promise** -- check, repair, and force, mirroring `mm gc --dry-run`. Negative tests must patch `os.unlink`, because the existing no-unlink pin patches `Path.unlink` and would go blind. Repair reverses a promise printed three times in README and once in the invariant doc; all four change here. _cli.py + docs + tests, ~40 lines._ (S)
+_read-first: 27A, src/mind_meld/events_tail.py_
+_produces: a user can decline mm writing into their agent config dirs_
+_session: fresh · effort: high · attach: @src/mind_meld/config.py, @src/mind_meld/events_tail.py, @tests/test_config.py · verify: pytest tests/test_config.py tests/test_skill_link.py -q_
+- **Skills auto-install opt-out** -- `HOST_READER_SOURCE_GATE` will not `stat` `~/.codex/sessions` without consent, but mm writes a symlink into `~/.codex/skills/` with none. Add the config key plus per-agent toggles, defaulted to today's behavior, and report "auto-install: disabled" rather than calling it degradation. _config.py + tests, ~90 lines._ (M)
+- **Pass consent into the installer** -- a `may_create` frozenset derived from `get_sources(config)`. Note `init` calls the installer BEFORE it resolves sources; that ordering has to flip. The invariant doc currently documents the skills-dir `mkdir` as unconditional under an available root; that sentence becomes conditional here. _cli.py + skill_link.py + tests, ~70 lines._ (M)
 
-#### Group 29: Grok row
+#### Group 29: Repair authority
 _Depends on: Group 28_
 
-##### Track 29A: Add Grok as a registry row
+##### Track 29A: Ownership-aware repair
+_3 tasks . ~240 LOC . high risk . 5 files_
+_touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py, README.md, docs/invariants/events-retro.md_
+_blocked-by: Track 28A_
+_out: 30A_
+_read-first: 28A, src/mind_meld/lockedjson.py_
+_produces: mm can heal a link it provably wrote, and refuses everything else_
+_session: fresh · effort: high · attach: @src/mind_meld/skill_link.py, @src/mind_meld/lockedjson.py, @tests/test_skill_link.py · verify: pytest tests/test_skill_link.py -q_
+- **Ledger-backed repair authority** -- a `readlink` tail plus a success marker proves only "points into some mind-meld tree" and "this target installed once"; neither binds the marker to the link, so a user's deliberate link into a second checkout would be deleted silently. Record the exact link text in a ledger via `lockedjson`; repair iff `os.readlink` byte-equals. _skill_link.py + tests, ~110 lines._ (M)
+- **Race-safe replace** -- `dir_fd` plus `O_NOFOLLOW` pins directory identity so a swapped ancestor cannot redirect the write, and an atomic rename removes the replace window. POSIX has no atomic "unlink iff still pointing here", so document the residual. Reject symlinked skills dirs and ancestors for every row that exists at this point (Claude, Codex, OpenCode — the Grok row does not land until 29A). `config.grok_customization_dirs_exist` and `walk_grok_source` are the existing precedent for refusing a symlinked tree; match their posture. _skill_link.py + tests, ~90 lines._ (M)
+- **Repair verbs and the reversed promise** -- check, repair, and force, mirroring `mm gc --dry-run`. Negative tests must patch `os.unlink`, because the existing no-unlink pin patches `Path.unlink` and would go blind. Repair reverses a no-clobber promise printed twice in README and twice in the invariant doc; all four change here. Do not fix only one site per file — the second invariant-doc site is the `install-skills` "leaves user files or foreign symlinks untouched" sentence, which is easy to miss. _cli.py + docs + tests, ~40 lines._ (S)
+
+#### Group 30: Grok row
+_Depends on: Group 29_
+
+##### Track 30A: Add Grok as a registry row
 _3 tasks . ~140 LOC . medium risk . 6 files_
 _touches: src/mind_meld/skill_link.py, src/mind_meld/config.py, tests/test_skill_link.py, tests/test_config.py, docs/invariants/events-retro.md, docs/designs/host-parity.md_
-_blocked-by: Track 28A_
-_read-first: 26A, 27A, docs/designs/host-parity.md_
+_blocked-by: Track 29A_
+_read-first: 27A, 28A, docs/designs/host-parity.md_
 _produces: Grok gets the skill link without mm ever manufacturing Grok consent_
-- **Install only where consent already exists** -- the installer's mkdir of `~/.grok/skills` flips `grok_customization_dirs_exist`, and that has two consequences with different preconditions. On a legacy or default config it auto-enables the grok sync source, which authorizes `read_grok_usage` — but only there: `get_sources` applies that filter solely while building `DEFAULT_SOURCES`, so an explicit `[[sync.sources]]` list is never appended to. On **any** config it also makes `_source_path_is_detected` label grok "detected" and default the `mm init` / `reconfigure-sources` prompt to Y. Test both shapes separately; do not assume the unconditional chain. Never create the directory. Assert the consequence, not the mechanism: after a full install, `grok_customization_dirs_exist()` is False AND `grok` is absent from `get_sources`. Requires 26A first — otherwise running `pytest` writes the developer's real `~/.grok/skills` and manufactures the very consent this track exists to prevent. _skill_link.py + tests, ~70 lines._ (M)
+_session: fresh · effort: medium · attach: @src/mind_meld/skill_link.py, @src/mind_meld/config.py, @docs/designs/host-parity.md · verify: pytest tests/test_skill_link.py tests/test_config.py -q_
+- **Install only where consent already exists** -- the installer's mkdir of `~/.grok/skills` flips `grok_customization_dirs_exist`, and that has two consequences with different preconditions. On a legacy or default config it auto-enables the grok sync source, which authorizes `read_grok_usage` — but only there: `get_sources` applies that filter solely while building `DEFAULT_SOURCES`, so an explicit `[[sync.sources]]` list is never appended to. On **any** config it also makes `_source_path_is_detected` label grok "detected" and default the `mm init` / `reconfigure-sources` prompt to Y. Test both shapes separately; do not assume the unconditional chain. Never create the directory. Assert the consequence, not the mechanism: after a full install, `grok_customization_dirs_exist()` is False AND `grok` is absent from `get_sources`. The second conjunct is vacuous on an explicit-`sync.sources` config (which `mm init` always writes), so the test needs a default-config fixture to have any teeth. Requires 27A first — otherwise running `pytest` writes the developer's real `~/.grok/skills` and manufactures the very consent this track exists to prevent. _skill_link.py + tests, ~70 lines._ (M)
 - **One Grok home resolver, no env var** -- `GROK_HOME` stays a `host_usage` sessions-only override. A shared resolver honoring it would put an environment variable in charge of which directory `walk_grok_source` encrypts and publishes, and `conftest` deletes the variable, making that branch untestable by fixture. _config.py + tests, ~40 lines._ (S)
-- **Per-row reasons and doc reconciliation** -- the "root is absent" reason is factually wrong under this gate, so reasons become per-row. Pin that the installed link yields zero manifest entries from `walk_grok_source`. Update host-parity.md's capability matrix and the invariant doc's three-targets line. Record the manual host-load check: a green unit test proves the symlink, not that Grok loads the skill. _docs + tests, ~30 lines._ (S)
+- **Per-row reasons and doc reconciliation** -- the "root is absent" reason is factually wrong under this gate, so reasons become per-row. Pin that the installed link yields zero manifest entries from `walk_grok_source`. Update host-parity.md's capability matrix AND its Plan C section — Plan C currently recommends `$GROK_HOME/skills` resolved at call time, which task 2 deliberately refuses, so leaving it unedited keeps the design doc recommending the thing this track rejects. Also the invariant doc's three-targets line. Record the manual host-load check: a green unit test proves the symlink, not that Grok loads the skill. _docs + tests, ~30 lines._ (S)
 
 ### Execution Map
 
@@ -110,40 +121,49 @@ of document order; document order is priority, not a gate.
 ```
 - Group 24 ← {}
 - Group 25 ← {24}
-- Group 26 ← {25}
-- Group 27 ← {26}
+- Group 26 ← {24, 25}
+- Group 27 ← {25}
 - Group 28 ← {27}
 - Group 29 ← {28}
+- Group 30 ← {29}
 ```
 
 Track detail per group:
 
 ```
-Group 24: Skill-link classification ∥ retro trends
+Group 24: Skill-link classification
   +-- Track 24A ........... ~M . 3 tasks
-  +-- Track 24B ........... ~M . 2 tasks
 
 Group 25: Wedge visibility
   +-- Track 25A ........... ~M . 3 tasks
 
-Group 26: Target-list hygiene
-  +-- Track 26A ........... ~M . 3 tasks
+Group 26: Retro trends
+  +-- Track 26A ........... ~M . 2 tasks
 
-Group 27: Install consent
-  +-- Track 27A ........... ~M . 2 tasks
+Group 27: Target-list hygiene
+  +-- Track 27A ........... ~M . 3 tasks
 
-Group 28: Repair authority
-  +-- Track 28A ........... ~M . 3 tasks
+Group 28: Install consent
+  +-- Track 28A ........... ~M . 2 tasks
 
-Group 29: Grok row
+Group 29: Repair authority
   +-- Track 29A ........... ~M . 3 tasks
+
+Group 30: Grok row
+  +-- Track 30A ........... ~M . 3 tasks
 ```
 
-**Total: 0 phases . 6 groups . 7 tracks remaining.**
+**Total: 0 phases . 7 groups . 7 tracks remaining.**
 
-Six waves is the honest shape: every skill-link track collides in
-`src/mind_meld/skill_link.py`, so they serialize. Track 24B is the only
-genuine parallelism — it is the only track that does not touch `skill_link.py`.
+Six waves, and there is no parallelism left to harvest. Every skill-link track
+collides in `src/mind_meld/skill_link.py`, and once the tracks that amend
+`docs/invariants/events-retro.md` are named honestly, that doc becomes the second
+shared hot file — it is touched by 24A, 25A, 26A, 27A, 28A and 29A. The retro-trends
+work (26A) is topologically independent of the installer chain but still serializes
+behind 25A on that file, which is why it earned its own Group instead of riding
+along with 24A. Two workspaces cannot both edit the invariant doc, so the honest
+plan is a chain.
+
 ---
 
 ## Future
@@ -190,10 +210,11 @@ genuine parallelism — it is the only track that does not touch `skill_link.py`
 - **Machine-readable GC outcomes** — expose orphan-blob outcomes only when an automation or audit consumer needs them; Track 17D's reaper scope stays as shipped. _Source: unprocessed GC follow-up 2026-08-17._
 - **Do not add a Codex or Grok sessions-snapshot** — Claude's sessions-snapshot walk stays Claude-only. Codex rollouts and Grok session dirs are not a metadata-only project ledger; encoded cwd is a path and must not go on the wire. Promote only if a host ships a metadata-only project index. Session-transcript sync stays refused for every host. _Source: [manual] host-parity 2026-08-17._
 - **Deterministic demo/fixture path for `retro-fleet`** — fresh-clone time-to-first-output is 10-30 min and nondeterministic (3.11+ interpreter, venv, editable install, `mm init`, an enabled host source, a substantive push, two aggregator passes). A `--demo` flag over a bundled synthetic corpus would make the card reproducible in three commands. The test suite is the current deterministic path and is adequate for CI, so this is ergonomics, not correctness. _Source: [23A] inbox 2026-08-18._
-- **Un-hide and rename `--dump-host-usage`** — documented only in CHANGELOG and hidden from `--help`, so the primary forensic hatch is undiscoverable, and the name reads like spend when it is retained inventory. Prefer `--host-inventory-json`, keeping the old flag as an alias. _Source: [23A] inbox 2026-08-18._
+- **Un-hide and rename `--dump-host-usage`** — hidden from `--help`, and documented only in CHANGELOG and the maintainer-facing invariant doc, so the primary forensic hatch is undiscoverable, and the name reads like spend when it is retained inventory. Prefer `--host-inventory-json`, keeping the old flag as an alias. _Source: [23A] inbox 2026-08-18._
 - **Accept a bare integer retro window** — `mm retro-fleet 7` is rejected while `7d` works. The skill translates natural language so agents never hit it; direct CLI users do. _Source: [23A] inbox 2026-08-18._
 - **Deregister/prune retired devices** — a retired-but-registered Mac inflates every "N of M machines" denominator forever, which is the root cause 23A's coverage wording worked around rather than fixed. Wants `mm devices --prune` or a staleness nudge. _Source: [23A] inbox 2026-08-18._
 - **Reset-aware per-device snapshot deltas** — the only honest route to real per-agent window spend, versus the lower-bound day counts 23A ships. Needs at least two retained snapshots per device (22A keeps only the latest), counter-reset detection, and a new wire/consumer invariant. A data-layer track, not a renderer change. _Source: [23A] inbox 2026-08-18._
+- **Two releases share the version string `0.11.23`** — `CHANGELOG.md` carries `## [0.11.23] - 2026-05-06` and `## [0.11.23] - 2026-05-05` as separate releases; `docs/PROGRESS.md` charts only the 2026-05-05 one, so the 2026-05-06 "auto-pin iCloud storage on `mm init`" release has no row. `test_every_changelog_version_has_a_progress_row` matches on version string, so the gate cannot see this and reports parity. Needs a decision: renumber one release, or teach the gate to key on (version, date). _Source: /ship adversarial review 2026-08-21._
 - **Fleet-wide skill-link visibility** — markers and links are per-machine, so nothing answers "which of my Macs has a wedged link", which is the real question behind surfacing a wedge. One field on the mm-push event would let the retro card answer it. Deferred as a wire-format change, outside the installer's blast radius. _Source: /autoplan Phase 3 eng review 2026-08-20._
 
 ## Shipped

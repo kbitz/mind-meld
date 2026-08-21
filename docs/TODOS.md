@@ -19,8 +19,10 @@ Drain record, 7 items from the 2026-08-18 Track 23A pass:
   save/compare circularity, so the bug is still open.
 - 1 discharged: the `mm status` agent-coverage row was absorbed into Track 25A,
   which adds a `mm status` line on the same surface under the same one-line
-  budget. `mm status` still has zero skill or agent-coverage references, so the
-  underlying gap is real — this was a merge, not a deletion.
+  budget. `mm status` has zero skill-link references today; it does print a
+  Grok usage-capture enabled/disabled line, so the gap is narrower than "says
+  nothing about agent capture" — but the retro-side coverage the item asked for
+  is still missing. A merge, not a deletion.
 - 5 deferred to `## Future` in `docs/ROADMAP.md`: demo/fixture path,
   `--dump-host-usage` rename, bare-integer retro window, retired-device pruning,
   and reset-aware snapshot deltas.
