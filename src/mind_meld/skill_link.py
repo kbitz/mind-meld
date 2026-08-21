@@ -19,14 +19,24 @@ installer branches.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import json
 import os
 import stat
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal
 
+from packaging.version import InvalidVersion, Version
+
+from mind_meld import __version__
+from mind_meld.errors import StorageError
+from mind_meld.fsutil import atomic_write_bytes
 from mind_meld.safety import safe_str
 
 # Captured at import, BEFORE any test can monkeypatch $HOME, so the test-time
@@ -79,6 +89,7 @@ def _is_real_agent_dir_under_pytest(target: Path) -> bool:
             (_REAL_HOME / ".codex" / "skills"),
             (_REAL_HOME / ".config" / "opencode" / "skills"),
             (_REAL_HOME / ".config" / "mind-meld"),
+            (_REAL_HOME / ".local" / "share" / "mind-meld" / "agent-skills"),
         )
     )
 
@@ -130,7 +141,21 @@ SKILL_ROOTS: tuple[str, str, str] = (
 )
 
 
-SkillInstallStatus = Literal["installed", "unchanged", "unavailable", "conflict", "failed"]
+SkillInstallStatus = Literal[
+    "installed",
+    "unchanged",
+    "unavailable",
+    "dangling-ours",
+    "dangling-ours-legacy",
+    "foreign",
+    "failed",
+]
+
+_STORE_PAYLOAD = "SKILL.md"
+_STORE_META = ".mm-skill.json"
+_STORE_SENTINEL = ".mm-owned"
+_STORE_LOCK = ".publish.lock"
+_LEGACY_TAIL = ("mind_meld", "skills", "retro_fleet")
 
 
 @dataclass(frozen=True)
@@ -160,6 +185,7 @@ class SkillInstallResult:
     descriptor: SkillTarget
     status: SkillInstallStatus
     skill_src: Path | None = None
+    link_target: Path | None = None
     reason: str | None = None
 
     @property
@@ -191,6 +217,295 @@ def _reason(error: BaseException) -> str:
     return f"{type(error).__name__}: {safe_str(error)}"
 
 
+def _skill_store_dir() -> Path:
+    """Return the mm-owned skill store. Call-time seam — never expanduser at import.
+
+    Override with ``MM_SKILLS_DIR`` for tests. The default sits next to the
+    mm-events root but outside every ``DEFAULT_SOURCES`` ``include_dirs`` entry.
+    """
+    override = os.environ.get("MM_SKILLS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path("~/.local/share/mind-meld/agent-skills/retro-fleet").expanduser()
+
+
+def _store_payload_path(store: Path | None = None) -> Path:
+    return (store or _skill_store_dir()) / _STORE_PAYLOAD
+
+
+def _store_is_healthy(store: Path | None = None) -> bool:
+    payload = _store_payload_path(store)
+    try:
+        return payload.is_file() and payload.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_store_meta(store: Path) -> dict | None:
+    path = store / _STORE_META
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _pkg_skill_md(skill_src: Path) -> bytes:
+    path = skill_src / _STORE_PAYLOAD
+    data = path.read_bytes()
+    if not data:
+        raise FileNotFoundError(f"{path} is empty")
+    return data
+
+
+def _ensure_real_dir(path: Path, *, mode: int = 0o700) -> None:
+    """Create ``path`` as a real directory, refusing a symlink or regular file."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        path.mkdir(mode=mode, parents=False)
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise FileExistsError(f"refusing symlink at skill store path {path}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(f"refusing non-directory at skill store path {path}")
+
+
+def _prepare_store_dir(store: Path) -> None:
+    """Create the store directory with no-clobber checks. Raises on foreign trees."""
+    parent = store.parent
+    try:
+        parent.lstat()
+    except FileNotFoundError:
+        grand = parent.parent
+        try:
+            grand_info = grand.lstat()
+        except FileNotFoundError:
+            grand.mkdir(mode=0o700, parents=True)
+        else:
+            if stat.S_ISLNK(grand_info.st_mode):
+                raise FileExistsError(f"refusing symlink at {grand}")
+            if not stat.S_ISDIR(grand_info.st_mode):
+                raise NotADirectoryError(str(grand))
+        _ensure_real_dir(parent)
+    else:
+        _ensure_real_dir(parent)
+
+    try:
+        info = store.lstat()
+    except FileNotFoundError:
+        _ensure_real_dir(store)
+        atomic_write_bytes(store / _STORE_SENTINEL, b"mind-meld skill store\n", mode=0o644)
+        return
+
+    if stat.S_ISLNK(info.st_mode):
+        raise FileExistsError(f"refusing symlink at skill store path {store}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise NotADirectoryError(f"refusing non-directory at skill store path {store}")
+
+    names = {p.name for p in store.iterdir()}
+    owned = _STORE_SENTINEL in names or _STORE_META in names or _STORE_PAYLOAD in names
+    if names and not owned:
+        raise FileExistsError(f"foreign non-empty skill store: {store}")
+    if _STORE_SENTINEL not in names:
+        atomic_write_bytes(store / _STORE_SENTINEL, b"mind-meld skill store\n", mode=0o644)
+
+
+def _reject_payload_symlink(store: Path) -> None:
+    payload = store / _STORE_PAYLOAD
+    try:
+        info = payload.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
+        raise FileExistsError(f"refusing to replace symlink payload at {payload}")
+
+
+@contextmanager
+def _store_publish_lock(store: Path) -> Iterator[None]:
+    """Serialize publishers. ``init`` and ``install-skills`` do not hold the mm lock."""
+    lock_path = store.parent / _STORE_LOCK
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _should_publish(pkg_version: str, pkg_hash: str, store: Path) -> tuple[bool, str | None]:
+    """Return (publish?, equal-version-differing-hash notice)."""
+    payload = store / _STORE_PAYLOAD
+    meta = _read_store_meta(store)
+    store_hash = None
+    try:
+        store_hash = _sha256_bytes(payload.read_bytes())
+    except OSError:
+        pass
+    if meta is None or store_hash is None:
+        return True, None
+    try:
+        pkg_v = Version(pkg_version)
+        store_v = Version(str(meta.get("skill_version", "0")))
+    except InvalidVersion:
+        return True, None
+    if pkg_v < store_v:
+        return False, None
+    if pkg_v > store_v:
+        return True, None
+    if pkg_hash != store_hash:
+        return True, (
+            "mm: notice: skill store and package share version "
+            f"{pkg_version} but SKILL.md differs; republishing\n"
+        )
+    return False, None
+
+
+def _publish_skill_store(skill_src: Path) -> Path:
+    """Copy package SKILL.md into the store. Returns the store path.
+
+    Publish-before-link invariant: callers must not re-point any agent link
+    unless this returns and ``_store_is_healthy`` is True.
+    """
+    store = _skill_store_dir()
+    if _is_real_agent_dir_under_pytest(store):
+        _refuse_real_home_under_pytest(store)
+        raise PermissionError(f"refusing to write real skill store from a test: {store}")
+
+    payload = _pkg_skill_md(skill_src)
+    pkg_hash = _sha256_bytes(payload)
+    pkg_version = __version__
+
+    try:
+        _ensure_real_dir(store.parent)
+    except FileNotFoundError:
+        store.parent.mkdir(mode=0o700, parents=True)
+        _ensure_real_dir(store.parent)
+
+    with _store_publish_lock(store):
+        _prepare_store_dir(store)
+        _reject_payload_symlink(store)
+        publish, notice = _should_publish(pkg_version, pkg_hash, store)
+        if not publish:
+            if not _store_is_healthy(store):
+                raise FileNotFoundError(f"skill store payload missing at {store}")
+            return store
+        if notice:
+            sys.stderr.write(notice)
+        atomic_write_bytes(store / _STORE_PAYLOAD, payload, mode=0o644)
+        meta = {
+            "schema": 1,
+            "skill_version": pkg_version,
+            "published_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "published_by": str(skill_src),
+            "min_mm_version": pkg_version,
+        }
+        atomic_write_bytes(
+            store / _STORE_META,
+            json.dumps(meta, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+            mode=0o644,
+        )
+    if not _store_is_healthy(store):
+        raise FileNotFoundError(f"publish left empty skill store at {store}")
+    return store
+
+
+def _legacy_shape(resolved: Path) -> Literal["package", "checkout", "other"]:
+    parts = resolved.parts
+    if len(parts) < 4 or parts[-3:] != _LEGACY_TAIL:
+        return "other"
+    if "site-packages" in parts or "dist-packages" in parts:
+        return "package"
+    if parts[-4] == "src":
+        return "checkout"
+    return "other"
+
+
+def _points_at_store(target: Path, store: Path) -> bool:
+    try:
+        raw = os.readlink(target)
+    except OSError:
+        return False
+    linked = Path(raw)
+    return linked == store or linked == Path(str(store))
+
+
+def _symlink_lives(target: Path) -> bool:
+    try:
+        target.resolve(strict=True)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise
+
+
+def _replace_symlink(target: Path, store: Path) -> None:
+    """Point ``target`` at ``store`` via tmp symlink + os.replace. Never unlink."""
+    tmp = target.with_name(f".{target.name}.mm-new")
+    try:
+        if tmp.exists() or tmp.is_symlink():
+            os.unlink(tmp)
+        os.symlink(str(store), tmp)
+        current = os.readlink(target) if target.is_symlink() else None
+        if current is not None:
+            still = os.readlink(target)
+            if still != current:
+                os.unlink(tmp)
+                raise FileExistsError("skill link changed during replace")
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def render_skill_status(result: SkillInstallResult) -> str:
+    """Pure leaf: cause + readlink + copy-pasteable fix. Peer strings go through safe_str."""
+    target = safe_str(str(result.target))
+    readlink = ""
+    try:
+        if result.target.is_symlink():
+            readlink = safe_str(os.readlink(result.target))
+    except OSError:
+        readlink = ""
+    store = safe_str(str(result.link_target or _skill_store_dir()))
+    if result.status == "dangling-ours":
+        return (
+            f"{target} is mm's symlink to {readlink or store} but the store is missing; "
+            f"run: mm install-skills"
+        )
+    if result.status == "dangling-ours-legacy":
+        return (
+            f"{target} is a dangling mm symlink to {readlink or '(unreadable)'}; "
+            f"run: mm install-skills"
+        )
+    if result.status == "foreign":
+        dest = readlink or "a non-symlink"
+        return (
+            f"{target} exists and points at {dest}, which is not mm's skill store "
+            f"({store}); move it aside and run: mm install-skills"
+        )
+    if result.status == "failed":
+        return f"{target} installation failed: {safe_str(result.reason or 'unknown')}"
+    if result.status == "installed":
+        return f"{target} -> {store}"
+    if result.status == "unchanged":
+        return f"{target} -> {store}"
+    return f"{target}: {result.status}"
+
+
 def _ensure_retro_skill_link(*, dry_run: bool = False) -> SkillInstallResult | None:
     """Compatibility adapter for Claude Code's descriptor-driven installer."""
     return _ensure_skill_target(_skill_target_descriptors()[0], dry_run=dry_run)
@@ -206,19 +521,33 @@ def _ensure_opencode_retro_skill_link(*, dry_run: bool = False) -> SkillInstallR
     return _ensure_skill_target(_skill_target_descriptors()[2], dry_run=dry_run)
 
 
-def _ensure_retro_skill_links(*, dry_run: bool = False) -> tuple[SkillInstallResult, ...]:
+def _ensure_retro_skill_links(
+    *,
+    dry_run: bool = False,
+    allow_mutate: bool = True,
+    explicit: bool = False,
+) -> tuple[SkillInstallResult, ...]:
     """Best-effort install for all three supported agent roots.
 
     Results are complete and ordered Claude Code, Codex, OpenCode. Expected
     filesystem failures are values, never exceptions, so init and push keep
     their best-effort contract while ``mm install-skills`` can report truthfully.
-    """
-    if dry_run:
-        return ()
 
+    ``dry_run=True`` returns full classifications with zero writes.
+    ``allow_mutate=False`` (quiet/autopush) classifies and notices but never
+    rewrites agent config.
+    ``explicit=True`` (``mm install-skills`` / ``mm init``) will re-point a
+    *live* checkout-shaped dogfood link; push will not.
+    """
+    write = bool(allow_mutate and not dry_run)
     descriptors = _skill_target_descriptors()
     results: list[SkillInstallResult | None] = [None] * len(descriptors)
     available: list[tuple[int, SkillTarget]] = []
+    store = _skill_store_dir()
+
+    if write and _is_real_agent_dir_under_pytest(store):
+        _refuse_real_home_under_pytest(store)
+        write = False
 
     for index, descriptor in enumerate(descriptors):
         if _is_real_agent_dir_under_pytest(descriptor.target):
@@ -241,18 +570,97 @@ def _ensure_retro_skill_links(*, dry_run: bool = False) -> tuple[SkillInstallRes
         else:
             available.append((index, descriptor))
 
-    if available:
+    if not available:
+        return tuple(
+            result
+            if result is not None
+            else _failed_result(
+                descriptor,
+                "installation",
+                RuntimeError("installer produced no outcome"),
+            )
+            for descriptor, result in zip(descriptors, results)
+        )
+
+    skill_src: Path | None = None
+    if write:
         try:
             skill_src = _resolve_retro_skill_source_once()
         except Exception as error:
+            if _store_is_healthy(store):
+                skill_src = None
+            else:
+                for index, descriptor in available:
+                    results[index] = _failed_result(descriptor, "skill source resolution", error)
+                return tuple(
+                    result
+                    if result is not None
+                    else _failed_result(
+                        descriptor,
+                        "installation",
+                        RuntimeError("installer produced no outcome"),
+                    )
+                    for descriptor, result in zip(descriptors, results)
+                )
+
+    published = _store_is_healthy(store)
+    if write and skill_src is not None:
+        try:
+            store = _publish_skill_store(skill_src)
+            published = _store_is_healthy(store)
+        except (OSError, StorageError, PermissionError, FileNotFoundError) as error:
             for index, descriptor in available:
-                results[index] = _failed_result(descriptor, "skill source resolution", error)
-        else:
+                results[index] = _failed_result(descriptor, "skill store publish", error)
+            return tuple(
+                result
+                if result is not None
+                else _failed_result(
+                    descriptor,
+                    "installation",
+                    RuntimeError("installer produced no outcome"),
+                )
+                for descriptor, result in zip(descriptors, results)
+            )
+        except Exception as error:
             for index, descriptor in available:
-                try:
-                    results[index] = _install_available_skill_target(descriptor, skill_src)
-                except Exception as error:
-                    results[index] = _failed_result(descriptor, "installation", error)
+                results[index] = _failed_result(descriptor, "skill store publish", error)
+            return tuple(
+                result
+                if result is not None
+                else _failed_result(
+                    descriptor,
+                    "installation",
+                    RuntimeError("installer produced no outcome"),
+                )
+                for descriptor, result in zip(descriptors, results)
+            )
+
+    if write and not published:
+        err = FileNotFoundError(f"skill store is empty at {store}")
+        for index, descriptor in available:
+            results[index] = _failed_result(descriptor, "skill store publish", err)
+        return tuple(
+            result
+            if result is not None
+            else _failed_result(
+                descriptor,
+                "installation",
+                RuntimeError("installer produced no outcome"),
+            )
+            for descriptor, result in zip(descriptors, results)
+        )
+
+    for index, descriptor in available:
+        try:
+            results[index] = _install_available_skill_target(
+                descriptor,
+                skill_src,
+                store=store,
+                write=write,
+                explicit=explicit,
+            )
+        except Exception as error:
+            results[index] = _failed_result(descriptor, "installation", error)
 
     return tuple(
         result
@@ -267,13 +675,22 @@ def _ensure_retro_skill_links(*, dry_run: bool = False) -> tuple[SkillInstallRes
 
 
 def _ensure_skill_target(
-    descriptor: SkillTarget, *, dry_run: bool = False
+    descriptor: SkillTarget,
+    *,
+    dry_run: bool = False,
+    allow_mutate: bool = True,
+    explicit: bool = False,
 ) -> SkillInstallResult | None:
     """Run the legacy one-agent adapter without weakening its safety rules."""
-    if dry_run:
-        return None
+    write = bool(allow_mutate and not dry_run)
     if _is_real_agent_dir_under_pytest(descriptor.target):
         _refuse_real_home_under_pytest(descriptor.target)
+        if dry_run:
+            return SkillInstallResult(
+                descriptor,
+                "failed",
+                reason="refused to write a real agent directory from a test",
+            )
         return None
 
     try:
@@ -284,11 +701,39 @@ def _ensure_skill_target(
         return SkillInstallResult(descriptor, "unavailable")
     if availability == "failed":
         return _failed_result(descriptor, "availability check", failure)
+
+    store = _skill_store_dir()
+    if write and _is_real_agent_dir_under_pytest(store):
+        _refuse_real_home_under_pytest(store)
+        return None
+
+    skill_src: Path | None
     try:
         skill_src = _resolve_retro_skill_source_once()
     except Exception as error:
-        return _failed_result(descriptor, "skill source resolution", error)
-    return _install_available_skill_target(descriptor, skill_src)
+        if not _store_is_healthy(store):
+            return _failed_result(descriptor, "skill source resolution", error)
+        skill_src = None
+
+    if write and skill_src is not None:
+        try:
+            store = _publish_skill_store(skill_src)
+        except (OSError, StorageError, PermissionError, FileNotFoundError) as error:
+            return _failed_result(descriptor, "skill store publish", error)
+        if not _store_is_healthy(store):
+            return _failed_result(
+                descriptor,
+                "skill store publish",
+                FileNotFoundError(f"skill store is empty at {store}"),
+            )
+
+    return _install_available_skill_target(
+        descriptor,
+        skill_src,
+        store=store,
+        write=write,
+        explicit=explicit,
+    )
 
 
 def _ensure_retro_skill_link_at(
@@ -344,16 +789,29 @@ def _resolve_retro_skill_source_once() -> Path:
     return skill_src.resolve(strict=True)
 
 
-def _install_available_skill_target(descriptor: SkillTarget, skill_src: Path) -> SkillInstallResult:
-    """Install one link after its agent root and shared source are known good."""
+def _install_available_skill_target(
+    descriptor: SkillTarget,
+    skill_src: Path | None,
+    *,
+    store: Path,
+    write: bool,
+    explicit: bool,
+) -> SkillInstallResult:
+    """Install or classify one link after the agent root is known good.
+
+    Link step is gated on a healthy store when ``write`` is True. Never unlinks.
+    """
     target = descriptor.target
     try:
         skills_info = descriptor.skills_dir.stat()
     except FileNotFoundError:
-        try:
-            descriptor.skills_dir.mkdir(mode=0o700)
-        except OSError as error:
-            return _failed_result(descriptor, "skills directory setup", error)
+        if write:
+            try:
+                descriptor.skills_dir.mkdir(mode=0o700)
+            except OSError as error:
+                return _failed_result(descriptor, "skills directory setup", error)
+        else:
+            return SkillInstallResult(descriptor, "unavailable", skill_src=skill_src)
     except OSError as error:
         return _failed_result(descriptor, "skills directory inspection", error)
     else:
@@ -371,35 +829,112 @@ def _install_available_skill_target(descriptor: SkillTarget, skill_src: Path) ->
     except OSError as error:
         return _failed_result(descriptor, "target inspection", error)
 
-    if target_info is not None:
-        if stat.S_ISLNK(target_info.st_mode):
-            try:
-                resolved_target = target.resolve(strict=True)
-            except FileNotFoundError:
-                # Do not unlink a dangling path. Another process could replace
-                # it between resolution and cleanup, and unlinking would then
-                # clobber the user's file or foreign symlink. A manual remove
-                # is deliberate and preserves the installer no-clobber rule.
-                _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
-                return SkillInstallResult(descriptor, "conflict", skill_src=skill_src)
-            except Exception as error:
-                return _failed_result(descriptor, "target resolution", error)
-            else:
-                if resolved_target == skill_src:
-                    _touch_marker(descriptor.success_marker)
-                    return SkillInstallResult(descriptor, "unchanged", skill_src=skill_src)
-                _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
-                return SkillInstallResult(descriptor, "conflict", skill_src=skill_src)
-        else:
-            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
-            return SkillInstallResult(descriptor, "conflict", skill_src=skill_src)
+    if target_info is not None and not stat.S_ISLNK(target_info.st_mode):
+        _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
+        return SkillInstallResult(descriptor, "foreign", skill_src=skill_src, link_target=store)
 
+    if target_info is not None and stat.S_ISLNK(target_info.st_mode):
+        try:
+            lives = _symlink_lives(target)
+        except OSError as error:
+            return _failed_result(descriptor, "target resolution", error)
+        if _points_at_store(target, store):
+            if lives:
+                if write:
+                    _touch_marker(descriptor.success_marker)
+                return SkillInstallResult(
+                    descriptor, "unchanged", skill_src=skill_src, link_target=store
+                )
+            status: SkillInstallStatus = "dangling-ours"
+            if write:
+                try:
+                    _replace_symlink(target, store)
+                except OSError as error:
+                    return _failed_result(descriptor, "link repair", error)
+                _touch_marker(descriptor.success_marker)
+                return SkillInstallResult(
+                    descriptor,
+                    "installed",
+                    skill_src=skill_src,
+                    link_target=store,
+                    reason="repaired dangling store link",
+                )
+            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
+            return SkillInstallResult(descriptor, status, skill_src=skill_src, link_target=store)
+
+        resolved = target.resolve(strict=False)
+        shape = _legacy_shape(resolved)
+        if shape == "other":
+            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
+            return SkillInstallResult(descriptor, "foreign", skill_src=skill_src, link_target=store)
+        if lives and shape == "checkout" and not explicit:
+            sys.stderr.write(
+                f"mm: notice: {safe_str(str(target))} is a live checkout skill link "
+                f"({safe_str(os.readlink(target))}); leaving it alone. "
+                f"Run mm install-skills to point it at {safe_str(str(store))}.\n"
+            )
+            if write:
+                _touch_marker(descriptor.success_marker)
+            return SkillInstallResult(
+                descriptor,
+                "unchanged",
+                skill_src=skill_src,
+                link_target=store,
+                reason="live-checkout",
+            )
+        if not lives:
+            status = "dangling-ours-legacy"
+            if write:
+                try:
+                    _replace_symlink(target, store)
+                except OSError as error:
+                    return _failed_result(descriptor, "link repair", error)
+                _touch_marker(descriptor.success_marker)
+                return SkillInstallResult(
+                    descriptor,
+                    "installed",
+                    skill_src=skill_src,
+                    link_target=store,
+                    reason="repaired dangling-ours-legacy",
+                )
+            _emit_conflict_notice(target, conflict_marker=descriptor.conflict_marker)
+            return SkillInstallResult(descriptor, status, skill_src=skill_src, link_target=store)
+        # live package, or explicit live checkout: migrate
+        if write:
+            try:
+                _replace_symlink(target, store)
+            except OSError as error:
+                return _failed_result(descriptor, "link migrate", error)
+            _touch_marker(descriptor.success_marker)
+            return SkillInstallResult(
+                descriptor,
+                "installed",
+                skill_src=skill_src,
+                link_target=store,
+                reason="migrated",
+            )
+        return SkillInstallResult(
+            descriptor,
+            "unchanged",
+            skill_src=skill_src,
+            link_target=store,
+            reason="would-migrate",
+        )
+
+    if not write:
+        return SkillInstallResult(
+            descriptor,
+            "unavailable",
+            skill_src=skill_src,
+            link_target=store,
+            reason="would-install",
+        )
     try:
-        target.symlink_to(skill_src)
+        os.symlink(str(store), target)
     except OSError as error:
         return _failed_result(descriptor, "link install", error)
     _touch_marker(descriptor.success_marker)
-    return SkillInstallResult(descriptor, "installed", skill_src=skill_src)
+    return SkillInstallResult(descriptor, "installed", skill_src=skill_src, link_target=store)
 
 
 def _resolve_retro_skill_src() -> Path:
@@ -423,9 +958,16 @@ def _emit_conflict_notice(
     hostile; the gate suppresses repeats."""
     if _marker_is_fresh(conflict_marker):
         return
+    dest = ""
+    try:
+        if target.is_symlink():
+            dest = os.readlink(target)
+    except OSError:
+        dest = ""
+    where = f" -> {safe_str(dest)}" if dest else ""
     sys.stderr.write(
-        f"mm: notice: skill at {safe_str(str(target))} exists; not replacing "
-        f"(remove the file to take mm's retro-fleet skill)\n"
+        f"mm: notice: skill at {safe_str(str(target))}{where} is not mm's store link; "
+        f"not replacing (move it aside and run: mm install-skills)\n"
     )
     _touch_marker(conflict_marker)
 
@@ -533,6 +1075,29 @@ def _skill_link_check_due_for(descriptor: SkillTarget) -> bool:
     return _skill_link_check_due_at(descriptor.target, success_marker=descriptor.success_marker)
 
 
+def _store_needs_refresh() -> bool:
+    """True when the store is missing or its version/size disagrees with the package."""
+    store = _skill_store_dir()
+    payload = store / _STORE_PAYLOAD
+    try:
+        store_size = payload.stat().st_size
+        if store_size <= 0:
+            return True
+    except OSError:
+        return True
+    try:
+        skill_src = _resolve_retro_skill_src()
+        pkg = skill_src / _STORE_PAYLOAD
+        pkg_size = pkg.stat().st_size
+    except Exception:
+        return False
+    meta = _read_store_meta(store)
+    store_ver = str(meta.get("skill_version", "")) if meta else ""
+    if store_ver != __version__ or store_size != pkg_size:
+        return True
+    return False
+
+
 def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
     """Target-specific implementation of the 24-hour skill-link drift gate."""
     if not _marker_is_fresh(success_marker):
@@ -541,9 +1106,13 @@ def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
         target_info = target.lstat()
         if not stat.S_ISLNK(target_info.st_mode):
             return True
-        skill_src = _resolve_retro_skill_source_once()
-        if target.resolve(strict=True) != skill_src:
-            return True  # wrong target (e.g. stale workspace path)
+        store = _skill_store_dir()
+        if not _points_at_store(target, store):
+            return True
+        if not target.exists():
+            return True
+        if _store_needs_refresh():
+            return True
     except Exception:
         return True
     return False
@@ -564,12 +1133,79 @@ def skill_targets() -> tuple[Path, ...]:
     return tuple(descriptor.target for descriptor in _skill_target_descriptors())
 
 
+def diagnose_skill_links() -> list[dict[str, str]]:
+    """Passphrase-free snapshot of the three agent links plus the store. No writes."""
+    store = _skill_store_dir()
+    rows: list[dict[str, str]] = []
+    payload = store / _STORE_PAYLOAD
+    store_state = "missing"
+    try:
+        if payload.is_file() and payload.stat().st_size > 0:
+            store_state = "ok"
+        elif payload.is_symlink():
+            store_state = "symlink"
+        elif payload.exists():
+            store_state = "empty"
+    except OSError as error:
+        store_state = type(error).__name__
+    meta = _read_store_meta(store)
+    for descriptor in _skill_target_descriptors():
+        row = {
+            "agent": descriptor.display_name,
+            "target": str(descriptor.target),
+            "store": str(store),
+            "store_state": store_state,
+            "store_version": str(meta.get("skill_version", "")) if meta else "",
+        }
+        try:
+            info = descriptor.target.lstat()
+        except FileNotFoundError:
+            row["status"] = "absent"
+            rows.append(row)
+            continue
+        except OSError as error:
+            row["status"] = "error"
+            row["detail"] = _reason(error)
+            rows.append(row)
+            continue
+        if not stat.S_ISLNK(info.st_mode):
+            row["status"] = "foreign"
+            row["detail"] = "not a symlink"
+            rows.append(row)
+            continue
+        try:
+            row["readlink"] = os.readlink(descriptor.target)
+        except OSError as error:
+            row["status"] = "error"
+            row["detail"] = _reason(error)
+            rows.append(row)
+            continue
+        if _points_at_store(descriptor.target, store):
+            row["status"] = "ok" if descriptor.target.exists() else "dangling-ours"
+        else:
+            try:
+                lives = _symlink_lives(descriptor.target)
+            except OSError:
+                lives = False
+            shape = _legacy_shape(descriptor.target.resolve(strict=False))
+            if not lives and shape in ("package", "checkout"):
+                row["status"] = "dangling-ours-legacy"
+            elif lives and shape == "checkout":
+                row["status"] = "live-checkout"
+            else:
+                row["status"] = "foreign"
+        rows.append(row)
+    return rows
+
+
 __all__ = [
     "SKILL_LINK_TTL_SECONDS",
     "SKILL_ROOTS",
     "SkillInstallResult",
     "SkillTarget",
     "_refuse_real_home_under_pytest",
+    "diagnose_skill_links",
+    "render_skill_status",
     "skill_targets",
     "_codex_skill_link_check_due",
     "_ensure_codex_retro_skill_link",
@@ -583,4 +1219,5 @@ __all__ = [
     "_skill_link_check_due",
     "_skill_link_check_due_at",
     "_skill_links_check_due",
+    "_skill_store_dir",
 ]

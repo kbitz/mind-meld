@@ -171,6 +171,11 @@ def _isolate_skill_links(monkeypatch, tmp_path, request) -> None:
         roots.append(str(agent_dir / "skills"))
     monkeypatch.setattr(_skill_link, "SKILL_ROOTS", tuple(roots))
     monkeypatch.setattr(_skill_link, "_marker_dir", lambda: tmp_path / "skill-markers")
+    monkeypatch.setattr(
+        _skill_link,
+        "_skill_store_dir",
+        lambda: tmp_path / "agent-skills" / "retro-fleet",
+    )
 
 
 @pytest.fixture(autouse=True)

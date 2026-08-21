@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.38] - 2026-08-21
+
+**Agent skill links now point at an mm-owned store instead of whichever interpreter ran `mm`, so a destroyed Conductor workspace or a Homebrew Python bump can no longer take retro-fleet offline.**
+
+### Changed
+
+- **Durable skill store.** `mm` copies `SKILL.md` (only) into `~/.local/share/mind-meld/agent-skills/retro-fleet/` and points the Claude Code, Codex, and OpenCode `retro-fleet` links at that constant path. A live checkout-shaped dogfood link is left alone on push; a dangling one is repaired. `mm install-skills` always re-points. Autopush classifies and warns but does not rewrite agent config.
+- **`mm diag` reports skill links.** Passphrase-free, one block, with `readlink` output. `mm status` prints one line only when a link is broken.
+- **`mm install-skills --help` no longer claims the link auto-updates on `pipx upgrade`.** Refresh is a version-then-hash compare on the existing 24h gate.
+
+### Fixed
+
+- A wedged `retro-fleet` link into a deleted workspace is now a classified, repairable state (`dangling-ours` / `dangling-ours-legacy`) instead of a generic "not mm's symlink" refusal.
+
 ## [0.12.37] - 2026-08-18
 
 **Fleet retros now show which coding agents you actually used, as activity rhythm rather than token counts, because a token count from an agent log cannot be honestly compared to a Claude session total.**

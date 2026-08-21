@@ -2696,7 +2696,7 @@ def init() -> None:
     # if the user already has a correct symlink. Conflicts emit a one-line
     # notice; failures are forensic-only.
     try:
-        skill_link._ensure_retro_skill_links(dry_run=False)
+        skill_link._ensure_retro_skill_links(dry_run=False, explicit=True)
     except Exception as e:
         stderr_console.print(
             f"mm: notice: retro-fleet skill installation failed: {type(e).__name__}: {safe_str(e)}"
@@ -2936,7 +2936,7 @@ def _push_core(
     if not dry_run:
         try:
             if skill_link._skill_links_check_due():
-                skill_link._ensure_retro_skill_links(dry_run=False)
+                skill_link._ensure_retro_skill_links(dry_run=False, allow_mutate=not quiet)
         except Exception as e:
             stderr_console.print(
                 f"mm: notice: retro-fleet skill installation failed: "
@@ -4392,6 +4392,18 @@ def status(
             "run [bold]mm migrate-config[/bold] to add."
         )
 
+    broken_skills = [
+        row
+        for row in skill_link.diagnose_skill_links()
+        if row.get("status") not in ("ok", "absent")
+    ]
+    if broken_skills:
+        agents = ", ".join(safe_str(str(row.get("agent", ""))) for row in broken_skills)
+        console.print(
+            f"  [yellow]Skill links broken:[/yellow] {agents} — "
+            "run [bold]mm diag[/bold] then [bold]mm install-skills[/bold]."
+        )
+
     # Seam 3 — auto-upgrade nudge surfacing in status. Reads cache only,
     # no network call. Distinct from autopull/autopush emission (which gates
     # on last_nudged_at) — `mm status` is an explicit user check and shows
@@ -4649,6 +4661,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         "sidecar": sidecar_info,
         "storage_inventory": storage_inv,
         "last_autorun": breadcrumb,
+        "skill_links": skill_link.diagnose_skill_links(),
     }
 
 
@@ -4740,6 +4753,17 @@ def diag(
             # interprets markup in an f-string. The v0.12.16 degradation
             # strings are all literals, but the field is shared.
             console.print(f"  detail:     {safe_str(str(br.get('detail')))}")
+
+    console.print("\n[bold]Skill links[/bold]")
+    for row in state.get("skill_links") or []:
+        agent = safe_str(str(row.get("agent", "")))
+        status = safe_str(str(row.get("status", "")))
+        target = safe_str(str(row.get("target", "")))
+        detail = row.get("readlink") or row.get("detail") or row.get("store_state")
+        extra = f" ({safe_str(str(detail))})" if detail else ""
+        console.print(f"  {agent}: {status}{extra}")
+        if status not in ("ok", "absent") and target:
+            console.print(f"    {target}")
 
 
 # ── devices ───────────────────────────────────────────────────────────
@@ -5619,11 +5643,13 @@ def install_skills_cmd() -> None:
     * manual install on a machine where ``mm push`` hasn't run yet
     * verifying the link state on a fresh ``pipx install`` of mm
 
-    The symlink target follows the wheel: pipx upgrades replace the
-    contents of ``~/.local/pipx/venvs/mind-meld/`` in place, so the link
-    auto-updates on every ``pipx upgrade mind-meld``.
+    Each agent link points at the mm-owned store
+    ``~/.local/share/mind-meld/agent-skills/retro-fleet/``. ``mm`` copies
+    ``SKILL.md`` there from the running package and refreshes it on a
+    version-then-hash compare. ``pipx upgrade`` no longer updates the
+    agent-visible file in place.
     """
-    results = skill_link._ensure_retro_skill_links(dry_run=False)
+    results = skill_link._ensure_retro_skill_links(dry_run=False, explicit=True)
     available = False
     failed = False
 
@@ -5631,23 +5657,26 @@ def install_skills_cmd() -> None:
         descriptor = result.descriptor
         target = safe_str(str(result.target))
         agent_root = safe_str(str(descriptor.agent_root))
-        skill_src = safe_str(str(result.skill_src)) if result.skill_src is not None else "unknown"
+        dest = (
+            safe_str(str(result.link_target))
+            if result.link_target is not None
+            else (safe_str(str(result.skill_src)) if result.skill_src is not None else "unknown")
+        )
         if result.status == "installed":
             available = True
-            typer.echo(f"Installed: {descriptor.display_name}: {target} -> {skill_src}")
+            typer.echo(f"Installed: {descriptor.display_name}: {target} -> {dest}")
         elif result.status == "unchanged":
             available = True
             typer.echo(
-                f"Installed (already correct): {descriptor.display_name}: {target} -> {skill_src}"
+                f"Installed (already correct): {descriptor.display_name}: {target} -> {dest}"
             )
         elif result.status == "unavailable":
             typer.echo(f"Unavailable: {descriptor.display_name} ({agent_root} is absent)")
-        elif result.status == "conflict":
+        elif result.status in ("dangling-ours", "dangling-ours-legacy", "foreign"):
             available = True
             failed = True
             typer.echo(
-                f"mm: error: {descriptor.display_name}: {target} exists and is not mm's symlink; "
-                f"remove it and re-run (mm's source is {skill_src})",
+                f"mm: error: {descriptor.display_name}: {skill_link.render_skill_status(result)}",
                 err=True,
             )
         else:

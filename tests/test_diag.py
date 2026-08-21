@@ -90,6 +90,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "sidecar",
         "storage_inventory",
         "last_autorun",
+        "skill_links",
     ):
         assert section in payload, f"missing {section}"
 
@@ -106,6 +107,7 @@ def test_diag_plain_text_is_human_readable(tmp_path, monkeypatch):
     assert "mm-crypto-init" in result.stdout
     assert "Sidecar" in result.stdout
     assert "Storage inventory" in result.stdout
+    assert "Skill links" in result.stdout
 
 
 # ── Secrets boundary ─────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
-- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_marker_dir` / `SKILL_ROOTS`
+- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_marker_dir` / `SKILL_ROOTS`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
@@ -386,11 +386,10 @@ does not).
   with `_aggregate_model_families`: the two callers sit on opposite sides of a
   trust boundary, and a later hardening for the tolerant caller would otherwise
   silently cap accepted host totals.
-- **No card-level change gate is possible.** `main` renders the card iff
-  `has_card_input` and saves a snapshot iff **not** `has_card_input`, so the
-  card's only available baseline is a snapshot written seconds earlier from the
-  identical corpus. Any "changed since last retro" gating on the card is dead
-  code by construction; deltas belong to the save-enabled first pass.
+- **A card-level change gate is possible (Track 24B).** The v0.12.0 circularity
+  (`main` rendered the card iff `has_card_input` and saved iff **not**
+  `has_card_input`) is the bug 24B exists to break. Do not re-assert that
+  deltas can only live on the save-enabled first pass.
 
 Forbidden: summing `lifetime_by_family[family][day]` buckets as "tokens this
 window", summing across machines at all, and rendering any ratio against the
@@ -606,21 +605,80 @@ v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is cou
 
 `_emit_custom_path_notice_if_due(events_dir)` runs from `aggregator.main()` right after `events_dir = _resolve_events_dir()`. Library callers of `aggregate()` never see the notice — the gating is in `main()` only. Three-stage gate: (1) `MM_EVENTS_DIR` set → silent (user is overriding correctly); (2) resolved `events_dir != DEFAULT_EVENTS_DIR` → silent (already non-default via param/env); (3) `_read_mm_events_config_path()` returns the configured `mm-events` path; if it equals `DEFAULT_EVENTS_DIR.parent` → silent (config matches default), else emit one `mm: notice:` to stderr pointing at the env override. `_read_mm_events_config_path` mirrors `_read_config_author_emails` — wraps `from mind_meld.config import CONFIG_PATH, load_config` in `try/except Exception`, returns None on any failure, never raises. Pinned by `tests/test_retro_fleet_aggregator.py::TestCustomPathNotice` (5 tests).
 
-## Group 8 retro-fleet skill — symlink installer (load-bearing, v0.11.0)
+## Group 8 retro-fleet skill — symlink installer (load-bearing, v0.11.0; store, v0.12.38)
 
-`_ensure_retro_skill_link()` symlinks `~/.claude/skills/retro-fleet` → `<wheel>/mind_meld/skills/retro_fleet/`. Source dir is `retro_fleet/` (underscore — Python identifier so `mind_meld.skills.retro_fleet.aggregator` is importable from the typer wrapper at `cli.py:retro_fleet_cmd`); link name is `retro-fleet` (hyphen — Claude Code skill convention). The conventions and importability both resolve cleanly via the rename.
+Agent links point at an mm-owned **constant** store, not at the running
+package. `_skill_store_dir()` is `~/.local/share/mind-meld/agent-skills/retro-fleet/`
+(override `MM_SKILLS_DIR` for tests). `mm` copies **only** `SKILL.md` there via
+`fsutil.atomic_write_bytes`. `aggregator.py` stays in the wheel and is imported
+by `cli.py:retro_fleet_cmd`. Never symlink the store at the package — that
+moves the dangle one hop.
 
-**Three targets since v0.12.18.** Claude Code, Codex, and OpenCode all discover the same Agent Skills format from different global directories, enumerated in `SKILL_ROOTS` and resolved per call by `skill_targets()` (`expanduser` reads `$HOME` at call time, so a test that moves HOME moves the targets with it). A call-time `SkillTarget` descriptor owns each agent root, skills directory, display name, and legacy success + conflict markers; `SkillInstallResult` reports `installed`, `unchanged`, `unavailable`, `conflict`, or `failed`. `_ensure_retro_skill_link` / `_ensure_codex_retro_skill_link` / `_ensure_opencode_retro_skill_link` remain thin compatibility adapters; **`_ensure_retro_skill_links` (plural) is the one every caller uses.** Each target carries its own markers, so a deliberate skip on one agent never suppresses repair of another. Do NOT collapse the markers to a single pair.
+Source dir on disk is `retro_fleet/` (underscore — Python identifier so
+`mind_meld.skills.retro_fleet.aggregator` is importable); link name is
+`retro-fleet` (hyphen — Claude Code skill convention).
 
-**State machine.** The root is probed with `stat`: an absent root is `unavailable`, while a non-directory or I/O failure is `failed`; a *missing skills dir under an available root* is created with `mkdir(mode=0o700)`. Target entries are then checked in this order: (1) dangling symlink → `conflict` with a throttled notice, never unlink it automatically because it could be concurrently replaced by a user file; (2) intact symlink resolving to the bundled source → `unchanged`; (3) foreign symlink, file, or directory → `conflict`; (4) absent target → `symlink_to` and `installed`. Directory setup, resolution, and link-creation errors return `failed` with a stderr breadcrumb and leave markers untouched, so push never crashes and later attempts remain eligible.
+**Three targets since v0.12.18.** Claude Code, Codex, and OpenCode, enumerated
+in `SKILL_ROOTS` and resolved per call by `skill_targets()`. A call-time
+`SkillTarget` descriptor owns each agent root. `SkillInstallResult` reports
+`installed`, `unchanged`, `unavailable`, `dangling-ours`,
+`dangling-ours-legacy`, `foreign`, or `failed`. `skill_src` is provenance
+(the package dir); `link_target` is the store path. `_ensure_retro_skill_links`
+(plural) is the one every caller uses.
 
-**Two-marker 24h-TTL gate (cross-model #3).** A single TTL marker can't distinguish "skip until tomorrow because it just succeeded" from "skip until tomorrow because the user has their own file there" — touching the marker on conflict skips silently for 24h, leaving it untouched re-emits the notice every push (hostile noise). Two markers under `~/.config/mind-meld/`: `.skill-link-checked` (success) and `.skill-link-conflict` (deliberate-skip). Transient failures (OSError) touch neither, so next push retries. `_marker_is_fresh()` wraps `os.stat` in try/except and **fail-opens** on EACCES / EIO so a chmod-restricted config dir doesn't crash push (TODO#3 critical-gap fix).
+**Publish-before-link.** The link step is gated on a publish that verifies
+`store/SKILL.md` exists and is non-empty **in this run**. Publish failure ⇒
+every link untouched ⇒ `failed`. Catch `(OSError, StorageError)` at the publish
+site (`StorageError` is not an `OSError`). Payload then metadata; hash is
+recomputed from the store file on read. Freshness is monotonic
+`packaging.version` then hash: never silent-downgrade; equal-version-differing-hash
+republishes with a notice. `lstat`-refuse a symlink or regular file at the
+store dir and payload. A dedicated flock serializes publishers (`init` and
+`install-skills` do not hold the mm lock).
 
-**Drift-aware gate (post-v0.11.5 hotfix).** `_skill_link_check_due()` is no longer marker-only. After `_marker_is_fresh()` returns True, the gate also verifies that `~/.claude/skills/retro-fleet` is a symlink, exists (not dangling), and resolves to `_resolve_retro_skill_src()`. Returns True (run installer) when any of those fail; any I/O or resolver error in the drift check fails open. Since v0.12.18 the per-target body lives in `_skill_link_check_due_at(target, success_marker=...)`; the three per-agent gates are wrappers over it and `_skill_links_check_due()` ORs them. Pre-fix bug in the wild: pipx-installed mm 0.11.0 created the link successfully and touched the marker; user later removed the link by hand (cleaning up an old conductor workspace path the link used to point at on a previous editable install); next 24h of pushes silently skipped the installer. Cost on the steady-state path: one `lstat` + one `readlink` + `importlib.resources` resolution — negligible vs the rest of push.
+**Migration (liveness, not shape alone).**
 
-**Hook positions.** `mm init` calls `skill_link._ensure_retro_skill_links(dry_run=False)` unconditionally at the end. `_push_core` HEAD calls the same plural installer AFTER `_ensure_device_registered` but BEFORE `_run_events_tail` (Architecture #5 lock-in: stacked self-heals before the events tail's load-bearing capture block). Gated by `_skill_links_check_due()`, which ORs the three descriptor gates — one marker freshness check plus target drift verification per available agent. The root directory is the availability predicate: an absent root is skipped, while a present root without its `skills/` directory is due immediately even with a fresh legacy marker. `dry_run` returns no installer results and performs no source resolution or filesystem mutation. Init and push retain a final forensic notice boundary so an unexpected installer exception never aborts either load-bearing flow.
+| resolved | shape | on push | on `mm install-skills` |
+|---|---|---|---|
+| resolves | checkout | leave alone, notice | migrate |
+| resolves | package | migrate | migrate |
+| dangling | package | repair | repair |
+| dangling | checkout | repair | repair |
 
-**`mm install-skills` user-facing CLI (post-v0.11.5, three-agent since v0.12.18).** Force-runs `_ensure_retro_skill_links(dry_run=False)` ignoring the TTL gate. Use cases: post-cleanup recovery (link manually removed), fresh-machine install before first push, verifying the link state after `pipx upgrade mind-meld`. The descriptor-driven installer returns exactly one result for Claude Code, Codex, and OpenCode: `installed`, `unchanged`, `unavailable`, `conflict`, or `failed`. The CLI renders each result, exits 1 for any available conflict or failure, and leaves user files or foreign symlinks untouched. An absent agent root is informational; if all three are absent it exits 1 with `no Claude Code, Codex, or OpenCode skills directory exists`. The CLI surface is intentionally kebab-case-plural to match `migrate-config` / `enable-source` / `reconfigure-sources` and to leave room for future skills mm might ship.
+`dangling-ours` is claimed only for `os.readlink(target)` byte-equals the store
+constant. Package/checkout dangling uses `dangling-ours-legacy`. Live checkout
+links are never touched on push. Re-point via `os.symlink(store, tmp)` then
+`os.replace`; never `unlink` the skill link first.
+
+**Quiet-gate.** Autopush (`quiet=True`) classifies and notices but does not
+rewrite agent config. Interactive `mm push`, `init`, and `install-skills` write.
+
+**State machine.** Absent root → `unavailable`; non-directory/I/O → `failed`;
+missing skills dir under an available root → `mkdir(mode=0o700)`. Then: store
+link that resolves → `unchanged`; store link that dangles → repair if writing
+else `dangling-ours`; foreign file/dir/symlink → `foreign`, never unlink;
+absent target → symlink to the store → `installed`. `dry_run=True` returns full
+classifications with zero writes.
+
+**Two-marker 24h-TTL gate (cross-model #3).** Success vs conflict-skip markers
+under `~/.config/mind-meld/`. Transient failures touch neither. `_marker_is_fresh()`
+fail-opens on EACCES / EIO.
+
+**Drift-aware gate.** After a fresh success marker, the gate verifies the link
+is a symlink to the store constant, is not dangling, and that the store is
+not stale vs the running package (size or version). Resolver failure with a
+healthy store does not fail the gate open.
+
+**Hook positions.** `mm init` calls `_ensure_retro_skill_links(explicit=True)`.
+`_push_core` calls it AFTER `_ensure_device_registered` and BEFORE
+`_run_events_tail`, with `allow_mutate=not quiet`. `mm diag` is passphrase-free
+and prints the skill-links block. `mm status` prints one line only when a link
+is broken.
+
+**`mm install-skills`.** Force-runs the installer with `explicit=True`, ignoring
+the TTL gate. Renders `render_skill_status` for foreign/dangling outcomes. Exits
+1 for any available foreign/failed result. Leaves user files and foreign
+symlinks untouched.
 
 **`mm retro-fleet [window]` typer wrapper (load-bearing, v0.11.22).** SKILL.md's documented invocation is `mm retro-fleet <window>`, NOT `python -m mind_meld.skills.retro_fleet.aggregator`. Reason: the prior `python -m` form failed in real fleet use (user feedback on v0.11.21) on macOS systems where only `python3` is on PATH, and is structurally impossible to fix for the dominant install path — pipx puts mm in `~/.local/pipx/venvs/mind-meld/` and nothing outside that venv can `import mind_meld`. Routing through the `mm` console-script (always on PATH wherever mm is installed) sidesteps both. The typer command is a thin shim: forward-imports `aggregator.main` lazily to keep cli.py module-load fast, builds `argv` from the typer args (positional `window` defaults to `7d`; `--no-author-filter`, `--theme`, `--noteworthy`, `--name`, `--no-save` flags forward verbatim), and `raise typer.Exit(code=...)` so non-zero aggregator exits become the CLI exit code. The aggregator's existing `argparse`-based `main()` is unchanged — direct `python -m` invocation still works from a development checkout, it's just no longer the public surface. Pinned by `tests/test_retro_fleet_cli.py` (TestRetroFleetCommand: positional window, default `7d`, `--no-author-filter` forwarded, theme/noteworthy/name/no-save forwarded, non-zero aggregator exit propagates).
 
