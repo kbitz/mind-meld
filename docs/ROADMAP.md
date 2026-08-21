@@ -38,8 +38,8 @@ _produces: `## Trends vs last retro` renders on repeat runs, in the output the u
 _Depends on: Group 24_
 
 ##### Track 25A: Make a wedged link legible
-_3 tasks . ~150 LOC . low risk . 4 files_
-_touches: src/mind_meld/cli.py, README.md, docs/invariants/events-retro.md, tests/test_skill_link.py_
+_3 tasks . ~150 LOC . low risk . 6 files_
+_touches: src/mind_meld/cli.py, README.md, docs/invariants/events-retro.md, tests/test_diag.py, tests/test_silent_failure_contract.py, tests/test_skill_link.py_
 _blocked-by: Track 24A_
 _out: 26A_
 _read-first: 24A_
@@ -98,7 +98,7 @@ _touches: src/mind_meld/skill_link.py, src/mind_meld/config.py, tests/test_skill
 _blocked-by: Track 28A_
 _read-first: 26A, 27A, docs/designs/host-parity.md_
 _produces: Grok gets the skill link without mm ever manufacturing Grok consent_
-- **Install only where consent already exists** -- the installer's mkdir of `~/.grok/skills` flips `grok_customization_dirs_exist`, which auto-enables the grok sync source, which authorizes `read_grok_usage`. Never create the directory. Assert the consequence, not the mechanism: after a full install, `grok_customization_dirs_exist()` is False AND `grok` is absent from `get_sources`. Requires 26A first — otherwise running `pytest` writes the developer's real `~/.grok/skills` and manufactures the very consent this track exists to prevent. _skill_link.py + tests, ~70 lines._ (M)
+- **Install only where consent already exists** -- the installer's mkdir of `~/.grok/skills` flips `grok_customization_dirs_exist`, and that has two consequences with different preconditions. On a legacy or default config it auto-enables the grok sync source, which authorizes `read_grok_usage` — but only there: `get_sources` applies that filter solely while building `DEFAULT_SOURCES`, so an explicit `[[sync.sources]]` list is never appended to. On **any** config it also makes `_source_path_is_detected` label grok "detected" and default the `mm init` / `reconfigure-sources` prompt to Y. Test both shapes separately; do not assume the unconditional chain. Never create the directory. Assert the consequence, not the mechanism: after a full install, `grok_customization_dirs_exist()` is False AND `grok` is absent from `get_sources`. Requires 26A first — otherwise running `pytest` writes the developer's real `~/.grok/skills` and manufactures the very consent this track exists to prevent. _skill_link.py + tests, ~70 lines._ (M)
 - **One Grok home resolver, no env var** -- `GROK_HOME` stays a `host_usage` sessions-only override. A shared resolver honoring it would put an environment variable in charge of which directory `walk_grok_source` encrypts and publishes, and `conftest` deletes the variable, making that branch untestable by fixture. _config.py + tests, ~40 lines._ (S)
 - **Per-row reasons and doc reconciliation** -- the "root is absent" reason is factually wrong under this gate, so reasons become per-row. Pin that the installed link yields zero manifest entries from `walk_grok_source`. Update host-parity.md's capability matrix and the invariant doc's three-targets line. Record the manual host-load check: a green unit test proves the symlink, not that Grok loads the skill. _docs + tests, ~30 lines._ (S)
 
@@ -143,7 +143,7 @@ Group 29: Grok row
 
 Six waves is the honest shape: every skill-link track collides in
 `src/mind_meld/skill_link.py`, so they serialize. Track 24B is the only
-genuine parallelism — it touches the retro aggregator and nothing else.
+genuine parallelism — it is the only track that does not touch `skill_link.py`.
 ---
 
 ## Future
@@ -184,7 +184,6 @@ genuine parallelism — it touches the retro aggregator and nothing else.
 - **Per-verb or sticky autorun breadcrumbs** — the v0.12.16 signal is an improvement but still overwritable.
 - **CT-4 enforcement and short-write handling** — storage-boundary hardening outside this batch.
 - **Residual Track 16A coverage gaps** — three defensive or theoretical cases from the ship audit. _Source: [ship] coverage audit 2026-08-15._
-- **Pre-0.11 PROGRESS backfill** — ten historical release rows (0.1.0, 0.8.6-0.8.8, 0.8.15.1, 0.9.5, 0.9.6, 0.10.0, 0.10.2, 0.10.3); re-counted 2026-08-20, the earlier note said nine. The CI parity gate enforces from 0.11.0 forward, so it already prevents recurrence without closing the historical gap. _Source: [ship] 2026-08-15._
 - **Host-usage cache GC reaper** — extend `mm gc` and its dry-run path to remove stale Codex, Grok, and OpenCode cache entries without weakening complete-pass pruning. _Source: unprocessed host-cache follow-up 2026-08-17._
 - **Active host-session degradation policy** — consider skipping a stale or partial final rollout when its next completed record restates usage; preserve all-or-nothing publication until that proof exists. _Source: unprocessed host-usage follow-up 2026-08-17._
 - **Warm host-scan scaling** — revisit fingerprint-every-file cost with a measured corpus before the 250 ms autopush budget becomes user-visible. _Source: unprocessed host-cache follow-up 2026-08-17._
