@@ -2,9 +2,9 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
+- `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
-- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_marker_dir` / `SKILL_ROOTS`
+- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `SKILL_ROOTS`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
@@ -608,8 +608,14 @@ v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is cou
 ## Group 8 retro-fleet skill — symlink installer (load-bearing, v0.11.0; store, v0.12.38)
 
 Agent links point at an mm-owned **constant** store, not at the running
-package. `_skill_store_dir()` is `~/.local/share/mind-meld/agent-skills/retro-fleet/`
-(override `MM_SKILLS_DIR` for tests). `mm` copies **only** `SKILL.md` there via
+package. `_skill_store_dir()` is `~/.local/share/mind-meld/agent-skills/retro-fleet/`.
+`MM_SKILLS_DIR` overrides it and is read on EVERY call, NOT gated on pytest —
+set it in a real shell and it relocates the real store and every agent link.
+The docstring calls it a test override, but the suite does not use it:
+`conftest.py:_isolate_skill_links` monkeypatches `_skill_store_dir` itself.
+So it is an undocumented production knob, and the user-facing `--store PATH`
+form is deliberately unshipped. Either gate it or document it — do not leave
+the docstring claiming a scope the code does not enforce. `mm` copies **only** `SKILL.md` there via
 `fsutil.atomic_write_bytes`. `aggregator.py` stays in the wheel and is imported
 by `cli.py:retro_fleet_cmd`. Never symlink the store at the package — that
 moves the dangle one hop.
@@ -626,15 +632,30 @@ in `SKILL_ROOTS` and resolved per call by `skill_targets()`. A call-time
 (the package dir); `link_target` is the store path. `_ensure_retro_skill_links`
 (plural) is the one every caller uses.
 
-**Publish-before-link.** The link step is gated on a publish that verifies
-`store/SKILL.md` exists and is non-empty **in this run**. Publish failure ⇒
-every link untouched ⇒ `failed`. Catch `(OSError, StorageError)` at the publish
+**Publish-before-link.** The link step is gated on `store/SKILL.md` being
+verified present and non-empty **in this run** — normally by the publish
+itself. One documented exception: when `_resolve_retro_skill_source_once()`
+raises against an ALREADY-healthy store, `skill_src` goes `None`, publish is
+skipped, and `_store_is_healthy` alone carries the gate (a broken package
+source must not take a working store offline). Publish *failure*, and an
+unhealthy store with nothing published, both ⇒ every link untouched ⇒
+`failed`. Catch `(OSError, StorageError)` at the publish
 site (`StorageError` is not an `OSError`). Payload then metadata; hash is
 recomputed from the store file on read. Freshness is monotonic
 `packaging.version` then hash: never silent-downgrade; equal-version-differing-hash
 republishes with a notice. `lstat`-refuse a symlink or regular file at the
 store dir and payload. A dedicated flock serializes publishers (`init` and
 `install-skills` do not hold the mm lock).
+
+**Store ownership is the `.mm-owned` sentinel or mm's namespaced
+`.mm-skill.json` — NEVER the payload.** `SKILL.md` is the canonical Agent
+Skills filename, so it is exactly what a user hand-authoring their own
+`retro-fleet` skill at that path would name. Counting the payload as proof of
+ownership made a payload-only directory read as owned, planted the sentinel,
+gave `_should_publish` a `meta is None`, and published over the user's file
+with no backup and no notice. A non-empty store directory with neither marker
+is `FileExistsError("foreign non-empty skill store")`, which surfaces as
+`failed` and leaves every link alone.
 
 **Migration (liveness, not shape alone).**
 
@@ -659,6 +680,41 @@ link that resolves → `unchanged`; store link that dangles → repair if writin
 else `dangling-ours`; foreign file/dir/symlink → `foreign`, never unlink;
 absent target → symlink to the store → `installed`. `dry_run=True` returns full
 classifications with zero writes.
+
+**`BROKEN_SKILL_STATUSES` is an allowlist of broken states, never a denylist of
+healthy ones.** `mm status` reads it. `ok` / `live-checkout` (the deliberate
+dogfood link the installer preserves) / `foreign` (the user's own file) /
+`absent` (agent not installed) are all working-as-intended and permanent, so a
+denylist (`status not in ("ok", "absent")`) reported two of them as broken on
+every run, forever, and pointed the user at `mm install-skills`, which would
+have migrated the checkout link away. An allowlist also defaults any status a
+later Track adds to not-broken rather than broken. `foreign-dangling` is split
+out of `foreign` and IS in the set: a dangling link to an unrecognized path is
+broken from the agent's view even though mm must not touch it.
+
+**`diagnose_skill_links()` must never raise.** `mm status` and `mm diag` both
+call it with no enclosing handler — the two commands you run to diagnose a
+broken link crashed on the broken link. The per-descriptor body (`_diagnose_one`)
+raises freely and the caller degrades that descriptor to an `error` row.
+Escapes that got through the first version: `UnicodeDecodeError` (a
+`ValueError`, not an `OSError`) from a bad byte in `.mm-skill.json`,
+`RuntimeError` from a symlink loop, and `PermissionError` from `Path.exists()`
+on an unreadable agent dir.
+
+**Symlink-loop classification is normalized on errno, not exception type.**
+`_symlink_lives` treats py3.11/3.12's `RuntimeError("Symlink loop from ...")`
+and py3.13+'s `OSError(ELOOP)` identically as "not live". Otherwise the same
+filesystem state is a repairable classification on one Python and a hard
+`failed` on another — and CI runs 3.13 only, so the worse branch was invisible.
+
+**The push notice renders through `render_skill_status`,** so the push path and
+`mm install-skills` state the SAME cause. One hardcoded string said "is not
+mm's store link" for every branch, including `dangling-ours` — a link whose
+`readlink` byte-equals the store constant, which is the very thing that proves
+it IS mm's — and told the user to move it aside, the one action that stops mm
+repairing it. `_emit_status_notice(write=False)` must NOT touch the 24h conflict
+marker: a classify-only autopush would otherwise spend the notice budget that
+the interactive push which could actually repair the link then goes without.
 
 **Two-marker 24h-TTL gate (cross-model #3).** Success vs conflict-skip markers
 under `~/.config/mind-meld/`. Transient failures touch neither. `_marker_is_fresh()`
