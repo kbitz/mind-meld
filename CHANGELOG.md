@@ -8,18 +8,15 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Changed
 
-- **Durable skill store.** `mm` copies `SKILL.md` (only) into `~/.local/share/mind-meld/agent-skills/retro-fleet/` and points the Claude Code, Codex, and OpenCode `retro-fleet` links at that constant path. A live checkout-shaped dogfood link is left alone on push; a dangling one is repaired. `mm install-skills` always re-points. Autopush classifies and warns but does not rewrite agent config.
-- **`mm diag` reports skill links.** Passphrase-free, one block, with `readlink` output. `mm status` prints one line only when a link is broken.
-- **`mm install-skills --help` no longer claims the link auto-updates on `pipx upgrade`.** Refresh is a version-then-hash compare on the existing 24h gate.
+- **Durable skill store.** `mm` copies `SKILL.md` (only) into `~/.local/share/mind-meld/agent-skills/retro-fleet/` and points the Claude Code, Codex, and OpenCode `retro-fleet` links at that constant path. The path does not move when you upgrade mm, switch between a pipx install and a development checkout, or delete a virtualenv.
+- **Links mm previously wrote are repaired by liveness.** A dangling link into a deleted install or workspace is re-pointed at the store. A *live* development-checkout link is left alone on `mm push` with a notice naming the remedy; `mm init` and `mm install-skills` re-point it. Anything mm did not write -- your own file, directory, or a symlink it does not recognize -- is never replaced.
+- **`mm autopush` classifies but does not rewrite agent config.** A first-of-its-kind mutation to three third-party config directories does not debut on an unattended hook. Run `mm push` or `mm install-skills` to repair.
+- **`mm diag` reports skill links.** Passphrase-free, one block, with raw `readlink` output and the store's published version. `mm status` prints one line only when a link is in a state mm can act on.
+- **`mm install-skills --help` no longer claims the link auto-updates on `pipx upgrade`.** Because the store is a copy rather than a link into the package, an upgrade no longer refreshes it instantly: the next `mm push` republishes on a version-then-hash compare, or run `mm install-skills` to do it now.
 
 ### Fixed
 
-- A wedged `retro-fleet` link into a deleted workspace is now a classified, repairable state (`dangling-ours` / `dangling-ours-legacy`) instead of a generic "not mm's symlink" refusal.
-- **A hand-authored `SKILL.md` in the store path is never overwritten.** `SKILL.md` is the canonical Agent Skills filename, so treating it as proof mm owned the directory silently replaced a user's own skill with no backup and no notice. Ownership is now the `.mm-owned` sentinel (or mm's namespaced `.mm-skill.json`), never the payload.
-- **`mm status` no longer calls working states broken.** A deliberate development-checkout link and a user's own file at the target were both reported broken on every run, forever, with a remedy that would have migrated the checkout link away. The check is now an allowlist of states mm can actually act on, so a status added by a later track defaults to not-broken.
-- **The push-time notice states the real cause.** Every branch previously printed "is not mm's store link" -- including `dangling-ours`, a link that byte-matches the store and is therefore provably mm's own -- and told the user to move it aside, the one action that stops mm repairing it. The notice now renders per status, and a classify-only run (autopush) no longer spends the 24h notice budget it cannot act on.
-- **`mm status` and `mm diag` survive a broken environment.** Both call the skill-link snapshot with no enclosing handler; a single bad byte in `.mm-skill.json`, a symlink loop, or an unreadable agent directory crashed the two commands you run to diagnose exactly those problems.
-- A dangling link pointing somewhere mm does not recognize is now reported as broken rather than collapsed into the deliberate-user-file case.
+- **A wedged `retro-fleet` link is now a classified, repairable state** (`dangling-ours` / `dangling-ours-legacy`) instead of a generic "exists and is not mm's symlink" refusal that named neither the cause nor the fix. This was the actual outage: on a machine where mm had been run from a Conductor workspace, all three agent links pointed into a directory Conductor had since destroyed, and mm refused to repair them while reporting the user had planted their own file there.
 
 ## [0.12.37] - 2026-08-18
 
