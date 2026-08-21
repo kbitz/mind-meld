@@ -15,6 +15,11 @@ All notable changes to Mind Meld will be documented in this file.
 ### Fixed
 
 - A wedged `retro-fleet` link into a deleted workspace is now a classified, repairable state (`dangling-ours` / `dangling-ours-legacy`) instead of a generic "not mm's symlink" refusal.
+- **A hand-authored `SKILL.md` in the store path is never overwritten.** `SKILL.md` is the canonical Agent Skills filename, so treating it as proof mm owned the directory silently replaced a user's own skill with no backup and no notice. Ownership is now the `.mm-owned` sentinel (or mm's namespaced `.mm-skill.json`), never the payload.
+- **`mm status` no longer calls working states broken.** A deliberate development-checkout link and a user's own file at the target were both reported broken on every run, forever, with a remedy that would have migrated the checkout link away. The check is now an allowlist of states mm can actually act on, so a status added by a later track defaults to not-broken.
+- **The push-time notice states the real cause.** Every branch previously printed "is not mm's store link" -- including `dangling-ours`, a link that byte-matches the store and is therefore provably mm's own -- and told the user to move it aside, the one action that stops mm repairing it. The notice now renders per status, and a classify-only run (autopush) no longer spends the 24h notice budget it cannot act on.
+- **`mm status` and `mm diag` survive a broken environment.** Both call the skill-link snapshot with no enclosing handler; a single bad byte in `.mm-skill.json`, a symlink loop, or an unreadable agent directory crashed the two commands you run to diagnose exactly those problems.
+- A dangling link pointing somewhere mm does not recognize is now reported as broken rather than collapsed into the deliberate-user-file case.
 
 ## [0.12.37] - 2026-08-18
 
