@@ -12,6 +12,12 @@ All notable changes to Mind Meld will be documented in this file.
 - **`--no-save` is a hidden no-op.** Kept so `mm retro-fleet 30d --no-save > /tmp/retro.md` still exits 0 and a stale skill-store copy of SKILL.md does not fail Step 4 once per upgrade. Passing it prints one `mm: notice:` to stderr naming this release as the start of the removal window.
 - **`mm gc` reaps leftover snapshot files** matching `YYYY-MM-DD-NNN.json` under `~/.local/share/mind-meld/retros/`, then removes the directory if empty. Never `rm -rf`. Dry-runnable.
 
+### Fixed
+
+- **Trends stay deterministic across timezones and duplicate event copies.** Active-day keys and period labels use UTC, and an out-of-window copy of a SHA can no longer hide its valid current-period copy.
+- **Unreadable mm-event records no longer masquerade as a known-zero prior period.** Trends now render unavailable rather than producing a table against incomplete data.
+- **Current Typer/Rich help rendering no longer makes the hidden `--no-save` compatibility test fail in CI.**
+
 ### Removed
 
 - The snapshot subsystem (`_save_snapshot` / `_load_prior_snapshot` / `MM_RETROS_DIR` / the 365-day snapshot reaper). Trends no longer depend on this machine's command history.

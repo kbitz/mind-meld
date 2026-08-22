@@ -3783,6 +3783,33 @@ class TestPriorPeriodComparison:
         prior, current = _pair(events)
         assert prior.commits + current.commits == 1
 
+    def test_out_of_window_duplicate_does_not_hide_current_commit(self):
+        sha = "deadbee"
+        events = [
+            _git_event("dev-a", 20, [_commit(sha, 20)]),
+            _git_event("dev-b", 1, [_commit(sha, 1)]),
+        ]
+        prior, current = _pair(events)
+        assert prior.commits == 0
+        assert current.commits == 1
+
+    def test_active_days_use_utc_not_machine_local_timezone(self, monkeypatch):
+        def _unexpected_local_day(_dt):
+            raise AssertionError("trends must not use the machine's local timezone")
+
+        monkeypatch.setattr(aggregator, "_local_day_iso", _unexpected_local_day)
+        first = _commit("a" * 7, 1)
+        first["date"] = "2026-04-27T23:30:00+00:00"
+        second = _commit("b" * 7, 0)
+        second["date"] = "2026-04-28T00:30:00+00:00"
+        _prior, current = _pair([_git_event("dev-a", 0, [first, second])])
+        assert current.active_days == 2
+
+    def test_trends_day_labels_normalize_to_utc(self):
+        offset = timezone(timedelta(hours=2))
+        dt = datetime(2026, 4, 28, 0, 30, tzinfo=offset)
+        assert aggregator._trend_day_iso(dt) == "2026-04-27"
+
     def test_prior_window_before_coverage_floor_is_unavailable(self, tmp_path, monkeypatch):
         data = _agg_with_floor(
             tmp_path,
@@ -3824,6 +3851,29 @@ class TestPriorPeriodComparison:
         assert "Unavailable:" in out
         assert "Prior 7d" not in out
         assert "↑" not in out
+
+    def test_unreadable_event_records_make_trends_unavailable(self, tmp_path, monkeypatch):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        (events_dir / "dev-old-2026-04-01.jsonl").write_text("not json\n", encoding="utf-8")
+        _write_events(
+            events_dir,
+            "dev-current",
+            "2026-04-28",
+            [_git_event("dev-current", 1, [_commit("a" * 7, 1)])],
+        )
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+        data = aggregator.aggregate(
+            events_dir=events_dir,
+            window_days=7,
+            author_emails=frozenset({"kb@example.com"}),
+            now=NOW,
+        )
+        assert data.skipped_per_source == {"events": 1}
+        assert data.comparison.status == "unavailable"
+        out = aggregator.format_retro(data)
+        assert "event log contains unreadable records" in out
+        assert "| Commits" not in out
 
     def test_prior_zero_current_active_renders_zero_not_dash(self, tmp_path, monkeypatch):
         data = _agg_with_floor(

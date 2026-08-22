@@ -11,6 +11,8 @@ typer wrapper".
 
 from __future__ import annotations
 
+import re
+
 from typer.testing import CliRunner
 
 
@@ -151,8 +153,10 @@ class TestRetroFleetCommand:
         assert result.exit_code == 0, result.output
         assert captured["argv"] == ["30d", "--no-save"]
         help_result = self._runner().invoke(app, ["retro-fleet", "--help"])
+        assert help_result.exit_code == 0, help_result.output
         # hidden=True: the Options list does not advertise the flag. The
         # command docstring may still name it so a stale SKILL.md is explained.
-        options = help_result.output.split("Options")[-1]
+        plain_help = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", help_result.output)
+        options = plain_help.rsplit("Options", 1)[-1]
         assert "--theme" in options
         assert "--no-save" not in options

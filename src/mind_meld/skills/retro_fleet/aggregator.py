@@ -396,7 +396,8 @@ class PeriodComparison:
 
     Computed from the in-memory events list; no snapshot file. Status
     decides the renderer: ``gated`` (≥14d, weekly table owns it),
-    ``unavailable`` (coverage floor unmet — heading + reason, no rows),
+    ``unavailable`` (coverage proof unmet or unreadable events — heading +
+    reason, no rows),
     ``suppressed`` (current window empty — vanish entirely), ``ok`` (table).
     """
 
@@ -970,6 +971,17 @@ def aggregate_git(
     return out
 
 
+def _trend_day_iso(dt: datetime) -> str:
+    """``YYYY-MM-DD`` in UTC for fleet-shared trends.
+
+    Unlike streaks and the weekly retrospective, the trends table promises
+    byte-identical output on every machine after sync. Its day keys and
+    period labels must therefore not depend on the rendering machine's local
+    timezone.
+    """
+    return dt.astimezone(timezone.utc).date().isoformat()
+
+
 def _local_day_iso(dt: datetime) -> str:
     """``YYYY-MM-DD`` in the system's local timezone. Used for streak day
     keys so a late-night commit shows up "today" instead of leaking into
@@ -996,10 +1008,11 @@ def _aggregate_git_period_pair(
     until: datetime,
     author_emails: frozenset[str] | None,
 ) -> tuple[PriorPeriod, PriorPeriod]:
-    """Dedup ``(canonical remote, sha)`` GLOBALLY before bucketing.
+    """Reject out-of-pair copies, then dedup ``(canonical remote, sha)`` globally.
 
-    A SHA that appears with conflicting dates cannot enter both periods —
-    first-seen wins, then that occurrence's date selects the bucket.
+    An out-of-window occurrence must not consume the dedup key. Among eligible
+    copies, first-seen wins before either period accumulator is updated, so a
+    SHA with conflicting in-window dates cannot enter both periods.
     Re-running ``aggregate_git`` twice cannot close that double-count.
 
     Both windows use the SAME ``author_emails`` set (today's fleet union).
@@ -1050,19 +1063,25 @@ def _aggregate_git_period_pair(
                     ae = c.get("author_email")
                     if not isinstance(ae, str) or ae.lower() not in emails:
                         continue
+                if prior_start <= commit_dt <= prior_until:
+                    period = "prior"
+                elif boundary <= commit_dt <= until:
+                    period = "current"
+                else:
+                    continue
                 key = (remote, sha)
                 if key in seen:
                     continue
                 seen.add(key)
                 add = _safe_int(c.get("add"))
                 dlt = _safe_int(c.get("del"))
-                day = _local_day_iso(commit_dt)
-                if prior_start <= commit_dt <= prior_until:
+                day = _trend_day_iso(commit_dt)
+                if period == "prior":
                     pc += 1
                     pa += add
                     pd += dlt
                     prior_days.add(day)
-                elif boundary <= commit_dt <= until:
+                else:
                     cc += 1
                     ca += add
                     cd += dlt
@@ -1082,8 +1101,8 @@ def _unavailable_reason(
 ) -> str:
     """Inline italic copy when the prior window cannot be proven fully retained."""
     need = 2 * window_days
-    start_s = prior_start.astimezone().date().isoformat()
-    end_s = prior_end.astimezone().date().isoformat()
+    start_s = _trend_day_iso(prior_start)
+    end_s = _trend_day_iso(prior_end)
     # Wording-only fast path. The gate is ``_coverage_allows_prior``.
     if need > EVENTS_RETENTION_DAYS:
         return (
@@ -1114,6 +1133,7 @@ def _build_period_comparison(
     until: datetime,
     author_emails: frozenset[str] | None,
     coverage_floor: date | None,
+    events_complete: bool,
     devices_current: set[str],
 ) -> PeriodComparison:
     """Assemble the comparison RetroData carries. Never calls ``aggregate()``."""
@@ -1125,6 +1145,17 @@ def _build_period_comparison(
             prior_start=prior_start,
             prior_end=prior_end,
             coverage_floor=coverage_floor,
+        )
+    if not events_complete:
+        return PeriodComparison(
+            status="unavailable",
+            prior_start=prior_start,
+            prior_end=prior_end,
+            coverage_floor=coverage_floor,
+            unavailable_reason=(
+                "Unavailable: event log contains unreadable records. Rows are omitted "
+                "rather than computed against incomplete data."
+            ),
         )
     if not _coverage_allows_prior(coverage_floor, prior_start):
         return PeriodComparison(
@@ -1993,6 +2024,7 @@ def aggregate(
         until=until,
         author_emails=effective_emails,
         coverage_floor=coverage_floor,
+        events_complete=not skip_counter.get(SKIP_CATEGORY_EVENTS, 0),
         devices_current=pushes.devices_with_pushes,
     )
 
@@ -3024,8 +3056,8 @@ def _render_period_comparison(data: RetroData) -> list[str]:
     if cmp_.status in ("gated", "suppressed"):
         return []
     n = data.window_days
-    start = cmp_.prior_start.astimezone().date().isoformat()
-    end = cmp_.prior_end.astimezone().date().isoformat()
+    start = _trend_day_iso(cmp_.prior_start)
+    end = _trend_day_iso(cmp_.prior_end)
     heading = f"## Trends vs prior {n}d ({start} → {end})"
     lines = [heading, ""]
     if cmp_.status == "unavailable":
