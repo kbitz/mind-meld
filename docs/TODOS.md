@@ -10,7 +10,9 @@ reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
 
 ## Unprocessed
 
-_(empty — drained 2026-08-20 by `/roadmap`.)_
+- `mm retro-fleet --format json` for scripted metric export. The v0.12.0 snapshot JSON was the de-facto export surface and Track 24B removed it. A weekly `mm retro-fleet 7d --format json >> ~/retro-history.jsonl` is a strictly better long-horizon archive than the snapshot ever was. (24B / DX-6)
+- `--no-trends` is a deliberate non-goal. The section self-suppresses when the current window is empty and the point is that it should appear otherwise. Do not add an opt-out flag. (24B / DX-6)
+- `_iter_jsonl` in `aggregator.py` uses unbounded text iteration with replacement decoding, unlike the bounded binary readers elsewhere (`token_usage.iter_bounded_lines`). The free second pass for prior-period trends is free because someone already paid to materialise the whole corpus. Follow-up, not a 24B expansion. (24B / Eng F1)
 
 Drain record, 7 items from the 2026-08-18 Track 23A pass:
 

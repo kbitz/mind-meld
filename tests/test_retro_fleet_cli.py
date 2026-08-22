@@ -135,3 +135,24 @@ class TestRetroFleetCommand:
         assert "--name" in argv
         assert "kb" in argv
         assert "--no-save" in argv
+
+    def test_no_save_is_accepted_as_deprecated_noop(self, monkeypatch):
+        """Hidden flag still forwards so a stale SKILL.md Step 4 exits 0."""
+        from mind_meld.cli import app
+
+        captured: dict = {}
+
+        def _fake_main(argv):
+            captured["argv"] = list(argv)
+            return 0
+
+        monkeypatch.setattr("mind_meld.skills.retro_fleet.aggregator.main", _fake_main)
+        result = self._runner().invoke(app, ["retro-fleet", "30d", "--no-save"])
+        assert result.exit_code == 0, result.output
+        assert captured["argv"] == ["30d", "--no-save"]
+        help_result = self._runner().invoke(app, ["retro-fleet", "--help"])
+        # hidden=True: the Options list does not advertise the flag. The
+        # command docstring may still name it so a stale SKILL.md is explained.
+        options = help_result.output.split("Options")[-1]
+        assert "--theme" in options
+        assert "--no-save" not in options

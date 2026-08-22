@@ -92,17 +92,14 @@ DEFAULT_EVENTS_DIR = Path("~/.local/share/mind-meld/events").expanduser()
 ``config.py:_bootstrap_mm_events_path`` materializes on first ``get_sources()``
 call."""
 
-DEFAULT_RETROS_DIR = Path("~/.local/share/mind-meld/retros").expanduser()
-"""Local-only snapshot directory. NOT synced — retros are deterministic
-across the fleet (post-v0.11.17 union filter), so a local cache suffices
-for "trends vs last retro" deltas without the complexity of cross-fleet
-snapshot reconciliation. Files: ``YYYY-MM-DD-N.json`` (sequence per day)."""
+_EVENTS_FILENAME_DATE_RE = re.compile(r"^(?P<device>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$")
+"""Same intrinsic-filename-date rule ``retention._EVENTS_FILENAME_DATE_RE``
+uses. Duplicated so the aggregator does not import ``retention`` (which
+pulls resolveflow / config / storage). Filename date is push day."""
 
-RETROS_RETENTION_DAYS = 365
-"""Snapshot retention. Year-long ceiling — older snapshots aren't load-
-bearing for any current trend computation (only the most recent matching-
-window prior is consulted) but are preserved for the user's own forensic
-use. Pruned best-effort on each save."""
+TRENDS_MAX_WINDOW_DAYS = 14
+"""``## Trends vs prior Nd`` renders only when ``window_days < 14``.
+At 14d and above, ``_render_weekly`` already owns period-over-period."""
 
 V2_SCHEMA_VERSION = 2
 """sessions-snapshot schema version that the aggregator treats as full
@@ -363,23 +360,54 @@ class FleetState:
 SKIP_CATEGORY_EVENTS = "events"
 
 
-@dataclass
-class PriorRetroDelta:
-    """Compact deltas between this retro and the most recent prior snapshot
-    that ran with the same ``window_days``. Numbers are absolute deltas
-    (now - prior); negative values mean a metric dropped. ``has_prior``
-    flips True only when a matching snapshot was loaded — first-run retros
-    skip the section."""
+PeriodStatus = Literal["ok", "unavailable", "suppressed", "gated"]
 
-    has_prior: bool = False
-    prior_date: str = ""
+
+@dataclass(frozen=True)
+class PriorPeriod:
+    """Integers-only projection of one equal-length git window.
+
+    Holds no reference to ``GitAggregate`` / ``SessionsAggregate`` so a
+    future "prior top repo" row cannot smuggle a peer-controlled string
+    past ``_safe_repo_url`` / ``_safe_prose`` by default. The deleted
+    8-integer snapshot was structurally immune; this shape restores that
+    immunity. Pinned by ``test_prior_period_holds_only_integers``.
+
+    Four genuine flows, all windowed on the commit's own date (so push
+    cadence cannot distort them). Dropped, with the reasoning recorded
+    together in ``docs/invariants/events-retro.md``:
+
+    * ``streak_days`` — state at ``until``, not a flow over the window
+    * ``sessions`` — v=2 full inventory, not a flow
+    * ``tokens`` — ~99% ``cache_read``; rose in 6 of 9 measured weeks
+      regardless of whether commits rose
+    * ``pushes`` — sync cadence, not work
+    """
+
     commits: int = 0
     additions: int = 0
     deletions: int = 0
-    sessions: int = 0
-    tokens_total: int = 0
-    push_events: int = 0
-    streak_days: int = 0
+    active_days: int = 0
+
+
+@dataclass(frozen=True)
+class PeriodComparison:
+    """Current window vs the immediately preceding equal-length window.
+
+    Computed from the in-memory events list; no snapshot file. Status
+    decides the renderer: ``gated`` (≥14d, weekly table owns it),
+    ``unavailable`` (coverage floor unmet — heading + reason, no rows),
+    ``suppressed`` (current window empty — vanish entirely), ``ok`` (table).
+    """
+
+    status: PeriodStatus
+    prior: PriorPeriod = field(default_factory=PriorPeriod)
+    current: PriorPeriod = field(default_factory=PriorPeriod)
+    prior_start: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=timezone.utc))
+    prior_end: datetime = field(default_factory=lambda: datetime(1970, 1, 1, tzinfo=timezone.utc))
+    coverage_floor: date | None = None
+    unavailable_reason: str = ""
+    fleet_changed: bool = False
 
 
 _HOST_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -522,10 +550,10 @@ class RetroData:
     # skipped_per_source to verify category-specific behavior.
     skipped_lines: int = 0
     window_exceeds_retention: bool = False  # TODO#2 visible-failure breadcrumb
-    # Trend deltas vs most recent matching-window snapshot. Populated by
-    # ``main()`` from disk; unset (has_prior=False) for the first retro of
-    # a given window or when the snapshot dir doesn't exist yet.
-    prior: PriorRetroDelta = field(default_factory=PriorRetroDelta)
+    # Current vs prior equal-length git window. Populated by ``aggregate()``
+    # from the in-memory events list. Default ``gated`` so a hand-built
+    # RetroData (tests, themes prompt) does not invent a trends section.
+    comparison: PeriodComparison = field(default_factory=lambda: PeriodComparison(status="gated"))
     host_inventory: HostUsageInventory = field(default_factory=HostUsageInventory)
 
 
@@ -569,22 +597,72 @@ def _iter_jsonl(path: Path, *, skip_counter: dict[str, int], category: str) -> I
             yield obj
 
 
+def _list_event_files(events_dir: Path, *, skip_counter: dict[str, int]) -> list[Path]:
+    """One glob of ``*.jsonl`` under ``events_dir``. Empty on missing dir."""
+    if not events_dir.is_dir():
+        return []
+    try:
+        return sorted(events_dir.glob("*.jsonl"))
+    except OSError:
+        _bump(skip_counter, SKIP_CATEGORY_EVENTS)
+        return []
+
+
+def _event_file_date(path: Path) -> date | None:
+    """YYYY-MM-DD from ``<device>-YYYY-MM-DD.jsonl``, or None."""
+    m = _EVENTS_FILENAME_DATE_RE.match(path.name)
+    if m is None:
+        return None
+    try:
+        return date.fromisoformat(m.group("date"))
+    except ValueError:
+        return None
+
+
+def _coverage_floor_from_files(files: Iterable[Path]) -> date | None:
+    """Min YYYY-MM-DD parsed from event filenames.
+
+    Filename date is push day, so a ``git-snapshot`` row can carry commits
+    older than its file — meaning the floor is a LOWER BOUND on coverage
+    and fails safe (it can refuse a comparison that would have been fine,
+    never the reverse). Do not "optimize" this into using commit dates or
+    file mtimes: those would be unsafe optimism. The floor is a fleet
+    property, not per-machine: ``mm gc`` on any peer reaps fleet-wide via
+    tombstones, so ``min`` across all filenames is correct.
+    """
+    dates = [d for f in files if (d := _event_file_date(f)) is not None]
+    return min(dates) if dates else None
+
+
+def _coverage_allows_prior(coverage_floor: date | None, prior_start: datetime) -> bool:
+    """True iff the filename-date floor proves the prior window is fully retained.
+
+    ``2 * window_days > EVENTS_RETENTION_DAYS`` is NOT this gate: it is
+    off-by-one against ``_gc_old_event_files`` (``age_days >= 90``) and it
+    measures a max-age policy that only runs from the manual ``mm gc``
+    command. A machine initialised 20 days ago would pass that arithmetic,
+    get an empty prior window, and fabricate 100% growth. The comparison
+    survives only as a fast path for unavailable-message wording.
+    """
+    if coverage_floor is None:
+        return False
+    return coverage_floor <= prior_start.date()
+
+
 def _read_events(events_dir: Path, *, skip_counter: dict[str, int]) -> Iterator[dict]:
     """Iterate every line of every ``*.jsonl`` under ``events_dir``.
+
+    Unwindowed: the events list already spans everything on disk (up to
+    retention). Window filters happen downstream. A second pass over the
+    same in-memory list is how the prior period is computed — do not add
+    a since/until argument here.
 
     Per-file tolerance: an unreadable file bumps the skip counter and
     continues. Per-line tolerance: torn / non-JSON lines bump the skip
     counter and continue. Glob failure (rare; would need a vanished
     parent dir) bumps the counter once and returns.
     """
-    if not events_dir.is_dir():
-        return
-    try:
-        files = sorted(events_dir.glob("*.jsonl"))
-    except OSError:
-        _bump(skip_counter, SKIP_CATEGORY_EVENTS)
-        return
-    for f in files:
+    for f in _list_event_files(events_dir, skip_counter=skip_counter):
         yield from _iter_jsonl(f, skip_counter=skip_counter, category=SKIP_CATEGORY_EVENTS)
 
 
@@ -897,6 +975,196 @@ def _local_day_iso(dt: datetime) -> str:
     keys so a late-night commit shows up "today" instead of leaking into
     "tomorrow" via UTC drift."""
     return dt.astimezone().date().isoformat()
+
+
+def _prior_until(boundary: datetime) -> datetime:
+    """Exclusive-top bound for the prior window, as an inclusive until.
+
+    Shared predicates (``_within_window``, ``aggregate_git``) are inclusive
+    on both ends. Passing ``until=boundary`` would count a commit at exactly
+    ``since`` in BOTH windows. Do not change those predicates — that silently
+    moves the current window's numbers and breaks a dozen pins. Call-site
+    fix: ``prior_until = since - timedelta(microseconds=1)``.
+    """
+    return boundary - timedelta(microseconds=1)
+
+
+def _aggregate_git_period_pair(
+    events: Iterable[dict],
+    prior_start: datetime,
+    boundary: datetime,
+    until: datetime,
+    author_emails: frozenset[str] | None,
+) -> tuple[PriorPeriod, PriorPeriod]:
+    """Dedup ``(canonical remote, sha)`` GLOBALLY before bucketing.
+
+    A SHA that appears with conflicting dates cannot enter both periods —
+    first-seen wins, then that occurrence's date selects the bucket.
+    Re-running ``aggregate_git`` twice cannot close that double-count.
+
+    Both windows use the SAME ``author_emails`` set (today's fleet union).
+    Do not recompute the union per window: a growing author set would make
+    the prior column a different population than the current column.
+
+    Periods are half-open and non-overlapping: prior ``[prior_start, boundary)``,
+    current ``[boundary, until]``. Achieved via ``_prior_until(boundary)``,
+    not by editing the shared inclusive predicates.
+
+    Streak / ship / weekly are NOT computed. They are invalid on a prior
+    window (streak is state at ``until``; weekly is gated at ``window_days
+    >= 14``, where this section does not render).
+    """
+    seen: set[tuple[str, str]] = set()
+    prior_until = _prior_until(boundary)
+    pc = pa = pd = 0
+    cc = ca = cd = 0
+    prior_days: set[str] = set()
+    current_days: set[str] = set()
+    emails = author_emails or frozenset()
+    for ev in events:
+        if ev.get("type") != "git-snapshot":
+            continue
+        projects = ev.get("projects")
+        if not isinstance(projects, list):
+            continue
+        for proj in projects:
+            if not isinstance(proj, dict):
+                continue
+            remote_raw = proj.get("remote")
+            remote = (
+                mm_events.canonicalize_remote_url(remote_raw) if isinstance(remote_raw, str) else ""
+            )
+            commits = proj.get("commits")
+            if not isinstance(commits, list):
+                continue
+            for c in commits:
+                if not isinstance(c, dict):
+                    continue
+                sha = c.get("sha")
+                if not isinstance(sha, str) or not sha:
+                    continue
+                commit_dt = _parse_iso(c.get("date"))
+                if commit_dt is None:
+                    continue
+                if emails:
+                    ae = c.get("author_email")
+                    if not isinstance(ae, str) or ae.lower() not in emails:
+                        continue
+                key = (remote, sha)
+                if key in seen:
+                    continue
+                seen.add(key)
+                add = _safe_int(c.get("add"))
+                dlt = _safe_int(c.get("del"))
+                day = _local_day_iso(commit_dt)
+                if prior_start <= commit_dt <= prior_until:
+                    pc += 1
+                    pa += add
+                    pd += dlt
+                    prior_days.add(day)
+                elif boundary <= commit_dt <= until:
+                    cc += 1
+                    ca += add
+                    cd += dlt
+                    current_days.add(day)
+    return (
+        PriorPeriod(commits=pc, additions=pa, deletions=pd, active_days=len(prior_days)),
+        PriorPeriod(commits=cc, additions=ca, deletions=cd, active_days=len(current_days)),
+    )
+
+
+def _unavailable_reason(
+    *,
+    window_days: int,
+    coverage_floor: date | None,
+    prior_start: datetime,
+    prior_end: datetime,
+) -> str:
+    """Inline italic copy when the prior window cannot be proven fully retained."""
+    need = 2 * window_days
+    start_s = prior_start.astimezone().date().isoformat()
+    end_s = prior_end.astimezone().date().isoformat()
+    # Wording-only fast path. The gate is ``_coverage_allows_prior``.
+    if need > EVENTS_RETENTION_DAYS:
+        return (
+            f"Unavailable: would need {need} days of events "
+            f"(retention is {EVENTS_RETENTION_DAYS}). Rows are omitted rather "
+            f"than computed against a partial baseline."
+        )
+    if coverage_floor is None:
+        return (
+            f"Unavailable: the event log is empty, inside the prior window "
+            f"({start_s} → {end_s}). Rows are omitted rather than computed "
+            f"against a partial baseline; they appear once the log covers "
+            f"{need} days."
+        )
+    return (
+        f"Unavailable: the event log starts {coverage_floor.isoformat()}, "
+        f"inside the prior window ({start_s} → {end_s}). Rows are omitted "
+        f"rather than computed against a partial baseline; they appear once "
+        f"the log covers {need} days."
+    )
+
+
+def _build_period_comparison(
+    events: Iterable[dict],
+    *,
+    window_days: int,
+    since: datetime,
+    until: datetime,
+    author_emails: frozenset[str] | None,
+    coverage_floor: date | None,
+    devices_current: set[str],
+) -> PeriodComparison:
+    """Assemble the comparison RetroData carries. Never calls ``aggregate()``."""
+    prior_start = since - timedelta(days=window_days)
+    prior_end = _prior_until(since)
+    if window_days >= TRENDS_MAX_WINDOW_DAYS:
+        return PeriodComparison(
+            status="gated",
+            prior_start=prior_start,
+            prior_end=prior_end,
+            coverage_floor=coverage_floor,
+        )
+    if not _coverage_allows_prior(coverage_floor, prior_start):
+        return PeriodComparison(
+            status="unavailable",
+            prior_start=prior_start,
+            prior_end=prior_end,
+            coverage_floor=coverage_floor,
+            unavailable_reason=_unavailable_reason(
+                window_days=window_days,
+                coverage_floor=coverage_floor,
+                prior_start=prior_start,
+                prior_end=prior_end,
+            ),
+        )
+    prior, current = _aggregate_git_period_pair(
+        events,
+        prior_start,
+        since,
+        until,
+        author_emails,
+    )
+    if current.commits == 0:
+        return PeriodComparison(
+            status="suppressed",
+            prior=prior,
+            current=current,
+            prior_start=prior_start,
+            prior_end=prior_end,
+            coverage_floor=coverage_floor,
+        )
+    prior_pushes = aggregate_pushes(events, since=prior_start, until=prior_end)
+    return PeriodComparison(
+        status="ok",
+        prior=prior,
+        current=current,
+        prior_start=prior_start,
+        prior_end=prior_end,
+        coverage_floor=coverage_floor,
+        fleet_changed=prior_pushes.devices_with_pushes != devices_current,
+    )
 
 
 def _compute_streak(commit_days: set[str], until: datetime) -> int:
@@ -1628,6 +1896,15 @@ def aggregate(
 
     Two machines that have pushed-and-pulled produce identical retros
     because the fleet union is identical on every machine after sync.
+    The trends section is part of that determinism: it is a pure function
+    of the synced corpus, the window, and ``now``, not of this machine's
+    command history.
+
+    Do NOT call ``aggregate()`` twice to obtain a prior window.
+    ``get_known_devices()`` shells out inside this function; a second
+    call doubles that subprocess. The prior period is a second pass over
+    the same in-memory events list. Pinned by
+    ``test_aggregate_reads_events_dir_once_and_shells_out_once``.
     """
     until = now or datetime.now(timezone.utc)
     since = until - timedelta(days=window_days)
@@ -1637,7 +1914,12 @@ def aggregate(
     # retired with the gstack-analytics reader.
     skip_counter: dict[str, int] = {}
 
-    events = list(_read_events(events_dir, skip_counter=skip_counter))
+    # One glob, one coverage-floor parse, one events materialisation.
+    event_files = _list_event_files(events_dir, skip_counter=skip_counter)
+    coverage_floor = _coverage_floor_from_files(event_files)
+    events: list[dict] = []
+    for f in event_files:
+        events.extend(_iter_jsonl(f, skip_counter=skip_counter, category=SKIP_CATEGORY_EVENTS))
 
     # Fleet-wide trust set (v0.11.17): union every peer's ``local_emails``
     # field across all mm-push events on disk, then OR-in the running
@@ -1701,6 +1983,19 @@ def aggregate(
         registered_ids=host_registered,
     )
 
+    # Host inventory is last-known-good, not window spend, and must never
+    # reach the prior-period integers. The pair function walks git-snapshot
+    # rows only. Pinned by ``test_host_tokens_do_not_reach_prior_period``.
+    comparison = _build_period_comparison(
+        events,
+        window_days=window_days,
+        since=since,
+        until=until,
+        author_emails=effective_emails,
+        coverage_floor=coverage_floor,
+        devices_current=pushes.devices_with_pushes,
+    )
+
     return RetroData(
         window_days=window_days,
         since=since,
@@ -1718,6 +2013,7 @@ def aggregate(
         skipped_per_source=dict(skip_counter),
         skipped_lines=sum(skip_counter.values()),
         window_exceeds_retention=window_days > EVENTS_RETENTION_DAYS,
+        comparison=comparison,
         host_inventory=host_inventory,
     )
 
@@ -2716,30 +3012,39 @@ def _render_weekly(weekly: list[WeeklyBucket]) -> list[str]:
     return lines
 
 
-def _render_prior_delta(prior: PriorRetroDelta) -> list[str]:
-    """Trends-vs-last-retro table. Skips when no prior snapshot exists."""
-    if not prior.has_prior:
+def _render_period_comparison(data: RetroData) -> list[str]:
+    """``## Trends vs prior Nd`` two-column table, or an inline unavailable.
+
+    A vanished section never encodes a data-availability state. Suppression
+    is only for "there is genuinely nothing to compare" (current window
+    empty, or ``window_days >= 14`` where weekly already owns the frame).
+    Everything else renders the heading with the reason inline.
+    """
+    cmp_ = data.comparison
+    if cmp_.status in ("gated", "suppressed"):
         return []
-    rows = [
-        ("Commits", prior.commits),
-        ("+LOC", prior.additions),
-        ("-LOC", prior.deletions),
-        ("Sessions", prior.sessions),
-        ("Tokens", prior.tokens_total),
-        ("Pushes", prior.push_events),
-        ("Streak", prior.streak_days),
-    ]
-    nonzero = [(label, delta) for label, delta in rows if delta != 0]
-    if not nonzero:
-        # No changes is the right answer — emitting "no metric changed"
-        # as a stranded bullet pollutes more than it informs. Skip the
-        # whole section and let the rest of the report stand on its own.
-        return []
-    lines = [f"## Trends vs last retro ({prior.prior_date or 'prior'})", ""]
-    for label, delta in nonzero:
-        arrow = "↑" if delta > 0 else "↓"
-        lines.append(f"- {label}: {arrow}{abs(delta):,}")
-    lines.append("")
+    n = data.window_days
+    start = cmp_.prior_start.astimezone().date().isoformat()
+    end = cmp_.prior_end.astimezone().date().isoformat()
+    heading = f"## Trends vs prior {n}d ({start} → {end})"
+    lines = [heading, ""]
+    if cmp_.status == "unavailable":
+        reason = cmp_.unavailable_reason or "Unavailable: prior window is not fully retained."
+        lines.append(f"_{reason}_")
+        lines.append("")
+        return lines
+    prior, cur = cmp_.prior, cmp_.current
+    lines.extend(
+        [
+            f"| Metric        | Prior {n}d | This {n}d |",
+            "|---------------|---------:|--------:|",
+            f"| Commits       | {prior.commits:>8} | {cur.commits:>7} |",
+            f"| Lines added   | {prior.additions:>8,} | {cur.additions:>7,} |",
+            f"| Lines removed | {prior.deletions:>8,} | {cur.deletions:>7,} |",
+            f"| Active days   | {prior.active_days:>8} | {cur.active_days:>7} |",
+            "",
+        ]
+    )
     return lines
 
 
@@ -2811,15 +3116,19 @@ def format_retro(
     rendered when the caller is a non-skill consumer (the test fixture
     path that just wants data).
 
-    Section layout (post-v0.12.0):
+    Section layout (post-v0.12.39):
 
     * (Optional) ASCII card with global stats, observed model-family usage,
-      source coverage, NOTEWORTHY, and TOP WORK themes.
+      source coverage, NOTEWORTHY, and TOP WORK themes. No trends row —
+      the card is width-constrained and a down-arrow on a shareable
+      artifact is public self-flagellation.
     * Header — date range + activity-across-N-machines line.
-    * Trends vs last retro — delta block when a prior snapshot exists.
     * Code shipped — commits, LOC, top repos, commit-type mix, peak hours,
       commit bursts, ship-of-the-window.
     * Week-over-week — bucketed table when window_days >= 14.
+    * Trends vs prior Nd — two-column ``prior | current`` table when
+      window_days < 14, computed from the synced corpus. Identical in
+      both passes. Unavailable renders the heading with the reason inline.
     * Claude Code activity — sessions and token block.
     * Skills used — fleet-wide invocation rollup.
     * mm sync activity — push counts.
@@ -2879,11 +3188,6 @@ def format_retro(
         notes.append("Known-fleet count unavailable (`mm devices --format=json` failed).")
     lines.append("")
 
-    # Trends vs last retro (only when a matching-window snapshot exists).
-    delta_lines = _render_prior_delta(data.prior)
-    if delta_lines:
-        lines.extend(delta_lines)
-
     # Code shipped.
     lines.append("## Code shipped")
     lines.append(
@@ -2909,6 +3213,10 @@ def format_retro(
     lines.extend(_render_ship(data.git.ship))
     lines.extend(_render_weekly(data.git.weekly))
     lines.append("")
+
+    # Trends vs prior equal period — below Code shipped (accomplishment
+    # first, context second). Gated off at window_days >= 14.
+    lines.extend(_render_period_comparison(data))
 
     # Claude Code activity. Per-user feedback v0.11.12: drop MB total,
     # "counted separately" parenthetical, and Most active list — they were
@@ -3041,9 +3349,19 @@ def format_retro(
             f"{data.skipped_lines} record(s) skipped due to parse errors. Output may be incomplete."
         )
     if data.window_exceeds_retention:
+        # Mutually exclusive with the trends unavailable line: that section
+        # is gated off at window_days >= 14, and this note only fires when
+        # window_days > 90. Emit this one alone.
         notes.append(
             f"Requested {data.window_days}d window exceeds the {EVENTS_RETENTION_DAYS}-day "
             f"events retention. Older days are reaped by `mm gc` and will not appear."
+        )
+    elif data.comparison.status == "ok" and data.comparison.fleet_changed:
+        notes.append(
+            f"Fleet composition changed between windows: "
+            f"the set of devices that pushed in the prior {data.window_days}d "
+            f"differs from this {data.window_days}d. Counts are still comparable "
+            f"as activity, not as a same-machine pair."
         )
 
     if notes:
@@ -3076,229 +3394,9 @@ def _resolve_events_dir() -> Path:
     return DEFAULT_EVENTS_DIR
 
 
-def _resolve_retros_dir() -> Path:
-    """``MM_RETROS_DIR`` env override (parallel to ``MM_EVENTS_DIR``);
-    falls back to default. Test isolation hook."""
-    override = os.environ.get("MM_RETROS_DIR")
-    if override:
-        return Path(override).expanduser()
-    return DEFAULT_RETROS_DIR
-
-
-def _retro_to_snapshot(data: RetroData) -> dict:
-    """Serialize a ``RetroData`` to the JSON-on-disk shape. Stores ONLY
-    the fields needed for trend deltas — keeping the file small and
-    forward-compatible (a future field can be added without breaking
-    older readers, which simply ignore unknown keys)."""
-    return {
-        "schema_version": 1,
-        "window_days": data.window_days,
-        "since": data.since.isoformat(),
-        "until": data.until.isoformat(),
-        "metrics": {
-            "commits": data.git.commits,
-            "additions": data.git.additions,
-            "deletions": data.git.deletions,
-            "pull_requests": data.git.pull_requests,
-            "streak_days": data.git.streak_days,
-            "sessions": data.sessions.total_sessions,
-            "tokens_total": (
-                data.sessions.tokens_input
-                + data.sessions.tokens_cache_create
-                + data.sessions.tokens_cache_read
-                + data.sessions.tokens_output
-            ),
-            "push_events": data.pushes.push_events,
-        },
-    }
-
-
-_SNAPSHOT_FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(\d+)\.json$")
-"""Snapshot filename: ``YYYY-MM-DD-NNN.json``. Sequence is zero-padded to
-3 digits so lexical sort agrees with numeric sort up to 999 retros/day —
-``-002`` sorts before ``-010``, where the un-padded ``-2`` would sort
-after ``-10``. Pre-fix, ``_load_prior_snapshot`` returned the wrong
-"most recent" once a single day exceeded 9 retros."""
-
-_SNAPSHOT_SEQ_DIGITS = 3
-_SNAPSHOT_SEQ_MAX = 10**_SNAPSHOT_SEQ_DIGITS - 1  # 999
-
-
-def _save_snapshot(data: RetroData, retros_dir: Path) -> Path | None:
-    """Persist a JSON snapshot for trend deltas. Returns the saved path or
-    None on failure. Failure is forensic-only — emits a single
-    ``mm: notice:`` to stderr and returns; the retro render proceeds.
-
-    Race-safe: uses ``O_CREAT|O_EXCL`` so two concurrent runs picking the
-    same sequence number can't silently overwrite each other. On
-    collision the seq advances and we retry. Pre-fix, the
-    ``len(existing) + 1`` heuristic was a TOCTOU bug — both runs
-    computed the same seq and the second ``write_text`` clobbered the
-    first."""
-    try:
-        retros_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError as exc:
-        sys.stderr.write(f"mm: notice: retro snapshot dir unwritable ({exc}); skipping save\n")
-        return None
-    today = data.until.astimezone().date().isoformat()
-    # Sequence number: pick max(existing seqs for today) + 1. Zero-padded
-    # to keep lex sort numerically correct.
-    try:
-        existing = list(retros_dir.glob(f"{today}-*.json"))
-    except OSError:
-        existing = []
-    max_seq = 0
-    for f in existing:
-        m = _SNAPSHOT_FILENAME_RE.match(f.name)
-        if m and m.group(1) == today:
-            try:
-                n = int(m.group(2))
-            except ValueError:
-                continue
-            if n > max_seq:
-                max_seq = n
-    payload = json.dumps(_retro_to_snapshot(data), indent=2) + "\n"
-    seq = max_seq + 1
-    path: Path | None = None
-    while seq <= _SNAPSHOT_SEQ_MAX:
-        candidate = retros_dir / f"{today}-{seq:0{_SNAPSHOT_SEQ_DIGITS}d}.json"
-        try:
-            # O_EXCL: race-safe; raises FileExistsError if another writer
-            # took this seq first. Bump seq and retry.
-            with open(
-                candidate,
-                "x",
-                encoding="utf-8",
-            ) as f:
-                f.write(payload)
-            path = candidate
-            break
-        except FileExistsError:
-            seq += 1
-            continue
-        except OSError as exc:
-            sys.stderr.write(f"mm: notice: retro snapshot write failed ({exc}); skipping\n")
-            return None
-    if path is None:
-        sys.stderr.write(
-            f"mm: notice: retro snapshot seq exhausted for {today} "
-            f"(>{_SNAPSHOT_SEQ_MAX} retros in one day); skipping save\n"
-        )
-        return None
-    _prune_old_snapshots(retros_dir)
-    return path
-
-
-def _prune_old_snapshots(retros_dir: Path) -> None:
-    """Best-effort prune of snapshots older than ``RETROS_RETENTION_DAYS``.
-    Reaped by FILENAME date (the date is intrinsic, mtime is not — same
-    rationale as ``_gc_old_event_files``). Silent on every failure.
-    Filenames not matching the canonical shape are left alone."""
-    try:
-        files = list(retros_dir.glob("*.json"))
-    except OSError:
-        return
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=RETROS_RETENTION_DAYS)).date()
-    for f in files:
-        m = _SNAPSHOT_FILENAME_RE.match(f.name)
-        if m is None:
-            continue
-        try:
-            file_date = datetime.fromisoformat(m.group(1)).date()
-        except ValueError:
-            continue
-        if file_date < cutoff:
-            try:
-                f.unlink()
-            except OSError:
-                continue
-
-
-_SNAPSHOT_MAX_BYTES = 1_000_000
-"""Cap individual snapshot file reads at 1 MiB. A typical snapshot is
-<1 KiB; a 1 MB file would already be 1000× normal. Defends against a
-corrupt / fs-recovery / planted file from blowing up memory before
-``json.loads`` even fails."""
-
-
-def _load_prior_snapshot(retros_dir: Path, window_days: int) -> dict | None:
-    """Return the most recent snapshot dict whose ``window_days`` matches.
-    None when no matching snapshot exists or directory missing.
-    Tolerant of corrupt JSON / unreadable files (skipped).
-
-    Sorts by parsed ``(date, seq)`` tuple, NOT by lexical filename.
-    Pre-fix, ``sorted(..., reverse=True)`` ordered ``-9.json`` AFTER
-    ``-10.json`` (because lex sort puts longer strings first in
-    reverse), so once a single day produced 10+ retros, "most recent"
-    returned a stale snapshot. Filenames now zero-pad to 3 digits at
-    write time AND the loader parses+sorts by tuple — both layers of
-    defense."""
-    if not retros_dir.is_dir():
-        return None
-    try:
-        files = list(retros_dir.glob("*.json"))
-    except OSError:
-        return None
-    parsed: list[tuple[str, int, Path]] = []
-    for f in files:
-        m = _SNAPSHOT_FILENAME_RE.match(f.name)
-        if m is None:
-            continue
-        try:
-            seq = int(m.group(2))
-        except ValueError:
-            continue
-        parsed.append((m.group(1), seq, f))
-    # Newest first by (date, seq) — both numeric / lex-stable.
-    parsed.sort(reverse=True)
-    for _date, _seq, f in parsed:
-        try:
-            if f.stat().st_size > _SNAPSHOT_MAX_BYTES:
-                continue
-            obj = json.loads(f.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(obj, dict):
-            continue
-        if obj.get("window_days") != window_days:
-            continue
-        return obj
-    return None
-
-
-def _compute_prior_delta(data: RetroData, prior: dict | None) -> PriorRetroDelta:
-    """Build a ``PriorRetroDelta`` from a snapshot dict. Tolerant of missing
-    fields (treated as zero) so a v1 snapshot read by a future v2 renderer
-    degrades cleanly."""
-    if prior is None:
-        return PriorRetroDelta()
-    metrics = prior.get("metrics", {}) if isinstance(prior, dict) else {}
-    if not isinstance(metrics, dict):
-        return PriorRetroDelta()
-    until_raw = prior.get("until") if isinstance(prior, dict) else None
-    prior_date = ""
-    if isinstance(until_raw, str):
-        try:
-            prior_date = datetime.fromisoformat(until_raw.replace("Z", "+00:00")).date().isoformat()
-        except ValueError:
-            prior_date = ""
-    now_tokens = (
-        data.sessions.tokens_input
-        + data.sessions.tokens_cache_create
-        + data.sessions.tokens_cache_read
-        + data.sessions.tokens_output
-    )
-    return PriorRetroDelta(
-        has_prior=True,
-        prior_date=prior_date,
-        commits=data.git.commits - _safe_int(metrics.get("commits")),
-        additions=data.git.additions - _safe_int(metrics.get("additions")),
-        deletions=data.git.deletions - _safe_int(metrics.get("deletions")),
-        sessions=data.sessions.total_sessions - _safe_int(metrics.get("sessions")),
-        tokens_total=now_tokens - _safe_int(metrics.get("tokens_total")),
-        push_events=data.pushes.push_events - _safe_int(metrics.get("push_events")),
-        streak_days=data.git.streak_days - _safe_int(metrics.get("streak_days")),
-    )
+NO_SAVE_REMOVED_IN = "v0.12.39"
+"""Named in the ``--no-save`` no-op notice so the eventual flag deletion
+needs no second announcement."""
 
 
 def _read_mm_events_config_path() -> Path | None:
@@ -3378,8 +3476,9 @@ that bounds real data; defends ``timedelta(days=...)`` against
 def _parse_window(s: str) -> int:
     m = WINDOW_PATTERN.match(s)
     if m is None:
+        hint = f" (did you mean '{s}d'?)" if s.isdigit() else ""
         raise argparse.ArgumentTypeError(
-            f"window must be of the form Nd (e.g. '7d', '30d'); got {s!r}"
+            f"window must be of the form Nd (e.g. '7d', '30d'); got {s!r}{hint}"
         )
     n = int(m.group(1))
     if n <= 0:
@@ -3393,7 +3492,7 @@ def _parse_window(s: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="retro-fleet",
+        prog="mm retro-fleet",
         description="Fleet-aware retro for the mm event log.",
     )
     parser.add_argument(
@@ -3428,20 +3527,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--no-save",
         action="store_true",
-        help=(
-            "Skip writing a snapshot to ~/.local/share/mind-meld/retros/. "
-            "Useful for the second pass (the first pass already saved)."
-        ),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--dump-host-usage",
         action="store_true",
-        help=(
-            "Forensic JSON of accepted host inventory, missing devices, "
-            "and reject reasons. Skips the markdown retro and snapshot save."
-        ),
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args(argv)
+
+    if args.no_save:
+        # stderr, not stdout: the documented recipe redirects stdout
+        # (``mm retro-fleet 30d --no-save > /tmp/retro.md``). Tier is
+        # ``mm: notice:`` — CLAUDE.md reserves ``warning`` for data-at-risk
+        # degradation and a no-op flag is not that.
+        sys.stderr.write(
+            f"mm: notice: --no-save is a no-op as of {NO_SAVE_REMOVED_IN} "
+            "(trends are computed from the events corpus; snapshots are gone) "
+            "and will be removed in a future release.\n"
+        )
 
     events_dir = _resolve_events_dir()
     _emit_custom_path_notice_if_due(events_dir)
@@ -3456,22 +3560,9 @@ def main(argv: list[str] | None = None) -> int:
         author_emails=author_emails,
     )
 
-    # Trend deltas vs the most recent matching-window snapshot. Loading
-    # before saving so today's snapshot doesn't compare against itself.
-    retros_dir = _resolve_retros_dir()
-    prior = _load_prior_snapshot(retros_dir, args.window)
-    data.prior = _compute_prior_delta(data, prior)
-
-    # Persist a snapshot for next time. Skipped on the second pass so a
-    # single retro session doesn't write twice (the first-pass save is
-    # the canonical record for trend deltas).
     if args.dump_host_usage:
         sys.stdout.write(_dump_host_inventory(data.host_inventory))
         return 0
-
-    has_card_input = bool(args.theme) or bool(args.noteworthy) or bool(args.name)
-    if not args.no_save and not has_card_input:
-        _save_snapshot(data, retros_dir)
 
     sys.stdout.write(
         format_retro(

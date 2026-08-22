@@ -290,6 +290,67 @@ def test_every_changelog_version_has_a_progress_row() -> None:
     )
 
 
+def _string_constants(node: ast.AST) -> list[str]:
+    """Literal string pieces inside a call argument (incl. f-string constants)."""
+    out: list[str] = []
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        out.append(node.value)
+    elif isinstance(node, ast.JoinedStr):
+        for part in node.values:
+            out.extend(_string_constants(part))
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        out.extend(_string_constants(node.left))
+        out.extend(_string_constants(node.right))
+    return out
+
+
+def test_every_notes_line_has_a_skill_decoder_entry() -> None:
+    """Every aggregator Notes line has a SKILL.md decoder entry.
+
+    SKILL.md's Notes section is the AI agent's API doc. A new Notes line the
+    decoder doesn't cover means the agent either drops it or invents an
+    explanation. Retro-catches the v0.12.37 drift where aggregator emitted
+    ``pre-v0.11.14 OR cold token cache`` while SKILL.md documented
+    ``pre-v0.11.0 session schema and/or pre-v0.11.14``.
+    """
+    aggregator = (
+        ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "aggregator.py"
+    ).read_text(encoding="utf-8")
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    decoder = skill.split("## Notes section in aggregator output", 1)[-1].split(
+        "## Trends vs prior", 1
+    )[0]
+
+    required: list[str] = []
+    tree = ast.parse(aggregator)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "append":
+            continue
+        if not isinstance(func.value, ast.Name):
+            continue
+        # notes.append(...) and coverage_reasons.append(...) both feed Notes.
+        if func.value.id not in {"notes", "coverage_reasons"}:
+            continue
+        if not node.args:
+            continue
+        pieces = [" ".join(c.split()) for c in _string_constants(node.args[0])]
+        identifying = next((p for p in pieces if len(p) >= 16), None)
+        if identifying is not None:
+            required.append(identifying[:32].rstrip())
+
+    assert required, "parser found no Notes stems — the extractor broke"
+    missing = [p for p in required if p not in decoder]
+    assert missing == [], (
+        "aggregator Notes identifying fragments with no SKILL.md decoder "
+        "entry: " + "; ".join(missing)
+    )
+
+
 def test_every_extracted_module_has_a_routing_row() -> None:
     """The Track 16A modules each get at least one row.
 
