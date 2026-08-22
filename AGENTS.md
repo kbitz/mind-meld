@@ -142,13 +142,13 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:install_skills_cmd` / `retro_fleet_cmd` (typer shells only) | `docs/invariants/events-retro.md` |
 | `cli.py:status` / `diag` / `_collect_diag_state` (their `skill_link.diagnose_skill_links` consumers) | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
-| `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` | `docs/invariants/events-retro.md` |
+| `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
 | `host_usage.py` (incl. `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry`) | `docs/invariants/events-retro.md` |
 | `token_usage.py:PRICING` / `MODEL_FAMILY_TIERS` / `resolve_prices` / `model_family` / `estimate_cost` / `_CACHE_WRITE_MULT` | `docs/invariants/events-retro.md` (cost-estimation section) |
 | `token_usage.py:walk_jsonl_segment` / `walk_jsonl_buckets` / `iter_bounded_lines` / `_drain_to_newline` / `get_or_compute` / `_resume_plan` / `head_fingerprint` / `head_probe_len` / `_carry_tail_ids` / `merge_token_days` / `merge_skill_days` / `TAIL_MSG_ID_LOOKBACK` / `_HEAD_PROBE_BYTES` / `_MAX_TAIL_MSG_ID_LEN` | `docs/invariants/events-retro.md` (incremental-resume section) |
 | `aggregator.py:_render_token_block` / `_unpriced_token_summary` / `_short_model_name` / `_format_usd` | `docs/invariants/events-retro.md` (cost-estimation section) |
-| `skills/retro_fleet/aggregator.py` (incl. `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_render_ascii_card` / `_save_snapshot` / `_load_prior_snapshot` / `_classify_commit_subject` / `_detect_bursts` / `_safe_prose`) | `docs/invariants/events-retro.md` |
+| `skills/retro_fleet/aggregator.py` (incl. `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_render_ascii_card` / `_aggregate_git_period_pair` / `_classify_commit_subject` / `_detect_bursts` / `_safe_prose`) | `docs/invariants/events-retro.md` |
 | `skills/retro_fleet/aggregator.py` 23A renderers (`AgentRhythmView` / `_agent_rhythm_view` / `_render_agent_block` / `_render_agent_inventory` / `_agent_coverage_notes` / `_agent_state_label` / `_window_day_keys` / `AGENT_FAMILY_ROWS` / `MAX_AGENT_INVENTORY_MACHINES` / `_render_models_block`) and `token_usage.sum_bucket` | `docs/invariants/events-retro.md` (Track 23A renderer contract) |
 | `skills/retro_fleet/SKILL.md` (two-pass card flow) | `docs/invariants/events-retro.md` |
 | `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |

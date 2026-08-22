@@ -6,7 +6,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mind_meld.cli import _do_gc
-from mind_meld.retention import _gc_old_event_files, _sweep_local_tmp_files
+from mind_meld.retention import (
+    _SNAPSHOT_FILENAME_RE,
+    _gc_old_event_files,
+    _gc_orphan_retros_dir,
+    _sweep_local_tmp_files,
+)
 from mind_meld.storage.local import LocalBackend
 
 
@@ -143,3 +148,50 @@ class TestEventsRetention:
         output = capsys.readouterr().out
         assert "Events: candidates=1 deleted=0 failed=1" in output
         assert "use `-v` for paths and details" in output
+
+
+class TestOrphanRetrosDir:
+    def test_reaps_matching_files_and_rmdir_if_empty(self, tmp_path, capsys):
+        retros = tmp_path / "retros"
+        retros.mkdir()
+        snap = retros / "2026-05-10-001.json"
+        snap.write_text("{}")
+        outcome = _gc_orphan_retros_dir(dry_run=False, verbose=False, retros_dir=retros)
+        assert outcome.candidates == 1
+        assert outcome.deleted == 1
+        assert outcome.repairs == 1
+        assert not snap.exists()
+        assert not retros.exists()
+        assert "Orphan retros:" in capsys.readouterr().out
+
+    def test_leaves_non_matching_files_and_keeps_dir(self, tmp_path):
+        retros = tmp_path / "retros"
+        retros.mkdir()
+        keep = retros / "notes.md"
+        keep.write_text("mine")
+        snap = retros / "2026-05-10-001.json"
+        snap.write_text("{}")
+        outcome = _gc_orphan_retros_dir(dry_run=False, verbose=False, retros_dir=retros)
+        assert outcome.candidates == 1
+        assert outcome.deleted == 1
+        assert outcome.repairs == 0
+        assert keep.exists()
+        assert retros.exists()
+        assert _SNAPSHOT_FILENAME_RE.match("2026-05-10-001.json")
+
+    def test_dry_run_does_not_unlink(self, tmp_path, capsys):
+        retros = tmp_path / "retros"
+        retros.mkdir()
+        snap = retros / "2026-08-15-001.json"
+        snap.write_text("{}")
+        outcome = _gc_orphan_retros_dir(dry_run=True, verbose=False, retros_dir=retros)
+        assert outcome.candidates == 1
+        assert outcome.deleted == 0
+        assert snap.exists()
+        assert retros.exists()
+        assert "dry-run" in capsys.readouterr().out
+
+    def test_missing_dir_is_zero(self, tmp_path, capsys):
+        outcome = _gc_orphan_retros_dir(dry_run=False, verbose=False, retros_dir=tmp_path / "nope")
+        assert outcome.candidates == 0
+        assert "Orphan retros:" in capsys.readouterr().out

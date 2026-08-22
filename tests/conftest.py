@@ -300,24 +300,6 @@ def _isolate_mm_events_path(request, monkeypatch, tmp_path) -> None:
     monkeypatch.setitem(target, "path", str(tmp_path / "_isolated_mm_events"))
 
 
-@pytest.fixture(autouse=True)
-def _isolate_retros_dir(monkeypatch, tmp_path) -> None:
-    """Redirect retro snapshots to a per-test directory.
-
-    ``aggregator.main()`` saves a JSON snapshot to
-    ``~/.local/share/mind-meld/retros/`` after every successful run for
-    trend deltas. Without isolation, every test invoking ``main()`` would
-    pollute the user's real retros dir AND read whatever was previously
-    cached there — non-deterministic. Same pattern as
-    ``_isolate_identity_cache`` / ``_isolate_pullhistory``.
-
-    Uses the ``MM_RETROS_DIR`` env hook the aggregator already provides
-    (mirroring ``MM_EVENTS_DIR``) — no monkeypatch into module internals
-    needed.
-    """
-    monkeypatch.setenv("MM_RETROS_DIR", str(tmp_path / "_isolated_retros"))
-
-
 def pytest_configure(config) -> None:
     """Register the `no_mm_events_isolation` marker so pytest doesn't
     warn about unknown markers."""

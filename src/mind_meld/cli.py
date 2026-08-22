@@ -4994,6 +4994,9 @@ def gc(
         # by_day older than 90d) are dropped. Dry-run reports without
         # mutating the cache file.
         retention._gc_token_cache(dry_run, verbose)
+        # v0.12.39: leftover v0.12.0 trend-snapshot files. Best-effort,
+        # filename-matched only, then rmdir if empty. Never rm -rf.
+        retention._gc_orphan_retros_dir(dry_run, verbose)
         if prune_conflicts:
             retention._gc_old_conflict_files(config, dry_run, verbose)
     finally:
@@ -5736,16 +5739,14 @@ def retro_fleet_cmd(
     no_save: bool = typer.Option(
         False,
         "--no-save",
-        help=(
-            "Skip writing the snapshot at ~/.local/share/mind-meld/retros/. "
-            "Used by the skill on the second pass to avoid double-writes."
-        ),
+        hidden=True,
+        help="Deprecated no-op. Snapshot persistence was removed in v0.12.39.",
     ),
     dump_host_usage: bool = typer.Option(
         False,
         "--dump-host-usage",
         hidden=True,
-        help="Forensic JSON of accepted host inventory (Track 22A).",
+        help="Forensic JSON of accepted host inventory. Skips the markdown retro.",
     ),
 ) -> None:
     """Render fleet retrospective markdown to stdout.
@@ -5760,9 +5761,9 @@ def retro_fleet_cmd(
       ``MM_THEMES_PROMPT`` JSON sidecar at the bottom. Skill reads the
       sidecar, synthesizes themes + noteworthy, then re-invokes.
     * Pass 2 — ``mm retro-fleet 7d --theme A --theme B --theme C
-      --noteworthy "..." --name kb --no-save`` re-renders with a
-      pixel-aligned ASCII card up top and skips a duplicate snapshot
-      write.
+      --noteworthy "..." --name kb`` re-renders with a pixel-aligned
+      ASCII card up top. ``--no-save`` is accepted as a hidden no-op
+      (removed as of v0.12.39; kept so a stale skill copy still exits 0).
 
     Thin wrapper around ``mind_meld.skills.retro_fleet.aggregator.main``.
     Routes through ``mm`` (guaranteed on PATH wherever mm is installed)

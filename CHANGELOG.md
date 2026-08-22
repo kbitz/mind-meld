@@ -2,6 +2,26 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.39] - 2026-08-21
+
+**Fleet retros now compare this window to the prior equal period from the synced events corpus, so the trends section is fleet-deterministic for the first time.** The v0.12.0 machine-local snapshot cache compared against whenever you last typed the command, fired twice in 106 days, and was wrong both times. Snapshots were never synced, so an upgraded Mac and an old one produce different trend sections from the same corpus until both upgrade — that is the pre-existing non-determinism being fixed, not a new bug.
+
+### Changed
+
+- **`## Trends vs prior <N>d`.** A four-row `prior | current` table (commits, lines added, lines removed, active days) computed from events already in memory. Renders below Code shipped, only when the window is shorter than 14d (week-over-week already owns longer windows), identically in both skill passes. Unavailable coverage renders the heading with the reason inline rather than fabricating growth from an empty baseline.
+- **`--no-save` is a hidden no-op.** Kept so `mm retro-fleet 30d --no-save > /tmp/retro.md` still exits 0 and a stale skill-store copy of SKILL.md does not fail Step 4 once per upgrade. Passing it prints one `mm: notice:` to stderr naming this release as the start of the removal window.
+- **`mm gc` reaps leftover snapshot files** matching `YYYY-MM-DD-NNN.json` under `~/.local/share/mind-meld/retros/`, then removes the directory if empty. Never `rm -rf`. Dry-runnable.
+
+### Fixed
+
+- **Trends stay deterministic across timezones and duplicate event copies.** Active-day keys and period labels use UTC, and an out-of-window copy of a SHA can no longer hide its valid current-period copy.
+- **Unreadable mm-event records no longer masquerade as a known-zero prior period.** Trends now render unavailable rather than producing a table against incomplete data.
+- **Current Typer/Rich help rendering no longer makes the hidden `--no-save` compatibility test fail in CI.**
+
+### Removed
+
+- The snapshot subsystem (`_save_snapshot` / `_load_prior_snapshot` / `MM_RETROS_DIR` / the 365-day snapshot reaper). Trends no longer depend on this machine's command history.
+
 ## [0.12.38] - 2026-08-21
 
 **Agent skill links now point at an mm-owned store instead of whichever interpreter ran `mm`, so a destroyed Conductor workspace or a Homebrew Python bump can no longer take retro-fleet offline.**

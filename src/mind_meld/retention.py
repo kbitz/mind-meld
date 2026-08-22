@@ -8,6 +8,8 @@ Extracted from ``cli.py`` in Track 16A. Four reapers behind ``mm gc``:
 * ``_gc_old_event_files`` — mm-events JSONLs past ``EVENTS_RETENTION_DAYS``
 * ``_gc_old_conflict_files`` — ``.sync-conflict-*`` sidecars past
   ``CONFLICT_AGE_DAYS`` (only with ``--conflicts``)
+* ``_gc_orphan_retros_dir`` — leftover v0.12.0 ``YYYY-MM-DD-NNN.json``
+  snapshot files, then ``rmdir`` if empty (never ``rm -rf``)
 
 Depends on ``resolveflow._find_conflict_files``, which is why this module lands
 AFTER resolveflow in the Track 16A series and why ``retention -> resolveflow``
@@ -46,6 +48,12 @@ CONFLICT_AGE_DAYS = 30
 # C6) — iCloud restores produce misleading mtimes.
 EVENTS_RETENTION_DAYS = 90
 _EVENTS_FILENAME_DATE_RE = re.compile(r"^(?P<device>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$")
+DEFAULT_RETROS_DIR = Path("~/.local/share/mind-meld/retros").expanduser()
+"""Orphaned v0.12.0 trend-snapshot directory. Track 24B deleted the
+snapshot subsystem; ``_gc_orphan_retros_dir`` reaps leftover files."""
+_SNAPSHOT_FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(\d+)\.json$")
+"""v0.12.0 snapshot filename ``YYYY-MM-DD-NNN.json``. The reaper unlinks
+only files matching this shape — never ``rm -rf`` the directory."""
 
 
 @dataclass(frozen=True)
@@ -343,12 +351,117 @@ def _gc_old_conflict_files(
     return outcome
 
 
+def _gc_orphan_retros_dir(
+    dry_run: bool,
+    verbose: bool,
+    *,
+    retros_dir: Path | None = None,
+) -> ReapOutcome:
+    """Reap leftover v0.12.0 trend-snapshot files.
+
+    Track 24B deleted the snapshot subsystem. This reaper unlinks only
+    files matching ``_SNAPSHOT_FILENAME_RE``, then ``rmdir`` the directory
+    if empty. Never ``rm -rf``: a user file that does not match the
+    snapshot regex is left alone, and a non-empty dir stays. Best-effort:
+    every I/O failure is skipped, not raised. Dry-run selects the same
+    candidates without unlinking or rmdir.
+    """
+    target = retros_dir if retros_dir is not None else DEFAULT_RETROS_DIR
+    if not target.is_dir():
+        outcome = ReapOutcome()
+        _render_reap_outcome("Orphan retros", outcome, dry_run=dry_run)
+        return outcome
+
+    candidates = 0
+    deleted = 0
+    failed = 0
+    skipped = 0
+    repairs = 0
+    repair_failed = 0
+    try:
+        files = list(target.iterdir())
+    except OSError as e:
+        outcome = ReapOutcome(skipped=1)
+        if verbose:
+            console.print(
+                f"  [yellow]orphan retros scan skipped: {safe_str(target)} — {safe_str(e)}[/yellow]"
+            )
+        _render_reap_outcome("Orphan retros", outcome, dry_run=dry_run)
+        return outcome
+
+    matching: list[Path] = []
+    leftovers = 0
+    for path in files:
+        try:
+            if not path.is_file():
+                leftovers += 1
+                continue
+        except OSError:
+            skipped += 1
+            continue
+        if _SNAPSHOT_FILENAME_RE.match(path.name) is None:
+            leftovers += 1
+            continue
+        matching.append(path)
+
+    candidates = len(matching)
+    for path in matching:
+        if dry_run:
+            if verbose:
+                console.print(f"  [dim]would delete:[/dim] {safe_str(path)}")
+            continue
+        try:
+            path.unlink()
+        except OSError as e:
+            failed += 1
+            leftovers += 1
+            if verbose:
+                console.print(f"  [yellow]delete failed:[/yellow] {safe_str(path)} — {safe_str(e)}")
+            continue
+        deleted += 1
+        if verbose:
+            console.print(f"  [dim]deleted:[/dim] {safe_str(path)}")
+
+    would_rmdir = leftovers == 0 and (dry_run or failed == 0)
+    if would_rmdir and (matching or not files):
+        if dry_run:
+            repairs = 1
+            if verbose:
+                console.print(f"  [dim]would rmdir:[/dim] {safe_str(target)}")
+        else:
+            try:
+                target.rmdir()
+                repairs = 1
+                if verbose:
+                    console.print(f"  [dim]rmdir:[/dim] {safe_str(target)}")
+            except OSError as e:
+                repair_failed = 1
+                if verbose:
+                    console.print(
+                        f"  [yellow]rmdir failed:[/yellow] {safe_str(target)} — {safe_str(e)}"
+                    )
+
+    outcome = ReapOutcome(
+        candidates=candidates,
+        deleted=deleted,
+        failed=failed,
+        skipped=skipped,
+        repairs=repairs,
+        repair_failed=repair_failed,
+    )
+    _render_reap_outcome("Orphan retros", outcome, dry_run=dry_run)
+    return outcome
+
+
 __all__ = [
     "CONFLICT_AGE_DAYS",
+    "DEFAULT_RETROS_DIR",
     "EVENTS_RETENTION_DAYS",
     "ReapOutcome",
+    "_SNAPSHOT_FILENAME_RE",
     "_gc_old_conflict_files",
     "_gc_old_event_files",
+    "_gc_orphan_retros_dir",
     "_gc_token_cache",
     "_sweep_local_tmp_files",
 ]

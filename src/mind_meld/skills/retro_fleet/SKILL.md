@@ -179,10 +179,11 @@ Keep them tight. The card has a fixed width and Python truncates with
 
 ## Step 4: second-pass card render
 
-Call the aggregator again with the synthesized strings, `--name` set to
+Call the aggregator again with the synthesized strings and `--name` set to
 the user's identifier (use `git config --global user.email` to derive a
-short handle when the user hasn't said one explicitly), and `--no-save`
-so the snapshot isn't double-written.
+short handle when the user hasn't said one explicitly). `--no-save` is a
+no-op as of v0.12.39 (kept so this invocation stays compatible across an
+upgrade whose skill store still has the old SKILL.md).
 
 ```bash
 mm retro-fleet <window> \
@@ -232,8 +233,8 @@ chat (NOT to the card) three short paragraphs:
   criticism. "Test ratio held at ~25% this window; lifting it past 40%
   before the next major refactor would cushion regressions."
 - **Focus next window (one specific thing).** Forward-looking and
-  actionable. "Land the snapshot pruning hook so the retros dir
-  doesn't grow unbounded as you settle into weekly retros."
+  actionable. "Land the `--format json` export so a weekly cron can
+  keep a long-horizon archive now that snapshot files are gone."
 
 Match the **tone block**: specific, earned, no coddling. Praise should
 feel like something you'd actually say in a 1:1; growth suggestions
@@ -255,10 +256,11 @@ section is omitted when there is nothing to surface):
 - `Sessions count incomplete: N peer(s) on pre-v0.11.0` — those peers still
   emit v=1 sessions snapshots (delta semantics). Their session totals are
   honestly omitted instead of double-counted.
-- `Tokens incomplete on <peers>: pre-v0.11.0 session schema and/or
-  pre-v0.11.14 OR cold token cache` — those peers cannot provide complete
-  model-token totals. Run `mm push` on the named peers to rebuild the cache,
-  then upgrade if the warning persists.
+- `Tokens incomplete on <peers>: pre-v0.11.0 session schema + pre-v0.11.14 OR cold token cache` —
+  those peers cannot provide complete model-token totals. The reasons join with
+  ` + ` and name `pre-v0.11.0 session schema` and/or `pre-v0.11.14 OR cold token
+  cache`. Run `mm push` on the named peers to rebuild the cache, then upgrade
+  if the warning persists.
 - `Skills incomplete: N peer(s) on pre-v0.11.27 OR with cold token cache` —
   those peers' v=2 snapshots omit ``skills_by_day``. Run `mm push` on the
   named peers (warms the token cache and re-emits the field), or upgrade
@@ -270,6 +272,11 @@ section is omitted when there is nothing to surface):
 - `Requested Nd window exceeds the 90-day events retention.` — user asked
   for a window longer than `EVENTS_RETENTION_DAYS`. Older days are reaped
   by `mm gc` and not in the data.
+- `No agent-log snapshots yet from N machine(s) — run mm push there…` —
+  no accepted host-usage snapshot on those machines. Unknown, not zero.
+- `No agent-log snapshots were accepted from any machine — run mm push on
+  each Mac…` — the device registry was unavailable so missing-device
+  detection could not run; still unknown, not zero.
 - `No agent-log reader contributed on any machine…` — the row's contributor
   list is empty. That can mean no source is enabled, or that each selected
   reader had no attributable local ledger; it cannot distinguish the two.
@@ -286,24 +293,35 @@ section is omitted when there is nothing to surface):
 - `Agent-log snapshots from N machine(s) were rejected (<reasons>)…` — those
   machines' rows failed validation, usually a version mismatch. Counts
   **machines**, not rows, so one broken writer cannot inflate it.
+- `Known-fleet count unavailable (`mm devices --format=json` failed).` — the
+  header drops the "of M known" tail. Not a data-loss signal.
+- `N tokens from N unpriced model(s) excluded from cost estimate.` — those
+  models contribute to the token total but not the cost line.
+- `N discovery error(s) recorded — see mm: notice: stderr breadcrumbs.` —
+  forensic; do not invent a cause.
+- `N record(s) skipped due to parse errors. Output may be incomplete.` —
+  foreign-caller fallback; treat like the mm-event parse-error line.
+- `Fleet composition changed between windows:` — the set of devices that
+  pushed in the prior Nd differs from this Nd. Report it; never compute the
+  trend yourself from the two windows.
 
-## Trends vs last retro
+## Trends vs prior Nd
 
-The aggregator persists a JSON snapshot to
-`~/.local/share/mind-meld/retros/YYYY-MM-DD-N.json` after every save-
-enabled run. On subsequent runs with the same window, deltas vs the most
-recent matching snapshot render as a `## Trends vs last retro` block —
-when something changed. No section is rendered for first runs or
-zero-delta runs.
+For windows shorter than 14d the body includes a `## Trends vs prior <N>d
+(A → B)` two-column table (commits, lines added, lines removed, active
+days) computed from the synced events corpus against the immediately
+preceding equal-length window. Identical in both passes. Windows of 14d
+and longer omit this section — week-over-week already owns
+period-over-period there.
 
-**Known limitation: Trends belongs to the first pass only.** The card renders
-only when card inputs are supplied, and the snapshot saves only when they are
-*not*, so the second pass compares against the snapshot the first pass wrote
-seconds earlier over the identical corpus — every delta is zero and the section
-is skipped. So Trends appears in the Step 2 output and never in the Step 4
-output you paste. If the user asks about week-over-week movement, read it from
-the first-pass markdown. Tracked in `docs/TODOS.md`; do not add a
-change-gated line to the card, which cannot work for the same reason.
+This is NOT a delta vs the last time the command was run. Do not add a
+trends line to the ASCII card: the card is width-constrained and a
+down-arrow on a shareable artifact is public self-flagellation.
+
+If the section is missing on a 7d retro whose current window has commits,
+the heading is still present with an `_Unavailable: ..._` italic line —
+coverage is incomplete, not "no change". Never invent a trend from the
+two windows yourself.
 
 ## Author email filtering
 

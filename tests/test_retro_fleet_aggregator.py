@@ -19,10 +19,11 @@ Pins all the load-bearing aggregation rules from /plan-eng-review:
 
 from __future__ import annotations
 
+import dataclasses
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import get_args
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -3704,102 +3705,352 @@ class TestWeeklyBuckets:
         assert total_active >= 2
 
 
-class TestSnapshotPersistence:
-    def test_save_and_load_roundtrip(self, tmp_path):
-        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        data.git = aggregator.GitAggregate(
-            commits=42,
-            additions=1000,
-            deletions=200,
-            pull_request_identities={("github.com/kb/mm", 114)},
+def _pair(
+    events: list[dict],
+    *,
+    window_days: int = 7,
+    emails: frozenset[str] | None = None,
+) -> tuple[aggregator.PriorPeriod, aggregator.PriorPeriod]:
+    since = NOW - timedelta(days=window_days)
+    return aggregator._aggregate_git_period_pair(
+        events,
+        since - timedelta(days=window_days),
+        since,
+        NOW,
+        emails if emails is not None else frozenset({"kb@example.com"}),
+    )
+
+
+def _agg_with_floor(
+    tmp_path: Path,
+    monkeypatch,
+    events: list[dict],
+    *,
+    floor: str,
+    window_days: int = 7,
+    now: datetime = NOW,
+) -> aggregator.RetroData:
+    events_dir = tmp_path / "events"
+    _write_events(events_dir, "dev-a", floor, events)
+    monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+    monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset({"kb@example.com"}))
+    return aggregator.aggregate(
+        events_dir=events_dir,
+        window_days=window_days,
+        author_emails=frozenset({"kb@example.com"}),
+        now=now,
+    )
+
+
+class TestPriorPeriodComparison:
+    """Track 24B — computed prior equal period, no snapshot file."""
+
+    def test_commit_at_exactly_since_counts_once(self):
+        since = NOW - timedelta(days=7)
+        events = [_git_event("dev-a", 0, [_commit("a" * 7, 7)])]
+        prior, current = aggregator._aggregate_git_period_pair(
+            events,
+            since - timedelta(days=7),
+            since,
+            NOW,
+            frozenset({"kb@example.com"}),
         )
-        path = aggregator._save_snapshot(data, tmp_path)
-        assert path is not None
-        assert path.exists()
-        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
-        assert prior is not None
-        assert prior["window_days"] == 7
-        assert prior["metrics"]["commits"] == 42
-        assert prior["metrics"]["pull_requests"] == 1
+        assert current.commits + prior.commits == 1
+        assert current.commits == 1
+        assert prior.commits == 0
 
-    def test_legacy_snapshot_without_pr_metric_loads(self, tmp_path):
-        legacy = {
-            "schema_version": 1,
-            "window_days": 7,
-            "since": (NOW - timedelta(days=7)).isoformat(),
-            "until": NOW.isoformat(),
-            "metrics": {"commits": 42},
-        }
-        (tmp_path / "2026-04-28-001.json").write_text(json.dumps(legacy))
-        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
-        assert prior == legacy
+    def test_boundary_day_not_counted_in_both_windows(self):
+        since = NOW - timedelta(days=7)
+        in_current = _commit("c" * 7, 7)
+        in_prior = _commit("p" * 7, 7)
+        in_prior["date"] = (since - timedelta(microseconds=1)).isoformat()
+        prior, current = aggregator._aggregate_git_period_pair(
+            [_git_event("dev-a", 0, [in_current, in_prior])],
+            since - timedelta(days=7),
+            since,
+            NOW,
+            frozenset({"kb@example.com"}),
+        )
+        assert current.commits == 1
+        assert prior.commits == 1
 
-    def test_load_skips_window_mismatch(self, tmp_path):
-        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        aggregator._save_snapshot(data, tmp_path)
-        prior = aggregator._load_prior_snapshot(tmp_path, window_days=30)
-        assert prior is None
+    def test_same_sha_conflicting_dates_enters_one_period(self):
+        sha = "deadbee"
+        events = [
+            _git_event("dev-a", 10, [_commit(sha, 10)]),
+            _git_event("dev-b", 1, [_commit(sha, 1)]),
+        ]
+        prior, current = _pair(events)
+        assert prior.commits + current.commits == 1
 
-    def test_load_picks_most_recent_matching(self, tmp_path):
-        # Save two snapshots; loader returns the most recent.
-        d1 = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        d1.git = aggregator.GitAggregate(commits=10)
-        path1 = aggregator._save_snapshot(d1, tmp_path)
-        # Force ascending filename order to simulate sequence.
-        path1.rename(tmp_path / "2026-05-01-1.json")
+    def test_out_of_window_duplicate_does_not_hide_current_commit(self):
+        sha = "deadbee"
+        events = [
+            _git_event("dev-a", 20, [_commit(sha, 20)]),
+            _git_event("dev-b", 1, [_commit(sha, 1)]),
+        ]
+        prior, current = _pair(events)
+        assert prior.commits == 0
+        assert current.commits == 1
 
-        d2 = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        d2.git = aggregator.GitAggregate(commits=99)
-        path2 = aggregator._save_snapshot(d2, tmp_path)
-        path2.rename(tmp_path / "2026-05-07-1.json")
+    def test_active_days_use_utc_not_machine_local_timezone(self, monkeypatch):
+        def _unexpected_local_day(_dt):
+            raise AssertionError("trends must not use the machine's local timezone")
 
-        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
-        assert prior is not None
-        assert prior["metrics"]["commits"] == 99
+        monkeypatch.setattr(aggregator, "_local_day_iso", _unexpected_local_day)
+        first = _commit("a" * 7, 1)
+        first["date"] = "2026-04-27T23:30:00+00:00"
+        second = _commit("b" * 7, 0)
+        second["date"] = "2026-04-28T00:30:00+00:00"
+        _prior, current = _pair([_git_event("dev-a", 0, [first, second])])
+        assert current.active_days == 2
 
-    def test_corrupt_snapshot_skipped(self, tmp_path):
-        (tmp_path / "2026-05-07-1.json").write_text("{ not json")
-        d = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        d.git = aggregator.GitAggregate(commits=10)
-        path = aggregator._save_snapshot(d, tmp_path)
-        # Save still succeeds; load skips the corrupt file and finds ours.
-        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
-        assert prior is not None
-        assert path is not None
+    def test_trends_day_labels_normalize_to_utc(self):
+        offset = timezone(timedelta(hours=2))
+        dt = datetime(2026, 4, 28, 0, 30, tzinfo=offset)
+        assert aggregator._trend_day_iso(dt) == "2026-04-27"
 
-    def test_compute_prior_delta_from_dict(self):
-        prior = {
-            "window_days": 7,
-            "until": "2026-05-01T00:00:00+00:00",
-            "metrics": {
-                "commits": 10,
-                "additions": 100,
-                "deletions": 20,
-                "streak_days": 5,
-                "sessions": 50,
-                "tokens_total": 1000,
-                "push_events": 3,
-            },
-        }
-        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        data.git = aggregator.GitAggregate(commits=15, additions=200, deletions=30, streak_days=12)
-        delta = aggregator._compute_prior_delta(data, prior)
-        assert delta.has_prior is True
-        assert delta.commits == 5
-        assert delta.additions == 100
-        assert delta.streak_days == 7
+    def test_prior_window_before_coverage_floor_is_unavailable(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [_git_event("dev-a", 1, [_commit("a" * 7, 1)]), _push_event("dev-a", 1)],
+            floor="2026-04-20",
+        )
+        assert data.comparison.status == "unavailable"
+        out = aggregator.format_retro(data)
+        assert "## Trends vs prior 7d" in out
+        assert "Unavailable:" in out
+        assert "event log starts 2026-04-20" in out
+        assert "| Commits" not in out
 
-    def test_compute_prior_delta_handles_none(self):
-        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        delta = aggregator._compute_prior_delta(data, None)
-        assert delta.has_prior is False
+    def test_45d_window_refused_at_retention_boundary(self):
+        prior_start = NOW - timedelta(days=90)
+        floor = date(2026, 1, 29)
+        assert (NOW.date() - floor).days == 89
+        assert aggregator._coverage_allows_prior(floor, prior_start) is False
+        # The arithmetic guard this replaced would have PASSED: 2*45 > 90 is False.
+        assert not (2 * 45 > aggregator.EVENTS_RETENTION_DAYS)
+        data = aggregator.RetroData(
+            window_days=45,
+            since=NOW - timedelta(days=45),
+            until=NOW,
+            comparison=aggregator.PeriodComparison(status="gated"),
+        )
+        assert "Trends vs prior" not in aggregator.format_retro(data)
 
-    def test_render_skips_section_when_no_changes(self):
-        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        data.prior = aggregator.PriorRetroDelta(has_prior=True, prior_date="2026-05-01")
-        markdown = aggregator.format_retro(data)
-        assert "Trends vs last retro" not in markdown
-        assert "No metric changed" not in markdown
+    def test_prior_window_with_no_snapshot_is_unavailable_not_zero(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [_git_event("dev-a", 1, [_commit("a" * 7, 1, add=99, dlt=3)])],
+            floor="2026-04-25",
+        )
+        assert data.comparison.status == "unavailable"
+        out = aggregator.format_retro(data)
+        assert "Unavailable:" in out
+        assert "Prior 7d" not in out
+        assert "↑" not in out
+
+    def test_unreadable_event_records_make_trends_unavailable(self, tmp_path, monkeypatch):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        (events_dir / "dev-old-2026-04-01.jsonl").write_text("not json\n", encoding="utf-8")
+        _write_events(
+            events_dir,
+            "dev-current",
+            "2026-04-28",
+            [_git_event("dev-current", 1, [_commit("a" * 7, 1)])],
+        )
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
+        data = aggregator.aggregate(
+            events_dir=events_dir,
+            window_days=7,
+            author_emails=frozenset({"kb@example.com"}),
+            now=NOW,
+        )
+        assert data.skipped_per_source == {"events": 1}
+        assert data.comparison.status == "unavailable"
+        out = aggregator.format_retro(data)
+        assert "event log contains unreadable records" in out
+        assert "| Commits" not in out
+
+    def test_prior_zero_current_active_renders_zero_not_dash(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [_git_event("dev-a", 1, [_commit("a" * 7, 1, add=10, dlt=2)])],
+            floor="2026-04-01",
+        )
+        assert data.comparison.status == "ok"
+        assert data.comparison.prior.commits == 0
+        out = aggregator.format_retro(data)
+        assert "| Commits" in out
+        assert "—" not in out.split("## Trends vs prior 7d")[1].split("## ")[0]
+
+    def test_current_zero_suppresses_section(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [_git_event("dev-a", 10, [_commit("a" * 7, 10)])],
+            floor="2026-04-01",
+        )
+        assert data.comparison.status == "suppressed"
+        assert "Trends vs prior" not in aggregator.format_retro(data)
+
+    def test_identical_nonzero_columns_still_render(self):
+        since = NOW - timedelta(days=7)
+        data = aggregator.RetroData(
+            window_days=7,
+            since=since,
+            until=NOW,
+            comparison=aggregator.PeriodComparison(
+                status="ok",
+                prior=aggregator.PriorPeriod(commits=1, additions=4, deletions=1, active_days=1),
+                current=aggregator.PriorPeriod(commits=1, additions=4, deletions=1, active_days=1),
+                prior_start=since - timedelta(days=7),
+                prior_end=since - timedelta(microseconds=1),
+            ),
+        )
+        data.git = aggregator.GitAggregate(commits=1, additions=4, deletions=1)
+        out = aggregator.format_retro(data)
+        block = out.split("## Trends vs prior 7d")[1]
+        assert "| Commits" in block
+        assert "1" in block
+
+    def test_window_days_14_omits_section(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [_git_event("dev-a", 1, [_commit("a" * 7, 1)])],
+            floor="2026-04-01",
+            window_days=14,
+        )
+        assert data.comparison.status == "gated"
+        assert "Trends vs prior" not in aggregator.format_retro(data)
+
+    def test_device_coverage_mismatch_is_disclosed(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [
+                _git_event("dev-a", 1, [_commit("a" * 7, 1)]),
+                _push_event("dev-a", 1),
+                _push_event("dev-b", 10),
+            ],
+            floor="2026-04-01",
+        )
+        assert data.comparison.status == "ok"
+        assert data.comparison.fleet_changed is True
+        out = aggregator.format_retro(data)
+        assert "Fleet composition changed between windows" in out
+
+    def test_prior_window_sees_rows_outside_the_current_window(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [
+                _git_event("dev-a", 10, [_commit("p" * 7, 10, add=5, dlt=1)]),
+                _git_event("dev-a", 1, [_commit("c" * 7, 1, add=8, dlt=2)]),
+            ],
+            floor="2026-04-01",
+        )
+        assert data.comparison.status == "ok"
+        assert data.comparison.prior.commits == 1
+        assert data.comparison.current.commits == 1
+        assert data.git.commits == 1
+
+    def test_sessions_row_absent_from_prior_period(self):
+        names = {f.name for f in dataclasses.fields(aggregator.PriorPeriod)}
+        assert "sessions" not in names
+        assert "tokens_total" not in names
+        assert "push_events" not in names
+
+    def test_streak_row_absent_from_prior_period(self):
+        names = {f.name for f in dataclasses.fields(aggregator.PriorPeriod)}
+        assert "streak_days" not in names
+
+    def test_prior_period_holds_only_integers(self):
+        hints = get_type_hints(aggregator.PriorPeriod)
+        assert hints
+        for name, typ in hints.items():
+            assert typ is int, f"{name} is {typ}, not int"
+
+    def test_host_tokens_do_not_reach_prior_period(self):
+        git = _git_event("dev-a", 1, [_commit("a" * 7, 1)])
+        host = _host_event("dev-a", NOW.isoformat())
+        since = NOW - timedelta(days=7)
+        emails = frozenset({"kb@example.com"})
+        with_host = aggregator._aggregate_git_period_pair(
+            [git, host], since - timedelta(days=7), since, NOW, emails
+        )
+        without = aggregator._aggregate_git_period_pair(
+            [git], since - timedelta(days=7), since, NOW, emails
+        )
+        assert with_host == without
+
+    def test_weekly_buckets_not_computed_for_prior_window(self, tmp_path, monkeypatch):
+        calls: list[int] = []
+        real = aggregator.aggregate_git
+
+        def spy(*args, **kwargs):
+            calls.append(kwargs.get("window_days", -1))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(aggregator, "aggregate_git", spy)
+        _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [_git_event("dev-a", 1, [_commit("a" * 7, 1)])],
+            floor="2026-04-01",
+        )
+        assert calls == [7]
+
+    def test_aggregate_reads_events_dir_once_and_shells_out_once(self, tmp_path, monkeypatch):
+        events_dir = tmp_path / "events"
+        _write_events(
+            events_dir,
+            "dev-a",
+            "2026-04-01",
+            [_git_event("dev-a", 1, [_commit("a" * 7, 1)]), _push_event("dev-a", 1)],
+        )
+        n = {"list": 0, "devices": 0}
+        real_list = aggregator._list_event_files
+
+        def counting_list(path, *, skip_counter):
+            n["list"] += 1
+            return real_list(path, skip_counter=skip_counter)
+
+        def counting_devices():
+            n["devices"] += 1
+            return None, []
+
+        monkeypatch.setattr(aggregator, "_list_event_files", counting_list)
+        monkeypatch.setattr(aggregator, "get_known_devices", counting_devices)
+        aggregator.aggregate(
+            events_dir=events_dir,
+            window_days=7,
+            author_emails=frozenset({"kb@example.com"}),
+            now=NOW,
+        )
+        assert n["list"] == 1
+        assert n["devices"] == 1
+
+    def test_snapshot_subsystem_is_gone(self):
+        assert not hasattr(aggregator, "_save_snapshot")
+        assert not hasattr(aggregator, "_load_prior_snapshot")
+        assert not hasattr(aggregator, "_retro_to_snapshot")
+        assert not hasattr(aggregator, "PriorRetroDelta")
+
+    def test_trends_sit_below_code_shipped(self, tmp_path, monkeypatch):
+        data = _agg_with_floor(
+            tmp_path,
+            monkeypatch,
+            [_git_event("dev-a", 1, [_commit("a" * 7, 1)])],
+            floor="2026-04-01",
+        )
+        out = aggregator.format_retro(data)
+        assert out.index("## Code shipped") < out.index("## Trends vs prior 7d")
 
 
 class TestAsciiCard:
@@ -4088,24 +4339,33 @@ class TestThemesPrompt:
 
 
 class TestMainCliFlags:
-    def test_no_save_flag_skips_snapshot(self, tmp_path, monkeypatch, capsys):
+    def test_no_save_is_accepted_as_deprecated_noop(self, tmp_path, monkeypatch, capsys):
         events_dir = tmp_path / "events"
         events_dir.mkdir()
-        retros_dir = tmp_path / "retros"
         monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
-        monkeypatch.setenv("MM_RETROS_DIR", str(retros_dir))
         monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset(), raising=True)
         monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
         rc = aggregator.main(["7d", "--no-save"])
         assert rc == 0
-        # No snapshot dir should have been created (no save attempted).
-        assert not retros_dir.exists() or list(retros_dir.glob("*.json")) == []
+        captured = capsys.readouterr()
+        assert captured.out.startswith("# Retro")
+        assert "mm: notice: --no-save is a no-op as of v0.12.39" in captured.err
+        assert "warning:" not in captured.err
+
+    def test_bare_integer_window_suggests_nd(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            aggregator.main(["7"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "did you mean '7d'?" in err
+        assert "mm retro-fleet" in err
+        assert "--dump-host-usage" not in err
+        assert "--no-save" not in err
 
     def test_theme_args_render_card(self, tmp_path, monkeypatch, capsys):
         events_dir = tmp_path / "events"
         events_dir.mkdir()
         monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
-        monkeypatch.setenv("MM_RETROS_DIR", str(tmp_path / "retros"))
         monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset(), raising=True)
         monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
         rc = aggregator.main(
@@ -4123,26 +4383,15 @@ class TestMainCliFlags:
             ]
         )
         assert rc == 0
-        out = capsys.readouterr().out
+        captured = capsys.readouterr()
+        out = captured.out
         assert "╔" in out
         assert "kb · " in out
         assert "alpha" in out
         assert "MODELS" in out
         assert "0 detected GitHub PR references" in out
         assert "MM_THEMES_PROMPT" not in out
-
-    def test_first_pass_writes_snapshot(self, tmp_path, monkeypatch):
-        events_dir = tmp_path / "events"
-        events_dir.mkdir()
-        retros_dir = tmp_path / "retros"
-        monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
-        monkeypatch.setenv("MM_RETROS_DIR", str(retros_dir))
-        monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset(), raising=True)
-        monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
-        rc = aggregator.main(["7d"])
-        assert rc == 0
-        snapshots = list(retros_dir.glob("*.json"))
-        assert len(snapshots) == 1
+        assert "mm: notice: --no-save is a no-op" in captured.err
 
 
 class TestSafeProseHardening:
@@ -4184,62 +4433,6 @@ class TestSafeProseHardening:
         assert aggregator._classify_commit_subject(long) == "feat"
 
 
-class TestSnapshotRaceSafety:
-    """v0.12.0 review-gate fixes — snapshot save uses O_EXCL so two
-    concurrent retros can't silently overwrite each other on the same
-    sequence number; load + prune sort by parsed (date, seq) tuple so
-    seq=10+ doesn't lex-shadow seq=9."""
-
-    def test_filename_format_zero_padded(self, tmp_path):
-        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        path = aggregator._save_snapshot(data, tmp_path)
-        assert path is not None
-        assert aggregator._SNAPSHOT_FILENAME_RE.match(path.name) is not None
-        assert path.name.endswith("-001.json")
-
-    def test_seq_advances_on_collision(self, tmp_path):
-        # Pre-create a file with seq=001 then save; new save must pick
-        # a fresh seq instead of overwriting.
-        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
-        today = NOW.astimezone().date().isoformat()
-        squat = tmp_path / f"{today}-001.json"
-        squat.write_text('{"window_days": 7, "metrics": {"commits": 999}}')
-        path = aggregator._save_snapshot(data, tmp_path)
-        assert path is not None
-        # Squatter file is untouched; new save took seq 002.
-        assert "999" in squat.read_text()
-        assert path.name.endswith("-002.json")
-
-    def test_load_returns_seq_ten_not_seq_nine(self, tmp_path):
-        # Pre-fix bug: lex sort with reverse=True puts -9.json BEFORE
-        # -10.json so loader returned seq=9 as "most recent."
-        # With zero-pad + tuple sort, -010 sorts after -009 correctly.
-        today = NOW.astimezone().date().isoformat()
-        for seq, commits in [(9, 9), (10, 10)]:
-            (tmp_path / f"{today}-{seq:03d}.json").write_text(
-                json.dumps(
-                    {
-                        "window_days": 7,
-                        "until": NOW.isoformat(),
-                        "metrics": {"commits": commits},
-                    }
-                )
-            )
-        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
-        assert prior is not None
-        assert prior["metrics"]["commits"] == 10
-
-    def test_load_caps_oversized_files(self, tmp_path):
-        today = NOW.astimezone().date().isoformat()
-        big = tmp_path / f"{today}-001.json"
-        big.write_text("[" + "0," * 1_000_000 + "0]")
-        good = tmp_path / f"{today}-002.json"
-        good.write_text('{"window_days": 7, "metrics": {"commits": 7}}')
-        prior = aggregator._load_prior_snapshot(tmp_path, window_days=7)
-        assert prior is not None
-        assert prior["metrics"]["commits"] == 7
-
-
 class TestRenderHardening:
     """v0.12.0 review-gate fixes — card caps theme count at MAX_THEMES,
     aggregator window arg refuses pathological values, header date uses
@@ -4270,25 +4463,6 @@ class TestRenderHardening:
         local_since = (NOW - timedelta(days=7)).astimezone().date().isoformat()
         out = aggregator.format_retro(data, themes=["x"], noteworthy="y", name="kb")
         assert f"# Retro: {local_since} → {local_until}" in out
-
-
-class TestSnapshotPruning:
-    def test_old_snapshots_reaped(self, tmp_path):
-        # Year-old snapshot file (filename date) — should be pruned.
-        old_date = (datetime.now(timezone.utc) - timedelta(days=400)).date().isoformat()
-        old = tmp_path / f"{old_date}-001.json"
-        old.write_text('{"window_days": 7, "metrics": {}}')
-        recent = tmp_path / "2026-05-07-001.json"
-        recent.write_text('{"window_days": 7, "metrics": {}}')
-        aggregator._prune_old_snapshots(tmp_path)
-        assert not old.exists()
-        assert recent.exists()
-
-    def test_unparseable_filenames_left_alone(self, tmp_path):
-        weird = tmp_path / "not-a-date-file.json"
-        weird.write_text("{}")
-        aggregator._prune_old_snapshots(tmp_path)
-        assert weird.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -4690,10 +4864,10 @@ class TestHostSnapshotNoWindowSpend:
         aggregator._render_token_block(token_with, with_host.sessions)
         aggregator._render_token_block(token_without, without.sessions)
         assert token_with == token_without
-        assert (
-            aggregator._retro_to_snapshot(with_host)["metrics"]["tokens_total"]
-            == (aggregator._retro_to_snapshot(without)["metrics"]["tokens_total"])
-        )
+        # Guardrail #2 of 5: host data never reaches the prior-period integers
+        # (replaces the deleted `_retro_to_snapshot` pin).
+        assert with_host.comparison.prior == without.comparison.prior
+        assert with_host.comparison.current == without.comparison.current
         assert with_host.sessions.tokens_by_model == without.sessions.tokens_by_model
         assert aggregator._aggregate_model_families(
             with_host.sessions.tokens_by_model
@@ -4788,14 +4962,12 @@ class TestHostSnapshotCoverage:
 
 
 class TestDumpHostUsage:
-    def test_dump_flag_skips_markdown_and_snapshot(self, tmp_path, monkeypatch, capsys):
+    def test_dump_flag_skips_markdown(self, tmp_path, monkeypatch, capsys):
         events_dir = tmp_path / "events"
         events_dir.mkdir()
-        retros_dir = tmp_path / "retros"
         ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
         (events_dir / "dev-a.jsonl").write_text(json.dumps(ev) + "\n")
         monkeypatch.setenv("MM_EVENTS_DIR", str(events_dir))
-        monkeypatch.setenv("MM_RETROS_DIR", str(retros_dir))
         monkeypatch.setattr(aggregator, "gather_author_emails", lambda: frozenset())
         monkeypatch.setattr(aggregator, "get_known_devices", lambda: (None, []))
         rc = aggregator.main(["7d", "--dump-host-usage"])
@@ -4805,7 +4977,6 @@ class TestDumpHostUsage:
         assert "dev-a" in payload["by_device"]
         assert "# Retro" not in out
         assert "MM_THEMES_PROMPT" not in out
-        assert not retros_dir.exists() or list(retros_dir.glob("*.json")) == []
 
 
 def _snap(

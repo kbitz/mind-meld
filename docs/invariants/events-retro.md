@@ -5,15 +5,15 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `SKILL_ROOTS`
-- `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files`
+- `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
-- `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
+- `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy).
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy).
 
 ---
 
@@ -381,15 +381,17 @@ does not).
 - **Isolation, pinned by test.** Host data reaches exactly two render sites and
   nothing else: not `sessions.tokens_by_model`, not
   `_aggregate_model_families`, not `estimate_cost`, not
-  `_unpriced_token_summary`, not `_render_token_block`, not `PriorRetroDelta`,
-  not `_retro_to_snapshot`. `token_usage.sum_bucket` is deliberately NOT shared
+  `_unpriced_token_summary`, not `_render_token_block`, not `PriorPeriod`,
+  not `_aggregate_git_period_pair`. `token_usage.sum_bucket` is deliberately NOT shared
   with `_aggregate_model_families`: the two callers sit on opposite sides of a
   trust boundary, and a later hardening for the tolerant caller would otherwise
-  silently cap accepted host totals.
-- **A card-level change gate is possible (Track 24B).** The v0.12.0 circularity
-  (`main` rendered the card iff `has_card_input` and saved iff **not**
-  `has_card_input`) is the bug 24B exists to break. Do not re-assert that
-  deltas can only live on the save-enabled first pass.
+  silently cap accepted host totals. Pinned by
+  `test_host_tokens_do_not_reach_prior_period` (replaces the deleted
+  `_retro_to_snapshot` pin).
+- **No card row (Track 24B, closed).** `_render_ascii_card` stays untouched.
+  The card is width-constrained at 64 chars with five blocks already competing,
+  and a down-arrow on an artifact you paste into iMessage is public
+  self-flagellation. Do not add a trends line to the card.
 
 Forbidden: summing `lifetime_by_family[family][day]` buckets as "tokens this
 window", summing across machines at all, and rendering any ratio against the
@@ -746,38 +748,36 @@ The retro-fleet output has two artifacts with different production paths:
 
 2. **The narrative paragraphs** (praise / level-up / focus) — written by the LLM directly into the conversation, NOT into the card. The SKILL.md instructs one each, anchored in actual commits/stats, framed as investment-advice not criticism.
 
-**Two-pass invocation is load-bearing.** Pass 1 (`mm retro-fleet 7d`) renders the markdown body + a fenced JSON sidecar tagged `<!-- MM_THEMES_PROMPT -->` for theme synthesis. Pass 2 (`mm retro-fleet 7d --theme A --theme B --theme C --noteworthy "..." --name kb --no-save`) re-renders with the card pinned at the top. The LLM never counts characters — Python pads. The single-pass alternative (LLM pads its own card content to width) was rejected because Opus drifts by 1-2 chars often enough to ruin screenshots. Pinned by `TestAsciiCard.test_card_lines_pad_to_fixed_width`.
-
-**`--no-save` on the second pass** prevents the snapshot from being double-written. The first-pass save is the canonical record for trend deltas; the second pass is purely a re-render for presentation. Pinned by `TestMainCliFlags.test_no_save_flag_skips_snapshot`.
+**Two-pass invocation is load-bearing.** Pass 1 (`mm retro-fleet 7d`) renders the markdown body + a fenced JSON sidecar tagged `<!-- MM_THEMES_PROMPT -->` for theme synthesis. Pass 2 (`mm retro-fleet 7d --theme A --theme B --theme C --noteworthy "..." --name kb`) re-renders with the card pinned at the top. The LLM never counts characters — Python pads. The single-pass alternative (LLM pads its own card content to width) was rejected because Opus drifts by 1-2 chars often enough to ruin screenshots. Pinned by `TestAsciiCard.test_card_lines_pad_to_fixed_width`. `--no-save` is accepted as a hidden no-op (v0.12.39) so a stale skill-store copy of SKILL.md still exits 0; pinned by `test_no_save_is_accepted_as_deprecated_noop`.
 
 **Themes prompt content scope.** The JSON payload includes `window_days` / `since` / `until` / `commits` / `additions` / `deletions` / `top_repos[]` / `ship` (or null). Repo URLs and ship subject pass through `_safe_repo_url` + `_shorten_repo_url` and `_safe_prose` respectively before serialization — the same trust-boundary defenses applied to the markdown body, so a long-canonical-URL or peer-controlled subject doesn't leak into the JSON sidecar. Pinned by `TestThemesPrompt.test_long_repo_url_shortened_in_prompt`.
 
 **`_safe_prose` vs `_safe_short` (v0.12.0).** `_safe_short` whitelists `[A-Za-z0-9._\-() ]` — fine for short identifiers (skill names, model names, sha) but mangles prose punctuation (colons, slashes, hashes, em-dashes). `_safe_prose` strips terminal escapes + Rich markup + C0 controls but preserves printable punctuation — use for commit subjects (peer-controlled) and LLM-supplied theme/noteworthy/name lines. Both call through `safety.safe_str` so the terminal-escape defense is shared.
 
-## Snapshot persistence (v0.12.0)
+## Trends vs prior equal period (v0.12.39)
 
-Local-only JSON snapshots at `~/.local/share/mind-meld/retros/YYYY-MM-DD-N.json` (mode 0o700). NOT synced — fleet determinism (every machine produces identical retros after sync, per the v0.11.17 union filter) makes a local cache sufficient for "trends vs last retro" deltas without cross-fleet snapshot reconciliation. Sequence number defends against multiple retros in one day.
+`## Trends vs prior <N>d (A → B)` is a four-row `prior | current` table computed from the already-in-memory synced events corpus. It is fleet-deterministic for the first time: two machines that have pushed-and-pulled produce the same trends section, because the baseline is a function of the corpus, the window, and `now`, not of this machine's command history. The v0.12.0 machine-local snapshot cache (`~/.local/share/mind-meld/retros/`) is gone. Mixed-fleet window: snapshots were never synced, so an upgraded Mac and an old one produce different trend sections from the same corpus until both upgrade — that is the pre-existing non-determinism being fixed, not a new bug.
 
-**Saved fields (v1 schema).** `window_days`, `since`, `until`, and a `metrics` block (`commits`, `additions`, `deletions`, `pull_requests`, `streak_days`, `sessions`, `tokens_total`, `push_events`). Tokens are summed across input/cache_create/cache_read/output for a single comparable scalar. Future fields can be added without breaking older readers — `_compute_prior_delta` defaults missing keys to zero.
+**Architecture.** `_aggregate_git_period_pair(events, prior_start, boundary, until, author_emails) -> (PriorPeriod, PriorPeriod)`, not `aggregate(compare_prior=True)`. A union scan first rejects out-of-pair occurrences, then dedups `(canonical remote, sha)` GLOBALLY across the eligible copies before updating either bucket. An out-of-window first copy must never consume the key and hide a valid in-window copy; eligible duplicates still cannot enter both periods. Do NOT call `aggregate()` twice: `get_known_devices()` shells out inside it. `_read_events` is unwindowed, so the prior period is a second pass over the same in-memory list. Pinned by `test_aggregate_reads_events_dir_once_and_shells_out_once` and `test_out_of_window_duplicate_does_not_hide_current_commit`.
 
-**`metrics.pull_requests` (Track 17E).** Count of distinct, repository-qualified
-GitHub PR references detected from supported commit-subject forms, not an API-backed
-repository-throughput total. An identity is `(canonical remote, PR number)` and is
-created only after the existing author filter (unless `--no-author-filter`), window,
-and `(canonical remote, sha)` commit-dedup gates accept the record. Empty or malformed
-remotes and unsupported, malformed, oversized, or non-positive subject markers do not
-contribute. Older snapshots legitimately lack this additive field; it is not yet used
-for a PR trend delta, so missing history is never presented as zero.
+**Half-open periods.** Shared predicates are inclusive on both ends (`since <= x <= until`). A naive adjacent prior period double-counts the boundary. Fix at the call site with `prior_until = since - timedelta(microseconds=1)`. Do NOT edit the shared predicates — that silently moves the current window's numbers. Pinned by `test_commit_at_exactly_since_counts_once`.
 
-**Load picks most recent matching window.** `_load_prior_snapshot(retros_dir, window_days)` glob-sorts descending and returns the first snapshot with the same `window_days`. A 7d retro never compares against a 30d snapshot. First-run / no-match returns None and the trends section is omitted. Pinned by `TestSnapshotPersistence.test_load_skips_window_mismatch`.
+**Coverage floor, not arithmetic.** `coverage_floor = min(YYYY-MM-DD parsed from the event filenames `_read_events` already globs)`. Gate: `coverage_floor <= prior_start.date()`. Filename date is push day, so a `git-snapshot` row can carry commits older than its file — the floor is a LOWER BOUND on coverage and fails safe (it can refuse a comparison that would have been fine, never the reverse). Do not "optimize" this into using commit dates or file mtimes. The filename proof is valid only when every globbed event file parses cleanly: any skipped event record makes Trends unavailable, because an unreadable prior record must never render as a known zero. `2 * window_days > EVENTS_RETENTION_DAYS` is off-by-one (`age_days >= 90`) and measures a max-age policy that only runs from the manual `mm gc` command; it survives only as a fast path for unavailable-message wording. Pinned by `test_prior_window_before_coverage_floor_is_unavailable`, `test_unreadable_event_records_make_trends_unavailable`, and `test_45d_window_refused_at_retention_boundary`.
 
-**Write is post-load.** `main()` loads the prior snapshot BEFORE saving the new one so today's retro doesn't compare against itself.
+**Row set.** `commits`, `additions`, `deletions`, `active_days` — four genuine flows windowed on the commit's own date. Trends use UTC day keys and UTC period labels, unlike the intentionally local streak and weekly views, so the table remains fleet-deterministic across timezones. Dropped, recorded here so nobody re-adds one:
 
-**Save skip on second pass.** `--no-save` is wired AND any of `--theme` / `--noteworthy` / `--name` being set also short-circuits the save (the second-pass call IS the card render; the first-pass call already saved). The second-pass guard is intentional belt-and-braces in case a power user calls the second pass directly without `--no-save`.
+* `streak_days` — state at `until`, not a flow over the window (`↓41` reads as "lost 41 streak days" when it means the streak broke).
+* `sessions` — v=2 full inventory restricted to projects whose `last_session_at` is in-window, not a flow. Differencing two inventories is the same category error.
+* `tokens` — ~99% `cache_read`; rose in 6 of 9 measured weeks regardless of whether commits rose. Also structurally biased: re-calling `aggregate_sessions` with `until=since` rejects the current snapshot on its envelope before reading `tokens_by_day` buckets that cover the prior period.
+* `pushes` — measures sync cadence, not work.
 
-**Reap by FILENAME date, NOT mtime.** Same rationale as `_gc_old_event_files` — iCloud restores rewrite mtimes. `_prune_old_snapshots` parses the `YYYY-MM-DD` prefix from `<stem>` and drops files older than `RETROS_RETENTION_DAYS` (365). Best-effort: every step (glob, unlink, parse) is wrapped in try/except. Pinned by `TestSnapshotPruning`.
+`PriorPeriod` holds integers only, with no reference to the prior `GitAggregate` / `SessionsAggregate`. Pinned by `test_prior_period_holds_only_integers`.
 
-**Conftest isolation: `_isolate_retros_dir` autouse fixture.** Sets `MM_RETROS_DIR` to a per-test tmp dir so every test invoking `aggregator.main()` gets its own retros dir. Mirrors the `MM_EVENTS_DIR` / identity-cache / pullhistory isolation pattern. Without it, every test run would pollute the user's real `~/.local/share/mind-meld/retros/`.
+**Render states.** Section renders only when `window_days < 14` (`_render_weekly` owns ≥14d). Below `## Code shipped`. Unavailable (coverage proof unmet **or** unreadable event records) renders the heading with the reason inline — a vanished section never encodes a data-availability state. Current-window-empty suppresses the section entirely (never itemize a week off). `0` is known-zero; `—` is unavailable. No arrow glyphs. Both windows use today's author-email union; `--no-author-filter` is consistent across both. Fleet composition change (`prior.devices_with_pushes != current`) is a `## Notes` line. No card row.
+
+**`--no-save` is a hidden no-op.** Removing it is a silent truncation of `mm retro-fleet 30d --no-save > /tmp/retro.md` (exit 2, 0-byte file) and breaks the `/retro-fleet` skill's Step 4 exactly once per upgrade, because SKILL.md is copied into the skill store and refreshes on `mm init` / non-quiet `mm push` / `mm install-skills`, not on `pipx upgrade`. Keep the flag (`hidden=True` in typer, `help=argparse.SUPPRESS` in argparse), ignore the value, emit one `mm: notice:` to stderr only when actually passed. Named removal release: v0.12.39.
+
+**Orphan dir.** `mm gc` runs `retention._gc_orphan_retros_dir`: unlinks only `_SNAPSHOT_FILENAME_RE`-matching files, then `rmdir` if empty. Never `rm -rf`. Dry-runnable, best-effort.
 
 ## Aggregate metrics added in v0.12.0
 
