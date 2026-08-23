@@ -1,0 +1,15 @@
+# Paths every release-bearing Track touches. The packer treats an overlap on
+# these as SHARED_INFRA rather than a collision, so declaring them honestly in
+# a Track's `_touches:` no longer serializes the whole plan.
+#
+# mind-meld has no VERSION file -- `pyproject.toml` is the version source of
+# truth (AGENTS.md "Version source of truth"), so it belongs here for the same
+# reason VERSION does in repos that have one.
+
+pyproject.toml
+CHANGELOG.md
+docs/PROGRESS.md
+docs/ROADMAP.md
+docs/TODOS.md
+docs/roadmap-future.md
+docs/roadmap-shipped.md

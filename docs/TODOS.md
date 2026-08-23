@@ -6,11 +6,23 @@ Inbox for unprocessed items. Other skills (`/full-review`, `/investigate`,
 
 Single source of truth — there is no root-level `TODOS.md`. The two files were
 reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
-`## Inbox` heading was renamed to `## Unprocessed` (what `/roadmap` drains).
-
-## Unprocessed
+`## Inbox` heading was renamed to `## Unprocessed
 
 _(none)_
+
+Track 25B `/autoplan` drain, 5 items on 2026-08-22:
+
+- 1 placed: `mm uninstall-skills` became **Track 27A** (new Group 27, between
+  Install consent and the Grok row). Placed rather than deferred because the
+  installer's `absent target -> symlink -> installed` branch re-creates a
+  manually deleted link on the next interactive push, so there is currently no
+  supported way to decline the skill — and shipping the Grok row first would
+  orphan a fourth link on every uninstall.
+- 4 deferred to `docs/roadmap-future.md`: the `mm skill-run --protocol N`
+  handshake, the `mm status` store-vs-binary skew nag, the README agent-name
+  doc-lint, and the process fix for regenerating the roadmap after a Track
+  lands rather than only before.
+- 0 killed. 0 discharged.
 
 Drain record, 7 items from the 2026-08-18 Track 23A pass:
 
