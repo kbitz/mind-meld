@@ -287,10 +287,10 @@ def test_real_home_guard_fires(tmp_path: Path) -> None:
     ):
         assert skill_link._is_real_agent_dir_under_pytest(real), real
 
-    # A redirected target is fine -- the guard matches the THREE KNOWN AGENT
-    # PATHS, not "anything under $HOME". A developer whose TMPDIR lives under
-    # $HOME must not see every skill-link test fail with a message accusing the
-    # test of being unisolated when it is correctly using tmp_path.
+    # A redirected target is fine -- the guard matches the registry's canonical
+    # agent paths, not "anything under $HOME". A developer whose TMPDIR lives
+    # under $HOME must not see every skill-link test fail with a message
+    # accusing the test of being unisolated when it is correctly using tmp_path.
     assert not skill_link._is_real_agent_dir_under_pytest(
         tmp_path / "agents" / "claude" / "skills" / "retro-fleet"
     )
@@ -428,14 +428,17 @@ def test_skill_roots_are_redirected_for_this_test() -> None:
     """conftest's autouse fixture is actually in effect (not silently skipped)."""
     from mind_meld import skill_link
 
-    assert all(not r.startswith("~") for r in skill_link.SKILL_ROOTS), skill_link.SKILL_ROOTS
+    overrides = skill_link._TEST_SKILL_ROOT_OVERRIDES
+    assert overrides, "fixture should have populated the override map"
+    assert all(not r.startswith("~") for r in overrides.values()), overrides
+    assert all(row.skills_root.startswith("~/") for row in skill_link.AGENT_ROWS)
 
 
 def test_skill_marker_dir_is_redirected_for_this_test() -> None:
     """The other half of `_isolate_skill_links`, which nothing pinned.
 
-    `SKILL_ROOTS` moves where the SYMLINKS go; `_marker_dir` moves where the
-    six TTL marker dotfiles go. Only the first had a non-vacuity check, so the
+    The override map moves where the SYMLINKS go; `_marker_dir` moves where the
+    TTL marker dotfiles go. Only the first had a non-vacuity check, so the
     fixture could half-break — leaving every test that runs the installer
     stamping `.skill-link-checked` into the developer's real
     `~/.config/mind-meld` — and the suite would stay green.
@@ -446,11 +449,271 @@ def test_skill_marker_dir_is_redirected_for_this_test() -> None:
 
 
 def test_skill_store_dir_is_redirected_for_this_test() -> None:
-    """Post-B: a store leak mutates the SKILL.md three agents execute."""
+    """Post-B: a store leak mutates the SKILL.md every agent executes."""
     from mind_meld import skill_link
 
     real = Path("~/.local/share/mind-meld/agent-skills/retro-fleet").expanduser()
     assert skill_link._skill_store_dir() != real
+
+
+def test_agent_rows_are_tilde_relative_and_unique() -> None:
+    """Hard assertions live in tests; import must never raise (T3)."""
+    from mind_meld import skill_link
+
+    rows = skill_link.AGENT_ROWS
+    assert rows, "AGENT_ROWS must not be empty"
+    keys = [row.key for row in rows]
+    roots = [row.skills_root for row in rows]
+    names = [row.display_name for row in rows]
+    markers = [m for row in rows for m in (row.success_marker, row.conflict_marker)]
+    assert all(root.startswith("~/") for root in roots), roots
+    assert len(keys) == len(set(keys)), keys
+    assert len(roots) == len(set(roots)), roots
+    assert len(names) == len(set(names)), names
+    assert len(set(markers)) == 2 * len(rows), markers
+
+
+def test_marker_literals_are_byte_identical_to_v0_12_18() -> None:
+    """A rename silently resets every fleet machine's 24h TTL (T5)."""
+    from mind_meld import skill_link
+
+    assert skill_link._SKILL_LINK_SUCCESS_MARKER == "skill-link-checked"
+    assert skill_link._SKILL_LINK_CONFLICT_MARKER == "skill-link-conflict"
+    assert skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER == "codex-skill-link-checked"
+    assert skill_link._CODEX_SKILL_LINK_CONFLICT_MARKER == "codex-skill-link-conflict"
+    assert skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER == "opencode-skill-link-checked"
+    assert skill_link._OPENCODE_SKILL_LINK_CONFLICT_MARKER == "opencode-skill-link-conflict"
+    # Claude's success name is a suffix of the others, so startswith is unusable.
+    names = [
+        skill_link._SKILL_LINK_SUCCESS_MARKER,
+        skill_link._SKILL_LINK_CONFLICT_MARKER,
+        skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER,
+        skill_link._CODEX_SKILL_LINK_CONFLICT_MARKER,
+        skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER,
+        skill_link._OPENCODE_SKILL_LINK_CONFLICT_MARKER,
+    ]
+    assert len(set(names)) == 6, names
+
+
+def test_first_three_agent_keys_are_stable() -> None:
+    """Result order is append-only. The original three stay at the front."""
+    from mind_meld import skill_link
+
+    assert [row.key for row in skill_link.AGENT_ROWS[:3]] == [
+        "claude",
+        "codex",
+        "opencode",
+    ]
+
+
+def test_production_overrides_default_is_empty() -> None:
+    src = (SRC / "skill_link.py").read_text(encoding="utf-8")
+    assert "_TEST_SKILL_ROOT_OVERRIDES: dict[str, str] = {}" in src
+
+
+def test_descriptor_for_names_known_keys() -> None:
+    from mind_meld import skill_link
+
+    claude = skill_link._descriptor_for("claude")
+    assert claude.key == "claude"
+    assert claude.display_name == "Claude Code"
+    with pytest.raises(KeyError, match="known keys:") as raised:
+        skill_link._descriptor_for("not-an-agent")
+    msg = str(raised.value)
+    for row in skill_link.AGENT_ROWS:
+        assert row.key in msg
+
+
+def test_real_home_guard_covers_every_registry_row() -> None:
+    """Expectation is computed independently of ``_home_relative`` (T2)."""
+    from mind_meld import skill_link
+
+    for row in skill_link.AGENT_ROWS:
+        expected = Path(row.skills_root.replace("~", str(skill_link._REAL_HOME), 1))
+        assert skill_link._is_real_agent_dir_under_pytest(expected), row.key
+
+
+def test_malformed_skills_root_makes_guard_overmatch(monkeypatch) -> None:
+    """A non-``~/``-relative root must over-match, never go blind (T2, T3)."""
+    from mind_meld import skill_link
+
+    bad = skill_link.AgentRow(
+        key="bad",
+        display_name="Bad Agent",
+        skills_root="/opt/not-home-relative/skills",
+        success_marker="bad-skill-link-checked",
+        conflict_marker="bad-skill-link-conflict",
+    )
+    monkeypatch.setattr(skill_link, "AGENT_ROWS", (*skill_link.AGENT_ROWS, bad))
+    sibling = skill_link._REAL_HOME / "some-unrelated-dir" / "skills"
+    assert skill_link._is_real_agent_dir_under_pytest(sibling)
+
+
+def test_redirect_creates_agent_dir_but_not_skills_dir(tmp_path: Path) -> None:
+    from mind_meld import skill_link
+
+    for row in skill_link.AGENT_ROWS:
+        agent_dir = tmp_path / "agents" / row.key
+        skills_dir = agent_dir / "skills"
+        assert agent_dir.is_dir(), row.key
+        assert not skills_dir.exists(), row.key
+
+
+def test_redirect_gives_each_agent_its_own_dir(tmp_path: Path) -> None:
+    from mind_meld import skill_link
+
+    dirs = [(tmp_path / "agents" / row.key).resolve() for row in skill_link.AGENT_ROWS]
+    assert len(dirs) == len(set(dirs)), dirs
+
+
+def test_orphan_override_key_emits_notice(monkeypatch, capsys) -> None:
+    from mind_meld import skill_link
+
+    monkeypatch.setattr(skill_link, "_ORPHAN_OVERRIDE_WARNED", set())
+    patched = dict(skill_link._TEST_SKILL_ROOT_OVERRIDES)
+    patched["no-such-agent"] = "/tmp/nowhere"
+    monkeypatch.setattr(skill_link, "_TEST_SKILL_ROOT_OVERRIDES", patched)
+    skill_link._skill_target_descriptors()
+    err = capsys.readouterr().err
+    assert "orphan key 'no-such-agent'" in err
+
+
+def test_mm_skills_dir_is_rejected_outside_pytest(monkeypatch, tmp_path, capsys) -> None:
+    from mind_meld import skill_link
+
+    monkeypatch.setattr(skill_link, "_MM_SKILLS_DIR_REJECTION_EMITTED", False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("MM_SKILLS_DIR", str(tmp_path / "should-not-be-used"))
+    store = skill_link._skill_store_dir()
+    assert store == Path("~/.local/share/mind-meld/agent-skills/retro-fleet").expanduser()
+    assert "MM_SKILLS_DIR is a test-only override" in capsys.readouterr().err
+
+
+def test_synthetic_row_is_covered_with_no_other_edit(monkeypatch, tmp_path) -> None:
+    """The instrument that keeps the one-row claim honest (S4, T4)."""
+    from typer.testing import CliRunner
+
+    from mind_meld import skill_link
+    from mind_meld.cli import app
+    from tests.conftest import redirect_skill_paths
+
+    synthetic = skill_link.AgentRow(
+        key="synthetic",
+        display_name="Synthetic Agent",
+        skills_root="~/.mm-synthetic-agent/skills",
+        success_marker="synthetic-skill-link-checked",
+        conflict_marker="synthetic-skill-link-conflict",
+    )
+    redirect_skill_paths(monkeypatch, tmp_path, extra_rows=(synthetic,))
+
+    redirected = skill_link._TEST_SKILL_ROOT_OVERRIDES["synthetic"]
+    assert redirected.startswith(str(tmp_path)), redirected
+    assert not redirected.startswith(str(skill_link._REAL_HOME))
+    synth_skills = Path(redirected)
+    assert synth_skills.parent.is_dir()
+    assert not synth_skills.exists()
+
+    descriptors = skill_link._skill_target_descriptors()
+    keys = [d.key for d in descriptors]
+    assert keys[:3] == ["claude", "codex", "opencode"]
+    assert keys[-1] == "synthetic"
+    synth_desc = skill_link._descriptor_for("synthetic")
+    assert synth_desc.display_name == "Synthetic Agent"
+    assert str(synth_desc.skills_dir).startswith(str(tmp_path))
+
+    targets = skill_link.skill_targets()
+    assert synth_desc.target in targets
+    assert skill_link._skill_links_check_due() is True
+
+    results = skill_link._ensure_retro_skill_links()
+    by_key = {r.descriptor.key: r for r in results}
+    assert "synthetic" in by_key
+    assert by_key["synthetic"].status == "installed"
+    assert synth_desc.target.is_symlink()
+    assert skill_link._skill_links_check_due() is False
+
+    synth_desc.target.unlink()
+    assert skill_link._skill_links_check_due() is True
+    skill_link._ensure_retro_skill_links()
+    assert synth_desc.target.is_symlink()
+
+    healthy = skill_link.diagnose_skill_links()
+    healthy_synth = next(row for row in healthy if row["key"] == "synthetic")
+    assert healthy_synth["agent"] == "Synthetic Agent"
+    assert healthy_synth["status"] == "ok"
+    assert "key" in healthy_synth
+
+    original = skill_link._diagnose_one
+
+    def boom(descriptor, *args, **kwargs):
+        if descriptor.key == "synthetic":
+            raise RuntimeError("forced diagnose error")
+        return original(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(skill_link, "_diagnose_one", boom)
+    errored = skill_link.diagnose_skill_links()
+    error_synth = next(row for row in errored if row.get("key") == "synthetic")
+    assert error_synth["status"] == "error"
+    assert error_synth["key"] == "synthetic"
+    monkeypatch.setattr(skill_link, "_diagnose_one", original)
+
+    import shutil
+
+    for row in skill_link.AGENT_ROWS:
+        agent_dir = tmp_path / "agents" / row.key
+        if agent_dir.exists():
+            shutil.rmtree(agent_dir)
+    invoked = CliRunner().invoke(app, ["install-skills"])
+    assert invoked.exit_code == 1
+    assert "no supported agent skills directory exists" in invoked.output
+    assert "Claude Code, Codex, and OpenCode" not in invoked.output
+
+    canonical = skill_link._REAL_HOME / ".mm-synthetic-agent" / "skills"
+    assert skill_link._is_real_agent_dir_under_pytest(canonical)
+    assert not Path("~/.mm-synthetic-agent").expanduser().exists()
+
+
+def test_no_consumer_owned_agent_name_lists() -> None:
+    """A parallel agent-name list is the failure class this Track exists to kill."""
+    import ast
+
+    from mind_meld import skill_link
+
+    keys = {row.key for row in skill_link.AGENT_ROWS}
+    names = {row.display_name for row in skill_link.AGENT_ROWS}
+    files = [
+        SRC / "skill_link.py",
+        SRC / "cli.py",
+        Path(__file__).resolve().parent / "conftest.py",
+        Path(__file__).resolve().parent / "test_skill_link.py",
+        Path(__file__),
+    ]
+    offenders: list[str] = []
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        tree = ast.parse(text)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+                continue
+            vals: list[str] = []
+            ok = True
+            for elt in node.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    vals.append(elt.value)
+                else:
+                    ok = False
+                    break
+            if not ok or len(vals) < 2:
+                continue
+            literal_values = set(vals)
+            if not (literal_values <= keys or literal_values <= names):
+                continue
+            src_line = lines[node.lineno - 1] if node.lineno <= len(lines) else ""
+            if "[:3]" in src_line:
+                continue
+            offenders.append(f"{path.name}:{node.lineno}:{src_line.strip()}")
+    assert offenders == [], "parallel agent-name list:\n" + "\n".join(offenders)
 
 
 def test_sidecar_and_lock_are_redirected_for_this_test(tmp_path: Path) -> None:

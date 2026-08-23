@@ -150,10 +150,10 @@ nested `skills/<link> → sessions/` upload zero files.
 
 ### Plan C — Grok `retro-fleet` skill link (new design)
 
-**Not a sync source.** Extend `skill_link.SKILL_ROOTS` with
-`~/.grok/skills` (or `$GROK_HOME/skills` at call time) as a fourth
-`SkillTarget`. Same no-clobber state machine, own 24h markers, own
-status line.
+**Not a sync source.** Append an `AgentRow` to `skill_link.AGENT_ROWS`
+with `skills_root="~/.grok/skills"`. The guard cannot express a runtime
+env root (`$GROK_HOME`), so the row must stay `~/`-relative. Same
+no-clobber state machine, own 24h markers, own status line.
 
 Grok already discovers `~/.claude/skills` when Claude compatibility
 is on, so a fleet that only uses Claude's skill dir already shares

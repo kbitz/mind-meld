@@ -50,7 +50,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `errors.py` | Exception hierarchy |
 | **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
 | **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
-| **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, and the `mm status` / `mm diag` link diagnosis |
+| **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, and the `AGENT_ROWS` registry — add a new agent HERE |
 | **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, and (19A) the all-or-nothing host-usage capture |
 | **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
 | **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
@@ -136,7 +136,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `events_tail.py:_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `events.py:make_host_usage_snapshot` / `HostUsageSnapshot` / `HOST_USAGE_TOKEN_SOURCES` | `docs/invariants/events-retro.md` (host-usage-snapshot section) |
 | `cli.py:PushResult.events_degradations` / the `autopush` breadcrumb outcome / `_breadcrumb_staleness_suffix` | `docs/invariants/events-retro.md` |
 | `events.py:_read_cwd_from_latest_jsonl` / `_last_mm_push_ts` / `_scan_one_project` cwd-scan site / `walk_git_projects` future-collection blocks / `token_usage.is_cache_cold` / `token_usage.iter_bounded_lines` / `pullhistory._yield_lines` | `docs/invariants/events-retro.md` (tolerant-binary-reads + one-cwd-scan sections) |
-| `skill_link.py:SkillTarget` / `SkillInstallResult` / `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_marker_dir` / `SKILL_ROOTS` / `_refuse_real_home_under_pytest` / `skill_targets` | `docs/invariants/events-retro.md` |
+| `skill_link.py:SkillTarget` / `SkillInstallResult` / `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `_refuse_real_home_under_pytest` / `skill_targets` | `docs/invariants/events-retro.md` |
 | `skill_link.py:_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `_store_is_healthy` / `_read_store_meta` / `_reject_payload_symlink` / `_store_publish_lock` / `_legacy_shape` / `_points_at_store` / `_symlink_lives` / `_replace_symlink` | `docs/invariants/events-retro.md` |
 | `skill_link.py:diagnose_skill_links` / `_diagnose_one` / `render_skill_status` / `_emit_status_notice` / `BROKEN_SKILL_STATUSES` / `SkillInstallStatus` | `docs/invariants/events-retro.md` |
 | `cli.py:install_skills_cmd` / `retro_fleet_cmd` (typer shells only) | `docs/invariants/events-retro.md` |

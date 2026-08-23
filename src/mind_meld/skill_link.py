@@ -1,8 +1,12 @@
 """Retro-fleet skill installer: symlinks, the 24h drift gate, and its markers.
 
 Extracted from ``cli.py`` in Track 16A. `mm` keeps a ``retro-fleet`` skill
-symlinked into each supported agent's skills directory (Claude Code, Codex,
-OpenCode) and self-heals the link behind a 24-hour TTL gate on every push.
+symlinked into each supported agent's skills directory and self-heals the
+link behind a 24-hour TTL gate on every push.
+
+Add agents only to ``AGENT_ROWS``. Never add a parallel agent-name list.
+``AGENT_ROWS`` is canonical; ``_TEST_SKILL_ROOT_OVERRIDES`` is empty in
+production and exists only so tests can redirect paths.
 
 Imports nothing from ``cli`` — pinned by ``tests/test_module_boundaries.py``.
 
@@ -45,20 +49,124 @@ from mind_meld.safety import safe_str
 _REAL_HOME = Path(os.path.expanduser("~")).resolve()
 
 
+@dataclass(frozen=True)
+class AgentRow:
+    """One supported agent's skill-link identity.
+
+    ``key`` is lowercase and matches ``events_tail.HOST_READER_SOURCE_GATE``
+    vocabulary for the three hosts that have a skill dir (claude is gated
+    separately via ``_enabled_claude_paths``, so 3 of 4).
+
+    ``skills_root`` is a ``~``-relative STRING, never a Path.
+    ``expanduser()`` must run at CALL time, or every agent path freezes at
+    the developer's real HOME at import and defeats every isolation fixture.
+    That is the Track 15B invariant: ``config.CONFIG_DIR`` is
+    ``Path.home() / ...`` frozen at import, and that is exactly the hazard
+    Track 15B deleted two constants for.
+    """
+
+    key: str
+    display_name: str
+    skills_root: str
+    success_marker: str
+    conflict_marker: str
+
+
+# Append-only. Result order is a documented contract:
+# ``_ensure_retro_skill_links`` docstring + ordered-list assertions.
+# Ordinary isolation never patches this; exactly one structural-extension
+# test does, via ``redirect_skill_paths(..., extra_rows=...)``.
+AGENT_ROWS: tuple[AgentRow, ...] = (
+    AgentRow(
+        key="claude",
+        display_name="Claude Code",
+        skills_root="~/.claude/skills",
+        success_marker="skill-link-checked",
+        conflict_marker="skill-link-conflict",
+    ),
+    AgentRow(
+        key="codex",
+        display_name="Codex",
+        skills_root="~/.codex/skills",
+        success_marker="codex-skill-link-checked",
+        conflict_marker="codex-skill-link-conflict",
+    ),
+    AgentRow(
+        key="opencode",
+        display_name="OpenCode",
+        skills_root="~/.config/opencode/skills",
+        success_marker="opencode-skill-link-checked",
+        conflict_marker="opencode-skill-link-conflict",
+    ),
+)
+
+# Empty in production. Tests patch this (together with AGENT_ROWS) so
+# descriptors resolve under tmp_path. Never derive the real-home guard
+# from this map.
+_TEST_SKILL_ROOT_OVERRIDES: dict[str, str] = {}
+
+# Bound to the row values so nothing that imported the old module-level
+# names breaks. A rename of any of these six literals silently resets
+# every fleet machine's 24h TTL and re-emits one notice.
+_SKILL_LINK_SUCCESS_MARKER = next(row.success_marker for row in AGENT_ROWS if row.key == "claude")
+_SKILL_LINK_CONFLICT_MARKER = next(row.conflict_marker for row in AGENT_ROWS if row.key == "claude")
+_CODEX_SKILL_LINK_SUCCESS_MARKER = next(
+    row.success_marker for row in AGENT_ROWS if row.key == "codex"
+)
+_CODEX_SKILL_LINK_CONFLICT_MARKER = next(
+    row.conflict_marker for row in AGENT_ROWS if row.key == "codex"
+)
+_OPENCODE_SKILL_LINK_SUCCESS_MARKER = next(
+    row.success_marker for row in AGENT_ROWS if row.key == "opencode"
+)
+_OPENCODE_SKILL_LINK_CONFLICT_MARKER = next(
+    row.conflict_marker for row in AGENT_ROWS if row.key == "opencode"
+)
+
+
+def _home_relative(skills_root: str) -> Path:
+    """Strip a leading ``~/``. Fail closed on anything else.
+
+    A root that is not ``~/``-relative yields an empty relative path, so
+    ``_REAL_HOME / result`` is ``_REAL_HOME`` itself. The guard then
+    over-matches rather than going blind. Never raise: this runs at
+    descriptor-build time on the ``mm status`` / ``mm diag`` path.
+    """
+    if skills_root.startswith("~/"):
+        return Path(skills_root[2:])
+    return Path()
+
+
+def _real_guard_paths() -> tuple[Path, ...]:
+    """Canonical real-home paths the pytest guard must refuse.
+
+    Derived from ``AGENT_ROWS`` (never from ``_TEST_SKILL_ROOT_OVERRIDES``)
+    plus the two explicit extras: the marker dir and the 24A skill store.
+    Ordinary test isolation patches the override map; if this derived from
+    that map the guard's target set would become the tmp paths and go
+    blind to every real agent dir, with a green suite.
+    """
+    return (
+        *(_REAL_HOME / _home_relative(row.skills_root) for row in AGENT_ROWS),
+        _REAL_HOME / ".config" / "mind-meld",
+        _REAL_HOME / ".local" / "share" / "mind-meld" / "agent-skills",
+    )
+
+
 def _is_real_agent_dir_under_pytest(target: Path) -> bool:
     """True when a TEST is about to write one of the real agent skills dirs.
 
-    The installer mkdirs and symlinks into ``~/.claude/skills``,
-    ``~/.codex/skills``, and ``~/.config/opencode/skills``. ``conftest.py`` had
-    eight autouse isolation fixtures and none covered these, so any test driving
-    ``_push_core`` or ``init`` without stubbing the installer mutated the
-    developer's real agent config dirs — **67 tests**, measured.
+    The installer mkdirs and symlinks into each ``AgentRow.skills_root``.
+    ``conftest.py`` had eight autouse isolation fixtures and none covered
+    these, so any test driving ``_push_core`` or ``init`` without stubbing
+    the installer mutated the developer's real agent config dirs —
+    **67 tests**, measured.
 
-    Matches the THREE KNOWN AGENT PATHS, not "anything under ``$HOME``". A
-    developer whose ``TMPDIR`` lives under ``$HOME`` (common on macOS with a
-    custom setting) would otherwise see every skill-link test fail with a
-    message accusing the test of being unisolated when it is correctly using
-    ``tmp_path``.
+    Matches the registry's canonical agent paths plus the two explicit
+    extras, not "anything under ``$HOME``". A developer whose ``TMPDIR``
+    lives under ``$HOME`` (common on macOS with a custom setting) would
+    otherwise see every skill-link test fail with a message accusing the
+    test of being unisolated when it is correctly using ``tmp_path``.
 
     Deliberately NOT a suite-wide ``monkeypatch.setenv("HOME", ...)``:
     ``importlib.metadata.version()`` resolves from the HOME-derived user
@@ -83,16 +191,7 @@ def _is_real_agent_dir_under_pytest(target: Path) -> bool:
         candidate = Path(os.path.abspath(target.expanduser()))
     except OSError:
         return False
-    return any(
-        candidate == real or real in candidate.parents
-        for real in (
-            (_REAL_HOME / ".claude" / "skills"),
-            (_REAL_HOME / ".codex" / "skills"),
-            (_REAL_HOME / ".config" / "opencode" / "skills"),
-            (_REAL_HOME / ".config" / "mind-meld"),
-            (_REAL_HOME / ".local" / "share" / "mind-meld" / "agent-skills"),
-        )
-    )
+    return any(candidate == real or real in candidate.parents for real in _real_guard_paths())
 
 
 def _refuse_real_home_under_pytest(target: Path) -> None:
@@ -118,28 +217,6 @@ def _refuse_real_home_under_pytest(target: Path) -> None:
 # untouched so next push retries — matches the visible-failure contract.
 SKILL_LINK_TTL_SECONDS = 24 * 60 * 60
 _SKILL_LINK_NAME = "retro-fleet"
-_SKILL_LINK_SUCCESS_MARKER = "skill-link-checked"
-_SKILL_LINK_CONFLICT_MARKER = "skill-link-conflict"
-_CODEX_SKILL_LINK_SUCCESS_MARKER = "codex-skill-link-checked"
-_CODEX_SKILL_LINK_CONFLICT_MARKER = "codex-skill-link-conflict"
-_OPENCODE_SKILL_LINK_SUCCESS_MARKER = "opencode-skill-link-checked"
-_OPENCODE_SKILL_LINK_CONFLICT_MARKER = "opencode-skill-link-conflict"
-
-# The three agent skills directories, as ~-relative strings. A module-level
-# indirection rather than literals inline in each wrapper, so `conftest.py` can
-# redirect all three with one setattr -- see `_isolate_skill_links` there.
-#
-# Strings, not Paths: `expanduser()` must run at CALL time, not import time.
-# `config.CONFIG_DIR` is `Path.home() / ...` frozen at import and that is
-# exactly the hazard Track 15B deleted two constants for.
-#
-# The descriptor registry below is derived from this seam on every call, so
-# tests can redirect the three roots without freezing a developer's real HOME.
-SKILL_ROOTS: tuple[str, str, str] = (
-    "~/.claude/skills",
-    "~/.codex/skills",
-    "~/.config/opencode/skills",
-)
 
 
 SkillInstallStatus = Literal[
@@ -174,11 +251,13 @@ _LEGACY_TAIL = ("mind_meld", "skills", "retro_fleet")
 class SkillTarget:
     """One supported agent's retro-fleet installation contract.
 
-    ``SKILL_ROOTS`` intentionally stays patchable for test isolation. These
-    descriptors are therefore built at call time instead of freezing paths at
-    import time.
+    Built at call time from ``AGENT_ROWS`` so patched roots and ``$HOME``
+    take effect. ``key`` is the registry key; ad-hoc targets constructed
+    by ``_ensure_retro_skill_link_at`` use a sentinel rather than inheriting
+    ``"claude"``.
     """
 
+    key: str
     display_name: str
     agent_root: Path
     skills_dir: Path
@@ -205,23 +284,54 @@ class SkillInstallResult:
         return self.descriptor.target
 
 
+_ORPHAN_OVERRIDE_WARNED: set[str] = set()
+
+
+def _warn_orphan_overrides() -> None:
+    """A key in the override map with no matching row is always a bug."""
+    known = {row.key for row in AGENT_ROWS}
+    for key in _TEST_SKILL_ROOT_OVERRIDES:
+        if key in known or key in _ORPHAN_OVERRIDE_WARNED:
+            continue
+        _ORPHAN_OVERRIDE_WARNED.add(key)
+        sys.stderr.write(
+            f"mm: notice: _TEST_SKILL_ROOT_OVERRIDES has orphan key {key!r} "
+            f"with no matching AGENT_ROWS row\n"
+        )
+
+
+def _root_for(row: AgentRow) -> str:
+    return _TEST_SKILL_ROOT_OVERRIDES.get(row.key, row.skills_root)
+
+
+def _descriptor_from_row(row: AgentRow) -> SkillTarget:
+    skills_dir = Path(_root_for(row)).expanduser()
+    return SkillTarget(
+        key=row.key,
+        display_name=row.display_name,
+        agent_root=skills_dir.parent,
+        skills_dir=skills_dir,
+        success_marker=row.success_marker,
+        conflict_marker=row.conflict_marker,
+    )
+
+
+def _descriptor_for(key: str) -> SkillTarget:
+    """Return the call-time descriptor for ``key``.
+
+    Error names the known keys so a typo is actionable.
+    """
+    for row in AGENT_ROWS:
+        if row.key == key:
+            return _descriptor_from_row(row)
+    known = ", ".join(row.key for row in AGENT_ROWS)
+    raise KeyError(f"unknown agent key {key!r}; known keys: {known}")
+
+
 def _skill_target_descriptors() -> tuple[SkillTarget, ...]:
     """Return fresh descriptors so patched roots and ``$HOME`` take effect."""
-    entries = (
-        ("Claude Code", _SKILL_LINK_SUCCESS_MARKER, _SKILL_LINK_CONFLICT_MARKER),
-        ("Codex", _CODEX_SKILL_LINK_SUCCESS_MARKER, _CODEX_SKILL_LINK_CONFLICT_MARKER),
-        ("OpenCode", _OPENCODE_SKILL_LINK_SUCCESS_MARKER, _OPENCODE_SKILL_LINK_CONFLICT_MARKER),
-    )
-    return tuple(
-        SkillTarget(
-            display_name=display_name,
-            agent_root=(skills_dir := Path(root).expanduser()).parent,
-            skills_dir=skills_dir,
-            success_marker=success_marker,
-            conflict_marker=conflict_marker,
-        )
-        for root, (display_name, success_marker, conflict_marker) in zip(SKILL_ROOTS, entries)
-    )
+    _warn_orphan_overrides()
+    return tuple(_descriptor_from_row(row) for row in AGENT_ROWS)
 
 
 def _reason(error: BaseException) -> str:
@@ -229,15 +339,25 @@ def _reason(error: BaseException) -> str:
     return f"{type(error).__name__}: {safe_str(error)}"
 
 
+_MM_SKILLS_DIR_REJECTION_EMITTED = False
+
+
 def _skill_store_dir() -> Path:
     """Return the mm-owned skill store. Call-time seam — never expanduser at import.
 
-    Override with ``MM_SKILLS_DIR`` for tests. The default sits next to the
-    mm-events root but outside every ``DEFAULT_SOURCES`` ``include_dirs`` entry.
+    ``MM_SKILLS_DIR`` is a test-only override, gated on ``PYTEST_CURRENT_TEST``.
+    Set it outside a test and it is ignored, with one ``mm: error:`` to stderr.
+    The default sits next to the mm-events root but outside every
+    ``DEFAULT_SOURCES`` ``include_dirs`` entry.
     """
+    global _MM_SKILLS_DIR_REJECTION_EMITTED
     override = os.environ.get("MM_SKILLS_DIR")
     if override:
-        return Path(override).expanduser()
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return Path(override).expanduser()
+        if not _MM_SKILLS_DIR_REJECTION_EMITTED:
+            _MM_SKILLS_DIR_REJECTION_EMITTED = True
+            sys.stderr.write("mm: error: MM_SKILLS_DIR is a test-only override; ignoring it\n")
     return Path("~/.local/share/mind-meld/agent-skills/retro-fleet").expanduser()
 
 
@@ -532,32 +652,18 @@ def render_skill_status(result: SkillInstallResult) -> str:
     return f"{target}: {result.status}"
 
 
-def _ensure_retro_skill_link(*, dry_run: bool = False) -> SkillInstallResult | None:
-    """Compatibility adapter for Claude Code's descriptor-driven installer."""
-    return _ensure_skill_target(_skill_target_descriptors()[0], dry_run=dry_run)
-
-
-def _ensure_codex_retro_skill_link(*, dry_run: bool = False) -> SkillInstallResult | None:
-    """Compatibility adapter for Codex's descriptor-driven installer."""
-    return _ensure_skill_target(_skill_target_descriptors()[1], dry_run=dry_run)
-
-
-def _ensure_opencode_retro_skill_link(*, dry_run: bool = False) -> SkillInstallResult | None:
-    """Compatibility adapter for OpenCode's descriptor-driven installer."""
-    return _ensure_skill_target(_skill_target_descriptors()[2], dry_run=dry_run)
-
-
 def _ensure_retro_skill_links(
     *,
     dry_run: bool = False,
     allow_mutate: bool = True,
     explicit: bool = False,
 ) -> tuple[SkillInstallResult, ...]:
-    """Best-effort install for all three supported agent roots.
+    """Best-effort install for every ``AGENT_ROWS`` entry.
 
-    Results are complete and ordered Claude Code, Codex, OpenCode. Expected
-    filesystem failures are values, never exceptions, so init and push keep
-    their best-effort contract while ``mm install-skills`` can report truthfully.
+    Results are complete and ordered as ``AGENT_ROWS`` (append-only: new
+    agents are appended, never inserted). Expected filesystem failures are
+    values, never exceptions, so init and push keep their best-effort
+    contract while ``mm install-skills`` can report truthfully.
 
     ``dry_run=True`` returns full classifications with zero writes.
     ``allow_mutate=False`` (quiet/autopush) classifies and notices but never
@@ -767,11 +873,13 @@ def _ensure_retro_skill_link_at(
     *,
     success_marker: str,
     conflict_marker: str,
+    display_name: str = "ad-hoc",
     dry_run: bool = False,
 ) -> SkillInstallResult | None:
     """Backward-compatible one-target entry point used by safety tests."""
     descriptor = SkillTarget(
-        display_name="Claude Code",
+        key="",
+        display_name=display_name,
         agent_root=target.parent.parent,
         skills_dir=target.parent,
         success_marker=success_marker,
@@ -1043,8 +1151,10 @@ def _marker_dir() -> Path:
     return Path("~/.config/mind-meld").expanduser()
 
 
-def _skill_link_check_due() -> bool:
-    """Gate consulted by ``_push_core``. Returns True when the installer
+def _skill_links_check_due() -> bool:
+    """Return whether any supported agent's retro-fleet link has drifted.
+
+    Gate consulted by ``_push_core``. Returns True when the installer
     should run.
 
     Two paths to True:
@@ -1066,21 +1176,6 @@ def _skill_link_check_due() -> bool:
     True) so the installer runs and emits its own notice. The conflict
     marker is consulted separately by ``_emit_status_notice``.
     """
-    return _skill_link_check_due_for(_skill_target_descriptors()[0])
-
-
-def _codex_skill_link_check_due() -> bool:
-    """Return whether Codex's retro-fleet skill needs a self-heal attempt."""
-    return _skill_link_check_due_for(_skill_target_descriptors()[1])
-
-
-def _opencode_skill_link_check_due() -> bool:
-    """Return whether OpenCode's retro-fleet skill needs a self-heal attempt."""
-    return _skill_link_check_due_for(_skill_target_descriptors()[2])
-
-
-def _skill_links_check_due() -> bool:
-    """Return whether any supported agent's retro-fleet link has drifted."""
     return any(_skill_link_check_due_for(descriptor) for descriptor in _skill_target_descriptors())
 
 
@@ -1151,7 +1246,7 @@ def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
 
 
 def skill_targets() -> tuple[Path, ...]:
-    """The three agent skill-link targets, in Claude / Codex / OpenCode order.
+    """The agent skill-link targets, in ``AGENT_ROWS`` order.
 
     Single source of truth for the target paths. ``install_skills_cmd`` used to
     rebuild this tuple from its own hardcoded string literals 3,000 lines away
@@ -1166,7 +1261,7 @@ def skill_targets() -> tuple[Path, ...]:
 
 
 def diagnose_skill_links() -> list[dict[str, str]]:
-    """Passphrase-free snapshot of the three agent links plus the store. No writes."""
+    """Passphrase-free snapshot of every agent link plus the store. No writes."""
     store = _skill_store_dir()
     rows: list[dict[str, str]] = []
     payload = store / _STORE_PAYLOAD
@@ -1187,6 +1282,7 @@ def diagnose_skill_links() -> list[dict[str, str]]:
         except Exception as error:  # never crash `mm status` / `mm diag`
             rows.append(
                 {
+                    "key": descriptor.key,
                     "agent": descriptor.display_name,
                     "target": str(descriptor.target),
                     "store": str(store),
@@ -1203,6 +1299,7 @@ def _diagnose_one(
 ) -> dict[str, str]:
     """One descriptor's diagnose row. Raises; the caller turns that into `error`."""
     row = {
+        "key": descriptor.key,
         "agent": descriptor.display_name,
         "target": str(descriptor.target),
         "store": str(store),
@@ -1252,25 +1349,22 @@ def _diagnose_one(
 
 
 __all__ = [
+    "AGENT_ROWS",
+    "AgentRow",
     "BROKEN_SKILL_STATUSES",
     "SKILL_LINK_TTL_SECONDS",
-    "SKILL_ROOTS",
     "SkillInstallResult",
     "SkillTarget",
     "_refuse_real_home_under_pytest",
     "diagnose_skill_links",
     "render_skill_status",
     "skill_targets",
-    "_codex_skill_link_check_due",
-    "_ensure_codex_retro_skill_link",
-    "_ensure_opencode_retro_skill_link",
-    "_ensure_retro_skill_link",
+    "_descriptor_for",
     "_ensure_retro_skill_link_at",
     "_ensure_retro_skill_links",
     "_marker_dir",
-    "_opencode_skill_link_check_due",
+    "_real_guard_paths",
     "_resolve_retro_skill_src",
-    "_skill_link_check_due",
     "_skill_link_check_due_at",
     "_skill_links_check_due",
     "_skill_store_dir",
