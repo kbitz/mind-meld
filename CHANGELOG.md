@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.41] - 2026-08-23
+
+**`/retro-fleet` now refuses up front when `mm` is missing or broken, and the README names the missing-block failure that Step 0 cannot reach.** A preflight that lived inside a skippable Step 1 is not a preflight; Step 0 is unskippable and silent on a healthy machine. Step 0 reaches a user only when the store republishes, which requires an `mm` at least as new as the store — a user who never upgrades never receives it. Step 0 prevents future drift; it does not cure current drift. The new README troubleshooting entry is the remedy for that population.
+
+### Changed
+
+- **SKILL.md Step 0 preflight.** Within Step 0, stage 0A (`command -v mm`, then `mm --version`) is the only thing that can stop the run, and a missing or broken binary does not proceed into Steps 1-5. The rule scopes to Step 0 only — Steps 1-5 keep their own failure contracts, so a malformed `mm retro-fleet` in Step 2 is still fatal. Stage 0B relays an upgrade notice from Step 1's `mm push` when one appears, names the consequence (absent blocks are unmeasured, not zero), and quotes `upgrade.INSTALL_CMD`. Silence is not evidence of freshness. Every remediation ends with "restart the agent so it reloads SKILL.md."
+- **Step 1's skip clause names Step 1.** An "offline" or "stale" request no longer drops the binary probe. The rotting `v0.12.37` floor literals are gone.
+- **`docs/invariants/events-retro.md` records the Step 0 contract.** The terminal rule scopes to Step 0 only, `0B` relays mm's existing upgrade nudge rather than comparing versions, and the cut version-comparison stage is written down with why so it is not reintroduced. `AGENTS.md`'s routing row points SKILL.md edits at it.
+- **README troubleshooting.** New first entry for a missing, empty, or older-than-expected retro. The `mm: command not found` symptom is rewritten for the up-front refusal. `mm diag --json` is documented as the fields it actually emits (`key`, `agent`, `target`, `store`, `store_state`, `status`, plus `store_version` on successfully diagnosed rows), not as the loaded SKILL.md or the upgrade-check outcome. Agent-count-bound prose at four sites is gone; the uninstall loop stays literal and admits it.
+
+- **`docs/shared-infra.txt` tells the roadmap packer which paths are not collisions.** `CHANGELOG.md`, `docs/PROGRESS.md`, and the roadmap files are listed. `pyproject.toml` is deliberately excluded: `release.yml` force-advances the `latest` branch unconditionally, so two Tracks claiming one version would publish an untagged commit under a released version. Letting the packer serialize release-bearing Tracks is the guard.
+
+### Fixed
+
+- **A missing `mm` no longer produces a plausible retro.** Step 1 told the agent not to treat a non-zero exit as fatal, then ran `command -v mm` in the same block as `mm push`.
+
 ## [0.12.40] - 2026-08-22
 
 **Adding a supported agent is now one `AgentRow` in `skill_link.AGENT_ROWS` — descriptors, test isolation, the real-home guard, diagnosis, and `mm install-skills` all pick it up.** A fourth row can no longer vanish from isolated tests via a silent `zip` truncation, and `mm diag --json` rows gained a `key` field.
