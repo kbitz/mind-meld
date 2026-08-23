@@ -350,7 +350,7 @@ mm disable-source NAME [--force]   # turn a configured sync source OFF for this 
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
-mm install-skills           # check/install the retro-fleet skill link for Claude Code, Codex, and OpenCode; reports each target, repairs mm's own dangling and legacy links, never overwrites a foreign one
+mm install-skills           # check/install the retro-fleet skill link for every agent mm supports; reports each target, repairs mm's own dangling and legacy links, never overwrites a foreign one
 mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N] [--format jsonl|table]
                             # query the per-file pull/push history log
 mm retro-fleet [WINDOW] [--no-author-filter]

@@ -150,7 +150,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `aggregator.py:_render_token_block` / `_unpriced_token_summary` / `_short_model_name` / `_format_usd` | `docs/invariants/events-retro.md` (cost-estimation section) |
 | `skills/retro_fleet/aggregator.py` (incl. `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_render_ascii_card` / `_aggregate_git_period_pair` / `_classify_commit_subject` / `_detect_bursts` / `_safe_prose`) | `docs/invariants/events-retro.md` |
 | `skills/retro_fleet/aggregator.py` 23A renderers (`AgentRhythmView` / `_agent_rhythm_view` / `_render_agent_block` / `_render_agent_inventory` / `_agent_coverage_notes` / `_agent_state_label` / `_window_day_keys` / `AGENT_FAMILY_ROWS` / `MAX_AGENT_INVENTORY_MACHINES` / `_render_models_block`) and `token_usage.sum_bucket` | `docs/invariants/events-retro.md` (Track 23A renderer contract) |
-| `skills/retro_fleet/SKILL.md` (two-pass card flow) | `docs/invariants/events-retro.md` |
+| `skills/retro_fleet/SKILL.md` (two-pass card flow; `## Step 0: preflight` and its terminal rule) | `docs/invariants/events-retro.md` |
 | `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |
 | `upgrade.py` / `cli.py` upgrade hook seams / `pullhistory.py:append_self_upgrade` | `docs/invariants/auto-upgrade.md` |
 | `pyproject.toml` version bump / tagging | `docs/invariants/auto-upgrade.md` |
