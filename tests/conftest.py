@@ -125,17 +125,47 @@ def _isolate_sidecar_and_lock(monkeypatch, tmp_path) -> None:
     _redirect_lock(monkeypatch, tmp_path)
 
 
+def redirect_skill_paths(monkeypatch, tmp_path, *, extra_rows=()) -> None:
+    """Redirect every ``AGENT_ROWS`` skills root (plus ``extra_rows``) to tmp.
+
+    Patches ``AGENT_ROWS`` and ``_TEST_SKILL_ROOT_OVERRIDES`` together so they
+    are never observable in a mismatched state. Ordinary isolation calls this
+    with no extras; the synthetic-row test passes ``extra_rows=(_SYNTHETIC,)``.
+
+    Load-bearing layout, preserved:
+
+    * the agent dir exists, the skills dir does NOT — keeps the installer's
+      ``agent_dir.exists()`` pre-check and the ``skills_dir.mkdir(mode=0o700)``
+      branch reachable.
+    * one agent dir per agent — sharing one would make ``agent_dir.exists()``
+      and ``target.parent.exists()`` agree unconditionally, which is exactly
+      the predicate mismatch Track 17A exists to fix.
+    """
+    from mind_meld import skill_link as _skill_link
+
+    rows = (*_skill_link.AGENT_ROWS, *extra_rows)
+    monkeypatch.setattr(_skill_link, "AGENT_ROWS", rows)
+    overrides: dict[str, str] = {}
+    for row in rows:
+        agent_dir = tmp_path / "agents" / row.key
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        overrides[row.key] = str(agent_dir / "skills")
+    monkeypatch.setattr(_skill_link, "_TEST_SKILL_ROOT_OVERRIDES", overrides)
+    monkeypatch.setattr(_skill_link, "_marker_dir", lambda: tmp_path / "skill-markers")
+    monkeypatch.setenv("MM_SKILLS_DIR", str(tmp_path / "agent-skills" / "retro-fleet"))
+
+
 @pytest.fixture(autouse=True)
 def _isolate_skill_links(monkeypatch, tmp_path, request) -> None:
-    """Redirect the retro-fleet skill installer's three targets to a tmp path.
+    """Redirect the retro-fleet skill installer's targets to a tmp path.
 
-    The installer mkdirs and symlinks into ``~/.claude/skills``,
-    ``~/.codex/skills`` and ``~/.config/opencode/skills``, and touches marker
-    files in ``~/.config/mind-meld``. Every test that drove ``_push_core`` past
-    its TTL gate, or ``init``, without stubbing the installer was mutating the
-    developer's REAL agent config dirs. Measured when Track 16A added
-    ``skill_link._refuse_real_home_under_pytest``: **67 tests** were reaching
-    them. This is a pre-existing leak the extraction merely made visible.
+    The installer mkdirs and symlinks into each ``AgentRow.skills_root`` and
+    touches marker files in ``~/.config/mind-meld``. Every test that drove
+    ``_push_core`` past its TTL gate, or ``init``, without stubbing the
+    installer was mutating the developer's REAL agent config dirs. Measured
+    when Track 16A added ``skill_link._refuse_real_home_under_pytest``:
+    **67 tests** were reaching them. This is a pre-existing leak the
+    extraction merely made visible.
 
     Redirects the roots rather than moving ``$HOME``. A suite-wide
     ``monkeypatch.setenv("HOME", ...)`` looks simpler and is a trap:
@@ -151,31 +181,7 @@ def _isolate_skill_links(monkeypatch, tmp_path, request) -> None:
     if request.node.get_closest_marker("owns_skill_paths"):
         return
 
-    from mind_meld import skill_link as _skill_link
-
-    # Mirror the real layout: <agent_dir>/skills/retro-fleet. SKILL_ROOTS
-    # entries ARE the skills dirs, so the agent dir is one level UP.
-    #
-    # Create the agent dir but NOT the skills dir. That keeps two branches
-    # reachable that a flatter shape would silently disable: the installer's
-    # `agent_dir.exists()` pre-check (its "agent not installed → skip" path)
-    # and the `skills_dir.mkdir(mode=0o700)` path. It also keeps the three
-    # agents in SEPARATE agent dirs — sharing one would make
-    # `agent_dir.exists()` and `target.parent.exists()` agree unconditionally,
-    # which is exactly the predicate mismatch Track 17A exists to fix. The
-    # harness Group 17 builds on must not be blind to the bug it was made for.
-    roots = []
-    for name in ("claude", "codex", "opencode"):
-        agent_dir = tmp_path / "agents" / name
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        roots.append(str(agent_dir / "skills"))
-    monkeypatch.setattr(_skill_link, "SKILL_ROOTS", tuple(roots))
-    monkeypatch.setattr(_skill_link, "_marker_dir", lambda: tmp_path / "skill-markers")
-    monkeypatch.setattr(
-        _skill_link,
-        "_skill_store_dir",
-        lambda: tmp_path / "agent-skills" / "retro-fleet",
-    )
+    redirect_skill_paths(monkeypatch, tmp_path)
 
 
 @pytest.fixture(autouse=True)

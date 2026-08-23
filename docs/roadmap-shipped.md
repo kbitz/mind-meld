@@ -166,6 +166,11 @@ _Track 23B ("Install retro-fleet into Grok skills") was dissolved on 2026-08-20
 after failing its `/autoplan` premise gate 6/6 across two models: the installer's
 mkdir would have manufactured the Grok consent signal, the 4-file scope estimate
 ran against an 11-file empirical baseline, and its `blocked-by` edge on 22A was
-fabricated. Its intent survives as Group 29; the prerequisites it was missing are
-Groups 24 through 28. Review:
+fabricated. Its intent survives as Track 27A; the prerequisites it was missing are
+Groups 24 through 26. Review:
 `~/.gstack/projects/kbitz-mind-meld/kbitz-track-23b-autoplan-phase1-ceo-20260820.md`._
+
+### Group 24: Durable skill store ∥ Deterministic retro trends ✓ Shipped (v0.12.38–v0.12.39)
+
+- Track 24A — _shipped (v0.12.38): published the mm-owned `retro-fleet` skill store at `~/.local/share/mind-meld/agent-skills/`, migrated live links safely, and made a wedged link diagnosable in one `mm diag` step without touching an ephemeral checkout._
+- Track 24B — _shipped (v0.12.39): replaced the machine-local snapshot trends with a prior equal-period comparison computed from the synced event corpus in one in-memory pass. `--no-save` became a hidden compatible no-op, safe snapshot leftovers are reaped, and coverage is derived from the earliest event-file date rather than the retention constant._

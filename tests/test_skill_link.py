@@ -1,4 +1,4 @@
-"""Group 8 / Track 8A: ``_ensure_retro_skill_link`` symlink installer pins.
+"""Group 8 / Track 8A: retro-fleet skill symlink installer pins.
 
 Pins every branch identified in the /plan-eng-review coverage diagram:
 
@@ -11,7 +11,7 @@ Pins every branch identified in the /plan-eng-review coverage diagram:
 * ~/.claude/skills doesn't exist → silent skip
 * ``symlink_to`` raises OSError → mm: notice: + continue (CQ#1 contract)
 * TOCTOU race FileExistsError → mm: notice: + continue
-* 24h-TTL gate fresh → ``_skill_link_check_due`` returns False
+* 24h-TTL gate fresh → ``_skill_link_check_due_for`` returns False
 * 24h-TTL gate stale → returns True
 * gate stat fails (EACCES) → fail-open (TODO#3 critical-gap fix)
 * dry_run=True → installer is a no-op
@@ -40,9 +40,32 @@ def _assert_store_link(target):
 
 # This file owns its own path isolation: it moves $HOME deliberately, because
 # it is testing the installer's real path resolution. conftest's autouse
-# _isolate_skill_links pins SKILL_ROOTS to absolute tmp paths, which would
+# _isolate_skill_links redirects roots via the override map, which would
 # fight that -- the marker tells it to step aside.
 pytestmark = pytest.mark.owns_skill_paths
+
+
+def _install(key: str = "claude", **kwargs):
+    return skill_link._ensure_skill_target(skill_link._descriptor_for(key), **kwargs)
+
+
+def _due(key: str = "claude") -> bool:
+    return skill_link._skill_link_check_due_for(skill_link._descriptor_for(key))
+
+
+def _target_for(home: Path, key: str) -> Path:
+    row = next(r for r in skill_link.AGENT_ROWS if r.key == key)
+    skills_dir = home / row.skills_root[2:]
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    return skills_dir / "retro-fleet"
+
+
+def _result_for(results, key: str = "claude"):
+    return next(result for result in results if result.descriptor.key == key)
+
+
+def _diagnosis_for(rows, key: str = "claude"):
+    return next(row for row in rows if row["key"] == key)
 
 
 @pytest.fixture(autouse=True)
@@ -59,21 +82,23 @@ def _isolate_paths(tmp_path, monkeypatch):
 
 @pytest.fixture
 def target(_isolate_paths):
-    return _isolate_paths / ".claude" / "skills" / "retro-fleet"
+    return _target_for(_isolate_paths, "claude")
+
+
+@pytest.fixture
+def agent_targets(_isolate_paths):
+    """Every registry row's retro-fleet target, with its skills dir created."""
+    return {row.key: _target_for(_isolate_paths, row.key) for row in skill_link.AGENT_ROWS}
 
 
 @pytest.fixture
 def codex_target(_isolate_paths):
-    skills_dir = _isolate_paths / ".codex" / "skills"
-    skills_dir.mkdir(parents=True)
-    return skills_dir / "retro-fleet"
+    return _target_for(_isolate_paths, "codex")
 
 
 @pytest.fixture
 def opencode_target(_isolate_paths):
-    skills_dir = _isolate_paths / ".config" / "opencode" / "skills"
-    skills_dir.mkdir(parents=True)
-    return skills_dir / "retro-fleet"
+    return _target_for(_isolate_paths, "opencode")
 
 
 @pytest.fixture
@@ -117,14 +142,14 @@ def store(_isolate_paths):
 
 class TestTargetAbsent:
     def test_creates_symlink_when_target_absent(self, target, skill_src, config_dir):
-        skill_link._ensure_retro_skill_link()
+        _install()
         _assert_store_link(target)
         # Success marker touched.
         marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
 
     def test_creates_codex_symlink_when_target_absent(self, codex_target, skill_src, config_dir):
-        skill_link._ensure_codex_retro_skill_link()
+        _install("codex")
         _assert_store_link(codex_target)
         marker = config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
@@ -132,32 +157,27 @@ class TestTargetAbsent:
     def test_creates_opencode_symlink_when_target_absent(
         self, opencode_target, skill_src, config_dir
     ):
-        skill_link._ensure_opencode_retro_skill_link()
+        _install("opencode")
         _assert_store_link(opencode_target)
         marker = config_dir / f".{skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
 
-    @pytest.mark.parametrize("agent_root", [".claude", ".codex", ".config/opencode"])
+    @pytest.mark.parametrize("key", [row.key for row in skill_link.AGENT_ROWS])
     def test_creates_missing_skills_directory_when_agent_is_installed(
-        self, _isolate_paths, skill_src, agent_root
+        self, _isolate_paths, skill_src, key
     ):
         import shutil
 
-        skills_dir = _isolate_paths / agent_root / "skills"
+        descriptor = skill_link._descriptor_for(key)
+        skills_dir = descriptor.skills_dir
         if skills_dir.exists():
             shutil.rmtree(skills_dir)
         skills_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        target = skills_dir / "retro-fleet"
-        if agent_root == ".claude":
-            skill_link._ensure_retro_skill_link()
-        elif agent_root == ".codex":
-            skill_link._ensure_codex_retro_skill_link()
-        else:
-            skill_link._ensure_opencode_retro_skill_link()
+        _install(key)
 
-        assert target.is_symlink()
-        _assert_store_link(target)
+        assert descriptor.target.is_symlink()
+        _assert_store_link(descriptor.target)
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +187,8 @@ class TestTargetAbsent:
 
 class TestTargetCorrect:
     def test_correct_symlink_is_noop(self, target, skill_src, config_dir):
-        skill_link._ensure_retro_skill_link()
-        skill_link._ensure_retro_skill_link()
+        _install()
+        _install()
         assert target.is_symlink()
         _assert_store_link(target)
         marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
@@ -196,7 +216,7 @@ class TestDanglingSymlink:
         assert not target.exists()  # dangling
 
         # It remains a conflict until the user removes it deliberately.
-        skill_link._ensure_retro_skill_link()
+        _install()
 
         assert target.is_symlink()
         assert not target.exists()
@@ -217,7 +237,7 @@ class TestDanglingSymlink:
 class TestConflictSkip:
     def test_real_file_at_target_not_clobbered(self, target, skill_src, config_dir, capsys):
         target.write_text("user's own retro-fleet skill")
-        skill_link._ensure_retro_skill_link()
+        _install()
         # File untouched.
         assert target.read_text() == "user's own retro-fleet skill"
         assert not target.is_symlink()
@@ -237,7 +257,7 @@ class TestConflictSkip:
         their_dir = _isolate_paths / "their-skill"
         their_dir.mkdir()
         target.symlink_to(their_dir)
-        skill_link._ensure_retro_skill_link()
+        _install()
         # Symlink unchanged.
         assert target.resolve() == their_dir.resolve()
         captured = capsys.readouterr()
@@ -248,11 +268,11 @@ class TestConflictSkip:
         gate suppresses the notice within 24h."""
         target.write_text("user's file")
         # First call — emits notice + touches conflict marker.
-        skill_link._ensure_retro_skill_link()
+        _install()
         first = capsys.readouterr()
         assert "mm: notice:" in first.err
         # Second call within the TTL → marker is fresh, no notice.
-        skill_link._ensure_retro_skill_link()
+        _install()
         second = capsys.readouterr()
         assert second.err == ""
 
@@ -271,7 +291,7 @@ class TestNoClaudeCode:
         import shutil
 
         shutil.rmtree(_isolate_paths / ".claude")
-        skill_link._ensure_retro_skill_link()
+        _install()
         captured = capsys.readouterr()
         assert captured.err == ""
         # No marker touched — next call still due.
@@ -298,7 +318,7 @@ class TestSymlinkToError:
             return original_symlink(src, dst, target_is_directory)
 
         monkeypatch.setattr(os, "symlink", fake_symlink)
-        skill_link._ensure_retro_skill_link()  # Must not raise.
+        _install()  # Must not raise.
         captured = capsys.readouterr()
         assert "mm: notice:" in captured.err
         assert "PermissionError" in captured.err
@@ -313,35 +333,27 @@ class TestSymlinkToError:
 
 class TestSkillLinkCheckDue:
     def test_no_marker_means_check_due(self, config_dir):
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
-    @pytest.mark.parametrize(
-        ("gate_name", "target_index", "success_marker"),
-        [
-            ("_skill_link_check_due", 0, skill_link._SKILL_LINK_SUCCESS_MARKER),
-            ("_codex_skill_link_check_due", 1, skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER),
-            ("_opencode_skill_link_check_due", 2, skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER),
-        ],
-    )
-    def test_present_agent_root_without_skills_directory_is_due(
-        self, config_dir, gate_name, target_index, success_marker
-    ):
+    @pytest.mark.parametrize("key", [row.key for row in skill_link.AGENT_ROWS])
+    def test_present_agent_root_without_skills_directory_is_due(self, config_dir, key):
         """A fresh legacy marker must not delay repair of a missing skills dir."""
         import shutil
 
-        skills_dir = skill_link.skill_targets()[target_index].parent
+        descriptor = skill_link._descriptor_for(key)
+        skills_dir = descriptor.skills_dir
         if skills_dir.exists():
             shutil.rmtree(skills_dir)
         skills_dir.parent.mkdir(parents=True, exist_ok=True)
-        (config_dir / f".{success_marker}").touch()
+        (config_dir / f".{descriptor.success_marker}").touch()
 
-        assert getattr(skill_link, gate_name)() is True
+        assert _due(key) is True
 
     def test_codex_fresh_marker_with_correct_link_means_not_due(
         self, codex_target, skill_src, config_dir
     ):
-        skill_link._ensure_codex_retro_skill_link()
-        assert skill_link._codex_skill_link_check_due() is False
+        _install("codex")
+        assert _due("codex") is False
 
     def test_combined_gate_repairs_codex_when_claude_is_healthy(
         self, target, codex_target, skill_src, config_dir
@@ -366,8 +378,8 @@ class TestSkillLinkCheckDue:
     def test_fresh_marker_with_correct_link_means_not_due(self, target, skill_src, config_dir):
         """Steady state: marker fresh AND link points at our source → skip.
         Both conditions are required post-drift-check."""
-        skill_link._ensure_retro_skill_link()
-        assert skill_link._skill_link_check_due() is False
+        _install()
+        assert _due() is False
 
     def test_stale_marker_means_due(self, target, skill_src, config_dir):
         target.symlink_to(skill_src)
@@ -375,7 +387,7 @@ class TestSkillLinkCheckDue:
         marker.touch()
         old = time.time() - (25 * 3600)
         os.utime(marker, (old, old))
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
     def test_fresh_marker_but_link_missing_means_due(self, skill_src, config_dir):
         """REGRESSION pin for the post-cleanup-recovery bug: marker got
@@ -385,7 +397,7 @@ class TestSkillLinkCheckDue:
         marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
         # No symlink at target. Drift check must trip.
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
     def test_fresh_marker_but_link_dangling_means_due(
         self, target, skill_src, _isolate_paths, config_dir
@@ -401,7 +413,7 @@ class TestSkillLinkCheckDue:
         shutil.rmtree(deleted_target.parent.parent)
         marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
     def test_fresh_marker_but_link_wrong_target_means_due(
         self, target, skill_src, _isolate_paths, config_dir
@@ -413,7 +425,7 @@ class TestSkillLinkCheckDue:
         target.symlink_to(their_dir)
         marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
     def test_drift_check_resolver_failure_fails_open(self, target, config_dir, monkeypatch):
         """If ``_resolve_retro_skill_src`` raises during the drift check,
@@ -429,7 +441,7 @@ class TestSkillLinkCheckDue:
             raise RuntimeError("resolver simulated failure")
 
         monkeypatch.setattr(skill_link, "_resolve_retro_skill_src", boom)
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
     def test_marker_stat_failure_fails_open(self, config_dir, monkeypatch):
         """TODO#3 critical-gap fix: EACCES / EIO on the marker dir must
@@ -448,7 +460,7 @@ class TestSkillLinkCheckDue:
             return original_stat(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "stat", fake_stat)
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +471,7 @@ class TestSkillLinkCheckDue:
 class TestDryRun:
     def test_dry_run_is_noop(self, target, skill_src, config_dir):
         """`mm push --dry-run` must NOT mutate the symlink or the marker."""
-        skill_link._ensure_retro_skill_link(dry_run=True)
+        _install(dry_run=True)
         assert not target.exists()
         assert not (config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}").exists()
 
@@ -477,28 +489,23 @@ class TestSkillTargets:
     17 owners, which makes the drift cheaper to introduce and harder to see.
     Nothing pinned the agreement, so pin it here."""
 
-    def test_skill_targets_are_exactly_the_installer_targets(
-        self, target, codex_target, opencode_target
-    ):
-        """Claude / Codex / OpenCode order, matching this file's fixtures."""
-        assert skill_link.skill_targets() == (target, codex_target, opencode_target)
+    def test_skill_targets_are_exactly_the_installer_targets(self, agent_targets):
+        """Order matches ``AGENT_ROWS``, matching this file's row-keyed helper."""
+        assert skill_link.skill_targets() == tuple(
+            agent_targets[row.key] for row in skill_link.AGENT_ROWS
+        )
 
-    def test_each_wrapper_installs_at_its_skill_targets_entry(
-        self, target, codex_target, opencode_target, skill_src
-    ):
+    def test_each_wrapper_installs_at_its_skill_targets_entry(self, agent_targets, skill_src):
         """The stronger form: drive the real installers and confirm the links
         land exactly where ``skill_targets()`` says they will.
 
         Comparing tuples alone would still pass if BOTH sides drifted together
-        (e.g. someone renames ``SKILL_ROOTS[1]`` to ``~/.codex2/skills``);
+        (e.g. someone renames a row's ``skills_root``);
         asserting on the on-disk result is what makes that visible.
         """
         skill_link._ensure_retro_skill_links()
-        assert [t for t in skill_link.skill_targets() if t.is_symlink()] == [
-            target,
-            codex_target,
-            opencode_target,
-        ]
+        expected = [agent_targets[row.key] for row in skill_link.AGENT_ROWS]
+        assert [t for t in skill_link.skill_targets() if t.is_symlink()] == expected
 
     def test_skill_targets_are_re_resolved_per_call(self, _isolate_paths, monkeypatch, tmp_path):
         """``expanduser()`` must read ``$HOME`` at CALL time, not import time.
@@ -523,37 +530,37 @@ class TestSkillTargets:
 
 
 class TestInstallerResults:
-    def test_reports_one_outcome_for_each_agent(
-        self, target, codex_target, opencode_target, skill_src
-    ):
+    def test_reports_one_outcome_for_each_agent(self, agent_targets, skill_src):
         results = skill_link._ensure_retro_skill_links()
 
         assert [result.descriptor.display_name for result in results] == [
-            "Claude Code",
-            "Codex",
-            "OpenCode",
+            row.display_name for row in skill_link.AGENT_ROWS
         ]
-        assert [result.status for result in results] == ["installed", "installed", "installed"]
-        assert [result.target for result in results] == [target, codex_target, opencode_target]
+        assert [result.status for result in results] == ["installed"] * len(skill_link.AGENT_ROWS)
+        assert [result.target for result in results] == [
+            agent_targets[row.key] for row in skill_link.AGENT_ROWS
+        ]
 
-    def test_correct_link_reports_unchanged(self, target, codex_target, opencode_target, skill_src):
+    def test_correct_link_reports_unchanged(self, agent_targets, skill_src):
         skill_link._ensure_retro_skill_links()
-        result = skill_link._ensure_retro_skill_links()[0]
+        result = _result_for(skill_link._ensure_retro_skill_links())
 
         assert result.status == "unchanged"
         assert result.skill_src == skill_src.resolve()
 
-    def test_conflict_does_not_hide_other_successes(
-        self, target, codex_target, opencode_target, skill_src
-    ):
-        target.write_text("user's own retro-fleet skill")
+    def test_conflict_does_not_hide_other_successes(self, agent_targets, skill_src):
+        agent_targets["claude"].write_text("user's own retro-fleet skill")
 
         results = skill_link._ensure_retro_skill_links()
+        by_key = {result.descriptor.key: result for result in results}
 
-        assert [result.status for result in results] == ["foreign", "installed", "installed"]
-        assert target.read_text() == "user's own retro-fleet skill"
-        _assert_store_link(codex_target)
-        _assert_store_link(opencode_target)
+        assert by_key["claude"].status == "foreign"
+        assert agent_targets["claude"].read_text() == "user's own retro-fleet skill"
+        for row in skill_link.AGENT_ROWS:
+            if row.key == "claude":
+                continue
+            assert by_key[row.key].status == "installed"
+            _assert_store_link(agent_targets[row.key])
 
     def test_dangling_symlink_reports_conflict_without_unlinking(
         self, target, skill_src, _isolate_paths, monkeypatch
@@ -572,7 +579,7 @@ class TestInstallerResults:
             lambda _self, *args, **kwargs: pytest.fail("installer must not unlink dangling links"),
         )
 
-        result = skill_link._ensure_retro_skill_links()[0]
+        result = _result_for(skill_link._ensure_retro_skill_links())
 
         assert result.status == "foreign"
         assert target.is_symlink()
@@ -593,15 +600,13 @@ class TestInstallerResults:
 
         monkeypatch.setattr(pathlib.Path, "resolve", fake_resolve)
 
-        result = skill_link._ensure_retro_skill_links()[0]
+        result = _result_for(skill_link._ensure_retro_skill_links())
 
         assert result.status == "failed"
         assert result.reason is not None
         assert "OSError" in result.reason
 
-    def test_source_failure_fans_out_to_every_available_agent(
-        self, codex_target, opencode_target, monkeypatch
-    ):
+    def test_source_failure_fans_out_to_every_available_agent(self, agent_targets, monkeypatch):
         calls = 0
 
         def boom():
@@ -614,34 +619,44 @@ class TestInstallerResults:
         results = skill_link._ensure_retro_skill_links()
 
         assert calls == 1
-        assert [result.status for result in results] == ["failed", "failed", "failed"]
+        assert [result.status for result in results] == ["failed"] * len(skill_link.AGENT_ROWS)
         assert all(result.reason is not None for result in results)
 
     def test_directory_setup_failure_does_not_hide_other_outcomes(
-        self, target, codex_target, skill_src, monkeypatch
+        self, target, skill_src, _isolate_paths, monkeypatch
     ):
         import pathlib
-        import shutil
 
-        shutil.rmtree(codex_target.parent)
+        others = [row for row in skill_link.AGENT_ROWS if row.key != "claude"]
+        fail_row, *rest = others
+        fail_skills = Path(fail_row.skills_root).expanduser()
+        fail_skills.parent.mkdir(parents=True, exist_ok=True)
         original_mkdir = pathlib.Path.mkdir
 
         def fake_mkdir(self, *args, **kwargs):
-            if self == codex_target.parent:
+            if self == fail_skills:
                 raise PermissionError("simulated read-only skills directory")
             return original_mkdir(self, *args, **kwargs)
 
         monkeypatch.setattr(pathlib.Path, "mkdir", fake_mkdir)
 
         results = skill_link._ensure_retro_skill_links()
+        by_key = {result.descriptor.key: result.status for result in results}
 
-        assert [result.status for result in results] == ["installed", "failed", "unavailable"]
+        assert by_key["claude"] == "installed"
+        assert by_key[fail_row.key] == "failed"
+        for row in rest:
+            assert by_key[row.key] == "unavailable"
         _assert_store_link(target)
 
     def test_dangling_conflict_does_not_hide_other_outcomes(
-        self, target, codex_target, skill_src, _isolate_paths
+        self, target, skill_src, _isolate_paths
     ):
         import shutil
+
+        others = [row for row in skill_link.AGENT_ROWS if row.key != "claude"]
+        keep_row, *rest = others
+        keep_target = _target_for(_isolate_paths, keep_row.key)
 
         gone = _isolate_paths / "old-venv" / "retro_fleet"
         gone.mkdir(parents=True)
@@ -649,9 +664,13 @@ class TestInstallerResults:
         shutil.rmtree(gone.parent)
 
         results = skill_link._ensure_retro_skill_links()
+        by_key = {result.descriptor.key: result.status for result in results}
 
-        assert [result.status for result in results] == ["foreign", "installed", "unavailable"]
-        _assert_store_link(codex_target)
+        assert by_key["claude"] == "foreign"
+        assert by_key[keep_row.key] == "installed"
+        for row in rest:
+            assert by_key[row.key] == "unavailable"
+        _assert_store_link(keep_target)
 
     def test_non_directory_agent_root_is_a_failed_result(self, target, skill_src, _isolate_paths):
         import shutil
@@ -660,10 +679,14 @@ class TestInstallerResults:
         (_isolate_paths / ".claude").write_text("not a directory")
 
         results = skill_link._ensure_retro_skill_links()
+        by_key = {result.descriptor.key: result for result in results}
 
-        assert [result.status for result in results] == ["failed", "unavailable", "unavailable"]
-        assert results[0].reason is not None
-        assert "NotADirectoryError" in results[0].reason
+        assert by_key["claude"].status == "failed"
+        assert by_key["claude"].reason is not None
+        assert "NotADirectoryError" in by_key["claude"].reason
+        for row in skill_link.AGENT_ROWS:
+            if row.key != "claude":
+                assert by_key[row.key].status == "unavailable"
 
     def test_dry_run_returns_no_results_or_side_effects(self, target, monkeypatch):
         def fail_if_called():
@@ -685,7 +708,7 @@ class TestInstallerResults:
 
 
 class TestInstallSkillsCommand:
-    """The user-facing companion to ``_ensure_retro_skill_link``: explicit
+    """The user-facing companion to ``_ensure_retro_skill_links``: explicit
     install on demand, useful when the steady-state self-heal hasn't run
     yet (fresh machine) or when the user wants to force a re-install
     after manual cleanup. Bypasses the 24h TTL gate by calling the
@@ -745,7 +768,7 @@ class TestInstallSkillsCommand:
         shutil.rmtree(_isolate_paths / ".claude")
         result = self._runner().invoke(app, ["install-skills"])
         assert result.exit_code == 1
-        assert "no Claude Code, Codex, or OpenCode skills directory exists" in result.output
+        assert "no supported agent skills directory exists" in result.output
 
     def test_installs_when_only_codex_skills_dir_exists(
         self, target, codex_target, skill_src, _isolate_paths
@@ -885,12 +908,13 @@ class TestPushSkillLinkWiring:
 
 class TestDurableStore:
     def test_publish_failure_leaves_every_link_untouched(
-        self, target, codex_target, opencode_target, skill_src, monkeypatch
+        self, agent_targets, skill_src, monkeypatch
     ):
         from mind_meld.errors import StorageError
 
-        target.symlink_to(skill_src)
-        prior = os.readlink(target)
+        claude = agent_targets["claude"]
+        claude.symlink_to(skill_src)
+        prior = os.readlink(claude)
 
         def boom(*_args, **_kwargs):
             raise StorageError("disk full")
@@ -898,15 +922,15 @@ class TestDurableStore:
         monkeypatch.setattr(skill_link, "atomic_write_bytes", boom)
         results = skill_link._ensure_retro_skill_links()
         assert {result.status for result in results} == {"failed"}
-        assert target.is_symlink()
-        assert os.readlink(target) == prior
+        assert claude.is_symlink()
+        assert os.readlink(claude) == prior
 
     def test_version_bump_republishes_the_store(self, target, skill_src, monkeypatch):
         """The mm-upgrade path -- the entire reason the store exists.
 
         `_should_publish`'s pkg > store arm had no test: every other arm did.
-        Without this, `pipx upgrade mind-meld` could silently leave the three
-        agents executing the OLD SKILL.md and nothing would catch it.
+        Without this, `pipx upgrade mind-meld` could silently leave every
+        agent executing the OLD SKILL.md and nothing would catch it.
         """
         skill_link._ensure_retro_skill_links()
         store = skill_link._skill_store_dir()
@@ -928,14 +952,14 @@ class TestDurableStore:
         wrong string. Point at the store and the guarantee is real.
         """
         first = skill_link._ensure_retro_skill_links(explicit=True)
-        assert first[0].status == "installed"
+        assert _result_for(first).status == "installed"
         store = skill_link._skill_store_dir()
         before = (store / "SKILL.md").stat().st_mtime_ns
         prior_link = os.readlink(target)
 
         second = skill_link._ensure_retro_skill_links(explicit=True)
 
-        assert second[0].status == "unchanged", second[0]
+        assert _result_for(second).status == "unchanged", _result_for(second)
         assert os.readlink(target) == prior_link
         assert (store / "SKILL.md").stat().st_mtime_ns == before
 
@@ -950,13 +974,13 @@ class TestDurableStore:
         target.symlink_to(checkout)
 
         push = skill_link._ensure_retro_skill_links(explicit=False)
-        assert push[0].status == "unchanged"
-        assert push[0].reason == "live-checkout"
+        assert _result_for(push).status == "unchanged"
+        assert _result_for(push).reason == "live-checkout"
         assert os.readlink(target) == str(checkout)
 
         explicit = skill_link._ensure_retro_skill_links(explicit=True)
-        assert explicit[0].status == "installed"
-        assert explicit[0].reason == "migrated"
+        assert _result_for(explicit).status == "installed"
+        assert _result_for(explicit).reason == "migrated"
         assert os.readlink(target) == str(skill_link._skill_store_dir())
 
     def test_autopush_classifies_but_never_mutates(self, target, skill_src, capsys):
@@ -971,7 +995,7 @@ class TestDurableStore:
 
         assert os.readlink(target) == str(foreign), "autopush mutated agent config"
         assert not (store / "SKILL.md").exists(), "autopush created the store"
-        assert results[0].status == "foreign"
+        assert _result_for(results).status == "foreign"
 
     def test_bad_utf8_in_store_meta_does_not_crash_diagnose(self, target, skill_src):
         """`mm status` and `mm diag` call diagnose_skill_links() with NO enclosing
@@ -985,7 +1009,7 @@ class TestDurableStore:
 
         assert skill_link._read_store_meta(store) is None
         rows = skill_link.diagnose_skill_links()
-        assert len(rows) == 3
+        assert len(rows) == len(skill_link.AGENT_ROWS)
 
     def test_symlink_loop_is_classified_not_crashed_on(self, target, skill_src):
         """A looped link must classify identically on every supported Python.
@@ -999,8 +1023,8 @@ class TestDurableStore:
 
         assert skill_link._symlink_lives(target) is False
         rows = skill_link.diagnose_skill_links()
-        assert len(rows) == 3
-        assert rows[0]["status"] != "ok"
+        assert len(rows) == len(skill_link.AGENT_ROWS)
+        assert _diagnosis_for(rows)["status"] != "ok"
 
     def test_dangling_foreign_link_is_reported_broken(self, target, skill_src):
         """A dangling link to an unrecognized path is BROKEN from the agent's
@@ -1010,7 +1034,7 @@ class TestDurableStore:
         target.symlink_to(target.parent / "nowhere" / "gone")
 
         rows = skill_link.diagnose_skill_links()
-        assert rows[0]["status"] == "foreign-dangling"
+        assert _diagnosis_for(rows)["status"] == "foreign-dangling"
         assert "foreign-dangling" in skill_link.BROKEN_SKILL_STATUSES
 
     def test_notice_states_the_real_cause_for_a_dangling_store_link(
@@ -1093,7 +1117,7 @@ class TestDurableStore:
         store = skill_link._skill_store_dir()
         store.parent.mkdir(parents=True, exist_ok=True)
         store.symlink_to(real)
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "failed"
         assert not target.exists() or os.readlink(target) != str(store)
 
@@ -1101,7 +1125,7 @@ class TestDurableStore:
         store = skill_link._skill_store_dir()
         store.parent.mkdir(parents=True, exist_ok=True)
         store.symlink_to(_isolate_paths / "missing-store")
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "failed"
 
     def test_store_payload_symlink_is_not_replaced(self, target, skill_src, _isolate_paths):
@@ -1109,7 +1133,7 @@ class TestDurableStore:
         store.mkdir(parents=True)
         (store / skill_link._STORE_SENTINEL).write_text("mind-meld skill store\n")
         (store / skill_link._STORE_PAYLOAD).symlink_to(_isolate_paths / "other.md")
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "failed"
         assert (store / skill_link._STORE_PAYLOAD).is_symlink()
 
@@ -1119,7 +1143,7 @@ class TestDurableStore:
         store = skill_link._skill_store_dir()
         store.parent.mkdir(parents=True, exist_ok=True)
         store.write_text("not a directory")
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "failed"
         assert store.read_text() == "not a directory"
 
@@ -1129,7 +1153,7 @@ class TestDurableStore:
         store = skill_link._skill_store_dir()
         store.mkdir(parents=True)
         (store / "notes.txt").write_text("user data")
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "failed"
         assert (store / "notes.txt").read_text() == "user data"
 
@@ -1143,7 +1167,7 @@ class TestDurableStore:
             return original(path, *args, **kwargs)
 
         monkeypatch.setattr(os, "unlink", fake_unlink)
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "installed"
         _assert_store_link(target)
 
@@ -1152,7 +1176,7 @@ class TestDurableStore:
         checkout.mkdir(parents=True)
         (checkout / "SKILL.md").write_text("# dogfood")
         target.symlink_to(checkout)
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "unchanged"
         assert result.reason == "live-checkout"
         assert target.resolve() == checkout.resolve()
@@ -1184,12 +1208,12 @@ class TestDurableStore:
             return original(path, *args, **kwargs)
 
         monkeypatch.setattr(os, "unlink", fake_unlink)
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "installed"
         _assert_store_link(target)
 
     def test_publish_skipped_when_stored_version_is_newer(self, target, skill_src, monkeypatch):
-        skill_link._ensure_retro_skill_link()
+        _install()
         store = skill_link._skill_store_dir()
         meta = skill_link._read_store_meta(store)
         meta["skill_version"] = "99.0.0"
@@ -1199,24 +1223,24 @@ class TestDurableStore:
         before = (store / skill_link._STORE_PAYLOAD).read_bytes()
         (skill_src / "SKILL.md").write_text("# newer package bytes")
         monkeypatch.setattr(skill_link, "__version__", "0.1.0")
-        skill_link._ensure_retro_skill_link()
+        _install()
         assert (store / skill_link._STORE_PAYLOAD).read_bytes() == before
 
     def test_publish_on_equal_version_differing_hash(self, target, skill_src, capsys, monkeypatch):
-        skill_link._ensure_retro_skill_link()
+        _install()
         (skill_src / "SKILL.md").write_text("# equal version, new hash")
         monkeypatch.setattr(skill_link, "__version__", skill_link.__version__)
-        skill_link._ensure_retro_skill_link()
+        _install()
         assert (skill_link._skill_store_dir() / "SKILL.md").read_text() == (
             "# equal version, new hash"
         )
         assert "republishing" in capsys.readouterr().err
 
     def test_identical_payload_causes_no_write(self, target, skill_src):
-        skill_link._ensure_retro_skill_link()
+        _install()
         store = skill_link._skill_store_dir() / "SKILL.md"
         before = store.stat().st_mtime_ns
-        skill_link._ensure_retro_skill_link()
+        _install()
         assert store.stat().st_mtime_ns == before
 
     def test_version_compare_is_not_lexical(self):
@@ -1227,22 +1251,22 @@ class TestDurableStore:
     def test_store_freshness_trips_the_gate_after_a_version_bump(
         self, target, skill_src, monkeypatch
     ):
-        skill_link._ensure_retro_skill_link()
-        assert skill_link._skill_link_check_due() is False
+        _install()
+        assert _due() is False
         monkeypatch.setattr(skill_link, "__version__", "9.9.9")
         (skill_src / "SKILL.md").write_text("# bumped")
-        assert skill_link._skill_link_check_due() is True
+        assert _due() is True
 
     def test_dead_editable_install_reports_unchanged_not_failed(
         self, target, skill_src, monkeypatch
     ):
-        skill_link._ensure_retro_skill_link()
+        _install()
 
         def boom():
             raise ModuleNotFoundError("editable tree gone")
 
         monkeypatch.setattr(skill_link, "_resolve_retro_skill_src", boom)
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result.status == "unchanged"
         _assert_store_link(target)
 
@@ -1260,14 +1284,14 @@ class TestDurableStore:
                 assert store not in covered.parents or include == "."
 
     def test_store_payload_is_skill_md_only(self, target, skill_src):
-        skill_link._ensure_retro_skill_link()
+        _install()
         store = skill_link._skill_store_dir()
         names = {p.name for p in store.iterdir()}
         assert "SKILL.md" in names
         assert "aggregator.py" not in names
 
     def test_store_file_mode_is_0644_and_dir_is_0700(self, target, skill_src):
-        skill_link._ensure_retro_skill_link()
+        _install()
         store = skill_link._skill_store_dir()
         assert oct(store.stat().st_mode & 0o777) == "0o700"
         assert oct((store / "SKILL.md").stat().st_mode & 0o777) == "0o644"
@@ -1292,5 +1316,5 @@ class TestDurableStore:
                 / "retro-fleet"
             ),
         )
-        result = skill_link._ensure_retro_skill_link()
+        result = _install()
         assert result is None or result.status == "failed"

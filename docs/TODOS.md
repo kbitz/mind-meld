@@ -37,4 +37,13 @@ Track 23B, which was dissolved on 2026-08-20 after failing its `/autoplan`
 premise gate; 2026-08-21 regen places it as Track 27A behind Groups 24-26
 (Approach B deleted Group 29).
 
+Track 25A `/autoplan` drain, 1 item on 2026-08-22:
+
+- 1 deferred to `docs/roadmap-future.md`: unify the seven per-agent enumerations
+  across five modules. The `/autoplan` run also falsified Track 25A's premise
+  (pytest never writes the real `~/.grok/skills`; the defect is silent `zip()`
+  truncation), so 25A was retitled and re-scoped, Group 24 moved to Shipped, and
+  the packer re-roomed the old 26A with 25A as Track 25B.
+- 0 placed from the inbox: `## Unprocessed` was already empty.
+
 _Last updated 2026-08-22 by `/roadmap`._

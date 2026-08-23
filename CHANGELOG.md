@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.40] - 2026-08-22
+
+**Adding a supported agent is now one `AgentRow` in `skill_link.AGENT_ROWS` — descriptors, test isolation, the real-home guard, diagnosis, and `mm install-skills` all pick it up.** A fourth row can no longer vanish from isolated tests via a silent `zip` truncation, and `mm diag --json` rows gained a `key` field.
+
+### Changed
+
+- **`AGENT_ROWS` is the one table.** Every skill-link consumer derives from it. Canonical `~`-relative roots live on the row; tests redirect via an empty-by-default override map that the real-home guard never reads.
+- **`mm diag --json` rows include `key`.** Healthy and `error` branches emit the same schema, so a wedged link still names its registry row.
+- **`mm install-skills` names no agent count.** The unavailable message is now "no supported agent skills directory exists", and `--help` says it covers every agent mm supports.
+
 ## [0.12.39] - 2026-08-21
 
 **Fleet retros now compare this window to the prior equal period from the synced events corpus, so the trends section is fleet-deterministic for the first time.** The v0.12.0 machine-local snapshot cache compared against whenever you last typed the command, fired twice in 106 days, and was wrong both times. Snapshots were never synced, so an upgraded Mac and an old one produce different trend sections from the same corpus until both upgrade — that is the pre-existing non-determinism being fixed, not a new bug.

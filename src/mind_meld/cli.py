@@ -5643,7 +5643,9 @@ def migrate_config(
 
 @app.command(name="install-skills")
 def install_skills_cmd() -> None:
-    """Install (or re-install) retro-fleet for Claude Code, Codex, and OpenCode.
+    """Install (or re-install) retro-fleet for every agent mm supports.
+
+    Prints one line per agent, including agents that aren't installed.
 
     Force-runs the same self-heal that ``mm init`` and ``mm push`` invoke
     automatically, bypassing the steady-state TTL gate. Intended for:
@@ -5700,8 +5702,7 @@ def install_skills_cmd() -> None:
 
     if not available:
         typer.echo(
-            "mm: error: no Claude Code, Codex, or OpenCode skills directory exists; "
-            "install an agent first",
+            "mm: error: no supported agent skills directory exists; install an agent first",
             err=True,
         )
         raise typer.Exit(code=1)

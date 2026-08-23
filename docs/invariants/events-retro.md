@@ -4,7 +4,7 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
-- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `SKILL_ROOTS`
+- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
@@ -611,13 +611,10 @@ v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is cou
 
 Agent links point at an mm-owned **constant** store, not at the running
 package. `_skill_store_dir()` is `~/.local/share/mind-meld/agent-skills/retro-fleet/`.
-`MM_SKILLS_DIR` overrides it and is read on EVERY call, NOT gated on pytest —
-set it in a real shell and it relocates the real store and every agent link.
-The docstring calls it a test override, but the suite does not use it:
-`conftest.py:_isolate_skill_links` monkeypatches `_skill_store_dir` itself.
-So it is an undocumented production knob, and the user-facing `--store PATH`
-form is deliberately unshipped. Either gate it or document it — do not leave
-the docstring claiming a scope the code does not enforce. `mm` copies **only** `SKILL.md` there via
+`MM_SKILLS_DIR` is a test-only override, gated on `PYTEST_CURRENT_TEST`.
+Set it outside a test and it is ignored, with one `mm: error:` to stderr.
+`conftest.py:_isolate_skill_links` sets it via `monkeypatch.setenv`. The
+user-facing `--store PATH` form is deliberately unshipped. `mm` copies **only** `SKILL.md` there via
 `fsutil.atomic_write_bytes`. `aggregator.py` stays in the wheel and is imported
 by `cli.py:retro_fleet_cmd`. Never symlink the store at the package — that
 moves the dangle one hop.
@@ -626,9 +623,13 @@ Source dir on disk is `retro_fleet/` (underscore — Python identifier so
 `mind_meld.skills.retro_fleet.aggregator` is importable); link name is
 `retro-fleet` (hyphen — Claude Code skill convention).
 
-**Three targets since v0.12.18.** Claude Code, Codex, and OpenCode, enumerated
-in `SKILL_ROOTS` and resolved per call by `skill_targets()`. A call-time
-`SkillTarget` descriptor owns each agent root. `SkillInstallResult` reports
+**`AGENT_ROWS` is the one table.** Every consumer — descriptors,
+`skill_targets()`, the installer, diagnosis, test isolation, and the
+real-home guard — derives from it. Canonical `~`-relative roots live on
+the row; `_TEST_SKILL_ROOT_OVERRIDES` is empty in production and is the
+only thing tests patch to redirect paths. The guard derives from
+`AGENT_ROWS`, never from the override map. A call-time `SkillTarget`
+descriptor owns each agent root. `SkillInstallResult` reports
 `installed`, `unchanged`, `unavailable`, `dangling-ours`,
 `dangling-ours-legacy`, `foreign`, or `failed`. `skill_src` is provenance
 (the package dir); `link_target` is the store path. `_ensure_retro_skill_links`
