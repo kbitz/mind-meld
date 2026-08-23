@@ -90,6 +90,58 @@ support:
    that every selected reader had no attributable local ledger; read the note
    instead of inferring which one occurred.
 
+## Step 0: preflight
+
+Within Step 0, only stage 0A can stop the run: 0B is informational and
+must not change what you do next. This rule scopes to Step 0 only — it says
+nothing about Steps 1-5, which keep their own failure contracts. In
+particular, a failed or malformed `mm retro-fleet` in Step 2 is still fatal;
+never synthesize a card from output you did not get. On a healthy machine
+Step 0 is silent — do not narrate the preflight.
+
+**0A — is `mm` on PATH and working?** Its own block, its own contract.
+Do not fold this into Step 1's `mm push` / `mm autopull` block.
+
+```bash
+command -v mm
+```
+
+If that exits non-zero, **STOP.** Do not run Steps 1-5. Anything you
+produced would be missing this machine's activity entirely. Tell the user:
+
+> `mm` is not on your PATH, so I stopped before running the retro. Check
+> `pipx list | grep mind-meld`. If it is listed there, this is a
+> PATH-order problem, not a missing install. After you repair it, restart
+> the agent so it reloads SKILL.md.
+
+If `mm` resolves, run:
+
+```bash
+mm --version
+```
+
+If that fails, **STOP.** A broken install is not a degraded run; later
+`mm` commands cannot work either. Quote the error, tell the user to
+repair it (same `pipx list` check), and restart the agent so it reloads
+SKILL.md.
+
+This proves shell resolution and that the binary starts. It does not
+prove the install is current.
+
+**0B — after Step 1, relay an upgrade notice if one appeared.** Step 1
+runs interactive `mm push`, whose tail may print something about
+upgrading (GitHub `/tags` check). If `mm push` printed anything about
+upgrading, repeat it verbatim in your reply, then add: this retro may
+omit blocks added after your installed version; absent means unmeasured,
+not zero. The upgrade command is
+`pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`
+— do not invent a different one. After they run it, they still need
+`mm install-skills`, then restart the agent so it reloads SKILL.md.
+
+Silence is not evidence of freshness. The notice is 24h-throttled,
+skipped when `[upgrade] auto_check = false` or `--no-check-version`, and
+network-dependent.
+
 ## Step 1: refresh fleet state
 
 Push first, then pull. `_run_events_tail` only fires on push, so today's
@@ -117,24 +169,13 @@ non-zero exit from `mm push`, and continue to Step 2 with whatever state
 exists on disk.
 
 ```bash
-command -v mm
-mm --version
 mm push
 mm autopull
 ```
 
-Skip this step only if the user explicitly asks for a "stale" or "offline"
-retro, or if they just ran `mm push` and `mm pull` themselves.
-
-**Read `mm --version` before you interpret anything as missing.** The
-`AGENT LOGS` block needs **v0.12.37+**, and a stale binary renders a
-perfectly valid-looking retro *without* that block — indistinguishable
-from "no agent activity happened." This is not hypothetical: a global
-pipx install can sit several releases behind the checkout you are looking
-at. If the version is below 0.12.37 and the user asks about agent-log
-activity, say the binary is too old and name the upgrade rather than
-reporting an absence. Same for `command -v mm` resolving somewhere
-unexpected.
+Skip Step 1 only if the user explicitly asks for a "stale" or "offline"
+retro, or if they just ran `mm push` and `mm pull` themselves. Step 0
+still runs.
 
 ## Step 2: first-pass aggregation
 
@@ -374,5 +415,6 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
   that is the only reader-level claim the data supports.
 - **It does not treat a missing `AGENT LOGS` block as zero activity.** The
   block is omitted only when no snapshot has ever been accepted, and the body
-  always names the cause. A stale `mm` binary (below v0.12.37) also produces
-  no block — check `mm --version` from Step 1 before reporting an absence.
+  always names the cause. A stale `mm` also produces no block — Step 0
+  already stopped you if the install is missing or broken; treat any
+  remaining absence as unmeasured, not zero.

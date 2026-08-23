@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from mind_meld import upgrade
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "mind_meld"
 CLAUDE_MD = ROOT / "CLAUDE.md"
@@ -302,6 +304,59 @@ def _string_constants(node: ast.AST) -> list[str]:
         out.extend(_string_constants(node.left))
         out.extend(_string_constants(node.right))
     return out
+
+
+def test_skill_md_step0_preflight_contract() -> None:
+    """Step 0 is an unskippable binary gate above Step 1.
+
+    ``split(heading, 1)[-1]`` returns the whole document when the heading is
+    absent, and ``command -v mm`` already appears in Step 1 historically, so
+    that idiom would pass for a *missing* Step 0. Assert both headings exist,
+    then slice by index. Do not reuse the Notes-decoder test's boundaries —
+    that couples two independent contracts to one pair of headings.
+    """
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## Step 0" in skill, "Step 0 preflight heading is gone"
+    assert "## Step 1" in skill
+    i0, i1 = skill.index("## Step 0"), skill.index("## Step 1")
+    assert i0 < i1, "Step 0 must precede Step 1"
+    step0 = skill[i0:i1]
+    # Positive substrings alone do not protect a gate: "never run `command -v
+    # mm`" would satisfy them. Assert the STOP semantics too, and assert the
+    # Step 1 clause POSITIVELY -- forbidding one phrase passes if the clause is
+    # deleted or rewritten unconditionally.
+    assert "command -v mm" in step0
+    assert "mm --version" in step0, "0A must probe the binary, not just resolve it"
+    assert step0.count("STOP") >= 2, "both 0A branches must stop the run"
+    assert "Do not run Steps 1-5" in step0
+    assert "Skip this step" not in step0, "Step 0 must carry no escape hatch"
+    # D2 cut the version-comparison stage: two matching stale numbers read as
+    # verification, and the check cannot know which SKILL.md the agent loaded.
+    assert "min_mm_version" not in step0
+    assert "skill_version" not in step0
+    assert "sort -V" not in step0
+
+    # Prose wraps. Assert against whitespace-normalized text so reflowing a
+    # paragraph is not a test failure -- the contract is the sentence, not
+    # where the line breaks fall.
+    flat = " ".join(step0.split())
+    assert "restart the agent so it reloads SKILL.md" in flat
+
+    # Stage 0B relays mm's own upgrade nudge, which is the only
+    # network-authoritative staleness signal the skill can reach. Bind the
+    # command to the constant rather than a copy: this Track removed two
+    # rotting version literals, so it must not add a rotting command literal.
+    # Asserting the constant also pins 0B's existence -- without it, deleting
+    # the whole relay leaves this test green.
+    assert upgrade.INSTALL_CMD in flat, "Stage 0B must quote upgrade.INSTALL_CMD verbatim"
+    step1 = skill[i1 : skill.index("## Step 2")]
+    assert "Skip this step" not in step1, "Step 1's skip clause must name Step 1"
+    assert "Skip Step 1 only if" in step1, (
+        "Step 1's skip clause must still exist and stay conditional -- deleting "
+        "it, or making it unconditional, silently re-opens the Step 0 bypass"
+    )
 
 
 def test_every_notes_line_has_a_skill_decoder_entry() -> None:
