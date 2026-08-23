@@ -6,13 +6,15 @@ Inbox for unprocessed items. Other skills (`/full-review`, `/investigate`,
 
 Single source of truth — there is no root-level `TODOS.md`. The two files were
 reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
-`## Inbox` heading was renamed to `## Unprocessed
+`## Inbox` heading was renamed to `## Unprocessed` (what `/roadmap` drains).
+
+## Unprocessed
 
 _(none)_
 
 Track 25B `/autoplan` drain, 5 items on 2026-08-22:
 
-- 1 placed: `mm uninstall-skills` became **Track 27A** (new Group 27, between
+- 1 placed: `mm uninstall-skills` became **Track 26A** (new Group 26, between
   Install consent and the Grok row). Placed rather than deferred because the
   installer's `absent target -> symlink -> installed` branch re-creates a
   manually deleted link on the next interactive push, so there is currently no

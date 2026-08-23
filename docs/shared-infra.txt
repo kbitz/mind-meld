@@ -2,11 +2,17 @@
 # these as SHARED_INFRA rather than a collision, so declaring them honestly in
 # a Track's `_touches:` no longer serializes the whole plan.
 #
-# mind-meld has no VERSION file -- `pyproject.toml` is the version source of
-# truth (AGENTS.md "Version source of truth"), so it belongs here for the same
-# reason VERSION does in repos that have one.
+# pyproject.toml is deliberately NOT here, even though mind-meld has no VERSION
+# file and pyproject is its version source of truth. Two Tracks that both claim
+# the same version merge cleanly in git, and .github/workflows/release.yml
+# guards tag and Release creation behind existence checks but force-advances
+# `latest` unconditionally (`git push origin "+HEAD:refs/heads/latest"`). The
+# second merge would therefore leave `latest` -- the ref `pipx install ...@latest`
+# and the upgrade nudge both track -- pointing at an untagged commit published
+# under an already-released version. Letting the packer serialize
+# release-bearing Tracks is the cheap guard against that, so keep it.
+# See CLAUDE.md: parallel-workspace version collisions are a known deferred gap.
 
-pyproject.toml
 CHANGELOG.md
 docs/PROGRESS.md
 docs/ROADMAP.md
