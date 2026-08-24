@@ -169,6 +169,65 @@ def test_leaf_modules_import_nothing_from_cli(mod: str) -> None:
     assert hits == [], f"leaf {mod}.py must not import cli (found {hits})"
 
 
+_MAY_CREATE_CALLEES = {"_ensure_retro_skill_links", "_skill_links_check_due"}
+
+
+def _calls_missing_may_create(path: Path) -> list[tuple[int, str]]:
+    """Return (lineno, func) for src/ calls that omit the consent kwarg."""
+    hits: list[tuple[int, str]] = []
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            name = func.attr
+        elif isinstance(func, ast.Name):
+            name = func.id
+        else:
+            continue
+        if name not in _MAY_CREATE_CALLEES:
+            continue
+        if not any(kw.arg == "may_create" for kw in node.keywords):
+            hits.append((node.lineno, name))
+    return hits
+
+
+def test_src_skill_link_calls_pass_may_create() -> None:
+    """Optional may_create is silently forgettable; every src/ call must spell it.
+
+    Tests may still call the functions bare (None means allow-all). Production
+    callers that omit the kwarg restore the ungated write this Track removes.
+    """
+    offenders = {
+        str(p.relative_to(SRC)): hits
+        for p in SRC.rglob("*.py")
+        if (hits := _calls_missing_may_create(p))
+    }
+    assert offenders == {}, f"src/ calls missing may_create: {offenders}"
+
+
+def test_skill_link_does_not_import_config() -> None:
+    """consented_agent_keys takes resolved sources; skill_link stays a near-leaf."""
+    src = (SRC / "skill_link.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                assert a.name != "mind_meld.config" and not a.name.startswith(
+                    "mind_meld.config."
+                ), f"skill_link imports config at line {node.lineno}"
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            assert mod != "mind_meld.config" and not mod.startswith("mind_meld.config."), (
+                f"skill_link imports config at line {node.lineno}"
+            )
+            if mod == "mind_meld":
+                assert all(a.name != "config" for a in node.names), (
+                    f"skill_link imports config at line {node.lineno}"
+                )
+
+
 def test_no_module_under_src_imports_cli() -> None:
     """Repo-wide: nothing in the package imports cli.
 
@@ -543,6 +602,7 @@ def test_malformed_skills_root_makes_guard_overmatch(monkeypatch) -> None:
         skills_root="/opt/not-home-relative/skills",
         success_marker="bad-skill-link-checked",
         conflict_marker="bad-skill-link-conflict",
+        consent_source="bad",
     )
     monkeypatch.setattr(skill_link, "AGENT_ROWS", (*skill_link.AGENT_ROWS, bad))
     sibling = skill_link._REAL_HOME / "some-unrelated-dir" / "skills"
@@ -603,8 +663,10 @@ def test_synthetic_row_is_covered_with_no_other_edit(monkeypatch, tmp_path) -> N
         skills_root="~/.mm-synthetic-agent/skills",
         success_marker="synthetic-skill-link-checked",
         conflict_marker="synthetic-skill-link-conflict",
+        consent_source="synthetic",
     )
     redirect_skill_paths(monkeypatch, tmp_path, extra_rows=(synthetic,))
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", tmp_path / "no-such-config.toml")
 
     redirected = skill_link._TEST_SKILL_ROOT_OVERRIDES["synthetic"]
     assert redirected.startswith(str(tmp_path)), redirected

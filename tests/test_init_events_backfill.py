@@ -402,7 +402,7 @@ class TestInitWiring:
         # avoids touching ~/.claude.
         monkeypatch.setattr(
             "mind_meld.skill_link._ensure_retro_skill_links",
-            lambda *, dry_run=False, allow_mutate=True, explicit=False: (),
+            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create=None: (),
         )
 
         storage = tmp_path / "icloud"
@@ -416,6 +416,31 @@ class TestInitWiring:
         assert cfg_dev_id == called_dev_id, "device_id must match config"
         assert n_sources >= 1, "sources list must not be empty"
 
+    def test_init_passes_derived_skill_consent_to_installer(self, tmp_path, monkeypatch):
+        """The init hook receives the same source-derived consent as push."""
+        from typer.testing import CliRunner
+
+        from mind_meld.cli import app
+
+        cfg_path = tmp_path / "config.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
+        received: list[frozenset[str] | None] = []
+        monkeypatch.setattr(
+            "mind_meld.skill_link._ensure_retro_skill_links",
+            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create=None: (
+                received.append(may_create) or ()
+            ),
+        )
+        monkeypatch.setattr("mind_meld.events_tail._run_events_backfill", lambda *_args: None)
+
+        storage = tmp_path / "icloud"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
+        result = CliRunner().invoke(app, ["init"], input=stdin)
+
+        assert result.exit_code == 0, result.output
+        assert received == [frozenset({"claude"})]
+
     def test_init_continues_when_skill_installer_raises(self, tmp_path, monkeypatch):
         """The optional installer must not abort init or suppress backfill."""
         from typer.testing import CliRunner
@@ -427,7 +452,7 @@ class TestInitWiring:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
 
-        def installer_failure(*, dry_run=False, allow_mutate=True, explicit=False):
+        def installer_failure(*, dry_run=False, allow_mutate=True, explicit=False, may_create=None):
             raise RuntimeError("simulated installer regression")
 
         backfill_calls: list[str] = []
@@ -492,7 +517,7 @@ class TestEventsDirIsolation:
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         monkeypatch.setattr(
             "mind_meld.skill_link._ensure_retro_skill_links",
-            lambda *, dry_run=False, allow_mutate=True, explicit=False: (),
+            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create=None: (),
         )
 
         # Snapshot the real events dir pre-init so we can compare.

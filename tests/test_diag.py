@@ -185,6 +185,34 @@ def test_diag_handles_missing_config(tmp_path, monkeypatch):
     assert payload["config"]["state"].startswith("error")
 
 
+def test_diag_handles_unresolvable_explicit_source(tmp_path, monkeypatch):
+    """Source resolution failures are config errors, never a diag crash."""
+    storage, cfg_path, _backend = _setup(tmp_path, monkeypatch)
+    loop = tmp_path / "source-loop"
+    loop.symlink_to(loop)
+    save_config(
+        {
+            "device": {"id": "mac-a", "name": "Mac A"},
+            "storage": {"path": str(storage)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [{"name": "claude", "path": str(loop), "type": "claude"}],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        },
+        cfg_path,
+    )
+
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["config"]["state"].startswith("error: config: failed to resolve")
+    assert all(
+        row["maintain_links"].startswith("unknown (config invalid:")
+        for row in payload["skill_links"]
+    )
+
+
 def test_diag_detects_root_salt_drift(tmp_path, monkeypatch):
     """Config's root_salt_fp doesn't match storage — drift signal must show."""
     storage, cfg_path, backend = _setup(tmp_path, monkeypatch)

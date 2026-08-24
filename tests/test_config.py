@@ -1598,3 +1598,107 @@ class TestGrokHostUsageConfig:
                 },
             }
         )
+
+
+class TestSkillsSection:
+    """[skills] maintain_links + agents. Track 25C."""
+
+    def _base(self) -> dict:
+        return {
+            "device": {"id": "abc123", "name": "Mac"},
+            "storage": {"path": "/tmp"},
+        }
+
+    def test_absent_table_is_valid(self):
+        _validate(self._base())
+
+    def test_maintain_links_true_and_false(self):
+        cfg = self._base()
+        cfg["skills"] = {"maintain_links": True}
+        _validate(cfg)
+        cfg["skills"] = {"maintain_links": False}
+        _validate(cfg)
+
+    def test_maintain_links_string_is_config_error(self):
+        cfg = self._base()
+        cfg["skills"] = {"maintain_links": "false"}
+        with pytest.raises(ConfigError, match="skills.maintain_links must be a boolean"):
+            _validate(cfg)
+
+    def test_agents_list_of_str_accepted(self):
+        cfg = self._base()
+        cfg["skills"] = {"agents": ["codex", "nope"]}
+        _validate(cfg)
+
+    def test_agents_non_list_is_config_error(self):
+        cfg = self._base()
+        cfg["skills"] = {"agents": "codex"}
+        with pytest.raises(ConfigError, match="skills.agents must be a list"):
+            _validate(cfg)
+
+    def test_agents_non_str_element_names_index(self):
+        cfg = self._base()
+        cfg["skills"] = {"agents": [42]}
+        with pytest.raises(ConfigError, match=r"skills.agents\[0\] must be a string"):
+            _validate(cfg)
+
+    def test_empty_agents_is_config_error_naming_maintain_links(self):
+        cfg = self._base()
+        cfg["skills"] = {"agents": []}
+        with pytest.raises(
+            ConfigError, match="skills.agents must not be empty.*maintain_links = false"
+        ):
+            _validate(cfg)
+
+    def test_skills_non_table_is_config_error(self):
+        cfg = self._base()
+        cfg["skills"] = "bad"
+        with pytest.raises(ConfigError, match=r"\[skills\] must be a table, got str"):
+            _validate(cfg)
+
+    def test_unknown_agent_name_is_accepted(self):
+        cfg = self._base()
+        cfg["skills"] = {"agents": ["grok"]}
+        _validate(cfg)
+
+    def test_explicit_source_symlink_loop_is_a_config_error(self, tmp_path):
+        loop = tmp_path / "source-loop"
+        loop.symlink_to(loop)
+        cfg = self._base()
+        cfg["sync"] = {"sources": [{"name": "claude", "path": str(loop), "type": "claude"}]}
+
+        with pytest.raises(ConfigError, match="failed to resolve source 'claude' path"):
+            get_sources(cfg)
+
+    def test_round_trip_preserves_both_keys(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(storage)},
+            "skills": {"maintain_links": False, "agents": ["codex"]},
+        }
+        save_config(config, config_path)
+        loaded = load_config(config_path)
+        assert loaded["skills"]["maintain_links"] is False
+        assert loaded["skills"]["agents"] == ["codex"]
+
+    def test_patch_config_on_disk_writes_flat_skills_section(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        save_config(
+            {
+                "device": {"id": "abc", "name": "Mac"},
+                "storage": {"path": str(storage)},
+            },
+            config_path,
+        )
+        patch_config_on_disk(
+            {"skills": {"maintain_links": True, "agents": ["claude", "codex"]}},
+            config_path,
+        )
+        loaded = load_config(config_path)
+        assert loaded["skills"]["maintain_links"] is True
+        assert loaded["skills"]["agents"] == ["claude", "codex"]
