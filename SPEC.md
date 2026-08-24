@@ -146,6 +146,10 @@ path = "~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld"
 [sync]
 max_file_size = 52428800   # bytes (50MB). Skip files larger than this.
 
+[skills]                   # optional: per-machine retro-fleet link-maintenance policy
+maintain_links = true      # false disables every agent link
+# agents = ["claude", "codex"]  # when present, an exhaustive allowlist
+
 [[sync.sources]]
 name = "claude"
 path = "~/.claude"
@@ -326,10 +330,11 @@ mm push                     # build manifest, diff against remote, upload change
 mm pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
 mm status [--source NAME]   # show local vs remote state, pending changes
-                            # plus one line per broken retro-fleet skill link
+                            # plus a line for broken retro-fleet links and a pending 0.12.42 policy-transition notice
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # `skill_links` rows: agent, target, store, store_state, store_version, status, readlink|detail
+                            # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
+                            # maintain_links is enabled | disabled (...) | unknown (config invalid: ...)
 mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
 mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
                                              # annotates modified files as write / merge / skip / conflict
@@ -350,7 +355,8 @@ mm disable-source NAME [--force]   # turn a configured sync source OFF for this 
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
-mm install-skills           # check/install the retro-fleet skill link for every agent mm supports; reports each target, repairs mm's own dangling and legacy links, never overwrites a foreign one
+mm install-skills [--agent KEY]  # check/install the retro-fleet skill link for every authorized agent; reports declined rows, repairs mm's own dangling and legacy links, never overwrites a foreign one
+                               # --agent is repeatable: persist a maintenance grant without enabling sync or usage reading, then install every authorized agent
 mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N] [--format jsonl|table]
                             # query the per-file pull/push history log
 mm retro-fleet [WINDOW] [--no-author-filter]

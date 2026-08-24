@@ -2,6 +2,27 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.42] - 2026-08-23
+
+**`mm` now maintains each `retro-fleet` skill link only when that agent is authorized by its local skill-link policy.** Reads of a host's local store were already gated on `get_sources`; writes into that host's skills directory were not. By default, policy derives from enabled sources; `[skills] maintain_links` and the optional exhaustive `[skills] agents` allowlist can override it. `mm install-skills --agent KEY` grants link maintenance without enabling sync or usage reading. Existing links stay in place; `mm uninstall-skills` is next.
+
+### Added
+
+- **`[skills] maintain_links` and `[skills] agents`.** Strictly validated at load. `maintain_links = false` disables every row. An explicit `agents` list suppresses source derivation the same way an explicit `[[sync.sources]]` suppresses `DEFAULT_SOURCES`. `agents = []` is a `ConfigError` pointing at `maintain_links = false`. Unknown names are accepted and inert.
+- **`mm install-skills --agent KEY`** (repeatable). Writes `maintain_links = true` and `agents =` the current effective set plus KEY, preserving unknown future-agent grants, then installs every authorized agent. Refuses and exits 1 if it cannot persist the grant. Does not enable source sync or usage reading.
+- **One-time upgrade notice** on the first interactive push after 0.12.41, naming every declined agent that still has an mm-owned link. `mm autopush` cannot spend that marker. `mm status` shows the pending transition until acknowledged.
+
+### Changed
+
+- **Installer and TTL gate share one consent set.** A declined row is classified before any `stat`, never touches its success marker, and is silent on push. `declined` is not a broken `mm status` state. `mm diag` carries a separate `maintain_links` policy field; `status: ok` and `maintain_links: disabled` can coexist when a leftover link still resolves.
+- **Store publish is not gated on agent consent.** An all-declined machine still refreshes an mm-owned store its surviving links point at, and does not create a store if none exists.
+- **`init` and `_push_core` resolve sources before the skill hook** so consent is known. The hook itself stays between device registration and the events tail.
+- **`mm install-skills`** skips declined rows with a remedy line and exits 0 when every available agent is declined. A broken config fails closed and exits 1. Bare invocation with no config still installs for every available agent (fresh-machine setup).
+
+### Fixed
+
+- Unconsented writes into `~/.codex/skills/` and `~/.config/opencode/skills/` under the default source-derived policy.
+
 ## [0.12.41] - 2026-08-23
 
 **`/retro-fleet` now refuses up front when `mm` is missing or broken, and the README names the missing-block failure that Step 0 cannot reach.** A preflight that lived inside a skippable Step 1 is not a preflight; Step 0 is unskippable and silent on a healthy machine. Step 0 reaches a user only when the store republishes, which requires an `mm` at least as new as the store — a user who never upgrades never receives it. Step 0 prevents future drift; it does not cure current drift. The new README troubleshooting entry is the remedy for that population.

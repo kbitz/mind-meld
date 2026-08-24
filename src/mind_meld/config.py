@@ -228,6 +228,9 @@ def _validate(config: dict[str, Any]) -> None:
                 f"got {type(retro['grok_host_usage']).__name__}."
             )
 
+    if "skills" in config:
+        _validate_skills(config["skills"])
+
 
 def _apply_defaults(config: dict[str, Any]) -> None:
     """Fill in optional fields with defaults."""
@@ -292,6 +295,15 @@ def _validate_sources(sources: Any) -> None:
             _validate_exclude_patterns(src["exclude_patterns"], name)
 
 
+def _validate_str_list(value: Any, label: str) -> None:
+    """Check ``value`` is a list[str]. Shared by disabled_sources and skills.agents."""
+    if not isinstance(value, list):
+        raise ConfigError(f"config: {label} must be a list, got {type(value).__name__}.")
+    for j, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ConfigError(f"config: {label}[{j}] must be a string, got {type(item).__name__}.")
+
+
 def _validate_disabled_sources(names: Any) -> None:
     """Check sync.disabled_sources is a list[str].
 
@@ -301,14 +313,32 @@ def _validate_disabled_sources(names: Any) -> None:
     Validation here is purely structural: shape errors at load time
     instead of crashing mid-sync on iteration.
     """
-    if not isinstance(names, list):
+    _validate_str_list(names, "sync.disabled_sources")
+
+
+def _validate_skills(skills: Any) -> None:
+    """Check the optional [skills] table.
+
+    ``maintain_links`` is a strict bool — a string ``"false"`` is truthy in
+    Python, and a lenient read would silently ignore a user's decline.
+    ``agents`` is an exhaustive allowlist when present; an empty list is
+    rejected because ``maintain_links = false`` is the one way to say "none".
+    Unknown agent names are accepted and inert (same forward-compat allowance
+    as ``disabled_sources``).
+    """
+    if not isinstance(skills, dict):
+        raise ConfigError(f"config: [skills] must be a table, got {type(skills).__name__}.")
+    if "maintain_links" in skills and not isinstance(skills["maintain_links"], bool):
         raise ConfigError(
-            f"config: sync.disabled_sources must be a list, got {type(names).__name__}."
+            "config: skills.maintain_links must be a boolean, "
+            f"got {type(skills['maintain_links']).__name__}."
         )
-    for j, name in enumerate(names):
-        if not isinstance(name, str):
+    if "agents" in skills:
+        _validate_str_list(skills["agents"], "skills.agents")
+        if not skills["agents"]:
             raise ConfigError(
-                f"config: sync.disabled_sources[{j}] must be a string, got {type(name).__name__}."
+                "config: skills.agents must not be empty; "
+                "use maintain_links = false to turn skill-link maintenance off."
             )
 
 
@@ -362,6 +392,25 @@ def grok_host_usage_enabled(config: dict[str, Any]) -> bool:
     return isinstance(retro, dict) and retro.get("grok_host_usage") is True
 
 
+def _resolve_source_path(value: str, *, label: str) -> str:
+    """Resolve one configured source path or raise a typed config error."""
+    path = Path(value).expanduser()
+    try:
+        resolved = path.resolve()
+        # ``resolve(strict=False)`` intentionally preserves an absent source so
+        # get_sources can later omit it.  On newer Python versions, though, a
+        # symlink loop can also resolve lexically instead of raising.  A
+        # follow-symlink stat distinguishes the two: FileNotFoundError remains
+        # the supported absent-source case; ELOOP and other traversal failures
+        # are invalid explicit config.
+        path.stat()
+    except FileNotFoundError:
+        return str(resolved)
+    except (OSError, RuntimeError) as e:
+        raise ConfigError(f"config: failed to resolve {label} path {value!r} — {e}") from e
+    return str(resolved)
+
+
 def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     """Resolve the list of sync sources from config.
 
@@ -374,20 +423,26 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     is absent from a legacy (non-explicit) config, append that default source.
 
     Finally, filter to sources whose path actually exists on disk.
+
+    Raises ``ConfigError`` when an explicitly configured source path cannot
+    be resolved. Callers can then honor the normal typed-config-error path.
     """
     sync = config.get("sync", {})
 
     explicit_sources = "sources" in sync
     if explicit_sources:
         sources = [
-            {**src, "path": str(Path(src["path"]).expanduser().resolve())}
+            {
+                **src,
+                "path": _resolve_source_path(src["path"], label=f"source {src['name']!r}"),
+            }
             for src in sync["sources"]
         ]
     elif "claude_dir" in sync:
         sources = [
             {
                 "name": "claude",
-                "path": str(Path(sync["claude_dir"]).expanduser().resolve()),
+                "path": _resolve_source_path(sync["claude_dir"], label="claude_dir"),
                 "type": "claude",
             }
         ]

@@ -1607,7 +1607,7 @@ class TestSkillLinkStatusNag:
     def test_working_and_deliberate_states_are_not_broken(self) -> None:
         from mind_meld import skill_link
 
-        for status in ("ok", "absent", "live-checkout", "foreign"):
+        for status in ("ok", "absent", "live-checkout", "foreign", "declined"):
             assert status not in skill_link.BROKEN_SKILL_STATUSES, status
 
     def test_wedged_states_are_broken(self) -> None:
@@ -1646,7 +1646,9 @@ class TestSkillLinkStatusNag:
         """
         from mind_meld import cli as _cli
 
-        monkeypatch.setattr(_cli.skill_link, "diagnose_skill_links", lambda: self._row(status))
+        monkeypatch.setattr(
+            _cli.skill_link, "diagnose_skill_links", lambda **_kwargs: self._row(status)
+        )
         _setup_real_config(tmp_path, monkeypatch)
         result = runner.invoke(app, ["status"])
         assert "Skill links broken" not in result.output, (status, result.output)
@@ -1657,7 +1659,9 @@ class TestSkillLinkStatusNag:
     def test_mm_status_nags_for_wedged_states(self, status, tmp_path, monkeypatch) -> None:
         from mind_meld import cli as _cli
 
-        monkeypatch.setattr(_cli.skill_link, "diagnose_skill_links", lambda: self._row(status))
+        monkeypatch.setattr(
+            _cli.skill_link, "diagnose_skill_links", lambda **_kwargs: self._row(status)
+        )
         _setup_real_config(tmp_path, monkeypatch)
         result = runner.invoke(app, ["status"])
         assert "Skill links broken" in result.output, (status, result.output)

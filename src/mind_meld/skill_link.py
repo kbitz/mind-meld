@@ -63,6 +63,12 @@ class AgentRow:
     That is the Track 15B invariant: ``config.CONFIG_DIR`` is
     ``Path.home() / ...`` frozen at import, and that is exactly the hazard
     Track 15B deleted two constants for.
+
+    ``consent_source`` is the ``get_sources`` name that authorizes writing
+    this row's skill link. Required, no default: a future row must state
+    its policy. ``None`` would mean "ungated", which is the defect Track 25C
+    removes. Do not add a second ``row.consent_source in enabled`` test
+    anywhere else — ``consented_agent_keys`` is the one derivation.
     """
 
     key: str
@@ -70,6 +76,7 @@ class AgentRow:
     skills_root: str
     success_marker: str
     conflict_marker: str
+    consent_source: str
 
 
 # Append-only. Result order is a documented contract:
@@ -83,6 +90,7 @@ AGENT_ROWS: tuple[AgentRow, ...] = (
         skills_root="~/.claude/skills",
         success_marker="skill-link-checked",
         conflict_marker="skill-link-conflict",
+        consent_source="claude",
     ),
     AgentRow(
         key="codex",
@@ -90,6 +98,7 @@ AGENT_ROWS: tuple[AgentRow, ...] = (
         skills_root="~/.codex/skills",
         success_marker="codex-skill-link-checked",
         conflict_marker="codex-skill-link-conflict",
+        consent_source="codex",
     ),
     AgentRow(
         key="opencode",
@@ -97,6 +106,7 @@ AGENT_ROWS: tuple[AgentRow, ...] = (
         skills_root="~/.config/opencode/skills",
         success_marker="opencode-skill-link-checked",
         conflict_marker="opencode-skill-link-conflict",
+        consent_source="opencode",
     ),
 )
 
@@ -227,6 +237,7 @@ SkillInstallStatus = Literal[
     "dangling-ours-legacy",
     "foreign",
     "failed",
+    "declined",
 ]
 
 # The `diagnose_skill_links` statuses that mean mm's own link is wedged and mm
@@ -332,6 +343,72 @@ def _skill_target_descriptors() -> tuple[SkillTarget, ...]:
     """Return fresh descriptors so patched roots and ``$HOME`` take effect."""
     _warn_orphan_overrides()
     return tuple(_descriptor_from_row(row) for row in AGENT_ROWS)
+
+
+def consented_agent_keys(config: dict | None, sources: list[dict]) -> frozenset[str]:
+    """The one derivation for which agent skill links mm may create.
+
+    Caller supplies a validated config (or None) and already-resolved
+    sources. This helper imports nothing from ``config`` and does not
+    call ``get_sources``. It catches nothing.
+
+    * ``config is None`` — no consent context (fresh pipx, no config) →
+      every registry key. Not an error.
+    * ``[skills] maintain_links`` is false → empty, ``agents`` ignored.
+    * ``agents`` present (key-absence, never a falsy check) → that list
+      ∩ known keys. Unknown names are inert.
+    * else → rows whose ``consent_source`` is in the passed-in source
+      names. On a non-explicit config ``get_sources`` auto-detects by
+      directory existence, so this is the same bit the host-usage read
+      gate already uses, not ideal consent.
+    """
+    known = frozenset(row.key for row in AGENT_ROWS)
+    if config is None:
+        return known
+    skills = config.get("skills")
+    if not isinstance(skills, dict):
+        skills = {}
+    if not skills.get("maintain_links", True):
+        return frozenset()
+    if "agents" in skills:
+        return frozenset(key for key in skills["agents"] if key in known)
+    names = {src.get("name") for src in sources}
+    return frozenset(row.key for row in AGENT_ROWS if row.consent_source in names)
+
+
+def _row_is_consented(key: str, may_create: frozenset[str] | None) -> bool:
+    """True when this row may be written.
+
+    ``may_create is None`` means "no consent context supplied — allow
+    all", which keeps the 37 bare test callers green and lets
+    ``_ensure_retro_skill_link_at``'s ad-hoc ``key=""`` sentinel through.
+    A bare ``key in may_create`` would deny that sentinel.
+    """
+    return may_create is None or key in may_create
+
+
+def _declined_result(descriptor: SkillTarget) -> SkillInstallResult:
+    return SkillInstallResult(
+        descriptor,
+        "declined",
+        reason="skill-link maintenance is not enabled for this agent",
+    )
+
+
+def _finalize(
+    descriptors: tuple[SkillTarget, ...],
+    results: list[SkillInstallResult | None],
+) -> tuple[SkillInstallResult, ...]:
+    return tuple(
+        result
+        if result is not None
+        else _failed_result(
+            descriptor,
+            "installation",
+            RuntimeError("installer produced no outcome"),
+        )
+        for descriptor, result in zip(descriptors, results)
+    )
 
 
 def _reason(error: BaseException) -> str:
@@ -626,7 +703,8 @@ def render_skill_status(result: SkillInstallResult) -> str:
             readlink = safe_str(os.readlink(result.target))
     except OSError:
         readlink = ""
-    store = safe_str(str(result.link_target or _skill_store_dir()))
+    store_path = result.link_target or _skill_store_dir()
+    store = safe_str(str(store_path))
     if result.status == "dangling-ours":
         return (
             f"{target} is mm's symlink to {readlink or store} but the store is missing; "
@@ -649,6 +727,24 @@ def render_skill_status(result: SkillInstallResult) -> str:
         return f"{target} -> {store}"
     if result.status == "unchanged":
         return f"{target} -> {store}"
+    if result.status == "declined":
+        reason = result.reason or "skill-link maintenance is off"
+        remedy = f"mm install-skills --agent {result.descriptor.key}"
+        surviving = ""
+        try:
+            if (
+                result.target.is_symlink()
+                and _points_at_store(result.target, store_path)
+                and _symlink_lives(result.target)
+                and _store_is_healthy(store_path)
+            ):
+                surviving = f" (an mm-owned link is still present at {target} and still works)"
+        except OSError:
+            surviving = ""
+        return (
+            f"{result.descriptor.display_name} — {reason}. "
+            f"Keep the link maintained: {remedy}{surviving}"
+        )
     return f"{target}: {result.status}"
 
 
@@ -657,6 +753,7 @@ def _ensure_retro_skill_links(
     dry_run: bool = False,
     allow_mutate: bool = True,
     explicit: bool = False,
+    may_create: frozenset[str] | None = None,
 ) -> tuple[SkillInstallResult, ...]:
     """Best-effort install for every ``AGENT_ROWS`` entry.
 
@@ -670,6 +767,15 @@ def _ensure_retro_skill_links(
     rewrites agent config.
     ``explicit=True`` (``mm install-skills`` / ``mm init``) will re-point a
     *live* checkout-shaped dogfood link; push will not.
+    ``may_create`` is the consent set from ``consented_agent_keys``. ``None``
+    means no consent context (allow all). A declined row is classified
+    before any ``stat`` on that agent root, reaches neither
+    ``_failed_result`` nor ``_emit_status_notice``, and does not touch
+    its success marker.
+
+    Store publish is never gated on agent consent: if the mm-owned store
+    already exists it is refreshed even when every row is declined. An
+    absent store is created only when at least one row is consented.
     """
     write = bool(allow_mutate and not dry_run)
     descriptors = _skill_target_descriptors()
@@ -690,6 +796,9 @@ def _ensure_retro_skill_links(
                 reason="refused to write a real agent directory from a test",
             )
             continue
+        if not _row_is_consented(descriptor.key, may_create):
+            results[index] = _declined_result(descriptor)
+            continue
         try:
             availability, failure = _agent_root_availability(descriptor)
         except Exception as error:
@@ -702,85 +811,57 @@ def _ensure_retro_skill_links(
         else:
             available.append((index, descriptor))
 
-    if not available:
-        return tuple(
-            result
-            if result is not None
-            else _failed_result(
-                descriptor,
-                "installation",
-                RuntimeError("installer produced no outcome"),
-            )
-            for descriptor, result in zip(descriptors, results)
-        )
+    # Publish before the empty-available return when the owned store exists,
+    # so an all-declined machine still refreshes a store its surviving links
+    # point at. Creating a new store still requires at least one consented
+    # available row.
+    should_publish = write and (bool(available) or _owned_store_exists())
+    if not available and not should_publish:
+        return _finalize(descriptors, results)
 
     skill_src: Path | None = None
-    if write:
+    if should_publish:
         try:
             skill_src = _resolve_retro_skill_source_once()
         except Exception as error:
             if _store_is_healthy(store):
                 skill_src = None
-            else:
+            elif available:
                 for index, descriptor in available:
                     results[index] = _failed_result(descriptor, "skill source resolution", error)
-                return tuple(
-                    result
-                    if result is not None
-                    else _failed_result(
-                        descriptor,
-                        "installation",
-                        RuntimeError("installer produced no outcome"),
-                    )
-                    for descriptor, result in zip(descriptors, results)
-                )
+                return _finalize(descriptors, results)
+            else:
+                sys.stderr.write(f"mm: notice: skill store refresh failed: {_reason(error)}\n")
+                return _finalize(descriptors, results)
 
     published = _store_is_healthy(store)
-    if write and skill_src is not None:
+    if should_publish and skill_src is not None:
         try:
             store = _publish_skill_store(skill_src)
             published = _store_is_healthy(store)
         except (OSError, StorageError, PermissionError, FileNotFoundError) as error:
-            for index, descriptor in available:
-                results[index] = _failed_result(descriptor, "skill store publish", error)
-            return tuple(
-                result
-                if result is not None
-                else _failed_result(
-                    descriptor,
-                    "installation",
-                    RuntimeError("installer produced no outcome"),
-                )
-                for descriptor, result in zip(descriptors, results)
-            )
+            if available:
+                for index, descriptor in available:
+                    results[index] = _failed_result(descriptor, "skill store publish", error)
+                return _finalize(descriptors, results)
+            sys.stderr.write(f"mm: notice: skill store refresh failed: {_reason(error)}\n")
+            return _finalize(descriptors, results)
         except Exception as error:
-            for index, descriptor in available:
-                results[index] = _failed_result(descriptor, "skill store publish", error)
-            return tuple(
-                result
-                if result is not None
-                else _failed_result(
-                    descriptor,
-                    "installation",
-                    RuntimeError("installer produced no outcome"),
-                )
-                for descriptor, result in zip(descriptors, results)
-            )
+            if available:
+                for index, descriptor in available:
+                    results[index] = _failed_result(descriptor, "skill store publish", error)
+                return _finalize(descriptors, results)
+            sys.stderr.write(f"mm: notice: skill store refresh failed: {_reason(error)}\n")
+            return _finalize(descriptors, results)
+
+    if not available:
+        return _finalize(descriptors, results)
 
     if write and not published:
         err = FileNotFoundError(f"skill store is empty at {store}")
         for index, descriptor in available:
             results[index] = _failed_result(descriptor, "skill store publish", err)
-        return tuple(
-            result
-            if result is not None
-            else _failed_result(
-                descriptor,
-                "installation",
-                RuntimeError("installer produced no outcome"),
-            )
-            for descriptor, result in zip(descriptors, results)
-        )
+        return _finalize(descriptors, results)
 
     for index, descriptor in available:
         try:
@@ -794,16 +875,7 @@ def _ensure_retro_skill_links(
         except Exception as error:
             results[index] = _failed_result(descriptor, "installation", error)
 
-    return tuple(
-        result
-        if result is not None
-        else _failed_result(
-            descriptor,
-            "installation",
-            RuntimeError("installer produced no outcome"),
-        )
-        for descriptor, result in zip(descriptors, results)
-    )
+    return _finalize(descriptors, results)
 
 
 def _ensure_skill_target(
@@ -1151,41 +1223,47 @@ def _marker_dir() -> Path:
     return Path("~/.config/mind-meld").expanduser()
 
 
-def _skill_links_check_due() -> bool:
+def _skill_links_check_due(may_create: frozenset[str] | None = None) -> bool:
     """Return whether any supported agent's retro-fleet link has drifted.
 
     Gate consulted by ``_push_core``. Returns True when the installer
-    should run.
+    should run. ``may_create`` MUST be the same frozenset the installer
+    receives in the same push — a declined row never gets its success
+    marker touched, so an unfiltered gate stays open forever.
 
-    Two paths to True:
+    Three paths to True:
 
-    1. **Marker is stale** (or absent) — the original 24h-TTL behavior.
-    2. **Marker is fresh but link state has drifted** — link is missing,
-       dangling, or pointing somewhere other than our source. Pre-fix
-       (post-v0.11.0 / pre-this-fix) the fresh marker silently suppressed
-       self-heal for 24h. The case in the wild: pipx-installed mm 0.11.0
-       creates the link successfully and touches the marker; user later
-       removes the link manually (e.g. cleaning up an old conductor
-       workspace whose path the link used to point at on a previous
-       install); next push sees fresh marker + missing link and skips
-       the installer for the rest of the day. The drift check costs one
-       ``lstat`` + one ``readlink`` + ``importlib.resources`` resolution
-       on the steady-state path — negligible vs the rest of push.
+    1. **Owned store exists and needs refresh**, independent of any row's
+       consent. Without this, an all-declined machine never reaches the
+       installer and its surviving links freeze against a stale store.
+    2. **Marker is stale** (or absent) — the original 24h-TTL behavior.
+    3. **Marker is fresh but link state has drifted** — link is missing,
+       dangling, or pointing somewhere other than our source.
 
-    Any I/O or resolver error in the drift check fails open (returns
-    True) so the installer runs and emits its own notice. The conflict
-    marker is consulted separately by ``_emit_status_notice``.
+    Declined rows are skipped before any ``stat``. Any I/O or resolver
+    error in the drift check fails open (returns True) so the installer
+    runs and emits its own notice.
     """
-    return any(_skill_link_check_due_for(descriptor) for descriptor in _skill_target_descriptors())
+    if _owned_store_exists() and _store_needs_refresh():
+        return True
+    return any(
+        _skill_link_check_due_for(descriptor, may_create=may_create)
+        for descriptor in _skill_target_descriptors()
+    )
 
 
-def _skill_link_check_due_for(descriptor: SkillTarget) -> bool:
+def _skill_link_check_due_for(
+    descriptor: SkillTarget, may_create: frozenset[str] | None = None
+) -> bool:
     """Return whether one descriptor needs a repair attempt.
 
-    A missing agent root is the only quiet skip. A present root with no skills
-    directory is immediately due, and every other inspection failure fails
-    open so the plural installer can leave a forensic notice.
+    A declined row is a quiet skip (zero I/O). A missing agent root is
+    the only other quiet skip. A present root with no skills directory
+    is immediately due, and every other inspection failure fails open
+    so the plural installer can leave a forensic notice.
     """
+    if not _row_is_consented(descriptor.key, may_create):
+        return False
     availability, _failure = _agent_root_availability(descriptor)
     if availability == "unavailable":
         return False
@@ -1200,6 +1278,20 @@ def _skill_link_check_due_for(descriptor: SkillTarget) -> bool:
     if not stat.S_ISDIR(skills_info.st_mode):
         return True
     return _skill_link_check_due_at(descriptor.target, success_marker=descriptor.success_marker)
+
+
+def _owned_store_exists() -> bool:
+    """True when the mm-owned store directory is already on disk.
+
+    Ownership is the ``.mm-owned`` sentinel or ``.mm-skill.json``, never
+    the payload. A missing or foreign tree is False.
+    """
+    store = _skill_store_dir()
+    try:
+        names = {p.name for p in store.iterdir()}
+    except OSError:
+        return False
+    return _STORE_SENTINEL in names or _STORE_META in names
 
 
 def _store_needs_refresh() -> bool:
@@ -1260,8 +1352,111 @@ def skill_targets() -> tuple[Path, ...]:
     return tuple(descriptor.target for descriptor in _skill_target_descriptors())
 
 
-def diagnose_skill_links() -> list[dict[str, str]]:
-    """Passphrase-free snapshot of every agent link plus the store. No writes."""
+_POLICY_TRANSITION_MARKER = "skill-link-policy-v0.12.42"
+
+
+def _join_display_names(names: list[str]) -> str:
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f", and {names[-1]}"
+
+
+def declined_owned_link_rows(
+    may_create: frozenset[str] | None,
+) -> tuple[AgentRow, ...]:
+    """Declined registry rows that still have an mm-owned link at the target.
+
+    ``readlink == store`` proves mm created the link under the old policy.
+    Used by the one-time 0.12.42 transition notice. Not a consent signal.
+    """
+    if may_create is None:
+        return ()
+    store = _skill_store_dir()
+    found: list[AgentRow] = []
+    for row in AGENT_ROWS:
+        if _row_is_consented(row.key, may_create):
+            continue
+        descriptor = _descriptor_from_row(row)
+        try:
+            if _points_at_store(descriptor.target, store):
+                found.append(row)
+        except OSError:
+            continue
+    return tuple(found)
+
+
+def policy_transition_acknowledged() -> bool:
+    try:
+        return (_marker_dir() / f".{_POLICY_TRANSITION_MARKER}").is_file()
+    except OSError:
+        return False
+
+
+def acknowledge_policy_transition() -> None:
+    _touch_marker(_POLICY_TRANSITION_MARKER)
+
+
+def policy_transition_text(rows: tuple[AgentRow, ...]) -> str:
+    names = _join_display_names([row.display_name for row in rows])
+    flags = " ".join(f"--agent {row.key}" for row in rows)
+    return (
+        "mm: notice: skill-link maintenance changed in 0.12.42.\n"
+        f"{names} links remain in place, but mm will no longer repair them\n"
+        "because their skill-link policy no longer authorizes maintenance.\n"
+        "\n"
+        "Keep a link maintained without enabling sync or usage reading:\n"
+        f"  mm install-skills {flags}\n"
+        "\n"
+        "Inspect current policy with: mm diag\n"
+    )
+
+
+def maybe_emit_policy_transition(may_create: frozenset[str] | None, *, acknowledge: bool) -> bool:
+    """Emit the one-time upgrade notice if a declined mm-owned link exists.
+
+    Returns True when a notice was printed. The permanent marker is touched
+    only when ``acknowledge`` is True (interactive path). Autopush must
+    pass ``acknowledge=False`` so it cannot spend the notice budget.
+    """
+    if policy_transition_acknowledged():
+        return False
+    affected = declined_owned_link_rows(may_create)
+    if not affected:
+        return False
+    sys.stderr.write(policy_transition_text(affected))
+    if acknowledge:
+        acknowledge_policy_transition()
+    return True
+
+
+def _maintain_links_field(
+    key: str,
+    may_create: frozenset[str] | None,
+    config_error: str | None,
+) -> str:
+    if config_error:
+        return f"unknown (config invalid: {safe_str(config_error)})"
+    if _row_is_consented(key, may_create):
+        return "enabled"
+    return "disabled (not authorized by skill-link policy)"
+
+
+def diagnose_skill_links(
+    *,
+    may_create: frozenset[str] | None = None,
+    config_error: str | None = None,
+) -> list[dict[str, str]]:
+    """Passphrase-free snapshot of every agent link plus the store. No writes.
+
+    Link ``status`` and ``maintain_links`` are orthogonal: a declined row
+    can still be ``status: ok`` when an mm-owned link survives. Never fold
+    policy into ``status``. When the config could not be parsed, the policy
+    field is ``unknown (config invalid: …)``, never ``disabled``.
+    """
     store = _skill_store_dir()
     rows: list[dict[str, str]] = []
     payload = store / _STORE_PAYLOAD
@@ -1291,6 +1486,8 @@ def diagnose_skill_links() -> list[dict[str, str]]:
                     "detail": _reason(error),
                 }
             )
+    for row in rows:
+        row["maintain_links"] = _maintain_links_field(row.get("key", ""), may_create, config_error)
     return rows
 
 
@@ -1356,7 +1553,13 @@ __all__ = [
     "SkillInstallResult",
     "SkillTarget",
     "_refuse_real_home_under_pytest",
+    "acknowledge_policy_transition",
+    "consented_agent_keys",
+    "declined_owned_link_rows",
     "diagnose_skill_links",
+    "maybe_emit_policy_transition",
+    "policy_transition_acknowledged",
+    "policy_transition_text",
     "render_skill_status",
     "skill_targets",
     "_descriptor_for",

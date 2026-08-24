@@ -68,6 +68,46 @@ def _diagnosis_for(rows, key: str = "claude"):
     return next(row for row in rows if row["key"] == key)
 
 
+def _may(*keys: str) -> frozenset[str]:
+    """Consent set without a 2+ key literal (test_no_consumer_owned_agent_name_lists)."""
+    return frozenset(keys)
+
+
+def _write_mm_config(home: Path, *, source_names=("claude",), maintain_links=True, agents=None):
+    from mind_meld import config as config_mod
+    from mind_meld.config import save_config
+
+    storage = home / "mm-storage"
+    storage.mkdir(exist_ok=True)
+    sources = []
+    for name in source_names:
+        if name == "claude":
+            path = home / ".claude"
+        elif name == "codex":
+            path = home / ".codex"
+        elif name == "opencode":
+            path = home / ".config" / "opencode"
+        else:
+            path = home / name
+        path.mkdir(parents=True, exist_ok=True)
+        src_type = name if name in ("claude", "codex", "opencode", "grok") else "generic"
+        sources.append({"name": name, "path": str(path), "type": src_type})
+    cfg: dict = {
+        "device": {"id": "dev-a", "name": "Mac A"},
+        "storage": {"path": str(storage)},
+        "sync": {"sources": sources, "max_file_size": 1024},
+    }
+    skills: dict = {}
+    if maintain_links is not True:
+        skills["maintain_links"] = maintain_links
+    if agents is not None:
+        skills["agents"] = agents
+    if skills:
+        cfg["skills"] = skills
+    save_config(cfg, config_mod.CONFIG_PATH)
+    return cfg
+
+
 @pytest.fixture(autouse=True)
 def _isolate_paths(tmp_path, monkeypatch):
     """Point all the installer's filesystem touchpoints at tmp_path."""
@@ -77,6 +117,13 @@ def _isolate_paths(tmp_path, monkeypatch):
     (fake_home / ".config" / "mind-meld").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(fake_home))
     # Path("~/...").expanduser() reads HOME, so we just need to set the env.
+    # CONFIG_PATH is frozen at import from the real HOME; patch it or
+    # install_skills_cmd reads the developer's real config locally and none
+    # on CI.
+    monkeypatch.setattr(
+        "mind_meld.config.CONFIG_PATH",
+        fake_home / ".config" / "mind-meld" / "config.toml",
+    )
     yield fake_home
 
 
@@ -562,6 +609,16 @@ class TestInstallerResults:
             assert by_key[row.key].status == "installed"
             _assert_store_link(agent_targets[row.key])
 
+    def test_declined_row_keeps_results_complete_and_ordered(self, agent_targets, skill_src):
+        results = skill_link._ensure_retro_skill_links(may_create=frozenset({"claude"}))
+        assert [result.descriptor.key for result in results] == [
+            row.key for row in skill_link.AGENT_ROWS
+        ]
+        by_key = {result.descriptor.key: result for result in results}
+        assert by_key["claude"].status == "installed"
+        assert by_key["codex"].status == "declined"
+        assert by_key["opencode"].status == "declined"
+
     def test_dangling_symlink_reports_conflict_without_unlinking(
         self, target, skill_src, _isolate_paths, monkeypatch
     ):
@@ -876,11 +933,13 @@ class TestPushSkillLinkWiring:
         }
         monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
         monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda: True)
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create=None: True)
         monkeypatch.setattr(
             skill_link,
             "_ensure_retro_skill_links",
-            lambda *, dry_run, allow_mutate=True, explicit=False: calls.append(dry_run),
+            lambda *, dry_run, allow_mutate=True, explicit=False, may_create=None: calls.append(
+                dry_run
+            ),
         )
         monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
 
@@ -894,9 +953,9 @@ class TestPushSkillLinkWiring:
         }
         monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
         monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda: True)
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create=None: True)
 
-        def boom(*, dry_run, allow_mutate=True, explicit=False):
+        def boom(*, dry_run, allow_mutate=True, explicit=False, may_create=None):
             raise RuntimeError("unexpected installer regression")
 
         monkeypatch.setattr(skill_link, "_ensure_retro_skill_links", boom)
@@ -904,6 +963,61 @@ class TestPushSkillLinkWiring:
 
         assert cli_module._push_core(config, "pw", 1024) is None
         assert "retro-fleet skill installation failed" in capsys.readouterr().err
+
+    def test_push_gate_and_installer_share_may_create_and_call_get_sources_once(self, monkeypatch):
+        gate_args: list = []
+        install_args: list = []
+        gs_calls: list = []
+
+        def gs(_config):
+            gs_calls.append(1)
+            return []
+
+        def gate(*, may_create=None):
+            gate_args.append(may_create)
+            return True
+
+        def installer(*, dry_run=False, allow_mutate=True, explicit=False, may_create=None):
+            install_args.append(may_create)
+            return ()
+
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "sync": {"max_file_size": 1024},
+            "skills": {"agents": [skill_link.AGENT_ROWS[0].key]},
+        }
+        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", gate)
+        monkeypatch.setattr(skill_link, "_ensure_retro_skill_links", installer)
+        monkeypatch.setattr(cli_module, "get_sources", gs)
+        monkeypatch.setattr(skill_link, "maybe_emit_policy_transition", lambda *a, **k: False)
+
+        assert cli_module._push_core(config, "pw", 1024) is None
+        assert gs_calls == [1]
+        assert gate_args == install_args
+        assert gate_args == [frozenset({skill_link.AGENT_ROWS[0].key})]
+
+    def test_push_only_acknowledges_policy_transition_interactively(self, monkeypatch):
+        acknowledgements: list[bool] = []
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "sync": {"max_file_size": 1024},
+            "skills": {"agents": [skill_link.AGENT_ROWS[0].key]},
+        }
+        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
+        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create=None: False)
+        monkeypatch.setattr(
+            skill_link,
+            "maybe_emit_policy_transition",
+            lambda _may_create, *, acknowledge: acknowledgements.append(acknowledge) or False,
+        )
+
+        assert cli_module._push_core(config, "pw", 1024, quiet=True) is None
+        assert cli_module._push_core(config, "pw", 1024, quiet=False) is None
+        assert acknowledgements == [False, True]
 
 
 class TestDurableStore:
@@ -1318,3 +1432,381 @@ class TestDurableStore:
         )
         result = _install()
         assert result is None or result.status == "failed"
+
+
+class TestConsentDerivation:
+    def test_agents_absent_derives_from_passed_in_sources(self):
+        keys = skill_link.consented_agent_keys(
+            {"skills": {}}, [{"name": "claude"}, {"name": "gstack"}]
+        )
+        assert keys == frozenset({"claude"})
+
+    def test_agents_present_wins_over_derivation(self):
+        keys = skill_link.consented_agent_keys(
+            {"skills": {"agents": ["codex"]}},
+            [{"name": "claude"}, {"name": "codex"}],
+        )
+        assert keys == frozenset({"codex"})
+
+    def test_maintain_links_false_ignores_agents(self):
+        keys = skill_link.consented_agent_keys(
+            {"skills": {"maintain_links": False, "agents": ["claude"]}},
+            [{"name": "claude"}],
+        )
+        assert keys == frozenset()
+
+    def test_config_none_returns_all_row_keys(self):
+        assert skill_link.consented_agent_keys(None, []) == frozenset(
+            row.key for row in skill_link.AGENT_ROWS
+        )
+
+    def test_unknown_agent_name_is_inert(self):
+        keys = skill_link.consented_agent_keys({"skills": {"agents": ["codex", "nope"]}}, [])
+        assert keys == frozenset({"codex"})
+
+    def test_row_is_consented_none_allows_all_including_empty_key(self):
+        assert skill_link._row_is_consented("claude", None) is True
+        assert skill_link._row_is_consented("", None) is True
+        assert skill_link._row_is_consented("", frozenset({"claude"})) is False
+
+
+class TestConsentGate:
+    def test_declined_row_never_stats_agent_root(self, agent_targets, skill_src, monkeypatch):
+        declined_root = os.path.abspath(skill_link._descriptor_for("codex").agent_root)
+        original = Path.stat
+
+        def fake_stat(self, *args, **kwargs):
+            if os.path.abspath(self) == declined_root:
+                raise AssertionError("declined row must not stat agent root")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", fake_stat)
+        results = skill_link._ensure_retro_skill_links(may_create=frozenset({"claude"}))
+        assert _result_for(results, "codex").status == "declined"
+        assert _result_for(results, "claude").status == "installed"
+
+    def test_declined_row_touches_no_marker_and_emits_no_failure(
+        self, agent_targets, skill_src, config_dir, capsys
+    ):
+        marker = config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}"
+        results = skill_link._ensure_retro_skill_links(may_create=frozenset({"claude"}))
+        assert _result_for(results, "codex").status == "declined"
+        assert not marker.exists()
+        err = capsys.readouterr().err
+        assert "Codex retro-fleet" not in err
+        assert "failed:" not in err or "Codex" not in err
+
+    def test_declined_row_never_opens_ttl_gate(self, agent_targets, skill_src, config_dir):
+        skill_link._ensure_retro_skill_links(may_create=frozenset({"claude"}))
+        assert skill_link._skill_links_check_due(may_create=frozenset({"claude"})) is False
+
+    def test_dry_run_and_quiet_declined_still_declined(self, agent_targets, skill_src):
+        dry = skill_link._ensure_retro_skill_links(dry_run=True, may_create=frozenset({"claude"}))
+        quiet = skill_link._ensure_retro_skill_links(
+            allow_mutate=False, may_create=frozenset({"claude"})
+        )
+        assert _result_for(dry, "codex").status == "declined"
+        assert _result_for(quiet, "codex").status == "declined"
+        assert not agent_targets["codex"].exists()
+
+    def test_declined_not_in_broken_skill_statuses(self):
+        assert "declined" not in skill_link.BROKEN_SKILL_STATUSES
+
+    def test_render_declined_is_not_the_generic_fallback(self, agent_targets):
+        result = skill_link._declined_result(skill_link._descriptor_for("codex"))
+        text = skill_link.render_skill_status(result)
+        assert ": declined" not in text
+        assert "mm install-skills --agent codex" in text
+        assert "codex" in text
+        assert "sync source" not in text
+
+    def test_render_declined_names_surviving_link(self, agent_targets, skill_src):
+        skill_link._ensure_retro_skill_links()
+        result = skill_link._declined_result(skill_link._descriptor_for("codex"))
+        text = skill_link.render_skill_status(result)
+        assert "still present" in text
+        assert str(agent_targets["codex"]) in text
+
+    def test_render_declined_dangling_link_does_not_claim_it_works(self, agent_targets, skill_src):
+        skill_link._ensure_retro_skill_links()
+        store = skill_link._skill_store_dir()
+        store.rename(store.with_name("missing-store"))
+
+        result = skill_link._declined_result(skill_link._descriptor_for("codex"))
+        text = skill_link.render_skill_status(result)
+        assert "still works" not in text
+
+
+class TestStoreRefreshCarveOut:
+    def test_owned_stale_store_refreshes_when_every_row_declined(self, agent_targets, skill_src):
+        import json
+
+        skill_link._ensure_retro_skill_links()
+        store = skill_link._skill_store_dir()
+        payload = store / "SKILL.md"
+        original = payload.read_bytes()
+        data = json.loads((store / ".mm-skill.json").read_text())
+        data["skill_version"] = "0.0.1"
+        (store / ".mm-skill.json").write_text(json.dumps(data))
+        payload.write_bytes(original + b"\n# stale\n")
+
+        assert skill_link._owned_store_exists()
+        assert skill_link._store_needs_refresh()
+        assert skill_link._skill_links_check_due(may_create=frozenset()) is True
+
+        results = skill_link._ensure_retro_skill_links(may_create=frozenset())
+        assert all(r.status == "declined" for r in results)
+        assert payload.read_bytes() == original
+        for target in agent_targets.values():
+            assert target.is_symlink()
+
+    def test_absent_store_is_not_created_when_every_row_declined(self, agent_targets):
+        store = skill_link._skill_store_dir()
+        assert not skill_link._owned_store_exists()
+        assert skill_link._skill_links_check_due(may_create=frozenset()) is False
+        results = skill_link._ensure_retro_skill_links(may_create=frozenset())
+        assert all(r.status == "declined" for r in results)
+        assert not skill_link._owned_store_exists()
+        assert not store.exists() or not any(store.iterdir())
+        for target in agent_targets.values():
+            assert not target.exists()
+
+    def test_foreign_store_is_left_alone_when_every_row_declined(self, agent_targets):
+        store = skill_link._skill_store_dir()
+        store.mkdir(parents=True)
+        payload = store / "SKILL.md"
+        payload.write_text("user's own skill\n")
+        assert not skill_link._owned_store_exists()
+        assert skill_link._skill_links_check_due(may_create=frozenset()) is False
+        results = skill_link._ensure_retro_skill_links(may_create=frozenset())
+        assert all(r.status == "declined" for r in results)
+        assert payload.read_text() == "user's own skill\n"
+        assert not (store / ".mm-owned").exists()
+
+
+class TestDiagnosePolicyField:
+    def test_ok_status_and_disabled_policy_coexist(self, agent_targets, skill_src):
+        skill_link._ensure_retro_skill_links()
+        rows = skill_link.diagnose_skill_links(may_create=frozenset({"claude"}))
+        claude = _diagnosis_for(rows, "claude")
+        codex = _diagnosis_for(rows, "codex")
+        assert claude["status"] == "ok"
+        assert claude["maintain_links"] == "enabled"
+        assert codex["status"] == "ok"
+        assert codex["maintain_links"] == "disabled (not authorized by skill-link policy)"
+
+    def test_invalid_config_renders_unknown_not_disabled(self, agent_targets):
+        rows = skill_link.diagnose_skill_links(
+            may_create=frozenset(), config_error="failed to parse"
+        )
+        for row in rows:
+            assert row["maintain_links"].startswith("unknown (config invalid:")
+            assert "disabled" not in row["maintain_links"]
+
+    def test_explicit_decline_names_the_skill_link_policy(self, agent_targets):
+        rows = skill_link.diagnose_skill_links(may_create=frozenset({"claude"}))
+        codex = _diagnosis_for(rows, "codex")
+        assert codex["maintain_links"] == "disabled (not authorized by skill-link policy)"
+
+
+class TestConsentFlipFlop:
+    def test_enabled_declined_enabled_recreates_and_is_not_suppressed_by_ttl(
+        self, agent_targets, skill_src, config_dir
+    ):
+        first = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
+        assert _result_for(first, "codex").status == "installed"
+        _assert_store_link(agent_targets["codex"])
+
+        agent_targets["codex"].unlink()
+        second = skill_link._ensure_retro_skill_links(may_create=frozenset({"claude"}))
+        assert _result_for(second, "codex").status == "declined"
+        assert not agent_targets["codex"].exists()
+
+        assert skill_link._skill_links_check_due(may_create=_may("claude", "codex")) is True
+        third = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
+        assert _result_for(third, "codex").status == "installed"
+        _assert_store_link(agent_targets["codex"])
+
+
+class TestInstallSkillsConsent:
+    def _runner(self):
+        from typer.testing import CliRunner
+
+        return CliRunner()
+
+    def test_declined_row_prints_remedy_and_exits_0(self, agent_targets, skill_src, _isolate_paths):
+        from mind_meld.cli import app
+
+        _write_mm_config(_isolate_paths, source_names=("claude",))
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert "Skipped:" in result.output
+        assert "mm install-skills --agent codex" in result.output
+
+    def test_all_declined_exits_0_with_distinct_message(
+        self, agent_targets, skill_src, _isolate_paths
+    ):
+        from mind_meld.cli import app
+
+        _write_mm_config(_isolate_paths, source_names=("claude",), maintain_links=False)
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert "No agent is enabled for skill install" in result.output
+
+    def test_agent_flag_preserves_derived_grants(self, agent_targets, skill_src, _isolate_paths):
+        from mind_meld import config as config_mod
+        from mind_meld.cli import app
+        from mind_meld.config import load_config
+
+        _write_mm_config(_isolate_paths, source_names=("claude",))
+        result = self._runner().invoke(app, ["install-skills", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        loaded = load_config(config_mod.CONFIG_PATH)
+        assert loaded["skills"]["maintain_links"] is True
+        assert loaded["skills"]["agents"] == [
+            skill_link.AGENT_ROWS[0].key,
+            skill_link.AGENT_ROWS[1].key,
+        ]
+        assert "claude" in result.output.lower() or "Claude" in result.output
+
+    def test_agent_flag_preserves_unknown_future_grants(
+        self, agent_targets, skill_src, _isolate_paths
+    ):
+        from mind_meld import config as config_mod
+        from mind_meld.cli import app
+        from mind_meld.config import load_config
+
+        _write_mm_config(_isolate_paths, source_names=("claude",), agents=["grok"])
+        result = self._runner().invoke(app, ["install-skills", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        loaded = load_config(config_mod.CONFIG_PATH)
+        assert loaded["skills"]["agents"] == ["codex", "grok"]
+
+    def test_agent_flag_when_maintain_links_was_false_writes_only_key(
+        self, agent_targets, skill_src, _isolate_paths
+    ):
+        from mind_meld import config as config_mod
+        from mind_meld.cli import app
+        from mind_meld.config import load_config
+
+        _write_mm_config(_isolate_paths, source_names=("claude",), maintain_links=False)
+        result = self._runner().invoke(app, ["install-skills", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        loaded = load_config(config_mod.CONFIG_PATH)
+        assert loaded["skills"]["agents"] == ["codex"]
+
+    def test_agent_flag_without_config_exits_1_and_writes_nothing(
+        self, agent_targets, skill_src, _isolate_paths
+    ):
+        from mind_meld.cli import app
+
+        result = self._runner().invoke(app, ["install-skills", "--agent", "codex"])
+        assert result.exit_code == 1
+        assert "mm init" in result.output
+        assert "No agent links were changed" in result.output
+        assert not agent_targets["codex"].exists()
+
+    def test_agent_unknown_key_exits_1(self, agent_targets, skill_src, _isolate_paths):
+        from mind_meld.cli import app
+
+        _write_mm_config(_isolate_paths, source_names=("claude",))
+        result = self._runner().invoke(app, ["install-skills", "--agent", "nope"])
+        assert result.exit_code == 1
+        assert "unknown agent 'nope'" in result.output
+
+    def test_broken_config_fails_closed(self, agent_targets, skill_src, _isolate_paths):
+        from mind_meld import config as config_mod
+        from mind_meld.cli import app
+
+        config_mod.CONFIG_PATH.write_text("this is not toml {")
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 1
+        assert "skill-link maintenance disabled" in result.output
+        assert not agent_targets["claude"].is_symlink()
+
+    def test_agent_flag_unresolvable_source_fails_closed(
+        self, agent_targets, skill_src, _isolate_paths
+    ):
+        from mind_meld import config as config_mod
+        from mind_meld.cli import app
+        from mind_meld.config import save_config
+
+        storage = _isolate_paths / "storage"
+        storage.mkdir()
+        loop = _isolate_paths / "source-loop"
+        loop.symlink_to(loop)
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "Mac A"},
+                "storage": {"path": str(storage)},
+                "sync": {
+                    "max_file_size": 1024,
+                    "sources": [{"name": "claude", "path": str(loop), "type": "claude"}],
+                },
+            },
+            config_mod.CONFIG_PATH,
+        )
+
+        result = self._runner().invoke(app, ["install-skills", "--agent", "codex"])
+        assert result.exit_code == 1
+        assert "skill-link maintenance disabled" in result.output
+        assert "failed to resolve" in result.output
+        assert "[skills]" not in config_mod.CONFIG_PATH.read_text()
+        assert not agent_targets["codex"].is_symlink()
+
+    def test_agent_flag_storage_error_exits_without_installing(
+        self, agent_targets, skill_src, _isolate_paths, monkeypatch
+    ):
+        from mind_meld import cli as cli_module
+        from mind_meld.cli import app
+        from mind_meld.errors import StorageError
+
+        _write_mm_config(_isolate_paths, source_names=("claude",))
+
+        def fail_write(*_args, **_kwargs):
+            raise StorageError("disk full")
+
+        monkeypatch.setattr(cli_module, "patch_config_on_disk", fail_write)
+        result = self._runner().invoke(app, ["install-skills", "--agent", "codex"])
+        assert result.exit_code == 1
+        assert "could not write" in result.output
+        assert "No agent links were changed" in result.output
+        assert "Retry this command" in result.output
+        assert not agent_targets["codex"].is_symlink()
+
+    def test_agent_installs_every_consented_row(self, agent_targets, skill_src, _isolate_paths):
+        from mind_meld.cli import app
+
+        _write_mm_config(_isolate_paths, source_names=("claude",))
+        result = self._runner().invoke(app, ["install-skills", "--agent", "codex"])
+        assert result.exit_code == 0, result.output
+        assert agent_targets["claude"].is_symlink()
+        assert agent_targets["codex"].is_symlink()
+        assert "every authorized agent" in result.output
+
+
+class TestPolicyTransitionNotice:
+    def test_emits_once_on_interactive_path(self, agent_targets, skill_src, config_dir, capsys):
+        skill_link._ensure_retro_skill_links()
+        emitted = skill_link.maybe_emit_policy_transition(frozenset({"claude"}), acknowledge=True)
+        assert emitted is True
+        err = capsys.readouterr().err
+        assert "skill-link maintenance changed in 0.12.42" in err
+        assert "mm install-skills --agent" in err
+        assert skill_link.policy_transition_acknowledged() is True
+        assert (
+            skill_link.maybe_emit_policy_transition(frozenset({"claude"}), acknowledge=True)
+            is False
+        )
+
+    def test_autopush_does_not_acknowledge(self, agent_targets, skill_src, capsys):
+        skill_link._ensure_retro_skill_links()
+        emitted = skill_link.maybe_emit_policy_transition(frozenset({"claude"}), acknowledge=False)
+        assert emitted is True
+        assert skill_link.policy_transition_acknowledged() is False
+        assert "skill-link maintenance changed" in capsys.readouterr().err
+
+    def test_transition_text_does_not_blame_the_sync_source(self):
+        text = skill_link.policy_transition_text((skill_link.AGENT_ROWS[1],))
+        assert "sources are not enabled" not in text
+        assert "skill-link policy" in text

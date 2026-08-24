@@ -2695,8 +2695,13 @@ def init() -> None:
     # (no 24h gate here — first-install pass should always try). Idempotent
     # if the user already has a correct symlink. Conflicts emit a one-line
     # notice; failures are forensic-only.
+    # Track 25C: resolve sources BEFORE the installer so consent is known.
+    # Hook position relative to _register_and_save and _run_events_backfill
+    # is unchanged. The mm-events bootstrap mkdir moves a few lines earlier.
+    resolved_sources = get_sources(config)
+    may_create = skill_link.consented_agent_keys(config, resolved_sources)
     try:
-        skill_link._ensure_retro_skill_links(dry_run=False, explicit=True)
+        skill_link._ensure_retro_skill_links(dry_run=False, explicit=True, may_create=may_create)
     except Exception as e:
         stderr_console.print(
             f"mm: notice: retro-fleet skill installation failed: {type(e).__name__}: {safe_str(e)}"
@@ -2707,7 +2712,6 @@ def init() -> None:
     # after init, without waiting for the first push to populate events.
     # Resolves sources via get_sources() so mm-events bootstraps the events
     # dir before walk runs. Forensic-only on failure; init proceeds.
-    resolved_sources = get_sources(config)
     events_tail._run_events_backfill(config, resolved_sources, device_id)
 
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
@@ -2926,6 +2930,13 @@ def _push_core(
     backend = get_backend(config)
     _ensure_device_registered(backend, device_id, device_name, dry_run=dry_run)
 
+    # Build local manifest (v2 with sources). Hoisted above the skill hook
+    # so consent is known before the gate runs (Track 25C). The hook itself
+    # stays AFTER _ensure_device_registered and BEFORE _run_events_tail.
+    # The mm-events bootstrap mkdir moves a few lines earlier.
+    sources = get_sources(config)
+    may_create = skill_link.consented_agent_keys(config, sources)
+
     # Group 8 / Track 8A retro-fleet skill self-heal. Position locked in
     # /plan-eng-review Architecture #5: AFTER device self-heal (storage-
     # write before any walk), BEFORE events tail (local-FS self-heals
@@ -2933,18 +2944,23 @@ def _push_core(
     # 24h-TTL — the marker stat is the entire hot-path cost on the steady-
     # state push (~1 syscall). dry_run gates the install too (preview
     # contract; mirrors _ensure_device_registered).
+    # The gate and the installer MUST receive the same may_create: a
+    # declined row never gets its success marker touched, so an unfiltered
+    # gate stays open and runs the full installer prologue on every push.
     if not dry_run:
         try:
-            if skill_link._skill_links_check_due():
-                skill_link._ensure_retro_skill_links(dry_run=False, allow_mutate=not quiet)
+            skill_link.maybe_emit_policy_transition(may_create, acknowledge=bool(not quiet))
+            if skill_link._skill_links_check_due(may_create=may_create):
+                skill_link._ensure_retro_skill_links(
+                    dry_run=False,
+                    allow_mutate=not quiet,
+                    may_create=may_create,
+                )
         except Exception as e:
             stderr_console.print(
                 f"mm: notice: retro-fleet skill installation failed: "
                 f"{type(e).__name__}: {safe_str(e)}"
             )
-
-    # Build local manifest (v2 with sources)
-    sources = get_sources(config)
     if not sources:
         msg = "no sync sources found. Run 'mm init' to configure."
         if quiet:
@@ -4399,9 +4415,10 @@ def status(
     # which would have migrated it away. Same shape as the Grok refusal that
     # pinned the breadcrumb at `degraded` and destroyed it as a signal. A
     # denylist also defaults every FUTURE status to "broken".
+    skill_may_create = skill_link.consented_agent_keys(config, sources_configs)
     broken_skills = [
         row
-        for row in skill_link.diagnose_skill_links()
+        for row in skill_link.diagnose_skill_links(may_create=skill_may_create)
         if row.get("status") in skill_link.BROKEN_SKILL_STATUSES
     ]
     if broken_skills:
@@ -4410,6 +4427,22 @@ def status(
             f"  [yellow]Skill links broken:[/yellow] {agents} — "
             "run [bold]mm diag[/bold] then [bold]mm install-skills[/bold]."
         )
+
+    # One-time 0.12.42 policy migration. Not a permanent nag: only while the
+    # upgrade notice is unacknowledged AND an mm-owned declined link exists.
+    # Autopush cannot spend this marker; mm status is the surface until an
+    # interactive push or install-skills acknowledges it.
+    if not skill_link.policy_transition_acknowledged():
+        pending = skill_link.declined_owned_link_rows(skill_may_create)
+        if pending:
+            names = skill_link._join_display_names([row.display_name for row in pending])
+            flags = " ".join(f"--agent {row.key}" for row in pending)
+            console.print(
+                f"  [yellow]Skill-link maintenance changed in 0.12.42:[/yellow] "
+                f"{safe_str(names)} links remain in place but will no longer be "
+                f"repaired. Keep them: [bold]mm install-skills {flags}[/bold] — "
+                "inspect with [bold]mm diag[/bold]."
+            )
 
     # Seam 3 — auto-upgrade nudge surfacing in status. Reads cache only,
     # no network call. Distinct from autopull/autopush emission (which gates
@@ -4559,6 +4592,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     exact scenario this command exists to diagnose.
     """
     # Local config (best-effort — a broken config is itself diag-worthy).
+    skill_may_create: frozenset[str] | None = None
+    skill_config_error: str | None = None
     try:
         cfg = load_config()
         dev_id = cfg.get("device", {}).get("id")
@@ -4566,9 +4601,12 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         storage_path = cfg.get("storage", {}).get("path")
         local_fp = cfg.get("crypto", {}).get("root_salt_fp")
         config_state = "ok"
+        skill_may_create = skill_link.consented_agent_keys(cfg, get_sources(cfg))
     except MindMeldError as e:
         dev_id = dev_name = storage_path = local_fp = None
         config_state = f"error: {e}"
+        skill_config_error = str(e)
+        skill_may_create = frozenset()
 
     # Storage crypto init (delegates tri-state to the source of truth).
     fetch = fetch_crypto_init(backend)
@@ -4668,7 +4706,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         "sidecar": sidecar_info,
         "storage_inventory": storage_inv,
         "last_autorun": breadcrumb,
-        "skill_links": skill_link.diagnose_skill_links(),
+        "skill_links": skill_link.diagnose_skill_links(
+            may_create=skill_may_create, config_error=skill_config_error
+        ),
     }
 
 
@@ -4768,7 +4808,10 @@ def diag(
         target = safe_str(str(row.get("target", "")))
         detail = row.get("readlink") or row.get("detail") or row.get("store_state")
         extra = f" ({safe_str(str(detail))})" if detail else ""
+        policy = row.get("maintain_links") or ""
         console.print(f"  {agent}: {status}{extra}")
+        if policy:
+            console.print(f"    maintain_links: {safe_str(str(policy))}")
         if status not in ("ok", "absent") and target:
             console.print(f"    {target}")
 
@@ -5328,8 +5371,13 @@ def enable_source(
 
     Enabling `codex`, `grok`, or `opencode` ALSO authorizes that host's local
     usage reader, whose activity shows up in the `retro-fleet` AGENT LOGS
-    block. That consent coupling is the feature's only switch, so it is stated
-    here at the point of decision (see HOST_READER_SOURCE_GATE).
+    block, and (for `codex` / `opencode` / `claude`) authorizes mm to
+    maintain a `retro-fleet` skill link in that agent's skills directory.
+    That consent coupling is the feature's default switch, so it is stated
+    here at the point of decision (see HOST_READER_SOURCE_GATE). To keep a
+    skill link maintained WITHOUT enabling sync or usage reading, use
+    `mm install-skills --agent <key>` instead. This command does not
+    install the link itself.
     """
     config = _get_config()
     try:
@@ -5642,8 +5690,21 @@ def migrate_config(
 
 
 @app.command(name="install-skills")
-def install_skills_cmd() -> None:
-    """Install (or re-install) retro-fleet for every agent mm supports.
+def install_skills_cmd(
+    agent: list[str] = typer.Option(
+        [],
+        "--agent",
+        help=(
+            "Grant and persist skill-link maintenance for this agent key, then "
+            "install every authorized agent (not only this one). Does not enable "
+            "source sync or usage reading. Repeatable. Requires an existing "
+            "config (run mm init first). Bare invocation (no --agent): with a "
+            "config, install what is already authorized; with no config, install "
+            "for every available agent (fresh-machine setup)."
+        ),
+    ),
+) -> None:
+    """Install (or re-install) retro-fleet for every authorized agent.
 
     Prints one line per agent, including agents that aren't installed.
 
@@ -5654,6 +5715,8 @@ def install_skills_cmd() -> None:
       old pipx workspace whose path the link pointed at)
     * manual install on a machine where ``mm push`` hasn't run yet
     * verifying the link state on a fresh ``pipx install`` of mm
+    * granting skill-link maintenance for one agent without enabling that
+      agent's sync source or usage reader (``--agent KEY``)
 
     Each agent link points at the mm-owned store
     ``~/.local/share/mind-meld/agent-skills/retro-fleet/``. ``mm`` copies
@@ -5661,7 +5724,100 @@ def install_skills_cmd() -> None:
     version-then-hash compare. ``pipx upgrade`` no longer updates the
     agent-visible file in place.
     """
-    results = skill_link._ensure_retro_skill_links(dry_run=False, explicit=True)
+    config_path = _config_module.CONFIG_PATH
+    known = {row.key for row in skill_link.AGENT_ROWS}
+    known_list = ", ".join(row.key for row in skill_link.AGENT_ROWS)
+    requested = [key.strip() for key in agent if key.strip()]
+
+    if requested:
+        unknown = [key for key in requested if key not in known]
+        if unknown:
+            typer.echo(
+                f"mm: error: unknown agent '{unknown[0]}'; known agents: {known_list}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if not config_path.exists():
+            typer.echo(
+                "mm: error: --agent needs a config to record the grant. "
+                "Run 'mm init' first, then retry this command. "
+                "No agent links were changed.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        try:
+            cfg = load_config()
+            sources = get_sources(cfg)
+        except MindMeldError as e:
+            typer.echo(
+                f"mm: notice: skill-link maintenance disabled: {e}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from e
+        order = {row.key: i for i, row in enumerate(skill_link.AGENT_ROWS)}
+        effective_before = skill_link.consented_agent_keys(cfg, sources)
+        skills = cfg.get("skills")
+        unknown_explicit_agents = (
+            [key for key in skills.get("agents", []) if key not in known]
+            if isinstance(skills, dict)
+            else []
+        )
+        new_agents = sorted(effective_before | set(requested), key=lambda k: order[k])
+        new_agents.extend(unknown_explicit_agents)
+        try:
+            patch_config_on_disk(
+                {"skills": {"maintain_links": True, "agents": new_agents}},
+                config_path,
+            )
+        except (ConfigError, OSError, StorageError) as e:
+            typer.echo(
+                f"mm: error: could not write {config_path}: {e}. "
+                "No agent links were changed. Retry this command.",
+                err=True,
+            )
+            raise typer.Exit(code=1) from e
+        try:
+            cfg = load_config()
+            sources = get_sources(cfg)
+        except MindMeldError as e:
+            typer.echo(
+                f"mm: notice: skill-link maintenance disabled: {e}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from e
+        may_create = skill_link.consented_agent_keys(cfg, sources)
+        typer.echo(
+            f"Recorded skill-link grant in {config_path}: "
+            f"maintain_links = true, agents = [{', '.join(new_agents)}]. "
+            "This command installs every authorized agent, not only the ones named here."
+        )
+    elif not config_path.exists():
+        may_create = None
+    else:
+        try:
+            cfg = load_config()
+            sources = get_sources(cfg)
+            may_create = skill_link.consented_agent_keys(cfg, sources)
+        except MindMeldError as e:
+            typer.echo(
+                f"mm: notice: skill-link maintenance disabled: {e}",
+                err=True,
+            )
+            raise typer.Exit(code=1) from e
+
+    try:
+        results = skill_link._ensure_retro_skill_links(
+            dry_run=False, explicit=True, may_create=may_create
+        )
+    except Exception as e:
+        typer.echo(
+            f"mm: notice: retro-fleet skill installation failed: {type(e).__name__}: {safe_str(e)}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from e
+
+    skill_link.maybe_emit_policy_transition(may_create, acknowledge=True)
+
     available = False
     failed = False
 
@@ -5684,6 +5840,9 @@ def install_skills_cmd() -> None:
             )
         elif result.status == "unavailable":
             typer.echo(f"Unavailable: {descriptor.display_name} ({agent_root} is absent)")
+        elif result.status == "declined":
+            available = True
+            typer.echo(f"Skipped: {skill_link.render_skill_status(result)}")
         elif result.status in ("dangling-ours", "dangling-ours-legacy", "foreign"):
             available = True
             failed = True
@@ -5700,6 +5859,13 @@ def install_skills_cmd() -> None:
                 err=True,
             )
 
+    statuses = {result.status for result in results}
+    if statuses <= {"declined", "unavailable"} and "declined" in statuses:
+        keys = "|".join(row.key for row in skill_link.AGENT_ROWS)
+        typer.echo(
+            f"No agent is enabled for skill install. Enable one: mm install-skills --agent <{keys}>"
+        )
+        raise typer.Exit(code=0)
     if not available:
         typer.echo(
             "mm: error: no supported agent skills directory exists; install an agent first",
