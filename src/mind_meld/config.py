@@ -394,10 +394,21 @@ def grok_host_usage_enabled(config: dict[str, Any]) -> bool:
 
 def _resolve_source_path(value: str, *, label: str) -> str:
     """Resolve one configured source path or raise a typed config error."""
+    path = Path(value).expanduser()
     try:
-        return str(Path(value).expanduser().resolve())
+        resolved = path.resolve()
+        # ``resolve(strict=False)`` intentionally preserves an absent source so
+        # get_sources can later omit it.  On newer Python versions, though, a
+        # symlink loop can also resolve lexically instead of raising.  A
+        # follow-symlink stat distinguishes the two: FileNotFoundError remains
+        # the supported absent-source case; ELOOP and other traversal failures
+        # are invalid explicit config.
+        path.stat()
+    except FileNotFoundError:
+        return str(resolved)
     except (OSError, RuntimeError) as e:
         raise ConfigError(f"config: failed to resolve {label} path {value!r} — {e}") from e
+    return str(resolved)
 
 
 def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:

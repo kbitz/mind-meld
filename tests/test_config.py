@@ -1670,6 +1670,28 @@ class TestSkillsSection:
         with pytest.raises(ConfigError, match="failed to resolve source 'claude' path"):
             get_sources(cfg)
 
+    def test_explicit_source_loop_is_rejected_when_resolve_is_nonstrict(
+        self, tmp_path, monkeypatch
+    ):
+        """Python 3.13+ can return a lexical path for an ELOOP."""
+        loop = tmp_path / "source-loop"
+        loop.symlink_to(loop)
+        cfg = self._base()
+        cfg["sync"] = {"sources": [{"name": "claude", "path": str(loop), "type": "claude"}]}
+
+        monkeypatch.setattr(Path, "resolve", lambda self, *_args, **_kwargs: self)
+
+        with pytest.raises(ConfigError, match="failed to resolve source 'claude' path"):
+            get_sources(cfg)
+
+    def test_explicit_missing_source_remains_absent(self, tmp_path):
+        cfg = self._base()
+        cfg["sync"] = {
+            "sources": [{"name": "claude", "path": str(tmp_path / "missing"), "type": "claude"}]
+        }
+
+        assert get_sources(cfg) == []
+
     def test_round_trip_preserves_both_keys(self, tmp_path):
         config_path = tmp_path / "config.toml"
         storage = tmp_path / "storage"
