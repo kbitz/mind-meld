@@ -434,8 +434,17 @@ class TestInitWiring:
         )
         monkeypatch.setattr("mind_meld.events_tail._run_events_backfill", lambda *_args: None)
 
+        # The consent helper deliberately receives *resolved* sources.  Avoid
+        # deriving this test's source from the developer or CI runner's home.
+        claude_dir = tmp_path / "claude"
+        claude_dir.mkdir()
+        monkeypatch.setattr(
+            "mind_meld.cli._prompt_sources",
+            lambda: [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+        )
+
         storage = tmp_path / "icloud"
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\n"
         result = CliRunner().invoke(app, ["init"], input=stdin)
 
         assert result.exit_code == 0, result.output
