@@ -4,13 +4,13 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
-- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths`
+- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `maybe_emit_policy_transition`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
-- `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES`
+- `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
 Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy).
@@ -631,7 +631,7 @@ only thing tests patch to redirect paths. The guard derives from
 `AGENT_ROWS`, never from the override map. A call-time `SkillTarget`
 descriptor owns each agent root. `SkillInstallResult` reports
 `installed`, `unchanged`, `unavailable`, `dangling-ours`,
-`dangling-ours-legacy`, `foreign`, or `failed`. `skill_src` is provenance
+`dangling-ours-legacy`, `foreign`, `failed`, or `declined`. `skill_src` is provenance
 (the package dir); `link_target` is the store path. `_ensure_retro_skill_links`
 (plural) is the one every caller uses.
 
@@ -677,12 +677,75 @@ links are never touched on push. Re-point via `os.symlink(store, tmp)` then
 **Quiet-gate.** Autopush (`quiet=True`) classifies and notices but does not
 rewrite agent config. Interactive `mm push`, `init`, and `install-skills` write.
 
-**State machine.** Absent root → `unavailable`; non-directory/I/O → `failed`;
-missing skills dir under an available root → `mkdir(mode=0o700)`. Then: store
+**State machine.** Consent is checked after the pytest isolation guard and
+before any `stat` on that agent root: a declined row is `declined`, costs
+zero I/O, and reaches neither `_failed_result` nor `_emit_status_notice`.
+Absent root → `unavailable`; non-directory/I/O → `failed`; missing skills dir
+under an available **and consented** root → `mkdir(mode=0o700)`. Then: store
 link that resolves → `unchanged`; store link that dangles → repair if writing
 else `dangling-ours`; foreign file/dir/symlink → `foreign`, never unlink;
 absent target → symlink to the store → `installed`. `dry_run=True` returns full
 classifications with zero writes.
+
+**Consent (Track 25C).** Writes are gated on the same bit the host-usage read
+gate already uses: the source name in `get_sources(config)`. That is symmetry
+with the read gate, not ideal consent — on a non-explicit (legacy) config
+`get_sources` auto-detects by directory existence, so the gate is a no-op
+there and `mm disable-source` is the lever. `AgentRow.consent_source` is a
+required `str` (no default, no `None`): a future row must state its policy.
+`consented_agent_keys(config, sources)` is the **one derivation**. Do NOT
+reintroduce a second `row.consent_source in enabled` test anywhere else.
+
+The helper takes already-resolved sources and does not import `config` or
+call `get_sources` — that keeps `skill_link` a near-leaf and keeps one
+`get_sources` call per command. It catches nothing; `config.py:_validate`
+owns every `[skills]` check. Config absent (`None`) → every registry key
+(fresh-pipx `mm install-skills`). `[skills] maintain_links` false → empty.
+`agents` present → that list ∩ known keys; use **key-absence** (`"agents"
+in skills`), never a falsy check — `[]` is a `ConfigError` pointing at
+`maintain_links = false`. Else derive from the passed-in source names.
+Unknown names in `agents` are accepted and inert.
+
+`_row_is_consented(key, may_create)` is `may_create is None or key in
+may_create`. The `is None` arm keeps bare test callers green and lets
+`_ensure_retro_skill_link_at`'s ad-hoc `key=""` sentinel through; a bare
+membership test would deny that sentinel.
+
+`_skill_links_check_due` and `_ensure_retro_skill_links` MUST receive the
+same `may_create` in one push. A declined row never gets its success marker
+touched, so an unfiltered gate stays open and runs the full installer
+prologue on every push.
+
+**Store publish is never gated on agent consent.** The store lives at
+`~/.local/share/mind-meld/agent-skills/`, an mm-owned path. `_skill_links_check_due`
+returns True when the owned store exists and `_store_needs_refresh()`,
+independent of any row. `_ensure_retro_skill_links` publishes before its
+empty-available return when the store already exists. An all-declined
+machine with no store does not create one.
+
+**`declined` is an installer status, not a diagnose `status`.** Link state
+and policy are orthogonal: a declined row can still be `status: ok` when
+an mm-owned link resolves. `mm diag` carries policy in `maintain_links`
+(`enabled` / `disabled (not authorized by skill-link policy)` / `unknown
+(config invalid: …)`). The renderer receives the resolved consent set, not
+the original policy branch, so it must not falsely blame a disabled source
+when an explicit `[skills] agents` list made the decision. Never render a
+policy from a config you could not parse.
+`declined` is not in `BROKEN_SKILL_STATUSES`; `mm status` stays silent for
+a deliberate decline. The one exception is the one-time 0.12.42 upgrade
+notice (`maybe_emit_policy_transition`), acknowledged only on an interactive
+path so `mm autopush` cannot spend the marker.
+
+**`mm install-skills --agent KEY`** writes `maintain_links = true` and
+the known entries from `sorted(effective_before | {KEYS})` in registry
+order, preserving unknown entries from an existing explicit `agents` list,
+then installs every consented row. A bare `[KEY]` would convert the
+source-derived fallback into an explicit allowlist and drop the user's
+other links; dropping unknown entries would erase a future-agent pre-grant.
+It grants only link maintenance — not source sync, not usage reading. It
+refuses and exits 1 if it cannot persist (no config, or write failure). Bare
+`install-skills` with no config keeps the fresh-machine allow-all; a
+present-but-broken config fails closed and exits 1.
 
 **`BROKEN_SKILL_STATUSES` is an allowlist of broken states, never a denylist of
 healthy ones.** `mm status` reads it. `ok` / `live-checkout` (the deliberate
@@ -730,9 +793,13 @@ healthy store does not fail the gate open.
 
 **Hook positions.** `mm init` calls `_ensure_retro_skill_links(explicit=True)`.
 `_push_core` calls it AFTER `_ensure_device_registered` and BEFORE
-`_run_events_tail`, with `allow_mutate=not quiet`. `mm diag` is passphrase-free
-and prints the skill-links block. `mm status` prints one line only when a link
-is broken.
+`_run_events_tail`, with `allow_mutate=not quiet`. Both call sites hoist
+`get_sources` above the hook so consent is known; the hook itself does not
+move relative to device registration or the events tail. That hoist also
+moves the mm-events bootstrap `mkdir` a few lines earlier. `mm diag` is
+passphrase-free and prints the skill-links block. `mm status` prints one
+line only when a link is broken, plus the pending 0.12.42 policy-transition
+notice until it is acknowledged.
 
 **`mm install-skills`.** Force-runs the installer with `explicit=True`, ignoring
 the TTL gate. Renders `render_skill_status` for foreign/dangling outcomes. Exits

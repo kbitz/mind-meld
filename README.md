@@ -127,12 +127,12 @@ Mind Meld treats Codex and OpenCode as first-class peers of Claude Code:
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`.
 - `opencode` syncs `~/.config/opencode/` customizations: rules, agents, commands, modes, plugins, skills, and tools.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` / `opencode.json{,c}` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
-- Enabling the `codex` or `opencode` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. `mm enable-source grok` is the same verb: it adds a scoped Grok source (`skills/`, `commands/`, and `rules/` only — same idea as Claude's `memory/` + `todos/`) and opts this Mac into reading terminal token totals from local `updates.jsonl` records. Session files, prompts, and chat history stay on the Mac.
-- The bundled `/retro-fleet` skill installs for every agent mm supports when you run `mm init`, `mm push`, or `mm install-skills`. OpenCode's Claude compatibility remains useful for existing gstack skills, but its own skill link works even when compatibility is disabled.
+- Enabling the `codex` or `opencode` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source grok` is the same verb: it adds a scoped Grok source (`skills/`, `commands/`, and `rules/` only — same idea as Claude's `memory/` + `todos/`) and opts this Mac into reading terminal token totals from local `updates.jsonl` records. Session files, prompts, and chat history stay on the Mac.
+- The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`. OpenCode's Claude compatibility remains useful for existing gstack skills, but its own skill link works even when compatibility is disabled.
 
 Symlinks inside any sync source are local routing, not portable content: Mind Meld does not upload them and leaves existing local links untouched on pull, including dangling links and linked directories. A source root itself may be a symlink.
 
-Fresh installs are asked about the `codex` and `opencode` sources during `mm init`. Existing installations remain opt-in:
+Fresh installs are asked about the `codex` and `opencode` sources during `mm init`. That choice also decides whether mm maintains a `retro-fleet` skill link in that agent's skills directory. Existing installations remain opt-in:
 
 ```bash
 mm enable-source codex
@@ -163,8 +163,8 @@ OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immed
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
-| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h. Prints one extra line when a `retro-fleet` skill link is broken |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, and `retro-fleet` skill-link state for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output |
+| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h. Prints one extra line when a `retro-fleet` skill link is broken, and a one-time line after the 0.12.42 skill-link policy change until you acknowledge it |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, and `retro-fleet` skill-link state for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Each skill-link row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)`) |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
@@ -178,7 +178,7 @@ OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immed
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. |
-| `mm install-skills` | Force-check the `retro-fleet` skill link for every agent mm supports and report every agent's outcome. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. Use it for fresh-machine setup, or after a `pipx` reinstall or a deleted workspace. Restart the agent afterwards so it reloads SKILL.md. |
+| `mm install-skills` | Force-check the `retro-fleet` skill link for every *authorized* agent and report every agent's outcome, including skipped (declined) rows. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. `--agent KEY` (repeatable) grants and persists skill-link maintenance for that agent without enabling sync or usage reading, then installs every authorized agent. Bare invocation with no config is fresh-machine setup (install all available); with a config it honors `[skills]`. Restart the agent afterwards so it reloads SKILL.md. |
 
 ### Syncing gstack
 
@@ -241,9 +241,9 @@ mm disable-source gstack       # this Mac only; iCloud peers untouched
 mm enable-source gstack        # turn it back on
 ```
 
-The on/off state lives in `[sync].disabled_sources = ["gstack"]`. Disabling does NOT delete your `[[sync.sources]]` entry — re-enabling preserves any customizations like `include_dirs` or `exclude_patterns`.
+The on/off state lives in `[sync].disabled_sources = ["gstack"]`. Disabling does NOT delete your `[[sync.sources]]` entry — re-enabling preserves any customizations like `include_dirs` or `exclude_patterns`. For a supported agent, disabling its source removes the **derived** skill-link grant. It does not override an explicit `[skills] agents` list; edit that list to revoke maintenance. `gstack` has no agent skill-link row.
 
-`mm sources` shows the toggle state as an `Enabled` column. `mm status` calls out disabled sources in a one-line breadcrumb so future-you doesn't forget gstack is off and re-debug "why isn't this syncing".
+`mm sources` shows the toggle state as an `Enabled` column. `mm status` calls out disabled sources in a one-line breadcrumb so future-you doesn't forget gstack is off and re-debug "why isn't this syncing". Neither `mm sources` nor `mm status` shows a `[skills] agents` override — `mm diag` is the authoritative resolved view of skill-link policy.
 
 **Forward-compat for not-yet-shipped sources.** When `mm` adds a new source to its defaults, upgraders don't get auto-enrolled — `mm status` surfaces a one-shot enable hint. To pre-disable a name before it ships:
 
@@ -251,7 +251,29 @@ The on/off state lives in `[sync].disabled_sources = ["gstack"]`. Disabling does
 mm disable-source future-agent --force   # accepts unknown names for forward-compat
 ```
 
-`mm reconfigure-sources` re-runs the picker against your current config + new defaults, in case you want to revisit every choice at once.
+`mm reconfigure-sources` re-runs the picker against your current config + new defaults, in case you want to revisit every choice at once. Changing which sources are enabled also changes derived skill-link consent on this machine.
+
+## Managing agent skill links per machine
+
+Skill-link maintenance is per-machine and never synced (`config.toml` lives at `~/.config/mind-meld/`). By default mm maintains a `retro-fleet` link for each agent whose sync source is enabled, using the same source bit as host-usage reads.
+
+```toml
+[skills]
+maintain_links = true          # false disables every row
+# agents = ["claude", "codex"] # when present, an exhaustive allowlist
+```
+
+1. `maintain_links = false` disables every row.
+2. Omitting `agents` derives consent from enabled sources.
+3. Providing `agents` creates an exhaustive allowlist and suppresses source derivation, the same way an explicit `[[sync.sources]]` suppresses `DEFAULT_SOURCES` auto-detect.
+4. `agents = []` is invalid; use `maintain_links = false` to turn maintenance off. Two encodings of one result is a bug farm.
+5. `mm install-skills --agent KEY` turns `maintain_links` back on and preserves prior derived grants (`agents =` the set you already had, plus KEY), then installs every authorized agent — not only KEY. It does not enable source sync or usage reading.
+6. Existing links remain; this release does not revoke them. With source-derived policy, `mm disable-source KEY` also removes its grant and drops sync and usage reading. Once `[skills] agents` exists, edit that list by hand until `mm uninstall-skills` ships.
+7. The mm-owned store at `~/.local/share/mind-meld/agent-skills/` may keep refreshing while unmanaged links still point at it.
+8. The config is per-machine and never synced.
+9. An explicit `agents` list will not automatically include future agents.
+
+`mm diag` is the authoritative resolved view. `mm sources` structurally cannot show a `[skills] agents` override.
 
 ## Fleet retro (`/retro-fleet`)
 
@@ -281,7 +303,7 @@ Session jsonls only ever grow, so from v0.12.15 each push re-reads only the byte
 
 **Where the skill lives (v0.12.38).** `mm` copies `SKILL.md` into a store it owns at `~/.local/share/mind-meld/agent-skills/retro-fleet/`, then points every supported agent's `retro-fleet` link at that one constant path (Claude Code's is `~/.claude/skills/retro-fleet`; `mm diag` lists them all). The store is machine-local and never synced. Before v0.12.38 each link pointed straight into whichever Python installation ran `mm`, so deleting a Conductor workspace or bumping a Homebrew Python took the skill offline with a dangling link and no way to repair it. The link target no longer moves. The store refreshes on a version-then-hash compare, so a new `SKILL.md` lands on the next `mm init`, `mm push`, or `mm install-skills` after a `pipx upgrade` — not in place during the upgrade itself. Restart the agent afterwards so it reloads SKILL.md.
 
-The link is created on `mm init` and re-checked by each push (24h-TTL gated, a handful of syscalls per available agent in steady state). Each agent is tracked separately, so a problem on one never suppresses checks for another. Mind Meld repairs its own links without being asked: a link that points at the store but dangles, and a leftover link into an old package or checkout that no longer resolves, are both re-pointed. A *live* checkout link — the development dogfood case — is left alone by push, and re-pointed by `mm init` or `mm install-skills`. A file of your own, or a symlink to somewhere Mind Meld does not recognize, is never touched: `mm diag` shows it with the `readlink` output and `mm install-skills` names the cause and the fix. `mm status` nags only about links Mind Meld could act on — a *live* entry of your own is a working deliberate choice and is never called broken, while a *dangling* one is, because the agent sees a dead skill entry either way. Background `mm autopush` classifies and warns but never rewrites agent config — run an interactive `mm push` or `mm install-skills` to actually repair a link, then restart the agent so it reloads SKILL.md.
+The link is created on `mm init` and re-checked by each push **for agents authorized by `[skills]`**: derived from enabled sources when `agents` is omitted, or from that explicit allowlist when it is present. The check is 24h-TTL gated, a handful of syscalls per available consented agent in steady state. Each agent is tracked separately, so a problem on one never suppresses checks for another. Mind Meld repairs its own links without being asked: a link that points at the store but dangles, and a leftover link into an old package or checkout that no longer resolves, are both re-pointed. A *live* checkout link — the development dogfood case — is left alone by push, and re-pointed by `mm init` or `mm install-skills`. A file of your own, or a symlink to somewhere Mind Meld does not recognize, is never touched: `mm diag` shows it with the `readlink` output and `mm install-skills` names the cause and the fix. A declined row whose mm-owned link still **resolves** is `status: ok` with `maintain_links: disabled` — `mm status` does not nag about a deliberate decline. Background `mm autopush` classifies and warns but never rewrites agent config — run an interactive `mm push` or `mm install-skills` to actually repair a link, then restart the agent so it reloads SKILL.md.
 
 **Caveats the output is honest about:**
 
@@ -306,13 +328,13 @@ Managing conflicts:
 
 ## Troubleshooting
 
-**Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm`, `mm --version`, `mm diag`, and an interactive `mm push`. If push prints an upgrade notice, run its command, then run `mm install-skills`, **restart the agent**, and rerun the retro. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
+**Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm`, `mm --version`, `mm diag`, and an interactive `mm push`. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 
 **`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either.
 
 **`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` carries `key`, `agent`, `target`, `store`, `store_state`, and `status` on every row, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones, and restart the agent so it reloads SKILL.md. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own is not one of those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links` on every row, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -337,7 +359,8 @@ pipx uninstall mind-meld
 # store below, not at the deleted pipx venv), so each agent keeps offering
 # /retro-fleet even though the `mm` it shells out to is gone. This removes
 # only links that actually point at Mind Meld's store — an entry of your own
-# at that path is left alone, the same rule the installer follows.
+# at that path is left alone. Installation now also requires source consent
+# (or `mm install-skills --agent`); cleanup still matches on readlink.
 # Covers every agent mm supports as of this release. Run `mm diag` BEFORE
 # uninstalling for the authoritative list — there is no `mm` left after
 # `pipx uninstall` to ask.
