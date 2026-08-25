@@ -238,12 +238,14 @@ SkillInstallStatus = Literal[
     "foreign",
     "failed",
     "declined",
+    "user-removed",
 ]
 
 # The `diagnose_skill_links` statuses that mean mm's own link is wedged and mm
 # can act. `ok` / `live-checkout` (a deliberate dogfood link) / `foreign` (the
-# user's own file) / `absent` (agent not installed) are all working-as-intended
-# and must never be reported as broken. Consumed by `mm status`.
+# user's own file) / `absent` (agent not installed) / `removed-by-user` (a link
+# mm created and the user deleted) are all working-as-intended and must never be
+# reported as broken. Consumed by `mm status`.
 BROKEN_SKILL_STATUSES = (
     "dangling-ours",
     "dangling-ours-legacy",
@@ -725,6 +727,10 @@ def render_skill_status(result: SkillInstallResult) -> str:
         return f"{target} -> {store}"
     if result.status == "unchanged":
         return f"{target} -> {store}"
+    if result.status == "user-removed":
+        return (
+            f"{target} was removed and mm left it removed. Put it back: mm install-skills{restart}"
+        )
     if result.status == "declined":
         reason = result.reason or "skill-link maintenance is off"
         remedy = f"mm install-skills --agent {result.descriptor.key}"
@@ -1051,6 +1057,18 @@ def _install_available_skill_target(
             reason="would-migrate",
         )
 
+    # The target is absent. If mm has installed here before, the user removed
+    # it -- deletion is intent, not damage, so push must not resurrect it.
+    # `explicit=True` (`mm install-skills` / `mm init`) is the documented way
+    # to put it back and deliberately skips this guard.
+    if not explicit and _marker_exists(descriptor.success_marker):
+        return SkillInstallResult(
+            descriptor,
+            "user-removed",
+            skill_src=skill_src,
+            link_target=store,
+        )
+
     if not write:
         return SkillInstallResult(
             descriptor,
@@ -1116,6 +1134,61 @@ def _marker_is_fresh(name: str) -> bool:
         return False
     age = time.time() - st.st_mtime
     return age < SKILL_LINK_TTL_SECONDS
+
+
+def _marker_exists(name: str) -> bool:
+    """Return True iff the row's success marker is on disk, ignoring its age.
+
+    Existence and freshness are separate questions. ``_marker_is_fresh``
+    answers "should the drift gate re-check this row"; this answers "has mm
+    ever successfully installed a link at this target". The marker is touched
+    on every successful outcome including ``unchanged``, so its presence is
+    the durable record of a link mm created.
+
+    Fails OPEN (returns False) on an unreadable marker dir, matching
+    ``_marker_is_fresh``. Fail-closed was the first instinct here -- if we
+    cannot tell whether mm installed, do not resurrect -- but it trades a
+    loud, recoverable outcome for a silent one: an unreadable marker dir
+    would suppress self-heal forever with no message, which is the TODO#3
+    bug ``_marker_is_fresh`` was fixed for and a violation of the
+    visible-failure contract. A resurrected link is visible and the user can
+    delete it again; silently never installing is not.
+
+    Reads via ``Path.stat`` rather than ``Path.is_file``, deliberately and
+    identically to ``_marker_is_fresh``. ``Path.is_file()`` calls ``os.stat``
+    internally on CPython 3.14, so it bypasses a ``Path.stat`` fault
+    injection -- the two predicates would then disagree about the same
+    unreadable marker, one failing open and one not.
+    """
+    marker = _marker_dir() / f".{name}"
+    try:
+        marker.stat()
+    except OSError:
+        return False
+    return True
+
+
+def _user_removed_link(target: Path, success_marker: str) -> bool:
+    """True when the target is absent AND mm has installed there before.
+
+    Absent-plus-a-marker is the ONE filesystem state that means the user
+    deleted a link mm created. Every other broken state keeps the link
+    itself: `dangling-ours` (store gone), `dangling-ours-legacy` (old package
+    path), and `foreign` (someone else's file) are all "a link is present and
+    wrong", which is damage mm repairs. A missing link is not damage.
+
+    An inspection error is NOT a removal -- return False and let the normal
+    classification path produce its own forensic outcome.
+    """
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    else:
+        return False
+    return _marker_exists(success_marker)
 
 
 def _touch_marker(name: str) -> None:
@@ -1236,7 +1309,18 @@ def _store_needs_refresh() -> bool:
 
 
 def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
-    """Target-specific implementation of the 24-hour skill-link drift gate."""
+    """Target-specific implementation of the 24-hour skill-link drift gate.
+
+    The user-removed check runs FIRST and short-circuits, because the
+    absent-target `lstat` below throws into the blanket fail-open. Without
+    this the gate would return True on every push forever for a row whose
+    only possible outcome is a no-op: the installer declines to recreate, so
+    it never touches the success marker, so the marker goes stale, so the
+    gate stays hot permanently. Store refresh is unaffected -- that path in
+    `_skill_links_check_due` is independent of any row.
+    """
+    if _user_removed_link(target, success_marker):
+        return False
     if not _marker_is_fresh(success_marker):
         return True
     try:
@@ -1268,87 +1352,6 @@ def skill_targets() -> tuple[Path, ...]:
     that moves HOME moves the targets with it.
     """
     return tuple(descriptor.target for descriptor in _skill_target_descriptors())
-
-
-_POLICY_TRANSITION_MARKER = "skill-link-policy-v0.12.42"
-
-
-def _join_display_names(names: list[str]) -> str:
-    if not names:
-        return ""
-    if len(names) == 1:
-        return names[0]
-    if len(names) == 2:
-        return f"{names[0]} and {names[1]}"
-    return ", ".join(names[:-1]) + f", and {names[-1]}"
-
-
-def declined_owned_link_rows(
-    may_create: frozenset[str] | None,
-) -> tuple[AgentRow, ...]:
-    """Declined registry rows that still have an mm-owned link at the target.
-
-    ``readlink == store`` proves mm created the link under the old policy.
-    Used by the one-time 0.12.42 transition notice. Not a consent signal.
-    """
-    if may_create is None:
-        return ()
-    store = _skill_store_dir()
-    found: list[AgentRow] = []
-    for row in AGENT_ROWS:
-        if _row_is_consented(row.key, may_create):
-            continue
-        descriptor = _descriptor_from_row(row)
-        try:
-            if _points_at_store(descriptor.target, store):
-                found.append(row)
-        except OSError:
-            continue
-    return tuple(found)
-
-
-def policy_transition_acknowledged() -> bool:
-    try:
-        return (_marker_dir() / f".{_POLICY_TRANSITION_MARKER}").is_file()
-    except OSError:
-        return False
-
-
-def acknowledge_policy_transition() -> None:
-    _touch_marker(_POLICY_TRANSITION_MARKER)
-
-
-def policy_transition_text(rows: tuple[AgentRow, ...]) -> str:
-    names = _join_display_names([row.display_name for row in rows])
-    flags = " ".join(f"--agent {row.key}" for row in rows)
-    return (
-        "mm: notice: skill-link maintenance changed in 0.12.42.\n"
-        f"{names} links remain in place, but mm will no longer repair them\n"
-        "because their skill-link policy no longer authorizes maintenance.\n"
-        "\n"
-        "Keep a link maintained without enabling sync or usage reading:\n"
-        f"  mm install-skills {flags}\n"
-        "\n"
-        "Inspect current policy with: mm diag\n"
-    )
-
-
-def maybe_emit_policy_transition(may_create: frozenset[str] | None, *, acknowledge: bool) -> bool:
-    """Emit the one-time upgrade notice if a declined mm-owned link exists.
-
-    Returns True when a notice was printed. The permanent marker is touched
-    only when ``acknowledge`` is True (interactive path). Autopush must
-    pass ``acknowledge=False`` so it cannot spend the notice budget.
-    """
-    if policy_transition_acknowledged():
-        return False
-    affected = declined_owned_link_rows(may_create)
-    if not affected:
-        return False
-    sys.stderr.write(policy_transition_text(affected))
-    if acknowledge:
-        acknowledge_policy_transition()
-    return True
 
 
 def _maintain_links_field(
@@ -1429,7 +1432,14 @@ def _diagnose_one(
     try:
         info = descriptor.target.lstat()
     except FileNotFoundError:
-        row["status"] = "absent"
+        # `absent` means the agent has no link and mm never made one.
+        # `removed-by-user` means mm made one and it is gone. Both are
+        # working-as-intended, so neither is in BROKEN_SKILL_STATUSES -- but
+        # only one of them is answerable with "run mm install-skills", and
+        # collapsing them left `mm diag` unable to confirm a deliberate
+        # deletion. This is link state, not policy, so it does not touch the
+        # `maintain_links` field or its renderer contract.
+        row["status"] = "removed-by-user" if _marker_exists(descriptor.success_marker) else "absent"
         return row
     except OSError as error:
         row["status"] = "error"
@@ -1476,13 +1486,8 @@ __all__ = [
     "SkillInstallResult",
     "SkillTarget",
     "_refuse_real_home_under_pytest",
-    "acknowledge_policy_transition",
     "consented_agent_keys",
-    "declined_owned_link_rows",
     "diagnose_skill_links",
-    "maybe_emit_policy_transition",
-    "policy_transition_acknowledged",
-    "policy_transition_text",
     "render_skill_status",
     "skill_targets",
     "_descriptor_for",
@@ -1490,7 +1495,9 @@ __all__ = [
     "_marker_dir",
     "_real_guard_paths",
     "_resolve_retro_skill_src",
+    "_marker_exists",
     "_skill_link_check_due_at",
     "_skill_links_check_due",
+    "_user_removed_link",
     "_skill_store_dir",
 ]

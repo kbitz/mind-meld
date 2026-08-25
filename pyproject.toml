@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mind-meld"
-version = "0.12.43"
+version = "0.12.44"
 description = "Sync AI coding-agent context across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"

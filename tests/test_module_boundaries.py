@@ -707,9 +707,12 @@ def test_synthetic_row_is_covered_with_no_other_edit(monkeypatch, tmp_path) -> N
     assert synth_desc.target.is_symlink()
     assert skill_link._skill_links_check_due(may_create=None) is False
 
+    # An absent target is a user removal (Track 28A): the gate stays shut and
+    # push leaves it alone. Explicit install is the documented recovery, and a
+    # new registry row must be covered by that path too.
     synth_desc.target.unlink()
-    assert skill_link._skill_links_check_due(may_create=None) is True
-    skill_link._ensure_retro_skill_links(may_create=None)
+    assert skill_link._skill_links_check_due(may_create=None) is False
+    skill_link._ensure_retro_skill_links(explicit=True, may_create=None)
     assert synth_desc.target.is_symlink()
 
     healthy = skill_link.diagnose_skill_links()

@@ -412,7 +412,11 @@ class TestSkillLinkCheckDue:
         skill_link._ensure_retro_skill_links(may_create=None)
         assert skill_link._skill_links_check_due(may_create=None) is False
 
+        # Damage, not deletion: an absent target is now "the user removed it"
+        # (Track 28A) and is deliberately NOT due. Repointing keeps this test on
+        # its actual subject -- per-row independence of the gate.
         codex_target.unlink()
+        codex_target.symlink_to(codex_target.parent / "not-the-store")
         assert skill_link._skill_links_check_due(may_create=None) is True
 
     def test_combined_gate_repairs_opencode_when_other_agents_are_healthy(
@@ -423,6 +427,7 @@ class TestSkillLinkCheckDue:
         assert skill_link._skill_links_check_due(may_create=None) is False
 
         opencode_target.unlink()
+        opencode_target.symlink_to(opencode_target.parent / "not-the-store")
         assert skill_link._skill_links_check_due(may_create=None) is True
 
     def test_fresh_marker_with_correct_link_means_not_due(self, target, skill_src, config_dir):
@@ -439,15 +444,19 @@ class TestSkillLinkCheckDue:
         os.utime(marker, (old, old))
         assert _due() is True
 
-    def test_fresh_marker_but_link_missing_means_due(self, skill_src, config_dir):
-        """REGRESSION pin for the post-cleanup-recovery bug: marker got
-        touched on a previous push but the link was later removed by hand
-        (e.g. user cleaning up an old workspace path). Pre-fix the fresh
-        marker silently suppressed self-heal for 24h."""
+    def test_fresh_marker_but_link_missing_is_not_due(self, skill_src, config_dir):
+        """INVERTED by Track 28A, deliberately.
+
+        This used to pin auto-recovery: marker touched by an earlier push, link
+        later removed by hand, so the drift check tripped and push rebuilt it.
+        That is now the definition of a user removal, and push leaves it alone.
+        The recovery path did not disappear -- it became explicit, and
+        ``install_skills_cmd``'s docstring already names this exact case as its
+        first use ("post-cleanup recovery (link removed by hand...)").
+        """
         marker = config_dir / f".{skill_link._SKILL_LINK_SUCCESS_MARKER}"
         marker.touch()
-        # No symlink at target. Drift check must trip.
-        assert _due() is True
+        assert _due() is False
 
     def test_fresh_marker_but_link_dangling_means_due(
         self, target, skill_src, _isolate_paths, config_dir
@@ -992,33 +1001,11 @@ class TestPushSkillLinkWiring:
         monkeypatch.setattr(skill_link, "_skill_links_check_due", gate)
         monkeypatch.setattr(skill_link, "_ensure_retro_skill_links", installer)
         monkeypatch.setattr(cli_module, "get_sources", gs)
-        monkeypatch.setattr(skill_link, "maybe_emit_policy_transition", lambda *a, **k: False)
 
         assert cli_module._push_core(config, "pw", 1024) is None
         assert gs_calls == [1]
         assert gate_args == install_args
         assert gate_args == [frozenset({skill_link.AGENT_ROWS[0].key})]
-
-    def test_push_only_acknowledges_policy_transition_interactively(self, monkeypatch):
-        acknowledgements: list[bool] = []
-        config = {
-            "device": {"id": "dev-a", "name": "Mac A"},
-            "sync": {"max_file_size": 1024},
-            "skills": {"agents": [skill_link.AGENT_ROWS[0].key]},
-        }
-        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
-        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
-        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
-        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create: False)
-        monkeypatch.setattr(
-            skill_link,
-            "maybe_emit_policy_transition",
-            lambda _may_create, *, acknowledge: acknowledgements.append(acknowledge) or False,
-        )
-
-        assert cli_module._push_core(config, "pw", 1024, quiet=True) is None
-        assert cli_module._push_core(config, "pw", 1024, quiet=False) is None
-        assert acknowledgements == [False, True]
 
 
 class TestDurableStore:
@@ -1622,9 +1609,16 @@ class TestDiagnosePolicyField:
 
 
 class TestConsentFlipFlop:
-    def test_enabled_declined_enabled_recreates_and_is_not_suppressed_by_ttl(
+    def test_consent_churn_does_not_resurrect_a_deleted_link(
         self, agent_targets, skill_src, config_dir
     ):
+        """Track 28A: the two switches are independent.
+
+        Consent answers "may mm maintain this row". Presence answers "is there
+        a link". Re-granting consent does not un-delete -- otherwise flipping a
+        source off and on would silently undo a deliberate removal. The undo is
+        ``mm install-skills``, which is explicit and skips the guard.
+        """
         first = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
         assert _result_for(first, "codex").status == "installed"
         _assert_store_link(agent_targets["codex"])
@@ -1634,10 +1628,36 @@ class TestConsentFlipFlop:
         assert _result_for(second, "codex").status == "declined"
         assert not agent_targets["codex"].exists()
 
-        assert skill_link._skill_links_check_due(may_create=_may("claude", "codex")) is True
+        # Consent comes back. The gate stays shut and push does not rebuild.
+        assert skill_link._skill_links_check_due(may_create=_may("claude", "codex")) is False
         third = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
-        assert _result_for(third, "codex").status == "installed"
+        assert _result_for(third, "codex").status == "user-removed"
+        assert not agent_targets["codex"].exists()
+
+        # Explicit install is the documented recovery, and it still works.
+        fourth = skill_link._ensure_retro_skill_links(
+            explicit=True, may_create=_may("claude", "codex")
+        )
+        assert _result_for(fourth, "codex").status == "installed"
         _assert_store_link(agent_targets["codex"])
+
+    def test_declined_row_link_still_repaired_when_consent_returns(
+        self, agent_targets, skill_src, config_dir
+    ):
+        """The TTL half of the old test, kept on its own subject.
+
+        A row that was declined and whose link is DAMAGED (present but wrong)
+        must still be repaired when consent returns -- a fresh marker from
+        before the decline must not suppress it.
+        """
+        first = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
+        assert _result_for(first, "codex").status == "installed"
+
+        target = agent_targets["codex"]
+        target.unlink()
+        target.symlink_to(target.parent / "not-the-store")
+
+        assert skill_link._skill_links_check_due(may_create=_may("claude", "codex")) is True
 
 
 class TestInstallSkillsConsent:
@@ -1803,28 +1823,163 @@ class TestInstallSkillsConsent:
         assert "every authorized agent" in result.output
 
 
-class TestPolicyTransitionNotice:
-    def test_emits_once_on_interactive_path(self, agent_targets, skill_src, config_dir, capsys):
-        skill_link._ensure_retro_skill_links(may_create=None)
-        emitted = skill_link.maybe_emit_policy_transition(frozenset({"claude"}), acknowledge=True)
-        assert emitted is True
-        err = capsys.readouterr().err
-        assert "skill-link maintenance changed in 0.12.42" in err
-        assert "mm install-skills --agent" in err
-        assert skill_link.policy_transition_acknowledged() is True
-        assert (
-            skill_link.maybe_emit_policy_transition(frozenset({"claude"}), acknowledge=True)
-            is False
-        )
+class TestUserRemovedLink:
+    """Deletion is intent, not damage. Track 28A.
 
-    def test_autopush_does_not_acknowledge(self, agent_targets, skill_src, capsys):
-        skill_link._ensure_retro_skill_links(may_create=None)
-        emitted = skill_link.maybe_emit_policy_transition(frozenset({"claude"}), acknowledge=False)
-        assert emitted is True
-        assert skill_link.policy_transition_acknowledged() is False
-        assert "skill-link maintenance changed" in capsys.readouterr().err
+    Every key list here derives from ``AGENT_ROWS`` rather than naming agents
+    literally: ``tests/test_module_boundaries.py`` AST-scans this file for a
+    list of >=2 agent-key string constants and fails the build on one.
+    """
 
-    def test_transition_text_does_not_blame_the_sync_source(self):
-        text = skill_link.policy_transition_text((skill_link.AGENT_ROWS[1],))
-        assert "sources are not enabled" not in text
-        assert "skill-link policy" in text
+    def _runner(self):
+        from typer.testing import CliRunner
+
+        return CliRunner()
+
+    def test_push_does_not_recreate_a_link_the_user_deleted(self, agent_targets, skill_src):
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert agent_targets[row.key].is_symlink()
+
+        agent_targets[row.key].unlink()
+        results = skill_link._ensure_retro_skill_links(may_create=None)
+
+        assert not agent_targets[row.key].exists()
+        assert not agent_targets[row.key].is_symlink()
+        by_key = {r.descriptor.key: r for r in results}
+        assert by_key[row.key].status == "user-removed"
+
+    def test_fresh_machine_still_installs(self, agent_targets, skill_src):
+        """No marker means mm has never been here -- install, as today."""
+        row = skill_link.AGENT_ROWS[0]
+        assert not skill_link._marker_exists(row.success_marker)
+        results = skill_link._ensure_retro_skill_links(may_create=None)
+        by_key = {r.descriptor.key: r for r in results}
+        assert by_key[row.key].status == "installed"
+        assert agent_targets[row.key].is_symlink()
+
+    def test_install_skills_puts_it_back(self, agent_targets, skill_src, _isolate_paths):
+        """`explicit=True` is the documented undo and skips the guard."""
+        from mind_meld.cli import app
+
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert agent_targets[row.key].is_symlink()
+
+    def test_a_dangling_store_link_is_damage_not_a_removal(self, agent_targets, skill_src):
+        """Damage keeps the link. Only an ABSENT target means intent.
+
+        Classified with ``allow_mutate=False``: a writing run republishes the
+        store before it classifies, which heals the dangle and reports
+        ``unchanged``. Non-mutating is the only way to observe the
+        classification itself.
+        """
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        store = skill_link._skill_store_dir()
+        for child in store.iterdir():
+            child.unlink()
+        store.rmdir()
+
+        results = skill_link._ensure_retro_skill_links(allow_mutate=False, may_create=None)
+        by_key = {r.descriptor.key: r for r in results}
+        assert by_key[row.key].status == "dangling-ours"
+
+        healed = skill_link._ensure_retro_skill_links(may_create=None)
+        assert {r.descriptor.key: r for r in healed}[row.key].status in ("installed", "unchanged")
+        assert agent_targets[row.key].is_symlink()
+
+    def test_the_drift_gate_closes_after_a_removal(self, agent_targets, skill_src):
+        """G2b: the gate used to fail open on the absent lstat, forever."""
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+
+        descriptor = skill_link._descriptor_for(row.key)
+        assert skill_link._skill_link_check_due_for(descriptor, frozenset({row.key})) is False
+
+    def test_removal_on_one_agent_does_not_affect_another(self, agent_targets, skill_src):
+        keys = [r.key for r in skill_link.AGENT_ROWS]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[keys[0]].unlink()
+
+        results = skill_link._ensure_retro_skill_links(may_create=None)
+        by_key = {r.descriptor.key: r for r in results}
+        assert by_key[keys[0]].status == "user-removed"
+        for other in keys[1:]:
+            assert by_key[other].status == "unchanged"
+            assert agent_targets[other].is_symlink()
+
+    def test_results_stay_complete_and_ordered(self, agent_targets, skill_src):
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[skill_link.AGENT_ROWS[0].key].unlink()
+        results = skill_link._ensure_retro_skill_links(may_create=None)
+        assert [r.descriptor.key for r in results] == [r.key for r in skill_link.AGENT_ROWS]
+
+    def test_quiet_autopush_also_reports_user_removed(self, agent_targets, skill_src):
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+        results = skill_link._ensure_retro_skill_links(allow_mutate=False, may_create=None)
+        by_key = {r.descriptor.key: r for r in results}
+        assert by_key[row.key].status == "user-removed"
+        assert not agent_targets[row.key].is_symlink()
+
+    def test_renderer_names_the_undo(self, agent_targets, skill_src):
+        row = skill_link.AGENT_ROWS[0]
+        descriptor = skill_link._descriptor_for(row.key)
+        result = skill_link.SkillInstallResult(descriptor, "user-removed")
+        rendered = skill_link.render_skill_status(result)
+        assert "mm install-skills" in rendered
+        assert "restart the agent" in rendered
+
+    def test_diag_distinguishes_removed_from_never_installed(self, agent_targets, skill_src):
+        row = skill_link.AGENT_ROWS[0]
+        rows = {r["key"]: r for r in skill_link.diagnose_skill_links()}
+        assert rows[row.key]["status"] == "absent"
+
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+        rows = {r["key"]: r for r in skill_link.diagnose_skill_links()}
+        assert rows[row.key]["status"] == "removed-by-user"
+
+    def test_removed_by_user_is_not_a_broken_status(self):
+        assert "removed-by-user" not in skill_link.BROKEN_SKILL_STATUSES
+        assert "absent" not in skill_link.BROKEN_SKILL_STATUSES
+
+    def test_marker_exists_ignores_age(self, agent_targets, skill_src, monkeypatch):
+        """Existence is durable; only freshness has the 24h TTL."""
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        marker = skill_link._marker_dir() / f".{row.success_marker}"
+        stale = time.time() - (skill_link.SKILL_LINK_TTL_SECONDS * 3)
+        os.utime(marker, (stale, stale))
+
+        assert skill_link._marker_is_fresh(row.success_marker) is False
+        assert skill_link._marker_exists(row.success_marker) is True
+
+    def test_user_removed_link_is_false_when_something_is_there(self, agent_targets, skill_src):
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        target = agent_targets[row.key]
+        assert skill_link._user_removed_link(target, row.success_marker) is False
+
+        target.unlink()
+        assert skill_link._user_removed_link(target, row.success_marker) is True
+
+    def test_a_foreign_file_is_not_a_removal(self, agent_targets, skill_src):
+        """The user's own file at the target stays `foreign`, never `user-removed`."""
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        target = agent_targets[row.key]
+        target.unlink()
+        target.write_text("mine\n")
+
+        results = skill_link._ensure_retro_skill_links(may_create=None)
+        by_key = {r.descriptor.key: r for r in results}
+        assert by_key[row.key].status == "foreign"
+        assert target.read_text() == "mine\n"
