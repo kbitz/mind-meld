@@ -12,6 +12,23 @@ reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
 
 _(none)_
 
+Regen drain, 2026-08-25 — nothing from the inbox, which was already empty. Recorded
+because the run's whole yield came from reconciling against git rather than from
+filed items:
+
+- 2 Tracks closed from ground truth: 25B shipped as v0.12.41 and 25C as v0.12.42,
+  both still listed unshipped at HEAD three releases later. Group 25 → Shipped.
+- 1 Group minted for unplanned shipped work: v0.12.43's Grok skill-discovery probe
+  became Group 26, so the 27A kill has a visible cause.
+- 1 Track killed: 27A (Grok row). v0.12.43 shipped the opposite conclusion plus a
+  written exit criterion that refuses the row. Group 27 tombstoned.
+- 1 item promoted from `docs/roadmap-future.md`: "Regenerate the roadmap AFTER a
+  Track lands" → Track 28B. Sixth occurrence; the deferral reason ("a process
+  convention, not a Track") is refuted by this repo's own PROGRESS-row history,
+  where a convention line failed twice and a pytest fixed it.
+- 2 of 3 leftover task premises on the old 26A had rotted and were rewritten with
+  this-turn evidence rather than re-emitted. 0 discharged.
+
 Track 25B `/autoplan` drain, 5 items on 2026-08-22:
 
 - 1 placed: `mm uninstall-skills` became **Track 26A** (new Group 26, between
@@ -60,4 +77,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-08-22 by `/roadmap`._
+_Last updated 2026-08-25 by `/roadmap`._
