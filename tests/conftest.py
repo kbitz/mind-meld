@@ -185,6 +185,36 @@ def _isolate_skill_links(monkeypatch, tmp_path, request) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_upgrade_cache(monkeypatch, tmp_path) -> None:
+    """Redirect ``upgrade.CACHE_PATH`` to a per-test path.
+
+    ``upgrade.py:50`` freezes ``CACHE_PATH`` at import from the real HOME, so
+    every test that reaches ``check_for_upgrade`` / ``emit_nudge_if_due`` /
+    ``append_self_upgrade`` wrote the developer's real
+    ``~/.config/mind-meld/upgrade-state.json``. Measured on the maintainer's
+    machine: a bare ``pytest tests/test_silent_failure_contract.py`` moved its
+    mtime.
+
+    ``_isolate_sidecar_and_lock``'s docstring above already NAMES this file as a
+    known harm -- it just never redirected it, because that fixture only owns
+    ``SIDECAR_DIR`` and ``LOCK_PATH``. Two harms, same shape as the ones that
+    fixture lists: the suite can spend the real 24h nudge gate (so a genuine
+    "new version available" notice is suppressed on the maintainer's machine),
+    and it can leave fixture version strings in a cache that ``mm status``
+    reads.
+
+    Imports the module explicitly rather than patching a dotted string, for the
+    reason stated in ``_isolate_devices_write_lock``.
+    """
+    from mind_meld import upgrade as _upgrade
+
+    cache_dir = tmp_path / "upgrade-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_upgrade, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(_upgrade, "CACHE_PATH", cache_dir / "upgrade-state.json")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_token_cache(monkeypatch, tmp_path) -> None:
     """Redirect ``mind_meld.token_usage.CACHE_PATH`` to a per-test path
     and reset all per-process warning sets.

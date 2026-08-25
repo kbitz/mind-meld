@@ -310,6 +310,9 @@ Changed your mind:
 mm install-skills          # rebuilds every authorized agent's link
 ```
 
+`mm init` rebuilds them too — both are explicit acts, and only an unattended
+`mm push` respects the deletion.
+
 This is per-machine. `config.toml` is never synced, and deleting a link on one
 Mac does not touch the others.
 

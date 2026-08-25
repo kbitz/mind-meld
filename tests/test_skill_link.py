@@ -122,8 +122,14 @@ def _isolate_paths(tmp_path, monkeypatch):
     # CONFIG_PATH is frozen at import from the real HOME; patch it or
     # install_skills_cmd reads the developer's real config locally and none
     # on CI.
+    # Explicit import, not a dotted string. `tests/conftest.py` states the rule:
+    # a dotted string cannot resolve a module the test never imported, and it
+    # is the exact call that died when `test_version.py` ran first.
+    from mind_meld import config as _config
+
     monkeypatch.setattr(
-        "mind_meld.config.CONFIG_PATH",
+        _config,
+        "CONFIG_PATH",
         fake_home / ".config" / "mind-meld" / "config.toml",
     )
     yield fake_home
@@ -1932,6 +1938,9 @@ class TestUserRemovedLink:
         agent_targets[skill_link.AGENT_ROWS[0].key].unlink()
         results = skill_link._ensure_retro_skill_links(may_create=None)
         assert [r.descriptor.key for r in results] == [r.key for r in skill_link.AGENT_ROWS]
+        # Ordering alone survives deleting the feature -- pin the status too.
+        by_key = {r.descriptor.key: r for r in results}
+        assert by_key[skill_link.AGENT_ROWS[0].key].status == "removed-by-user"
 
     def test_quiet_autopush_also_reports_user_removed(self, agent_targets, skill_src):
         row = skill_link.AGENT_ROWS[0]
@@ -1964,7 +1973,7 @@ class TestUserRemovedLink:
         assert "removed-by-user" not in skill_link.BROKEN_SKILL_STATUSES
         assert "absent" not in skill_link.BROKEN_SKILL_STATUSES
 
-    def test_marker_exists_ignores_age(self, agent_targets, skill_src, monkeypatch):
+    def test_marker_exists_ignores_age(self, agent_targets, skill_src):
         """Existence is durable; only freshness has the 24h TTL."""
         row = skill_link.AGENT_ROWS[0]
         skill_link._ensure_retro_skill_links(may_create=None)
@@ -2069,6 +2078,10 @@ class TestUserRemovedLink:
 
         skill_link._ensure_retro_skill_links(may_create=None)
         assert "mm: notice:" not in capsys.readouterr().err
+        # Without this the test passes on the pre-feature code too: that path
+        # symlinks and returns `installed`, which is also silent.
+        assert not agent_targets[row.key].exists()
+        assert not agent_targets[row.key].is_symlink()
 
     def test_removal_survives_a_store_version_bump(self, agent_targets, skill_src, monkeypatch):
         """The realistic resurrection path: every mm release re-opens the gate.
@@ -2088,6 +2101,21 @@ class TestUserRemovedLink:
         assert {r.descriptor.key: r for r in results}[row.key].status == "removed-by-user"
         assert not agent_targets[row.key].exists()
         assert not agent_targets[row.key].is_symlink()
+
+    def test_init_also_puts_it_back(self, agent_targets, skill_src):
+        """`mm init` is a SECOND undo, because it also passes explicit=True.
+
+        The README and CHANGELOG name `mm install-skills` as the undo and do not
+        mention init. Pinned so the second door is deliberate rather than an
+        accident of the `explicit` flag, and so removing it is a visible choice.
+        """
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+
+        results = skill_link._ensure_retro_skill_links(explicit=True, may_create=None)
+        assert {r.descriptor.key: r for r in results}[row.key].status == "installed"
+        assert agent_targets[row.key].is_symlink()
 
     def test_install_skills_reports_removed_by_user_without_failing(
         self, agent_targets, skill_src, _isolate_paths, monkeypatch
@@ -2113,8 +2141,13 @@ class TestUserRemovedLink:
         assert "Left removed" in result.output
         assert "installation failed" not in result.output
 
-    def test_shell_completion_options_are_exposed(self):
-        """`add_completion=True` is a user-facing surface added by this Track."""
+
+class TestShellCompletion:
+    """`add_completion=True` (cli.py). Rides along with Track 28A but is
+    unrelated to skill links -- filed here so whoever flips the flag back
+    finds the test that breaks."""
+
+    def test_completion_options_are_exposed(self):
         from typer.testing import CliRunner
 
         from mind_meld.cli import app
