@@ -238,7 +238,7 @@ SkillInstallStatus = Literal[
     "foreign",
     "failed",
     "declined",
-    "user-removed",
+    "removed-by-user",
 ]
 
 # The `diagnose_skill_links` statuses that mean mm's own link is wedged and mm
@@ -727,7 +727,7 @@ def render_skill_status(result: SkillInstallResult) -> str:
         return f"{target} -> {store}"
     if result.status == "unchanged":
         return f"{target} -> {store}"
-    if result.status == "user-removed":
+    if result.status == "removed-by-user":
         return (
             f"{target} was removed and mm left it removed. Put it back: mm install-skills{restart}"
         )
@@ -1064,7 +1064,7 @@ def _install_available_skill_target(
     if not explicit and _marker_exists(descriptor.success_marker):
         return SkillInstallResult(
             descriptor,
-            "user-removed",
+            "removed-by-user",
             skill_src=skill_src,
             link_target=store,
         )
@@ -1311,7 +1311,7 @@ def _store_needs_refresh() -> bool:
 def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
     """Target-specific implementation of the 24-hour skill-link drift gate.
 
-    The user-removed check runs FIRST and short-circuits, because the
+    The removed-by-user check runs FIRST and short-circuits, because the
     absent-target `lstat` below throws into the blanket fail-open. Without
     this the gate would return True on every push forever for a row whose
     only possible outcome is a no-op: the installer declines to recreate, so

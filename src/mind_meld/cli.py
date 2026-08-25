@@ -5876,7 +5876,7 @@ def install_skills_cmd(
         elif result.status == "declined":
             available = True
             typer.echo(f"Skipped: {skill_link.render_skill_status(result)}")
-        elif result.status == "user-removed":
+        elif result.status == "removed-by-user":
             # Unreachable while this command passes explicit=True (the guard in
             # _install_available_skill_target is skipped). Handled anyway: the
             # bare `else` below reports "installation failed: None" and exits 1,

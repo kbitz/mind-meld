@@ -1631,7 +1631,7 @@ class TestConsentFlipFlop:
         # Consent comes back. The gate stays shut and push does not rebuild.
         assert skill_link._skill_links_check_due(may_create=_may("claude", "codex")) is False
         third = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
-        assert _result_for(third, "codex").status == "user-removed"
+        assert _result_for(third, "codex").status == "removed-by-user"
         assert not agent_targets["codex"].exists()
 
         # Explicit install is the documented recovery, and it still works.
@@ -1847,7 +1847,7 @@ class TestUserRemovedLink:
         assert not agent_targets[row.key].exists()
         assert not agent_targets[row.key].is_symlink()
         by_key = {r.descriptor.key: r for r in results}
-        assert by_key[row.key].status == "user-removed"
+        assert by_key[row.key].status == "removed-by-user"
 
     def test_fresh_machine_still_installs(self, agent_targets, skill_src):
         """No marker means mm has never been here -- install, as today."""
@@ -1909,7 +1909,7 @@ class TestUserRemovedLink:
 
         results = skill_link._ensure_retro_skill_links(may_create=None)
         by_key = {r.descriptor.key: r for r in results}
-        assert by_key[keys[0]].status == "user-removed"
+        assert by_key[keys[0]].status == "removed-by-user"
         for other in keys[1:]:
             assert by_key[other].status == "unchanged"
             assert agent_targets[other].is_symlink()
@@ -1926,13 +1926,13 @@ class TestUserRemovedLink:
         agent_targets[row.key].unlink()
         results = skill_link._ensure_retro_skill_links(allow_mutate=False, may_create=None)
         by_key = {r.descriptor.key: r for r in results}
-        assert by_key[row.key].status == "user-removed"
+        assert by_key[row.key].status == "removed-by-user"
         assert not agent_targets[row.key].is_symlink()
 
     def test_renderer_names_the_undo(self, agent_targets, skill_src):
         row = skill_link.AGENT_ROWS[0]
         descriptor = skill_link._descriptor_for(row.key)
-        result = skill_link.SkillInstallResult(descriptor, "user-removed")
+        result = skill_link.SkillInstallResult(descriptor, "removed-by-user")
         rendered = skill_link.render_skill_status(result)
         assert "mm install-skills" in rendered
         assert "restart the agent" in rendered
@@ -1972,7 +1972,7 @@ class TestUserRemovedLink:
         assert skill_link._user_removed_link(target, row.success_marker) is True
 
     def test_a_foreign_file_is_not_a_removal(self, agent_targets, skill_src):
-        """The user's own file at the target stays `foreign`, never `user-removed`."""
+        """The user's own file at the target stays `foreign`, never `removed-by-user`."""
         row = skill_link.AGENT_ROWS[0]
         skill_link._ensure_retro_skill_links(may_create=None)
         target = agent_targets[row.key]
@@ -1983,3 +1983,121 @@ class TestUserRemovedLink:
         by_key = {r.descriptor.key: r for r in results}
         assert by_key[row.key].status == "foreign"
         assert target.read_text() == "mine\n"
+
+    def test_the_gate_stays_shut_after_the_marker_goes_stale(self, agent_targets, skill_src):
+        """ORDERING PIN: `_user_removed_link` MUST precede `_marker_is_fresh`.
+
+        Caught by a ship-review mutant that the whole suite missed. Every other
+        test here uses a FRESH marker, and with a fresh marker both orderings
+        return False -- so moving the short-circuit below the freshness test
+        passed 2741 tests while breaking the feature.
+
+        The stale case is not exotic: it is every machine 24h after a removal,
+        because the installer declines and therefore never touches the marker.
+        Below the freshness test, the absent-target `lstat` falls into the
+        blanket fail-open and the gate re-opens on every push forever for a row
+        whose only possible outcome is a no-op.
+
+        Asserts through `_skill_link_check_due_for`, not `_skill_links_check_due`
+        -- the plural gate can open on the row-independent store-refresh path and
+        would mask this.
+        """
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+
+        marker = skill_link._marker_dir() / f".{row.success_marker}"
+        stale = time.time() - (skill_link.SKILL_LINK_TTL_SECONDS * 3)
+        os.utime(marker, (stale, stale))
+        assert skill_link._marker_is_fresh(row.success_marker) is False
+
+        descriptor = skill_link._descriptor_for(row.key)
+        assert skill_link._skill_link_check_due_for(descriptor, frozenset({row.key})) is False
+
+    def test_an_lstat_error_is_not_a_removal(self, agent_targets, skill_src, monkeypatch):
+        """An inspection failure is not consent to stop maintaining a link.
+
+        `_user_removed_link` must distinguish FileNotFoundError (the link is
+        gone) from any other OSError (we could not look). Fail-closed here would
+        silently suppress repair on an EACCES agent directory.
+        """
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        target = agent_targets[row.key]
+        target.unlink()
+
+        original = Path.lstat
+
+        def fake_lstat(self, *args, **kwargs):
+            if self.name == "retro-fleet":
+                raise PermissionError("simulated EACCES")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", fake_lstat)
+        assert skill_link._user_removed_link(target, row.success_marker) is False
+        assert (
+            skill_link._skill_link_check_due_at(target, success_marker=row.success_marker) is True
+        )
+
+    def test_push_is_silent_about_a_removal(self, agent_targets, skill_src, capsys):
+        """A deliberate removal is not a fault, so it must not spend a notice."""
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+        capsys.readouterr()
+
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert "mm: notice:" not in capsys.readouterr().err
+
+    def test_removal_survives_a_store_version_bump(self, agent_targets, skill_src, monkeypatch):
+        """The realistic resurrection path: every mm release re-opens the gate.
+
+        `_store_needs_refresh` is row-independent, so a version bump opens the
+        plural gate for reasons that have nothing to do with this row. The
+        per-row guard is what must still hold.
+        """
+        row = skill_link.AGENT_ROWS[0]
+        skill_link._ensure_retro_skill_links(may_create=None)
+        agent_targets[row.key].unlink()
+
+        monkeypatch.setattr(skill_link, "__version__", "99.99.99")
+        assert skill_link._skill_links_check_due(may_create=None) is True
+
+        results = skill_link._ensure_retro_skill_links(may_create=None)
+        assert {r.descriptor.key: r for r in results}[row.key].status == "removed-by-user"
+        assert not agent_targets[row.key].exists()
+        assert not agent_targets[row.key].is_symlink()
+
+    def test_install_skills_reports_removed_by_user_without_failing(
+        self, agent_targets, skill_src, _isolate_paths, monkeypatch
+    ):
+        """Defensive branch pin.
+
+        `install_skills_cmd` always passes `explicit=True`, so the guard never
+        fires and this status is unreachable there today. The branch exists
+        because the bare `else` below it reports "installation failed: None" and
+        exits 1 -- a future non-explicit caller would turn a benign outcome into
+        a hard failure. Pinned so that stays true.
+        """
+        from mind_meld.cli import app
+
+        descriptor = skill_link._descriptor_for(skill_link.AGENT_ROWS[0].key)
+        monkeypatch.setattr(
+            skill_link,
+            "_ensure_retro_skill_links",
+            lambda **_kwargs: (skill_link.SkillInstallResult(descriptor, "removed-by-user"),),
+        )
+        result = self._runner().invoke(app, ["install-skills"])
+        assert result.exit_code == 0, result.output
+        assert "Left removed" in result.output
+        assert "installation failed" not in result.output
+
+    def test_shell_completion_options_are_exposed(self):
+        """`add_completion=True` is a user-facing surface added by this Track."""
+        from typer.testing import CliRunner
+
+        from mind_meld.cli import app
+
+        output = " ".join(CliRunner().invoke(app, ["--help"]).output.split())
+        assert "--install-completion" in output
+        assert "--show-completion" in output
