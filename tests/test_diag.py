@@ -91,6 +91,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "storage_inventory",
         "last_autorun",
         "skill_links",
+        "host_skill_discovery",
     ):
         assert section in payload, f"missing {section}"
 
@@ -108,6 +109,7 @@ def test_diag_plain_text_is_human_readable(tmp_path, monkeypatch):
     assert "Sidecar" in result.stdout
     assert "Storage inventory" in result.stdout
     assert "Skill links" in result.stdout
+    assert "Host skill discovery" in result.stdout
 
 
 # ── Secrets boundary ─────────────────────────────────────────────────────
@@ -211,6 +213,9 @@ def test_diag_handles_unresolvable_explicit_source(tmp_path, monkeypatch):
         row["maintain_links"].startswith("unknown (config invalid:")
         for row in payload["skill_links"]
     )
+    assert "host_skill_discovery" in payload
+    assert payload["host_skill_discovery"].get("host") == "grok"
+    assert all("claude_skills_compat" not in row for row in payload["skill_links"])
 
 
 def test_diag_detects_root_salt_drift(tmp_path, monkeypatch):

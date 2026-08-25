@@ -332,9 +332,12 @@ mm pull [--from DEVICE] [--source NAME]              # download changes (optiona
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links and a pending 0.12.42 policy-transition notice
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
+                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, last_autorun, skill_links, host_skill_discovery
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
-                            # maintain_links is enabled | disabled (...) | unknown (config invalid: ...)
+                            # maintain_links is enabled | disabled (...) | unknown (config invalid: ...) | unknown (policy not resolved)
+                            # `host_skill_discovery` is a sibling key (Grok inspect probe), never a skill_links row
+                            # host_skill_discovery: host, status (ok | binary-absent | timeout | nonzero-exit | malformed-json | unsupported-schema), claude_skills_compat, retro_fleet_resolved, retro_fleet_path, grok_version
 mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
 mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
                                              # annotates modified files as write / merge / skip / conflict

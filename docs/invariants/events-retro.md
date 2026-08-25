@@ -4,7 +4,8 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
-- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `maybe_emit_policy_transition`
+- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `maybe_emit_policy_transition`
+- `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
@@ -13,7 +14,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy).
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_host_skill_discovery.py`, `tests/test_diag.py`.
 
 ---
 
@@ -143,7 +144,7 @@ The function itself defaults to `consented=False` and does not stat or open
 The grok *file* walker never opens `sessions/`; the usage reader is a
 separate consented walk of `updates.jsonl` only. Host interchangeability vs
 Claude is `docs/designs/host-parity.md`: 22A/23A put totals on the MODELS
-card; a Grok skill-link target is later; session-transcript sync and a
+card; Grok does not get an `AgentRow` (it discovers `~/.claude/skills`; `mm diag` measures that under `host_skill_discovery`); session-transcript sync and a
 Codex/Grok `sessions-snapshot` are not planned.
 
 **Grok v1 terminal ledger (Track 18D).** When consented, `read_grok_usage`
@@ -707,9 +708,14 @@ in skills`), never a falsy check — `[]` is a `ConfigError` pointing at
 Unknown names in `agents` are accepted and inert.
 
 `_row_is_consented(key, may_create)` is `may_create is None or key in
-may_create`. The `is None` arm keeps bare test callers green and lets
-`_ensure_retro_skill_link_at`'s ad-hoc `key=""` sentinel through; a bare
-membership test would deny that sentinel.
+may_create`. `None` still means allow-all (fresh-machine intent). The
+two writers (`_ensure_retro_skill_links`, `_skill_links_check_due`) take
+`may_create` as a keyword-required parameter with no default: a
+forgotten production call is a `TypeError` on the first test run
+instead of silently authorising every row. `diagnose_skill_links` keeps
+the argument optional and maps `None` to
+`maintain_links: "unknown (policy not resolved)"` — a diagnostic must
+not assert a policy it never resolved.
 
 `_skill_links_check_due` and `_ensure_retro_skill_links` MUST receive the
 same `may_create` in one push. A declined row never gets its success marker
@@ -727,7 +733,7 @@ machine with no store does not create one.
 and policy are orthogonal: a declined row can still be `status: ok` when
 an mm-owned link resolves. `mm diag` carries policy in `maintain_links`
 (`enabled` / `disabled (not authorized by skill-link policy)` / `unknown
-(config invalid: …)`). The renderer receives the resolved consent set, not
+(config invalid: …)` / `unknown (policy not resolved)`). The renderer receives the resolved consent set, not
 the original policy branch, so it must not falsely blame a disabled source
 when an explicit `[skills] agents` list made the decision. Never render a
 policy from a config you could not parse.
@@ -797,9 +803,31 @@ healthy store does not fail the gate open.
 `get_sources` above the hook so consent is known; the hook itself does not
 move relative to device registration or the events tail. That hoist also
 moves the mm-events bootstrap `mkdir` a few lines earlier. `mm diag` is
-passphrase-free and prints the skill-links block. `mm status` prints one
-line only when a link is broken, plus the pending 0.12.42 policy-transition
+passphrase-free and prints the skill-links block plus `host_skill_discovery`
+(Grok inspect probe; sibling key, never a `skill_links` row). `mm status` prints one
+line only when a link is broken (the first broken row through
+`render_skill_status`, including the restart clause), plus the pending 0.12.42 policy-transition
 notice until it is acknowledged.
+
+**Host skill discovery (`mm diag` only).** `host_skill_discovery.py:probe_grok_skill_discovery`
+runs `grok inspect --json` (argv subprocess, no shell, stdin=DEVNULL, 2s timeout,
+capped stdout). It extracts four values — Claude/skills compat bool, whether
+`retro-fleet` resolved, the resolved path, and the observed Grok version —
+and discards everything else. Failure states are five distinct strings:
+`binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`,
+`unsupported-schema`. Presence is `shutil.which("grok")`, not
+`config.grok_customization_dirs_exist` (that predicate is False when
+`~/.grok` has no `skills/`/`commands/`/`rules/`, which is a working Grok
+install). `$GROK_HOME` is a `host_usage` sessions-only override and is not
+consulted. Never persist or sync the result. Never call this from status,
+push, or autopush. Do not append the result to `skill_links` —
+`BROKEN_SKILL_STATUSES` filtering and the README uninstall loop treat that
+list as link-bearing.
+
+**Registry exit criterion.** mm maintains a skill link only for hosts that
+do not discover `~/.claude/skills`. Verified 2026-08-24: Grok 1.0.5 does
+(`grok inspect --json`); Codex and OpenCode show no evidence of it. Re-check
+with that command, not with static inference.
 
 **`mm install-skills`.** Force-runs the installer with `explicit=True`, ignoring
 the TTL gate. Renders `render_skill_status` for foreign/dangling outcomes. Exits

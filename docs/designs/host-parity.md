@@ -35,7 +35,7 @@ either upload prompts or mint a fake `grok` sync source.
 | Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render |
 | Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted agents / commands / modes / plugins / skills / tools / `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` |
 | Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No |
-| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | `~/.config/opencode/skills` | Not installed. New design; see Plan C |
+| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | `~/.config/opencode/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C |
 | Session / transcript sync | Never | Never | Never | Never |
 
 Claude is not the template for "sync the home directory." Claude does
@@ -148,17 +148,55 @@ The ship gate was a written allowlist in `DEFAULT_SOURCES`, a hardcoded
 walker, and tests proving that `sessions/`, `auth.json`, `config.toml`, and a
 nested `skills/<link> → sessions/` upload zero files.
 
-### Plan C — Grok `retro-fleet` skill link (new design)
+### Plan C — Grok `retro-fleet` skill discovery (measured, not linked)
 
-**Not a sync source.** Append an `AgentRow` to `skill_link.AGENT_ROWS`
-with `skills_root="~/.grok/skills"`. The guard cannot express a runtime
-env root (`$GROK_HOME`), so the row must stay `~/`-relative. Same
-no-clobber state machine, own 24h markers, own status line.
+**Not a sync source. Not an `AgentRow`.** Grok 1.0.5 already loads
+`retro-fleet` from `~/.claude/skills` via its default-on Claude
+compatibility layer, at the same documented priority tier as
+`~/.grok/skills` (Grok README "Skill Locations"). Verified 2026-08-24
+with `grok inspect --json`:
 
-Grok already discovers `~/.claude/skills` when Claude compatibility
-is on, so a fleet that only uses Claude's skill dir already shares
-`retro-fleet`. Plan C is for Grok-only machines and for installs that
-disabled Claude compat.
+```text
+name: retro-fleet
+source.path: /Users/kb/.claude/skills/retro-fleet/SKILL.md
+vendor: claude
+compatibilityStatus: enabled
+externalCompat claude/skills: true default
+```
+
+mm therefore maintains **no** Grok skill link. `skill_link.py` line 7
+forbids a parallel agent-name list; a second registry of non-linked
+hosts is the same mistake. Exit criterion, as a decision procedure
+rather than a property of hosts: **mm maintains a skill link only for
+hosts that do not discover `~/.claude/skills`.** Re-check with
+`grok inspect --json`. Codex and OpenCode show no evidence of that
+discovery (`~/.codex/AGENTS.md` mentions are the user's own instruction
+prose; OpenCode's `"~/.claude/**": "allow"` is a permission rule, not
+skill discovery — and gstack's `setup --host auto` plus `machine-setup`
+copy into both dirs).
+
+What `mm diag` reports instead is `host_skill_discovery`: whether Grok
+can load the skill. That is a sibling JSON key, never a fourth
+`skill_links` row (`skill_links` drives the `mm status` nag and the
+README uninstall loop). The probe is `mm diag` only — never status,
+push, or autopush.
+
+Two Grok levers, and they are not interchangeable:
+
+- `[skills] ignore` (Grok README) is the documented lever that
+  *breaks* discovery of `~/.claude/skills`.
+- `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` is the
+  remedy that *adds* the mm-owned store.
+- The Claude-compat-off toggle itself is **undocumented** in Grok
+  1.0.5 — a live `~/.grok/config.toml` can carry
+  `[compat.claude] hooks = false`, and that key appears nowhere in
+  Grok's README — so `grok inspect --json` → `externalCompat` is the
+  only reliable read.
+
+`$GROK_HOME` stays a `host_usage` sessions-only override. Do not reuse
+`config.grok_customization_dirs_exist` as a presence probe: it is False
+when `skills/`/`commands/`/`rules/` are absent under `~/.grok`, which
+is this exact Mac, while Grok is installed and loading the skill.
 
 Do not widen the shipped source or invent another Grok sync source to make the
 installer "complete."

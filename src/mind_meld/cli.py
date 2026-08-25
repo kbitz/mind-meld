@@ -41,6 +41,7 @@ from mind_meld import (
     __version__,
     events_tail,
     fsutil,
+    host_skill_discovery,
     identity,
     pullhistory,
     resolveflow,
@@ -4313,6 +4314,33 @@ def _pull_core(
 # ── status ────────────────────────────────────────────────────────────
 
 
+_BROKEN_DIAG_STATUS_TO_INSTALL = {
+    "foreign-dangling": "foreign",
+    "error": "failed",
+}
+
+
+def _render_broken_skill_status(row: dict) -> str:
+    """Render the first broken ``mm diag`` row through ``render_skill_status``."""
+    key = row.get("key")
+    if not isinstance(key, str) or not key:
+        return safe_str(str(row.get("agent", "")))
+    try:
+        descriptor = skill_link._descriptor_for(key)
+    except KeyError:
+        return safe_str(str(row.get("agent", "") or key))
+    raw_status = str(row.get("status") or "failed")
+    mapped = _BROKEN_DIAG_STATUS_TO_INSTALL.get(raw_status, raw_status)
+    store = row.get("store")
+    result = skill_link.SkillInstallResult(
+        descriptor,
+        mapped,  # type: ignore[arg-type]
+        link_target=Path(store) if isinstance(store, str) and store else None,
+        reason=str(row["detail"]) if row.get("detail") else None,
+    )
+    return skill_link.render_skill_status(result)
+
+
 @app.command()
 def status(
     source: str | None = typer.Option(
@@ -4422,11 +4450,10 @@ def status(
         if row.get("status") in skill_link.BROKEN_SKILL_STATUSES
     ]
     if broken_skills:
-        agents = ", ".join(safe_str(str(row.get("agent", ""))) for row in broken_skills)
-        console.print(
-            f"  [yellow]Skill links broken:[/yellow] {agents} — "
-            "run [bold]mm diag[/bold] then [bold]mm install-skills[/bold]."
-        )
+        rendered = _render_broken_skill_status(broken_skills[0])
+        if "restart the agent so it reloads SKILL.md" not in rendered:
+            rendered = f"{rendered}, then restart the agent so it reloads SKILL.md"
+        console.print(f"  [yellow]Skill links broken:[/yellow] {rendered}")
 
     # One-time 0.12.42 policy migration. Not a permanent nag: only while the
     # upgrade notice is unacknowledged AND an mm-owned declined link exists.
@@ -4585,6 +4612,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * keycheck_blob contents
       * passphrase
       * peer device_ids (only counts)
+      * grok inspect stdout / stderr / unknown fields / parse exceptions
+      * host_skill_discovery values other than the four extracted fields
+        (claude_skills_compat, retro_fleet_resolved, retro_fleet_path,
+        grok_version) plus host/status
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are
@@ -4709,6 +4740,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         "skill_links": skill_link.diagnose_skill_links(
             may_create=skill_may_create, config_error=skill_config_error
         ),
+        "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
     }
 
 
@@ -4814,6 +4846,19 @@ def diag(
             console.print(f"    maintain_links: {safe_str(str(policy))}")
         if status not in ("ok", "absent") and target:
             console.print(f"    {target}")
+
+    hsd = state.get("host_skill_discovery") or {}
+    console.print("\n[bold]Host skill discovery[/bold]")
+    console.print(f"  host:                  {safe_str(str(hsd.get('host', '')))[:200]}")
+    console.print(f"  status:                {safe_str(str(hsd.get('status', '')))[:200]}")
+    if hsd.get("status") == host_skill_discovery.STATUS_OK:
+        console.print(f"  claude_skills_compat:  {hsd.get('claude_skills_compat')}")
+        console.print(f"  retro_fleet_resolved:  {hsd.get('retro_fleet_resolved')}")
+        path = hsd.get("retro_fleet_path")
+        console.print(f"  retro_fleet_path:      {safe_str(str(path))[:200] if path else '(none)'}")
+        console.print(
+            f"  grok_version:          {safe_str(str(hsd.get('grok_version') or ''))[:200]}"
+        )
 
 
 # ── devices ───────────────────────────────────────────────────────────
@@ -5750,7 +5795,9 @@ def install_skills_cmd(
             sources = get_sources(cfg)
         except MindMeldError as e:
             typer.echo(
-                f"mm: notice: skill-link maintenance disabled: {e}",
+                f"mm: error: could not read config: {safe_str(e)}. "
+                "No agent links were changed. Run mm diag "
+                "(it still works with a broken config).",
                 err=True,
             )
             raise typer.Exit(code=1) from e
@@ -5781,7 +5828,9 @@ def install_skills_cmd(
             sources = get_sources(cfg)
         except MindMeldError as e:
             typer.echo(
-                f"mm: notice: skill-link maintenance disabled: {e}",
+                f"mm: error: could not read config: {safe_str(e)}. "
+                "No agent links were changed. Run mm diag "
+                "(it still works with a broken config).",
                 err=True,
             )
             raise typer.Exit(code=1) from e
@@ -5800,7 +5849,9 @@ def install_skills_cmd(
             may_create = skill_link.consented_agent_keys(cfg, sources)
         except MindMeldError as e:
             typer.echo(
-                f"mm: notice: skill-link maintenance disabled: {e}",
+                f"mm: error: could not read config: {safe_str(e)}. "
+                "No agent links were changed. Run mm diag "
+                "(it still works with a broken config).",
                 err=True,
             )
             raise typer.Exit(code=1) from e
@@ -5811,7 +5862,8 @@ def install_skills_cmd(
         )
     except Exception as e:
         typer.echo(
-            f"mm: notice: retro-fleet skill installation failed: {type(e).__name__}: {safe_str(e)}",
+            f"mm: error: retro-fleet skill installation failed: "
+            f"{type(e).__name__}: {safe_str(e)}. Run mm diag.",
             err=True,
         )
         raise typer.Exit(code=1) from e
@@ -5861,9 +5913,11 @@ def install_skills_cmd(
 
     statuses = {result.status for result in results}
     if statuses <= {"declined", "unavailable"} and "declined" in statuses:
-        keys = "|".join(row.key for row in skill_link.AGENT_ROWS)
+        example = skill_link.AGENT_ROWS[0].key
         typer.echo(
-            f"No agent is enabled for skill install. Enable one: mm install-skills --agent <{keys}>"
+            "No agent is enabled for skill install. "
+            f"Enable one: mm install-skills --agent {example} "
+            "(repeat --agent for each other link target). Inspect with: mm diag"
         )
         raise typer.Exit(code=0)
     if not available:

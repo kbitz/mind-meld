@@ -402,7 +402,7 @@ class TestInitWiring:
         # avoids touching ~/.claude.
         monkeypatch.setattr(
             "mind_meld.skill_link._ensure_retro_skill_links",
-            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create=None: (),
+            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create: (),
         )
 
         storage = tmp_path / "icloud"
@@ -428,7 +428,7 @@ class TestInitWiring:
         received: list[frozenset[str] | None] = []
         monkeypatch.setattr(
             "mind_meld.skill_link._ensure_retro_skill_links",
-            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create=None: (
+            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create: (
                 received.append(may_create) or ()
             ),
         )
@@ -461,7 +461,7 @@ class TestInitWiring:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg_path)
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
 
-        def installer_failure(*, dry_run=False, allow_mutate=True, explicit=False, may_create=None):
+        def installer_failure(*, dry_run=False, allow_mutate=True, explicit=False, may_create):
             raise RuntimeError("simulated installer regression")
 
         backfill_calls: list[str] = []
@@ -526,7 +526,7 @@ class TestEventsDirIsolation:
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         monkeypatch.setattr(
             "mind_meld.skill_link._ensure_retro_skill_links",
-            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create=None: (),
+            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create: (),
         )
 
         # Snapshot the real events dir pre-init so we can compare.

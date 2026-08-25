@@ -420,6 +420,7 @@ def test_every_extracted_module_has_a_routing_row() -> None:
         "skill_link.py",
         "retention.py",
         "conflictmtime.py",
+        "host_skill_discovery.py",
     ):
         assert f"`{mod}:" in table, f"{mod} has no routing row — Group 17 would fly blind"
 
@@ -479,3 +480,71 @@ def test_invariant_doc_citation_resolves(doc: str, fname: str, symbol: str) -> N
         f"{doc} routes {fname}:{symbol}, which is not defined there{hint}. "
         f"The symbol moved, or the row is stale."
     )
+
+
+_DIAG_JSON_TOP_LEVEL = (
+    "mm_version",
+    "config",
+    "crypto_init",
+    "root_salt_drift",
+    "sidecar",
+    "storage_inventory",
+    "last_autorun",
+    "skill_links",
+    "host_skill_discovery",
+)
+_HOST_SKILL_DISCOVERY_FIELDS = (
+    "host",
+    "status",
+    "claude_skills_compat",
+    "retro_fleet_resolved",
+    "retro_fleet_path",
+    "grok_version",
+)
+_SKILL_LINKS_ROW_FIELDS = (
+    "key",
+    "agent",
+    "target",
+    "store",
+    "store_state",
+    "status",
+    "maintain_links",
+)
+
+
+def _collect_diag_state_keys() -> set[str]:
+    tree = ast.parse((SRC / "cli.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_collect_diag_state":
+            for child in ast.walk(node):
+                if isinstance(child, ast.Return) and isinstance(child.value, ast.Dict):
+                    keys = {
+                        k.value
+                        for k in child.value.keys
+                        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                    }
+                    if keys:
+                        return keys
+    raise AssertionError("_collect_diag_state return dict not found")
+
+
+def test_readme_diag_json_fields_match_emitted_keys() -> None:
+    """README's documented `mm diag --json` field list must match the code.
+
+    Nothing enforced this, so README.md's troubleshooting entry could name
+    fields `_collect_diag_state` no longer emits, or omit a new sibling key
+    like `host_skill_discovery`.
+    """
+    emitted = _collect_diag_state_keys()
+    assert emitted == set(_DIAG_JSON_TOP_LEVEL), (
+        f"_collect_diag_state keys {sorted(emitted)} != documented {list(_DIAG_JSON_TOP_LEVEL)}"
+    )
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "`mm diag --json`" in readme
+    missing_top = [k for k in _DIAG_JSON_TOP_LEVEL if f"`{k}`" not in readme]
+    assert missing_top == [], f"README does not name mm diag --json top-level keys {missing_top}"
+    missing_hsd = [k for k in _HOST_SKILL_DISCOVERY_FIELDS if f"`{k}`" not in readme]
+    assert missing_hsd == [], f"README does not name host_skill_discovery fields {missing_hsd}"
+    missing_rows = [k for k in _SKILL_LINKS_ROW_FIELDS if f"`{k}`" not in readme]
+    assert missing_rows == [], f"README does not name skill_links row fields {missing_rows}"
