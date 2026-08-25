@@ -205,3 +205,14 @@ killed rather than discharged: the row was never added and now never will be.
 Phase 2's end-state clause it served is met by other means and was restated
 rather than dropped. The number is retired so that anyone re-anchoring on
 "Group 27: Grok row" does not land on Group 28's uninstall work.
+
+### Group 28: Symmetric uninstall ✓ Shipped (v0.12.44)
+
+- Track 28A — _shipped (v0.12.44): deleting a `retro-fleet` skill link now sticks. `mm push` stops treating an absent target as damage when a success marker proves mm installed there, so `rm ~/.codex/skills/retro-fleet` is the whole procedure and no config edit is involved. Damage — `dangling-ours`, `dangling-ours-legacy`, `foreign` — still repairs exactly as before; only an ABSENT link counts as intent. `mm install-skills` (`explicit=True`) is the undo. `mm diag` splits `removed-by-user` from `absent`, closing the read-back gap. Shell completion enabled (`add_completion=True`). The one-time 0.12.42 policy-transition machinery was deleted in the same PR — 7 symbols (the TODO named 6; `_join_display_names` was found during the Track), 5 stale `__all__` entries, 3 `cli.py` call sites, 5 test sites — while its README troubleshooting entry was deliberately KEPT._
+
+  **The promised `mm uninstall-skills` command was refused, not deferred.** `/autoplan` established that a revoke command, a `[skills] revoked` denylist, and a third policy axis were all downstream of one defect: the installer resurrected a link the user deleted. No normal CLI tool needs a denylist to make removal stick — it needs an installer that does not resurrect. The forward references in `README.md`, `CHANGELOG.md`, and `docs/PROGRESS.md` were retired rather than fulfilled. Full design record, including the four rejected command shapes and the two outside voices that rejected all of them: `~/.gstack/projects/kbitz-mind-meld/kbitz-installer-uninstall-autoplan-plan-20260825-090506.md`.
+
+- Track 28B — killed 2026-08-25, never shipped. Roadmap-staleness gate (a release drift budget parsing `✓ Shipped (vX.Y.Z)` markers against `CHANGELOG.md` releases, failing when drift exceeds N). Sixth occurrence of the underlying problem, and killed anyway on the user's call: with Group 28 closed and the Current Plan empty, there is no in-flight work left to drift, so the condition that generated six occurrences is removed rather than guarded. The concrete design is recorded here so a seventh occurrence — once new Groups are in flight — can pick it up instead of re-deriving it.
+
+Phase 2 (Durable agent skill links) completes here: Groups 24, 25, 26, 28.
+Group 27 stays tombstoned.
