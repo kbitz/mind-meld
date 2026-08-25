@@ -51,7 +51,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `errors.py` | Exception hierarchy |
 | **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
 | **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
-| **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, the `AGENT_ROWS` registry — add a new agent HERE — and (25C) `consented_agent_keys` / `AgentRow.consent_source` / the installer `declined` status |
+| **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, the `AGENT_ROWS` registry — add a new agent HERE — (25C) `consented_agent_keys` / `AgentRow.consent_source` / the installer `declined` status, and (28A) the deletion guard — `_marker_exists`, the `removed-by-user` status, and the rule that an ABSENT link is intent, not damage |
 | **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, and (19A) the all-or-nothing host-usage capture |
 | **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
 | **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
