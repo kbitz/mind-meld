@@ -2148,10 +2148,24 @@ class TestShellCompletion:
     finds the test that breaks."""
 
     def test_completion_options_are_exposed(self):
-        from typer.testing import CliRunner
+        """Assert the PARAMS, not the rendered help.
+
+        The first version of this test string-matched `mm --help` output. It
+        passed locally and failed on CI, because rich styles an option name as
+        several ANSI runs when color is on:
+
+            \x1b[1;36m-\x1b[0m\x1b[1;36m-install\x1b[0m\x1b[1;36m-completion\x1b[0m
+
+        so the literal token never appears contiguously. Whitespace-normalizing
+        does not help -- the split is inside the token. CliRunner emitted no
+        color locally, which is the only reason it ever passed. Reading the
+        click params tests the actual contract and cannot be broken by a
+        terminal width, a color setting, or a rich version bump.
+        """
+        import typer.main
 
         from mind_meld.cli import app
 
-        output = " ".join(CliRunner().invoke(app, ["--help"]).output.split())
-        assert "--install-completion" in output
-        assert "--show-completion" in output
+        opts = {name for param in typer.main.get_command(app).params for name in param.opts}
+        assert "--install-completion" in opts
+        assert "--show-completion" in opts
