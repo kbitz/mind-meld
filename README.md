@@ -383,7 +383,7 @@ Managing conflicts:
 
 **An agent's link is no longer repaired, and you never changed anything.** Nothing is broken. `mm` created that agent's link before 0.12.42 gated link maintenance on `[skills]` policy, and your current policy does not authorize that agent — by default that means its sync source is not enabled. It applies only where the link at the target still `readlink`s to `~/.local/share/mind-meld/agent-skills/retro-fleet`, which is what proves `mm` created it under the old ungated policy.
 
-The link keeps working. Store publish is *not* consent-gated, so `SKILL.md` refreshes for every link still pointing at the store regardless of policy, and the agent keeps offering `/retro-fleet`. What stops is repair: if that link is deleted, clobbered, or left dangling by a future store change, `mm` will not recreate it and the agent loses the skill silently. To keep it maintained, run the command the notice prints (`mm install-skills --agent KEY`, repeatable) — it grants link maintenance without enabling source sync or usage reading. To accept the decline, do nothing; the link works until something breaks it.
+The link keeps working. Store publish is *not* consent-gated, so `SKILL.md` refreshes for every link still pointing at the store regardless of policy, and the agent keeps offering `/retro-fleet`. What stops is repair: if that link is deleted, clobbered, or left dangling by a future store change, `mm` will not recreate it and the agent loses the skill silently. To keep it maintained, run `mm install-skills --agent KEY` (repeatable) — it grants link maintenance without enabling source sync or usage reading. To accept the decline, do nothing; the link works until something breaks it.
 
 Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed that notice, because a machine that skips those releases never receives it and this entry is the durable explanation. A leftover `~/.config/mind-meld/.skill-link-policy-v0.12.42` marker is inert and safe to ignore. `mm diag` is the authoritative resolved view: a declined row whose link still resolves reads `status: ok` with `maintain_links: disabled`, and that pair is a deliberate decline, not a fault.
 
@@ -396,6 +396,18 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 **A file came back after you deleted it.** Deletions propagate via tombstones on the *next* push from the machine that deleted it. Push there, then pull elsewhere.
 
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm diff` predicts them before a pull, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
+
+### Shell completion
+
+```bash
+mm --install-completion      # writes the completion script and sources it
+mm --show-completion         # prints it instead, if you would rather install it yourself
+```
+
+`--install-completion` edits your shell's startup file — `~/.zshrc` plus
+`~/.zfunc/_mm` on zsh, `~/.bashrc` on bash — and on zsh it also enables
+`compinit`. Use `--show-completion` if you would rather place the script
+yourself.
 
 ## Uninstalling
 

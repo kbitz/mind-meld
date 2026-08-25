@@ -4,7 +4,7 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
-- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists` / `_user_removed_link`
+- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
@@ -786,19 +786,30 @@ Three load-bearing details:
 
 * **`_marker_exists` is existence, NOT freshness.** `_marker_is_fresh` answers
   "should the gate re-check this row" and has the 24h TTL; `_marker_exists`
-  answers "has mm ever installed here" and ignores mtime. The marker is touched
-  on every successful outcome including `unchanged`, so its presence is the
-  durable record. Both **fail OPEN** on an unreadable marker dir. Fail-closed
+  answers "has mm ever resolved this target successfully" and ignores mtime.
+  The marker is touched on every successful outcome including `unchanged`.
+  Precisely: it records "mm looked and was satisfied", NOT "mm created this
+  link" -- the live-checkout branch touches it for a dogfood link mm refuses to
+  own, so a deleted checkout link is left deleted too. Defensible (you deleted
+  it), but do not restate the guard as resting on a "link mm created" proof. Both **fail OPEN** on an unreadable marker dir. Fail-closed
   was tried and rejected during review: it trades a visible, recoverable
   outcome (a resurrected link you can delete again) for a silent one (self-heal
   suppressed forever with no message), which is the TODO#3 bug `_marker_is_fresh`
   was fixed for and a violation of the visible-failure contract.
-* **`_user_removed_link` runs FIRST in `_skill_link_check_due_at`,** before the
-  `lstat` that would throw into the blanket fail-open. Without that ordering the
-  gate returns True on every push forever for a row whose only outcome is a
-  no-op: the installer declines to recreate, so it never touches the marker, so
-  the marker goes stale, so the gate stays hot permanently. Store refresh is
-  unaffected — that path in `_skill_links_check_due` is independent of any row.
+* **`_skill_link_check_due_at` does ONE `lstat` and returns the absent case from
+  inside its own `FileNotFoundError` handler.** Not a style choice. The gate must
+  stay SHUT on an absent target, or it returns True on every push forever for a
+  row whose only outcome is a no-op: the installer declines to recreate, so it
+  never touches the marker, so the marker goes stale, so the gate stays hot. The
+  first draft expressed this as a separate predicate placed above
+  `_marker_is_fresh` — correct, but order-dependent, and a ship-review mutant
+  that moved it one line down broke the feature while 2741 tests passed.
+  Returning from the handler makes that mutation unrepresentable and drops one
+  `lstat` per consented row per push. A non-`FileNotFoundError` `OSError` is NOT
+  a removal: fail open. Store refresh is unaffected — that path in
+  `_skill_links_check_due` is independent of any row. Pinned by
+  `test_the_gate_stays_shut_after_the_marker_goes_stale`, which is the test that
+  killed the mutant.
 * **`explicit=True` skips the guard, and that is the documented undo.**
   `mm install-skills` and `mm init` rebuild. `install_skills_cmd`'s docstring
   already named this exact case as its first use ("post-cleanup recovery (link
@@ -875,8 +886,10 @@ moves the mm-events bootstrap `mkdir` a few lines earlier. `mm diag` is
 passphrase-free and prints the skill-links block plus `host_skill_discovery`
 (Grok inspect probe; sibling key, never a `skill_links` row). `mm status` prints one
 line only when a link is broken (the first broken row through
-`render_skill_status`, including the restart clause), plus the pending 0.12.42 policy-transition
-notice until it is acknowledged.
+`render_skill_status`, including the restart clause). It is silent for every
+working-as-intended state, including `removed-by-user` — a deliberate deletion
+is not a fault. The 0.12.42 policy-transition notice that used to ride along
+here was deleted in v0.12.44 (see above).
 
 **Host skill discovery (`mm diag` only).** `host_skill_discovery.py:probe_grok_skill_discovery`
 runs `grok inspect --json` (argv subprocess, no shell, stdin=DEVNULL, 2s timeout,

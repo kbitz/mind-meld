@@ -672,7 +672,12 @@ def _symlink_lives(target: Path) -> bool:
 
 
 def _replace_symlink(target: Path, store: Path) -> None:
-    """Point ``target`` at ``store`` via tmp symlink + os.replace. Never unlink."""
+    """Point ``target`` at ``store`` via tmp symlink + os.replace.
+
+    Never unlinks THE TARGET. It does unlink its own ``tmp`` scratch path.
+    The distinction matters now that "mm does not remove your link" is a
+    user-facing promise in the README.
+    """
     tmp = target.with_name(f".{target.name}.mm-new")
     try:
         if tmp.exists() or tmp.is_symlink():
@@ -770,7 +775,9 @@ def _ensure_retro_skill_links(
     ``allow_mutate=False`` (quiet/autopush) classifies and notices but never
     rewrites agent config.
     ``explicit=True`` (``mm install-skills`` / ``mm init``) will re-point a
-    *live* checkout-shaped dogfood link; push will not.
+    *live* checkout-shaped dogfood link; push will not. It ALSO bypasses the
+    removed-by-user guard, which makes it the single documented way to undo a
+    deletion (README "Removing a skill link").
     ``may_create`` is required (no default): a forgotten kwarg is a
     ``TypeError`` on the first test run instead of silently authorising
     every row. ``None`` still means no consent context (allow all) —
@@ -1141,9 +1148,14 @@ def _marker_exists(name: str) -> bool:
 
     Existence and freshness are separate questions. ``_marker_is_fresh``
     answers "should the drift gate re-check this row"; this answers "has mm
-    ever successfully installed a link at this target". The marker is touched
-    on every successful outcome including ``unchanged``, so its presence is
-    the durable record of a link mm created.
+    ever resolved this target successfully". The marker is touched on every
+    successful outcome including ``unchanged``.
+
+    Precisely: it records "mm looked and was satisfied", NOT "mm created this
+    link". The live-checkout branch touches it for a dogfood link mm
+    deliberately refuses to own. So a deleted checkout link is also left
+    deleted -- defensible (you deleted it) but it is not the "link mm created"
+    proof an earlier draft of this docstring claimed.
 
     Fails OPEN (returns False) on an unreadable marker dir, matching
     ``_marker_is_fresh``. Fail-closed was the first instinct here -- if we
@@ -1156,9 +1168,13 @@ def _marker_exists(name: str) -> bool:
 
     Reads via ``Path.stat`` rather than ``Path.is_file``, deliberately and
     identically to ``_marker_is_fresh``. ``Path.is_file()`` calls ``os.stat``
-    internally on CPython 3.14, so it bypasses a ``Path.stat`` fault
+    internally on current CPython (verified 3.14; CI runs 3.13), so it
+    bypasses a ``Path.stat`` fault
     injection -- the two predicates would then disagree about the same
-    unreadable marker, one failing open and one not.
+    unreadable marker, one failing open and one not. That symmetry is why this
+    follows symlinks where the gate's target probe uses ``lstat``: a marker
+    symlink is same-uid, same-trust-domain, and switching to ``lstat`` here
+    would silently reintroduce the disagreement.
     """
     marker = _marker_dir() / f".{name}"
     try:
@@ -1166,29 +1182,6 @@ def _marker_exists(name: str) -> bool:
     except OSError:
         return False
     return True
-
-
-def _user_removed_link(target: Path, success_marker: str) -> bool:
-    """True when the target is absent AND mm has installed there before.
-
-    Absent-plus-a-marker is the ONE filesystem state that means the user
-    deleted a link mm created. Every other broken state keeps the link
-    itself: `dangling-ours` (store gone), `dangling-ours-legacy` (old package
-    path), and `foreign` (someone else's file) are all "a link is present and
-    wrong", which is damage mm repairs. A missing link is not damage.
-
-    An inspection error is NOT a removal -- return False and let the normal
-    classification path produce its own forensic outcome.
-    """
-    try:
-        target.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return False
-    else:
-        return False
-    return _marker_exists(success_marker)
 
 
 def _touch_marker(name: str) -> None:
@@ -1204,7 +1197,7 @@ def _touch_marker(name: str) -> None:
         _refuse_real_home_under_pytest(marker_dir)
         return
     try:
-        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         (marker_dir / f".{name}").touch()
     except OSError:
         pass
@@ -1311,20 +1304,38 @@ def _store_needs_refresh() -> bool:
 def _skill_link_check_due_at(target: Path, *, success_marker: str) -> bool:
     """Target-specific implementation of the 24-hour skill-link drift gate.
 
-    The removed-by-user check runs FIRST and short-circuits, because the
-    absent-target `lstat` below throws into the blanket fail-open. Without
-    this the gate would return True on every push forever for a row whose
-    only possible outcome is a no-op: the installer declines to recreate, so
-    it never touches the success marker, so the marker goes stale, so the
-    gate stays hot permanently. Store refresh is unaffected -- that path in
-    `_skill_links_check_due` is independent of any row.
+    ONE ``lstat``, and the absent case returns from inside its own handler.
+    That shape is deliberate and load-bearing twice over.
+
+    Correctness: an absent target means the user removed a link mm had
+    resolved, and the gate must stay SHUT -- otherwise it returns True on
+    every push forever for a row whose only possible outcome is a no-op (the
+    installer declines to recreate, so it never touches the success marker,
+    so the marker goes stale, so the gate stays hot). An earlier draft did
+    this as a separate check placed above ``_marker_is_fresh``, which was
+    correct but order-dependent: a ship-review mutant that moved it one line
+    down broke the feature and passed 2741 tests. Returning from the
+    ``FileNotFoundError`` handler makes that mutation unrepresentable.
+
+    Cost: the earlier draft lstat'd the target here AND in the predicate
+    above it, +1 syscall per consented row per push, forever. Measured at
+    ship review. Store refresh is unaffected -- that path in
+    ``_skill_links_check_due`` is independent of any row.
     """
-    if _user_removed_link(target, success_marker):
-        return False
+    try:
+        target_info = target.lstat()
+    except FileNotFoundError:
+        # Absent. A marker proves mm resolved this target before, so this is
+        # a deliberate removal: stay shut. No marker means mm has never been
+        # here (fresh machine) and the installer should run.
+        return not _marker_exists(success_marker)
+    except OSError:
+        # Could not inspect. Not a removal -- fail open and let the installer
+        # produce its own forensic outcome.
+        return True
     if not _marker_is_fresh(success_marker):
         return True
     try:
-        target_info = target.lstat()
         if not stat.S_ISLNK(target_info.st_mode):
             return True
         store = _skill_store_dir()
@@ -1485,7 +1496,6 @@ __all__ = [
     "SKILL_LINK_TTL_SECONDS",
     "SkillInstallResult",
     "SkillTarget",
-    "_refuse_real_home_under_pytest",
     "consented_agent_keys",
     "diagnose_skill_links",
     "render_skill_status",
@@ -1493,11 +1503,11 @@ __all__ = [
     "_descriptor_for",
     "_ensure_retro_skill_links",
     "_marker_dir",
-    "_real_guard_paths",
-    "_resolve_retro_skill_src",
     "_marker_exists",
+    "_real_guard_paths",
+    "_refuse_real_home_under_pytest",
+    "_resolve_retro_skill_src",
     "_skill_link_check_due_at",
     "_skill_links_check_due",
-    "_user_removed_link",
     "_skill_store_dir",
 ]

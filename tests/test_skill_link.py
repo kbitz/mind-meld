@@ -1653,11 +1653,24 @@ class TestConsentFlipFlop:
         first = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
         assert _result_for(first, "codex").status == "installed"
 
+        # Repairable damage: a package-shaped link to a path that no longer
+        # exists is `dangling-ours-legacy`. A `foreign` link would NOT do --
+        # mm deliberately never touches an entry it does not recognize, so
+        # asserting repair on one asserts the opposite of the contract.
         target = agent_targets["codex"]
+        dead_pkg = skill_src.parent.parent / "gone" / "mind_meld" / "skills" / "retro_fleet"
         target.unlink()
-        target.symlink_to(target.parent / "not-the-store")
+        target.symlink_to(dead_pkg)
 
-        assert skill_link._skill_links_check_due(may_create=_may("claude", "codex")) is True
+        # Per-row gate, not the plural one: `_skill_links_check_due` can return
+        # True via the row-independent store-refresh path and would mask this.
+        descriptor = skill_link._descriptor_for("codex")
+        assert skill_link._skill_link_check_due_for(descriptor, _may("claude", "codex")) is True
+
+        # And it must actually repair -- the name of this test is a promise.
+        third = skill_link._ensure_retro_skill_links(may_create=_may("claude", "codex"))
+        assert _result_for(third, "codex").status == "installed"
+        _assert_store_link(target)
 
 
 class TestInstallSkillsConsent:
@@ -1962,14 +1975,20 @@ class TestUserRemovedLink:
         assert skill_link._marker_is_fresh(row.success_marker) is False
         assert skill_link._marker_exists(row.success_marker) is True
 
-    def test_user_removed_link_is_false_when_something_is_there(self, agent_targets, skill_src):
+    def test_a_present_target_is_never_a_removal(self, agent_targets, skill_src):
+        """Only an ABSENT target can mean intent. Present-and-healthy is not."""
         row = skill_link.AGENT_ROWS[0]
         skill_link._ensure_retro_skill_links(may_create=None)
         target = agent_targets[row.key]
-        assert skill_link._user_removed_link(target, row.success_marker) is False
+        assert (
+            skill_link._skill_link_check_due_at(target, success_marker=row.success_marker) is False
+        )
 
         target.unlink()
-        assert skill_link._user_removed_link(target, row.success_marker) is True
+        assert (
+            skill_link._skill_link_check_due_at(target, success_marker=row.success_marker) is False
+        )
+        assert skill_link._marker_exists(row.success_marker) is True
 
     def test_a_foreign_file_is_not_a_removal(self, agent_targets, skill_src):
         """The user's own file at the target stays `foreign`, never `removed-by-user`."""
@@ -1985,12 +2004,15 @@ class TestUserRemovedLink:
         assert target.read_text() == "mine\n"
 
     def test_the_gate_stays_shut_after_the_marker_goes_stale(self, agent_targets, skill_src):
-        """ORDERING PIN: `_user_removed_link` MUST precede `_marker_is_fresh`.
+        """A stale marker must not re-open the gate on a removed row.
 
         Caught by a ship-review mutant that the whole suite missed. Every other
         test here uses a FRESH marker, and with a fresh marker both orderings
-        return False -- so moving the short-circuit below the freshness test
-        passed 2741 tests while breaking the feature.
+        return False -- so moving the absent-target check below the freshness
+        test passed 2741 tests while breaking the feature. The gate was then
+        restructured so the absent case returns from inside its own
+        `FileNotFoundError` handler, which makes that mutation unrepresentable;
+        this test is what proves the restructure kept the behavior.
 
         The stale case is not exotic: it is every machine 24h after a removal,
         because the installer declines and therefore never touches the marker.
@@ -2017,9 +2039,9 @@ class TestUserRemovedLink:
     def test_an_lstat_error_is_not_a_removal(self, agent_targets, skill_src, monkeypatch):
         """An inspection failure is not consent to stop maintaining a link.
 
-        `_user_removed_link` must distinguish FileNotFoundError (the link is
-        gone) from any other OSError (we could not look). Fail-closed here would
-        silently suppress repair on an EACCES agent directory.
+        The gate must distinguish FileNotFoundError (the link is gone) from any
+        other OSError (we could not look). Fail-closed here would silently
+        suppress repair on an EACCES agent directory.
         """
         row = skill_link.AGENT_ROWS[0]
         skill_link._ensure_retro_skill_links(may_create=None)
@@ -2034,7 +2056,6 @@ class TestUserRemovedLink:
             return original(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "lstat", fake_lstat)
-        assert skill_link._user_removed_link(target, row.success_marker) is False
         assert (
             skill_link._skill_link_check_due_at(target, success_marker=row.success_marker) is True
         )
