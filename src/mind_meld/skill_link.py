@@ -263,9 +263,7 @@ class SkillTarget:
     """One supported agent's retro-fleet installation contract.
 
     Built at call time from ``AGENT_ROWS`` so patched roots and ``$HOME``
-    take effect. ``key`` is the registry key; ad-hoc targets constructed
-    by ``_ensure_retro_skill_link_at`` use a sentinel rather than inheriting
-    ``"claude"``.
+    take effect. ``key`` is the registry key.
     """
 
     key: str
@@ -379,10 +377,9 @@ def consented_agent_keys(config: dict | None, sources: list[dict]) -> frozenset[
 def _row_is_consented(key: str, may_create: frozenset[str] | None) -> bool:
     """True when this row may be written.
 
-    ``may_create is None`` means "no consent context supplied — allow
-    all", which keeps the 37 bare test callers green and lets
-    ``_ensure_retro_skill_link_at``'s ad-hoc ``key=""`` sentinel through.
-    A bare ``key in may_create`` would deny that sentinel.
+    ``may_create is None`` means no consent context — allow all
+    (fresh-machine allow-all). Callers of the writers must pass this
+    explicitly; ``diagnose_skill_links`` maps ``None`` to unknown policy.
     """
     return may_create is None or key in may_create
 
@@ -705,21 +702,22 @@ def render_skill_status(result: SkillInstallResult) -> str:
         readlink = ""
     store_path = result.link_target or _skill_store_dir()
     store = safe_str(str(store_path))
+    restart = ", then restart the agent so it reloads SKILL.md"
     if result.status == "dangling-ours":
         return (
             f"{target} is mm's symlink to {readlink or store} but the store is missing; "
-            f"run: mm install-skills"
+            f"run: mm install-skills{restart}"
         )
     if result.status == "dangling-ours-legacy":
         return (
             f"{target} is a dangling mm symlink to {readlink or '(unreadable)'}; "
-            f"run: mm install-skills"
+            f"run: mm install-skills{restart}"
         )
     if result.status == "foreign":
         dest = readlink or "a non-symlink"
         return (
             f"{target} exists and points at {dest}, which is not mm's skill store "
-            f"({store}); move it aside and run: mm install-skills"
+            f"({store}); move it aside and run: mm install-skills{restart}"
         )
     if result.status == "failed":
         return f"{target} installation failed: {safe_str(result.reason or 'unknown')}"
@@ -753,7 +751,7 @@ def _ensure_retro_skill_links(
     dry_run: bool = False,
     allow_mutate: bool = True,
     explicit: bool = False,
-    may_create: frozenset[str] | None = None,
+    may_create: frozenset[str] | None,
 ) -> tuple[SkillInstallResult, ...]:
     """Best-effort install for every ``AGENT_ROWS`` entry.
 
@@ -767,9 +765,11 @@ def _ensure_retro_skill_links(
     rewrites agent config.
     ``explicit=True`` (``mm install-skills`` / ``mm init``) will re-point a
     *live* checkout-shaped dogfood link; push will not.
-    ``may_create`` is the consent set from ``consented_agent_keys``. ``None``
-    means no consent context (allow all). A declined row is classified
-    before any ``stat`` on that agent root, reaches neither
+    ``may_create`` is required (no default): a forgotten kwarg is a
+    ``TypeError`` on the first test run instead of silently authorising
+    every row. ``None`` still means no consent context (allow all) —
+    fresh-machine allow-all is documented intent. A declined row is
+    classified before any ``stat`` on that agent root, reaches neither
     ``_failed_result`` nor ``_emit_status_notice``, and does not touch
     its success marker.
 
@@ -876,88 +876,6 @@ def _ensure_retro_skill_links(
             results[index] = _failed_result(descriptor, "installation", error)
 
     return _finalize(descriptors, results)
-
-
-def _ensure_skill_target(
-    descriptor: SkillTarget,
-    *,
-    dry_run: bool = False,
-    allow_mutate: bool = True,
-    explicit: bool = False,
-) -> SkillInstallResult | None:
-    """Run the legacy one-agent adapter without weakening its safety rules."""
-    write = bool(allow_mutate and not dry_run)
-    if _is_real_agent_dir_under_pytest(descriptor.target):
-        _refuse_real_home_under_pytest(descriptor.target)
-        if dry_run:
-            return SkillInstallResult(
-                descriptor,
-                "failed",
-                reason="refused to write a real agent directory from a test",
-            )
-        return None
-
-    try:
-        availability, failure = _agent_root_availability(descriptor)
-    except Exception as error:
-        return _failed_result(descriptor, "availability check", error)
-    if availability == "unavailable":
-        return SkillInstallResult(descriptor, "unavailable")
-    if availability == "failed":
-        return _failed_result(descriptor, "availability check", failure)
-
-    store = _skill_store_dir()
-    if write and _is_real_agent_dir_under_pytest(store):
-        _refuse_real_home_under_pytest(store)
-        return None
-
-    skill_src: Path | None
-    try:
-        skill_src = _resolve_retro_skill_source_once()
-    except Exception as error:
-        if not _store_is_healthy(store):
-            return _failed_result(descriptor, "skill source resolution", error)
-        skill_src = None
-
-    if write and skill_src is not None:
-        try:
-            store = _publish_skill_store(skill_src)
-        except (OSError, StorageError, PermissionError, FileNotFoundError) as error:
-            return _failed_result(descriptor, "skill store publish", error)
-        if not _store_is_healthy(store):
-            return _failed_result(
-                descriptor,
-                "skill store publish",
-                FileNotFoundError(f"skill store is empty at {store}"),
-            )
-
-    return _install_available_skill_target(
-        descriptor,
-        skill_src,
-        store=store,
-        write=write,
-        explicit=explicit,
-    )
-
-
-def _ensure_retro_skill_link_at(
-    target: Path,
-    *,
-    success_marker: str,
-    conflict_marker: str,
-    display_name: str = "ad-hoc",
-    dry_run: bool = False,
-) -> SkillInstallResult | None:
-    """Backward-compatible one-target entry point used by safety tests."""
-    descriptor = SkillTarget(
-        key="",
-        display_name=display_name,
-        agent_root=target.parent.parent,
-        skills_dir=target.parent,
-        success_marker=success_marker,
-        conflict_marker=conflict_marker,
-    )
-    return _ensure_skill_target(descriptor, dry_run=dry_run)
 
 
 def _agent_root_availability(
@@ -1207,7 +1125,7 @@ def _touch_marker(name: str) -> None:
     # Guard the WRITE LOCATION, not just one caller. Markers live in
     # ~/.config/mind-meld, which conftest redirects — but a test that opts out
     # of that fixture, or any future path reaching here without going through
-    # _ensure_retro_skill_link_at, would otherwise write the developer's real
+    # _ensure_retro_skill_links, would otherwise write the developer's real
     # config dir with the guard silent.
     if _is_real_agent_dir_under_pytest(marker_dir):
         _refuse_real_home_under_pytest(marker_dir)
@@ -1223,7 +1141,7 @@ def _marker_dir() -> Path:
     return Path("~/.config/mind-meld").expanduser()
 
 
-def _skill_links_check_due(may_create: frozenset[str] | None = None) -> bool:
+def _skill_links_check_due(*, may_create: frozenset[str] | None) -> bool:
     """Return whether any supported agent's retro-fleet link has drifted.
 
     Gate consulted by ``_push_core``. Returns True when the installer
@@ -1440,6 +1358,8 @@ def _maintain_links_field(
 ) -> str:
     if config_error:
         return f"unknown (config invalid: {safe_str(config_error)})"
+    if may_create is None:
+        return "unknown (policy not resolved)"
     if _row_is_consented(key, may_create):
         return "enabled"
     return "disabled (not authorized by skill-link policy)"
@@ -1455,7 +1375,10 @@ def diagnose_skill_links(
     Link ``status`` and ``maintain_links`` are orthogonal: a declined row
     can still be ``status: ok`` when an mm-owned link survives. Never fold
     policy into ``status``. When the config could not be parsed, the policy
-    field is ``unknown (config invalid: …)``, never ``disabled``.
+    field is ``unknown (config invalid: …)``, never ``disabled``. A
+    bare call (``may_create is None`` and no ``config_error``) is
+    ``unknown (policy not resolved)`` — diagnosis must not assert a
+    policy it never resolved.
     """
     store = _skill_store_dir()
     rows: list[dict[str, str]] = []
@@ -1563,7 +1486,6 @@ __all__ = [
     "render_skill_status",
     "skill_targets",
     "_descriptor_for",
-    "_ensure_retro_skill_link_at",
     "_ensure_retro_skill_links",
     "_marker_dir",
     "_real_guard_paths",

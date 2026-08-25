@@ -33,7 +33,14 @@ EXTRACTED = [
     "retention",
 ]
 
-LEAVES = ["consoles", "conflictmtime", "safety", "conflictdiff", "fsutil"]
+LEAVES = [
+    "consoles",
+    "conflictmtime",
+    "safety",
+    "conflictdiff",
+    "fsutil",
+    "host_skill_discovery",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +201,11 @@ def _calls_missing_may_create(path: Path) -> list[tuple[int, str]]:
 
 
 def test_src_skill_link_calls_pass_may_create() -> None:
-    """Optional may_create is silently forgettable; every src/ call must spell it.
+    """The writers require may_create; every src/ call must still spell it.
 
-    Tests may still call the functions bare (None means allow-all). Production
-    callers that omit the kwarg restore the ungated write this Track removes.
+    A forgotten production kwarg is a TypeError. This AST gate is the
+    belt-and-braces check that also catches a call site the suite never
+    invokes. Tests must pass it too (None still means allow-all).
     """
     offenders = {
         str(p.relative_to(SRC)): hits
@@ -374,21 +382,26 @@ def test_real_home_guard_warns_instead_of_raising(capsys) -> None:
 
 
 def test_installer_skips_the_write_when_the_guard_trips(monkeypatch, tmp_path: Path) -> None:
-    """Warning is not enough -- the write itself must not happen."""
+    """Warning is not enough -- the write itself must not happen.
+
+    The production installer is ``_ensure_retro_skill_links``. Tests redirect
+    its roots via ``_TEST_SKILL_ROOT_OVERRIDES`` (and ``extra_rows``); this
+    is the path every real ``mm push`` takes, not a one-agent adapter.
+    """
     from mind_meld import skill_link
 
     monkeypatch.setattr(skill_link, "_is_real_agent_dir_under_pytest", lambda _t: True)
-    target = tmp_path / "would-be-written" / "skills" / "retro-fleet"
-    skill_link._ensure_retro_skill_link_at(
-        target, success_marker="s", conflict_marker="c", dry_run=False
-    )
-    assert not target.exists()
+    skill_link._ensure_retro_skill_links(may_create=None)
+    for descriptor in skill_link._skill_target_descriptors():
+        assert not descriptor.target.exists()
+    store = skill_link._skill_store_dir()
+    assert not (store / "SKILL.md").exists()
 
 
 def test_real_home_guard_is_inert_outside_pytest(monkeypatch) -> None:
     """With PYTEST_CURRENT_TEST unset the guard must be a total no-op.
 
-    This is the branch every REAL `mm push` takes. `_ensure_retro_skill_link_at`
+    This is the branch every REAL `mm push` takes. `_ensure_retro_skill_links`
     consults the guard before doing anything, so a predicate that answered True
     outside pytest would silently stop the skill installer for the whole fleet
     AND print "refusing to touch ... from a test" on every push. Nothing
@@ -448,7 +461,7 @@ def test_real_home_guard_is_silent_on_an_isolated_path(tmp_path: Path, capsys) -
     """The non-matching branch must print NOTHING.
 
     `_refuse_real_home_under_pytest` runs on every `_touch_marker` and every
-    `_ensure_retro_skill_link_at` call, which is most of the suite. An inverted
+    `_ensure_retro_skill_links` call, which is most of the suite. An inverted
     predicate would bury 2,000 tests' captured stderr in false notices — and
     `test_real_home_guard_warns_instead_of_raising` only asserts the positive
     direction, so it would stay green.
@@ -465,7 +478,7 @@ def test_touch_marker_refuses_the_real_config_dir(monkeypatch, capsys) -> None:
     The marker dir is `~/.config/mind-meld`, which conftest redirects — but a
     test that opts out of that fixture (this file's sibling `test_skill_link.py`
     does, deliberately), or any future path reaching `_touch_marker` without
-    going through `_ensure_retro_skill_link_at`, would otherwise touch the
+    going through `_ensure_retro_skill_links`, would otherwise touch the
     developer's real config dir with the guard silent.
     """
     import uuid
@@ -685,18 +698,18 @@ def test_synthetic_row_is_covered_with_no_other_edit(monkeypatch, tmp_path) -> N
 
     targets = skill_link.skill_targets()
     assert synth_desc.target in targets
-    assert skill_link._skill_links_check_due() is True
+    assert skill_link._skill_links_check_due(may_create=None) is True
 
-    results = skill_link._ensure_retro_skill_links()
+    results = skill_link._ensure_retro_skill_links(may_create=None)
     by_key = {r.descriptor.key: r for r in results}
     assert "synthetic" in by_key
     assert by_key["synthetic"].status == "installed"
     assert synth_desc.target.is_symlink()
-    assert skill_link._skill_links_check_due() is False
+    assert skill_link._skill_links_check_due(may_create=None) is False
 
     synth_desc.target.unlink()
-    assert skill_link._skill_links_check_due() is True
-    skill_link._ensure_retro_skill_links()
+    assert skill_link._skill_links_check_due(may_create=None) is True
+    skill_link._ensure_retro_skill_links(may_create=None)
     assert synth_desc.target.is_symlink()
 
     healthy = skill_link.diagnose_skill_links()

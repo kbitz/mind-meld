@@ -1629,6 +1629,7 @@ class TestSkillLinkStatusNag:
     def _row(self, status: str) -> list[dict[str, str]]:
         return [
             {
+                "key": "claude",
                 "agent": "Claude Code",
                 "target": "~/.claude/skills/retro-fleet",
                 "store": "~/.local/share/mind-meld/agent-skills/retro-fleet",
@@ -1665,3 +1666,7 @@ class TestSkillLinkStatusNag:
         _setup_real_config(tmp_path, monkeypatch)
         result = runner.invoke(app, ["status"])
         assert "Skill links broken" in result.output, (status, result.output)
+        flat = " ".join(result.output.split())
+        assert "restart the agent so it reloads SKILL.md" in flat
+        if status != "error":
+            assert "mm install-skills" in flat

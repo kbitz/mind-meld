@@ -173,7 +173,7 @@ class TestInitWiring:
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         monkeypatch.setattr(
             "mind_meld.skill_link._ensure_retro_skill_links",
-            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create=None: (),
+            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create: (),
         )
         monkeypatch.setattr(
             "mind_meld.events_tail._run_events_backfill",

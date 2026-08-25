@@ -37,6 +37,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `events.py` | mm-events log: git-root discovery, git/session walkers, budgets |
 | `token_usage.py` | Session-jsonl walker, token + skill caches, pricing, incremental resume |
 | `host_usage.py` | Local Codex, Grok (`updates.jsonl` terminal records, opt-in), and privacy-safe OpenCode usage readers, strict host-family classifier, and isolated host-token caches |
+| `host_skill_discovery.py` | Read-only `grok inspect --json` probe for `mm diag` (`host_skill_discovery` sibling key). Not a `skill_link` registry. |
 | `identity.py` | Author-email set behind a flock-guarded 7d-TTL cache |
 | `merge.py` | Merge dispatch (`.jsonl`, `MEMORY.md`) + `lcs_merge` 3-way merge |
 | `upgrade.py` | Self-upgrade check, nudge, transition hook |
@@ -143,6 +144,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `config.py:_validate_skills` / `_validate_str_list` | `docs/invariants/events-retro.md` |
 | `cli.py:install_skills_cmd` / `retro_fleet_cmd` (typer shells only) | `docs/invariants/events-retro.md` |
 | `cli.py:status` / `diag` / `_collect_diag_state` (their `skill_link.diagnose_skill_links` consumers) | `docs/invariants/events-retro.md` |
+| `host_skill_discovery.py:probe_grok_skill_discovery` | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
 | `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |

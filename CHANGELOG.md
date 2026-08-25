@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.43] - 2026-08-24
+
+**`mm diag` now reports whether Grok can load `retro-fleet`, and `mm` no longer pretends a skill link is how that host works.** Grok 1.0.5 already discovers `~/.claude/skills` via default-on Claude compatibility, so mm maintains no Grok `AgentRow`. `mm diag --json` gained a sibling key `host_skill_discovery`; `skill_links` stays the three links mm owns. The dead one-agent installer copy is gone, `may_create` is required on the writers, and `mm status` / `mm install-skills` name the restart and the real error.
+
+### Added
+
+- **`mm diag --json` `host_skill_discovery`.** A 2s `grok inspect --json` probe (argv, no shell, capped stdout) extracts the Claude/skills compat bit, whether `retro-fleet` resolved, the resolved path, and the Grok version. Five explicit failure states: `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. `mm diag` only — never status, push, or autopush. Not a `skill_links` row.
+
+### Changed
+
+- **`may_create` is keyword-required on `_ensure_retro_skill_links` and `_skill_links_check_due`.** A forgotten kwarg is a `TypeError`. `None` still means allow-all (fresh-machine intent). `diagnose_skill_links()` with no policy is `unknown (policy not resolved)`, not `enabled`.
+- **`mm status` names the first broken link's cause and fix** through `render_skill_status`, including "restart the agent so it reloads SKILL.md". The same restart clause is on the three installer messages that already pointed at `mm install-skills`.
+- **`mm install-skills` error lines are `error:`, not `notice:`**, name a config that could not be read, and point at `mm diag`. The nothing-was-installed line is pasteable (`mm install-skills --agent claude`) and points at `mm diag` rather than `<claude|codex|opencode>`.
+- **README and `host-parity.md` Plan C** lead with the Claude-compat fact. Grok appears under `host_skill_discovery`. Registry exit criterion: mm maintains a skill link only for hosts that do not discover `~/.claude/skills` (verified 2026-08-24 with `grok inspect --json`).
+
+### Removed
+
+- **`_ensure_skill_target` and `_ensure_retro_skill_link_at`.** Zero production callers. The real-home write guard is now pinned on `_ensure_retro_skill_links`, which is the path `mm push` actually takes.
+
 ## [0.12.42] - 2026-08-23
 
 **`mm` now maintains each `retro-fleet` skill link only when that agent is authorized by its local skill-link policy.** Reads of a host's local store were already gated on `get_sources`; writes into that host's skills directory were not. By default, policy derives from enabled sources; `[skills] maintain_links` and the optional exhaustive `[skills] agents` allowlist can override it. `mm install-skills --agent KEY` grants link maintenance without enabling sync or usage reading. Existing links stay in place; `mm uninstall-skills` is next.
