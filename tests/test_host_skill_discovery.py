@@ -80,7 +80,12 @@ def test_malformed_json(tmp_path, monkeypatch):
 
 def test_malformed_json_handles_parser_depth_error(monkeypatch):
     monkeypatch.setattr(hsd.shutil, "which", lambda _: "grok")
-    monkeypatch.setattr(hsd, "_run_inspect", lambda _: (None, b"[" * 2_000 + b"]" * 2_000))
+    monkeypatch.setattr(hsd, "_run_inspect", lambda _: (None, b"[]"))
+
+    def raise_recursion_error(_):
+        raise RecursionError("nested JSON")
+
+    monkeypatch.setattr(hsd.json, "loads", raise_recursion_error)
     row = hsd.probe_grok_skill_discovery()
     assert row == {"host": "grok", "status": hsd.STATUS_MALFORMED_JSON}
 
