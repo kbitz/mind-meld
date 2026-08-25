@@ -2,72 +2,51 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
+Standing constraints — these can refuse a Track, not merely shape how one is written:
+
+- **mm maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills`.** Verified 2026-08-24 against Grok 1.0.5 with `grok inspect --json`. A proposal to add an agent row must first show the host does not already find the directory. This criterion killed Track 27A.
+- **A card's premise is checked against HEAD at drain time, not carried forward from when it was filed.** Six Tracks have now run on falsified premises. If the premise is false, discharge or kill it — do not emit the task.
+- **Release-bearing Tracks serialize.** `pyproject.toml` is deliberately absent from `docs/shared-infra.txt`; two Tracks claiming one version force-advance `latest` to an untagged commit. See that file for the full argument.
+
 ---
 
 ## In Progress
 
 ### Phase 2: Durable agent skill links
 
-**End-state:** Every agent `retro-fleet` link points at an mm-owned constant path, a wedged link is named by `mm diag` in one step, a user can decline the write *and* remove it again, and Grok gets a row without mm manufacturing consent.
-**Groups:** 24 (✓ shipped), 25, 26, 27
+**End-state:** Every agent `retro-fleet` link points at an mm-owned constant path, a wedged link is named by `mm diag` in one step, a user can decline the write *and* remove it again, and Grok's access to the skill is a verified `mm diag` fact rather than a fourth link mm maintains.
+**Groups:** 24 (✓ shipped), 25 (✓ shipped), 26 (✓ shipped), 28
 
-#### Group 25: Registry hygiene ∥ SKILL.md preflight ∥ Install consent
-
-##### Track 25A: Make agent enumeration complete and policy-ready ✓ Shipped (v0.12.40)
-
-##### Track 25B: SKILL.md Step 0 and README troubleshooting
-_2 tasks . ~110 LOC . low risk . 6 files_
-_touches: src/mind_meld/skills/retro_fleet/SKILL.md, README.md, tests/test_docs_routing.py, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_read-first: 24A, 24B, 25A_
-_produces: `/retro-fleet` refuses before Step 1 when `mm` is missing or broken; README carries the missing-block symptom Step 0 cannot reach_
-_session: fresh · effort: medium · attach: @src/mind_meld/skills/retro_fleet/SKILL.md, @README.md · verify: pytest tests/test_docs_routing.py tests/test_skill_link.py; ruff check ._
-- **SKILL.md Step 0 preflight** -- one terminal rule (only stage 0A stops the run), a standalone `command -v mm` gate that also stops on a resolvable-but-broken binary, and a stage that relays the upgrade notice `upgrade.emit_nudge_if_due` already prints at the tail of interactive `mm push`. Step 1's skip clause is re-scoped to name Step 1, and the two hardcoded `v0.12.37` literals come out. **No version comparison**: `min_mm_version` is written by the same binary whose freshness is in question, cannot know which SKILL.md the agent loaded (`live-checkout` is a supported status), and two matching stale numbers read as verification. _SKILL.md, ~50 lines._ (S)
-- **README troubleshooting and uninstall** -- lead `## Troubleshooting` with the real symptom ("retro output is missing a block, unexpectedly empty, or older than expected"), rewrite `:315` (its symptom becomes wrong once Step 0 refuses up front), correct `:313`'s claim about what `mm diag --json` proves, add the `key` field, de-count `:131` / `:181` / `:282`, and append the agent-restart clause to every `mm install-skills` remedy. _README.md + tests, ~60 lines._ (S)
-
-##### Track 25C: Gate the writes the way the reads are gated
-_2 tasks . ~170 LOC . medium risk . 8 files_
-_touches: src/mind_meld/config.py, src/mind_meld/cli.py, src/mind_meld/skill_link.py, tests/test_config.py, tests/test_skill_link.py, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md_
-_out: 26A, 27A_
-_read-first: 25A, src/mind_meld/events_tail.py_
-_produces: a user can decline mm writing into their agent config dirs_
-_session: fresh · effort: high · attach: @src/mind_meld/config.py, @src/mind_meld/events_tail.py, @tests/test_config.py · verify: pytest tests/test_config.py tests/test_skill_link.py; ruff check ._
-- **Skills auto-install opt-out** -- `HOST_READER_SOURCE_GATE` will not `stat` `~/.codex/sessions` without consent, but mm writes a symlink into `~/.codex/skills/` with none. Add the config key plus per-agent toggles, defaulted to today's behavior, and report "auto-install: disabled" rather than calling it degradation. _config.py + tests, ~90 lines._ (M)
-- **Pass consent into the installer** -- a `may_create` frozenset derived from `get_sources(config)`, keyed on 25A's `AgentRow.key`. Add the `consent_source` field to the row here, where it has a policy to attach. Note `init` calls the installer BEFORE it resolves sources; that ordering has to flip. The invariant doc currently documents the skills-dir `mkdir` as unconditional under an available root; that sentence becomes conditional here. _cli.py + skill_link.py + tests, ~80 lines._ (M)
+_The fourth clause originally read "and Grok gets a row without mm manufacturing consent". v0.12.43 established the opposite — Grok discovers `~/.claude/skills` natively, so the row is refused by the exit criterion above. Restated rather than dropped: the end-state it names is met, by other means. Three of four clauses are shipped; symmetric uninstall (Track 28A) is the remaining one, and its Group has no shipped Tracks yet, so it sits under Current Plan below._
 
 ---
 
 ## Current Plan
 
-#### Group 26: Symmetric uninstall
+_tombstone: 27_
 
-_Depends on: Group 25_
+#### Group 28: Symmetric uninstall ∥ Roadmap staleness gate
 
-##### Track 26A: Give the installer an inverse
+##### Track 28A: Give the installer an inverse
 _3 tasks . ~200 LOC . medium risk . 8 files_
 _touches: src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_skill_link.py, README.md, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 25C_
-_out: 27A_
-_read-first: 25C, 25A, docs/invariants/events-retro.md_
-_produces: a user can remove `/retro-fleet` and have it stay removed_
-_session: fresh · effort: high · attach: @src/mind_meld/skill_link.py, @src/mind_meld/cli.py, @tests/test_skill_link.py · verify: pytest tests/test_skill_link.py; ruff check ._
-- **`mm uninstall-skills`, registry-driven** -- `mm install-skills` has no inverse, so removal falls back to a hardcoded shell loop in the README over paths `AGENT_ROWS` already owns. Iterate the registry, apply the same ownership rule the installer follows (only unlink what `readlink` proves is mm's store link; never touch a file of the user's), and report per-row outcomes. _skill_link.py + cli.py, ~90 lines._ (M)
-- **Removal has to stick** -- the installer's `absent target -> symlink -> installed` branch re-creates a manually deleted link on the next interactive push, so today there is no supported way to decline the skill short of leaving a foreign file at the path. Persist the decision through 26A's consent key rather than inventing a second opt-out. A command that only unlinks would be reinstalled by the next push and is worse than none. _skill_link.py + tests, ~70 lines._ (M)
-- **README off the hardcoded path loop** -- `README.md:339` enumerates three link paths in a copy-pasteable snippet; a fourth row orphans a link silently. Replace with `mm uninstall-skills` run before `pipx uninstall`, which is the only ordering where the registry is still available. _README.md + docs, ~40 lines._ (S)
+_read-first: 25C, docs/invariants/events-retro.md_
+_produces: a user can remove `/retro-fleet` and have it stay removed without hand-editing `config.toml`_
+_session: fresh · effort: high · attach: @src/mind_meld/skill_link.py, @src/mind_meld/cli.py, @tests/test_skill_link.py · verify: pytest tests/test_skill_link.py tests/test_config.py; ruff check ._
+- **`mm uninstall-skills`, registry-driven** -- verified 2026-08-25: `uninstall_skills` / `uninstall-skills` has zero hits in `src/` and `tests/`; the only hit in the repo is `README.md:271`, which forward-references it as unshipped ("edit that list by hand until `mm uninstall-skills` ships"). Iterate `AGENT_ROWS`, apply the installer's own ownership rule — only unlink what `readlink` proves points at the mm-owned store, never touch a file of the user's — and report per-row outcomes. Mirror `mm install-skills --agent KEY`, which already exists and already persists a grant. _skill_link.py + cli.py, ~90 lines._ (M)
+- **Removal has to stick** -- **premise corrected 2026-08-25.** This task previously claimed "there is no supported way to decline the skill short of leaving a foreign file at the path." False since v0.12.42: `[skills] maintain_links` and `[skills] agents` exist and `skill_link.consented_agent_keys` is the one derivation, so declining is supported — by hand-editing TOML. The real remaining gap is narrower, and is the one `README.md:271` names: no command writes that key, so a plain unlink is undone by the next interactive push, because the installer's absent-target → symlink branch still runs for a consented row. Reuse the persistence path `install-skills --agent` already has rather than inventing a second opt-out. A command that only unlinks is worse than none. _skill_link.py + cli.py + tests, ~70 lines._ (M)
+- **README off the hardcoded path loop** -- **anchor corrected twice on 2026-08-25: `:339` → `:375` → `:381`.** The copy-pasteable three-path loop is now `README.md:381` (`for l in ~/.claude/skills/retro-fleet ~/.codex/skills/retro-fleet ~/.config/opencode/skills/retro-fleet; do`); v0.12.42 and v0.12.43 moved it to `:375`, then the same-day skill-link docs commit added a Troubleshooting entry above it and moved it again. **Grep the loop body, not the line** — this anchor has now drifted three times in four days and will drift again before the Track runs. Replace with `mm uninstall-skills` run *before* `pipx uninstall` — the only ordering where the registry still exists, which `README.md:379-380` states in prose ("there is no `mm` left after `pipx uninstall` to ask"). `README.md:271`'s forward reference stops being true in this PR and must be updated in it; note rule 6 grew a "**Unmaintained is not dead:**" body on 2026-08-25, so that clause is now embedded in longer prose about what declining costs, and the rewrite has to keep the surrounding argument coherent rather than just deleting the trailing "until ... ships". _README.md + docs, ~40 lines._ (S)
 
-#### Group 27: Grok row
+##### Track 28B: Stop the roadmap going stale between Tracks
+_2 tasks . ~120 LOC . low risk . 4 files_
+_touches: tests/test_docs_routing.py, AGENTS.md, docs/ROADMAP.md, docs/PROGRESS.md_
+_read-first: AGENTS.md:104, tests/test_docs_routing.py:256_
+_produces: a PR that ships a Track cannot leave ROADMAP.md describing that Track as unshipped_
+_session: fresh · effort: medium · attach: @tests/test_docs_routing.py, @AGENTS.md · verify: pytest tests/test_docs_routing.py; ruff check ._
+- **Roadmap-staleness gate** -- sixth occurrence. The Future bullet this promotes named four (23B, 24B, 25A, 25B); the 2026-08-25 regen found two more, and they are the worst kind: Tracks 25B and 25C shipped as v0.12.41 and v0.12.42 and were still listed unshipped at HEAD, and the then-26A's premise had rotted *because* 25C landed. Model on `tests/test_docs_routing.py:256` `test_every_changelog_version_has_a_progress_row` — same problem, already solved once: a convention line alone failed twice (v0.11.24, v0.11.27), a tree-only pytest in the PR fixed it. Concrete candidate, feasibility-checked 2026-08-25: a **release drift budget** — parse `✓ Shipped (vX.Y.Z)` and `(vX–vY)` markers from `docs/ROADMAP.md` + `docs/roadmap-shipped.md`, parse `## [X.Y.Z]` from `CHANGELOG.md` (the precedent test already does exactly this), fail when the newest CHANGELOG release runs more than N releases ahead of the newest marker. Drift on 2026-08-25 was 3 (newest marker `v0.12.40`, CHANGELOG `0.12.43`), so the gate would have failed the v0.12.42 PR. Fallback if a tree-only invariant proves too blunt: a CI diff gate requiring `docs/ROADMAP.md` in any PR that bumps `pyproject.toml`. Pick one — a tree-only pytest cannot see PR intent, which is why the drift budget measures the symptom rather than the act. _tests/test_docs_routing.py, ~80 lines._ (M)
+- **Convention line beside the PROGRESS-row convention** -- `AGENTS.md:104` is the anchor and has exactly this shape ("the row goes in the SAME PR"). Add the roadmap-marking convention beside it and have it name the new gate the way `:104` names its own. `CLAUDE.md` is a symlink to `AGENTS.md` — declare only `AGENTS.md`. _AGENTS.md, ~40 lines._ (S)
 
-_Depends on: Group 26_
-
-##### Track 27A: Add Grok as a registry row
-_3 tasks . ~160 LOC . medium risk . 9 files_
-_touches: src/mind_meld/skill_link.py, src/mind_meld/config.py, tests/test_skill_link.py, tests/test_config.py, README.md, docs/invariants/events-retro.md, docs/designs/host-parity.md, CHANGELOG.md, docs/PROGRESS.md_
-_blocked-by: Track 26A_
-_read-first: 25A, 25C, 26A, docs/designs/host-parity.md_
-_produces: Grok gets the skill link without mm ever manufacturing Grok consent, and removing it works the same way every other row does_
-_session: fresh · effort: medium · attach: @src/mind_meld/skill_link.py, @src/mind_meld/config.py, @docs/designs/host-parity.md · verify: pytest tests/test_skill_link.py tests/test_config.py; ruff check ._
-- **Install only where consent already exists** -- the installer's mkdir of `~/.grok/skills` flips `grok_customization_dirs_exist` (`skills` is in `manifest.GROK_SYNCED_SUBDIRS`), and that has two consequences with different preconditions. On a legacy or default config it auto-enables the grok sync source, which authorizes `read_grok_usage` — but only there: `get_sources` applies that filter solely while building `DEFAULT_SOURCES`, so an explicit `[[sync.sources]]` list is never appended to. On **any** config it also makes `_source_path_is_detected` label grok "detected" and default the `mm init` / `reconfigure-sources` prompt to Y. Test both shapes separately; do not assume the unconditional chain. Never create the directory. Assert the consequence, not the mechanism: after a full install, `grok_customization_dirs_exist()` is False AND `grok` is absent from `get_sources`. _skill_link.py + tests, ~70 lines._ (M)
-- **One Grok home resolver, no env var** -- `GROK_HOME` stays a `host_usage` sessions-only override. A shared resolver honoring it would put an environment variable in charge of which directory `walk_grok_source` encrypts and publishes, and `conftest` deletes the variable, making that branch untestable by fixture. 25A already dropped the `$GROK_HOME/skills` variant from `host-parity.md` Plan C for the same reason: the real-home guard cannot express a runtime env root. _config.py + tests, ~40 lines._ (S)
-- **Per-row reasons and doc reconciliation** -- the "root is absent" reason is factually wrong under this gate, so reasons become per-row. Pin that the installed link yields zero manifest entries from `walk_grok_source` (belt-and-braces: `manifest.py:530` already skips every symlink). Update `host-parity.md`'s capability matrix and the README's agent-list prose. Record the manual host-load check: a green unit test proves the symlink, not that Grok loads the skill. _docs + tests, ~50 lines._ (S)
+_Track 28B rooms in this Group by packer bin — no `_touches:` overlap with 28A outside shared infra — not by theme._
 
 ### Execution Map
 
@@ -76,32 +55,23 @@ of document order; document order is priority, not a gate.
 
 Adjacency list (from the packer):
 ```
-- Group 25 ← {}
-- Group 26 ← {25}
-- Group 27 ← {26}
+- Group 28 ← {}
 ```
 
 Track detail per group:
 ```
-Group 25: Registry hygiene ∥ SKILL.md preflight ∥ Install consent  (in progress)
-  +-- Track 25A ........... ✓ shipped (v0.12.40)
-  +-- Track 25B ........... ~S+S . 2 tasks
-  +-- Track 25C ........... ~M+M . 2 tasks
-
-Group 26: Symmetric uninstall
-  +-- Track 26A ........... ~M+M+S . 3 tasks
-
-Group 27: Grok row
-  +-- Track 27A ........... ~M+S+S . 3 tasks
+Group 28: Symmetric uninstall ∥ Roadmap staleness gate
+  +-- Track 28A ........... ~M+M+S . 3 tasks
+  +-- Track 28B ........... ~M+S . 2 tasks
 ```
 
-**Total: 3 groups . 4 tracks remaining.**
+**Total: 1 group . 2 tracks remaining.**
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (58 items)
+Deferred: docs/roadmap-future.md (57 items)
 
 ## Shipped
 

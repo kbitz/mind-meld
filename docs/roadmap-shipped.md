@@ -168,9 +168,40 @@ mkdir would have manufactured the Grok consent signal, the 4-file scope estimate
 ran against an 11-file empirical baseline, and its `blocked-by` edge on 22A was
 fabricated. Its intent survives as Track 27A; the prerequisites it was missing are
 Groups 24 through 26. Review:
-`~/.gstack/projects/kbitz-mind-meld/kbitz-track-23b-autoplan-phase1-ceo-20260820.md`._
+`~/.gstack/projects/kbitz-mind-meld/kbitz-track-23b-autoplan-phase1-ceo-20260820.md`.
+Lineage ends there: Track 27A was itself killed on 2026-08-25 — see the Group 27
+tombstone below. 23B's premise gate was right for a reason neither run saw at the
+time, which is that Grok never needed a link at all._
 
 ### Group 24: Durable skill store ∥ Deterministic retro trends ✓ Shipped (v0.12.38–v0.12.39)
 
 - Track 24A — _shipped (v0.12.38): published the mm-owned `retro-fleet` skill store at `~/.local/share/mind-meld/agent-skills/`, migrated live links safely, and made a wedged link diagnosable in one `mm diag` step without touching an ephemeral checkout._
 - Track 24B — _shipped (v0.12.39): replaced the machine-local snapshot trends with a prior equal-period comparison computed from the synced event corpus in one in-memory pass. `--no-save` became a hidden compatible no-op, safe snapshot leftovers are reaped, and coverage is derived from the earliest event-file date rather than the retention constant._
+
+### Group 25: Registry hygiene ∥ SKILL.md preflight ∥ Install consent ✓ Shipped (v0.12.40–v0.12.42)
+
+Never marked at the time. The Group's own regeneration ran *inside* the v0.12.41
+PR, ahead of that PR's feature commit, so 25B shipped unmarked and 25C shipped
+unmarked behind it. Both were reconciled from git on 2026-08-25, three releases
+late. Track 28B exists to gate that recurrence.
+
+- Track 25A — _shipped (v0.12.40): derived the skill links from an agent registry; `AGENT_ROWS` became canonical and policy-ready, replacing seven ad-hoc per-agent enumerations at this site. 2 tasks shipped._
+- Track 25B — _shipped (v0.12.41): an unskippable Step 0 preflight for `retro-fleet` (one terminal rule, a standalone `command -v mm` gate that also catches a resolvable-but-broken binary, upgrade-notice relay) plus the README troubleshooting rewrite. No version comparison, deliberately. 2 tasks shipped._
+- Track 25C — _shipped (v0.12.42): gated the writes the way the reads were already gated. `[skills] maintain_links` and the optional exhaustive `[skills] agents` allowlist, `consented_agent_keys` as the one derivation, `AgentRow.consent_source`, the installer `declined` status, `mm install-skills --agent KEY`, and a one-time transition notice. Fixed unconsented writes into `~/.codex/skills/` and `~/.config/opencode/skills/`. 2 tasks shipped._
+
+### Group 26: Grok skill discovery, resolved without a registry row ✓ Shipped (v0.12.43)
+
+Unplanned — this was on no card before it shipped. Minted here at the first free
+integer after shipped history so that the kill of Track 27A has a visible cause
+rather than looking like scope that quietly evaporated.
+
+- Track 26A — _shipped (v0.12.43): `mm diag --json` gained the `host_skill_discovery` sibling key — a 2s `grok inspect --json` probe (argv, no shell, capped stdout) with five explicit failure states, `mm diag` only. Also made `may_create` keyword-required on the writers so a forgotten kwarg is a `TypeError`, and removed two zero-caller installer helpers. Established the registry exit criterion: **mm maintains a skill link only for hosts that do not discover `~/.claude/skills`** — verified 2026-08-24 against Grok 1.0.5, which discovers that directory at the same documented priority tier as `~/.grok/skills` via its default-on Claude compatibility layer._
+
+### Group 27 — tombstoned, never shipped
+
+"Grok row" / Track 27A, killed 2026-08-25. Group 26 above shipped the opposite
+conclusion and a written exit criterion that refuses the row, so the Track was
+killed rather than discharged: the row was never added and now never will be.
+Phase 2's end-state clause it served is met by other means and was restated
+rather than dropped. The number is retired so that anyone re-anchoring on
+"Group 27: Grok row" does not land on Group 28's uninstall work.

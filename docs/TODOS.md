@@ -10,7 +10,52 @@ reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
 
 ## Unprocessed
 
-_(none)_
+### [manual] Retire the 0.12.42 policy-transition machinery when Track 28A lands
+
+- **Why:** The one-time upgrade notice is dead weight once every fleet machine
+  has acknowledged it, and `mm uninstall-skills` (Track 28A) is the release that
+  makes it redundant — 28A gives users a supported way to decline a link, which
+  is the thing the notice exists to explain.
+- **Effort:** S (~60 lines deleted)
+- **Depends on:** Track 28A
+- **Priority:** P3
+- **Context:** Filed against "Track 26A" by a parallel workspace on 2026-08-25;
+  retargeted to 28A by the same day's regen, which renumbered the uninstall
+  Track. Reformatted from a compact bullet to this grammar in the same commit —
+  as filed, `roadmap-audit` reported `UNPROCESSED: ITEMS: 0` and the item would
+  never have been drained.
+
+Delete together, or the marker name outlives its own reason:
+`_POLICY_TRANSITION_MARKER`, `policy_transition_text`,
+`maybe_emit_policy_transition`, `declined_owned_link_rows`,
+`policy_transition_acknowledged`, `acknowledge_policy_transition`
+(`skill_link.py`), the three call sites in `cli.py` (push, `status`,
+`install_skills_cmd`), the `mm status` clause in the README command table, and
+the README Troubleshooting entry added 2026-08-25.
+
+Leave `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` —
+that is the permanent policy, not the migration.
+
+Note the marker file `~/.config/mind-meld/.skill-link-policy-v0.12.42` becomes
+orphaned state on every fleet machine; `mm gc` does not reap it, so decide
+reap-or-leave as part of the same change.
+
+Regen drain, 2026-08-25 — nothing from the inbox, which was already empty. Recorded
+because the run's whole yield came from reconciling against git rather than from
+filed items:
+
+- 2 Tracks closed from ground truth: 25B shipped as v0.12.41 and 25C as v0.12.42,
+  both still listed unshipped at HEAD three releases later. Group 25 → Shipped.
+- 1 Group minted for unplanned shipped work: v0.12.43's Grok skill-discovery probe
+  became Group 26, so the 27A kill has a visible cause.
+- 1 Track killed: 27A (Grok row). v0.12.43 shipped the opposite conclusion plus a
+  written exit criterion that refuses the row. Group 27 tombstoned.
+- 1 item promoted from `docs/roadmap-future.md`: "Regenerate the roadmap AFTER a
+  Track lands" → Track 28B. Sixth occurrence; the deferral reason ("a process
+  convention, not a Track") is refuted by this repo's own PROGRESS-row history,
+  where a convention line failed twice and a pytest fixed it.
+- 2 of 3 leftover task premises on the old 26A had rotted and were rewritten with
+  this-turn evidence rather than re-emitted. 0 discharged.
 
 Track 25B `/autoplan` drain, 5 items on 2026-08-22:
 
@@ -60,4 +105,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-08-22 by `/roadmap`._
+_Last updated 2026-08-25 by `/roadmap`._
