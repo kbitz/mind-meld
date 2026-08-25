@@ -1638,7 +1638,9 @@ class TestSkillLinkStatusNag:
             }
         ]
 
-    @pytest.mark.parametrize("status", ["ok", "absent", "live-checkout", "foreign"])
+    @pytest.mark.parametrize(
+        "status", ["ok", "absent", "removed-by-user", "live-checkout", "foreign"]
+    )
     def test_mm_status_stays_quiet_for_working_states(self, status, tmp_path, monkeypatch) -> None:
         """BEHAVIORAL pin on the cli.py call site, not on the constant.
 

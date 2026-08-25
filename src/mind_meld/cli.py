@@ -276,7 +276,7 @@ class PushResult:
 app = typer.Typer(
     name="mm",
     help="Mind Meld — sync Claude Code sessions and other sources across machines.",
-    add_completion=False,
+    add_completion=True,
 )
 # `console` / `stderr_console` now live in `mind_meld.consoles` (Track 16A) so
 # `resolveflow` and `retention` can render through the SAME objects without
@@ -2950,7 +2950,6 @@ def _push_core(
     # gate stays open and runs the full installer prologue on every push.
     if not dry_run:
         try:
-            skill_link.maybe_emit_policy_transition(may_create, acknowledge=bool(not quiet))
             if skill_link._skill_links_check_due(may_create=may_create):
                 skill_link._ensure_retro_skill_links(
                     dry_run=False,
@@ -4436,11 +4435,11 @@ def status(
             "run [bold]mm migrate-config[/bold] to add."
         )
 
-    # Allowlist the BROKEN states, never a denylist of healthy ones. `ok`,
-    # `live-checkout` and `foreign` are all working-as-intended and permanent:
-    # a denylist reported the user's own deliberate dogfood link as broken on
-    # every `mm status`, forever, and pointed them at `mm install-skills`,
-    # which would have migrated it away. Same shape as the Grok refusal that
+    # Allowlist the BROKEN states, never a denylist of healthy ones. The full
+    # argument lives beside the constant in `skill_link.BROKEN_SKILL_STATUSES`
+    # -- do not restate the working-as-intended list here, it drifted once
+    # already (this copy omitted `absent` and then `removed-by-user`).
+    # Same shape as the Grok refusal that
     # pinned the breadcrumb at `degraded` and destroyed it as a signal. A
     # denylist also defaults every FUTURE status to "broken".
     skill_may_create = skill_link.consented_agent_keys(config, sources_configs)
@@ -4454,22 +4453,6 @@ def status(
         if "restart the agent so it reloads SKILL.md" not in rendered:
             rendered = f"{rendered}, then restart the agent so it reloads SKILL.md"
         console.print(f"  [yellow]Skill links broken:[/yellow] {rendered}")
-
-    # One-time 0.12.42 policy migration. Not a permanent nag: only while the
-    # upgrade notice is unacknowledged AND an mm-owned declined link exists.
-    # Autopush cannot spend this marker; mm status is the surface until an
-    # interactive push or install-skills acknowledges it.
-    if not skill_link.policy_transition_acknowledged():
-        pending = skill_link.declined_owned_link_rows(skill_may_create)
-        if pending:
-            names = skill_link._join_display_names([row.display_name for row in pending])
-            flags = " ".join(f"--agent {row.key}" for row in pending)
-            console.print(
-                f"  [yellow]Skill-link maintenance changed in 0.12.42:[/yellow] "
-                f"{safe_str(names)} links remain in place but will no longer be "
-                f"repaired. Keep them: [bold]mm install-skills {flags}[/bold] — "
-                "inspect with [bold]mm diag[/bold]."
-            )
 
     # Seam 3 — auto-upgrade nudge surfacing in status. Reads cache only,
     # no network call. Distinct from autopull/autopush emission (which gates
@@ -5868,8 +5851,6 @@ def install_skills_cmd(
         )
         raise typer.Exit(code=1) from e
 
-    skill_link.maybe_emit_policy_transition(may_create, acknowledge=True)
-
     available = False
     failed = False
 
@@ -5895,6 +5876,14 @@ def install_skills_cmd(
         elif result.status == "declined":
             available = True
             typer.echo(f"Skipped: {skill_link.render_skill_status(result)}")
+        elif result.status == "removed-by-user":
+            # Unreachable while this command passes explicit=True (the guard in
+            # _install_available_skill_target is skipped). Handled anyway: the
+            # bare `else` below reports "installation failed: None" and exits 1,
+            # so any future non-explicit caller would turn a benign outcome into
+            # a hard failure.
+            available = True
+            typer.echo(f"Left removed: {skill_link.render_skill_status(result)}")
         elif result.status in ("dangling-ours", "dangling-ours-legacy", "foreign"):
             available = True
             failed = True

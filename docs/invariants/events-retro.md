@@ -4,7 +4,7 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
-- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `maybe_emit_policy_transition`
+- `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
@@ -738,9 +738,23 @@ the original policy branch, so it must not falsely blame a disabled source
 when an explicit `[skills] agents` list made the decision. Never render a
 policy from a config you could not parse.
 `declined` is not in `BROKEN_SKILL_STATUSES`; `mm status` stays silent for
-a deliberate decline. The one exception is the one-time 0.12.42 upgrade
-notice (`maybe_emit_policy_transition`), acknowledged only on an interactive
-path so `mm autopush` cannot spend the marker.
+a deliberate decline.
+
+The one-time 0.12.42 policy-transition notice (`maybe_emit_policy_transition`,
+`declined_owned_link_rows`, `policy_transition_text`,
+`policy_transition_acknowledged`, `acknowledge_policy_transition`,
+`_POLICY_TRANSITION_MARKER`, and the private `_join_display_names` that only it
+used) was **deleted in v0.12.44**. It explained one thing: mm no longer repairs
+a link whose row is unauthorized. `README.md`'s troubleshooting entry says that
+permanently and was deliberately KEPT when the code went — `docs/TODOS.md` said
+to delete it too, and that was overruled, because 2 of the 3 fleet machines
+(`mm devices`: 0.12.13 and 0.12.34.1) never ran a version that could emit the
+notice and will upgrade straight past it. A transient notice they cannot receive
+is worth less than a README entry they can. Do NOT reintroduce a one-time
+stderr notice for a fleet whose machines skip releases; put it in the README.
+The `~/.config/mind-meld/.skill-link-policy-v0.12.42` marker is left in place as
+inert state — `mm gc` does not reap it, and a reaper for one dead marker costs
+more than the byte it saves.
 
 **`mm install-skills --agent KEY`** writes `maintain_links = true` and
 the known entries from `sorted(effective_before | {KEYS})` in registry
@@ -752,6 +766,72 @@ It grants only link maintenance — not source sync, not usage reading. It
 refuses and exits 1 if it cannot persist (no config, or write failure). Bare
 `install-skills` with no config keeps the fresh-machine allow-all; a
 present-but-broken config fails closed and exits 1.
+
+**Deletion is intent, not damage (Track 28A, v0.12.44).** An ABSENT target
+whose row has a success marker means the user removed a link mm created, and
+`mm push` MUST NOT recreate it. This is the whole Track: before it, `rm
+~/.codex/skills/retro-fleet` was undone by the next interactive push, which is
+why a `mm uninstall-skills` verb, a `[skills] revoked` denylist, and a whole
+third policy axis all looked necessary. None of them were. No normal CLI tool
+needs a denylist to make `uninstall` stick; it needs an installer that does not
+resurrect.
+
+Absent-plus-marker is the ONLY state that means intent. Every other broken state
+keeps the link itself — `dangling-ours` (store gone), `dangling-ours-legacy`
+(old package path), `foreign` (someone else's file) are all "a link is present
+and wrong", which is damage, and mm still repairs or reports each exactly as
+before. A missing link is not damage.
+
+Three load-bearing details:
+
+* **`_marker_exists` is existence, NOT freshness.** `_marker_is_fresh` answers
+  "should the gate re-check this row" and has the 24h TTL; `_marker_exists`
+  answers "has mm ever resolved this target successfully" and ignores mtime.
+  The marker is touched on every successful outcome including `unchanged`.
+  Precisely: it records "mm looked and was satisfied", NOT "mm created this
+  link" -- the live-checkout branch touches it for a dogfood link mm refuses to
+  own, so a deleted checkout link is left deleted too. Defensible (you deleted
+  it), but do not restate the guard as resting on a "link mm created" proof. Both **fail OPEN** on an unreadable marker dir. Fail-closed
+  was tried and rejected during review: it trades a visible, recoverable
+  outcome (a resurrected link you can delete again) for a silent one (self-heal
+  suppressed forever with no message), which is the TODO#3 bug `_marker_is_fresh`
+  was fixed for and a violation of the visible-failure contract.
+* **`_skill_link_check_due_at` does ONE `lstat` and returns the absent case from
+  inside its own `FileNotFoundError` handler.** Not a style choice. The gate must
+  stay SHUT on an absent target, or it returns True on every push forever for a
+  row whose only outcome is a no-op: the installer declines to recreate, so it
+  never touches the marker, so the marker goes stale, so the gate stays hot. The
+  first draft expressed this as a separate predicate placed above
+  `_marker_is_fresh` — correct, but order-dependent, and a ship-review mutant
+  that moved it one line down broke the feature while 2741 tests passed.
+  Returning from the handler makes that mutation unrepresentable and drops one
+  `lstat` per consented row per push. A non-`FileNotFoundError` `OSError` is NOT
+  a removal: fail open. Store refresh is unaffected — that path in
+  `_skill_links_check_due` is independent of any row. Pinned by
+  `test_the_gate_stays_shut_after_the_marker_goes_stale`, which is the test that
+  killed the mutant.
+* **`explicit=True` skips the guard, and that is the documented undo.**
+  `mm install-skills` and `mm init` rebuild. `install_skills_cmd`'s docstring
+  already named this exact case as its first use ("post-cleanup recovery (link
+  removed by hand...)") three releases before the Track existed.
+
+**Consent and presence are independent switches.** Consent answers "may mm
+maintain this row"; presence answers "is there a link". Re-granting consent does
+NOT un-delete — otherwise flipping a source off and on would silently undo a
+deliberate removal. Pinned by
+`test_consent_churn_does_not_resurrect_a_deleted_link`.
+
+**`mm diag` splits `absent` from `removed-by-user`.** Both are
+working-as-intended and neither is in `BROKEN_SKILL_STATUSES`, but only one is
+answerable with "run `mm install-skills`", and collapsing them left `mm diag`
+unable to confirm a deliberate deletion — the read-back hole the review flagged
+as the largest DX gap. This is LINK state, computed in `_diagnose_one`, so it
+does not touch the `maintain_links` field or the renderer contract below.
+
+The accepted regression: if an agent app wipes its own skills directory, mm no
+longer silently heals it and the user runs `mm install-skills`. That is
+normal-tool behavior (reinstall the extension) and it is the correct trade for
+making deletion mean deletion.
 
 **`BROKEN_SKILL_STATUSES` is an allowlist of broken states, never a denylist of
 healthy ones.** `mm status` reads it. `ok` / `live-checkout` (the deliberate
@@ -806,8 +886,10 @@ moves the mm-events bootstrap `mkdir` a few lines earlier. `mm diag` is
 passphrase-free and prints the skill-links block plus `host_skill_discovery`
 (Grok inspect probe; sibling key, never a `skill_links` row). `mm status` prints one
 line only when a link is broken (the first broken row through
-`render_skill_status`, including the restart clause), plus the pending 0.12.42 policy-transition
-notice until it is acknowledged.
+`render_skill_status`, including the restart clause). It is silent for every
+working-as-intended state, including `removed-by-user` — a deliberate deletion
+is not a fault. The 0.12.42 policy-transition notice that used to ride along
+here was deleted in v0.12.44 (see above).
 
 **Host skill discovery (`mm diag` only).** `host_skill_discovery.py:probe_grok_skill_discovery`
 runs `grok inspect --json` (argv subprocess, no shell, stdin=DEVNULL, 2s timeout,

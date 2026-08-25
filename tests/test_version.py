@@ -45,8 +45,27 @@ def test_version_missing_package_returns_dev_sentinel():
             reloaded = importlib.import_module("mind_meld")
             assert reloaded.__version__ == "0.0.0+dev"
         finally:
+            # Re-importing is not enough. The submodules stay cached under
+            # their own `sys.modules` keys, so they are never re-executed and
+            # never re-bound as attributes of the fresh package object. Any
+            # later `monkeypatch.setattr("mind_meld.config.CONFIG_PATH", ...)`
+            # then dies with `module 'mind_meld' has no attribute 'config'`.
+            # Green today only because this file sorts second-to-last: run
+            # `pytest tests/test_version.py tests/test_skill_link.py` before
+            # this fix and 142 tests error at fixture setup.
             sys.modules.pop("mind_meld", None)
-            importlib.import_module("mind_meld")  # restore real module
+            restored = importlib.import_module("mind_meld")
+            for name, module in list(sys.modules.items()):
+                if not name.startswith("mind_meld."):
+                    continue
+                parts = name.split(".")[1:]
+                parent = restored
+                for part in parts[:-1]:
+                    parent = getattr(parent, part, None)
+                    if parent is None:
+                        break
+                if parent is not None:
+                    setattr(parent, parts[-1], module)
 
 
 def test_mm_version_cli_flag(tmp_path, monkeypatch):

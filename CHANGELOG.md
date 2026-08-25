@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.44] - 2026-08-25
+
+**Deleting a `retro-fleet` skill link now sticks.** `rm ~/.codex/skills/retro-fleet` is the whole procedure; the next `mm push` leaves it deleted instead of rebuilding it. `mm` still repairs a link that is present and wrong — dangling after a store move, or pointing at an old package path — so self-heal is unchanged for actual damage. Only an absent link, for an agent `mm` has installed for before, counts as your decision. `mm install-skills` is the undo. The promised `mm uninstall-skills` command is not shipping: it existed to make a removal survive the installer, and an installer that does not resurrect needs no inverse.
+
+### Added
+
+- **`mm diag` splits `removed-by-user` from `absent`.** A link you deleted and one that never existed were the same row before; only one of them is answerable with "run `mm install-skills`". Neither is a broken status.
+- **Shell completion.** `mm --install-completion` / `mm --show-completion` now work. Agent keys were previously enumerated to the user only inside an error message.
+
+### Changed
+
+- **`mm push` no longer recreates a skill link you deleted.** The 24h drift gate stops treating an absent target as damage when a success marker proves `mm` installed there. That marker was already written on every successful check, so no new state is introduced. The gate also stops staying permanently open for such a row — previously the absent-target `lstat` failed open on every push forever, for a row whose only possible outcome was a no-op.
+- **Consent and presence are independent.** Re-enabling an agent's source, or re-granting it with `mm install-skills --agent`, does not resurrect a link you removed. Flipping a source off and on used to silently undo a deliberate deletion.
+- **README:** new *Removing a skill link* section; the *Uninstalling* block now says up front that it is for removing `mm` itself and points single-link removal elsewhere. The copy-pasteable link loop is unchanged and still works with no `mm`, no config, or a broken config.
+
+### Removed
+
+- **The one-time 0.12.42 skill-link policy notice**, its marker check, and the `mm status` line that repeated it. It explained that `mm` no longer repairs an unauthorized agent's link; the README troubleshooting entry says that permanently and was kept. Two of three machines on this fleet never ran a version that could emit it and would have upgraded straight past it — a transient stderr notice is the wrong carrier for a fleet that skips releases. Any leftover `~/.config/mind-meld/.skill-link-policy-v0.12.42` marker is inert.
+
 ## [0.12.43] - 2026-08-24
 
 **`mm diag` now reports whether Grok can load `retro-fleet`, and `mm` no longer pretends a skill link is how that host works.** Grok 1.0.5 already discovers `~/.claude/skills` via default-on Claude compatibility, so mm maintains no Grok `AgentRow`. `mm diag --json` gained a sibling key `host_skill_discovery`; `skill_links` stays the three links mm owns. The dead one-agent installer copy is gone, `may_create` is required on the writers, and `mm status` / `mm install-skills` name the restart and the real error.

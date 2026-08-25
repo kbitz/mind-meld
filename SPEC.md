@@ -148,6 +148,7 @@ max_file_size = 52428800   # bytes (50MB). Skip files larger than this.
 
 [skills]                   # optional: per-machine retro-fleet link-maintenance policy
 maintain_links = true      # false disables every agent link
+                           # removing ONE link is not a config operation: delete it and mm leaves it deleted (v0.12.44)
 # agents = ["claude", "codex"]  # when present, an exhaustive allowlist
 
 [[sync.sources]]
@@ -330,11 +331,12 @@ mm push                     # build manifest, diff against remote, upload change
 mm pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
 mm status [--source NAME]   # show local vs remote state, pending changes
-                            # plus a line for broken retro-fleet links and a pending 0.12.42 policy-transition notice
+                            # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
                             # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, last_autorun, skill_links, host_skill_discovery
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
-                            # status is one of ok | absent | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
+                            # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
+                            # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
                             # maintain_links is enabled | disabled (...) | unknown (config invalid: ...) | unknown (policy not resolved)
                             # `host_skill_discovery` is a sibling key (Grok inspect probe), never a skill_links row
                             # host_skill_discovery: host, status (ok | binary-absent | timeout | nonzero-exit | malformed-json | unsupported-schema), claude_skills_compat, retro_fleet_resolved, retro_fleet_path, grok_version
@@ -360,6 +362,7 @@ mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
 mm install-skills [--agent KEY]  # check/install the retro-fleet skill link for every authorized agent; reports declined rows, repairs mm's own dangling and legacy links, never overwrites a foreign one
                                # --agent is repeatable: persist a maintenance grant without enabling sync or usage reading, then install every authorized agent
+                               # also the documented undo for a deleted link: `mm push` leaves an absent link deleted (v0.12.44), `mm install-skills` / `mm init` put it back
 mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N] [--format jsonl|table]
                             # query the per-file pull/push history log
 mm retro-fleet [WINDOW] [--no-author-filter]
@@ -372,6 +375,8 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 ```
 --verbose                      # show each file hashed, each blob transferred, timing info
 --dry-run                      # show what would happen without doing it
+--install-completion           # install shell completion for mm (typer built-in; edits your shell startup file)
+--show-completion              # print the completion script instead of installing it
 ```
 
 ### `mm init`
@@ -752,7 +757,7 @@ Claude, Codex, OpenCode, and Grok are peers for **fleet usage display**, not for
 |---|---|
 | Grok (or Codex) rows next to Claude on the MODELS card | Tracks 22A / 23A. 18D is the Grok reader; 21A is consent + publish. |
 | Grok skills / home rules roaming across Macs | `type: "grok"` source. Walker hardcodes `skills/`, `commands/`, `rules/`. Same verb as usage: `mm enable-source grok`. |
-| `retro-fleet` installed into `~/.grok/skills` | New design (Plan C). A `skill_link` target, not a sync source. |
+| `retro-fleet` installed into `~/.grok/skills` | No. Plan C resolved in v0.12.43: Grok 1.0.5 already discovers `~/.claude/skills` via default-on Claude compat, so mm maintains no Grok skill link. `mm diag --json` reports that under the sibling `host_skill_discovery` key, never as a `skill_links` row. |
 | Uploading Grok / Codex / Claude sessions | No. Claude does not sync `~/.claude/projects/**/*.jsonl` either. |
 
 ### Why we do not sync the Grok home root
@@ -769,7 +774,7 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 
 1. **Plan A (scheduled):** Groups 22 and 23 render accepted host snapshots beside Claude totals, with coverage, not false zeros.
 2. **Plan B (Track 22B):** a `type: "grok"` source named `grok`. Walker hardcodes `skills/`, `commands/`, `rules/`. Never `sessions/`, credentials, or `config.toml`.
-3. **Plan C (future):** add `~/.grok/skills` as a fourth `skill_link` target. Independent of Plan B.
+3. **Plan C (resolved, v0.12.43):** mm maintains **no** Grok skill link. Grok 1.0.5 discovers `~/.claude/skills` at the same documented priority tier as `~/.grok/skills` (verified with `grok inspect --json`), so a fourth `skill_link` target would duplicate a link the host already reads. `mm diag` reports discovery under `host_skill_discovery` instead. Exit criterion for any future host: mm maintains a skill link only for hosts that do not discover `~/.claude/skills`. See `docs/designs/host-parity.md`.
 
 ---
 
