@@ -338,8 +338,14 @@ section is omitted when there is nothing to surface):
   header drops the "of M known" tail. Not a data-loss signal.
 - `N tokens from N unpriced model(s) excluded from cost estimate.` — those
   models contribute to the token total but not the cost line.
-- `N discovery error(s) recorded — see mm: notice: stderr breadcrumbs.` —
-  forensic; do not invent a cause.
+- `N discovery error(s) recorded — run mm diag.` —
+  forensic; do not invent a cause. Those notices go to an unattended hook's
+  stderr and are persisted nowhere.
+- `Machine X captured 0 repositories on N of M pushes; its commits are
+  missing from this window.` — that machine's git-snapshot rows in the
+  window have `projects == []`. The commit count is a **lower bound**.
+  Name the machine. Do not compute a trend from the commit number. Do not
+  write the Step 5 narrative off it.
 - `N record(s) skipped due to parse errors. Output may be incomplete.` —
   foreign-caller fallback; treat like the mm-event parse-error line.
 - `Fleet composition changed between windows:` — the set of devices that
@@ -387,6 +393,11 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
 
 ## What this skill does NOT do
 
+- **A commit count is a lower bound.** If Notes reports zero-repository
+  captures, say the number is incomplete, name the machine, do not compute
+  a trend from it, and do not write the Step 5 narrative off it. A
+  `61 -> 4` Trends collapse next to a zero-repository note is missing
+  capture, not a bad week.
 - It does not query GitHub directly. Everything comes from the synced events log.
 - It does not include sessions from machines that haven't yet upgraded to mm
   v0.11.0+ (those peers emit pre-v=2 snapshots). The Notes section names

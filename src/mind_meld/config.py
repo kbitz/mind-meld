@@ -221,12 +221,15 @@ def _validate(config: dict[str, Any]) -> None:
             _validate_disabled_sources(sync["disabled_sources"])
 
     retro = config.get("retro")
-    if isinstance(retro, dict) and "grok_host_usage" in retro:
-        if not isinstance(retro["grok_host_usage"], bool):
-            raise ConfigError(
-                "config: retro.grok_host_usage must be a boolean, "
-                f"got {type(retro['grok_host_usage']).__name__}."
-            )
+    if isinstance(retro, dict):
+        if "grok_host_usage" in retro:
+            if not isinstance(retro["grok_host_usage"], bool):
+                raise ConfigError(
+                    "config: retro.grok_host_usage must be a boolean, "
+                    f"got {type(retro['grok_host_usage']).__name__}."
+                )
+        if "repo_roots" in retro:
+            _validate_repo_roots(retro["repo_roots"])
 
     if "skills" in config:
         _validate_skills(config["skills"])
@@ -302,6 +305,29 @@ def _validate_str_list(value: Any, label: str) -> None:
     for j, item in enumerate(value):
         if not isinstance(item, str):
             raise ConfigError(f"config: {label}[{j}] must be a string, got {type(item).__name__}.")
+
+
+def _validate_repo_roots(value: Any) -> None:
+    """Check ``retro.repo_roots`` is a list of non-empty absolute-or-tilde paths.
+
+    A bare string iterates characters, each becoming a 1-char Path. An empty
+    string resolves to the process CWD, which under the autopush hook is the
+    user's project — a silent, plausible-looking wrong root. Relative paths
+    have the same CWD dependence. Tilde paths are accepted: they expand to
+    absolute at discovery time and are not CWD-relative.
+    """
+    _validate_str_list(value, "retro.repo_roots")
+    for j, item in enumerate(value):
+        if not item:
+            raise ConfigError(
+                f"config: retro.repo_roots[{j}] must be a non-empty path, got {item!r}."
+            )
+        expanded = Path(item).expanduser()
+        if not expanded.is_absolute():
+            raise ConfigError(
+                f"config: retro.repo_roots[{j}] must be an absolute path "
+                f"(or start with ~), got {item!r}."
+            )
 
 
 def _validate_disabled_sources(names: Any) -> None:

@@ -157,7 +157,7 @@ class TestPullResultDegradationFields:
         assert r.exit_code == 0, (r.stdout, r.stderr)
         crumb = json.loads((iso / "last-autorun.json").read_text())
         # Clean pull should still be "success", not "degraded".
-        assert crumb["outcome"] == "success"
+        assert crumb["pull"]["outcome"] == "success"
 
 
 # ─── Autopull breadcrumb: "degraded" outcome ─────────────────────────────
@@ -220,8 +220,8 @@ class TestAutopullDegradedBreadcrumb:
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)
         crumb = json.loads((iso / "last-autorun.json").read_text())
-        assert crumb["outcome"] == "degraded"
-        assert "fsync failed" in crumb["detail"]
+        assert crumb["pull"]["outcome"] == "degraded"
+        assert "fsync failed" in crumb["pull"]["detail"]
 
     def test_degraded_on_corrupt_peer(self, tmp_path, monkeypatch):
         """Corrupt peer manifest → degraded with detail naming corrupt peer."""
@@ -234,8 +234,8 @@ class TestAutopullDegradedBreadcrumb:
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)
         crumb = json.loads((iso / "last-autorun.json").read_text())
-        assert crumb["outcome"] == "degraded"
-        assert "corrupt peer manifest" in crumb["detail"]
+        assert crumb["pull"]["outcome"] == "degraded"
+        assert "corrupt peer manifest" in crumb["pull"]["detail"]
 
     def test_degraded_on_unknown_source(self, tmp_path, monkeypatch):
         """Deterministic stub: PullResult with unknown-source count → degraded.
@@ -257,8 +257,8 @@ class TestAutopullDegradedBreadcrumb:
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)
         crumb = json.loads((iso / "last-autorun.json").read_text())
-        assert crumb["outcome"] == "degraded"
-        assert "2 unknown source(s)" in crumb["detail"]
+        assert crumb["pull"]["outcome"] == "degraded"
+        assert "2 unknown source(s)" in crumb["pull"]["detail"]
 
     def test_degraded_on_per_file_failure(self, tmp_path, monkeypatch):
         """Deterministic stub: PullResult with total_failed > 0 → degraded."""
@@ -276,8 +276,8 @@ class TestAutopullDegradedBreadcrumb:
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)
         crumb = json.loads((iso / "last-autorun.json").read_text())
-        assert crumb["outcome"] == "degraded"
-        assert "3 file(s) failed" in crumb["detail"]
+        assert crumb["pull"]["outcome"] == "degraded"
+        assert "3 file(s) failed" in crumb["pull"]["detail"]
 
     def test_degraded_detail_combines_all_four_signals(self, tmp_path, monkeypatch):
         """All 4 signals firing → detail enumerates each and joins with '; '.
@@ -306,8 +306,8 @@ class TestAutopullDegradedBreadcrumb:
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)
         crumb = json.loads((iso / "last-autorun.json").read_text())
-        assert crumb["outcome"] == "degraded"
-        detail = crumb["detail"]
+        assert crumb["pull"]["outcome"] == "degraded"
+        detail = crumb["pull"]["detail"]
         # Every signal appears with its count.
         assert "fsync failed on 1 parent dir(s)" in detail
         assert "2 corrupt peer manifest(s)" in detail
@@ -397,8 +397,8 @@ class TestAutopullFleetRefusalBreadcrumb:
 
         # Breadcrumb outcome must be `fleet-refused`, NOT `failed`.
         crumb = json.loads((iso / "last-autorun.json").read_text())
-        assert crumb["outcome"] == "fleet-refused", (
-            f"Expected fleet-refused; got {crumb['outcome']}. "
+        assert crumb["pull"]["outcome"] == "fleet-refused", (
+            f"Expected fleet-refused; got {crumb['pull']['outcome']}. "
             f"This means typer.Exit was caught by `except Exception` "
             f"(F3 regression) and the user's autopull.log is now spammed "
             f"with refusal tracebacks on every hook fire."

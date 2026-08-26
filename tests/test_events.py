@@ -14,6 +14,7 @@ Coverage buckets:
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import threading
@@ -116,9 +117,7 @@ class TestCanonicalizeRemoteUrl:
 
 
 def _init_git_repo(path: Path) -> None:
-    """Initialize a git repo at `path` so `git rev-parse --show-toplevel`
-    succeeds. Uses subprocess so the worktree-vs-dir invariant (CT-1) is
-    actually exercised."""
+    """Initialize a git repo at `path` with a real `git init`."""
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     subprocess.run(
@@ -139,6 +138,208 @@ def _make_git_worktree(repo: Path, worktree: Path, branch: str = "wt") -> None:
         ["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree)],
         check=True,
     )
+
+
+def _seed_commit(repo: Path) -> None:
+    (repo / "seed.txt").write_text("seed")
+    subprocess.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True)
+
+
+def _make_submodule(tmp_path: Path) -> Path:
+    """Submodule-shaped `.git` FILE pointing at a real git dir with HEAD."""
+    main = tmp_path / "main"
+    _init_git_repo(main)
+    _seed_commit(main)
+    super_repo = tmp_path / "super"
+    _init_git_repo(super_repo)
+    vendor = super_repo / "vendor"
+    vendor.mkdir()
+    (vendor / ".git").write_text(f"gitdir: {main / '.git'}\n")
+    return vendor
+
+
+def _make_bare_repo(tmp_path: Path) -> Path:
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    return bare
+
+
+def _make_stray_dot_git(tmp_path: Path, kind: str) -> Path:
+    root = tmp_path / kind
+    root.mkdir(parents=True)
+    git = root / ".git"
+    if kind == "dir-no-head":
+        git.mkdir()
+    elif kind == "dir-head-directory":
+        git.mkdir()
+        (git / "HEAD").mkdir()
+    elif kind == "file-garbage":
+        git.write_text("not a gitdir file\n")
+    elif kind == "file-dangling-gitdir":
+        git.write_text("gitdir: /no/such/gitdir/anywhere\n")
+    elif kind == "file-gitdir-head-directory":
+        gitdir = tmp_path / f"{kind}-gitdir"
+        gitdir.mkdir()
+        (gitdir / "HEAD").mkdir()
+        git.write_text(f"gitdir: {gitdir}\n")
+    elif kind in {"file-uppercase-gitdir", "file-gitdir-no-space"}:
+        target_repo = tmp_path / f"{kind}-target"
+        _init_git_repo(target_repo)
+        prefix = "GITDIR: " if kind == "file-uppercase-gitdir" else "gitdir:"
+        git.write_text(f"{prefix}{target_repo / '.git'}\n")
+    else:
+        raise ValueError(kind)
+    return root
+
+
+def _git_rev_parse_is_toplevel(path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    try:
+        return Path(result.stdout.strip()).resolve() == path.resolve()
+    except OSError:
+        return False
+
+
+class TestGitRootClassifier:
+    def test_normal_clone_with_head_is_a_root(self, tmp_path):
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        assert events._classify_git_root(repo) is True
+
+    def test_worktree_dot_git_file_is_a_root(self, tmp_path):
+        repo = tmp_path / "main-repo"
+        _init_git_repo(repo)
+        worktree = tmp_path / "wt"
+        _make_git_worktree(repo, worktree)
+        assert (worktree / ".git").is_file()
+        assert events._classify_git_root(worktree) is True
+
+    def test_submodule_dot_git_file_is_a_root(self, tmp_path):
+        vendor = _make_submodule(tmp_path)
+        assert (vendor / ".git").is_file()
+        assert events._classify_git_root(vendor) is True
+
+    def test_subdirectory_of_a_repo_is_not_a_root(self, tmp_path):
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        src = repo / "src"
+        src.mkdir()
+        assert events._classify_git_root(src) is False
+
+    def test_bare_repo_is_not_a_root(self, tmp_path):
+        bare = _make_bare_repo(tmp_path)
+        assert events._classify_git_root(bare) is False
+
+    def test_stray_dot_git_dir_without_head_is_not_a_root(self, tmp_path):
+        root = _make_stray_dot_git(tmp_path, "dir-no-head")
+        assert events._classify_git_root(root) is False
+
+    def test_stray_dot_git_dir_with_head_directory_is_not_a_root(self, tmp_path):
+        root = _make_stray_dot_git(tmp_path, "dir-head-directory")
+        assert events._classify_git_root(root) is False
+
+    def test_dot_git_file_with_garbage_is_not_a_root(self, tmp_path):
+        root = _make_stray_dot_git(tmp_path, "file-garbage")
+        assert events._classify_git_root(root) is False
+
+    def test_dot_git_file_gitdir_missing_is_not_a_root(self, tmp_path):
+        root = _make_stray_dot_git(tmp_path, "file-dangling-gitdir")
+        assert events._classify_git_root(root) is False
+
+    def test_dot_git_file_gitdir_head_directory_is_not_a_root(self, tmp_path):
+        root = _make_stray_dot_git(tmp_path, "file-gitdir-head-directory")
+        assert events._classify_git_root(root) is False
+
+    @pytest.mark.parametrize("kind", ["file-uppercase-gitdir", "file-gitdir-no-space"])
+    def test_dot_git_file_invalid_gitdir_prefix_is_not_a_root(self, tmp_path, kind):
+        root = _make_stray_dot_git(tmp_path, kind)
+        assert events._classify_git_root(root) is False
+
+    def test_dangling_dot_git_symlink_is_not_a_root(self, tmp_path):
+        root = tmp_path / "dangling"
+        root.mkdir()
+        (root / ".git").symlink_to(tmp_path / "nowhere")
+        assert events._classify_git_root(root) is False
+
+    def test_dot_git_symlink_to_real_repo_is_a_root(self, tmp_path):
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        alias = tmp_path / "alias"
+        alias.mkdir()
+        (alias / ".git").symlink_to(repo / ".git")
+        assert events._classify_git_root(alias) is True
+
+    def test_candidate_that_is_a_file_is_not_a_root(self, tmp_path):
+        blob = tmp_path / "just-a-file"
+        blob.write_text("nope")
+        assert events._classify_git_root(blob) is False
+
+    def test_permission_denied_candidate_returns_false_not_raises(self, tmp_path):
+        secret = tmp_path / "secret"
+        secret.mkdir()
+        secret.chmod(0)
+        try:
+            if os.access(secret, os.R_OK):
+                pytest.skip("fixture is still readable (root-like CI)")
+            assert events._classify_git_root(secret) is False
+        finally:
+            secret.chmod(0o755)
+
+    def test_classifier_agrees_with_git_rev_parse_on_every_fixture(self, tmp_path):
+        """Differential oracle: the permanent gate for dropping `git rev-parse`."""
+        fixtures: list[Path] = []
+        clone = tmp_path / "clone"
+        _init_git_repo(clone)
+        fixtures.append(clone)
+
+        worktree = tmp_path / "wt"
+        _make_git_worktree(clone, worktree)
+        fixtures.append(worktree)
+
+        fixtures.append(_make_submodule(tmp_path / "sub"))
+        fixtures.append(clone / "src")
+        (clone / "src").mkdir()
+        fixtures.append(_make_bare_repo(tmp_path))
+        fixtures.append(_make_stray_dot_git(tmp_path, "dir-no-head"))
+        fixtures.append(_make_stray_dot_git(tmp_path, "dir-head-directory"))
+        fixtures.append(_make_stray_dot_git(tmp_path, "file-garbage"))
+        fixtures.append(_make_stray_dot_git(tmp_path, "file-dangling-gitdir"))
+        fixtures.append(_make_stray_dot_git(tmp_path, "file-gitdir-head-directory"))
+        fixtures.append(_make_stray_dot_git(tmp_path, "file-uppercase-gitdir"))
+        fixtures.append(_make_stray_dot_git(tmp_path, "file-gitdir-no-space"))
+
+        dangling = tmp_path / "dangling"
+        dangling.mkdir()
+        (dangling / ".git").symlink_to(tmp_path / "nowhere")
+        fixtures.append(dangling)
+
+        alias = tmp_path / "alias"
+        alias.mkdir()
+        (alias / ".git").symlink_to(clone / ".git")
+        fixtures.append(alias)
+
+        blob = tmp_path / "just-a-file"
+        blob.write_text("nope")
+        fixtures.append(blob)
+
+        disagreements = []
+        for path in fixtures:
+            classified = events._classify_git_root(path)
+            git_says = _git_rev_parse_is_toplevel(path)
+            if classified != git_says:
+                disagreements.append((str(path), classified, git_says))
+        assert disagreements == []
 
 
 class TestDiscoverGitRoots:
@@ -201,31 +402,6 @@ class TestDiscoverGitRoots:
         # Same inode via .resolve() — only one entry survives
         assert len(roots) == 1
 
-    def test_gstack_disabled_skips_gstack_prober(self, tmp_path, monkeypatch):
-        # If gstack source isn't in resolved sources, prober doesn't run.
-        # We verify by setting up a fake gstack registry under tmp HOME and
-        # confirming an empty sources list ignores it.
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-        gstack_proj = tmp_path / ".gstack" / "projects" / "myproj"
-        gstack_proj.mkdir(parents=True)
-        repo = tmp_path / "real-repo"
-        _init_git_repo(repo)
-        (gstack_proj / "repo-mode.json").write_text(json.dumps({"repo_root": str(repo)}))
-        # Empty explicit sources → gstack not in enabled set
-        roots, errors = events.discover_git_roots({"sync": {"sources": []}})
-        assert roots == []  # gstack prober was not invoked
-
-    def test_gstack_enabled_reads_repo_mode_json(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-        gstack_proj = tmp_path / ".gstack" / "projects" / "myproj"
-        gstack_proj.mkdir(parents=True)
-        repo = tmp_path / "real-repo"
-        _init_git_repo(repo)
-        (gstack_proj / "repo-mode.json").write_text(json.dumps({"repo_root": str(repo)}))
-        config = {"sync": {"sources": [{"name": "gstack"}]}}
-        roots, errors = events.discover_git_roots(config)
-        assert repo.resolve() in roots
-
     def test_claude_prober_reads_cwd_field(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         claude_proj = tmp_path / ".claude" / "projects" / "-tmp-foo-bar"
@@ -239,18 +415,16 @@ class TestDiscoverGitRoots:
         roots, errors = events.discover_git_roots(config)
         assert repo.resolve() in roots
 
-    def test_prober_failure_appends_to_errors(self, tmp_path, monkeypatch):
+    def test_prober_exception_appends_to_errors_and_does_not_raise(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-        # Create a malformed gstack registry — JSONDecodeError gets caught
-        # PER-FILE inside _probe_gstack (forensic), so the prober itself
-        # doesn't raise. We force a top-level error by patching the prober
-        # to raise. This pins the contract that prober failures are
-        # captured in `errors`.
-        config = {"sync": {"sources": [{"name": "gstack"}]}}
-        with mock.patch.object(events, "_probe_gstack", side_effect=RuntimeError("boom")):
+        # Force a top-level error by patching the prober to raise. Pins the
+        # contract that prober failures are captured in `errors` rather than
+        # killing discovery.
+        config = {"sync": {"sources": [{"name": "claude"}]}}
+        with mock.patch.object(events, "_probe_claude", side_effect=RuntimeError("boom")):
             roots, errors = events.discover_git_roots(config)
         assert roots == []
-        assert any("gstack prober" in e for e in errors)
+        assert any("claude prober" in e for e in errors)
 
     def test_result_is_immutable_and_two_unpack_compatible(self, tmp_path):
         repo = tmp_path / "repo"
@@ -273,18 +447,18 @@ class TestDiscoverGitRoots:
 
         monkeypatch.setattr(
             events,
-            "_probe_gstack",
+            "_probe_claude",
             lambda **_kwargs: [automatic],
         )
 
-        def validate(path, *, timeout_s=None):
+        def classify(path):
             validated.append(path)
             return True
 
-        monkeypatch.setattr(events, "_is_git_toplevel", validate)
+        monkeypatch.setattr(events, "_classify_git_root", classify)
         result = events.discover_git_roots(
             {
-                "sync": {"sources": [{"name": "gstack"}]},
+                "sync": {"sources": [{"name": "claude"}]},
                 "retro": {"repo_roots": [str(manual)]},
             },
             deadline_monotonic=time.monotonic() + 1,
@@ -292,17 +466,17 @@ class TestDiscoverGitRoots:
         assert list(result.roots) == [manual.resolve(), automatic.resolve()]
         assert validated == [manual.resolve(), automatic.resolve()]
 
-    def test_expired_deadline_does_not_start_validation(self, tmp_path, monkeypatch):
+    def test_expired_deadline_does_not_start_classification(self, tmp_path, monkeypatch):
         repo = tmp_path / "repo"
         repo.mkdir()
         called = False
 
-        def validate(path, *, timeout_s=None):
+        def classify(path):
             nonlocal called
             called = True
             return True
 
-        monkeypatch.setattr(events, "_is_git_toplevel", validate)
+        monkeypatch.setattr(events, "_classify_git_root", classify)
         result = events.discover_git_roots(
             {"sync": {"sources": []}, "retro": {"repo_roots": [str(repo)]}},
             deadline_monotonic=time.monotonic() - 1,
@@ -312,22 +486,103 @@ class TestDiscoverGitRoots:
         assert events.GIT_ROOT_DISCOVERY_BUDGET_ERROR in result.errors
         assert called is False
 
-    def test_validation_receives_exact_remaining_deadline(self, tmp_path, monkeypatch):
+    def test_permission_denied_candidate_does_not_abort_discovery(self, tmp_path, monkeypatch):
+        """validate() must not escape the prober try (F1)."""
         repo = tmp_path / "repo"
-        repo.mkdir()
-        timeouts: list[float] = []
-        monkeypatch.setattr(events.time, "monotonic", lambda: 100.0)
-        monkeypatch.setattr(
-            events,
-            "_is_git_toplevel",
-            lambda _path, *, timeout_s=None: timeouts.append(timeout_s) or True,
+        _init_git_repo(repo)
+        secret = tmp_path / "secret"
+        secret.mkdir()
+        secret.chmod(0)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        claude_proj = tmp_path / ".claude" / "projects" / "-secret"
+        claude_proj.mkdir(parents=True)
+        (claude_proj / "session.jsonl").write_text(
+            json.dumps({"cwd": str(secret), "type": "user"}) + "\n"
+        )
+        try:
+            if os.access(secret, os.R_OK):
+                pytest.skip("fixture is still readable (root-like CI)")
+            result = events.discover_git_roots(
+                {
+                    "sync": {"sources": [{"name": "claude"}]},
+                    "retro": {"repo_roots": [str(repo)]},
+                }
+            )
+            assert repo.resolve() in result.roots
+            assert result.errors == ()
+        finally:
+            secret.chmod(0o755)
+
+    def test_no_enabled_claude_source_is_clean_zero_not_exceeded(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        result = events.discover_git_roots({"sync": {"sources": []}})
+        assert result.roots == ()
+        assert result.errors == ()
+        assert result.exceeded is False
+        assert result.probers_ran == ()
+
+    def test_duplicate_candidates_dedup_on_resolve(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        link = tmp_path / "alias"
+        link.symlink_to(repo)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        claude_proj = tmp_path / ".claude" / "projects" / "-alias"
+        claude_proj.mkdir(parents=True)
+        (claude_proj / "session.jsonl").write_text(
+            json.dumps({"cwd": str(link), "type": "user"}) + "\n"
         )
         result = events.discover_git_roots(
-            {"sync": {"sources": []}, "retro": {"repo_roots": [str(repo)]}},
-            deadline_monotonic=100.05,
+            {
+                "sync": {"sources": [{"name": "claude"}]},
+                "retro": {"repo_roots": [str(repo)]},
+            }
         )
-        assert result.exceeded is False
-        assert timeouts == [pytest.approx(0.05)]
+        assert list(result.roots) == [repo.resolve()]
+
+    def test_partial_results_survive_deadline_expiry(self, tmp_path, monkeypatch):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        _init_git_repo(first)
+        _init_git_repo(second)
+        classified: list[Path] = []
+
+        def classify(path):
+            classified.append(path)
+            if len(classified) >= 1:
+                monkeypatch.setattr(events.time, "monotonic", lambda: 10_000.0)
+            return True
+
+        monkeypatch.setattr(events, "_classify_git_root", classify)
+        monkeypatch.setattr(events.time, "monotonic", lambda: 0.0)
+        result = events.discover_git_roots(
+            {
+                "sync": {"sources": []},
+                "retro": {"repo_roots": [str(first), str(second)]},
+            },
+            deadline_monotonic=1.0,
+        )
+        assert result.exceeded is True
+        assert events.GIT_ROOT_DISCOVERY_BUDGET_ERROR in result.errors
+        assert first.resolve() in result.roots
+        assert second.resolve() not in result.roots
+
+    def test_prober_exception_during_validate_is_captured(self, tmp_path, monkeypatch):
+        """If classify raises, the prober try must swallow it into errors."""
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(
+            events,
+            "_probe_claude",
+            lambda **_kwargs: [tmp_path / "x"],
+        )
+        monkeypatch.setattr(
+            events,
+            "_classify_git_root",
+            lambda _path: (_ for _ in ()).throw(PermissionError("denied")),
+        )
+        result = events.discover_git_roots({"sync": {"sources": [{"name": "claude"}]}})
+        assert result.roots == ()
+        assert any("claude prober" in e for e in result.errors)
 
     def test_claude_probe_stops_after_deadline_between_projects(self, tmp_path, monkeypatch):
         base = tmp_path / ".claude" / "projects"
@@ -536,6 +791,49 @@ class TestWalkGitProjects:
         # Single repo, generous budget → would compute huge per-repo, cap wins
         events.walk_git_projects(roots, datetime.now(timezone.utc), 100_000)
         assert all(t == events.PER_REPO_TIMEOUT_CAP_MS for t in captured)
+
+    def test_false_positive_candidate_yields_exactly_one_skipped_project(self, tmp_path):
+        """A stray `.git` dir that slipped past the classifier costs one skip."""
+        stray = _make_stray_dot_git(tmp_path, "dir-no-head")
+        roots, errors = events.discover_git_roots(
+            {"sync": {"sources": []}, "retro": {"repo_roots": [str(stray)]}}
+        )
+        assert roots == []
+        assert errors == []
+        out = events.walk_git_projects([stray], datetime.now(timezone.utc), 2000)
+        assert out[0]["projects"] == []
+        assert len(out[0]["skipped"]) == 1
+
+    def test_junk_roots_do_not_shrink_real_repo_timeouts_below_floor(self, tmp_path, monkeypatch):
+        """Admitting junk inflates n_repos and shrinks every real repo's timeout."""
+        real = tmp_path / "real"
+        _init_git_repo(real)
+        junk = [_make_stray_dot_git(tmp_path / f"j{i}", "dir-no-head") for i in range(40)]
+        discovered, _ = events.discover_git_roots(
+            {
+                "sync": {"sources": []},
+                "retro": {"repo_roots": [str(real), *[str(j) for j in junk]]},
+            }
+        )
+        assert discovered == [real.resolve()]
+
+        captured: list[int] = []
+
+        def _capture(root, since_iso, timeout_ms):
+            captured.append(timeout_ms)
+            return None, None
+
+        monkeypatch.setattr(events, "_walk_one_repo", _capture)
+        events.walk_git_projects(discovered, datetime.now(timezone.utc), 250)
+        # n=1, budget 250 → (250 * 8) // 1 = 2000 → cap
+        assert captured == [events.PER_REPO_TIMEOUT_CAP_MS]
+        # Contrast: 41 admitted roots would floor at 200.
+        n_if_junk_admitted = 41
+        would_be = max(
+            events.PER_REPO_TIMEOUT_FLOOR_MS,
+            (250 * events.MAX_GIT_WORKERS) // n_if_junk_admitted,
+        )
+        assert would_be == events.PER_REPO_TIMEOUT_FLOOR_MS
 
 
 # ---------------------------------------------------------------------------

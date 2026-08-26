@@ -85,6 +85,13 @@ ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS = 50
 MAX_GIT_WORKERS = 8
 PER_REPO_TIMEOUT_FLOOR_MS = 200
 PER_REPO_TIMEOUT_CAP_MS = 2000
+MAX_DISCOVERY_REJECT_SAMPLE = 64
+"""Cap on (reason, path) reject records retained on GitRootDiscovery.
+
+Diag --json exposes this sample; the text renderer uses reject_counts, which
+are not capped. 52 dead Claude project cwds was the live corpus on the
+machine that motivated Track 29A; 64 leaves a small margin without letting
+an unbounded ~/.claude/projects tree enlarge the frozen result."""
 
 EVENTS_SCHEMA_VERSION = 2
 """Bumped from 1 → 2 for Group 8 (v0.11.0).
@@ -122,11 +129,21 @@ class GitRootDiscovery:
     ``roots`` and ``errors`` are immutable so capture and identity can share
     the same observation without a module cache. Iteration remains compatible
     with the historic ``roots, errors = discover_git_roots(config)`` form.
+
+    Extra fields after ``exceeded`` are diagnostic-only (``mm diag``). They
+    MUST stay off the mm-push wire: ``make_mm_push_event`` takes
+    ``discovery_errors`` (the ``errors`` tuple) and must not be handed
+    ``attribution`` or reject paths. ``attribution`` is a tuple, not a dict,
+    so the frozen dataclass's immutability guarantee still holds.
     """
 
     roots: tuple[Path, ...]
     errors: tuple[str, ...]
     exceeded: bool = False
+    attribution: tuple[tuple[str, Path], ...] = ()
+    rejects: tuple[tuple[str, Path], ...] = ()
+    reject_counts: tuple[tuple[str, int], ...] = ()
+    probers_ran: tuple[str, ...] = ()
 
     def __iter__(self):
         yield list(self.roots)
@@ -386,6 +403,10 @@ def discover_git_roots(
     roots: list[Path] = []
     seen: set[Path] = set()
     exceeded = False
+    attribution: list[tuple[str, Path]] = []
+    reject_sample: list[tuple[str, Path]] = []
+    reject_tally: dict[str, int] = {}
+    probers_ran: list[str] = []
 
     def deadline_expired() -> bool:
         return time.monotonic() >= deadline_monotonic
@@ -394,15 +415,24 @@ def discover_git_roots(
         nonlocal exceeded
         exceeded = True
 
-    def validate(candidates: list[Path]) -> bool:
-        """Validate candidates in order. Return false if the deadline ends."""
+    def record_reject(reason: str, path: Path) -> None:
+        reject_tally[reason] = reject_tally.get(reason, 0) + 1
+        if len(reject_sample) < MAX_DISCOVERY_REJECT_SAMPLE:
+            reject_sample.append((reason, path))
+
+    def validate(candidates: list[Path], source: str) -> bool:
+        """Classify candidates in order. Return false if the deadline ends."""
         for candidate in candidates:
             if deadline_expired():
                 mark_exceeded()
                 return False
             try:
                 resolved = candidate.resolve()
+            except PermissionError:
+                record_reject("unreadable", candidate)
+                continue
             except OSError:
+                record_reject("gone", candidate)
                 continue
             if resolved in seen:
                 continue
@@ -410,12 +440,11 @@ def discover_git_roots(
             if deadline_expired():
                 mark_exceeded()
                 return False
-            remaining = deadline_monotonic - time.monotonic()
-            if remaining <= 0:
-                mark_exceeded()
-                return False
-            if _is_git_toplevel(resolved, timeout_s=remaining):
+            if _classify_git_root(resolved):
                 roots.append(resolved)
+                attribution.append((source, resolved))
+            else:
+                record_reject(_reject_reason(resolved), resolved)
             if deadline_expired():
                 mark_exceeded()
                 return False
@@ -432,15 +461,19 @@ def discover_git_roots(
                 break
             if isinstance(raw, str):
                 manual_candidates.append(Path(raw).expanduser())
+        if manual_candidates:
+            probers_ran.append("manual")
         if not exceeded:
-            validate(manual_candidates)
+            validate(manual_candidates, "manual")
     except Exception as e:
         errors.append(f"manual prober: {type(e).__name__}: {e}")
 
     enabled_sources = set() if exceeded or deadline_expired() else _enabled_source_names(config)
     probers: list[tuple[str, Callable[..., list[Path]]]] = []
-    if "gstack" in enabled_sources:
-        probers.append(("gstack", _probe_gstack))
+    # Track 29A deleted `_probe_gstack`: every live `repo-mode.json` carries
+    # `{mode, top_pct, authors, total, computed}` — none of `repo_root` /
+    # `repo_path` / `root`. A "gstack" enabled source is now a no-op for
+    # discovery; the only automatic prober is `_probe_claude`.
     if "claude" in enabled_sources:
         probers.append(("claude", _probe_claude))
 
@@ -450,17 +483,28 @@ def discover_git_roots(
             break
         try:
             candidates = prober(deadline_monotonic=deadline_monotonic)
+            probers_ran.append(name)
+            if not validate(candidates, name):
+                break
         except Exception as e:
+            if name not in probers_ran:
+                probers_ran.append(name)
             errors.append(f"{name} prober: {type(e).__name__}: {e}")
             continue
-        if not validate(candidates):
-            break
 
     if deadline_expired():
         mark_exceeded()
     if exceeded:
         errors.append(GIT_ROOT_DISCOVERY_BUDGET_ERROR)
-    return GitRootDiscovery(tuple(roots), tuple(errors), exceeded)
+    return GitRootDiscovery(
+        tuple(roots),
+        tuple(errors),
+        exceeded,
+        tuple(attribution),
+        tuple(reject_sample),
+        tuple(sorted(reject_tally.items())),
+        tuple(probers_ran),
+    )
 
 
 def _enabled_source_names(config: dict) -> set[str]:
@@ -474,7 +518,8 @@ def _enabled_source_names(config: dict) -> set[str]:
     if isinstance(explicit, list):
         names = {s.get("name") for s in explicit if isinstance(s, dict)}
     else:
-        # Default sources include claude, gstack (if ~/.gstack exists), mm-events.
+        # Default sources include claude (and gstack if ~/.gstack exists, and
+        # mm-events). Only "claude" has a discovery prober after Track 29A.
         names = {"claude"}
         if (Path.home() / ".gstack").exists():
             names.add("gstack")
@@ -482,42 +527,13 @@ def _enabled_source_names(config: dict) -> set[str]:
     return {n for n in names if isinstance(n, str) and n not in disabled}
 
 
-def _probe_gstack(*, deadline_monotonic: float | None = None) -> list[Path]:
-    """Read gstack project metadata until the shared deadline expires."""
-    base = Path.home() / ".gstack" / "projects"
-    if _deadline_expired(deadline_monotonic) or not base.exists():
-        return []
-    out: list[Path] = []
-    try:
-        slug_dirs = iter(base.iterdir())
-        while not _deadline_expired(deadline_monotonic):
-            try:
-                slug_dir = next(slug_dirs)
-            except StopIteration:
-                break
-            rmf = slug_dir / "repo-mode.json"
-            if not rmf.is_file() or _deadline_expired(deadline_monotonic):
-                continue
-            try:
-                data = json.loads(rmf.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if _deadline_expired(deadline_monotonic):
-                break
-            for key in ("repo_root", "repo_path", "root"):
-                value = data.get(key) if isinstance(data, dict) else None
-                if isinstance(value, str) and value:
-                    out.append(Path(value).expanduser())
-                    break
-    except OSError:
-        return out
-    return out
-
-
 def _probe_claude(*, deadline_monotonic: float | None = None) -> list[Path]:
     """Read Claude project cwd evidence until the shared deadline expires."""
     base = Path.home() / ".claude" / "projects"
-    if _deadline_expired(deadline_monotonic) or not base.exists():
+    try:
+        if _deadline_expired(deadline_monotonic) or not base.exists():
+            return []
+    except OSError:
         return []
     out: list[Path] = []
     try:
@@ -609,25 +625,69 @@ def _deadline_expired(deadline_monotonic: float | None) -> bool:
     return deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
 
 
-def _is_git_toplevel(path: Path, *, timeout_s: float | None = None) -> bool:
-    """Return true when git resolves path itself as a repository toplevel."""
-    if timeout_s is not None and timeout_s <= 0:
-        return False
+def _classify_git_root(path: Path) -> bool:
+    """Return True when ``path`` looks like a git work tree.
+
+    Accepts a normal clone (``.git`` directory containing ``HEAD``) and a
+    worktree or submodule (``.git`` file whose first line is ``gitdir:``
+    pointing at an existing git dir). Wrapped in ``OSError`` because on
+    Python 3.11 (the declared floor) ``Path.exists()`` / ``Path.is_dir()``
+    raise ``PermissionError`` on an unreadable directory; on 3.13+ they
+    return False. CI runs 3.13 only, so this cannot reproduce there.
+    """
     try:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=2 if timeout_s is None else timeout_s,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        git = path / ".git"
+        if git.is_dir():
+            return (git / "HEAD").is_file()
+        if git.is_file():
+            return _gitfile_points_at_gitdir(git)
         return False
-    if result.returncode != 0:
-        return False
-    try:
-        return Path(result.stdout.strip()).resolve() == path.resolve()
     except OSError:
         return False
+
+
+def _gitfile_points_at_gitdir(gitfile: Path) -> bool:
+    """True when a ``.git`` file is a plausible gitdir pointer, not garbage.
+
+    The ``HEAD`` / ``gitdir:`` sniff is load-bearing: a stray ``.git``
+    directory or a garbage ``.git`` file would otherwise be admitted, cost a
+    ~10 ms failed ``git log``, leak the file body through
+    ``skipped[].reason``, and inflate ``n_repos`` so every real repo's
+    subprocess timeout shrinks.
+    """
+    try:
+        raw = gitfile.read_bytes()
+    except OSError:
+        return False
+    line = raw.split(b"\n", 1)[0]
+    try:
+        text = line.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if not text.startswith("gitdir: "):
+        return False
+    target = text[len("gitdir: ") :].strip()
+    if not target:
+        return False
+    gitdir = Path(target)
+    if not gitdir.is_absolute():
+        gitdir = gitfile.parent / gitdir
+    try:
+        if gitdir.is_dir():
+            return (gitdir / "HEAD").is_file()
+        return False
+    except OSError:
+        return False
+
+
+def _reject_reason(path: Path) -> str:
+    """Map a classified-negative path to a diag reason class."""
+    try:
+        if not path.exists():
+            return "gone"
+        return "not-a-repo"
+    except OSError:
+        return "unreadable"
 
 
 # ---------------------------------------------------------------------------

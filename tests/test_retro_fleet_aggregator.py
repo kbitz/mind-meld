@@ -5691,3 +5691,34 @@ class TestAcceptorSchemaConstant:
         ev["v"] = 3
         row = aggregator._accept_host_usage_snapshot(ev)
         assert '"v":3' in row.tie_key
+
+
+class TestZeroRepoCaptureNotes:
+    def test_notes_line_when_a_device_captured_zero_repositories(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        empty = {
+            "v": 2,
+            "type": "git-snapshot",
+            "ts": _ts(1),
+            "device": "dev-quiet",
+            "projects": [],
+        }
+        full = _git_event("dev-quiet", 1, [_commit("aaa", 1)])
+        _write_events(events_dir, "dev-quiet", "2026-04-27", [empty, full])
+        data = _aggregate(events_dir)
+        assert data.git.zero_repo_captures["dev-quiet"] == (1, 2)
+        out = aggregator.format_retro(data)
+        assert "captured 0 repositories on 1 of 2 pushes" in out
+        assert "run mm diag" not in out or "discovery error" not in out
+
+    def test_discovery_errors_point_at_mm_diag(self):
+        data = aggregator.RetroData(
+            window_days=7,
+            since=NOW - timedelta(days=7),
+            until=NOW,
+        )
+        data.pushes.discovery_errors.append("git root discovery exceeded its time budget")
+        out = aggregator.format_retro(data)
+        assert "run mm diag" in out
+        assert "stderr breadcrumbs" not in out

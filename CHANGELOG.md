@@ -2,6 +2,28 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.45] - 2026-08-25
+
+**Fleet retro now finds the repositories that are actually on this Mac.** Git-root discovery no longer spends the autopush budget proving deleted directories are not repositories: a `.git` + `HEAD` / `gitdir:` sniff replaced the per-candidate `git rev-parse` subprocess (the `.git`-file case that used to need the subprocess — Conductor worktrees — is still accepted). The dead gstack prober is gone. `mm diag` reports discovery at the autopush budget; `mm status` nags when a push recorded incomplete discovery; `last-autorun.json` is keyed per verb so autopull cannot erase a degraded push. This fix is not retroactive — earlier windows stay incomplete — and every Mac must upgrade individually.
+
+### Added
+
+- **`mm diag` `discovery` block.** Runs git-root discovery at the 50 ms autopush budget (not the 100 ms interactive one). Text: `~`-relative roots, reject counts by reason (`gone` / `not-a-repo` / `unreadable`), distinct "no prober ran" vs "found nothing". `--json` carries full path arrays. Paths go through `safe_str`.
+- **`[retro] repo_roots` validation.** Must be a list of non-empty absolute (or `~`) paths. A bare string used to iterate characters; an empty string used to silently make the process CWD a root.
+- **Copy-pasteable `[retro] repo_roots` block in README.** Per-machine, not synced, checked before automatic discovery, verified with `mm diag`. After deleting the gstack prober this is the only discovery mechanism on a machine where `claude` is disabled.
+- **Aggregator Notes line** when any device in the window captured 0 repositories on some of its pushes. SKILL.md: a commit count is a lower bound; do not narrate a trend off a zero-repository capture.
+
+### Changed
+
+- **Git-root classification is a stat, not a subprocess.** `_classify_git_root` accepts a `.git` directory containing `HEAD`, or a `.git` file whose first line is `gitdir:` pointing at a git dir with `HEAD`. Wrapped in `try/except OSError` because Python 3.11 `Path.exists()` raises `PermissionError` on an unreadable directory (CI is 3.13 and would not have caught this). Prober `validate()` moved inside the prober `try` so one unreadable candidate cannot swallow the entire events tail.
+- **Discovery degradations.** A prober exception (`errors and not exceeded`) and complete discovery that found zero repositories now reach the `degraded` breadcrumb. An ordinary rejected candidate stays silent. The budget notice no longer says "A later substantive push will retry" — a retry does not recover the lost interval. Action is `mm diag`.
+- **`last-autorun.json` is keyed per verb** (`{"push": {...}, "pull": {...}}`). `mm status` renders both. Legacy single-object files still read.
+- **Aggregator discovery-error Notes** point at `mm diag`, not at `mm: notice:` stderr breadcrumbs that an unattended hook discards.
+
+### Removed
+
+- **`_probe_gstack` and `_is_git_toplevel`.** Every live `repo-mode.json` carries `{mode, top_pct, authors, total, computed}` — none of the keys the prober read. The subprocess pre-gate agreed with the stat classifier on 60/60 live candidates and cost ~8 ms each.
+
 ## [0.12.44] - 2026-08-25
 
 **Deleting a `retro-fleet` skill link now sticks.** `rm ~/.codex/skills/retro-fleet` is the whole procedure; the next `mm push` leaves it deleted instead of rebuilding it. `mm` still repairs a link that is present and wrong — dangling after a store move, or pointing at an old package path — so self-heal is unchanged for actual damage. Only an absent link, for an agent `mm` has installed for before, counts as your decision. `mm install-skills` is the undo. The promised `mm uninstall-skills` command is not shipping: it existed to make a removal survive the installer, and an installer that does not resurrect needs no inverse.
