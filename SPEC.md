@@ -333,7 +333,7 @@ mm pull [--from DEVICE] [--source NAME]              # download changes (optiona
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, last_autorun, skill_links, host_skill_discovery
+                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, last_autorun, skill_links, host_skill_discovery, discovery
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.

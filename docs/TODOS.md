@@ -10,7 +10,12 @@ reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
 
 ## Unprocessed
 
-_Nothing unprocessed._
+- **N6 / subdirectory recovery.** A session started in `repo/src` drops `repo`. `_classify_git_root` (Track 29A) replaced `_is_git_toplevel`, which used to compute the git toplevel and then discarded it. Measured 0 of 60 candidates at review time, so latent. The cheap fix is foreclosed: recovery now needs a bounded parent walk with a ceiling. Route to Group 30 alongside the cursor / work-bounds work. _Source: Track 29A /autoplan Phase 3 Eng, 2026-08-25._
+- **S2 — git environment not scrubbed.** `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` are inherited by `_walk_one_repo` and `_origin_remote_url`. After Track 29A, classification ignores the env while `git log` still honours it, so every `.git`-bearing candidate can emit the env repo's `(canonical_remote, sha)` paired with its own `local_path` — the aggregator's exact dedup key. Exotic, but `autopush` runs from a hook whose environment mm does not control. _Source: Track 29A /autoplan Phase 3 Eng, 2026-08-25._
+- **No recapture path.** The retro cursor advanced past every lost discovery interval; Track 29A is not retroactive and there is no backfill verb (`_run_events_backfill` is reachable only from `mm init`). Wants `mm push --recapture <Nd>` that rewinds the git cursor only. _Source: Track 29A /autoplan Phase 3.5 DX, 2026-08-25._
+- **`~/.claude/projects` grows unbounded.** 88 dirs on the review machine, 30 with no jsonl, 50 of 60 candidates permanently dead. `_probe_claude` is ~95% of post-fix discovery cost and scales with this. mm does not own the directory, so a reaper is refused; a negative-result cache is the v0.12.15-shaped answer if it ever binds. _Source: Track 29A /autoplan Phase 3 Eng H4, 2026-08-25._
+- **`mm diag`'s Rich renderer reflows long paths mid-path**, so its "optimized for support-chat paste" claim (`cli.py` diag text path) is already false for paths. _Source: Track 29A /autoplan Phase 3.5 DX, 2026-08-25._
+- **X6 — `mm diag` should report last-push recorded capture alongside the fresh probe.** A fresh probe answers "what would happen if I pushed now", not "why does my card say 4". Deferred from Track 29A. _Source: Track 29A FINAL GATE, 2026-08-25._
 
 Track 28A `/autoplan` drain, 1 item on 2026-08-25:
 
