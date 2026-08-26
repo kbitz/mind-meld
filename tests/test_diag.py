@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from mind_meld import sidecar as sidecar_mod
@@ -62,6 +64,10 @@ def _setup(tmp_path, monkeypatch, *, with_config=True, with_crypto_init=True):
     # Isolate sidecar/breadcrumb to tmp_path.
     sc_dir = tmp_path / "sidecar"
     monkeypatch.setattr(sidecar_mod, "SIDECAR_DIR", sc_dir)
+    # `_probe_claude` hardcodes Path.home()/.claude/projects, ignoring the
+    # configured source path. Without this, diag reads the developer's
+    # real corpus locally and is vacuous on CI.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
     return storage, cfg_path, backend
 
@@ -92,6 +98,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "last_autorun",
         "skill_links",
         "host_skill_discovery",
+        "discovery",
     ):
         assert section in payload, f"missing {section}"
 
@@ -110,6 +117,7 @@ def test_diag_plain_text_is_human_readable(tmp_path, monkeypatch):
     assert "Storage inventory" in result.stdout
     assert "Skill links" in result.stdout
     assert "Host skill discovery" in result.stdout
+    assert "Git-root discovery" in result.stdout
 
 
 # ── Secrets boundary ─────────────────────────────────────────────────────
@@ -253,3 +261,208 @@ def test_diag_counts_peers(tmp_path, monkeypatch):
     # And those peer IDs must NOT appear in the output.
     assert "peer-aaaaaaaa" not in result.stdout
     assert "peer-bbbbbbbb" not in result.stdout
+
+
+# ── Discovery (Track 29A) ────────────────────────────────────────────────
+
+
+class TestDiagDiscovery:
+    def test_discovery_block_present_in_text_and_json(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        text = runner.invoke(app, ["diag"])
+        assert text.exit_code == 0, text.output
+        assert "Git-root discovery" in text.stdout
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        assert "discovery" in payload
+        assert payload["discovery"]["budget_ms"] == 50
+
+    def test_discovery_runs_at_the_autopush_budget(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        captured: list[float] = []
+        from mind_meld import events as events_mod
+
+        real = events_mod.discover_git_roots
+
+        def spy(config, *, deadline_monotonic=None):
+            captured.append(deadline_monotonic)
+            return real(config, deadline_monotonic=deadline_monotonic)
+
+        monkeypatch.setattr(events_mod, "discover_git_roots", spy)
+        monkeypatch.setattr("mind_meld.cli.events.discover_git_roots", spy)
+        import time as time_mod
+
+        monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)
+        monkeypatch.setattr("mind_meld.cli.time.monotonic", lambda: 1000.0)
+        runner.invoke(app, ["diag", "--json"])
+        assert captured, "discover_git_roots was not called"
+        remaining = captured[0] - 1000.0
+        assert remaining == pytest.approx(0.050)
+
+    def test_rejects_are_counts_by_reason_not_paths(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        from mind_meld.events import GitRootDiscovery
+
+        dead = tmp_path / "dead-workspace"
+        monkeypatch.setattr(
+            "mind_meld.cli.events.discover_git_roots",
+            lambda _cfg, **_kw: GitRootDiscovery(
+                (),
+                (),
+                False,
+                (),
+                (("gone", dead),),
+                (("gone", 1),),
+                ("claude",),
+            ),
+        )
+        text = runner.invoke(app, ["diag"])
+        assert text.exit_code == 0, text.output
+        assert "1 gone" in text.stdout
+        assert str(dead) not in text.stdout
+
+    def test_full_paths_only_in_json(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        from mind_meld.events import GitRootDiscovery
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.setattr(
+            "mind_meld.cli.events.discover_git_roots",
+            lambda _cfg, **_kw: GitRootDiscovery(
+                (repo,),
+                (),
+                False,
+                (("claude", repo),),
+                (),
+                (),
+                ("claude",),
+            ),
+        )
+        text = runner.invoke(app, ["diag"])
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        assert payload["discovery"]["roots"] == [str(repo)]
+        # Text uses ~-relative; the raw tmp_path absolute must not be required.
+        assert "rejects:" in text.stdout
+
+    def test_no_prober_ran_is_distinct_from_found_nothing(self, tmp_path, monkeypatch):
+        storage, cfg_path, _backend = _setup(tmp_path, monkeypatch)
+        save_config(
+            {
+                "device": {"id": "mac-a", "name": "Mac A"},
+                "storage": {"path": str(storage)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "gstack",
+                            "path": str(tmp_path / "gstack"),
+                            "type": "generic",
+                            "include_dirs": ["projects"],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            cfg_path,
+        )
+        (tmp_path / "gstack" / "projects").mkdir(parents=True)
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        assert payload["discovery"]["status"] == "no-prober"
+        assert payload["discovery"]["probers_ran"] == []
+        text = runner.invoke(app, ["diag"])
+        assert "none ran" in text.stdout
+
+        monkeypatch.setattr(
+            "mind_meld.cli.events.discover_git_roots",
+            lambda _cfg, **_kw: __import__(
+                "mind_meld.events", fromlist=["GitRootDiscovery"]
+            ).GitRootDiscovery((), (), False, (), (), (), ("claude",)),
+        )
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        assert payload["discovery"]["status"] == "empty"
+        assert payload["discovery"]["probers_ran"] == ["claude"]
+
+    def test_exceeded_discovery_is_not_reported_as_no_prober(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        from mind_meld.events import GIT_ROOT_DISCOVERY_BUDGET_ERROR, GitRootDiscovery
+
+        monkeypatch.setattr(
+            "mind_meld.cli.events.discover_git_roots",
+            lambda _cfg, **_kw: GitRootDiscovery((), (GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True),
+        )
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        assert payload["discovery"]["status"] == "exceeded"
+        assert payload["discovery"]["probers_ran"] == []
+
+    def test_discovery_paths_pass_through_safe_str(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        from mind_meld.events import GitRootDiscovery
+
+        nasty = tmp_path / "[red]boom"
+        nasty.mkdir()
+        monkeypatch.setattr(
+            "mind_meld.cli.events.discover_git_roots",
+            lambda _cfg, **_kw: GitRootDiscovery(
+                (nasty,),
+                (),
+                False,
+                (("claude", nasty),),
+                (),
+                (),
+                ("claude",),
+            ),
+        )
+        text = runner.invoke(app, ["diag"])
+        assert text.exit_code == 0, text.output
+        assert "[red]boom" in text.stdout or "boom" in text.stdout
+        # Rich must not interpret the markup as a style close.
+        assert "\\[red\\]boom" in text.stdout or "boom" in text.stdout
+
+    def test_diag_does_not_read_real_home_under_pytest(self, tmp_path, monkeypatch):
+        real_home = Path.home()
+        _setup(tmp_path, monkeypatch)
+        assert Path.home() == tmp_path
+        assert Path.home() != real_home
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        real_projects = str(real_home / ".claude" / "projects")
+        for raw in payload["discovery"]["roots"]:
+            assert not str(raw).startswith(real_projects)
+
+    def test_reject_sample_is_capped(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        from mind_meld import events as events_mod
+        from mind_meld.events import GitRootDiscovery
+
+        sample = tuple(("gone", tmp_path / f"dead{i}") for i in range(80))
+        monkeypatch.setattr(
+            "mind_meld.cli.events.discover_git_roots",
+            lambda _cfg, **_kw: GitRootDiscovery(
+                (),
+                (),
+                False,
+                (),
+                sample[: events_mod.MAX_DISCOVERY_REJECT_SAMPLE],
+                (("gone", 80),),
+                ("claude",),
+            ),
+        )
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        sample = payload["discovery"]["rejects"]["sample"]
+        assert len(sample) == events_mod.MAX_DISCOVERY_REJECT_SAMPLE
+        assert payload["discovery"]["rejects"]["counts"]["gone"] == 80
+
+    def test_discovery_runs_once_not_twice(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        calls = {"n": 0}
+        from mind_meld.events import GitRootDiscovery
+
+        def spy(_cfg, **_kw):
+            calls["n"] += 1
+            return GitRootDiscovery((), (), False, (), (), (), ("claude",))
+
+        monkeypatch.setattr("mind_meld.cli.events.discover_git_roots", spy)
+        runner.invoke(app, ["diag", "--json"])
+        assert calls["n"] == 1
+        calls["n"] = 0
+        runner.invoke(app, ["diag"])
+        assert calls["n"] == 1

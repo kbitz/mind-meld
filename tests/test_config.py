@@ -1724,3 +1724,43 @@ class TestSkillsSection:
         loaded = load_config(config_path)
         assert loaded["skills"]["maintain_links"] is True
         assert loaded["skills"]["agents"] == ["claude", "codex"]
+
+
+class TestRepoRootsValidation:
+    def _base(self):
+        return {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": "/tmp/mind-meld"},
+        }
+
+    def test_repo_roots_bare_string_raises_configerror(self):
+        config = self._base()
+        config["retro"] = {"repo_roots": "/Users/kb/src"}
+        with pytest.raises(ConfigError, match="retro.repo_roots must be a list"):
+            _validate(config)
+
+    def test_repo_roots_empty_string_entry_raises(self):
+        config = self._base()
+        config["retro"] = {"repo_roots": [""]}
+        with pytest.raises(ConfigError, match="non-empty"):
+            _validate(config)
+
+    def test_repo_roots_relative_path_raises(self):
+        config = self._base()
+        config["retro"] = {"repo_roots": ["src/mind-meld"]}
+        with pytest.raises(ConfigError, match="absolute"):
+            _validate(config)
+
+    def test_repo_roots_valid_list_round_trips(self, tmp_path):
+        config_path = tmp_path / "config.toml"
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(storage)},
+            "retro": {"repo_roots": [str(tmp_path / "repo"), "~/src"]},
+        }
+        _validate(config)
+        save_config(config, config_path)
+        loaded = load_config(config_path)
+        assert loaded["retro"]["repo_roots"] == [str(tmp_path / "repo"), "~/src"]

@@ -2020,7 +2020,7 @@ class TestAutoCommands:
         breadcrumb_path = sidecar_dir / "last-autorun.json"
         assert breadcrumb_path.exists()
         breadcrumb = json.loads(breadcrumb_path.read_text())
-        assert breadcrumb["outcome"] == "config-missing"
+        assert breadcrumb["pull"]["outcome"] == "config-missing"
 
     def test_autopush_no_config_exits_silently(self, tmp_path, monkeypatch):
         """autopush silent-mode twin of test_autopull_no_config_exits_silently."""
@@ -2034,7 +2034,7 @@ class TestAutoCommands:
         breadcrumb_path = sidecar_dir / "last-autorun.json"
         assert breadcrumb_path.exists()
         breadcrumb = json.loads(breadcrumb_path.read_text())
-        assert breadcrumb["outcome"] == "config-missing"
+        assert breadcrumb["push"]["outcome"] == "config-missing"
 
     def test_autopull_bad_config_prints_stderr_and_exits_zero(self, tmp_path, monkeypatch):
         """Regression for eager validation: a config file that exists but has
@@ -2121,8 +2121,8 @@ class TestAutoCommands:
         breadcrumb_path = sidecar_dir / "last-autorun.json"
         assert breadcrumb_path.exists()
         breadcrumb = json.loads(breadcrumb_path.read_text())
-        assert breadcrumb["outcome"] == "keyring-error"
-        assert breadcrumb["detail"] == "RuntimeError"
+        assert breadcrumb["pull"]["outcome"] == "keyring-error"
+        assert breadcrumb["pull"]["detail"] == "RuntimeError"
 
     def test_interactive_command_surfaces_keyring_backend_failure(self, tmp_path, monkeypatch):
         """Regression: interactive commands (mm push / pull / diff / gc) must

@@ -50,8 +50,15 @@ explicitly to every reader — no caller may fall through to ``host_usage``'s
 5-second default, which is ~20x an autopush's entire walk budget."""
 
 _ROOT_DISCOVERY_DEGRADATION = (
-    "git repository discovery hit its time budget: this retro capture may omit repositories. "
-    "A later substantive push will retry"
+    "git repository discovery hit its time budget: this push captured an incomplete "
+    "repository set and omitted commits are not recovered later. Run mm diag"
+)
+_ROOT_DISCOVERY_ERROR_DEGRADATION = (
+    "git repository discovery failed: probe error(s) recorded. Run mm diag"
+)
+_ROOT_DISCOVERY_EMPTY_DEGRADATION = (
+    "git repository discovery completed and found 0 repositories — "
+    "no commits will be captured from this Mac. Run mm diag"
 )
 
 _HOST_READ_REASONS = frozenset(get_args(host_usage.Reason))
@@ -650,6 +657,12 @@ def _run_events_tail(
         if capture.root_discovery.exceeded:
             sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
             degradations.append(_ROOT_DISCOVERY_DEGRADATION)
+        elif capture.root_discovery.errors:
+            sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_ERROR_DEGRADATION}\n")
+            degradations.append(_ROOT_DISCOVERY_ERROR_DEGRADATION)
+        elif not capture.root_discovery.roots and capture.root_discovery.probers_ran:
+            sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_EMPTY_DEGRADATION}\n")
+            degradations.append(_ROOT_DISCOVERY_EMPTY_DEGRADATION)
         if capture.walk_exceeded_budget:
             sys.stderr.write("mm: notice: events tail budget exceeded\n")
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
@@ -781,7 +794,7 @@ def _run_events_backfill(
         if capture.root_discovery.exceeded:
             sys.stderr.write(
                 "mm: notice: git repository discovery hit its time budget: "
-                "initial retro capture may omit repositories. A later substantive push will retry\n"
+                "initial retro capture may omit repositories. Run mm diag\n"
             )
         # Init has no `mm-push` row and no autorun breadcrumb, so the notice is
         # the only surface available — and init IS attended, so it lands.

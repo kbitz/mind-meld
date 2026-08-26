@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +39,14 @@ from tests.conftest import (  # noqa: E402
 )
 
 runner = CliRunner()
+
+
+def _verb_crumb(payload: dict, verb: str) -> dict:
+    """Read a per-verb last-autorun entry (Track 29A keyed shape)."""
+    entry = payload.get(verb)
+    if isinstance(entry, dict):
+        return entry
+    return payload
 
 
 # ─── Config-surface regressions ──────────────────────────────────────────
@@ -642,9 +652,10 @@ def test_autopull_writes_breadcrumb_on_success(tmp_path, monkeypatch):
     crumb = iso / "last-autorun.json"
     assert crumb.exists()
     data = json.loads(crumb.read_text())
-    assert data["verb"] == "pull"
-    assert data["outcome"] == "success"
-    assert "timestamp" in data
+    pull = _verb_crumb(data, "pull")
+    assert pull["outcome"] == "success"
+    assert "timestamp" in pull
+    assert "push" not in data
 
 
 @pytest.mark.parametrize(
@@ -669,8 +680,83 @@ def test_auto_command_writes_breadcrumb_on_lock_held(tmp_path, monkeypatch, comm
     crumb = iso / "last-autorun.json"
     assert crumb.exists()
     data = json.loads(crumb.read_text())
-    assert data["verb"] == verb
-    assert data["outcome"] == "lock-held"
+    entry = _verb_crumb(data, verb)
+    assert entry["outcome"] == "lock-held"
+
+
+def test_autopull_does_not_erase_autopush_crumb(tmp_path, monkeypatch):
+    """Documented lifecycle is autopull at conversation start, autopush at
+    end. Last-write-wins on a single verb field erased every degraded push."""
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0
+    r = runner.invoke(app, ["autopull"])
+    assert r.exit_code == 0
+    data = json.loads((iso / "last-autorun.json").read_text())
+    assert "push" in data
+    assert "pull" in data
+    assert data["push"]["outcome"]
+    assert data["pull"]["outcome"] == "success"
+
+
+def test_concurrent_autorun_breadcrumbs_preserve_each_verb(tmp_path, monkeypatch):
+    """A lock-held pull must not erase a concurrent degraded push crumb."""
+    from mind_meld import lockedjson
+
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    first_write_entered = threading.Event()
+    second_lock_attempted = threading.Event()
+    release_first_write = threading.Event()
+    original_acquire_lock = lockedjson._acquire_lock
+    original_write_json = lockedjson._write_json
+    acquire_count = 0
+    write_count = 0
+
+    def note_second_lock_attempt(fd, **kwargs):
+        nonlocal acquire_count
+        acquire_count += 1
+        if acquire_count == 2:
+            second_lock_attempted.set()
+        return original_acquire_lock(fd, **kwargs)
+
+    def pause_first_write(fd, data):
+        nonlocal write_count
+        write_count += 1
+        if write_count == 1:
+            first_write_entered.set()
+            assert release_first_write.wait(timeout=2), "test did not release first writer"
+        return original_write_json(fd, data)
+
+    monkeypatch.setattr(lockedjson, "_acquire_lock", note_second_lock_attempt)
+    monkeypatch.setattr(lockedjson, "_write_json", pause_first_write)
+    push = threading.Thread(
+        target=cli_module._write_autorun_breadcrumb,
+        args=("push", "degraded", "events tail failed"),
+    )
+    pull = threading.Thread(
+        target=cli_module._write_autorun_breadcrumb,
+        args=("pull", "lock-held"),
+    )
+
+    try:
+        push.start()
+        assert first_write_entered.wait(timeout=2), "writer did not use the shared JSON lock"
+        pull.start()
+        assert second_lock_attempted.wait(timeout=2), "second writer did not contend on the lock"
+    finally:
+        release_first_write.set()
+
+    push.join(timeout=2)
+    pull.join(timeout=2)
+    assert not push.is_alive()
+    assert not pull.is_alive()
+    payload = json.loads((iso / "last-autorun.json").read_text())
+    assert payload["push"]["outcome"] == "degraded"
+    assert payload["push"]["detail"] == "events tail failed"
+    assert payload["push"]["timestamp"]
+    assert payload["pull"]["outcome"] == "lock-held"
+    assert payload["pull"]["timestamp"]
 
 
 def test_mm_status_surfaces_breadcrumb(tmp_path, monkeypatch):
@@ -969,7 +1055,7 @@ def test_autopush_breadcrumb_no_sources_distinguishes_from_success(tmp_path, mon
     assert r.exit_code == 0, (r.stdout, r.stderr)
     crumb = iso / "last-autorun.json"
     assert crumb.exists()
-    assert json.loads(crumb.read_text())["outcome"] == "no-sources"
+    assert _verb_crumb(json.loads(crumb.read_text()), "push")["outcome"] == "no-sources"
 
 
 def _setup_events_tail_config(tmp_path, monkeypatch):
@@ -996,6 +1082,17 @@ def _setup_events_tail_config(tmp_path, monkeypatch):
     isolated_home = tmp_path / "isolated-home"
     isolated_home.mkdir()
     monkeypatch.setattr(_mm_events.Path, "home", classmethod(lambda cls: isolated_home))
+    # Plant a discoverable git root so complete-zero is not the default.
+    # `_probe_claude` reads Path.home()/.claude/projects, not the configured
+    # source path, so the token-walk jsonl below is a different corpus.
+    app_repo = tmp_path / "app-repo"
+    app_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(app_repo)], check=True)
+    claude_home = isolated_home / ".claude" / "projects" / "-app"
+    claude_home.mkdir(parents=True)
+    (claude_home / "session.jsonl").write_text(
+        json.dumps({"cwd": str(app_repo), "type": "user"}) + "\n"
+    )
     config_path = tmp_path / "config.toml"
     src = tmp_path / "claude"
     _populate_claude(src)
@@ -1070,7 +1167,7 @@ def test_autopush_breadcrumb_success_when_events_tail_is_healthy(tmp_path, monke
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "success", payload
 
 
@@ -1085,7 +1182,7 @@ def test_autopush_breadcrumb_degraded_when_walk_budget_exceeded(tmp_path, monkey
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     assert "budget" in payload.get("detail", "")
 
@@ -1106,13 +1203,121 @@ def test_autopush_breadcrumb_degraded_when_root_discovery_is_partial(tmp_path, m
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     assert payload["detail"] == (
-        "git repository discovery hit its time budget: this retro capture may omit repositories. "
-        "A later substantive push will retry"
+        "git repository discovery hit its time budget: this push captured an incomplete "
+        "repository set and omitted commits are not recovered later. Run mm diag"
     )
     assert str(tmp_path) not in payload["detail"]
+
+
+def test_budget_phrase_unchanged_when_exceeded(tmp_path, monkeypatch):
+    """The exceeded phrase must stay byte-identical to the constant."""
+    from mind_meld import events_tail, token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _config, **_kwargs: _mm_events.GitRootDiscovery(
+            (), (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True
+        ),
+    )
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert payload["detail"] == events_tail._ROOT_DISCOVERY_DEGRADATION
+
+
+def test_prober_exception_reaches_the_degraded_breadcrumb(tmp_path, monkeypatch):
+    from mind_meld import events_tail, token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _config, **_kwargs: _mm_events.GitRootDiscovery(
+            (), ("claude prober: RuntimeError: boom",), False, (), (), (), ("claude",)
+        ),
+    )
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert payload["outcome"] == "degraded", payload
+    assert payload["detail"] == events_tail._ROOT_DISCOVERY_ERROR_DEGRADATION
+    assert "time budget" not in payload["detail"]
+
+
+def test_ordinary_rejected_candidate_does_not_degrade_the_push(tmp_path, monkeypatch):
+    from mind_meld import token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    repo = tmp_path / "kept"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _config, **_kwargs: _mm_events.GitRootDiscovery(
+            (repo,),
+            (),
+            False,
+            (("claude", repo),),
+            (("gone", tmp_path / "dead"),),
+            (("gone", 1),),
+            ("claude",),
+        ),
+    )
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert payload["outcome"] == "success", payload
+
+
+def test_complete_zero_discovery_degrades_the_push(tmp_path, monkeypatch):
+    from mind_meld import events_tail, token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _config, **_kwargs: _mm_events.GitRootDiscovery(
+            (), (), False, (), (), (), ("claude",)
+        ),
+    )
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert payload["outcome"] == "degraded", payload
+    assert payload["detail"] == events_tail._ROOT_DISCOVERY_EMPTY_DEGRADATION
+
+
+def test_incomplete_discovery_still_triggers_tail_degradation(tmp_path, monkeypatch):
+    """Regression: exceeded discovery must still degrade even with some roots."""
+    from mind_meld import events_tail, token_usage
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    repo = tmp_path / "kept"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda _config, **_kwargs: _mm_events.GitRootDiscovery(
+            (repo,), (_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True
+        ),
+    )
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert payload["outcome"] == "degraded", payload
+    assert payload["detail"] == events_tail._ROOT_DISCOVERY_DEGRADATION
 
 
 def test_autopush_breadcrumb_degraded_when_token_cache_cold(tmp_path, monkeypatch):
@@ -1122,7 +1327,7 @@ def test_autopush_breadcrumb_degraded_when_token_cache_cold(tmp_path, monkeypatc
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     assert "tokens and skills are missing" in payload.get("detail", "")
 
@@ -1180,7 +1385,7 @@ def test_autopush_no_claude_source_is_not_a_degradation(tmp_path, monkeypatch):
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "success", (
         f"no claude source is a config shape, not a degradation: {payload}"
     )
@@ -1213,7 +1418,7 @@ def test_autopush_breadcrumb_degraded_when_token_cache_is_locked(tmp_path, monke
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     assert "locked" in payload.get("detail", "")
     assert "tokens and skills are missing" in payload.get("detail", "")
@@ -1245,7 +1450,7 @@ def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, m
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     assert payload["detail"] == (
         "host-usage snapshot skipped (grok unsupported) — "
@@ -1270,7 +1475,7 @@ def test_autopush_breadcrumb_joins_multiple_degradations(tmp_path, monkeypatch):
 
     r = runner.invoke(app, ["autopush"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    payload = json.loads((iso / "last-autorun.json").read_text())
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     detail = payload.get("detail", "")
     assert "budget" in detail
@@ -1397,7 +1602,7 @@ def test_autopush_breadcrumb_degraded_when_events_tail_fails(tmp_path, monkeypat
     assert r.exit_code == 0, (r.stdout, r.stderr)
     crumb = iso / "last-autorun.json"
     assert crumb.exists()
-    payload = json.loads(crumb.read_text())
+    payload = _verb_crumb(json.loads(crumb.read_text()), "push")
     assert payload["outcome"] == "degraded", (
         "events-tail failure still reported as success to mm status"
     )

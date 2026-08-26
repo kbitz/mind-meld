@@ -39,6 +39,7 @@ from rich.table import Table
 
 from mind_meld import (
     __version__,
+    events,
     events_tail,
     fsutil,
     host_skill_discovery,
@@ -109,6 +110,7 @@ from mind_meld.errors import (
     MindMeldError,
     StorageError,
 )
+from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -4378,42 +4380,50 @@ def status(
 
     # Surface the last autopull/autopush breadcrumb so a wedged sync
     # (silent lock contention, missing passphrase, bad config) is visible.
-    breadcrumb_path = _autorun_breadcrumb_path()
-    if breadcrumb_path.exists():
-        try:
-            import json as _json
-
-            crumb = _json.loads(breadcrumb_path.read_text())
-            ts = crumb.get("timestamp", "?")
-            verb = crumb.get("verb", "?")
-            outcome = crumb.get("outcome", "?")
-            # safe_str the peer-reachable fields before they hit a Rich
-            # console, which interprets markup and passes escapes through.
-            # `detail` is fed raw `str(e)` by the `failed` / `config-error` /
-            # `crypto-error` breadcrumb writers, and those exceptions can
-            # carry peer-derived text (device names, source names, rel_paths
-            # from a peer manifest). This is the render site that MATTERS:
-            # `mm status` is the command the v0.12.16 degradation signal is
-            # designed to reach, and it runs far more often than `mm diag`.
-            detail = crumb.get("detail")
-            outcome_str = (
-                f"{safe_str(str(outcome))}: {safe_str(str(detail))}"
-                if detail
-                else safe_str(str(outcome))
-            )
-            # Staleness gate. `_write_autorun_breadcrumb` is called from INSIDE
-            # the command, so a failure that happens before typer's runner --
-            # an ImportError at module scope being the obvious one -- writes no
-            # breadcrumb at all, and this line then reports the last SUCCESS
-            # forever while sync is wedged. That is the one degradation the
-            # v0.8.1 `no-sources` and v0.12.16 `degraded` breadcrumbs cannot
-            # cover, because both are written by code that never ran.
-            console.print(
-                f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})"
-                f"{_breadcrumb_staleness_suffix(ts)}"
-            )
-        except (OSError, ValueError):
-            pass  # corrupt breadcrumb is not worth surfacing an error for
+    crumbs = _read_autorun_breadcrumbs()
+    discovery_nag = False
+    for verb in ("pull", "push"):
+        crumb = crumbs.get(verb)
+        if not crumb:
+            continue
+        ts = crumb.get("timestamp", "?")
+        outcome = crumb.get("outcome", "?")
+        # safe_str the peer-reachable fields before they hit a Rich
+        # console, which interprets markup and passes escapes through.
+        # `detail` is fed raw `str(e)` by the `failed` / `config-error` /
+        # `crypto-error` breadcrumb writers, and those exceptions can
+        # carry peer-derived text (device names, source names, rel_paths
+        # from a peer manifest). This is the render site that MATTERS:
+        # `mm status` is the command the v0.12.16 degradation signal is
+        # designed to reach, and it runs far more often than `mm diag`.
+        detail = crumb.get("detail")
+        outcome_str = (
+            f"{safe_str(str(outcome))}: {safe_str(str(detail))}"
+            if detail
+            else safe_str(str(outcome))
+        )
+        # Staleness gate. `_write_autorun_breadcrumb` is called from INSIDE
+        # the command, so a failure that happens before typer's runner --
+        # an ImportError at module scope being the obvious one -- writes no
+        # breadcrumb at all, and this line then reports the last SUCCESS
+        # forever while sync is wedged. That is the one degradation the
+        # v0.8.1 `no-sources` and v0.12.16 `degraded` breadcrumbs cannot
+        # cover, because both are written by code that never ran.
+        console.print(
+            f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})"
+            f"{_breadcrumb_staleness_suffix(ts)}"
+        )
+        if (
+            verb == "push"
+            and outcome == "degraded"
+            and isinstance(detail, str)
+            and "git repository discovery" in detail
+        ):
+            discovery_nag = True
+    if discovery_nag:
+        console.print(
+            "  [yellow]Git repository discovery incomplete:[/yellow] run [bold]mm diag[/bold]"
+        )
     if fetch.status == "missing":
         console.print("  [dim]Remote manifest: not yet pushed from this device.[/dim]")
     elif fetch.status == "corrupt":
@@ -4585,6 +4595,77 @@ def status(
 
 # ── diag ──────────────────────────────────────────────────────────────
 
+_DISCOVERY_REJECT_REASONS = ("gone", "not-a-repo", "unreadable")
+
+
+def _home_relative_path(path: Path) -> str:
+    """Render ``path`` as ``~/...`` when it sits under $HOME."""
+    try:
+        resolved = path.expanduser()
+        home = Path.home()
+        try:
+            return "~/" + resolved.relative_to(home).as_posix()
+        except ValueError:
+            return str(resolved)
+    except OSError:
+        return str(path)
+
+
+def _collect_discovery_diag(config: dict) -> dict:
+    """Run git-root discovery at the AUTOPUSH budget and shape it for diag.
+
+    Autopush is the only path a Claude Code hook fires and the only one that
+    loses data; reporting complete at the interactive 100 ms budget while
+    autopush is exceeded at 50 ms would point the verification surface at
+    the wrong number.
+    """
+    budget_ms = events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+    started = time.monotonic()
+    try:
+        result = events.discover_git_roots(
+            config or {},
+            deadline_monotonic=started + budget_ms / 1000.0,
+        )
+    except Exception as e:
+        return {
+            "budget_ms": budget_ms,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            "status": "error",
+            "error": f"{type(e).__name__}: {safe_str(e)}",
+            "probers_ran": [],
+            "roots": [],
+            "attribution": [],
+            "rejects": {"counts": {}, "sample": []},
+            "errors": [],
+            "exceeded": False,
+        }
+    elapsed_ms = round((time.monotonic() - started) * 1000, 3)
+    if result.exceeded:
+        status = "exceeded"
+    elif not result.probers_ran:
+        status = "no-prober"
+    elif result.roots:
+        status = "complete"
+    else:
+        status = "empty"
+    counts = {reason: 0 for reason in _DISCOVERY_REJECT_REASONS}
+    for reason, n in result.reject_counts:
+        counts[reason] = n
+    return {
+        "budget_ms": budget_ms,
+        "elapsed_ms": elapsed_ms,
+        "status": status,
+        "exceeded": result.exceeded,
+        "probers_ran": list(result.probers_ran),
+        "roots": [str(p) for p in result.roots],
+        "attribution": [{"source": src, "path": str(p)} for src, p in result.attribution],
+        "rejects": {
+            "counts": counts,
+            "sample": [{"reason": reason, "path": str(p)} for reason, p in result.rejects],
+        },
+        "errors": list(result.errors),
+    }
+
 
 def _collect_diag_state(backend: LocalBackend) -> dict:
     """Gather non-secret state for support triage.
@@ -4608,6 +4689,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     # Local config (best-effort — a broken config is itself diag-worthy).
     skill_may_create: frozenset[str] | None = None
     skill_config_error: str | None = None
+    cfg: dict = {}
     try:
         cfg = load_config()
         dev_id = cfg.get("device", {}).get("id")
@@ -4691,12 +4773,15 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     }
 
     # Last autorun breadcrumb (ops-oriented: when did autopush/autopull
-    # last fire and how did it end).
+    # last fire and how did it end). Keyed per verb since v0.12.45 so
+    # autopull cannot erase a degraded autopush crumb.
     breadcrumb: dict | None = None
     try:
         bp = _autorun_breadcrumb_path()
         if bp.exists():
-            breadcrumb = json.loads(bp.read_text())
+            breadcrumb = _read_autorun_breadcrumbs()
+            if not breadcrumb:
+                breadcrumb = {"error": "unreadable"}
     except (OSError, ValueError):
         breadcrumb = {"error": "unreadable"}
 
@@ -4724,6 +4809,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             may_create=skill_may_create, config_error=skill_config_error
         ),
         "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
+        "discovery": _collect_discovery_diag(cfg),
     }
 
 
@@ -4804,17 +4890,25 @@ def diag(
     elif "error" in br:
         console.print("  [yellow]breadcrumb unreadable[/yellow]")
     else:
-        console.print(f"  verb:       {br.get('verb')}")
-        console.print(f"  outcome:    {br.get('outcome')}")
-        console.print(f"  timestamp:  {br.get('timestamp')}")
-        if br.get("detail"):
-            # safe_str at the render site covers every producer at once:
-            # sibling `_write_autorun_breadcrumb(verb, "failed"/"config-error",
-            # str(e))` calls can carry peer-derived text (device names, source
-            # names, rel_paths from a peer manifest) into this field, and Rich
-            # interprets markup in an f-string. The v0.12.16 degradation
-            # strings are all literals, but the field is shared.
-            console.print(f"  detail:     {safe_str(str(br.get('detail')))}")
+        rendered_any = False
+        for verb in ("pull", "push"):
+            entry = br.get(verb)
+            if not isinstance(entry, dict):
+                continue
+            rendered_any = True
+            console.print(f"  {verb}:")
+            console.print(f"    outcome:    {safe_str(str(entry.get('outcome', '')))}")
+            console.print(f"    timestamp:  {safe_str(str(entry.get('timestamp', '')))}")
+            if entry.get("detail"):
+                # safe_str at the render site covers every producer at once:
+                # sibling `_write_autorun_breadcrumb(verb, "failed"/"config-error",
+                # str(e))` calls can carry peer-derived text (device names, source
+                # names, rel_paths from a peer manifest) into this field, and Rich
+                # interprets markup in an f-string. The v0.12.16 degradation
+                # strings are all literals, but the field is shared.
+                console.print(f"    detail:     {safe_str(str(entry.get('detail')))}")
+        if not rendered_any:
+            console.print("  [yellow]breadcrumb unreadable[/yellow]")
 
     console.print("\n[bold]Skill links[/bold]")
     for row in state.get("skill_links") or []:
@@ -4842,6 +4936,33 @@ def diag(
         console.print(
             f"  grok_version:          {safe_str(str(hsd.get('grok_version') or ''))[:200]}"
         )
+
+    disc = state.get("discovery") or {}
+    console.print("\n[bold]Git-root discovery[/bold] (autopush budget)")
+    console.print(f"  budget_ms:    {disc.get('budget_ms')}")
+    console.print(f"  elapsed_ms:   {disc.get('elapsed_ms')}")
+    console.print(f"  status:       {safe_str(str(disc.get('status', '')))}")
+    if disc.get("status") == "error":
+        console.print(f"  error:        {safe_str(str(disc.get('error', '')))}")
+    probers = disc.get("probers_ran") or []
+    if not probers:
+        console.print("  probers:      (none ran — claude source disabled)")
+    else:
+        console.print(f"  probers:      {safe_str(', '.join(str(p) for p in probers))}")
+    roots = disc.get("roots") or []
+    console.print(f"  roots:        {len(roots)}")
+    for raw in roots:
+        shown = _home_relative_path(Path(str(raw)))
+        console.print(f"    {safe_str(shown)}")
+    counts = (disc.get("rejects") or {}).get("counts") or {}
+    parts = [
+        f"{counts[reason]} {reason}" for reason in _DISCOVERY_REJECT_REASONS if counts.get(reason)
+    ]
+    console.print(f"  rejects:      {', '.join(parts) if parts else '0'}")
+    if disc.get("errors"):
+        console.print(f"  errors:       {len(disc['errors'])}")
+        for err in disc["errors"]:
+            console.print(f"    {safe_str(str(err))}")
 
 
 # ── devices ───────────────────────────────────────────────────────────
@@ -6629,6 +6750,44 @@ def _maybe_prompt_migration(config: dict) -> None:
         _migrate_config_core(yes=False, dry_run=False)
 
 
+_AUTORUN_VERBS = ("push", "pull")
+
+
+def _normalize_autorun_breadcrumbs(payload: object) -> dict[str, dict]:
+    """Return the valid per-verb entries from current or legacy payload."""
+    if not isinstance(payload, dict):
+        return {}
+    keyed: dict[str, dict] = {}
+    for verb in _AUTORUN_VERBS:
+        entry = payload.get(verb)
+        if isinstance(entry, dict) and "outcome" in entry:
+            keyed[verb] = entry
+    if keyed:
+        return keyed
+    verb = payload.get("verb")
+    if verb in _AUTORUN_VERBS and "outcome" in payload:
+        entry = {k: v for k, v in payload.items() if k != "verb"}
+        return {verb: entry}
+    return {}
+
+
+def _read_autorun_breadcrumbs() -> dict[str, dict]:
+    """Load last-autorun.json keyed per verb under a read-only lock.
+
+    Pre-0.12.45 files are a single `{verb, outcome, timestamp, detail?}`
+    object; last-write-wins meant autopull erased a degraded push crumb.
+    The new shape is `{"push": {...}, "pull": {...}}`. Legacy files are
+    read as a one-verb map and rewritten on the next write.
+    """
+    try:
+        with locked_json_snapshot(_autorun_breadcrumb_path()) as snapshot:
+            if snapshot.data is None:
+                return {}
+            return _normalize_autorun_breadcrumbs(snapshot.data)
+    except Exception:
+        return {}
+
+
 def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None:
     """Record the last autopull/autopush attempt for forensic observability.
 
@@ -6637,21 +6796,27 @@ def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None
     see 'last auto-sync attempt: 3h ago, skipped (lock held)' instead of
     wondering why sync appears wedged.
 
+    Keyed per verb so the documented CLAUDE.md lifecycle (autopull at
+    conversation start, autopush at end) cannot erase the other verb's
+    crumb. The shared JSON lock serializes concurrent sibling hooks, so a
+    lock-held pull cannot replace a degraded push read from a stale payload.
     Silent contract preserved: nothing is printed. Any failure here is
     swallowed -- a broken breadcrumb must never crash the hook.
     """
+    entry: dict[str, str] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "outcome": outcome,
+    }
+    if detail:
+        entry["detail"] = detail
     try:
-        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "verb": verb,
-            "outcome": outcome,
-        }
-        if detail:
-            payload["detail"] = detail
-        import json as _json
-
-        _autorun_breadcrumb_path().write_text(_json.dumps(payload, indent=2))
+        with locked_json_rmw(_autorun_breadcrumb_path()) as ljson:
+            if not ljson.is_locked:
+                return
+            existing = _normalize_autorun_breadcrumbs(ljson.data)
+            existing[verb] = entry
+            ljson.data.clear()
+            ljson.data.update({k: existing[k] for k in _AUTORUN_VERBS if k in existing})
     except Exception:
         pass
 

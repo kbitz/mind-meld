@@ -269,6 +269,10 @@ class GitAggregate:
     ship: ShipOfWeek = field(default_factory=ShipOfWeek)
     # Empty unless window_days >= 14. Sorted oldest -> newest.
     weekly: list[WeeklyBucket] = field(default_factory=list)
+    # device_id -> (zero-project snapshots, total snapshots) in-window.
+    # A Notes line fires when any device captured 0 repositories on some
+    # of its pushes: that machine's commits are missing from the window.
+    zero_repo_captures: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
     def pull_requests(self) -> int:
@@ -868,12 +872,19 @@ def aggregate_git(
     burst_dts: list[datetime] = []
     weekly_by_start: dict[str, WeeklyBucket] = {}
     weekly_active_days: dict[str, set[str]] = {}
+    snap_total: dict[str, int] = {}
+    snap_zero: dict[str, int] = {}
     for ev in events:
         if ev.get("type") != "git-snapshot":
             continue
         projects = ev.get("projects")
         if not isinstance(projects, list):
             continue
+        device = ev.get("device")
+        if isinstance(device, str) and device and _within_window(ev.get("ts"), since, until):
+            snap_total[device] = snap_total.get(device, 0) + 1
+            if not projects:
+                snap_zero[device] = snap_zero.get(device, 0) + 1
         for proj in projects:
             if not isinstance(proj, dict):
                 continue
@@ -968,6 +979,9 @@ def aggregate_git(
         for week_start, bucket in weekly_by_start.items():
             bucket.active_days = len(weekly_active_days.get(week_start, set()))
         out.weekly = sorted(weekly_by_start.values(), key=lambda b: b.week_start)
+    out.zero_repo_captures = {
+        device: (snap_zero[device], snap_total[device]) for device in snap_zero if snap_zero[device]
+    }
     return out
 
 
@@ -3364,8 +3378,12 @@ def format_retro(
         )
     if data.pushes.discovery_errors:
         notes.append(
-            f"{len(data.pushes.discovery_errors)} discovery error(s) recorded — see "
-            f"mm: notice: stderr breadcrumbs."
+            f"{len(data.pushes.discovery_errors)} discovery error(s) recorded — run mm diag."
+        )
+    for device, (n_zero, n_total) in sorted(data.git.zero_repo_captures.items()):
+        notes.append(
+            f"Machine {_safe_short(device)} captured 0 repositories on "
+            f"{n_zero} of {n_total} pushes; its commits are missing from this window."
         )
     n_events = data.skipped_per_source.get(SKIP_CATEGORY_EVENTS, 0)
     if n_events:
