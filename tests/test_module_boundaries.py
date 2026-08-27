@@ -861,6 +861,7 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
         "migrate-config",
         "pull",
         "push",
+        "recapture",
         "reconfigure-sources",
         "recover",
         "refresh-identity",

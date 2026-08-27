@@ -107,9 +107,10 @@ inventory. v=1 is delta-semantic and excluded from sessions totals — see
 events.py's EVENTS_SCHEMA_VERSION docstring for the cross-model-review
 rationale."""
 
-WINDOW_PATTERN = re.compile(r"^(\d+)d$")
+WINDOW_PATTERN = mm_events.WINDOW_PATTERN
 """Window argument: ``7d``, ``30d``, etc. Days only — hours/weeks/months
-deferred to v2."""
+deferred to v2. Owned by ``events.WINDOW_PATTERN`` so ``mm recapture``
+cannot fork the regex."""
 
 TOP_N_REPOS = 5
 TOP_N_SKILLS = 10

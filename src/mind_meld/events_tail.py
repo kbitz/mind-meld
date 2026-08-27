@@ -51,7 +51,7 @@ explicitly to every reader — no caller may fall through to ``host_usage``'s
 
 _ROOT_DISCOVERY_DEGRADATION = (
     "git repository discovery hit its time budget: this push captured an incomplete "
-    "repository set and omitted commits are not recovered later. Run mm diag"
+    "repository set. Run mm diag, then mm recapture 30d to recover the omitted commits"
 )
 _ROOT_DISCOVERY_ERROR_DEGRADATION = (
     "git repository discovery failed: probe error(s) recorded. Run mm diag"
@@ -59,6 +59,18 @@ _ROOT_DISCOVERY_ERROR_DEGRADATION = (
 _ROOT_DISCOVERY_EMPTY_DEGRADATION = (
     "git repository discovery completed and found 0 repositories — "
     "no commits will be captured from this Mac. Run mm diag"
+)
+_GIT_WALK_DEGRADATION = (
+    "git walk dropped {n} repositories this push. "
+    "Run mm diag, then mm recapture 30d to recover the omitted commits"
+)
+_CURSOR_HOLD_DEGRADATION = (
+    "retro cursor held at last complete capture. "
+    "Run mm diag, then mm recapture 30d to recover the omitted commits"
+)
+_CURSOR_COVERAGE_DEGRADATION = (
+    "retro cursor floored: no complete capture found in the retained event log. "
+    "Run mm diag, then mm recapture 30d to recover older commits"
 )
 
 _HOST_READ_REASONS = frozenset(get_args(host_usage.Reason))
@@ -170,9 +182,11 @@ class CaptureResult:
     host_capture: HostUsageCapture
     root_discovery: events.GitRootDiscovery
     discovery_errors: list[str]
-    walk_exceeded_budget: bool
+    session_walk_exceeded_budget: bool
     warn_lock_unavailable: bool
     token_cache_requested: bool
+    walk_budget_aborts: int = 0
+    walk_errors: int = 0
 
 
 def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
@@ -390,6 +404,7 @@ def _capture_event_snapshots(
     host_readers: Sequence[tuple[str, HostReader]],
     root_discovery_budget_ms: int | None = None,
     host_budget_ms: int | None = None,
+    git_budget_ms: int | None = None,
     warm_host_cache: Callable[[str], bool] | None = None,
 ) -> CaptureResult:
     """Capture device-stamped git, session, and host snapshot rows without writing.
@@ -422,14 +437,14 @@ def _capture_event_snapshots(
             if budget_ms <= events.WALK_TIME_BUDGET_AUTOPUSH_MS
             else HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
         )
-    root_discovery = events.discover_git_roots(
+    git_rows, root_discovery, walk_budget_aborts, walk_errors = _capture_git_rows(
         config,
-        deadline_monotonic=time.monotonic() + root_discovery_budget_ms / 1000.0,
+        device_id,
+        since=since,
+        walk_budget_ms=git_budget_ms if git_budget_ms is not None else budget_ms,
+        root_discovery_budget_ms=root_discovery_budget_ms,
     )
-    roots, discovery_errors = root_discovery
-    git_rows = events.walk_git_projects(roots, since=since, total_budget_ms=budget_ms)
-    for row in git_rows:
-        row["device"] = device_id
+    _roots, discovery_errors = root_discovery
 
     token_cache_mode = prepare_token_cache()
     deadline = time.monotonic() + budget_ms / 1000.0
@@ -530,10 +545,48 @@ def _capture_event_snapshots(
         host_capture=host_capture,
         root_discovery=root_discovery,
         discovery_errors=discovery_errors,
-        walk_exceeded_budget=walk_done > deadline,
+        session_walk_exceeded_budget=walk_done > deadline,
         warn_lock_unavailable=warn_lock_unavailable,
         token_cache_requested=token_cache_mode is not None,
+        walk_budget_aborts=walk_budget_aborts,
+        walk_errors=walk_errors,
     )
+
+
+def _capture_git_rows(
+    config: dict,
+    device_id: str,
+    *,
+    since: datetime,
+    walk_budget_ms: int,
+    root_discovery_budget_ms: int,
+    origin: str | None = None,
+) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
+    """Discover roots and walk git. No writes, no notices, no mm-push.
+
+    Shared by the push tail, init backfill, and recapture. ``origin`` marks
+    recapture rows so the aggregator can tell them from pushes.
+    """
+    root_discovery = events.discover_git_roots(
+        config,
+        deadline_monotonic=time.monotonic() + root_discovery_budget_ms / 1000.0,
+    )
+    roots, _discovery_errors = root_discovery
+    git_rows = events.walk_git_projects(roots, since=since, total_budget_ms=walk_budget_ms)
+    for row in git_rows:
+        row["device"] = device_id
+        if origin is not None:
+            row["origin"] = origin
+    skipped = git_rows[0].get("skipped") or [] if git_rows else []
+    aborts, errs = events.walk_skip_counts(skipped)
+    return git_rows, root_discovery, aborts, errs
+
+
+def _git_walk_degradation(aborts: int, errors: int) -> str | None:
+    n = aborts + errors
+    if n <= 0:
+        return None
+    return _GIT_WALK_DEGRADATION.format(n=n)
 
 
 def _run_events_tail(
@@ -581,11 +634,17 @@ def _run_events_tail(
     if mm_events_src is None:
         return degradations
     try:
+        events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+        cursor = events.resolve_push_cursor(events_dir, device_id)
+        since = cursor.since
+        # Session-walk budget stays the quiet/interactive pair. Git-walk
+        # budget escalates independently when the cursor is old — mixing
+        # the two would make a first-run 30-day cursor silently raise the
+        # session-walk notice threshold (and break the AUTOPUSH=0 pin).
         budget_ms = (
             events.WALK_TIME_BUDGET_AUTOPUSH_MS if quiet else events.WALK_TIME_BUDGET_INTERACTIVE_MS
         )
-        events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-        since = events.last_push_ts(events_dir, device_id)
+        git_budget_ms = events.git_walk_budget_ms(quiet=quiet, since=since)
 
         claude_paths = _enabled_claude_paths(sources)
 
@@ -604,6 +663,7 @@ def _run_events_tail(
             device_id,
             since=since,
             budget_ms=budget_ms,
+            git_budget_ms=git_budget_ms,
             root_discovery_budget_ms=(
                 events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
                 if quiet
@@ -643,6 +703,12 @@ def _run_events_tail(
             sources=source_names,
             discovery_errors=capture.discovery_errors,
             local_emails=local_emails,
+            git_capture=events.make_git_capture(
+                since=since,
+                discovery=events.classify_discovery(capture.root_discovery),
+                walk_budget_aborts=capture.walk_budget_aborts,
+                walk_errors=capture.walk_errors,
+            ),
         )
         # CT-4 invariant: mm-push event LAST so a partial write doesn't
         # advance the next-push cursor. The optional host row sits between the
@@ -654,6 +720,12 @@ def _run_events_tail(
             [*capture.git_rows, *capture.session_rows, *capture.host_rows, mm_event],
         )
 
+        if cursor.held:
+            sys.stderr.write(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
+            degradations.append(_CURSOR_HOLD_DEGRADATION)
+        elif cursor.floored_after_incomplete:
+            sys.stderr.write(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")
+            degradations.append(_CURSOR_COVERAGE_DEGRADATION)
         if capture.root_discovery.exceeded:
             sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
             degradations.append(_ROOT_DISCOVERY_DEGRADATION)
@@ -663,7 +735,11 @@ def _run_events_tail(
         elif not capture.root_discovery.roots and capture.root_discovery.probers_ran:
             sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_EMPTY_DEGRADATION}\n")
             degradations.append(_ROOT_DISCOVERY_EMPTY_DEGRADATION)
-        if capture.walk_exceeded_budget:
+        walk_phrase = _git_walk_degradation(capture.walk_budget_aborts, capture.walk_errors)
+        if walk_phrase is not None:
+            sys.stderr.write(f"mm: notice: {walk_phrase}\n")
+            degradations.append(walk_phrase)
+        if capture.session_walk_exceeded_budget:
             sys.stderr.write("mm: notice: events tail budget exceeded\n")
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
         if capture.warn_lock_unavailable:
@@ -789,7 +865,7 @@ def _run_events_backfill(
                 f"{type(e).__name__}: {safe_str(e)}\n"
             )
 
-        if capture.walk_exceeded_budget:
+        if capture.session_walk_exceeded_budget:
             sys.stderr.write("mm: notice: events backfill budget exceeded\n")
         if capture.root_discovery.exceeded:
             sys.stderr.write(
@@ -808,9 +884,94 @@ def _run_events_backfill(
         sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")
 
 
+@dataclass
+class RecaptureCapture:
+    """Git-only recapture observation. No writes. No mm-push row."""
+
+    git_rows: list[dict]
+    root_discovery: events.GitRootDiscovery
+    walk_budget_aborts: int
+    walk_errors: int
+    events_dir: Path
+    since: datetime
+    until: datetime
+
+
+def _prepare_recapture(
+    config: dict,
+    sources: list[dict],
+    device_id: str,
+    *,
+    since: datetime,
+) -> RecaptureCapture | None:
+    """Git-only capture at interactive budgets. ``None`` if mm-events is unresolved."""
+    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if mm_events_src is None:
+        return None
+    events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+    # ``write_push_event`` creates this parent only when there are rows to
+    # append. Preparing a dry-run or a zero-root recapture is read-only.
+    until = datetime.now(timezone.utc)
+    git_rows, root_discovery, aborts, errors = _capture_git_rows(
+        config,
+        device_id,
+        since=since,
+        walk_budget_ms=events.WALK_TIME_BUDGET_INTERACTIVE_MS,
+        root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
+        origin=events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+    )
+    return RecaptureCapture(
+        git_rows=git_rows,
+        root_discovery=root_discovery,
+        walk_budget_aborts=aborts,
+        walk_errors=errors,
+        events_dir=events_dir,
+        since=since,
+        until=until,
+    )
+
+
+def _run_events_recapture(
+    config: dict,
+    sources: list[dict],
+    device_id: str,
+    *,
+    since: datetime,
+) -> list[str]:
+    """Write recapture git-snapshot rows (no mm-push). Returns degradations.
+
+    Writes nothing when mm-events is unresolved or discovery found zero
+    roots — an empty snapshot would bump the aggregator's zero-capture
+    note. The ordinary push path is the caller's job: writing these rows
+    first makes ``has_substantive`` true with no gate edit.
+    """
+    degradations: list[str] = []
+    try:
+        prepared = _prepare_recapture(config, sources, device_id, since=since)
+        if prepared is None:
+            return degradations
+        if not prepared.root_discovery.roots:
+            return degradations
+        events.write_push_event(prepared.events_dir, device_id, prepared.git_rows)
+        if prepared.root_discovery.exceeded:
+            degradations.append(_ROOT_DISCOVERY_DEGRADATION)
+        elif prepared.root_discovery.errors:
+            degradations.append(_ROOT_DISCOVERY_ERROR_DEGRADATION)
+        walk_phrase = _git_walk_degradation(prepared.walk_budget_aborts, prepared.walk_errors)
+        if walk_phrase is not None:
+            degradations.append(walk_phrase)
+    except Exception as e:
+        sys.stderr.write(
+            f"mm: notice: events recapture failed: {type(e).__name__}: {safe_str(e)}\n"
+        )
+        degradations.append(f"events recapture failed ({type(e).__name__})")
+    return degradations
+
+
 __all__ = [
     "_decide_token_walk_policy",
     "_enabled_claude_paths",
     "_run_events_backfill",
+    "_run_events_recapture",
     "_run_events_tail",
 ]

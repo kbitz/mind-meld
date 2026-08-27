@@ -1,7 +1,7 @@
 """Mind Meld CLI — built with Typer.
 
 Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
-          sources, conflicts, resolve, retro-fleet.
+          sources, conflicts, resolve, retro-fleet, recapture.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -4420,7 +4420,8 @@ def status(
             and "git repository discovery" in detail
         ):
             discovery_nag = True
-    if discovery_nag:
+    retro_nag = _print_retro_capture_status(sources_configs, device_id)
+    if discovery_nag and not retro_nag:
         console.print(
             "  [yellow]Git repository discovery incomplete:[/yellow] run [bold]mm diag[/bold]"
         )
@@ -4611,6 +4612,107 @@ def _home_relative_path(path: Path) -> str:
         return str(path)
 
 
+_DIAG_CAPTURE_CLAMP = 128
+"""Bound on peer-controlled strings in the recorded-capture diag block.
+
+The mm-push row arrives via the pull apply path and ``merge.merge_jsonl``,
+so ``ts`` / ``mm_version`` / ``since`` / discovery labels are peer text.
+The invariant requires bounding, not merely sanitizing; 128 matches
+``aggregator._safe_short``."""
+
+
+def _print_retro_capture_status(sources: list[dict], device_id: str) -> bool:
+    """Nag on an incomplete recorded capture. Returns True if a nag printed."""
+    mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if mm_events_src is None:
+        return False
+    events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+    projected = events.project_recorded_capture(events.latest_mm_push_row(events_dir, device_id))
+    if projected is None:
+        return False
+    aborts = projected.get("walk_budget_aborts") or 0
+    errs = projected.get("walk_errors") or 0
+    skipped = aborts + errs
+    incomplete = (not projected.get("advances_cursor", True)) or skipped > 0
+    if not incomplete:
+        return False
+    since_s = projected.get("since") or projected.get("ts")
+    since_day = since_s[:10] if isinstance(since_s, str) and len(since_s) >= 10 else "unknown"
+    days = events.INITIAL_CURSOR_LOOKBACK_DAYS
+    if isinstance(since_s, str):
+        try:
+            since_dt = datetime.fromisoformat(since_s)
+            if since_dt.tzinfo is not None:
+                delta_days = (datetime.now(timezone.utc) - since_dt).days
+                days = max(1, min(events.RECAPTURE_WINDOW_MAX_DAYS, delta_days or 1))
+        except (TypeError, ValueError):
+            pass
+    if skipped == 1:
+        skip_phrase = "1 repository was skipped"
+    elif skipped > 1:
+        skip_phrase = f"{skipped} repositories were skipped"
+    else:
+        skip_phrase = "repository set incomplete"
+    console.print(
+        f"  [yellow]Retro capture:[/yellow] incomplete since {safe_str(since_day)} — {skip_phrase}."
+    )
+    console.print(f"  Recover this Mac's last {days} days: [bold]mm recapture {days}d[/bold]")
+    console.print("  Details: [bold]mm diag[/bold]")
+    return True
+
+
+def _clamp_peer_text(value: object) -> str:
+    return safe_str(str(value))[:_DIAG_CAPTURE_CLAMP]
+
+
+def _sanitize_recorded_capture(projected: dict) -> dict:
+    out = dict(projected)
+    for key in ("ts", "mm_version", "discovery", "since"):
+        if out.get(key) is not None:
+            out[key] = _clamp_peer_text(out[key])
+    return out
+
+
+def _fresh_discovery_label(diag: dict) -> str:
+    status = diag.get("status")
+    if status in ("exceeded", "error"):
+        return "partial"
+    if status == "empty":
+        return "empty"
+    if status == "no-prober":
+        return "not-run"
+    if status == "complete":
+        return "complete"
+    return "not-run"
+
+
+def _collect_git_capture_diag(config: dict, device_id: str | None, discovery: dict) -> dict:
+    recorded = None
+    if device_id:
+        try:
+            sources = get_sources(config) if config else []
+            src = next((s for s in sources if s.get("name") == "mm-events"), None)
+            if src is not None:
+                events_dir = Path(src["path"]).expanduser() / "events"
+                projected = events.project_recorded_capture(
+                    events.latest_mm_push_row(events_dir, device_id)
+                )
+                if projected is not None:
+                    recorded = _sanitize_recorded_capture(projected)
+        except Exception:
+            recorded = None
+    return {
+        "recorded": recorded,
+        "fresh": {
+            "discovery": _fresh_discovery_label(discovery),
+            "status": discovery.get("status"),
+            "roots": len(discovery.get("roots") or []),
+            "exceeded": bool(discovery.get("exceeded")),
+            "error_count": len(discovery.get("errors") or []),
+        },
+    }
+
+
 def _collect_discovery_diag(config: dict) -> dict:
     """Run git-root discovery at the AUTOPUSH budget and shape it for diag.
 
@@ -4680,6 +4782,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * host_skill_discovery values other than the four extracted fields
         (claude_skills_compat, retro_fleet_resolved, retro_fleet_path,
         grok_version) plus host/status
+      * local_emails (this machine's author-email trust set, and peers'
+        after a pull merge) — project an allowlist, never render the row
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are
@@ -4785,6 +4889,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     except (OSError, ValueError):
         breadcrumb = {"error": "unreadable"}
 
+    discovery = _collect_discovery_diag(cfg)
     return {
         "mm_version": __version__,
         "config": {
@@ -4809,7 +4914,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             may_create=skill_may_create, config_error=skill_config_error
         ),
         "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
-        "discovery": _collect_discovery_diag(cfg),
+        "discovery": discovery,
+        "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery),
     }
 
 
@@ -4963,6 +5069,30 @@ def diag(
         console.print(f"  errors:       {len(disc['errors'])}")
         for err in disc["errors"]:
             console.print(f"    {safe_str(str(err))}")
+
+    cap = state.get("git_capture") or {}
+    console.print("\n[bold]Git capture[/bold]")
+    recorded = cap.get("recorded")
+    if not recorded:
+        console.print("  recorded:     (none — no mm-push row yet)")
+    else:
+        console.print("  recorded:")
+        console.print(f"    ts:                  {recorded.get('ts') or '(none)'}")
+        console.print(f"    mm_version:          {recorded.get('mm_version') or '(none)'}")
+        console.print(
+            f"    discovery:           {recorded.get('discovery') or '(legacy — no key)'}"
+        )
+        console.print(f"    since:               {recorded.get('since') or '(none)'}")
+        console.print(f"    walk_budget_aborts:  {recorded.get('walk_budget_aborts')}")
+        console.print(f"    walk_errors:         {recorded.get('walk_errors')}")
+        console.print(f"    advances_cursor:     {recorded.get('advances_cursor')}")
+    fresh = cap.get("fresh") or {}
+    console.print("  fresh:")
+    console.print(f"    discovery:           {fresh.get('discovery')}")
+    console.print(f"    status:              {safe_str(str(fresh.get('status', '')))}")
+    console.print(f"    roots:               {fresh.get('roots')}")
+    console.print(f"    exceeded:            {fresh.get('exceeded')}")
+    console.print(f"    error_count:         {fresh.get('error_count')}")
 
 
 # ── devices ───────────────────────────────────────────────────────────
@@ -6120,6 +6250,226 @@ def retro_fleet_cmd(
     if dump_host_usage:
         argv.append("--dump-host-usage")
     raise typer.Exit(code=_aggregator_main(argv))
+
+
+# ── recapture ─────────────────────────────────────────────────────────
+
+
+RECAPTURE_EXIT_PARTIAL = 4
+"""Partial recapture exit. Distinct from pull ``--conflict-mode fail`` (3)."""
+
+
+def _parse_recapture_window(window: str) -> int:
+    days = events.parse_nd_window(window)
+    if days is None:
+        _error(events.window_syntax_error(window))
+    if days < events.RECAPTURE_WINDOW_MIN_DAYS or days > events.RECAPTURE_WINDOW_MAX_DAYS:
+        _error(
+            f"WINDOW must be between {events.RECAPTURE_WINDOW_MIN_DAYS}d and "
+            f"{events.RECAPTURE_WINDOW_MAX_DAYS}d; got {days}d. "
+            "The limit keeps the synced event log bounded."
+        )
+    return days
+
+
+def _recapture_commit_stats(
+    git_rows: list[dict], events_dir: Path
+) -> tuple[list[dict], list[dict]]:
+    already = events.recorded_commit_keys(events_dir)
+    records = []
+    for row in git_rows:
+        records.extend(events.git_row_commit_records(row))
+    new = [c for c in records if (c.get("remote", ""), c.get("sha", "")) not in already]
+    return records, new
+
+
+def _oldest_commit_date(commits: list[dict]) -> datetime | None:
+    oldest: datetime | None = None
+    for commit in commits:
+        raw = commit.get("date")
+        if not isinstance(raw, str):
+            continue
+        try:
+            ts = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if oldest is None or ts < oldest:
+            oldest = ts
+    return oldest
+
+
+@app.command()
+def recapture(
+    window: str = typer.Argument(
+        events.RECAPTURE_WINDOW_DEFAULT,
+        help=(
+            "Redo this Mac's git capture for WINDOW (default 30d, same as mm init). "
+            "Safe to re-run — commits dedup fleet-wide on (remote, sha). "
+            "Retros window by the COMMIT's date, not by when mm captured it, "
+            "so mm recapture 90d then mm retro-fleet 7d will not show June commits."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Discover and walk, then report; write and upload nothing.",
+    ),
+) -> None:
+    """Recover omitted git commits into the fleet retro.
+
+    Writes git-snapshot rows first, then runs the ordinary push path so the
+    substantive-change gate passes without a special case. Partial recovery
+    exits 4. Zero discovered repositories writes nothing and exits 1.
+    """
+    days = _parse_recapture_window(window)
+    config = _get_config()
+    _maybe_prompt_migration(config)
+    config = _get_config()
+    passphrase = _get_passphrase_or_exit()
+
+    try:
+        acquire_lock()
+    except LockError as e:
+        _error(str(e))
+
+    try:
+        backend = get_backend(config)
+        try:
+            memory_kb = _init_crypto_session(backend, passphrase, config)
+        except MindMeldError as e:
+            _error(str(e))
+        sources = get_sources(config)
+        disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
+        if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
+            stderr_console.print(
+                "[red]Error:[/red] recapture requires the 'mm-events' source, "
+                "but it is disabled on this Mac."
+            )
+            stderr_console.print("Fix: mm enable-source mm-events")
+            stderr_console.print(f"Then retry: mm recapture {window}")
+            raise typer.Exit(1)
+
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        prepared = events_tail._prepare_recapture(
+            config, sources, config["device"]["id"], since=since
+        )
+        if prepared is None:
+            stderr_console.print(
+                "[red]Error:[/red] recapture requires the 'mm-events' source, "
+                "but it is disabled on this Mac."
+            )
+            stderr_console.print("Fix: mm enable-source mm-events")
+            stderr_console.print(f"Then retry: mm recapture {window}")
+            raise typer.Exit(1)
+
+        n_roots = len(prepared.root_discovery.roots)
+        skipped = prepared.walk_budget_aborts + prepared.walk_errors
+        records, new_records = _recapture_commit_stats(prepared.git_rows, prepared.events_dir)
+        until = prepared.until
+        since_day = prepared.since.date().isoformat()
+        until_day = until.date().isoformat()
+
+        if dry_run:
+            row_bytes = sum(
+                len(json.dumps(row, sort_keys=True).encode("utf-8")) for row in prepared.git_rows
+            )
+            console.print("[bold]Recapture dry-run[/bold] — nothing written.")
+            console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
+            console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
+            console.print(f"  Commit records:   {len(records)} captured")
+            console.print(f"  Estimated size:   {row_bytes} bytes")
+            if n_roots == 0:
+                raise typer.Exit(1)
+            return
+
+        if n_roots == 0:
+            console.print(
+                "Recapture stopped: no Git repositories were discovered on this Mac. "
+                "Add their absolute paths under [retro].repo_roots, verify with "
+                "'mm diag', then retry."
+            )
+            raise typer.Exit(1)
+
+        device_id = config["device"]["id"]
+        events.write_push_event(prepared.events_dir, device_id, prepared.git_rows)
+
+        try:
+            result = _push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)
+        except typer.Exit:
+            console.print(
+                "Recapture was written locally but not synced. "
+                "Fix the storage error above, then run 'mm push'."
+            )
+            raise
+
+        synced = result is not None
+        if not synced:
+            console.print(
+                "Recapture was written locally but not synced. "
+                "Fix the storage error above, then run 'mm push'."
+            )
+            raise typer.Exit(1)
+
+        partial = (
+            prepared.root_discovery.exceeded or bool(prepared.root_discovery.errors) or skipped > 0
+        )
+        n_scanned_ok = n_roots - skipped
+        if partial:
+            skip_reason = "the Git walk exceeded its budget"
+            if prepared.walk_errors and not prepared.walk_budget_aborts:
+                skip_reason = "the Git walk failed for those repositories"
+            elif prepared.root_discovery.exceeded:
+                skip_reason = "git repository discovery was incomplete"
+            narrower = "7d" if days > 7 else "1d"
+            noun = "repository was" if skipped == 1 else "repositories were"
+            console.print(
+                f"Recapture incomplete: captured {len(records)} commit records "
+                f"from {n_scanned_ok} of {n_roots} repositories for "
+                f"{since_day} → {until_day}. {skipped} {noun} skipped because "
+                f"{skip_reason}. Retry a narrower window: mm recapture {narrower}"
+            )
+            raise typer.Exit(RECAPTURE_EXIT_PARTIAL)
+
+        if not records:
+            console.print(
+                f"Recapture complete: scanned {n_roots} repositories but found "
+                f"no commits dated {since_day} → {until_day}. "
+                "No retro output will change."
+            )
+            return
+
+        if not new_records:
+            console.print(
+                "Recapture found no commits that were not already recorded. "
+                f"This Mac's events log already covers {since_day} → {until_day} "
+                f"for all {n_roots} repositories it can see.\n"
+                "If the retro is still short, the gap is on another Mac "
+                "(mm devices) or in a repo discovery cannot see "
+                "(mm diag, then [retro] repo_roots)."
+            )
+            return
+
+        oldest = _oldest_commit_date(new_records)
+        cover_days = days
+        if oldest is not None:
+            cover_days = max(days, (until.date() - oldest.date()).days + 1)
+            cover_days = min(cover_days, events.RECAPTURE_WINDOW_MAX_DAYS)
+        console.print("[bold green]Recapture complete.[/bold green]")
+        console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
+        console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
+        console.print(f"  Commit records:   {len(records)} captured")
+        console.print(f"  Synced:           {'yes' if synced else 'no'}")
+        console.print("")
+        console.print("Retros window by the COMMIT's date, not by when mm captured it, so a short")
+        console.print("window will not show the older recoveries:")
+        console.print(f"  mm retro-fleet {cover_days}d   # covers everything just recaptured")
+        console.print("  mm retro-fleet 7d    # covers the last 7 days only")
+    finally:
+        release_lock()
+
+    upgrade.emit_nudge_if_due(config)
 
 
 # ── refresh-identity ──────────────────────────────────────────────────

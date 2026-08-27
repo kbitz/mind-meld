@@ -1207,7 +1207,7 @@ def test_autopush_breadcrumb_degraded_when_root_discovery_is_partial(tmp_path, m
     assert payload["outcome"] == "degraded", payload
     assert payload["detail"] == (
         "git repository discovery hit its time budget: this push captured an incomplete "
-        "repository set and omitted commits are not recovered later. Run mm diag"
+        "repository set. Run mm diag, then mm recapture 30d to recover the omitted commits"
     )
     assert str(tmp_path) not in payload["detail"]
 
