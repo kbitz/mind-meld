@@ -52,7 +52,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
 | **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
 | **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, the `AGENT_ROWS` registry — add a new agent HERE — (25C) `consented_agent_keys` / `AgentRow.consent_source` / the installer `declined` status, and (28A) the deletion guard — `_marker_exists`, the `removed-by-user` status, and the rule that an ABSENT link is intent, not damage |
-| **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, and (19A) the all-or-nothing host-usage capture |
+| **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, (19A) the all-or-nothing host-usage capture, and (30A) git-only recapture |
 | **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
 | **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
 | `safety.py` | Peer-controlled string sanitization |
@@ -104,7 +104,7 @@ GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Pyt
 **PROGRESS row convention (load-bearing).** The PROGRESS.md row goes in the SAME PR as the `pyproject.toml` + `CHANGELOG.md` bump — not a workflow side-effect. The original v0.11.24 design tried to auto-append via `git push` from the workflow, which was rejected by branch protection ("Changes must be made through a pull request") on every release where the row wasn't already in the PR. v0.11.23 only "succeeded" because the row was pre-added in the PR and the script's idempotent-skip exited 0 before the push. v0.11.24 and v0.11.27 both hit the wall and shipped without rows. Lesson: a workflow that pushes to a protected branch is broken by definition; don't reintroduce that step. The row format mirrors what the old auto-append produced — CHANGELOG body lead paragraph (text from `## [version]` to first `### Section` or next `## [`), pipes escaped, single line, inserted directly after the `|---|---|---|` separator (newest at top). **The row is now CI-enforced** (Track 16A): `tests/test_docs_routing.py::test_every_changelog_version_has_a_progress_row` fails any PR that bumps the version without adding the row, enforced from 0.11.0 forward. That closes the recurrence the v0.11.24 auto-append design could not — a workflow that pushes to a protected branch is broken by definition, but a test in the PR is not. Still does NOT solve parallel-workspace version collisions (two open PRs both claiming the same version slot) — that remains deferred.
 
 ## Commands
-mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet
+mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture
 
 Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 3 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--dry-run` (preview orphan blobs plus retention candidates without mutation; each executed reaper reports candidates, repairs, and skips); `--conflicts` (also reap `.sync-conflict-*` files older than 30 days).
@@ -133,7 +133,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `devices.py` / `storage/local.py:put_exclusive` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
-| `events_tail.py:_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` | `docs/invariants/events-retro.md` |
+| `events_tail.py:_run_events_tail` / `_run_events_backfill` / `_run_events_recapture` / `_prepare_recapture` / `_decide_token_walk_policy` / `_enabled_claude_paths` | `docs/invariants/events-retro.md` |
 | `events_tail.py:_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `events.py:make_host_usage_snapshot` / `HostUsageSnapshot` / `HOST_USAGE_TOKEN_SOURCES` | `docs/invariants/events-retro.md` (host-usage-snapshot section) |
 | `cli.py:PushResult.events_degradations` / the `autopush` breadcrumb outcome / `_breadcrumb_staleness_suffix` | `docs/invariants/events-retro.md` |
 | `events.py:_read_cwd_from_latest_jsonl` / `_last_mm_push_ts` / `_scan_one_project` cwd-scan site / `walk_git_projects` future-collection blocks / `token_usage.is_cache_cold` / `token_usage.iter_bounded_lines` / `pullhistory._yield_lines` | `docs/invariants/events-retro.md` (tolerant-binary-reads + one-cwd-scan sections) |
@@ -146,6 +146,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:status` / `diag` / `_collect_diag_state` (their `skill_link.diagnose_skill_links` consumers) | `docs/invariants/events-retro.md` |
 | `host_skill_discovery.py:probe_grok_skill_discovery` | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
+| `cli.py:recapture` / `events_tail.py:_run_events_recapture` / `_prepare_recapture` / `events.py:resolve_push_cursor` / `capture_advances_cursor` / `make_git_capture` | `docs/invariants/events-retro.md` |
 | `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
 | `host_usage.py` (incl. `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry`) | `docs/invariants/events-retro.md` |

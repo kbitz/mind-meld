@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from mind_meld import events as _mm_events
 from mind_meld import events_tail
@@ -139,6 +139,47 @@ class TestSharedCapturePath:
 
 
 class TestEventsTailBudgetScope:
+    def test_old_cursor_escalates_only_git_budget_on_autopush(self, tmp_path, monkeypatch):
+        """An old cursor raises the git budget without widening the session budget."""
+        events_root = tmp_path / "events_root"
+        sources = _make_sources(events_root)
+        config = {"sync": {"sources": sources}}
+        since = datetime.now(timezone.utc) - timedelta(days=2)
+        captured_kwargs: dict = {}
+        result = events_tail.CaptureResult(
+            git_rows=[],
+            session_rows=[],
+            host_rows=[],
+            host_capture=events_tail.HostUsageCapture({}),
+            root_discovery=_mm_events.GitRootDiscovery((), (), False),
+            discovery_errors=[],
+            session_walk_exceeded_budget=False,
+            warn_lock_unavailable=False,
+            token_cache_requested=False,
+        )
+        monkeypatch.setattr(
+            _mm_events,
+            "resolve_push_cursor",
+            lambda *_args, **_kwargs: _mm_events.CursorResolution(since=since),
+        )
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_event_snapshots",
+            lambda *_args, **kwargs: captured_kwargs.update(kwargs) or result,
+        )
+        monkeypatch.setattr(
+            _mm_identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None: [],
+        )
+        monkeypatch.setattr(_mm_events, "write_push_event", lambda *_args: None)
+
+        assert (
+            events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=True) == []
+        )
+        assert captured_kwargs["budget_ms"] == _mm_events.WALK_TIME_BUDGET_AUTOPUSH_MS
+        assert captured_kwargs["git_budget_ms"] == _mm_events.WALK_TIME_BUDGET_INTERACTIVE_MS
+
     def test_slow_token_warm_does_not_consume_session_budget(self, tmp_path, monkeypatch, capsys):
         """Interactive cache warm can take seconds, but the advertised
         session-walk budget starts after that caller-owned preparation."""
@@ -356,7 +397,13 @@ class TestRootDiscoveryHandoffAndDegradation:
         )
         assert degradations == [events_tail._ROOT_DISCOVERY_DEGRADATION]
         assert "mm: notice: " + events_tail._ROOT_DISCOVERY_DEGRADATION in capsys.readouterr().err
-        assert writes[0][-1]["discovery_errors"] == [_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR]
+        mm_push = writes[0][-1]
+        assert mm_push["type"] == "mm-push"
+        assert mm_push["discovery_errors"] == [_mm_events.GIT_ROOT_DISCOVERY_BUDGET_ERROR]
+        assert mm_push["git_capture"]["discovery"] == "partial"
+        assert mm_push["git_capture"]["walk_budget_aborts"] == 0
+        assert mm_push["git_capture"]["walk_errors"] == 0
+        assert datetime.fromisoformat(mm_push["git_capture"]["since"]).tzinfo is not None
 
     def test_partial_backfill_notices_without_creating_mm_push(self, tmp_path, monkeypatch, capsys):
         events_root = tmp_path / "events_root"

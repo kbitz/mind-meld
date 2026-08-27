@@ -493,6 +493,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "skill_links",
     "host_skill_discovery",
     "discovery",
+    "git_capture",
 )
 _HOST_SKILL_DISCOVERY_FIELDS = (
     "host",

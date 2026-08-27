@@ -99,6 +99,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "skill_links",
         "host_skill_discovery",
         "discovery",
+        "git_capture",
     ):
         assert section in payload, f"missing {section}"
 
@@ -118,6 +119,9 @@ def test_diag_plain_text_is_human_readable(tmp_path, monkeypatch):
     assert "Skill links" in result.stdout
     assert "Host skill discovery" in result.stdout
     assert "Git-root discovery" in result.stdout
+    assert "Git capture" in result.stdout
+    assert "recorded" in result.stdout
+    assert "fresh" in result.stdout
 
 
 # ── Secrets boundary ─────────────────────────────────────────────────────
@@ -149,6 +153,7 @@ def test_diag_json_never_leaks_secrets(tmp_path, monkeypatch):
         'root_salt":',  # raw bytes (JSON quote) — fingerprint uses root_salt_fp
         # Peer device_ids: the registered "peer-decafbad" must not appear.
         "peer-decafbad",
+        "local_emails",
     ):
         assert banned not in payload_str, (
             f"secrets-boundary violation: {banned!r} found in diag JSON output"
@@ -165,7 +170,7 @@ def test_diag_plain_text_never_leaks_secrets(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["diag"])
     out = result.stdout.lower()
-    for banned in ("master_key", "keycheck", "passphrase", "peer-cafebabe"):
+    for banned in ("master_key", "keycheck", "passphrase", "peer-cafebabe", "local_emails"):
         assert banned not in out
 
 
@@ -466,3 +471,118 @@ class TestDiagDiscovery:
         calls["n"] = 0
         runner.invoke(app, ["diag"])
         assert calls["n"] == 1
+
+
+class TestDiagGitCapture:
+    def test_recorded_and_fresh_differ(self, tmp_path, monkeypatch):
+        from datetime import datetime, timezone
+
+        from mind_meld.config import load_config, save_config
+
+        _setup(tmp_path, monkeypatch)
+        events_root = tmp_path / "mm-events"
+        (events_root / "events").mkdir(parents=True)
+        cfg = load_config()
+        cfg["sync"]["sources"].append(
+            {
+                "name": "mm-events",
+                "type": "generic",
+                "path": str(events_root),
+                "include_dirs": ["events"],
+                "exclude_patterns": [],
+            }
+        )
+        save_config(cfg)
+        ts = datetime.now(timezone.utc)
+        row = {
+            "type": "mm-push",
+            "ts": ts.isoformat(),
+            "mm_version": "0.12.45",
+            "local_emails": ["secret@example.com"],
+            "git_capture": {
+                "since": ts.isoformat(),
+                "discovery": "partial",
+                "walk_budget_aborts": 1,
+                "walk_errors": 0,
+            },
+        }
+        (events_root / "events" / f"mac-a-{ts.date().isoformat()}.jsonl").write_text(
+            json.dumps(row) + "\n"
+        )
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        cap = payload["git_capture"]
+        assert cap["recorded"]["discovery"] == "partial"
+        assert cap["recorded"]["mm_version"] == "0.12.45"
+        assert cap["recorded"]["walk_budget_aborts"] == 1
+        assert cap["fresh"]["discovery"] in ("complete", "empty", "not-run", "partial")
+        assert (
+            cap["fresh"]["discovery"] != cap["recorded"]["discovery"] or cap["fresh"]["roots"] != 0
+        )
+        text = runner.invoke(app, ["diag"]).stdout
+        assert "recorded" in text
+        assert "fresh" in text
+        assert "secret@example.com" not in text
+        assert "local_emails" not in json.dumps(payload)
+
+    def test_legacy_row_without_git_capture(self, tmp_path, monkeypatch):
+        from datetime import datetime, timezone
+
+        from mind_meld.config import load_config, save_config
+
+        _setup(tmp_path, monkeypatch)
+        events_root = tmp_path / "mm-events"
+        (events_root / "events").mkdir(parents=True)
+        cfg = load_config()
+        cfg["sync"]["sources"].append(
+            {
+                "name": "mm-events",
+                "type": "generic",
+                "path": str(events_root),
+                "include_dirs": ["events"],
+                "exclude_patterns": [],
+            }
+        )
+        save_config(cfg)
+        ts = datetime.now(timezone.utc)
+        row = {"type": "mm-push", "ts": ts.isoformat(), "mm_version": "0.12.44"}
+        (events_root / "events" / f"mac-a-{ts.date().isoformat()}.jsonl").write_text(
+            json.dumps(row) + "\n"
+        )
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        rec = payload["git_capture"]["recorded"]
+        assert rec["discovery"] is None
+        assert rec["advances_cursor"] is True
+
+    def test_peer_text_is_sanitized_and_clamped(self, tmp_path, monkeypatch):
+        from datetime import datetime, timezone
+
+        from mind_meld.config import load_config, save_config
+
+        _setup(tmp_path, monkeypatch)
+        events_root = tmp_path / "mm-events"
+        (events_root / "events").mkdir(parents=True)
+        cfg = load_config()
+        cfg["sync"]["sources"].append(
+            {
+                "name": "mm-events",
+                "type": "generic",
+                "path": str(events_root),
+                "include_dirs": ["events"],
+                "exclude_patterns": [],
+            }
+        )
+        save_config(cfg)
+        ts = datetime.now(timezone.utc)
+        row = {
+            "type": "mm-push",
+            "ts": ts.isoformat(),
+            "mm_version": "\x1b[31m" + ("v" * 200),
+            "git_capture": {"discovery": "complete", "since": ts.isoformat()},
+        }
+        (events_root / "events" / f"mac-a-{ts.date().isoformat()}.jsonl").write_text(
+            json.dumps(row) + "\n"
+        )
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+        ver = payload["git_capture"]["recorded"]["mm_version"]
+        assert "\x1b" not in ver
+        assert len(ver) <= 128

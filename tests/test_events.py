@@ -695,6 +695,29 @@ class TestWalkGitProjects:
         assert len(proj["commits"]) == 1
         assert proj["commits"][0]["subject"] == "first"
 
+    def test_empty_git_init_is_benign_no_commits(self, tmp_path):
+        repo = tmp_path / "empty"
+        _init_git_repo(repo)
+        out = events.walk_git_projects([repo], datetime.now(timezone.utc), 2000)
+        assert out[0]["projects"] == []
+        assert [s["reason"] for s in out[0]["skipped"]] == [events.WALK_SKIP_NO_COMMITS]
+        aborts, errs = events.walk_skip_counts(out[0]["skipped"])
+        assert aborts == 0
+        assert errs == 0
+
+    def test_timeout_is_a_lossy_skip(self, tmp_path, monkeypatch):
+        def _timeout(root, since_iso, timeout_ms):
+            return None, events.WALK_SKIP_TIMEOUT
+
+        monkeypatch.setattr(events, "_walk_one_repo", _timeout)
+        repo = tmp_path / "r"
+        repo.mkdir()
+        out = events.walk_git_projects([repo], datetime.now(timezone.utc), 2000)
+        assert [s["reason"] for s in out[0]["skipped"]] == [events.WALK_SKIP_TIMEOUT]
+        aborts, errs = events.walk_skip_counts(out[0]["skipped"])
+        assert aborts == 0
+        assert errs == 1
+
     def test_repo_failure_folds_into_skipped(self, tmp_path):
         # Path that exists but isn't a git repo → walker returns it as
         # skipped with a non-zero git rc reason.

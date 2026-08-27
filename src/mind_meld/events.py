@@ -86,6 +86,66 @@ MAX_GIT_WORKERS = 8
 PER_REPO_TIMEOUT_FLOOR_MS = 200
 PER_REPO_TIMEOUT_CAP_MS = 2000
 MAX_DISCOVERY_REJECT_SAMPLE = 64
+CURSOR_SCAN_DAYS = 90
+"""How far ``last_push_ts`` walks daily files looking for a complete mm-push.
+
+Equal to ``retention.EVENTS_RETENTION_DAYS``. events does not import
+retention (that would pull resolveflow onto the capture path). Pinned
+equal by ``test_cursor_scan_matches_retention``.
+
+The previous 31-day bound silently orphaned anything older: a complete
+push 45 days back was never read, and the 30-day floor is *newer* than
+that true cursor. Measured 19.7 ms to parse all retained files for the
+busiest device."""
+
+WALK_BUDGET_ESCALATE_AFTER = timedelta(days=1)
+"""Escalate autopush's 250 ms git-walk budget to 500 ms when the resolved
+cursor is older than this.
+
+Measured 2026-08-25: 1-day cursor 48.6 ms / 0 aborts under 250 ms;
+30-day cursor 251.3 ms / 1 ``budget_abort`` under 250 ms, 335.1 ms /
+0 aborts under 500 ms. Without this, the recovery push that a held
+cursor exists to enable drops a repo and then advances past it."""
+
+WINDOW_PATTERN = re.compile(r"^(\d+)d$")
+"""Window argument shared with ``mm retro-fleet``: ``7d``, ``30d``. Days
+only. Do not fork this regex — aggregator imports it from here."""
+
+RECAPTURE_WINDOW_MIN_DAYS = 1
+RECAPTURE_WINDOW_MAX_DAYS = 90  # CURSOR_SCAN_DAYS / events retention
+RECAPTURE_WINDOW_DEFAULT = "30d"
+
+GIT_SNAPSHOT_ORIGIN_RECAPTURE = "recapture"
+"""Marker on git-snapshot rows written by ``mm recapture``.
+
+Lets the aggregator exclude them from its zero-capture *push* note
+(follow-up: they are not pushes). Ordinary tail/backfill rows omit the
+field."""
+
+WALK_SKIP_BUDGET_ABORT = "budget_abort"
+WALK_SKIP_TIMEOUT = "timeout"
+WALK_SKIP_NO_COMMITS = "no_commits"
+WALK_SKIP_GIT_ERROR = "git_error"
+WALK_SKIP_RAISED = "raised"
+"""Typed ``skipped[].reason`` values from ``walk_git_projects``.
+
+Never interpolate raw git stderr into these: ``git log`` puts branch
+names and absolute paths on stderr, and the skip list is written onto a
+synced row. ``no_commits`` is the empty-``git init`` case (rc=128 +
+"does not have any commits yet") — it fires on every push forever, so
+it is benign and must not degrade ``mm status``."""
+
+BENIGN_SKIP_REASONS = frozenset({WALK_SKIP_NO_COMMITS})
+
+_NO_COMMITS_NEEDLE = "does not have any commits yet"
+
+DISCOVERY_ADVANCE = frozenset({"complete", "not-run"})
+DISCOVERY_HOLD = frozenset({"partial", "empty"})
+"""Cursor policy allowlist for ``git_capture.discovery``.
+
+Walk failures NEVER affect the cursor. A denylist would default every
+future value to HOLD, which is the wedge direction (same argument as
+``BROKEN_SKILL_STATUSES``)."""
 """Cap on (reason, path) reject records retained on GitRootDiscovery.
 
 Diag --json exposes this sample; the text renderer uses reject_counts, which
@@ -153,6 +213,24 @@ class GitRootDiscovery:
 GIT_ROOT_DISCOVERY_BUDGET_ERROR = "git root discovery exceeded its time budget"
 
 
+@dataclass(frozen=True)
+class CursorResolution:
+    """Result of reading the git-walk cursor from retained mm-push rows.
+
+    ``held`` is True only when a newer incomplete row was skipped in
+    favour of an older complete one (or that complete row's recorded
+    ``since``). Fresh install — no rows at all, returning the 30-day
+    floor — is NOT a hold and is NOT a coverage degradation. That
+    distinction is the same lesson as ``_decide_token_walk_policy`` /
+    ``claude_paths``.
+    """
+
+    since: datetime
+    held: bool = False
+    floored_after_incomplete: bool = False
+    used_floor: bool = False
+
+
 # ---------------------------------------------------------------------------
 # v=1 schema (TypedDict). Functional form for GitCommit handles the `del`
 # Python reserved word so the JSON field name stays "del" (CT-8).
@@ -191,6 +269,14 @@ class GitSnapshot(TypedDict, total=False):
     device: str
     projects: list[GitSnapshotProject]
     skipped: list[GitSnapshotSkip]
+    origin: str
+
+
+class GitCaptureState(TypedDict, total=False):
+    since: str
+    discovery: str
+    walk_budget_aborts: int
+    walk_errors: int
 
 
 class SessionMetadata(TypedDict, total=False):
@@ -248,6 +334,15 @@ class MmPushEvent(TypedDict, total=False):
     # absent on pre-v0.11.17 peers; aggregator falls back to local gather
     # for those rows. See mind_meld.identity.
     local_emails: list[str]
+    # git_capture (Track 30A, additive on v=2 schema). Typed capture state
+    # the NEXT push reads to decide whether to advance the git cursor.
+    # Absence is the version discriminator (fail open: ADVANCE), same
+    # precedent as local_emails / skills_by_day / offset+head. Walk
+    # failures are recorded here for diagnosis and NEVER affect the
+    # cursor — git-walk cost is monotone in cursor age (48.6 ms @1d →
+    # 251.3 ms @30d vs a 250 ms autopush budget), so holding on a walk
+    # abort wedges unattended autopush.
+    git_capture: GitCaptureState
 
 
 HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "opencode")
@@ -774,8 +869,8 @@ def walk_git_projects(
                 # OSError subclass, so never narrow this to OSError.
                 try:
                     proj, err = fut.result(timeout=0)
-                except Exception as e:
-                    skipped.append({"path": str(root), "reason": f"{type(e).__name__}: {e}"})
+                except Exception:
+                    skipped.append({"path": str(root), "reason": WALK_SKIP_RAISED})
                     continue
                 if err:
                     skipped.append({"path": str(root), "reason": err})
@@ -793,8 +888,8 @@ def walk_git_projects(
                 if fut.done():
                     try:
                         proj, err = fut.result(timeout=0)
-                    except Exception as e:
-                        skipped.append({"path": str(root), "reason": f"{type(e).__name__}: {e}"})
+                    except Exception:
+                        skipped.append({"path": str(root), "reason": WALK_SKIP_RAISED})
                         continue
                     if err:
                         skipped.append({"path": str(root), "reason": err})
@@ -802,7 +897,7 @@ def walk_git_projects(
                         projects.append(proj)
                 else:
                     fut.cancel()
-                    skipped.append({"path": str(root), "reason": "budget_abort"})
+                    skipped.append({"path": str(root), "reason": WALK_SKIP_BUDGET_ABORT})
     except Exception as e:
         sys.stderr.write(
             "mm: notice: walk_git_projects whole-walk failure "
@@ -844,11 +939,17 @@ def _walk_one_repo(
             timeout=timeout_ms / 1000.0,
         )
     except subprocess.TimeoutExpired:
-        return None, "TimeoutExpired"
-    except OSError as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, WALK_SKIP_TIMEOUT
+    except OSError:
+        return None, WALK_SKIP_GIT_ERROR
     if result.returncode != 0:
-        return None, f"git log rc={result.returncode}: {result.stderr.strip()[:200]}"
+        err = result.stderr or ""
+        if result.returncode == 128 and _NO_COMMITS_NEEDLE in err:
+            # Empty `git init` directory. Verified: this returns on every
+            # push forever. A naive `len(skipped) > 0` predicate would pin
+            # `mm status` at `degraded` permanently.
+            return None, WALK_SKIP_NO_COMMITS
+        return None, WALK_SKIP_GIT_ERROR
 
     remote = _origin_remote_url(root)
     commits = _parse_git_log_numstat(result.stdout)
@@ -1170,35 +1271,196 @@ def _aggregate_jsonl_views_for_project(
 # ---------------------------------------------------------------------------
 
 
-def last_push_ts(events_dir: Path, device_id: str) -> datetime:
-    """Return the ts of the most recent ``mm-push`` event for this device.
+def classify_discovery(discovery: GitRootDiscovery) -> str:
+    """Map a ``GitRootDiscovery`` onto ``git_capture.discovery``.
 
-    Reverse-scans up to ``INITIAL_CURSOR_LOOKBACK_DAYS`` daily files for the
-    given device. On first run / events absent / no mm-push found, returns
+    ``partial`` — budget exceeded, or a prober raised.
+    ``complete`` — at least one root (a prober or ``repo_roots`` found it).
+    ``empty`` — a prober ran and found zero roots.
+    ``not-run`` — no prober enabled, a config shape, not a loss.
+    """
+    if discovery.exceeded or discovery.errors:
+        return "partial"
+    if discovery.roots:
+        return "complete"
+    if discovery.probers_ran:
+        return "empty"
+    return "not-run"
+
+
+def capture_advances_cursor(git_capture: object) -> bool:
+    """Return whether this mm-push row should advance the git cursor.
+
+    Walk failures NEVER affect the cursor.
+
+    Git-walk cost is monotone in cursor age (48.6 ms @1d → 251.3 ms @30d
+    vs a 250 ms autopush budget). Discovery cost is flat in cursor age
+    (3.8 ms) and a zero-root walk is 0.007 ms. Holding the cursor on a
+    walk abort creates a positive feedback loop that wedges unattended
+    autopush. Holding on discovery failure or zero-roots cannot.
+
+    Allowlist, never denylist: key absent / malformed / unknown value /
+    not a dict all ADVANCE (fail open). A denylist would default every
+    future value to HOLD, which is the wedge direction.
+    """
+    if not isinstance(git_capture, dict):
+        return True
+    discovery = git_capture.get("discovery")
+    if discovery in DISCOVERY_HOLD:
+        return False
+    return True
+
+
+def walk_skip_counts(skipped: object) -> tuple[int, int]:
+    """Return ``(walk_budget_aborts, walk_errors)`` from a skip list.
+
+    ``no_commits`` is excluded from both: an empty ``git init`` directory
+    returns that on every push forever.
+    """
+    if not isinstance(skipped, list):
+        return 0, 0
+    aborts = 0
+    errors = 0
+    for item in skipped:
+        if not isinstance(item, dict):
+            continue
+        reason = item.get("reason")
+        if reason in BENIGN_SKIP_REASONS:
+            continue
+        if reason == WALK_SKIP_BUDGET_ABORT:
+            aborts += 1
+        else:
+            errors += 1
+    return aborts, errors
+
+
+def git_walk_budget_ms(
+    *,
+    quiet: bool,
+    since: datetime,
+    now: datetime | None = None,
+) -> int:
+    """Pick the git-walk budget, escalating autopush when the cursor is old.
+
+    Interactive push is already at 500 ms. Autopush stays at 250 ms for a
+    fresh inter-push interval and escalates to 500 ms once the cursor is
+    older than ``WALK_BUDGET_ESCALATE_AFTER`` (1 day). See that constant
+    for the measured numbers this exists to defend.
+    """
+    if not quiet:
+        return WALK_TIME_BUDGET_INTERACTIVE_MS
+    now = now or datetime.now(timezone.utc)
+    try:
+        age = now - since
+    except TypeError:
+        return WALK_TIME_BUDGET_INTERACTIVE_MS
+    if age > WALK_BUDGET_ESCALATE_AFTER:
+        return WALK_TIME_BUDGET_INTERACTIVE_MS
+    return WALK_TIME_BUDGET_AUTOPUSH_MS
+
+
+def make_git_capture(
+    *,
+    since: datetime,
+    discovery: str,
+    walk_budget_aborts: int,
+    walk_errors: int,
+) -> GitCaptureState:
+    return {
+        "since": since.isoformat(),
+        "discovery": discovery,
+        "walk_budget_aborts": walk_budget_aborts,
+        "walk_errors": walk_errors,
+    }
+
+
+def parse_nd_window(s: str) -> int | None:
+    """Parse an ``Nd`` window string. ``None`` if the syntax is wrong."""
+    m = WINDOW_PATTERN.match(s)
+    if m is None:
+        return None
+    return int(m.group(1))
+
+
+def window_syntax_error(s: str) -> str:
+    """Same wording as ``aggregator._parse_window`` on a syntax miss."""
+    hint = f" (did you mean '{s}d'?)" if s.isdigit() else ""
+    return f"window must be of the form Nd (e.g. '7d', '30d'); got {s!r}{hint}"
+
+
+def last_push_ts(events_dir: Path, device_id: str) -> datetime:
+    """Return the git-walk cursor for this device.
+
+    Reverse-scans up to ``CURSOR_SCAN_DAYS`` daily files. Incomplete
+    captures (``git_capture.discovery`` in ``DISCOVERY_HOLD``) do not
+    advance the cursor; walk failures never do. On first run / events
+    absent / no usable mm-push found, returns
     ``now - INITIAL_CURSOR_LOOKBACK_DAYS``.
 
     Pattern matches pullhistory.py: the log file IS the state of truth. No
     separate cursor file means no separate flock domain (A3 + A4
     elimination)."""
-    default = datetime.now(timezone.utc) - timedelta(days=INITIAL_CURSOR_LOOKBACK_DAYS)
+    return resolve_push_cursor(events_dir, device_id).since
+
+
+def resolve_push_cursor(
+    events_dir: Path,
+    device_id: str,
+    *,
+    now: datetime | None = None,
+) -> CursorResolution:
+    """Read retained mm-push rows newest-first and apply the cursor gate."""
+    now = now or datetime.now(timezone.utc)
+    floor = now - timedelta(days=INITIAL_CURSOR_LOOKBACK_DAYS)
     if not events_dir.is_dir():
-        return default
-    today = datetime.now(timezone.utc).date()
-    for delta in range(0, INITIAL_CURSOR_LOOKBACK_DAYS + 1):
+        return CursorResolution(since=floor, used_floor=True)
+    today = now.date()
+    seen_hold = False
+    held_since: datetime | None = None
+    for delta in range(0, CURSOR_SCAN_DAYS + 1):
         day = today - timedelta(days=delta)
         path = events_dir / f"{device_id}-{day.isoformat()}.jsonl"
         if not path.is_file():
             continue
-        ts = _last_mm_push_ts(path)
-        if ts is not None:
-            return ts
-    return default
+        for obj in reversed(list(_iter_mm_push_objs(path))):
+            ts = _parse_aware_ts(obj.get("ts"))
+            if ts is None or ts > now:
+                # Future / timezone-naive / malformed ts cannot move the
+                # cursor forward.
+                continue
+            cap = obj.get("git_capture")
+            if capture_advances_cursor(cap):
+                return CursorResolution(since=ts, held=seen_hold)
+            seen_hold = True
+            if isinstance(cap, dict) and held_since is None:
+                parsed_since = _parse_aware_ts(cap.get("since"))
+                if parsed_since is not None and parsed_since <= now and parsed_since <= ts:
+                    held_since = parsed_since
+    if held_since is not None:
+        return CursorResolution(since=held_since, held=True)
+    if seen_hold:
+        return CursorResolution(
+            since=floor,
+            floored_after_incomplete=True,
+            used_floor=True,
+        )
+    return CursorResolution(since=floor, used_floor=True)
 
 
-def _last_mm_push_ts(path: Path) -> datetime | None:
-    """Read `path` and return the ts of the LAST `{"type":"mm-push", ...}`
-    line, or None if no such line exists. Reads forward (small daily files),
-    keeping last-match semantics so the most recent push wins.
+def _parse_aware_ts(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        return None
+    return ts
+
+
+def _iter_mm_push_objs(path: Path):
+    """Yield mm-push dicts from ``path`` in file order.
 
     BINARY and BOUNDED (v0.12.16), same rationale as
     ``_read_cwd_from_latest_jsonl``. This file lives under the SYNCED
@@ -1208,12 +1470,7 @@ def _last_mm_push_ts(path: Path) -> datetime | None:
     rather than a bare ``for raw in f``. The latter lets Python extend its
     buffer to newline-or-EOF, so one oversized line from a corrupt or
     hostile peer file would be slurped whole on every push.
-
-    Returning ``None`` here is NOT a benign fallback: it rewinds the cursor
-    to ``now - INITIAL_CURSOR_LOOKBACK_DAYS`` and re-walks 30 days of git
-    history on every subsequent push, forever. Per-line tolerance keeps a
-    single bad byte from costing the cursor."""
-    last: datetime | None = None
+    """
     try:
         with open(path, "rb") as f:
             for raw, _end in token_usage.iter_bounded_lines(
@@ -1229,22 +1486,126 @@ def _last_mm_push_ts(path: Path) -> datetime | None:
                 try:
                     obj = json.loads(stripped)
                 except ValueError:
-                    # Malformed JSON and invalid utf-8 are both ValueError.
                     continue
                 if not isinstance(obj, dict):
                     continue
                 if obj.get("type") != "mm-push":
                     continue
-                ts_s = obj.get("ts")
-                if not isinstance(ts_s, str):
-                    continue
-                try:
-                    last = datetime.fromisoformat(ts_s)
-                except ValueError:
-                    continue
+                yield obj
     except OSError:
-        return None
+        return
+
+
+def _last_mm_push_ts(path: Path) -> datetime | None:
+    """Return the ts of the LAST mm-push line, or None.
+
+    Kept as the bounded-read primitive the original last-match tests
+    exercise through ``last_push_ts``. Returning ``None`` here is NOT a
+    benign fallback: it rewinds the cursor to
+    ``now - INITIAL_CURSOR_LOOKBACK_DAYS`` and re-walks 30 days of git
+    history on every subsequent push, forever.
+    """
+    last: datetime | None = None
+    for obj in _iter_mm_push_objs(path):
+        ts = _parse_aware_ts(obj.get("ts"))
+        if ts is not None:
+            last = ts
     return last
+
+
+def latest_mm_push_row(events_dir: Path, device_id: str) -> dict | None:
+    """Newest mm-push dict for this device, or None. Fail-open on I/O."""
+    if not events_dir.is_dir():
+        return None
+    today = datetime.now(timezone.utc).date()
+    for delta in range(0, CURSOR_SCAN_DAYS + 1):
+        day = today - timedelta(days=delta)
+        path = events_dir / f"{device_id}-{day.isoformat()}.jsonl"
+        if not path.is_file():
+            continue
+        rows = list(_iter_mm_push_objs(path))
+        if rows:
+            return rows[-1]
+    return None
+
+
+def project_recorded_capture(row: dict | None) -> dict | None:
+    """Allowlisted projection of an mm-push row for ``mm diag``.
+
+    Never includes ``local_emails``. Absence of ``git_capture`` is a
+    legacy row, not an error — the discriminator is key-absence.
+    """
+    if not isinstance(row, dict) or row.get("type") != "mm-push":
+        return None
+    cap = row.get("git_capture") if isinstance(row.get("git_capture"), dict) else {}
+    discovery = cap.get("discovery") if isinstance(cap.get("discovery"), str) else None
+    since = cap.get("since") if isinstance(cap.get("since"), str) else None
+    aborts = cap.get("walk_budget_aborts")
+    errors = cap.get("walk_errors")
+    return {
+        "ts": row.get("ts") if isinstance(row.get("ts"), str) else None,
+        "mm_version": row.get("mm_version") if isinstance(row.get("mm_version"), str) else None,
+        "discovery": discovery,
+        "since": since,
+        "walk_budget_aborts": aborts if isinstance(aborts, int) else None,
+        "walk_errors": errors if isinstance(errors, int) else None,
+        "advances_cursor": capture_advances_cursor(cap) if cap else True,
+    }
+
+
+def recorded_commit_keys(events_dir: Path) -> set[tuple[str, str]]:
+    """``(remote, sha)`` pairs already in the local events corpus."""
+    keys: set[tuple[str, str]] = set()
+    if not events_dir.is_dir():
+        return keys
+    for path in events_dir.glob("*.jsonl"):
+        try:
+            with open(path, "rb") as f:
+                for raw, _end in token_usage.iter_bounded_lines(
+                    f,
+                    str(path),
+                    0,
+                    label="events recapture reader",
+                    yield_final_partial=True,
+                ):
+                    stripped = raw.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        obj = json.loads(stripped)
+                    except ValueError:
+                        continue
+                    if not isinstance(obj, dict) or obj.get("type") != "git-snapshot":
+                        continue
+                    for proj in obj.get("projects") or []:
+                        if not isinstance(proj, dict):
+                            continue
+                        remote = proj.get("remote") if isinstance(proj.get("remote"), str) else ""
+                        for commit in proj.get("commits") or []:
+                            if not isinstance(commit, dict):
+                                continue
+                            sha = commit.get("sha")
+                            if isinstance(sha, str) and sha:
+                                keys.add((remote, sha))
+        except OSError:
+            continue
+    return keys
+
+
+def git_row_commit_records(row: dict) -> list[dict]:
+    """Flatten commit dicts out of one git-snapshot row."""
+    out: list[dict] = []
+    for proj in row.get("projects") or []:
+        if not isinstance(proj, dict):
+            continue
+        remote = proj.get("remote") if isinstance(proj.get("remote"), str) else ""
+        for commit in proj.get("commits") or []:
+            if not isinstance(commit, dict):
+                continue
+            sha = commit.get("sha")
+            if isinstance(sha, str) and sha:
+                out.append({"remote": remote, **commit})
+    return out
 
 
 def write_push_event(
@@ -1290,6 +1651,7 @@ def make_mm_push_event(
     sources: list[str] | None = None,
     discovery_errors: list[str] | None = None,
     local_emails: list[str] | None = None,
+    git_capture: GitCaptureState | None = None,
     ts: datetime | None = None,
 ) -> MmPushEvent:
     """Construct an mm-push event row. Caller appends as the LAST element
@@ -1311,7 +1673,11 @@ def make_mm_push_event(
     keep the field off the event row entirely — pre-v0.11.17 callers and
     cold-cache emitters get the same wire shape as before. An empty list
     is emitted as ``"local_emails": []`` (explicit "machine had nothing to
-    contribute," distinguishable from "pre-v0.11.17 peer")."""
+    contribute," distinguishable from "pre-v0.11.17 peer").
+
+    ``git_capture`` (Track 30A) is the typed capture state the next push
+    reads for the cursor gate. Pass ``None`` to keep the field off the
+    row (legacy shape; readers fail open and ADVANCE)."""
     filtered = [s for s in (sources or []) if s not in MM_INTERNAL_SOURCE_NAMES]
     event: MmPushEvent = {
         "v": EVENTS_SCHEMA_VERSION,
@@ -1324,6 +1690,8 @@ def make_mm_push_event(
     }
     if local_emails is not None:
         event["local_emails"] = list(local_emails)
+    if git_capture is not None:
+        event["git_capture"] = git_capture
     return event
 
 
