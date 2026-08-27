@@ -2,6 +2,28 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.46] - 2026-08-27
+
+**Fleet retro can now recover omitted git history, and a held cursor no longer pretends recovery is impossible.** Incomplete discovery still holds the git cursor (the next substantive push re-walks from the last complete capture), but the mm-push row is still written so diagnosis and author attribution survive. Walk failures are visible on `mm status` and never hold the cursor — git-walk cost grows with cursor age (48.6 ms @1d → 251.3 ms @30d vs a 250 ms autopush budget), so holding on a walk abort wedges unattended autopush. `mm recapture [WINDOW]` (default 30d) is the dedicated recovery command. The first push after upgrading may take a one-off longer git walk (measured 251 ms) because a held or first-run 30-day cursor escalates from the 250 ms autopush budget to 500 ms so that recovery actually completes.
+
+### Added
+
+- **`git_capture` on the mm-push row.** Optional nested key: `since`, `discovery` (`complete` / `partial` / `empty` / `not-run`), `walk_budget_aborts`, `walk_errors`. Absence is the version discriminator (fail open: ADVANCE).
+- **`mm recapture [WINDOW]`.** Git-only recapture at interactive budgets, then the ordinary push path. Default `30d` (same as `mm init`), min `1d`, max `90d`. `--dry-run` walks and reports without writing. Partial recovery exits 4. Zero discovered repositories writes nothing and exits 1. Safe to re-run — commits dedup fleet-wide on `(remote, sha)`. Retros window by the commit's date, not by when mm captured it.
+- **`mm diag` `git_capture` block.** Recorded last mm-push projection (`ts`, `mm_version`, capture state, `since`, error counts) beside the fresh discovery probe. Never renders `local_emails`. Peer-controlled strings are sanitized and length-clamped.
+- **`mm status` recovery nag.** Names `mm recapture Nd` when the last recorded capture is incomplete.
+
+### Changed
+
+- **Cursor scan is the 90-day retention window**, not 31 days. A complete push 45 days back is found instead of jumping forward to the 30-day floor. `git_capture.since` keeps a still-older gap explicit.
+- **Git-walk budget escalates** from 250 ms to 500 ms when the resolved cursor is older than a day. Session-walk budget is unchanged.
+- **Discovery-budget phrase** names `mm recapture 30d`. Omitted commits are recoverable.
+- **Empty `git init` directories** (`rc=128` + "does not have any commits yet") are a benign `no_commits` skip and do not degrade the push. Per-repo `TimeoutExpired` does.
+
+### Fixed
+
+- Git-walk repository loss (`budget_abort`, timeout, git errors) was computed nowhere the user could read. `walk_exceeded_budget` measured the session-metadata walk (deadline set after the git walk). Renamed to `session_walk_exceeded_budget`.
+
 ## [0.12.45] - 2026-08-25
 
 **Fleet retro now finds the repositories that are actually on this Mac.** Git-root discovery no longer spends the autopush budget proving deleted directories are not repositories: a `.git` + `HEAD` / `gitdir:` sniff replaced the per-candidate `git rev-parse` subprocess (the `.git`-file case that used to need the subprocess — Conductor worktrees — is still accepted). The dead gstack prober is gone. `mm diag` reports discovery at the autopush budget; `mm status` nags when a push recorded incomplete discovery; `last-autorun.json` is keyed per verb so autopull cannot erase a degraded push. This fix is not retroactive — earlier windows stay incomplete — and every Mac must upgrade individually.
