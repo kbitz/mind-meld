@@ -49,7 +49,7 @@ still controls whether accepted host-usage snapshots render on the card.
 | Consent | Add a local, explicit `[retro].grok_host_usage = true` setting, controlled by `mm enable-source grok` / `mm disable-source grok`. Absent means false. Flat bool, not a nested table: `patch_config_on_disk` cannot nest-patch. |
 | Why not a zero-file `grok` sync source? | A zero-file source would mint an empty remote manifest and imply whole-home sync. Track 22B added a real Claude-shaped `type: "grok"` walker (`skills/` / `commands/` / `rules/` only) instead. |
 | Data sent to the fleet | Existing encrypted `host-usage-snapshot` aggregate only: canonical model family, UTC day, four token counters, active-day coverage, and source name. |
-| Unknown or changed Grok format | Fail closed. Omit the entire host snapshot rather than publish a partial Grok total. |
+| Unknown or changed Grok format | Fail closed per reader. Drop and declare Grok while retaining any completed Codex/OpenCode readers; omit the row only when no reader completed. |
 | Cost | Do not estimate Grok subscription/API cost in this work. Usage volume and cost are different claims. |
 
 Track 22B supersedes the source part of this original 21A design: `grok` is
@@ -76,9 +76,11 @@ credentials, session state, and whole-file configuration remain local.
 4. Accept a line only when its outer timestamp is timezone-aware and
    `params.update` is exactly the terminal metadata projection:
    `prompt_id`, `sessionUpdate`, `stop_reason`, and `usage`; its
-   `sessionUpdate` must equal `turn_completed`. A line whose update object
-   carries a content-bearing field is not a terminal ledger record and is
-   ignored, not inspected further.
+   `sessionUpdate` must equal `turn_completed`. The exact same terminal shape
+   without `usage` is a zero-token skip, tallied as `usage_less_skipped`
+   before the exact-match check. A line whose update object carries a
+   content-bearing field is not a terminal ledger record and is ignored, not
+   inspected further.
 5. Require a non-empty bounded `prompt_id`, a valid terminal stop reason, and
    a bounded model ID for every `modelUsage` entry. A malformed terminal
    record, duplicate terminal key with different counters, incomplete final
@@ -132,9 +134,10 @@ The cache follows the established Codex rules:
 
 The reader receives the existing fresh 250 ms `autopush` / 500 ms interactive
 host-read deadline. A deadline, lock, stale file, malformed ledger, or I/O
-error returns `complete=False`; `events_tail` then omits the *whole* snapshot,
-adds its closed-vocabulary degradation breadcrumb, and leaves normal sync,
-git, and Claude capture intact.
+error returns `complete=False`; `events_tail` drops and declares that reader,
+while preserving every other reader that completed. It omits the whole row
+only when none completed, and always leaves normal sync, git, and Claude
+capture intact.
 
 ## Integration plan
 
@@ -145,7 +148,7 @@ explicit local Grok consent
 strict updates.jsonl reader + private incremental cache
         |
         v
-existing all-or-nothing host-usage snapshot (encrypted by mm-events sync)
+reader-scoped host-usage snapshot (encrypted by mm-events sync)
         |
         v
 latest accepted snapshot per device in retro-fleet
@@ -186,8 +189,9 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 3. Replayed terminal updates, resuming a session, and repeated pushes do not
    double-count a prompt.
 4. Malformed, content-bearing, incomplete, changing, locked, or unrecognized
-   terminal data publishes no partial host snapshot and surfaces only the
-   existing safe reader/reason breadcrumb.
+   terminal data drops and declares only that reader. A host snapshot is
+   omitted only when no reader completed, and the existing safe reader/reason
+   breadcrumb still surfaces.
 5. The reader/cache never contains a raw session path, prompt ID, prompt,
    response, tool result, chat-history byte, or terminal text. Tests assert
    this against serialized cache and event rows.
@@ -206,7 +210,7 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 |---|---|
 | `tests/test_config.py` | Grok source name/type boundaries, hardcoded-walker config shape, and retained usage-consent compatibility |
 | `tests/test_host_usage.py` | strict v1 terminal acceptance, multi-model totals, UTC attribution, replay/conflicting duplicate handling, malformed/content/incomplete/stale/deadline/cache-resume cases |
-| `tests/test_host_usage_snapshot.py` | Grok consent gate, warm dispatch, all-or-nothing omission, and closed breadcrumb semantics |
+| `tests/test_host_usage_snapshot.py` | Grok consent gate, warm dispatch, reader-scoped isolation/omission, and closed breadcrumb semantics |
 | `tests/test_events.py` | serialized snapshot has only canonical aggregate fields and remains capped to 90 UTC days |
 | `tests/test_retro_fleet_aggregator.py` | accepted-row validation/selection, whole-view/no-window-slice/no-fleet-spend isolation, host coverage gaps, and MODELS card labels |
 | isolation fixtures | redirect Grok root and cache for every test; no test may touch a real `~/.grok` store |
@@ -219,7 +223,7 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
 | `src/mind_meld/cli.py` | Manage the scoped source and retained usage bit through one enable/disable verb and status copy. |
 | `src/mind_meld/manifest.py` | Walk only hardcoded `skills/`, `commands/`, and `rules/`, rejecting child links and hard links. |
 | `src/mind_meld/resolveflow.py` | Limit Grok conflict discovery to the same hardcoded directories. |
-| `src/mind_meld/events_tail.py` | Gate Grok usage on the source or retained bit, dispatch warm safely, and preserve all-or-nothing capture. |
+| `src/mind_meld/events_tail.py` | Gate Grok usage on the source or retained bit, dispatch warm safely, and preserve reader-scoped capture. |
 | `src/mind_meld/host_usage.py` | Strict v1 reader, per-turn accounting, fingerprinted incremental cache. |
 | `src/mind_meld/skills/retro_fleet/aggregator.py` | Consume latest accepted host snapshots and render coverage-aware family totals. |
 | `docs/invariants/sync.md` | Record the hard-link and scoped Grok source boundary. |
