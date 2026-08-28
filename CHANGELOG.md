@@ -2,6 +2,30 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.48] - 2026-08-28
+
+**Codex usage is now counted per turn, and stops counting the same work twice. Your Codex token numbers will drop by roughly half, and the smaller number is the correct one — do not read it as a decline in activity, and do not compare a window that straddles this release.** The reader kept one cumulative total per rollout file and attributed it to the day that file was last touched. But a rollout file is not a session: forking, retrying, or resuming a conversation writes a NEW file that repeats the old one's history. Measured on a 746-rollout corpus, 195 `turn_id` values spanned 244 files sharing 85% of their ledger, so **55% of the reported total was the same work counted once per file**. Codex tokens now land on the day they were actually spent, split correctly across a session that runs past midnight, with forked history counted once and divergent branches counted in full. The first `mm push` after upgrading rebuilds the Codex cache once (measured 801 ms for 694 MB); `mm status` and `mm diag` report the progress, and autopush converges over about three pushes without warming.
+
+### Added
+
+- **Cross-file turn dedup.** `turn_context.turn_id` is Codex's equivalent of Claude's `tail_msg_ids` and Grok's `_grok_terminal_key`. Readings are keyed by `(lineage, previous cumulative, current cumulative)`, so a shared prefix collapses while divergent branches both survive. Deduping readings rather than TRANSITIONS would treat one branch's tail as a waypoint on the other's and silently drop its work.
+- **`mm diag` `host_usage.codex` block.** Cache state, reader state (`cold` / `migrating` / `ready`), rollouts cached vs on disk, and how many still await the one-off re-walk. Cache-only, so `mm diag` still runs without a passphrase. The block previously had exactly one key, `grok`.
+- **`mm status` Codex line** during the rebuild, naming `mm push` as the way to finish it.
+- **`migration`-specific failure copy.** That reason had been in the `Reason` vocabulary with no text of its own, so it inherited "A later substantive push will retry" — false on a quiet Mac, where the events tail only runs on a substantive push and autopush never warms the host cache.
+
+### Changed
+
+- **A day bucket is now a day's recorded work.** It used to be "the lifetime totals of every session that last touched this machine on that day", which is why a fixed day's value could DECREASE between snapshots. Buckets are additive and stable now. Grok has been per-turn since v0.12.47; OpenCode rows were always disjoint. All three readers finally agree.
+- **A ledger seen before the first `turn_context` is buffered, not dropped**, and attributed to the first model the file names. The old skip was justified by "totals are cumulative, so a later attributable record restates it" — a premise this release deletes. On the live corpus that prefix is 1,557 records across 7 rollouts worth 209,515,399 input tokens. A file whose ledgers are ALL pre-context still refuses the store; the buffer must never rescue that case.
+- **A resumed rollout no longer counts its parent's history.** Its opening reading uses `last_token_usage`, which excludes the inherited total (4 rollouts, 65,262,198 input tokens on the corpus).
+- **`_aggregate` and `_aggregate_grok` are one reduction.** They differed only in how they reached `(day, model, usage)`.
+- **The Codex cache entry stores observed readings plus a four-field resume carry** (`last_total`, `last_model`, `last_turn`, `pending`). Pre-Track entries are detected by the ABSENCE of `states` and re-walked once — deliberately not a `CACHE_VERSION` bump, which is shared with the Grok and OpenCode namespaces and would discard those too. Same call this repo made for `skills_by_day` (v0.11.27) and `offset`/`head` (v0.12.15).
+
+### Fixed
+
+- A repeated `token_count` record no longer inflates the total. Codex emits one on 183 of 746 rollouts (414 records), and also re-emits a turn's final reading verbatim as the next turn's first — 473,932 input tokens over a single 71-record file.
+- The wire `hosts` payload is pinned to exactly the four token fields by test. `aggregator._copy_usage_bucket` rejects a day bucket on an exact key-set mismatch, and a rejected bucket fails the WHOLE snapshot row, so widening it would make every peer on an older mm silently drop the row and keep a stale one. Per-model detail ships as an additive sibling key instead.
+
 ## [0.12.47] - 2026-08-28
 
 **Enabling Grok usage capture now actually publishes Grok activity, and a Grok read failure no longer freezes the rest of the host view.** Two wire-drift bugs (an absent `updates.jsonl` treated as an I/O error, and a usage-less `turn_completed` treated as an unreadable format) meant `mm enable-source grok` turned on a reader that published nothing. Both are skipped now, with a tally of usage-less turns on the local cache. Host-reader failures are isolated: a Grok format change drops Grok, declared, and Codex still publishes. Each Mac upgrades individually, **and upgrading is not enough** — run `mm enable-source grok` on that Mac, then one interactive `mm push` (the fast path; autopush never warms and converges over about three pushes). The retro card gains a `Grok models: seen on N days` line, not a token magnitude.
