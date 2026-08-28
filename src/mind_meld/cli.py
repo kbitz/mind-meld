@@ -4512,6 +4512,21 @@ def status(
 
     from mind_meld import host_usage as _host_usage
 
+    # Codex has no consent bit to report (enabling the source is the consent),
+    # so this line exists only for the state a user cannot otherwise see: a
+    # cache mid-rebuild publishes less than it will, and autopush never warms.
+    codex_diag = _host_usage.codex_usage_diag()
+    if codex_diag.get("files_pre_track"):
+        console.print(
+            f"  Codex usage capture: rebuilding — {codex_diag['files_pre_track']} rollouts "
+            "awaiting re-walk; run [bold]mm push[/bold] to finish it"
+        )
+    elif codex_diag.get("state") == "migrating":
+        console.print(
+            f"  Codex usage capture: warming — {codex_diag.get('pending') or 0} rollouts "
+            "not yet scanned; run [bold]mm push[/bold] to finish it"
+        )
+
     grok_source_on = any(s.get("name") == "grok" for s in sources_configs)
     grok_on = grok_source_on or grok_host_usage_enabled(config)
     grok_present = False
@@ -4918,7 +4933,12 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "complete_once": grok_diag["complete_once"],
             "usage_less_skipped": grok_diag["usage_less_skipped"],
             "cache_state": grok_diag["cache_state"],
-        }
+        },
+        # Codex needs its own block for the same reason Grok does: a reader
+        # whose cache is mid-rebuild publishes less than it will, and nothing
+        # else on any surface says so. Cache-only, so this stays inside diag's
+        # no-passphrase contract.
+        "codex": _host_usage.codex_usage_diag(),
     }
     return {
         "mm_version": __version__,
@@ -5091,6 +5111,23 @@ def diag(
     console.print(f"  grok prior successful scan: {scan_shown}")
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
     console.print(f"  grok cache:              {safe_str(str(hu_state.get('cache_state', '')))}")
+
+    cx_state = (state.get("host_usage") or {}).get("codex") or {}
+    console.print(f"  codex cache:             {safe_str(str(cx_state.get('cache_state', '')))}")
+    console.print(f"  codex reader state:      {safe_str(str(cx_state.get('state', '')))}")
+    cx_disk = cx_state.get("files_on_disk")
+    console.print(
+        f"  codex rollouts cached:   {cx_state.get('files_cached', 0)}"
+        f" of {'unknown' if cx_disk is None else cx_disk}"
+    )
+    if cx_state.get("files_pre_track"):
+        # The actionable half: these entries predate per-turn accounting and
+        # are re-walked once. Autopush never warms the host cache, so on a
+        # quiet Mac the nudge is the only way a user learns to finish it.
+        console.print(
+            f"  codex awaiting re-walk:  {cx_state['files_pre_track']}"
+            " — run [bold]mm push[/bold] (interactive) to finish the rebuild"
+        )
 
     disc = state.get("discovery") or {}
     console.print("\n[bold]Git-root discovery[/bold] (autopush budget)")

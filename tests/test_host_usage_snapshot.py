@@ -839,9 +839,28 @@ class TestTailWiring:
         assert len(degradations) == 1
         assert degradations[0].startswith(f"host-usage snapshot skipped (opencode {reason})")
         # Permanent vs transient: never promise a retry for a failure a later
-        # push cannot fix.
+        # push cannot fix, and never leave a transient one without a next step.
         promises_retry = "A later substantive push will retry" in degradations[0]
-        assert promises_retry is (reason not in events_tail._HOST_PERMANENT_REASONS)
+        if reason in events_tail._HOST_PERMANENT_REASONS:
+            assert not promises_retry
+            assert "Upgrade mm" in degradations[0]
+        else:
+            # A transient reason must tell the user what happens next, and
+            # exactly one of the two ways. The generic promise is the default.
+            # `deadline` / `partial` name `mm push` instead, because that is
+            # what a warming cache produces and the generic promise is false
+            # there on a quiet Mac (autopush passes warm_host_cache=None).
+            # `migration` names the host's own storage migration, which mm
+            # cannot finish and a retry cannot fix.
+            names_command = "Run `mm push`" in degradations[0]
+            names_host_migration = "storage migration" in degradations[0]
+            assert sum((promises_retry, names_command, names_host_migration)) == 1
+            if reason in {"deadline", "partial"}:
+                assert names_command
+            elif reason == "migration":
+                assert names_host_migration
+            else:
+                assert promises_retry
 
     def test_an_absent_source_publishes_a_row_and_no_degradation(self, tmp_path, monkeypatch):
         """The whole point of the revised premise: a machine whose Grok store

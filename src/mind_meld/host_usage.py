@@ -58,7 +58,7 @@ import sqlite3
 import stat
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -144,16 +144,49 @@ class HostUsageResult:
 class _CacheEntry(TypedDict, total=False):
     """One rollout's cached parse. Two shapes share this map.
 
-    A LEDGER entry carries ``day`` / ``model`` / ``usage``. A NO-LEDGER entry
-    sets ``no_ledger`` instead and carries none of them: the file was parsed in
-    full and provably contained no usage (an abandoned or response-less
-    session). Both carry the same identity + fingerprint fields.
+    A LEDGER entry carries ``states`` plus the resume carry-set described
+    below. A NO-LEDGER entry sets ``no_ledger`` instead and carries none of
+    them: the file was parsed in full and provably contained no usage (an
+    abandoned or response-less session). Both carry the same identity +
+    fingerprint fields.
 
     The no-ledger shape exists for convergence, not tidiness. Without it those
     files are re-parsed on EVERY scan forever, so a corpus whose ledger-less
     files alone outcost the caller's 250ms budget can never reach a complete
     pass — the cache warms and the scan still expires, permanently. Pinned by
     ``test_uncacheable_rollouts_do_not_block_convergence``.
+
+    **The ledger shape stores observed CUMULATIVE STATES, not a total.** A
+    rollout is not the unit of accounting: 195 ``turn_id`` values span 244 of
+    746 files on a real corpus (fork / retry / resume), sharing 85% of their
+    ledger before diverging. Per-file totals therefore double-count roughly
+    half the corpus. ``states`` keeps every distinct ``(turn, cumulative)``
+    pair this file observed so ``_aggregate`` can union them across files and
+    difference the union once. See ``_aggregate``.
+
+    Entries written before this Track carried ``day`` / ``model`` / ``usage``
+    instead. The ABSENCE of ``states`` is the version discriminator and forces
+    one full re-walk of that file — deliberately NOT a ``CACHE_VERSION`` bump,
+    which shares a constant with the Grok and OpenCode namespaces and would
+    discard those too. Same call this repo made twice already, for
+    ``skills_by_day`` (v0.11.27) and ``offset``/``head`` (v0.12.15), both times
+    because a bump throws away valid data that is expensive to rebuild.
+
+    The four resume fields exist because a bucket alone cannot continue a
+    walk: ``last_total`` is what an appended ledger must be differenced
+    AGAINST, ``last_model`` / ``last_turn`` are the attribution context a
+    resumed segment inherits, and ``pending`` holds ledgers observed before any
+    ``turn_context`` — which a segment boundary can otherwise strand.
+
+    **This entry is much larger than the terminal it replaced, and that cost is
+    the reason the string columns are interned.** Measured on a 747-rollout /
+    694 MB corpus: 72,654 states, median 17 per file and 1,234 at the maximum.
+    Spelled out, the cache was 23.4 MB and its json round-trip alone was 95 ms
+    of the 250 ms autopush host budget. Interning ``turn_ids`` / ``days`` /
+    ``models`` and keeping ``last`` only on a file's FIRST state (the only place
+    ``_aggregate`` reads it) brings that to 13.5 MB and 56 ms. Still 34x the
+    v0.12.47 cache, and it grows with the corpus — see the scaling note in
+    ``docs/TODOS.md`` for the trigger to revisit the encoding.
     """
 
     dev: int
@@ -165,9 +198,14 @@ class _CacheEntry(TypedDict, total=False):
     tail: str
     tail_len: int
     offset: int
-    day: str
-    model: str
-    usage: Usage
+    turn_ids: list[str]
+    days: list[str]
+    models: list[str]
+    states: list[list[Any]]
+    last_total: list[int]
+    last_model: str
+    last_turn: str
+    pending: list[list[Any]]
     no_ledger: bool
 
 
@@ -181,9 +219,47 @@ class _Fingerprint:
 
 @dataclass(frozen=True)
 class _Terminal:
+    """One already-reduced ``(day, model, usage)`` contribution.
+
+    Still the OpenCode reader's unit: its sqlite rows are per-message and
+    already disjoint, so there is nothing to dedup and no cumulative counter
+    to difference. The Codex reader stopped using this in favour of
+    ``_TurnState``; do not reintroduce it there.
+    """
+
     day: str
     model: str
     usage: Usage
+
+
+@dataclass(frozen=True)
+class _TurnState:
+    """One observed CUMULATIVE reading inside a turn.
+
+    ``total`` is the host's own running counter, in ``TOKEN_FIELDS`` order, at
+    the moment ``day`` / ``model`` observed it. Two rollout files that forked
+    from one conversation report the SAME ``(turn, total)`` for every shared
+    event and diverge afterwards, which is what makes the pair a usable
+    identity: equal states are the same work, unequal states are not.
+
+    ``last`` is that record's ``last_token_usage`` — the host's own statement
+    of what THIS reading added. It is consulted only for the lowest state in a
+    turn's union, where differencing has nothing to difference against: the
+    cumulative counter there already includes every earlier turn of the session
+    (and, on a resumed rollout, a parent session's history too). Every state
+    carries it because the lowest state of a turn is not generally the first
+    record of a file — a file holds 2.89 turns on average, so gating this on
+    the file's first record would start every later turn's chain from the whole
+    cumulative total. ``None`` means the record carried no ``last_token_usage``
+    (no real record does; fixtures do), and the fallback is the cumulative,
+    which is correct only for a session's very first reading.
+    """
+
+    turn: str
+    total: tuple[int, ...]
+    day: str
+    model: str
+    last: tuple[int, ...] | None
 
 
 class _ReadFailure(RuntimeError):
@@ -329,6 +405,81 @@ def grok_completed_once() -> bool:
     latch (Track 31A). ``mm status`` / ``mm diag`` still do.
     """
     return grok_usage_diag()["complete_once"] is True
+
+
+def codex_usage_diag() -> dict[str, Any]:
+    """On-disk Codex usage-reader state. Does not open the host store.
+
+    Exists because the per-turn migration is otherwise undiagnosable. It forces
+    one full re-walk of every rollout (absence of ``states`` is the version
+    discriminator), which an autopush-only Mac completes over several bounded
+    passes with nothing on any surface saying so. Before this, ``mm diag``'s
+    ``host_usage`` block had exactly one key, ``grok``.
+
+    Cache-only, like its Grok sibling: ``mm diag`` must run without a
+    passphrase and without a valid config, so absence, lock contention, and
+    unreadable files are reported as ``cache_state``, never raised.
+
+    ``migrating`` is the state a user needs to recognise: some entries are
+    already per-turn and some are still pre-Track, so the published Codex
+    numbers are incomplete but converging. ``pending`` counts the rollouts on
+    disk that no cache entry covers yet.
+    """
+    blank = {
+        "cache_state": "missing",
+        "state": "cold",
+        "files_cached": 0,
+        "files_migrated": 0,
+        "files_pre_track": 0,
+        "files_on_disk": None,
+        "pending": None,
+    }
+    try:
+        with locked_json_snapshot(CACHE_PATH) as snap:
+            data = snap.data
+            state = snap.state
+    except OSError:
+        return {**blank, "cache_state": "unreadable"}
+    if state != "valid" or not isinstance(data, dict):
+        return {
+            **blank,
+            "cache_state": "missing" if state in {"missing", "empty"} else "unreadable",
+        }
+    files = _cached_files(data)
+    migrated = 0
+    pre_track = 0
+    for value in files.values():
+        if not isinstance(value, dict):
+            continue
+        if value.get("no_ledger") is True or isinstance(value.get("states"), list):
+            migrated += 1
+        else:
+            pre_track += 1
+    on_disk: int | None
+    try:
+        on_disk = sum(
+            1 for path in CODEX_SESSIONS_PATH.rglob("*") if _ROLLOUT_NAME.fullmatch(path.name)
+        )
+    except OSError:
+        on_disk = None
+    cached = migrated + pre_track
+    if not cached:
+        phase = "cold"
+    elif pre_track:
+        phase = "migrating"
+    elif on_disk is not None and cached < on_disk:
+        phase = "migrating"
+    else:
+        phase = "ready"
+    return {
+        "cache_state": "ok",
+        "state": phase,
+        "files_cached": cached,
+        "files_migrated": migrated,
+        "files_pre_track": pre_track,
+        "files_on_disk": on_disk,
+        "pending": None if on_disk is None else max(0, on_disk - cached),
+    }
 
 
 def grok_usage_diag() -> dict[str, Any]:
@@ -868,14 +1019,11 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
 
 
 def _aggregate_grok(entries: Any) -> HostTokens:
-    hosts: HostTokens = {}
-    for entry in entries:
-        for turn in entry.get("turns", ()) if isinstance(entry, dict) else ():
-            family = host_family(turn["model"])
-            days = hosts.setdefault(family, {})
-            bucket = days.setdefault(turn["day"], zero_model_bucket())
-            merge_usage_bucket(bucket, turn["usage"])
-    return hosts
+    """Grok's reduction is `_aggregate`'s ``turns`` branch. Kept as a named
+    alias because the Grok scan reads better with it, not because the reduction
+    differs — it deliberately does not, and a second implementation here is how
+    the two readers drifted apart in the first place."""
+    return _aggregate(entry for entry in entries if isinstance(entry, dict))
 
 
 def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
@@ -1212,16 +1360,16 @@ def _read_full_rollout(path: Path, before: os.stat_result, deadline: float) -> _
     must NOT be given a synthetic model or day: ``_aggregate`` would fabricate
     a family bucket out of it. See ``_CacheEntry``.
     """
-    terminal = _read_rollout(path, 0, None, before, deadline)
+    walk = _read_rollout(path, 0, None, before, deadline)
     after = _regular_stat(path)
     if not _same_source(before, after):
         raise _ReadFailure("stale")
     fingerprint = _fingerprint(path, after, deadline)
     if not _same_source(after, _regular_stat(path)):
         raise _ReadFailure("stale")
-    if terminal is None:
+    if walk is None:
         return _no_ledger_entry(after, fingerprint)
-    return _cache_entry(after, fingerprint, terminal)
+    return _cache_entry(after, fingerprint, walk)
 
 
 def _cache_hit(
@@ -1290,13 +1438,12 @@ def _resume_rollout(
     entry: _CacheEntry,
     deadline: float,
 ) -> _CacheEntry:
-    previous = _Terminal(entry["day"], entry["model"], entry["usage"])
-    terminal = _read_rollout(path, entry["offset"], previous, before, deadline)
-    if terminal is None:
-        # Unreachable today: `previous` seeds `terminal`, so a resumed read
-        # always carries at least the cached total forward. Guarded rather
-        # than asserted so a future change to `_read_rollout` degrades to a
-        # bounded refusal instead of a TypeError inside `_cache_entry`.
+    walk = _read_rollout(path, entry["offset"], _walk_from_entry(entry), before, deadline)
+    if walk is None:
+        # Unreachable today: the carried walk already holds this file's states,
+        # so a resumed read always returns them. Guarded rather than asserted
+        # so a future change to `_read_rollout` degrades to a bounded refusal
+        # instead of a TypeError inside `_cache_entry`.
         raise _ReadFailure("unsupported")
     after = _regular_stat(path)
     if not _same_source(before, after):
@@ -1304,26 +1451,58 @@ def _resume_rollout(
     fingerprint = _fingerprint(path, after, deadline)
     if not _same_source(after, _regular_stat(path)):
         raise _ReadFailure("stale")
-    return _cache_entry(after, fingerprint, terminal)
+    return _cache_entry(after, fingerprint, walk)
+
+
+def _walk_from_entry(entry: _CacheEntry) -> _Walk:
+    """Rehydrate the carried walk state of an earlier segment.
+
+    Every field matters. Dropping ``states`` would lose this file's share of a
+    turn that other files also observed; dropping ``last_total`` would make the
+    first appended ledger difference against nothing; dropping ``last_model`` /
+    ``last_turn`` would meet it with no attribution and refuse the whole store;
+    dropping ``pending`` would strand ledgers whose ``turn_context`` had not
+    arrived when the previous segment ended.
+    """
+    walk = _Walk(
+        states=[_TurnState(*parts) for parts in _entry_states(entry)],
+        pending=[
+            (tuple(total), day, (tuple(last) if last is not None else None))
+            for total, day, last in (entry.get("pending") or ())
+        ],
+        turn=entry.get("last_turn", ""),
+    )
+    last_total = entry.get("last_total")
+    if last_total is not None:
+        walk.last_total = tuple(last_total)
+    model = entry.get("last_model")
+    if model:
+        walk.model = model
+    return walk
 
 
 def _read_rollout(
     path: Path,
     start_offset: int,
-    previous: _Terminal | None,
+    previous: _Walk | None,
     before: os.stat_result,
     deadline: float,
-) -> _Terminal | None:
-    """Read a stable file from a complete-line offset and retain last total.
+) -> _Walk | None:
+    """Read a stable file from a complete-line offset, collecting turn states.
 
     Returns ``None`` when the rollout recorded no usage ledger at all — an
     abandoned or response-less session contributes nothing, which is a fact
     about that file rather than a reason to refuse the whole store. Refusal is
     reserved for a ledger we saw but could not attribute (see below).
+
+    ``previous`` is the carried walk state of an earlier segment of the SAME
+    file (see ``_resume_rollout``). It supplies the cumulative baseline the
+    first appended ledger is differenced against, the inherited model and turn,
+    and any pre-``turn_context`` ledgers that segment could not yet attribute.
     """
-    current_model = previous.model if previous is not None else None
-    terminal = previous
-    saw_usage_ledger = previous is not None
+    walk = previous if previous is not None else _Walk()
+    current_model = walk.model
+    saw_usage_ledger = previous is not None and bool(walk.states)
     last_offset = start_offset
     try:
         with path.open("rb") as fp:
@@ -1350,6 +1529,18 @@ def _read_rollout(
                 record_type = record.get("type")
                 if record_type == "turn_context":
                     current_model = _context_model(record)
+                    walk.model = current_model
+                    walk.turn = _context_turn(record)
+                    # A `turn_context` is the first thing that can attribute a
+                    # pre-context ledger, so flush the buffer HERE. Under the
+                    # cumulative reading this buffer did not exist: the code
+                    # dropped those records and a comment justified it with
+                    # "totals are CUMULATIVE, so a later attributable record
+                    # restates these tokens". Per-turn accounting deletes that
+                    # premise, and on a real corpus the dropped prefix is
+                    # 1,557 records across 7 rollouts worth 209,515,399 input
+                    # tokens. Dropping them now would be silent loss.
+                    _flush_pending(walk)
                     continue
                 if record_type == "event_msg" and _is_token_count(record):
                     if not _carries_usage(record):
@@ -1361,15 +1552,15 @@ def _read_rollout(
                         # as fatal refused the entire store.
                         continue
                     saw_usage_ledger = True
+                    total, day, last = _reading_from_record(record)
                     if current_model is None:
-                        # A ledger before the first `turn_context` cannot be
-                        # attributed yet. Totals are CUMULATIVE, so a later
-                        # attributable record restates these tokens; dropping
-                        # this one loses nothing. If no `turn_context` ever
-                        # arrives, `saw_usage_ledger` makes the file fatal
-                        # below rather than silently discarding real usage.
+                        # Not attributable YET. Buffer rather than drop; the
+                        # next `turn_context` flushes it. If none ever arrives
+                        # the file is refused below, never silently zeroed.
+                        walk.pending.append((total, day, last))
                         continue
-                    terminal = _terminal_from_record(record, current_model)
+                    walk.states.append(_TurnState(walk.turn, total, day, current_model, last))
+                    walk.last_total = total
             if fp.tell() != last_offset:
                 # `iter_bounded_lines` intentionally leaves a trailing
                 # unterminated write behind the persisted offset.
@@ -1377,14 +1568,123 @@ def _read_rollout(
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
 
-    if terminal is None and saw_usage_ledger:
+    if not walk.states and walk.pending:
         # We read real token counts and could not attribute a single one to a
         # model. That is a shape this reader does not understand, and silently
         # dropping it would under-report usage — refuse the store instead.
+        # NOTE the buffer must NOT rescue this case: a file whose only ledgers
+        # precede every `turn_context` is exactly the shape
+        # `test_missing_model_before_token_is_incomplete` pins as fatal.
+        raise _ReadFailure("unsupported")
+    if not walk.states and saw_usage_ledger:
         raise _ReadFailure("unsupported")
     if not _same_source(before, _regular_stat(path)):
         raise _ReadFailure("stale")
-    return terminal
+    return walk if walk.states else None
+
+
+@dataclass
+class _Walk:
+    """Mutable walk state for ONE rollout, carried across segment boundaries.
+
+    Mutable on purpose: it is threaded through a resume, persisted to the cache
+    entry, and rehydrated. These fields are exactly what a resumed segment
+    cannot reconstruct from the appended bytes alone.
+    """
+
+    states: list[_TurnState] = field(default_factory=list)
+    pending: list[tuple[tuple[int, ...], str, tuple[int, ...] | None]] = field(default_factory=list)
+    last_total: tuple[int, ...] | None = None
+    model: str | None = None
+    turn: str = ""
+
+
+def _flush_pending(walk: _Walk) -> None:
+    """Attribute buffered pre-``turn_context`` ledgers to the now-known model.
+
+    Called only from the ``turn_context`` branch, so ``walk.model`` is set.
+    Attributing an EARLIER ledger to a LATER context is normally forbidden
+    here — `test_model_context_after_token_is_not_retroactively_used` pins
+    that — but this case is different in kind and the difference is why the
+    buffer is safe: those records had no candidate model at all, and the
+    established stance for an unattributable ledger (see
+    `test_missing_model_before_token_is_incomplete`) is to refuse, never to
+    drop. Attributing to the first model the file names is the only reading
+    that neither refuses a routine shape nor loses real tokens.
+    """
+    if not walk.pending or walk.model is None:
+        return
+    for total, day, last in walk.pending:
+        walk.states.append(_TurnState(walk.turn, total, day, walk.model, last))
+        walk.last_total = total
+    walk.pending.clear()
+
+
+def _reading_from_record(
+    record: dict[str, Any],
+) -> tuple[tuple[int, ...], str, tuple[int, ...] | None]:
+    """Extract ``(cumulative_total, utc_day, last_token_usage)`` from a ledger.
+
+    Both counter maps go through `_counter`, so the required/optional split and
+    the `_MAX_COUNTER` bound still apply per record. `last_token_usage` is
+    optional at this layer: every record on a real corpus carries it, but the
+    first-state rule tolerates its absence by falling back to the cumulative,
+    which is correct for a rollout that inherited nothing.
+    """
+    payload = record.get("payload")
+    info = payload.get("info") if isinstance(payload, dict) else None
+    totals = info.get("total_token_usage") if isinstance(info, dict) else None
+    if not isinstance(totals, dict):
+        raise _ReadFailure("unsupported")
+    total = _counters(totals)
+    # Deliberately validated but never summed: total_tokens omits the cache
+    # counters and reasoning_output_tokens is already inside output_tokens.
+    _counter(totals, "reasoning_output_tokens", required=False)
+    _counter(totals, "total_tokens", required=False)
+    raw_last = info.get("last_token_usage") if isinstance(info, dict) else None
+    last = _counters(raw_last) if isinstance(raw_last, dict) else None
+    return total, _record_day(record), last
+
+
+def _counters(totals: dict[str, Any]) -> tuple[int, ...]:
+    return (
+        _counter(totals, "input_tokens", required=True),
+        _counter(totals, "cache_write_input_tokens", required=False),
+        _counter(totals, "cached_input_tokens", required=True),
+        _counter(totals, "output_tokens", required=True),
+    )
+
+
+def _record_day(record: dict[str, Any]) -> str:
+    timestamp = record.get("timestamp")
+    if not isinstance(timestamp, str):
+        raise _ReadFailure("unsupported")
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise _ReadFailure("unsupported") from exc
+    if parsed.tzinfo is None:
+        raise _ReadFailure("unsupported")
+    return parsed.astimezone(timezone.utc).date().isoformat()
+
+
+def _context_turn(record: dict[str, Any]) -> str:
+    """Return ``turn_context.turn_id``, or ``""`` when the host omits it.
+
+    This is the Codex analogue of Claude's ``message.id`` (``tail_msg_ids``)
+    and Grok's ``_grok_terminal_key``: the identity that makes the same work
+    recognisable in two different files. Present on all 2,101 ``turn_context``
+    records of a real corpus. An empty id degrades to per-file accounting for
+    that turn rather than refusing, because a missing OPTIONAL identity is not
+    evidence of a malformed ledger.
+    """
+    payload = record.get("payload")
+    turn = payload.get("turn_id") if isinstance(payload, dict) else None
+    if not isinstance(turn, str) or not turn:
+        return ""
+    if len(turn.encode("utf-8")) > _MAX_PROMPT_ID_BYTES:
+        raise _ReadFailure("unsupported")
+    return turn
 
 
 def _context_model(record: dict[str, Any]) -> str:
@@ -1459,21 +1759,202 @@ def _counter(totals: dict[str, Any], key: str, *, required: bool) -> int:
 
 
 def _aggregate(entries: Any) -> HostTokens:
+    """Reduce cached entries to ``{family: {day: Usage}}``.
+
+    Handles every reader's entry shape, which is why there is one of these and
+    not one per reader: OpenCode contributes ``_Terminal`` rows that are
+    already disjoint, Grok contributes pre-deduped ``turns``, and Codex
+    contributes ``states`` that must be deduped HERE, across files.
+
+    **Why Codex dedup cannot live in the per-file walk.** A rollout file is not
+    the unit of accounting. Measured on a real corpus: 195 ``turn_id`` values
+    appear in more than one file, spanning 244 of 746 files, sharing 85% of
+    their ledger before diverging (fork / retry / resume). Summing per file
+    double-counts the shared prefix — over half the reported total. Keeping
+    only the longest file per turn instead DISCARDS the divergent branches,
+    which is real work. Neither is correct, and neither is visible from inside
+    one file.
+
+    **The unit of identity is the TRANSITION, not the reading.** Deduping
+    readings looks right and is not: two branches that fork at 100 and reach
+    130 and 150 have four distinct readings, and treating 130 as a waypoint on
+    the way to 150 reports 150 when the real spend is 180. Their TRANSITIONS
+    differ — ``100 -> 130`` and ``100 -> 150`` — so keying on
+    ``(lineage, previous, current)`` counts the shared prefix once and both
+    tails in full.
+
+    It also subsumes two other shapes for free, which is the argument for
+    preferring it over a special case per shape:
+
+    * A repeated ``token_count`` (183 files / 414 records on that corpus) is a
+      ``t -> t`` transition, so its increment is 0 rather than a re-added
+      ``last_token_usage``.
+    * Codex re-emits a turn's final reading as the next turn's first, which is
+      the same ``t -> t`` shape across a turn boundary.
+
+    The ``max(0, ...)`` clamp is a guard, not a live case: zero non-monotonic
+    steps were observed across 1,041 turns and 34,313 readings. Monotonicity is
+    an observation about today's Codex, not a documented guarantee, and a
+    negative bucket would reach the wire as an unsigned counter.
+
+    **Known limitation, stated because it cannot be fixed at this layer.** A
+    transition identity is numeric, so two branches of one lineage that each
+    spend the EXACT same four counters from the exact same cumulative are
+    indistinguishable from one branch seen twice, and collapse to one. A
+    deterministic retry of an identical prompt is the realistic way to hit it.
+    Closing it needs a stable per-record id, and `token_count` has none: its
+    payload carries only ``type`` / ``info`` / ``rate_limits``, and ``turn_id``
+    lives on ``turn_context``, which is why a turn is a lineage link here rather
+    than a key. The alternative — not deduping — restores a measured 55%
+    over-count across 244 of 747 files. Under-counting an exact-duplicate retry
+    is the smaller and rarer error, but it IS an error; do not describe this
+    reduction as exact.
+    """
     hosts: HostTokens = {}
+    lineages = _Lineages()
+    staged: list[tuple[list[str], list[tuple[Any, ...]]]] = []
     for entry in entries:
         # No-ledger entries exist only to make an unchanged ledger-less file a
-        # cheap cache hit. They carry no model/day/usage and must never reach
+        # cheap cache hit. They carry nothing attributable and must never reach
         # `host_family`, which would bucket "" as the `other` family.
         if not isinstance(entry, _Terminal) and entry.get("no_ledger"):
             continue
-        model = entry.model if isinstance(entry, _Terminal) else entry["model"]
-        day = entry.day if isinstance(entry, _Terminal) else entry["day"]
-        usage = entry.usage if isinstance(entry, _Terminal) else entry["usage"]
-        family = host_family(model)
-        days = hosts.setdefault(family, {})
-        bucket = days.setdefault(day, zero_model_bucket())
-        merge_usage_bucket(bucket, usage)
+        if isinstance(entry, _Terminal):
+            _add_usage(hosts, entry.day, entry.model, entry.usage)
+            continue
+        for turn in entry.get("turns") or ():
+            _add_usage(hosts, turn["day"], turn["model"], turn["usage"])
+        parsed = _entry_states(entry)
+        if not parsed:
+            continue
+        # Every turn observed in ONE file belongs to one session, so its
+        # cumulative counter is one shared number line. A synthetic per-file id
+        # keeps a file with no named turn in its own lineage instead of pooling
+        # unrelated files together.
+        # dev+ino alone is NOT unique across a cache: a rollout deleted but not
+        # yet pruned can have its inode reused by a new file, and both entries
+        # then claim one id and merge into one lineage. Size and mtime_ns are
+        # already on the entry and make that collision unreachable in practice.
+        own = (
+            f"\x00{entry.get('dev')}:{entry.get('ino')}:{entry.get('size')}:{entry.get('mtime_ns')}"
+        )
+        turn_ids = [own] + [p[0] for p in parsed if p[0]]
+        lineages.union(turn_ids)
+        staged.append((turn_ids, parsed))
+    # (lineage, previous cumulative, this cumulative) -> (day, model, increment)
+    seen: dict[tuple[str, Any, tuple[int, ...]], tuple[str, str, tuple[int, ...], int]] = {}
+    # (lineage, cumulative) -> the entries that reached it BY a transition.
+    # Used to disarm an opening another FILE already accounted for. Tracking
+    # which entry did the reaching is load-bearing: a file whose own second
+    # reading repeats its first would otherwise suppress its own opening and
+    # lose that increment.
+    reached: dict[tuple[str, tuple[int, ...]], set[int]] = {}
+    for position, (turn_ids, parsed) in enumerate(staged):
+        root = lineages.find(turn_ids[0])
+        previous: tuple[int, ...] | None = None
+        for _turn, total, day, model, last in parsed:
+            if previous is None:
+                # Opening reading. Nothing to difference against: the counter
+                # already includes whatever came before, which on a resumed
+                # rollout is a PARENT session's history (4 files on the corpus,
+                # 65,262,198 input tokens). `last_token_usage` is the host's
+                # own statement of what this reading alone added.
+                increment = last if last is not None else total
+            else:
+                increment = tuple(max(0, total[i] - previous[i]) for i in range(len(total)))
+                reached.setdefault((root, total), set()).add(position)
+            seen.setdefault((root, previous, total), (day, model, increment, position))
+            previous = total
+    for (root, previous, total), (day, model, increment, position) in seen.items():
+        if previous is None and (reached.get((root, total), set()) - {position}):
+            # A resumed or forked file OPENS at a cumulative that some other
+            # file in this lineage already arrived at by spending tokens. That
+            # arrival transition already counted the work, so charging this
+            # file's `last_token_usage` on top double-counts it. Measured: 1 of
+            # 747 rollouts on a real corpus, so rare, but an opening has no
+            # predecessor and therefore no transition identity of its own —
+            # this is the only thing that can disambiguate it.
+            continue
+        _add_usage(hosts, day, model, dict(zip(TOKEN_FIELDS, increment)))
     return hosts
+
+
+class _Lineages:
+    """Union-find over turn ids. A turn is a LINK, not a bucket key.
+
+    Turns cannot be scoped independently, and the reason is a real shape in the
+    log: Codex re-emits a turn's final ``token_count`` verbatim as the first
+    record of the NEXT turn (same cumulative total, same ``last_token_usage``).
+    Scoping transitions per turn makes that re-emission an OPENING reading of a
+    fresh scope, which then claims its ``last_token_usage`` again — measured at
+    473,932 input tokens on a single 71-record rollout before this was folded
+    in.
+
+    A connected component is the right scope because it is exactly the set of
+    readings that share one cumulative number line. Two files that forked from
+    one conversation share turn ids, so they land in one lineage: their common
+    transitions collapse and their divergent ones both survive.
+    """
+
+    def __init__(self) -> None:
+        self._parent: dict[str, str] = {}
+
+    def find(self, item: str) -> str:
+        root = self._parent.setdefault(item, item)
+        while root != self._parent[root]:
+            root = self._parent[root]
+        while self._parent[item] != root:
+            self._parent[item], item = root, self._parent[item]
+        return root
+
+    def union(self, items: list[str]) -> None:
+        if not items:
+            return
+        root = self.find(items[0])
+        for other in items[1:]:
+            self._parent[self.find(other)] = root
+
+
+def _state_parts(
+    state: Any,
+    turn_ids: list[str] | None = None,
+    days: list[str] | None = None,
+    models: list[str] | None = None,
+) -> tuple[str, tuple[int, ...], str, str, tuple[int, ...] | None]:
+    """Resolve one stored state row, de-interning its string columns.
+
+    The tables are optional so an in-memory ``_TurnState`` still round-trips
+    through the same helper.
+    """
+    if isinstance(state, _TurnState):
+        return state.turn, state.total, state.day, state.model, state.last
+    turn, total, day, model, last = state
+    return (
+        turn_ids[turn] if turn_ids is not None else turn,
+        tuple(total),
+        days[day] if days is not None else day,
+        models[model] if models is not None else model,
+        (tuple(last) if last is not None else None),
+    )
+
+
+_StateParts = tuple[str, tuple[int, ...], str, str, "tuple[int, ...] | None"]
+
+
+def _entry_states(entry: Any) -> list[_StateParts]:
+    """Every stored state of one entry, in document order, de-interned."""
+    # NOTE `turn_ids`, not `turns`: `turns` is Grok's per-turn record list and
+    # both shapes flow through the same `_aggregate`.
+    turn_ids = entry.get("turn_ids") or []
+    days = entry.get("days") or []
+    models = entry.get("models") or []
+    return [_state_parts(row, turn_ids, days, models) for row in entry.get("states") or ()]
+
+
+def _add_usage(hosts: HostTokens, day: str, model: str, usage: Any) -> None:
+    days = hosts.setdefault(host_family(model), {})
+    bucket = days.setdefault(day, zero_model_bucket())
+    merge_usage_bucket(bucket, usage)
 
 
 _IDENTITY_KEYS = (
@@ -1518,23 +1999,56 @@ def _no_ledger_entry(source: os.stat_result, fingerprint: _Fingerprint) -> _Cach
     return entry
 
 
-def _cache_entry(
-    source: os.stat_result, fingerprint: _Fingerprint, terminal: _Terminal
-) -> _CacheEntry:
-    return {
-        "dev": source.st_dev,
-        "ino": source.st_ino,
-        "size": source.st_size,
-        "mtime_ns": source.st_mtime_ns,
-        "head": fingerprint.head,
-        "head_len": fingerprint.head_len,
-        "tail": fingerprint.tail,
-        "tail_len": fingerprint.tail_len,
-        "offset": source.st_size,
-        "day": terminal.day,
-        "model": terminal.model,
-        "usage": dict(terminal.usage),
+def _cache_entry(source: os.stat_result, fingerprint: _Fingerprint, walk: _Walk) -> _CacheEntry:
+    # Interned string tables. A 1,234-state rollout repeats one 36-byte turn id
+    # and one model id on every row; spelling them out cost 59 bytes a row and
+    # took the on-disk cache to 23.4 MB, whose json round-trip alone is 95 ms of
+    # a 250 ms autopush budget. `_aggregate` never reads `last` except on a
+    # file's FIRST state, so it is stored there and nowhere else.
+    turn_ids: list[str] = []
+    days: list[str] = []
+    models: list[str] = []
+
+    intern_index: dict[tuple[int, str], int] = {}
+
+    def _intern(table: list[str], value: str) -> int:
+        # Dict-backed, not `list.index`: a linear scan per row is quadratic in
+        # a file's distinct turn ids, and nothing bounds that count.
+        key = (id(table), value)
+        found = intern_index.get(key)
+        if found is None:
+            table.append(value)
+            found = intern_index[key] = len(table) - 1
+        return found
+
+    rows: list[list[Any]] = []
+    for index, state in enumerate(walk.states):
+        rows.append(
+            [
+                _intern(turn_ids, state.turn),
+                list(state.total),
+                _intern(days, state.day),
+                _intern(models, state.model),
+                (list(state.last) if (index == 0 and state.last) else None),
+            ]
+        )
+    entry: _CacheEntry = {
+        **_identity_fields(source, fingerprint),  # type: ignore[typeddict-item]
+        "turn_ids": turn_ids,
+        "days": days,
+        "models": models,
+        "states": rows,
+        "last_turn": walk.turn,
     }
+    if walk.last_total is not None:
+        entry["last_total"] = list(walk.last_total)
+    if walk.model is not None:
+        entry["last_model"] = walk.model
+    if walk.pending:
+        entry["pending"] = [
+            [list(total), day, (list(last) if last else None)] for total, day, last in walk.pending
+        ]
+    return entry
 
 
 def _cached_files(data: dict[str, Any]) -> dict[str, Any]:
@@ -1577,41 +2091,141 @@ def _validated_entry(value: Any) -> _CacheEntry | None:
             "no_ledger": True,
         }
         return entry
-    if not isinstance(value.get("day"), str) or not isinstance(value.get("model"), str):
+    raw_states = value.get("states")
+    if not isinstance(raw_states, list) or not raw_states:
+        # ABSENCE is the pre-Track discriminator: an entry written before
+        # per-turn accounting carries `day`/`model`/`usage` and cannot seed a
+        # resume (it has no cumulative baseline, turn id, or pending buffer).
+        # Rejecting it forces exactly one full re-walk of that file. Measured
+        # cost on a 746-file / 694 MB corpus: 801 ms cold, so 3 to 6 passes at
+        # the 250 ms autopush budget — the same convergence v0.12.47 shipped.
+        # NOT a CACHE_VERSION bump: that constant is shared with the Grok and
+        # OpenCode namespaces and would discard them too.
         return None
-    if not value["model"] or len(value["model"].encode("utf-8")) > _MAX_MODEL_ID_BYTES:
+    turn_ids = _validated_table(value.get("turn_ids"), _MAX_PROMPT_ID_BYTES, allow_empty=True)
+    days = _validated_table(value.get("days"), 32)
+    models = _validated_table(value.get("models"), _MAX_MODEL_ID_BYTES)
+    if turn_ids is None or days is None or models is None:
         return None
-    # Canonical YYYY-MM-DD only. `fromisoformat` alone accepts a full datetime
-    # with a local UTC offset, basic format, and week dates — and since Track
-    # 19A a cached `day` becomes a KEY in a synced event row, so a tampered or
-    # corrupted cache could otherwise put a per-machine timezone offset on the
-    # wire. Fresh parses always emit `date().isoformat()`; this bounds what a
-    # cache HIT can reintroduce.
-    if not _CANONICAL_DAY.fullmatch(value["day"]):
+    if any(not _validated_day(day) for day in days):
         return None
-    try:
-        datetime.fromisoformat(value["day"])
-    except ValueError:
-        return None
-    usage = value.get("usage")
-    if not isinstance(usage, dict):
-        return None
-    if any(not _is_valid_counter(usage.get(key)) for key in TOKEN_FIELDS):
-        return None
-    return {
-        "dev": value["dev"],
-        "ino": value["ino"],
-        "size": value["size"],
-        "mtime_ns": value["mtime_ns"],
-        "head": value["head"],
-        "head_len": value["head_len"],
-        "tail": value["tail"],
-        "tail_len": value["tail_len"],
-        "offset": value["offset"],
-        "day": value["day"],
-        "model": value["model"],
-        "usage": {key: usage[key] for key in TOKEN_FIELDS},
+    states: list[list[Any]] = []
+    for raw in raw_states:
+        parsed = _validated_state(raw, len(turn_ids), len(days), len(models))
+        if parsed is None:
+            return None
+        states.append(parsed)
+    pending: list[list[Any]] = []
+    for raw in value.get("pending") or ():
+        parsed_pending = _validated_pending(raw)
+        if parsed_pending is None:
+            return None
+        pending.append(parsed_pending)
+    entry_out: _CacheEntry = {
+        **_identity_fields_from(value),  # type: ignore[typeddict-item]
+        "turn_ids": turn_ids,
+        "days": days,
+        "models": models,
+        "states": states,
+        # Bounded like any other turn id: `last_turn` is carried into a resumed
+        # walk and becomes a lineage key, so an unbounded string here would be
+        # an unbounded key from a hand-edited cache.
+        "last_turn": _validated_turn_id(value.get("last_turn")),
     }
+    if pending:
+        entry_out["pending"] = pending
+    last_total = _validated_counter_list(value.get("last_total"))
+    if last_total is not None:
+        entry_out["last_total"] = last_total
+    model = value.get("last_model")
+    if isinstance(model, str) and model and len(model.encode("utf-8")) <= _MAX_MODEL_ID_BYTES:
+        entry_out["last_model"] = model
+    return entry_out
+
+
+def _validated_state(raw: Any, n_turns: int, n_days: int, n_models: int) -> list[Any] | None:
+    """Validate one stored row. String columns are INDICES into the entry's
+    interned tables, so the bound check is the trust boundary: an out-of-range
+    index from a hand-edited cache would otherwise raise IndexError out of
+    `_aggregate` rather than falling back to a re-parse."""
+    if not isinstance(raw, list) or len(raw) != 5:
+        return None
+    turn, total, day, model, last = raw
+    if not _index_in_range(turn, n_turns):
+        return None
+    if not _index_in_range(day, n_days) or not _index_in_range(model, n_models):
+        return None
+    counters = _validated_counter_list(total)
+    if counters is None:
+        return None
+    last_counters = None if last is None else _validated_counter_list(last)
+    if last is not None and last_counters is None:
+        return None
+    return [turn, counters, day, model, last_counters]
+
+
+def _validated_turn_id(value: Any) -> str:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > _MAX_PROMPT_ID_BYTES:
+        return ""
+    return value
+
+
+def _index_in_range(value: Any, size: int) -> bool:
+    return _is_nonnegative_int(value) and value < size
+
+
+def _validated_table(raw: Any, max_bytes: int, *, allow_empty: bool = False) -> list[str] | None:
+    if not isinstance(raw, list):
+        return None
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            return None
+        if not item and not allow_empty:
+            return None
+        if len(item.encode("utf-8")) > max_bytes:
+            return None
+        out.append(item)
+    return out
+
+
+def _validated_pending(raw: Any) -> list[Any] | None:
+    if not isinstance(raw, list) or len(raw) != 3:
+        return None
+    total, day, last = raw
+    counters = _validated_counter_list(total)
+    if counters is None or not _validated_day(day):
+        return None
+    last_counters = None if last is None else _validated_counter_list(last)
+    if last is not None and last_counters is None:
+        return None
+    return [counters, day, last_counters]
+
+
+def _validated_counter_list(raw: Any) -> list[int] | None:
+    if not isinstance(raw, list) or len(raw) != len(TOKEN_FIELDS):
+        return None
+    if any(not _is_valid_counter(v) for v in raw):
+        return None
+    return list(raw)
+
+
+def _validated_day(day: Any) -> bool:
+    """Canonical YYYY-MM-DD only.
+
+    `fromisoformat` alone accepts a full datetime with a local UTC offset,
+    basic format, and week dates — and since Track 19A a cached day becomes a
+    KEY in a synced event row, so a tampered or corrupted cache could otherwise
+    put a per-machine timezone offset on the wire. Fresh parses always emit
+    `date().isoformat()`; this bounds what a cache HIT can reintroduce.
+    """
+    if not isinstance(day, str) or not _CANONICAL_DAY.fullmatch(day):
+        return False
+    try:
+        datetime.fromisoformat(day)
+    except ValueError:
+        return False
+    return True
 
 
 def _is_nonnegative_int(value: Any) -> bool:
@@ -1721,6 +2335,7 @@ __all__ = [
     # its entire user-visible reason vocabulary from `get_args(Reason)`.
     "Reason",
     "host_family",
+    "codex_usage_diag",
     "grok_completed_once",
     "grok_usage_diag",
     "read_codex_usage",
