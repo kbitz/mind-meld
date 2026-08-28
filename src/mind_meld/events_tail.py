@@ -496,6 +496,28 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
             f"cannot read. Upgrade mm, or run `mm disable-source {reader}` "
             "to stop retrying."
         )
+    if reason == "migration":
+        # Exactly one site produces this: `host_usage._scan_opencode_root` when
+        # OpenCode holds BOTH `opencode.db` and a legacy `storage/message`
+        # directory. It is a property of that host's own storage migration and
+        # has nothing to do with mm's caches, so the copy must not send the
+        # user off to rebuild one. mm cannot fix it and neither can a retry.
+        return (
+            f"{phrase}. {reader} is part-way through its own storage migration "
+            f"and has two stores on disk at once. Finish or complete the "
+            f"{reader} upgrade, then the next push reads it."
+        )
+    if reason in {"deadline", "partial"}:
+        # THIS is what a cold or rebuilding cache produces, not `migration`.
+        # The generic promise below is false here on a quiet Mac: the events
+        # tail only runs on a SUBSTANTIVE push and `autopush` passes
+        # `warm_host_cache=None`, so an unattended machine never warms and
+        # "later" can be never. Name the command that actually finishes it.
+        return (
+            f"{phrase}. The {reader} cache is still warming. Run `mm push` "
+            "interactively to finish it in one pass, or `mm diag` to see how "
+            "much is left."
+        )
     return f"{phrase}. A later substantive push will retry"
 
 
