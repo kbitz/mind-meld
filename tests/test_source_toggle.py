@@ -321,6 +321,7 @@ class TestGrokUsageConsent:
         assert "Enabled source 'grok'" in result.output
         assert "skills/" in result.output
         assert "not synced" in result.output
+        assert "Reads terminal token totals" in result.output
 
         with open(cfg, "rb") as f:
             on_disk = tomllib.load(f)
@@ -600,7 +601,7 @@ class TestStatusBreadcrumbs:
         assert enabled.exit_code == 0, enabled.output
         shown = runner.invoke(app, ["status"])
         assert shown.exit_code == 0, shown.output
-        assert "Grok usage capture: enabled" in shown.output
+        assert "Grok usage capture: enabled, but no successful scan yet" in shown.output
 
         runner.invoke(app, ["disable-source", "grok"])
         _host_usage.GROK_SESSIONS_PATH.mkdir(parents=True)
@@ -633,7 +634,7 @@ class TestStatusBreadcrumbs:
 
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0, result.output
-        assert "Grok usage capture: enabled" in result.output
+        assert "Grok usage capture: enabled, but no successful scan yet" in result.output
 
 
 # ── _filter_disabled_sources ─────────────────────────────────────────

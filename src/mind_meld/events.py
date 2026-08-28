@@ -8,9 +8,10 @@ the mm-events synced source. Four event types per push:
                       remote URL + sha at retro render time)
   - sessions-snapshot per-project Claude Code session metadata
   - host-usage-snapshot  OPTIONAL (Track 19A): aggregate non-Claude host token
-                      totals per (family, UTC day). All-or-nothing — the row is
-                      absent entirely when any host reader came back incomplete,
-                      so absence means "unknown", never zero.
+                      totals per (family, UTC day). Reader-scoped as of Track
+                      31A — a failed reader is dropped and declared; the row is
+                      absent only when no consulted reader completed, so
+                      absence means "unknown", never zero.
 
 The events log itself is the cursor (no separate cursor file): the most
 recent `mm-push` event's `ts` answers "since when do I scan?" on the next
@@ -366,13 +367,15 @@ class HostUsageSnapshot(TypedDict, total=False):
     attribution, model IDs outside the canonical family buckets, or per-source
     status.
 
-    All-or-nothing by construction: a row exists only when EVERY reader named
-    in ``token_sources`` completed. ``hosts == {}`` is a real completed empty
-    observation only for that row's coverage; ``token_sources == []`` means no
-    reader contributed, never fleet-wide zero. An incomplete sweep omits the
-    whole row (``host_usage.HostUsageResult`` draws that line; ``events_tail``
-    honors it). An ABSENT row is no new complete observation — not a zero, not
-    a state update, and not proof of a particular failure.
+    A row exists when at least one consulted reader completed (or every
+    consulted source was absent / empty). ``token_sources`` names the readers
+    that contributed; additive ``degraded_sources`` names readers that failed
+    this sweep (a subsequence of ``HOST_USAGE_TOKEN_SOURCES``, disjoint from
+    ``token_sources``). ``hosts == {}`` is a real completed empty observation
+    only for that row's coverage; ``token_sources == []`` means no reader
+    contributed, never fleet-wide zero. A sweep that completed no reader omits
+    the whole row. An ABSENT row is no new complete observation — not a zero,
+    not a state update, and not proof of a particular failure.
 
     **A day bucket is NOT "tokens spent that day", and it is NOT stable across
     snapshots.** Read this before building anything on it. Each host session
@@ -401,6 +404,7 @@ class HostUsageSnapshot(TypedDict, total=False):
     token_sources: list[str]
     hosts: dict[str, dict[str, token_usage.Usage]]
     active_days: list[str]
+    degraded_sources: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -1702,15 +1706,15 @@ def make_host_usage_snapshot(
     token_sources: Sequence[str],
     ts: datetime | None = None,
     max_days: int = token_usage.MAX_BY_DAY_DAYS,
+    degraded_sources: Sequence[str] = (),
 ) -> HostUsageSnapshot:
-    """Construct a ``host-usage-snapshot`` row from COMPLETED reader output.
+    """Construct a ``host-usage-snapshot`` row from completed reader output.
 
     Pure: the caller (``events_tail._capture_event_snapshots``) has already
-    established that every reader it CONSULTED returned ``complete=True`` and
-    has merged their ``hosts`` maps. This function adds no classification of
-    its own — it does not parse model IDs, consult a session's ``cwd``,
-    attribute activity to a project, or invent a bucket for a host that
-    reported none. ``host_usage`` owns all of that.
+    merged the ``hosts`` maps of every reader that completed. This function
+    adds no classification of its own — it does not parse model IDs, consult a
+    session's ``cwd``, attribute activity to a project, or invent a bucket for
+    a host that reported none. ``host_usage`` owns all of that.
 
     ``token_sources`` is the per-push list of readers that actually
     contributed, NOT the built-in set: a host the user has not enabled as a
@@ -1719,8 +1723,11 @@ def make_host_usage_snapshot(
     sweep did not have, and would make "this host reported nothing" and "this
     host was never consulted" indistinguishable on the wire.
 
-    No ``EVENTS_SCHEMA_VERSION`` bump: the type is additive and every existing
-    consumer already skips event types it does not know.
+    ``degraded_sources`` is additive (Track 31A): readers that failed this
+    sweep, as a subsequence of ``HOST_USAGE_TOKEN_SOURCES`` disjoint from
+    ``token_sources``. Omitted when empty so the happy-path wire shape is
+    unchanged. No ``EVENTS_SCHEMA_VERSION`` bump: ``_accept_host_usage_snapshot``
+    does no key-set check and ``_tie_break_key`` excludes unknown fields.
 
     **The payload is capped at the most recent ``max_days`` UTC days.** The
     host readers aggregate the WHOLE local corpus — ``_iter_rollouts`` has no
@@ -1756,7 +1763,7 @@ def make_host_usage_snapshot(
             for family, days in payload.items()
         }
         payload = {family: days for family, days in payload.items() if days}
-    return {
+    row: HostUsageSnapshot = {
         "v": EVENTS_SCHEMA_VERSION,
         "type": "host-usage-snapshot",
         "ts": (ts or datetime.now(timezone.utc)).isoformat(),
@@ -1765,3 +1772,12 @@ def make_host_usage_snapshot(
         "hosts": payload,
         "active_days": sorted({day for days in payload.values() for day in days}),
     }
+    excluded = set(token_sources)
+    degraded = [
+        name
+        for name in HOST_USAGE_TOKEN_SOURCES
+        if name in set(degraded_sources) and name not in excluded
+    ]
+    if degraded:
+        row["degraded_sources"] = degraded
+    return row

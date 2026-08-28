@@ -21,8 +21,10 @@ is scoped to the walk (the ``walk_done`` snapshot precedes the identity gather
 AND the host capture on purpose), `_decide_token_walk_policy` returning False
 does NOT by itself mean degradation — it also returns False when no `claude`
 source is enabled, which is a config shape, so the append is gated on
-`claude_paths` — and the host snapshot is all-or-nothing: any incomplete
-reader omits the WHOLE row rather than publishing a partial or invented zero.
+`claude_paths` — and the host snapshot is reader-scoped: a failed reader is
+dropped and declared, other readers still publish. A row is omitted only when
+no consulted reader completed, or the sweep expired before any reader ran.
+Each reader stays all-or-nothing internally.
 """
 
 from __future__ import annotations
@@ -92,18 +94,19 @@ with the rest rather than vetoing the whole snapshot.
 
 This is deliberately NOT keyed on ``unsupported``. Codex returns ``unsupported``
 when it finds a ledger it cannot attribute, and OpenCode when a row is
-malformed: those mean "real usage exists here that I could not read", so
-publishing without them would silently under-report. They keep the veto.
+malformed: those mean "real usage exists here that I could not read". Track
+31A isolates that to the failing reader (dropped and declared); it is still
+not treated as absence.
 
 Pinned as a SUBSET of ``_HOST_READ_REASONS`` by
 ``test_absent_reasons_are_real_reader_reasons``: a rename on the
 ``host_usage.Reason`` side would otherwise empty this set silently and treat
-an honest absence as a total veto."""
+an honest absence as a failed read."""
 
 _HOST_PERMANENT_REASONS = frozenset({"unsupported"})
 """Failure reasons a later push cannot fix, so the notice must not promise a
-retry. Distinct from ``_HOST_ABSENT_REASONS``: these still veto the snapshot,
-they just do it permanently."""
+retry. Distinct from ``_HOST_ABSENT_REASONS``: these drop the reader (declared)
+rather than remaining silent, and they never claim a retry will help."""
 
 HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     "codex": "codex",
@@ -127,23 +130,22 @@ WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok"})
 """Readers with an incremental cache a warm can populate. OpenCode's
 adapter cache stores no totals and is not warmable."""
 
-_GROK_PRE_SUCCESS_TRANSIENTS: frozenset[str] = frozenset(
-    {"deadline", "locked", "busy", "io_error", "partial", "unavailable"}
-)
-
 
 @dataclass(frozen=True)
 class HostUsageCapture:
-    """The outcome of one all-or-nothing host-reader sweep.
+    """The outcome of one host-reader sweep.
 
-    ``hosts is None`` means the sweep was INCOMPLETE and the caller must omit
-    the whole snapshot: no partial totals, no zero placeholder. An empty dict
-    (``complete`` True) is a real completed empty scan and is healthy — it is
-    what a machine with no Codex/Grok/OpenCode data legitimately reports.
+    ``hosts is None`` means NO consulted reader completed (or the sweep expired
+    before any reader was invoked) and the caller must omit the whole snapshot:
+    no invented zero. An empty dict (``complete`` True) is a real completed
+    empty scan and is healthy — a machine with no host data, or whose enabled
+    readers were all absent sources.
 
-    ``reader`` and ``reason`` are safe, closed-vocabulary labels for the notice
-    and breadcrumb: never a path, transcript excerpt, SQL fragment, or raw
-    exception text.
+    A reader that failed is listed in ``dropped`` as ``(reader, reason)`` and
+    is not in ``token_sources``. Other readers still contribute. ``reader`` /
+    ``reason`` remain the sweep-level labels for the no-row case (pre-invoke
+    deadline, or every reader failed — then they mirror the first dropped
+    pair). Never a path, transcript excerpt, SQL fragment, or raw exception.
     """
 
     hosts: dict[str, dict[str, token_usage.Usage]] | None
@@ -156,8 +158,15 @@ class HostUsageCapture:
     never invoked, and one whose store can never hold a ledger is dropped. Both
     are honest absences, and the row says so rather than implying every built-in
     reader was consulted."""
+    dropped: tuple[tuple[str, str], ...] = ()
+    """``(reader, reason)`` pairs for readers that failed this sweep.
+
+    Order is invocation order so Codex-first vs Grok-first does not change
+    what is observable. Reasons are the closed vocabulary; never a path.
+    Absent sources (``no_metadata_ledger``) are not listed here.
+    """
     invoked: bool = True
-    """False when the sweep expired before calling the failing reader."""
+    """False when the sweep expired before calling any reader."""
 
     @property
     def complete(self) -> bool:
@@ -291,31 +300,53 @@ def _capture_host_usage(
 ) -> HostUsageCapture:
     """Read the consented host sources under ONE explicit deadline.
 
-    All-or-nothing for FAILURES (premise confirmed 2026-08-16): if any reader
-    could not read data that exists, the merged map is discarded and the caller
-    publishes nothing, because a total that silently omits real usage is worse
-    than no total.
+    Reader-scoped for FAILURES (Track 31A): a file/record failure still fails
+    that whole reader, but a reader failure no longer discards the others.
+    The original "partial totals are worse than no totals" argument predates
+    ``token_sources``; with per-reader coverage on the wire, deleting known
+    Codex tokens because Grok failed is the less truthful behaviour. Publish
+    no row only when no reader completed, or the sweep expired before any
+    reader was invoked.
 
-    A source that can never hold a ledger is NOT a failure (premise revised
-    2026-08-16, see ``_HOST_ABSENT_REASONS``). It is dropped from
-    ``token_sources`` and the sweep continues. Without that carve-out, merely
-    having Grok installed made the row unpublishable forever — measured on a
-    real machine, where it also pinned ``mm status`` at ``degraded`` and so
-    destroyed that breadcrumb as a signal for actual sync degradation.
+    A source that can never hold a ledger is NOT a failure (see
+    ``_HOST_ABSENT_REASONS``). It is omitted from ``token_sources`` and from
+    ``dropped`` — a standing property of the source, correctly silent.
 
     A reader that RAISES is caught here rather than at the tail's outer guard,
     because that guard would also discard the git and session rows already
     captured and the terminal ``mm-push`` row with them — an unreadable host
-    store must not cost the retro its actual content.
+    store must not cost the retro its actual content. The raise is a reader
+    failure (``unavailable``) and the sweep continues.
 
-    ``readers`` and ``now`` are injected so ordering, short-circuit, gating and
+    ``readers`` and ``now`` are injected so ordering, isolation, gating and
     deadline behavior are table-testable without touching a real host store.
     """
     merged: dict[str, dict[str, token_usage.Usage]] = {}
     contributed: list[str] = []
-    for name, read in readers:
+    dropped: list[tuple[str, str]] = []
+    remaining = list(readers)
+    invoked = False
+    while remaining:
+        name, read = remaining[0]
         if now() >= deadline:
+            if invoked:
+                dropped.extend((rest_name, "deadline") for rest_name, _ in remaining)
+                if contributed:
+                    return HostUsageCapture(
+                        merged,
+                        token_sources=tuple(contributed),
+                        dropped=tuple(dropped),
+                    )
+                first_reader, first_reason = dropped[0]
+                return HostUsageCapture(
+                    None,
+                    first_reader,
+                    first_reason,
+                    dropped=tuple(dropped),
+                )
             return HostUsageCapture(None, name, "deadline", invoked=False)
+        remaining.pop(0)
+        invoked = True
         try:
             result = read(deadline=deadline)
         except Exception as e:
@@ -327,14 +358,16 @@ def _capture_host_usage(
             sys.stderr.write(
                 f"mm: notice: host reader {name} raised: {type(e).__name__}: {safe_str(e)}\n"
             )
-            return HostUsageCapture(None, name, _HOST_UNKNOWN_REASON)
+            dropped.append((name, _HOST_UNKNOWN_REASON))
+            continue
         if not result.complete:
             reason = result.reason if result.reason in _HOST_READ_REASONS else _HOST_UNKNOWN_REASON
             if reason in _HOST_ABSENT_REASONS:
-                # Not installed, in effect. Drop it and keep going — the row
-                # will name only the sources that actually contributed.
+                # Not installed, in effect. Drop it silently and keep going —
+                # the row will name only the sources that actually contributed.
                 continue
-            return HostUsageCapture(None, name, reason)
+            dropped.append((name, reason))
+            continue
         contributed.append(name)
         # Codex and OpenCode both classify into the `codex` family, so a
         # collision on (family, UTC day) is ordinary rather than an error.
@@ -345,7 +378,10 @@ def _capture_host_usage(
             for day, usage in days.items():
                 bucket = target.setdefault(day, token_usage.zero_model_bucket())
                 token_usage.merge_usage_bucket(bucket, usage)
-    return HostUsageCapture(merged, token_sources=tuple(contributed))
+    if contributed or not dropped:
+        return HostUsageCapture(merged, token_sources=tuple(contributed), dropped=tuple(dropped))
+    first_reader, first_reason = dropped[0]
+    return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
 
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> bool:
@@ -378,18 +414,24 @@ def _warm_host_cache_with_notice(reader: str = "codex") -> bool:
 
 
 def _host_skip_phrase(reader: str, reason: str) -> str:
-    """One stable, safe sentence for an omitted host snapshot.
+    """One stable, safe sentence for a dropped or omitted host reader.
 
     It names the affected optional subsystem so a `degraded` breadcrumb can't
     be misread as content-sync loss, and it names only the reader and reason
-    class — never a path, transcript, query, or exception string.
+    class — never a path, transcript, query, or exception string. Permanent
+    reasons carry a fix clause and never promise a retry. The phrase contains
+    no ``; ``, which is the breadcrumb join separator.
     """
     phrase = (
         f"host-usage snapshot skipped ({reader} {reason}) — "
         "content sync and git/session capture unaffected"
     )
     if reason in _HOST_PERMANENT_REASONS:
-        return phrase
+        return (
+            f"{phrase}. {reader}'s log format changed in a way this version "
+            f"cannot read. Upgrade mm, or run `mm disable-source {reader}` "
+            "to stop retrying."
+        )
     return f"{phrase}. A later substantive push will retry"
 
 
@@ -493,11 +535,21 @@ def _capture_event_snapshots(
     host_capture = _capture_host_usage(
         host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
     )
+    warm_reader = next(
+        (
+            name
+            for name, reason in host_capture.dropped
+            if reason == "deadline" and name in WARMABLE_HOST_READERS
+        ),
+        None,
+    )
     if (
-        warm_host_cache is not None
+        warm_reader is None
         and host_capture.reason == "deadline"
         and host_capture.reader in WARMABLE_HOST_READERS
     ):
+        warm_reader = host_capture.reader
+    if warm_host_cache is not None and warm_reader is not None:
         # Warm-and-retry, and ONLY after a bounded attempt has already proven
         # the cache is too cold to fit. Gating on the failure instead of on a
         # "is it cold?" predicate costs nothing on the happy path, needs no
@@ -505,28 +557,15 @@ def _capture_event_snapshots(
         # has no host data — that machine's first attempt completes, so it
         # never warms. `deadline` is also the only reason a warm can fix.
         #
+        # After Track 31A a Grok deadline no longer vetoes Codex, so the
+        # warmable reader may live in `dropped` rather than `reader`/`reason`.
         # Retry ONLY if the warm finished. A corpus large enough to outgrow the
         # warm's own budget keeps reporting (deadline, reader) forever, so both
         # halves of the gate above keep passing and the reader gate alone does
         # not bound the repeat cost — the warm's own outcome does.
-        if warm_host_cache(host_capture.reader):
+        if warm_host_cache(warm_reader):
             host_capture = _capture_host_usage(
                 host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
-            )
-    if (
-        host_capture.hosts is None
-        and host_capture.reader == "grok"
-        and host_capture.invoked
-        and host_capture.reason in _GROK_PRE_SUCCESS_TRANSIENTS
-        and not host_usage.grok_completed_once()
-    ):
-        # First-success carve-out: a cold Grok miss must not take Codex
-        # hostage. Remap AFTER warm so a deadline can still trigger a Grok
-        # warm. Pre-invoke expiry (`invoked=False`) stays a sweep veto.
-        remaining = tuple((name, read) for name, read in host_readers if name != "grok")
-        if remaining:
-            host_capture = _capture_host_usage(
-                remaining, deadline=time.monotonic() + host_budget_ms / 1000.0
             )
     host_rows: list[dict] = []
     if host_capture.hosts is not None:
@@ -535,6 +574,7 @@ def _capture_event_snapshots(
                 device=device_id,
                 hosts=host_capture.hosts,
                 token_sources=host_capture.token_sources,
+                degraded_sources=tuple(name for name, _ in host_capture.dropped),
             )
         )
 
@@ -756,12 +796,19 @@ def _run_events_tail(
         # push published no token or skill data.
         if claude_paths and not capture.token_cache_requested:
             degradations.append("token walk skipped, so tokens and skills are missing")
-        # A COMPLETED empty host scan is healthy and stays silent; only an
-        # omission is reported. Deliberately not rate-limited: this describes
-        # the CURRENT state, and a stale `success` breadcrumb would hide an
-        # ongoing degradation from the unattended-hook user who only ever
-        # looks at `mm status`. No-op pushes never reach here at all.
-        if not capture.host_capture.complete:
+        # A COMPLETED empty host scan is healthy and stays silent. A dropped
+        # reader is declared (one degradation per dropped reader) even when
+        # other readers still published a row — AGENTS.md: any new degradation
+        # detected in the tail MUST be appended to this list, not merely
+        # printed. `no_metadata_ledger` is never in `dropped`. Sweep-level
+        # veto (no reader completed, or expired before any ran) still uses
+        # reader/reason when `dropped` is empty.
+        if capture.host_capture.dropped:
+            for dropped_reader, dropped_reason in capture.host_capture.dropped:
+                phrase = _host_skip_phrase(dropped_reader, dropped_reason)
+                sys.stderr.write(f"mm: notice: {phrase}\n")
+                degradations.append(phrase)
+        elif not capture.host_capture.complete:
             phrase = _host_skip_phrase(capture.host_capture.reader, capture.host_capture.reason)
             sys.stderr.write(f"mm: notice: {phrase}\n")
             degradations.append(phrase)
@@ -874,7 +921,12 @@ def _run_events_backfill(
             )
         # Init has no `mm-push` row and no autorun breadcrumb, so the notice is
         # the only surface available — and init IS attended, so it lands.
-        if not capture.host_capture.complete:
+        if capture.host_capture.dropped:
+            for dropped_reader, dropped_reason in capture.host_capture.dropped:
+                sys.stderr.write(
+                    "mm: notice: " + _host_skip_phrase(dropped_reader, dropped_reason) + "\n"
+                )
+        elif not capture.host_capture.complete:
             sys.stderr.write(
                 "mm: notice: "
                 + _host_skip_phrase(capture.host_capture.reader, capture.host_capture.reason)

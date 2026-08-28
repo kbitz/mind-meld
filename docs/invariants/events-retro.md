@@ -8,7 +8,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
+- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list`
@@ -141,18 +141,23 @@ The tail publishes the local Codex / Grok / OpenCode readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
-all-or-nothing decision. No `EVENTS_SCHEMA_VERSION` bump — legacy consumers
+publication decision. No `EVENTS_SCHEMA_VERSION` bump — legacy consumers
 already skip unknown types.
 
-**All-or-nothing for FAILURES (premise confirmed 2026-08-16).** A row is
-written only when every reader the sweep CONSULTED either returned
-`complete=True` or reported a reason in `_HOST_ABSENT_REASONS`. The latter
-means the source cannot supply a metadata-only ledger, so it is excluded from
-coverage and the sweep continues. Any other incomplete read omits the WHOLE
-row — no partial totals, no zero placeholder — and the scan short-circuits at
-the first failure. Publishing a total that silently omits real usage is worse
-than publishing nothing. The consumer side follows: an ABSENT row means
-"unknown", never zero.
+**All-or-nothing for FAILURES (premise revised Track 31A, 2026-08-27).**
+Sweep-level atomicity is retired. A file/record failure still fails that
+whole reader (each reader stays all-or-nothing *internally*). A reader
+failure no longer discards the others: the failed reader is dropped from
+`token_sources`, listed in additive `degraded_sources` (a subsequence of
+`HOST_USAGE_TOKEN_SOURCES`, disjoint from `token_sources`), and named in
+the tail's degradation list. A row is omitted only when *no* consulted
+reader completed, or the sweep expired before any reader was invoked.
+Never publish an undeclared omission. The original argument ("partial
+totals are worse than no totals") predates `token_sources`; with per-reader
+coverage on the wire, deleting known Codex tokens because Grok failed is
+now the less truthful behaviour. An ABSENT row still means "unknown",
+never zero. `no_metadata_ledger` stays a silent absence, not a dropped
+failure.
 
 **But an ABSENT source is not a failure (premise revised 2026-08-16).** The
 original reading treated Grok's refusal as a failure, which meant that merely
@@ -203,14 +208,26 @@ prompt IDs, or conversation bytes. Equal duplicate
 duplicates refuse the store. The model is always part of the key so a
 later multi-model restatement of the same prompt cannot double-count.
 
-**First-success carve-out (Track 21A).** Until this machine has completed a
-consented Grok scan that observed at least one `updates.jsonl`, a Grok
-`deadline` / `locked` / `busy` / `io_error` / `partial` / `unavailable`
-(returned by the reader, not a pre-invoke sweep expiry) drops Grok and still
-publishes Codex/OpenCode. After `complete_once` is set on the Grok cache,
-those reasons veto the whole snapshot again. `malformed` / `unsupported` /
-`stale` always veto when Grok was invoked. Warm Grok on a Grok `deadline`
-before applying the carve-out; autopush never warms.
+**First-success carve-out (Track 21A) — retired from sweep policy in Track 31A.**
+The latch's premise was already false (`complete_once` arms on an empty
+`updates.jsonl`, i.e. file existence, not content), and making Grok succeed
+once would have armed a permanent fleet-wide veto on the next Grok wire
+drift. Reader-scoped isolation replaces it. `host_usage.grok_completed_once()`
+is kept as a **diagnostic** for `mm status` / `mm diag` (and so the three
+CI-enforced doc citations to it still resolve). Do not reintroduce it as a
+sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
+sweep-level `reader`/`reason` for a pre-any-reader expiry); autopush never
+warms.
+
+**Grok terminal skip (Track 31A).** A `turn_completed` whose `params.update`
+key set is exactly `_GROK_TERMINAL_KEYS - {usage}` is a zero-token skip,
+counted on the Grok cache as `usage_less_skipped`. The carve-out MUST
+precede the exact-match key check — placing it at `usage = update.get("usage")`
+is dead code. `usage` present-but-not-a-dict stays fatal. `usageIsIncomplete`
+is accepted-and-ignored (fidelity caveat in
+`tests/fixtures/host_sessions/grok/CONTRACT.md`). An absent `updates.jsonl`
+is not an I/O error (`FileNotFoundError` / `NotADirectoryError` → skip;
+other `OSError` still `io_error`).
 
 **`token_sources` is therefore per-push, not the constant.**
 `events.HOST_USAGE_TOKEN_SOURCES` is the universe of readers; a row carries the
@@ -462,16 +479,21 @@ whichever reader ran first, silently.
 guard.** The tail's `try/except` would also discard the git and session rows
 already captured and the terminal `mm-push` with them, so an unreadable host
 store would cost the retro its real content AND rewind the cursor into a
-30-day re-walk on every subsequent push. Reader exceptions normalize to the
-same incomplete outcome as a returned `complete=False`.
+30-day re-walk on every subsequent push. Reader exceptions normalize to
+`unavailable` on that reader and the sweep continues.
 
 **The notice text is a closed vocabulary.** `_host_skip_phrase` names only the
 reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` NEVER promises a retry (it is a standing property
-of the host's storage); every other reason may. The phrase deliberately
-contains no `; `, which is the separator `autopush` joins breadcrumb reasons
-with.
+of the host's storage) and carries a fix clause (upgrade mm, or
+`mm disable-source <reader>`). Every other reason may retry. The phrase
+deliberately contains no `; `, which is the separator `autopush` joins
+breadcrumb reasons with. One degradation is appended per dropped reader.
+
+**`degraded_sources` is additive.** No `EVENTS_SCHEMA_VERSION` bump:
+`_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`
+excludes unknown top-level fields. The field carries reader names only.
 
 **Tail appends a degradation; init prints only.** Same rule as every other
 tail degradation: `_run_events_tail` writes the `mm: notice:` AND appends the

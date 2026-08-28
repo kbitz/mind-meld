@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from mind_meld import host_usage
 from mind_meld import sidecar as sidecar_mod
 from mind_meld.cli import app
 from mind_meld.config import save_config
@@ -98,10 +99,59 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "last_autorun",
         "skill_links",
         "host_skill_discovery",
+        "host_usage",
         "discovery",
         "git_capture",
     ):
         assert section in payload, f"missing {section}"
+    grok_hu = payload["host_usage"]["grok"]
+    assert set(grok_hu) == {
+        "consented",
+        "complete_once",
+        "usage_less_skipped",
+        "cache_state",
+    }
+
+
+def test_diag_host_usage_does_not_open_the_host_store(tmp_path, monkeypatch):
+    """X-5: mm diag's no-passphrase / no-valid-config contract. Host usage
+    state comes from the private cache, never from ~/.grok/sessions."""
+    _setup(tmp_path, monkeypatch)
+
+    def boom():
+        raise AssertionError("diag must not open the Grok host store")
+
+    monkeypatch.setattr("mind_meld.host_usage.grok_sessions_root", boom)
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["host_usage"]["grok"]["cache_state"] in {"missing", "ok", "unreadable"}
+
+
+def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
+    """T2-10: diag is a cache-only view, including a partial scan's tally."""
+    _setup(tmp_path, monkeypatch)
+    host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True)
+    host_usage.GROK_CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": host_usage.CACHE_VERSION,
+                "complete_once": False,
+                "usage_less_skipped": 3,
+                "files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def boom():
+        raise AssertionError("diag must not open the Grok host store")
+
+    monkeypatch.setattr("mind_meld.host_usage.grok_sessions_root", boom)
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["host_usage"]["grok"]["usage_less_skipped"] == 3
 
 
 # ── Plain text mode ──────────────────────────────────────────────────────
@@ -118,6 +168,7 @@ def test_diag_plain_text_is_human_readable(tmp_path, monkeypatch):
     assert "Storage inventory" in result.stdout
     assert "Skill links" in result.stdout
     assert "Host skill discovery" in result.stdout
+    assert "Host usage" in result.stdout
     assert "Git-root discovery" in result.stdout
     assert "Git capture" in result.stdout
     assert "recorded" in result.stdout
@@ -198,6 +249,7 @@ def test_diag_handles_missing_config(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["config"]["state"].startswith("error")
+    assert payload["host_usage"]["grok"]["consented"] is None
 
 
 def test_diag_handles_unresolvable_explicit_source(tmp_path, monkeypatch):
@@ -228,6 +280,8 @@ def test_diag_handles_unresolvable_explicit_source(tmp_path, monkeypatch):
     )
     assert "host_skill_discovery" in payload
     assert payload["host_skill_discovery"].get("host") == "grok"
+    assert "host_usage" in payload
+    assert payload["host_usage"]["grok"]["consented"] is None
     assert all("claude_skills_compat" not in row for row in payload["skill_links"])
 
 

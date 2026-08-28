@@ -492,6 +492,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "last_autorun",
     "skill_links",
     "host_skill_discovery",
+    "host_usage",
     "discovery",
     "git_capture",
 )

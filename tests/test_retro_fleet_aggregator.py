@@ -4762,6 +4762,31 @@ class TestHostSnapshotNoWindowSpend:
         raw = json.loads(json.dumps(row))
         assert isinstance(aggregator._accept_host_usage_snapshot(raw), aggregator._AcceptedHostRow)
 
+    def test_acceptor_ignores_degraded_sources_and_tie_break_is_unchanged(self):
+        """T3-4: no schema bump. Additive field is ignored; tie-break key
+        excludes unknown top-level fields so it cannot flip selection."""
+        from mind_meld import events
+
+        ts = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+        plain = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts={"codex": {"2026-04-20": _usage(4)}},
+            ts=ts,
+        )
+        degraded = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts={"codex": {"2026-04-20": _usage(4)}},
+            ts=ts,
+            degraded_sources=("grok",),
+        )
+        accepted_plain = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(plain)))
+        accepted_degraded = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(degraded)))
+        assert isinstance(accepted_plain, aggregator._AcceptedHostRow)
+        assert isinstance(accepted_degraded, aggregator._AcceptedHostRow)
+        assert accepted_plain.tie_key == accepted_degraded.tie_key
+
     def test_mutating_input_does_not_change_view(self):
         ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
         inv = aggregator.aggregate_host_usage(
