@@ -377,23 +377,32 @@ class HostUsageSnapshot(TypedDict, total=False):
     the whole row. An ABSENT row is no new complete observation — not a zero,
     not a state update, and not proof of a particular failure.
 
-    **A day bucket is NOT "tokens spent that day", and it is NOT stable across
-    snapshots.** Read this before building anything on it. Each host session
-    file reports a CUMULATIVE total, and the reader attributes that whole total
-    to the UTC day of the file's LAST record. So a bucket is "the lifetime
-    totals of every session that last touched this machine on that day" —
-    measured on a real corpus, 63 of 440 rollouts land on a different day than
-    they started, and one day showed 3.4B tokens because 91 sessions' lifetimes
-    collapsed onto it. Resuming an old session MOVES its entire total into the
-    new day, so a fixed day's value can DECREASE between two consecutive
-    snapshots.
+    **A day bucket IS the work recorded on that UTC day, since Track 32A.** It
+    was not before, and the old caveat is worth knowing because peers still on
+    an older mm publish the old shape: every reader used to report a CUMULATIVE
+    total per session file, attributed whole to the day of that file's LAST
+    record, so a bucket meant "the lifetime totals of every session that last
+    touched this machine on that day". 63 of 440 rollouts landed on a day they
+    did not start and one day showed 3.4B tokens because 91 sessions collapsed
+    onto it. Resuming an old session MOVED its entire total into the new day, so
+    a fixed day's value could DECREASE between two consecutive snapshots.
 
-    The only safe read is the latest ACCEPTED row per device as a whole,
+    All three readers are per-turn now (Codex differences the host's own
+    cumulative counter; Grok since v0.12.47; OpenCode rows are already
+    disjoint), so buckets are additive and stable.
+
+    **Two cautions survive the change.** Do NOT sum across machines: host stores
+    sit outside every mm sync source, so a migrated home directory can put
+    overlapping history under two device ids, which is independent of the
+    counter shape. And do NOT compare across the v0.12.48 boundary: Codex totals
+    before it double-counted work shared by forked and resumed rollout files,
+    roughly 55% of the reported figure on a real corpus.
+
+    The safe read remains the latest ACCEPTED row per device as a whole,
     point-in-time ``as_of`` view. It replaces the prior device view; a consumer
     cannot carry forward individual sources because the payload deliberately
-    merges some readers into one family. Do NOT diff snapshots, sum them, or
-    treat ``active_days`` as a per-day activity series. ``active_days`` names
-    the days present in ``hosts``, nothing more. The complete acceptance and
+    merges some readers into one family. ``active_days`` names the days present
+    in ``hosts``, nothing more. The complete acceptance and
     deterministic-selection rules live in ``docs/invariants/events-retro.md``.
     """
 

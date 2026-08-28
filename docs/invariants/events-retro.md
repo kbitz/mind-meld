@@ -313,23 +313,36 @@ The winning row is kept **whole**. ``HostDeviceSnapshot.lifetime_by_family``
 is inventory as of ``as_of``, and **do not sum devices into a fleet spend map**
 (see the disjointness note below).
 
-**What a day key actually is (corrected in v0.12.37 — the pre-v0.12.37 wording
-here said "day keys are last-touch lifetime totals", which is wrong and it
-mis-designed Track 23A).** Each *rollout file* contributes ONE cumulative
-terminal total, keyed to **that file's** last-touch UTC day
-(``host_usage._read_rollout`` → ``_terminal_from_record`` → ``_aggregate``
-merging into ``hosts[family][thatDay]``). So a bucket holds *the cumulative
-totals of every session that last touched this machine on that day* — a per-day
-distribution, not one lifetime figure smeared across days. Measured on a real
-corpus: 65 populated day keys across a 140-day span with 75 gap days.
+**What a day key actually is (corrected TWICE — read both corrections).** The
+pre-v0.12.37 wording said "day keys are last-touch lifetime totals", which was
+wrong and mis-designed Track 23A. The v0.12.37 replacement described a
+CUMULATIVE terminal total per rollout file keyed to that file's last-touch UTC
+day, which was accurate for the reader of its time and is **no longer true for
+any reader**.
 
-Two consequences a consumer must carry, and they pull in opposite directions:
+Since Track 32A every reader is per-turn. A day key is *the work actually
+recorded on that UTC day*: Codex differences the host's own cumulative counter
+between consecutive readings (`host_usage._read_rollout` collects `_TurnState`
+readings, `_aggregate` keys transitions by `(lineage, previous, current)` and
+sums them), Grok has been per-turn since v0.12.47 (`_aggregate_grok` over
+`entry["turns"]`), and OpenCode's sqlite rows are per-message and already
+disjoint. Buckets are therefore additive and stable: a fixed day's value no
+longer moves when an old session is resumed.
 
-- **A window slice of MAGNITUDE over-counts at the recent edge.** Resuming a
-  session restates its whole cumulative total onto its new last-touch day, so
-  the newest bucket is inflated (measured: 34% of a machine's lifetime landed on
-  the snapshot day). Label such a column *"tokens from sessions last active in
-  this window"*, never "spend".
+**This retired three derived prohibitions and kept one.** Retired: "a window
+slice over-counts at the recent edge", "active DAYS is a lower bound because
+restatement erases the old key", and "never label a column spend". All three
+followed from cumulative-with-restatement, which no longer exists. **Kept: the
+cross-machine disjointness argument below.** Host stores sit outside every mm
+sync source, so a migrated home directory can put overlapping history under two
+device ids. That is independent of the counter shape and still argues against a
+naive cross-machine sum. Do not delete an argument merely because a neighbouring
+one expired.
+
+**Do not compare a window that straddles v0.12.48.** Codex totals before it
+double-counted work shared across forked and resumed rollout files — measured at
+roughly 55% of the reported figure on a 746-rollout corpus. A trend computed
+across that boundary shows a large fake decline.
 - **A count of active DAYS under-counts, and is therefore a LOWER BOUND.** The
   same restatement *erases* the old day key, so a day that had real activity can
   vanish. Five weekday sessions resumed on Saturday collapse to one active day,
@@ -527,9 +540,14 @@ therefore skipped rather than refused:
 
 - a `token_count` whose `payload.info` is null or absent — Codex's
   start-of-turn marker, present in 33% of rollouts, carrying no ledger;
-- a ledger that precedes the first `turn_context` (no model yet). Totals are
-  cumulative, so a later attributable record restates it. Live sessions open
-  this way.
+- a ledger that precedes the first `turn_context` (no model yet). Live sessions
+  open this way. **This is now a BUFFER, not a skip** (Track 32A): the records
+  are held and attributed to the first model the file names. The old rationale
+  ("totals are cumulative, so a later attributable record restates it") died
+  with the cumulative reading — under per-turn accounting a dropped prefix is
+  gone, measured at 1,557 records across 7 rollouts worth 209,515,399 input
+  tokens. A file whose ledgers are ALL pre-context still refuses; the buffer
+  must never rescue that case.
 
 The discriminator is empty-marker vs broken-ledger, and it is load-bearing in
 BOTH directions. A ledger that was seen and could not be attributed to any
@@ -565,14 +583,15 @@ scan that staged nothing still escapes via `_NoCacheCommit` rather than
 rewriting the file. Measured after the fix: an autopush-only machine converges
 in **3 pushes** (264 → 361 → 440 files cached) with no interactive command.
 
-**A day bucket is not a day's spend, and it mutates.** The readers report a
-CUMULATIVE total per session file and attribute the whole total to the UTC day
-of that file's LAST record. A bucket therefore means "lifetime totals of every
-session that last touched this machine on that day" — 63 of 440 rollouts on a
-real corpus land on a day they did not start, and one day carried 3.4B tokens
-because 91 sessions collapsed onto it. Resuming an old session moves its entire
-total into a new day, so a FIXED day's value can DECREASE between consecutive
-snapshots. The only safe consumption is latest-row-per-device as a
+**A day bucket IS a day's recorded work, since Track 32A.** It was not before:
+the readers used to report a cumulative total per session file and attribute the
+whole thing to the UTC day of that file's LAST record, so a bucket meant
+"lifetime totals of every session that last touched this machine on that day",
+63 of 440 rollouts landed on a day they did not start, and one day carried 3.4B
+tokens because 91 sessions collapsed onto it. Every reader is now per-turn, so
+buckets are additive and a fixed day's value no longer decreases between
+snapshots. The cross-machine caution below still applies and is not affected by
+this change. The only safe consumption is latest-row-per-device as a
 point-in-time view; diffing, summing, or charting `active_days` as a time
 series all produce wrong numbers. Track 20A locks this contract above, before
 Track 21 adds the first consumer.

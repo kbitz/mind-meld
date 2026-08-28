@@ -2532,13 +2532,16 @@ def _agent_rhythm_view(
     could detect the overlap. A summed token total would be silently wrong and
     unfalsifiable; a day-set union is simply unaffected.
 
-    **The count is a LOWER BOUND, not a census.** ``docs/invariants/events-retro.md``:
-    resuming a session moves its entire cumulative total onto a new last-touch
-    day, so a day key can DISAPPEAR between snapshots ("63 of 440 rollouts on a
-    real corpus land on a day they did not start"). Five weekday sessions resumed
-    on Saturday collapse to one active day. The error is one-directional — it can
-    only understate — which is why the rendered copy says "seen on N days" rather
-    than asserting a count, and why nothing diffs or charts this value.
+    **The count is still a LOWER BOUND, for a changed reason.** It used to be one
+    because resuming a session moved its entire cumulative total onto a new
+    last-touch day, so a day key could DISAPPEAR between snapshots ("63 of 440
+    rollouts on a real corpus land on a day they did not start"). Track 32A made
+    every reader per-turn, so day keys no longer move and that mechanism is gone.
+    What remains: a peer on an older mm still publishes the old shape, and a
+    machine that never pushed in a window contributes no days at all. The error
+    stays one-directional — it can only understate — which is why the rendered
+    copy says "seen on N days" rather than asserting a count, and why nothing
+    diffs or charts this value.
 
     Day keys are clamped to ``min(until, as_of)`` so a snapshot can never report
     activity later than its own observation. The acceptor validates day-key
@@ -2774,7 +2777,8 @@ def _render_agent_inventory(
     out = [
         "## Agent activity",
         "",
-        "Per-machine diagnostic counters; not weekly spend and never safe to sum across machines.",
+        "Per-machine per-turn counters; never safe to sum across machines "
+        "(host stores move by OS migration, so two device ids can hold one history).",
         "",
         f"| Machine | Model family | Snapshot (UTC) | State | Tokens (last {cap} active days) "
         "| Tokens in this window |",
@@ -2866,7 +2870,8 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             else:
                 notes.append(
                     "No agent activity observed in this window. Counts are lower bounds: "
-                    "resuming a session moves its whole total onto a later day."
+                    "a machine that has not pushed contributes no days, and a peer on an "
+                    "older mm still reports last-touch totals rather than per-turn ones."
                 )
         if inventory.devices_without_accepted_row:
             notes.append(
