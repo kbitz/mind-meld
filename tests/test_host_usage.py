@@ -23,17 +23,40 @@ from mind_meld import token_usage as tu
 FIXTURES = Path(__file__).parent / "fixtures" / "host_sessions"
 
 
-def _context(model: str = "gpt-5-codex") -> dict:
+def _context(model: str = "gpt-5-codex", *, turn: str | None = None) -> dict:
+    payload: dict = {"model": model}
+    if turn is not None:
+        payload["turn_id"] = turn
     return {
         "timestamp": "2026-08-14T23:59:58Z",
         "type": "turn_context",
-        "payload": {"model": model},
+        "payload": payload,
+    }
+
+
+_OMIT = object()
+
+
+def _last_map(last: object) -> dict:
+    """Build a `last_token_usage` map. Real records carry all four counters.
+
+    An int is the input-only shorthand; a 4-tuple sets
+    (input, cache_create, cache_read, output) so a fixture can exercise the
+    opening-reading rule on every counter rather than just the one.
+    """
+    values = last if isinstance(last, tuple) else (last, 0, 0, 0)
+    return {
+        "input_tokens": values[0],
+        "cache_write_input_tokens": values[1],
+        "cached_input_tokens": values[2],
+        "output_tokens": values[3],
     }
 
 
 def _token(
     input_tokens: int,
     *,
+    last: object = _OMIT,
     timestamp: str = "2026-08-15T00:00:01Z",
     cache_create: int = 0,
     cache_read: int = 0,
@@ -53,7 +76,12 @@ def _token(
                     "output_tokens": output,
                     "reasoning_output_tokens": reasoning,
                     "total_tokens": input_tokens + output,
-                }
+                },
+                # Real Codex carries this on 100% of ledger records. Fixtures
+                # that omit it exercise the cumulative fallback instead, so the
+                # default mirrors the wire: `last` equals the running total,
+                # which is what a session's FIRST reading actually reports.
+                **({} if last is _OMIT else {"last_token_usage": _last_map(last)}),
             },
         },
     }
@@ -148,9 +176,23 @@ class TestHostFamily:
 
 
 class TestCodexFixture:
-    def test_uses_final_cumulative_token_count_and_utc_day(
+    def test_per_turn_increments_land_on_the_day_they_were_spent(
         self, isolated_cache: Path, tmp_path: Path
     ) -> None:
+        """A session that spans midnight is split, not stamped on one day.
+
+        This replaces `test_uses_final_cumulative_token_count_and_utc_day`,
+        which pinned the OPPOSITE: the whole cumulative total attributed to the
+        UTC day of the file's LAST record. That was faithful to a reader which
+        kept only the final `total_token_usage`, and it is what made a day
+        bucket mean "the lifetime of every session that last touched this
+        machine that day" rather than "tokens spent that day".
+
+        The fixture is one session with a ledger on each of two days. The sum
+        is unchanged (200/20/40/60) because the same work is being counted;
+        only its attribution moves. 8 of 746 rollouts on a real corpus span
+        more than one UTC day.
+        """
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES, root)
 
@@ -160,14 +202,24 @@ class TestCodexFixture:
         assert result.reason is None
         assert result.hosts == {
             "codex": {
+                "2026-08-14": {
+                    "input": 100,
+                    "cache_create": 10,
+                    "cache_read": 20,
+                    "output": 30,
+                },
                 "2026-08-15": {
-                    "input": 200,
-                    "cache_create": 20,
-                    "cache_read": 40,
-                    "output": 60,
-                }
+                    "input": 100,
+                    "cache_create": 10,
+                    "cache_read": 20,
+                    "output": 30,
+                },
             }
         }
+        # The window total is preserved; only its distribution changed.
+        totals = result.hosts["codex"]
+        assert sum(day["input"] for day in totals.values()) == 200
+        assert sum(day["output"] for day in totals.values()) == 60
         assert isolated_cache.exists()
         assert isolated_cache.stat().st_mode & 0o777 == 0o600
         assert str(root) not in isolated_cache.read_text(encoding="utf-8")
@@ -644,9 +696,9 @@ class TestCacheLifecycle:
         # NOT replaced, NOT pruned: b was unlinked and never re-listed, and its
         # entry survives this incomplete pass untouched.
         assert set(files_after) == keys_before
-        assert files_after[key_b]["usage"]["input"] == 100
+        assert files_after[key_b]["states"][0][1][0] == 100
         # ...but a's verified re-parse is kept, which is the convergence half.
-        assert files_after[key_a]["usage"]["input"] == 400
+        assert files_after[key_a]["states"][0][1][0] == 400
         # A surviving entry for a deleted file is inert: aggregation walks the
         # DISK, never the cache, so b cannot contribute to any total.
         assert incomplete.hosts == {}
@@ -1905,3 +1957,373 @@ class TestOpenCodeUsage:
 
         assert locked == hu.HostUsageResult({}, complete=False, reason="locked")
         assert opencode_cache.read_bytes() == cache_before
+
+
+class TestCodexTurnDedup:
+    """Cross-file dedup, the half of per-turn accounting a single file cannot see.
+
+    Measured on a real 746-rollout corpus: 195 ``turn_id`` values appear in
+    more than one file, spanning 244 of them, sharing 85% of their ledger
+    before diverging. Summing per file double-counted 55% of the total. These
+    pins are the regression guard for that reduction.
+    """
+
+    def test_shared_turn_prefix_across_rollout_files_is_counted_once(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Two files forked from one conversation share their prefix.
+
+        Both carry the SAME turn id and the same cumulative readings. The work
+        happened once, so it is counted once. Summing the files would report
+        200; keeping only one file would also report 100 here but is wrong for
+        the divergent case below.
+        """
+        root = tmp_path / "sessions"
+        shared = [_context(turn="turn-a"), _token(40, last=40), _token(100)]
+        _write_rollout(root, "rollout-fork-1.jsonl", shared)
+        _write_rollout(root, "rollout-fork-2.jsonl", shared)
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    def test_divergent_fork_tails_are_both_retained(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """The branch that "keep the longest file" would silently discard.
+
+        Same prefix, then each file continues differently. Both tails are real
+        work and both must survive: 100 shared + 50 + 30.
+        """
+        root = tmp_path / "sessions"
+        prefix = [_context(turn="turn-a"), _token(40, last=40), _token(100)]
+        _write_rollout(root, "rollout-fork-1.jsonl", [*prefix, _token(150)])
+        _write_rollout(root, "rollout-fork-2.jsonl", [*prefix, _token(130)])
+
+        result = hu.read_codex_usage(root)
+
+        # 40 opening + 60 shared + 50 on one branch + 30 on the other.
+        # Deduping READINGS instead would treat 130 as a waypoint to 150 and
+        # report 150, silently dropping one branch's work.
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 180
+
+    def test_turn_dedup_is_independent_of_file_order(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Reduction is over a SET of states, so scan order cannot change it.
+
+        `_iter_rollouts` walks a sorted directory tree, but a partial scan
+        commits whatever prefix it reached, so entries reach `_aggregate` in
+        whatever order the cache happens to hold. An order-sensitive reduction
+        would make the published number depend on how many passes it took.
+        """
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        prefix = [_context(turn="turn-a"), _token(40, last=40), _token(100)]
+        # `_iter_rollouts` walks a SORTED tree, so writing the same two files in
+        # a different order proves nothing. Swap which branch lives under which
+        # filename instead — then sorted traversal genuinely reverses the order
+        # the two state sequences reach `_aggregate`.
+        _write_rollout(root_a, "rollout-1.jsonl", [*prefix, _token(150)])
+        _write_rollout(root_a, "rollout-2.jsonl", [*prefix, _token(130)])
+        _write_rollout(root_b, "rollout-1.jsonl", [*prefix, _token(130)])
+        _write_rollout(root_b, "rollout-2.jsonl", [*prefix, _token(150)])
+
+        assert hu.read_codex_usage(root_a).hosts == hu.read_codex_usage(root_b).hosts
+        assert hu.read_codex_usage(root_a).hosts["codex"]["2026-08-15"]["input"] == 180
+
+    def test_turn_boundary_reemission_is_not_counted_twice(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Codex repeats a turn's final ledger as the next turn's first.
+
+        Found on `rollout-2026-04-11T09-20-25` in the live corpus: a new
+        `turn_context` at line 283, then a `token_count` at line 286 restating
+        the previous turn's total (1,422,894) and its `last_token_usage`
+        (73,158) verbatim. Chaining each turn independently restarts the second
+        chain with that `last` and counts it twice — 473,932 input tokens over
+        that one 71-record file.
+
+        This is why a turn id is a LINEAGE LINK and not a bucket key: both
+        turns share one cumulative number line, so the re-emitted reading is a
+        state already in the set.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-two-turns.jsonl",
+            [
+                _context(turn="turn-a"),
+                _token(40, last=40),
+                _token(100),
+                _context(turn="turn-b"),
+                _token(100, last=60),  # verbatim re-emission of the last reading
+                _token(160),
+            ],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        # 160 is the session's terminal cumulative. Counting the re-emission
+        # would report 220.
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 160
+
+    def test_an_opening_already_reached_by_another_file_is_not_charged_again(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """A resumed file can OPEN at a total another file spent its way to.
+
+        An opening reading has no predecessor, so it has no transition identity
+        and cannot be deduped like every other reading. If a sibling in the same
+        lineage already arrived at that exact cumulative by spending tokens,
+        that arrival counted the work, and charging this file's
+        `last_token_usage` on top counts it twice.
+
+        Measured: 1 of 747 rollouts on the live corpus. Rare, and wrong.
+        """
+        root = tmp_path / "sessions"
+        # Parent spends its way 40 -> 100 under the shared turn.
+        _write_rollout(
+            root,
+            "rollout-parent.jsonl",
+            [_context(turn="shared"), _token(40, last=40), _token(100)],
+        )
+        # Child resumes AT 100, claiming 60 of its own, then reaches 150.
+        _write_rollout(
+            root,
+            "rollout-resumed.jsonl",
+            [_context(turn="shared"), _token(100, last=60), _token(150)],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        # 40 + 60 (parent's own transition) + 50 (child's own). NOT 210.
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 150
+
+    def test_duplicate_token_count_record_produces_zero_increment(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """183 of 746 corpus rollouts repeat a `token_count` (414 records).
+
+        The total does not advance, so the host counted that turn once.
+        Differencing the host's own counter cannot double-count it; summing
+        `last_token_usage` would.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-dupe.jsonl",
+            [_context(turn="t"), _token(40, last=40), _token(90), _token(90)],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 90
+
+    def test_unforked_rollout_reconciles_with_its_terminal_total(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """The auditability pin.
+
+        For a file with no fork and no inherited parent total, the per-turn
+        increments must sum to exactly the cumulative total the SHIPPED reader
+        published. That is what makes this change checkable against the old
+        number rather than merely different from it. Verified on 479 of 479
+        in-scope rollouts of the live corpus, across all four counters.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-recon.jsonl",
+            [
+                _context(turn="t1"),
+                _token(10, last=(10, 0, 0, 1), output=1),
+                _token(35, output=4),
+                _context(turn="t2"),
+                _token(80, last=(45, 0, 0, 5), output=9),
+            ],
+        )
+
+        result = hu.read_codex_usage(root)
+        day = result.hosts["codex"]["2026-08-15"]
+
+        assert day["input"] == 80
+        assert day["output"] == 9
+
+    def test_resumed_rollout_excludes_the_inherited_parent_total(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """4 corpus rollouts open with a total that already counts a parent.
+
+        `total[0]` is 11,680,081 while `last_token_usage` is 89,789 on the real
+        ones. The parent file already reported its own history, so counting the
+        inherited figure again is the double-count this Track removes.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-resumed.jsonl",
+            [_context(turn="child"), _token(5000, last=90), _token(5150)],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        # 90 of its own, then a 150 increment. NOT 5150.
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 240
+
+    def test_counter_decrease_clamps_without_negative_usage(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Zero occurrences in 746 rollouts, so this is a contract not a case.
+
+        Monotonicity of `total_token_usage` is an observation about today's
+        Codex, not a documented guarantee. A reset, a compaction, or a schema
+        change could break it, and a negative bucket would propagate onto the
+        wire as an unsigned counter.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-reset.jsonl",
+            [_context(turn="t"), _token(100, last=100), _token(40, last=40)],
+        )
+
+        result = hu.read_codex_usage(root)
+        day = result.hosts["codex"]["2026-08-15"]
+
+        assert day["input"] >= 0
+        # Sorted union: 40 is the lower state so it opens the chain with its
+        # own `last`, then 100 adds the 60 difference.
+        assert day["input"] == 100
+
+
+class TestCodexPreContextBuffer:
+    """Ledgers seen before the first `turn_context` are buffered, not dropped.
+
+    The shipped reader dropped them, justified by "totals are CUMULATIVE, so a
+    later attributable record restates these tokens". Per-turn accounting
+    deletes that premise. Live corpus: 7 rollouts, 1,557 such records,
+    209,515,399 input tokens.
+    """
+
+    def test_pre_context_ledgers_are_attributed_not_dropped(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-early.jsonl",
+            [_token(10, last=10), _token(20), _context(turn="t"), _token(30)],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 30
+
+    def test_only_pre_context_ledgers_still_refuse_the_store(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """The buffer must NOT rescue an unattributable file.
+
+        A ledger we saw and could attribute to NOTHING still refuses, exactly
+        as `test_missing_model_before_token_is_incomplete` pins. Silently
+        converting it to `no_ledger` would under-report real usage, which is
+        the opposite failure from the tolerated marker shapes.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(root, "rollout-no-context.jsonl", [_token(10), _token(20)])
+
+        result = hu.read_codex_usage(root)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
+
+
+class TestCodexCacheMigration:
+    def test_pre_track_cache_entry_forces_a_full_rewalk(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Absence of `states` is the version discriminator.
+
+        A pre-Track entry carries `day`/`model`/`usage` and cannot seed a
+        resume: it has no cumulative baseline, no turn id, and no pending
+        buffer. Trusting it partially would silently mis-attribute; rejecting
+        it costs one re-walk of that file. Deliberately NOT a `CACHE_VERSION`
+        bump, which is shared with the Grok and OpenCode namespaces.
+        """
+        root = tmp_path / "sessions"
+        path = _write_rollout(root, "rollout-old.jsonl", [_context(turn="t"), _token(50, last=50)])
+        source = path.stat()
+        isolated_cache.parent.mkdir(parents=True, exist_ok=True)
+        isolated_cache.write_text(
+            json.dumps(
+                {
+                    "version": hu.CACHE_VERSION,
+                    "files": {
+                        hu._cache_key(path): {
+                            "dev": source.st_dev,
+                            "ino": source.st_ino,
+                            "size": source.st_size,
+                            "mtime_ns": source.st_mtime_ns,
+                            "head": "x" * 64,
+                            "head_len": min(source.st_size, 4096),
+                            "tail": "y" * 64,
+                            "tail_len": min(source.st_size, 4096),
+                            "offset": source.st_size,
+                            "day": "2026-08-15",
+                            "model": "gpt-5-codex",
+                            "usage": {
+                                "input": 999_999,
+                                "cache_create": 0,
+                                "cache_read": 0,
+                                "output": 0,
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = hu.read_codex_usage(root)
+
+        # The stale 999,999 is never trusted; the file is re-read.
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 50
+        entry = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"][hu._cache_key(path)]
+        assert "states" in entry
+        assert "usage" not in entry
+
+
+class TestCodexWireShape:
+    def test_host_day_buckets_stay_exactly_the_four_token_fields(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Fleet-safety pin. An extra key here drops the WHOLE row on peers.
+
+        `aggregator._copy_usage_bucket` validates a host day bucket with
+        `set(bucket) != set(TOKEN_FIELDS) -> reject`, an exact match, and a
+        rejected bucket fails the entire `host-usage-snapshot` row rather than
+        the one field. So adding `by_model` (or anything else) to this payload
+        makes every peer running an older mm discard the row and keep a stale
+        one, fleet-wide, until the last machine upgrades.
+
+        Bumping `EVENTS_SCHEMA_VERSION` does not rescue it either: the acceptor
+        compares against the current constant, so after a bump it also rejects
+        the older rows it had retained. Per-model detail therefore ships in
+        Track 33A as an ADDITIVE SIBLING key, the same shape v0.12.47 used for
+        `degraded_sources` — never by widening this bucket.
+        """
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-wire.jsonl",
+            [_context(turn="t"), _token(40, last=40), _token(90)],
+        )
+
+        result = hu.read_codex_usage(root)
+
+        assert result.hosts
+        for days in result.hosts.values():
+            for bucket in days.values():
+                assert set(bucket) == set(tu.TOKEN_FIELDS)
