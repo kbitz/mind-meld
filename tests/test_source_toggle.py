@@ -603,6 +603,26 @@ class TestStatusBreadcrumbs:
         assert shown.exit_code == 0, shown.output
         assert "Grok usage capture: enabled, but no successful scan yet" in shown.output
 
+        _host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _host_usage.GROK_CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": _host_usage.CACHE_VERSION,
+                    "complete_once": True,
+                    "usage_less_skipped": 0,
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        historical = runner.invoke(app, ["status"])
+        assert historical.exit_code == 0, historical.output
+        assert (
+            "Grok usage capture: enabled; a prior scan completed successfully" in historical.output
+        )
+        assert "last scan complete" not in historical.output
+        assert "Grok usage capture: enabled, publishing" not in historical.output
+
         runner.invoke(app, ["disable-source", "grok"])
         _host_usage.GROK_SESSIONS_PATH.mkdir(parents=True)
         present = runner.invoke(app, ["status"])

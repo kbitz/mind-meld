@@ -9,14 +9,14 @@ All notable changes to Mind Meld will be documented in this file.
 ### Added
 
 - **Reader-scoped host-usage failure isolation.** A failed reader is listed in additive `degraded_sources` (no schema bump) and named in the autopush `degraded` breadcrumb. A row is omitted only when no consulted reader completed. `no_metadata_ledger` stays silent.
-- **`mm diag` `host_usage` block.** Consent, last-scan state, and the usage-less skip tally, from on-disk cache only — no passphrase, no host store.
+- **`mm diag` `host_usage` block.** Consent, prior-success state, and the usage-less skip tally, from on-disk cache only — no passphrase, no host store.
 - **Grok wire-contract census** against Grok 1.0.5 (`tests/fixtures/host_sessions/grok/CONTRACT.md`), with fixtures for a usage-less terminal, a cancelled terminal that does carry usage, `usageIsIncomplete`, and a session dir without `updates.jsonl`.
 
 ### Changed
 
 - **An absent optional file is not an I/O error.** `_is_regular_non_symlink` treats `FileNotFoundError` / `NotADirectoryError` as a skip. A permission error on a file that exists is still `io_error`. Shared with the Codex walker, so a rollout reaped between `iterdir()` and `lstat()` no longer takes the Codex scan down.
 - **A usage-less `turn_completed` is a zero-token skip**, carved out *before* the exact-match key check (the check would otherwise fire first and the skip would be dead code). Exact-match on extra unknown keys stays fatal. Skip count is stored on the Grok cache for `mm diag`.
-- **`mm status` reports Grok capture outcome, not config:** `enabled, publishing (last scan complete)` vs `enabled, but no successful scan yet — run mm push`.
+- **`mm status` reports Grok capture outcome, not config:** `enabled; a prior scan completed successfully` vs `enabled, but no successful scan yet — run mm push`.
 - **`mm enable-source grok` prints the usage-read disclosure** on the fresh-enable path (it already existed, and was unreachable from every path that granted the permission).
 - **Permanent host-reader failures carry a fix clause** and never promise a retry. The first-success Grok carve-out is removed from sweep policy; `grok_completed_once()` remains a diagnostic.
 

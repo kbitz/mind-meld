@@ -217,7 +217,9 @@ is kept as a **diagnostic** for `mm status` / `mm diag` (and so the three
 CI-enforced doc citations to it still resolve). Do not reintroduce it as a
 sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
 sweep-level `reader`/`reason` for a pre-any-reader expiry); autopush never
-warms.
+warms. After a successful warm, retry only deadline-dropped readers and merge
+their fresh outcomes with the first pass's completed readers — a flaky
+second-pass Codex/OpenCode read must never erase totals already captured.
 
 **Grok terminal skip (Track 31A).** A `turn_completed` whose `params.update`
 key set is exactly `_GROK_TERMINAL_KEYS - {usage}` is a zero-token skip,

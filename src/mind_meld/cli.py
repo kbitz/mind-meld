@@ -4522,7 +4522,7 @@ def status(
     if grok_on or grok_present:
         if grok_on:
             if _host_usage.grok_completed_once():
-                console.print("  Grok usage capture: enabled, publishing (last scan complete)")
+                console.print("  Grok usage capture: enabled; a prior scan completed successfully")
             else:
                 console.print(
                     "  Grok usage capture: enabled, but no successful scan yet — "
@@ -4801,6 +4801,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     # Local config (best-effort — a broken config is itself diag-worthy).
     skill_may_create: frozenset[str] | None = None
     skill_config_error: str | None = None
+    resolved_sources: list[dict] = []
     cfg: dict = {}
     try:
         cfg = load_config()
@@ -4809,7 +4810,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         storage_path = cfg.get("storage", {}).get("path")
         local_fp = cfg.get("crypto", {}).get("root_salt_fp")
         config_state = "ok"
-        skill_may_create = skill_link.consented_agent_keys(cfg, get_sources(cfg))
+        resolved_sources = get_sources(cfg)
+        skill_may_create = skill_link.consented_agent_keys(cfg, resolved_sources)
     except MindMeldError as e:
         dev_id = dev_name = storage_path = local_fp = None
         config_state = f"error: {e}"
@@ -4902,16 +4904,13 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
 
     grok_consented: bool | None = None
     if config_state == "ok":
-        # Do not call get_sources(): diag must survive a source path it cannot
-        # resolve. Source-enabled is consent (Track 22B); the 21A bit is OR.
-        grok_consented = grok_host_usage_enabled(cfg)
-        if not grok_consented:
-            sync = cfg.get("sync") or {}
-            disabled = {
-                name for name in (sync.get("disabled_sources") or []) if isinstance(name, str)
-            }
-            explicit = [s.get("name") for s in (sync.get("sources") or []) if isinstance(s, dict)]
-            grok_consented = "grok" in explicit and "grok" not in disabled
+        # Source-enabled is consent (Track 22B), using the exact resolved
+        # source set already needed for skill policy above. The 21A bit remains
+        # an OR. This is cache-only with respect to host usage: get_sources()
+        # resolves configuration but never opens the Grok host store.
+        grok_consented = grok_host_usage_enabled(cfg) or any(
+            source.get("name") == "grok" for source in resolved_sources
+        )
     grok_diag = _host_usage.grok_usage_diag()
     host_usage_state = {
         "grok": {
@@ -5083,13 +5082,13 @@ def diag(
     else:
         consented_shown = "yes" if consented else "no"
     if hu_state.get("complete_once"):
-        scan_shown = "complete"
+        scan_shown = "yes"
     elif hu_state.get("cache_state") == "unreadable":
         scan_shown = "unreadable"
     else:
-        scan_shown = "no successful scan yet"
+        scan_shown = "no"
     console.print(f"  grok consented:          {consented_shown}")
-    console.print(f"  grok last scan:          {scan_shown}")
+    console.print(f"  grok prior successful scan: {scan_shown}")
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
     console.print(f"  grok cache:              {safe_str(str(hu_state.get('cache_state', '')))}")
 

@@ -1178,14 +1178,102 @@ class TestColdCacheWarmAndRetry:
             "grok",
             "opencode",
             "warm:grok",
-            "codex",
             "grok",
-            "opencode",
         ]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["token_sources"] == ["codex", "grok", "opencode"]
         assert "degraded_sources" not in row
+
+    def test_warm_retry_preserves_completed_first_pass_readers(self, tmp_path, monkeypatch):
+        """A warm Grok retry must not replace prior Codex/OpenCode totals.
+
+        The second Codex call deliberately raises: retrying every reader and
+        replacing the first capture would drop its completed totals. Only the
+        deadline-dropped Grok reader is safe to retry.
+        """
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=("codex", "grok", "opencode"))
+        _stub_fast_walks(monkeypatch)
+        state = {"warm": False}
+        calls: list[str] = []
+
+        def codex(*, deadline):
+            calls.append("codex")
+            if state["warm"]:
+                raise AssertionError("completed Codex reader must not be retried")
+            return _complete({"codex": {"2026-08-15": _usage(3)}})
+
+        def grok(*, deadline, consented=False):
+            calls.append("grok")
+            if not state["warm"]:
+                return _incomplete("deadline")
+            return _complete({"grok": {"2026-08-15": _usage(5)}})
+
+        def opencode(*, deadline):
+            calls.append("opencode")
+            return _complete({"codex": {"2026-08-15": _usage(4)}})
+
+        def warm(*, reader):
+            calls.append(f"warm:{reader}")
+            state["warm"] = True
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "read_opencode_usage", opencode)
+        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+
+        degradations = events_tail._run_events_tail(
+            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
+        )
+
+        assert calls == ["codex", "grok", "opencode", "warm:grok", "grok"]
+        assert degradations == []
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["hosts"] == {
+            "codex": {"2026-08-15": _usage(7)},
+            "grok": {"2026-08-15": _usage(5)},
+        }
+        assert row["token_sources"] == ["codex", "grok", "opencode"]
+        assert "degraded_sources" not in row
+
+    def test_warm_retry_keeps_first_pass_data_when_the_reader_still_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """An unsuccessful retry declares Grok without discarding Codex."""
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=("codex", "grok"))
+        _stub_fast_walks(monkeypatch)
+        calls: list[str] = []
+
+        def codex(*, deadline):
+            calls.append("codex")
+            return _complete({"codex": {"2026-08-15": _usage(3)}})
+
+        def grok(*, deadline, consented=False):
+            calls.append("grok")
+            return _incomplete("deadline")
+
+        def warm(*, reader):
+            calls.append(f"warm:{reader}")
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+
+        degradations = events_tail._run_events_tail(
+            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
+        )
+
+        assert calls == ["codex", "grok", "warm:grok", "grok"]
+        assert len(degradations) == 1
+        assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["hosts"] == {"codex": {"2026-08-15": _usage(3)}}
+        assert row["token_sources"] == ["codex"]
+        assert row["degraded_sources"] == ["grok"]
 
     def test_autopush_never_warms(self, tmp_path, monkeypatch):
         """An unattended hook must not spend seconds on optional analytics.

@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 from mind_meld import host_usage
 from mind_meld import sidecar as sidecar_mod
 from mind_meld.cli import app
-from mind_meld.config import save_config
+from mind_meld.config import load_config, save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
 from mind_meld.storage.local import LocalBackend
@@ -154,6 +154,38 @@ def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
     assert payload["host_usage"]["grok"]["usage_less_skipped"] == 3
 
 
+def test_diag_grok_consent_matches_an_auto_detected_resolved_source(tmp_path, monkeypatch):
+    """Legacy auto-detection is a real source gate, not merely a config hint."""
+    _, cfg_path, _ = _setup(tmp_path, monkeypatch)
+    cfg = load_config(cfg_path)
+    cfg["sync"].pop("sources")
+    save_config(cfg, cfg_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".grok" / "skills").mkdir(parents=True)
+
+    result = runner.invoke(app, ["diag", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["host_usage"]["grok"]["consented"] is True
+
+
+def test_diag_grok_consent_excludes_an_unresolved_explicit_source(tmp_path, monkeypatch):
+    """A config entry filtered out by get_sources() cannot authorize a read."""
+    _, cfg_path, _ = _setup(tmp_path, monkeypatch)
+    cfg = load_config(cfg_path)
+    cfg["sync"]["sources"].append(
+        {"name": "grok", "path": str(tmp_path / "missing-grok"), "type": "grok"}
+    )
+    save_config(cfg, cfg_path)
+
+    result = runner.invoke(app, ["diag", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["host_usage"]["grok"]["consented"] is False
+
+
 # ── Plain text mode ──────────────────────────────────────────────────────
 
 
@@ -169,6 +201,8 @@ def test_diag_plain_text_is_human_readable(tmp_path, monkeypatch):
     assert "Skill links" in result.stdout
     assert "Host skill discovery" in result.stdout
     assert "Host usage" in result.stdout
+    assert "grok prior successful scan" in result.stdout
+    assert "grok last scan" not in result.stdout
     assert "Git-root discovery" in result.stdout
     assert "Git capture" in result.stdout
     assert "recorded" in result.stdout

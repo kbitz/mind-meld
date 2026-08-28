@@ -369,19 +369,81 @@ def _capture_host_usage(
             dropped.append((name, reason))
             continue
         contributed.append(name)
-        # Codex and OpenCode both classify into the `codex` family, so a
-        # collision on (family, UTC day) is ordinary rather than an error.
-        # Sum the four TOKEN_FIELDS through the shared helper — a shallow map
-        # update would silently drop whichever reader landed first.
-        for family, days in result.hosts.items():
-            target = merged.setdefault(family, {})
-            for day, usage in days.items():
-                bucket = target.setdefault(day, token_usage.zero_model_bucket())
-                token_usage.merge_usage_bucket(bucket, usage)
+        _merge_host_usage_maps(merged, result.hosts)
     if contributed or not dropped:
         return HostUsageCapture(merged, token_sources=tuple(contributed), dropped=tuple(dropped))
     first_reader, first_reason = dropped[0]
     return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
+
+
+def _merge_host_usage_maps(
+    target: dict[str, dict[str, token_usage.Usage]],
+    source: dict[str, dict[str, token_usage.Usage]],
+) -> None:
+    """Add a completed reader's buckets to ``target`` without aliasing it.
+
+    Codex and OpenCode both classify into the ``codex`` family, so a collision
+    on (family, UTC day) is ordinary rather than an error. Sum the four
+    TOKEN_FIELDS through the shared helper — a shallow map update would silently
+    drop whichever reader landed first.
+    """
+    for family, days in source.items():
+        target_days = target.setdefault(family, {})
+        for day, usage in days.items():
+            bucket = target_days.setdefault(day, token_usage.zero_model_bucket())
+            token_usage.merge_usage_bucket(bucket, usage)
+
+
+def _merge_warm_retry_capture(
+    initial: HostUsageCapture,
+    retry: HostUsageCapture,
+    *,
+    readers: Sequence[tuple[str, HostReader]],
+    retried_names: set[str],
+) -> HostUsageCapture:
+    """Preserve completed first-pass readers while replacing retried outcomes.
+
+    A warm retry only re-runs readers that were dropped for ``deadline``. Its
+    output is therefore disjoint from the first pass's contributors, so the two
+    host maps can be safely added. Replacing the entire capture would let a
+    flaky already-completed reader erase truthful first-pass totals.
+    """
+    merged: dict[str, dict[str, token_usage.Usage]] = {}
+    if initial.hosts is not None:
+        _merge_host_usage_maps(merged, initial.hosts)
+    if retry.hosts is not None:
+        _merge_host_usage_maps(merged, retry.hosts)
+
+    names_in_order = tuple(name for name, _ in readers)
+    contributed = set(initial.token_sources) | set(retry.token_sources)
+    dropped_by_name = {
+        name: reason for name, reason in initial.dropped if name not in retried_names
+    }
+    dropped_by_name.update(retry.dropped)
+    token_sources = tuple(name for name in names_in_order if name in contributed)
+    dropped = tuple(
+        (name, dropped_by_name[name])
+        for name in names_in_order
+        if name in dropped_by_name and name not in contributed
+    )
+
+    if initial.complete or retry.complete:
+        return HostUsageCapture(
+            merged,
+            token_sources=token_sources,
+            dropped=dropped,
+            invoked=True,
+        )
+    if dropped:
+        first_reader, first_reason = dropped[0]
+        return HostUsageCapture(
+            None,
+            first_reader,
+            first_reason,
+            dropped=dropped,
+            invoked=True,
+        )
+    return HostUsageCapture(None, invoked=True)
 
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> bool:
@@ -564,8 +626,30 @@ def _capture_event_snapshots(
         # halves of the gate above keep passing and the reader gate alone does
         # not bound the repeat cost — the warm's own outcome does.
         if warm_host_cache(warm_reader):
-            host_capture = _capture_host_usage(
-                host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+            # Never re-read a reader that already completed: a transient
+            # second-pass failure must not erase its first-pass totals. If the
+            # initial deadline was pre-invoke there is nothing to preserve, so
+            # retry the whole sweep. Otherwise retry every reader dropped for
+            # deadline (including later readers that were never reached), then
+            # merge those fresh outcomes with the completed first-pass subset.
+            retried_names = {name for name, reason in host_capture.dropped if reason == "deadline"}
+            retry_readers = (
+                tuple((name, read) for name, read in host_readers if name in retried_names)
+                if host_capture.invoked
+                else host_readers
+            )
+            retry_capture = _capture_host_usage(
+                retry_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+            )
+            host_capture = (
+                _merge_warm_retry_capture(
+                    host_capture,
+                    retry_capture,
+                    readers=host_readers,
+                    retried_names=retried_names,
+                )
+                if host_capture.invoked
+                else retry_capture
             )
     host_rows: list[dict] = []
     if host_capture.hosts is not None:

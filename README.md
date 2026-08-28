@@ -148,7 +148,7 @@ Upgrade is per Mac, and **upgrading is not enough**. On each Mac:
 
 1. `mm enable-source grok`
 2. One **interactive** `mm push` (the fast path — it may warm the Grok cache once). Autopush never warms and converges over about three pushes instead.
-3. Verify: `mm status` should read `Grok usage capture: enabled, publishing (last scan complete)`, and `mm diag` should show `grok last scan: complete`. Then `mm retro-fleet 7d`.
+3. Verify: `mm status` should read `Grok usage capture: enabled; a prior scan completed successfully`, and `mm diag` should show `grok prior successful scan: yes`. Then `mm retro-fleet 7d`.
 
 If a later Grok release changes the log format, that Mac drops Grok (declared on `mm status` / `mm diag` / push stderr) and keeps publishing Codex. Upgrade mm, or `mm disable-source grok` to stop retrying.
 
@@ -403,7 +403,7 @@ Managing conflicts:
 
 **Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm`, `mm --version`, `mm diag`, and an interactive `mm push`. If `mm status` or `mm diag` shows an incomplete git capture, recover on that Mac with `mm recapture 30d`, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 
-**I enabled Grok, but no Grok activity appears.** Upgrade is not enough — run `mm enable-source grok` on that Mac, then one interactive `mm push`. `mm status` reports outcome, not config: `enabled, publishing (last scan complete)` vs `enabled, but no successful scan yet`. `mm diag` shows consent, last-scan state, and how many usage-less turns were skipped, without opening `~/.grok/sessions`. If push stderr names `grok` with `unsupported`, the log format changed; upgrade mm, or `mm disable-source grok` to stop retrying. Codex totals are unaffected.
+**I enabled Grok, but no Grok activity appears.** Upgrade is not enough — run `mm enable-source grok` on that Mac, then one interactive `mm push`. `mm status` reports outcome, not config: `enabled; a prior scan completed successfully` vs `enabled, but no successful scan yet`. `mm diag` shows consent, whether a prior scan completed, and how many usage-less turns were skipped, without opening `~/.grok/sessions`. If push stderr names `grok` with `unsupported`, the log format changed; upgrade mm, or `mm disable-source grok` to stop retrying. Codex totals are unaffected.
 
 **`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either.
 
