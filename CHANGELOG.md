@@ -2,6 +2,28 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.47] - 2026-08-28
+
+**Enabling Grok usage capture now actually publishes Grok activity, and a Grok read failure no longer freezes the rest of the host view.** Two wire-drift bugs (an absent `updates.jsonl` treated as an I/O error, and a usage-less `turn_completed` treated as an unreadable format) meant `mm enable-source grok` turned on a reader that published nothing. Both are skipped now, with a tally of usage-less turns on the local cache. Host-reader failures are isolated: a Grok format change drops Grok, declared, and Codex still publishes. Each Mac upgrades individually, **and upgrading is not enough** — run `mm enable-source grok` on that Mac, then one interactive `mm push` (the fast path; autopush never warms and converges over about three pushes). The retro card gains a `Grok models: seen on N days` line, not a token magnitude.
+
+### Added
+
+- **Reader-scoped host-usage failure isolation.** A failed reader is listed in additive `degraded_sources` (no schema bump) and named in the autopush `degraded` breadcrumb. A row is omitted only when no consulted reader completed. `no_metadata_ledger` stays silent.
+- **`mm diag` `host_usage` block.** Consent, last-scan state, and the usage-less skip tally, from on-disk cache only — no passphrase, no host store.
+- **Grok wire-contract census** against Grok 1.0.5 (`tests/fixtures/host_sessions/grok/CONTRACT.md`), with fixtures for a usage-less terminal, a cancelled terminal that does carry usage, `usageIsIncomplete`, and a session dir without `updates.jsonl`.
+
+### Changed
+
+- **An absent optional file is not an I/O error.** `_is_regular_non_symlink` treats `FileNotFoundError` / `NotADirectoryError` as a skip. A permission error on a file that exists is still `io_error`. Shared with the Codex walker, so a rollout reaped between `iterdir()` and `lstat()` no longer takes the Codex scan down.
+- **A usage-less `turn_completed` is a zero-token skip**, carved out *before* the exact-match key check (the check would otherwise fire first and the skip would be dead code). Exact-match on extra unknown keys stays fatal. Skip count is stored on the Grok cache for `mm diag`.
+- **`mm status` reports Grok capture outcome, not config:** `enabled, publishing (last scan complete)` vs `enabled, but no successful scan yet — run mm push`.
+- **`mm enable-source grok` prints the usage-read disclosure** on the fresh-enable path (it already existed, and was unreachable from every path that granted the permission).
+- **Permanent host-reader failures carry a fix clause** and never promise a retry. The first-success Grok carve-out is removed from sweep policy; `grok_completed_once()` remains a diagnostic.
+
+### Fixed
+
+- Enabling the Grok source advertised a feature that was guaranteed to publish nothing: one session dir without `updates.jsonl` zeroed the whole scan, and four usage-less cancelled turns would have been `unsupported` even after that.
+
 ## [0.12.46] - 2026-08-27
 
 **Fleet retro can now recover omitted git history, and a held cursor no longer pretends recovery is impossible.** Incomplete discovery still holds the git cursor (the next substantive push re-walks from the last complete capture), but the mm-push row is still written so diagnosis and author attribution survive. Walk failures are visible on `mm status` and never hold the cursor — git-walk cost grows with cursor age (48.6 ms @1d → 251.3 ms @30d vs a 250 ms autopush budget), so holding on a walk abort wedges unattended autopush. `mm recapture [WINDOW]` (default 30d) is the dedicated recovery command. The first push after upgrading may take a one-off longer git walk (measured 251 ms) because a held or first-run 30-day cursor escalates from the 250 ms autopush budget to 500 ms so that recovery actually completes.
