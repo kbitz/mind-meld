@@ -417,7 +417,9 @@ def _merge_warm_retry_capture(
     names_in_order = tuple(name for name, _ in readers)
     contributed = set(initial.token_sources) | set(retry.token_sources)
     dropped_by_name = {
-        name: reason for name, reason in initial.dropped if name not in retried_names
+        name: reason
+        for name, reason in initial.dropped
+        if name not in retried_names or not retry.invoked
     }
     dropped_by_name.update(retry.dropped)
     token_sources = tuple(name for name in names_in_order if name in contributed)

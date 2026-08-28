@@ -1275,6 +1275,31 @@ class TestColdCacheWarmAndRetry:
         assert row["token_sources"] == ["codex"]
         assert row["degraded_sources"] == ["grok"]
 
+    def test_preinvoke_retry_keeps_the_initial_deadline_declarations(self):
+        """A retry that never starts cannot replace first-pass outcomes."""
+        initial = events_tail.HostUsageCapture(
+            {"codex": {"2026-08-15": _usage(3)}},
+            token_sources=("codex",),
+            dropped=(("grok", "deadline"), ("opencode", "deadline")),
+            invoked=True,
+        )
+        retry = events_tail.HostUsageCapture(None, "grok", "deadline", invoked=False)
+
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(
+                ("codex", lambda **_kw: _complete()),
+                ("grok", lambda **_kw: _complete()),
+                ("opencode", lambda **_kw: _complete()),
+            ),
+            retried_names={"grok", "opencode"},
+        )
+
+        assert merged.hosts == {"codex": {"2026-08-15": _usage(3)}}
+        assert merged.token_sources == ("codex",)
+        assert merged.dropped == (("grok", "deadline"), ("opencode", "deadline"))
+
     def test_autopush_never_warms(self, tmp_path, monkeypatch):
         """An unattended hook must not spend seconds on optional analytics.
         A cold autopush converges instead, because an aborted host scan now
