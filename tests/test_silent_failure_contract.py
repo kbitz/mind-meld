@@ -1454,7 +1454,9 @@ def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, m
     assert payload["outcome"] == "degraded", payload
     assert payload["detail"] == (
         "host-usage snapshot skipped (grok unsupported) — "
-        "content sync and git/session capture unaffected"
+        "content sync and git/session capture unaffected. "
+        "grok's log format changed in a way this version cannot read. "
+        "Upgrade mm, or run `mm disable-source grok` to stop retrying."
     )
     # Safe by construction: no path, transcript, query, or exception text.
     assert str(tmp_path) not in payload["detail"]

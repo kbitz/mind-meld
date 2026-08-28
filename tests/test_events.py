@@ -1685,6 +1685,29 @@ class TestMakeHostUsageSnapshot:
         assert parsed["hosts"] == self._hosts()
         assert parsed["active_days"] == ["2026-08-14", "2026-08-15"]
 
+    def test_degraded_sources_is_omitted_when_empty(self):
+        ev = events.make_host_usage_snapshot(device="dev-a", token_sources=_SRC, hosts={})
+        assert "degraded_sources" not in ev
+
+    def test_degraded_sources_is_disjoint_subsequence(self):
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts={"codex": {"2026-08-15": _u(1)}},
+            degraded_sources=("grok", "opencode"),
+        )
+        assert ev["degraded_sources"] == ["grok", "opencode"]
+        assert set(ev["degraded_sources"]).isdisjoint(ev["token_sources"])
+
+    def test_degraded_sources_drops_overlap_with_token_sources(self):
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex", "grok"),
+            hosts={},
+            degraded_sources=("grok",),
+        )
+        assert "degraded_sources" not in ev
+
 
 class TestWriteOrderTransactionalPin:
     def test_partial_write_does_not_advance_cursor(self, tmp_path):

@@ -1,9 +1,10 @@
-"""Track 19A — the events tail's all-or-nothing host-usage capture.
+"""Track 19A / 31A — the events tail's host-usage capture.
 
 ``tests/test_host_usage.py`` pins the READERS. This file pins the CALLER
-policy those readers were written for: one snapshot when every built-in reader
-completes, no row at all when any of them does not, and never a partial total
-or an invented zero in between.
+policy those readers were written for: a snapshot when any consulted reader
+completes, other readers dropped and declared on failure, and no row at all
+when no reader completed (or the sweep expired before any ran). Never an
+invented zero.
 
 Every test here injects or monkeypatches the readers. None of them may touch a
 real ``~/.codex/sessions``, ``~/.grok/sessions``, or OpenCode database — the
@@ -141,11 +142,6 @@ class TestReaderOrchestration:
         readers[0][1](deadline=1_000.0)
         assert seen == {"consented": True}
 
-    def test_pre_success_transients_are_real_reader_reasons(self):
-        assert events_tail._GROK_PRE_SUCCESS_TRANSIENTS <= (
-            events_tail._HOST_READ_REASONS | {events_tail._HOST_UNKNOWN_REASON}
-        )
-
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with
         no consent check at all."""
@@ -182,9 +178,9 @@ class TestReaderOrchestration:
         assert capture.hosts == {}
         assert capture.reason == ""
 
-    def test_first_failure_short_circuits_the_remaining_readers(self):
-        """All-or-nothing for FAILURES: once the snapshot cannot ship, the
-        later readers are wasted work on the push hot path."""
+    def test_a_failed_reader_does_not_stop_the_remaining_readers(self):
+        """Track 31A: reader-scoped isolation. A grok failure used to
+        short-circuit opencode and discard Codex. Now every reader runs."""
         log: list = []
         readers = _readers(
             ("codex", _recording_reader(_complete({"codex": {"d": _usage(5)}}), log, "codex")),
@@ -194,15 +190,15 @@ class TestReaderOrchestration:
 
         capture = events_tail._capture_host_usage(readers, deadline=1_000.0, now=lambda: 0.0)
 
-        assert [name for name, _ in log] == ["codex", "grok"]
-        assert capture.complete is False
-        assert capture.hosts is None
-        assert (capture.reader, capture.reason) == ("grok", "malformed")
+        assert [name for name, _ in log] == ["codex", "grok", "opencode"]
+        assert capture.complete is True
+        assert capture.hosts == {"codex": {"d": _usage(5)}}
+        assert capture.token_sources == ("codex", "opencode")
+        assert capture.dropped == (("grok", "malformed"),)
 
-    def test_completed_data_is_discarded_when_a_read_actually_fails(self):
-        """`unsupported` means "real usage exists here that I could not read",
-        so publishing without it would silently under-report. It keeps the
-        veto — unlike `no_metadata_ledger` below."""
+    def test_completed_data_is_kept_when_a_sibling_read_fails(self):
+        """T3-1: `unsupported` drops Grok, declared; Codex still publishes.
+        Must fail on HEAD (the sweep used to omit the whole row)."""
         capture = events_tail._capture_host_usage(
             _readers(
                 ("codex", lambda **_kw: _complete({"codex": {"2026-08-15": _usage(100)}})),
@@ -211,7 +207,9 @@ class TestReaderOrchestration:
             deadline=1_000.0,
             now=lambda: 0.0,
         )
-        assert capture.hosts is None
+        assert capture.hosts == {"codex": {"2026-08-15": _usage(100)}}
+        assert capture.token_sources == ("codex",)
+        assert capture.dropped == (("grok", "unsupported"),)
 
     def test_a_source_with_no_usage_ledger_is_dropped_not_a_veto(self):
         """Premise revised 2026-08-16. A store that can never hold a metadata
@@ -254,23 +252,24 @@ class TestReaderOrchestration:
             "absent and permanent-failure are different verdicts and must not overlap"
         )
 
-    def test_reader_exception_is_contained_as_an_incomplete_outcome(self):
+    def test_reader_exception_is_contained_and_does_not_veto_siblings(self):
         """Contained HERE, not at the tail's outer guard: that guard would
         also discard the git and session rows already captured, and the
-        terminal mm-push row with them."""
+        terminal mm-push row with them. Track 31A: the raise is a reader
+        failure; other readers still publish."""
         log: list = []
         readers = _readers(
-            ("codex", _recording_reader(_complete(), log, "codex")),
+            ("codex", _recording_reader(_complete({"codex": {"d": _usage(1)}}), log, "codex")),
             ("grok", _recording_reader(RuntimeError("synthetic reader crash"), log, "grok")),
             ("opencode", _recording_reader(_complete(), log, "opencode")),
         )
 
         capture = events_tail._capture_host_usage(readers, deadline=1_000.0, now=lambda: 0.0)
 
-        assert capture.hosts is None
-        assert capture.reader == "grok"
-        assert capture.reason == "unavailable"
-        assert [name for name, _ in log] == ["codex", "grok"]
+        assert capture.complete is True
+        assert capture.hosts == {"codex": {"d": _usage(1)}}
+        assert capture.dropped == (("grok", "unavailable"),)
+        assert [name for name, _ in log] == ["codex", "grok", "opencode"]
 
     def test_reader_exception_text_never_reaches_the_outcome(self):
         """A raw exception can carry a path, a query, or transcript bytes."""
@@ -385,11 +384,28 @@ class TestAdditiveMerge:
 
 
 class TestHostDeadline:
-    @pytest.mark.parametrize("expire_before", [0, 1, 2])
-    def test_expiry_before_any_reader_short_circuits_safely(self, expire_before):
-        """Exhaustion before the first, middle, or last reader omits the row
-        without invoking anything further — and without touching the separate
-        session-walk budget, which was already snapshotted."""
+    def test_expiry_before_any_reader_is_still_a_sweep_veto(self):
+        """T3-6: sweep expired before ANY reader was invoked → no row.
+        Explicit decision: this stays a veto. Expiry after some readers
+        completed is degraded, not veto — see the next test."""
+        log: list = []
+        names = ["codex", "grok", "opencode"]
+        readers = _readers(
+            *[(names[i], _recording_reader(_complete(), log, names[i])) for i in range(3)]
+        )
+
+        capture = events_tail._capture_host_usage(deadline=10.0, readers=readers, now=lambda: 100.0)
+
+        assert capture.hosts is None
+        assert capture.reason == "deadline"
+        assert capture.reader == "codex"
+        assert capture.invoked is False
+        assert capture.dropped == ()
+        assert log == []
+
+    def test_expiry_after_some_readers_publishes_them_and_drops_the_rest(self):
+        """Codex completed, then the deadline hit before Grok: publish Codex,
+        declare remaining readers as deadline. Not a veto."""
         log: list = []
         clock = {"t": 0.0}
         names = ["codex", "grok", "opencode"]
@@ -397,24 +413,55 @@ class TestHostDeadline:
         def reader_for(index: int):
             def read(*, deadline):
                 log.append(names[index])
-                # Time passes inside each reader; the (index)th one is the
-                # first to find the deadline already blown.
-                clock["t"] = 100.0 if index + 1 == expire_before else clock["t"]
-                return _complete()
+                clock["t"] = 100.0
+                return _complete({"codex": {"2026-08-15": _usage(1)}} if index == 0 else {})
 
             return read
 
-        clock["t"] = 100.0 if expire_before == 0 else 0.0
         readers = _readers(*[(names[i], reader_for(i)) for i in range(3)])
-
         capture = events_tail._capture_host_usage(
             deadline=10.0, readers=readers, now=lambda: clock["t"]
         )
 
+        assert capture.complete is True
+        assert capture.token_sources == ("codex",)
+        assert capture.dropped == (("grok", "deadline"), ("opencode", "deadline"))
+        assert log == ["codex"]
+
+    def test_expiry_after_a_failed_reader_keeps_it_declared(self):
+        """An invoked failure is not a pre-invoke sweep veto.
+
+        The actual failed reader must stay in ``dropped`` so the interactive
+        retry warms it, rather than incorrectly charging the next reader.
+        """
+        clock = {"t": 0.0}
+        log: list[str] = []
+
+        def codex(*, deadline):
+            log.append("codex")
+            clock["t"] = 100.0
+            return _incomplete("deadline")
+
+        capture = events_tail._capture_host_usage(
+            deadline=10.0,
+            readers=_readers(
+                ("codex", codex),
+                ("grok", lambda **_kw: pytest.fail("Grok must not run")),
+                ("opencode", lambda **_kw: pytest.fail("OpenCode must not run")),
+            ),
+            now=lambda: clock["t"],
+        )
+
         assert capture.hosts is None
+        assert capture.reader == "codex"
         assert capture.reason == "deadline"
-        assert capture.reader == names[expire_before]
-        assert log == names[:expire_before]
+        assert capture.invoked is True
+        assert capture.dropped == (
+            ("codex", "deadline"),
+            ("grok", "deadline"),
+            ("opencode", "deadline"),
+        )
+        assert log == ["codex"]
 
     def test_budgets_are_separate_from_the_walk_budget(self):
         """Deliberately its own pair of constants: reusing the walk budget
@@ -644,10 +691,17 @@ class TestTailWiring:
         )
 
         types = [r["type"] for r in _rows(events_root)]
-        assert types == ["git-snapshot", "mm-push"], "content rows must survive a host omission"
+        assert types == ["git-snapshot", "host-usage-snapshot", "mm-push"], (
+            "content rows must survive a host reader drop; isolation publishes the others"
+        )
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert "grok" not in row["token_sources"]
+        assert row["degraded_sources"] == ["grok"]
         assert degradations == [
             "host-usage snapshot skipped (grok unsupported) — "
-            "content sync and git/session capture unaffected"
+            "content sync and git/session capture unaffected. "
+            "grok's log format changed in a way this version cannot read. "
+            "Upgrade mm, or run `mm disable-source grok` to stop retrying."
         ]
         assert f"mm: notice: {degradations[0]}" in capsys.readouterr().err
 
@@ -680,17 +734,20 @@ class TestTailWiring:
             == []
         )
 
+        omitted_sources = _sources(events_root, hosts=())
         _stub_hosts(monkeypatch, grok=_incomplete("unsupported"))
         omitted_degradations = events_tail._run_events_tail(
-            _tail_config(warm_sources, grok=True),
-            warm_sources,
+            _tail_config(omitted_sources, grok=True),
+            omitted_sources,
             "dev-a",
             dry_run=False,
             quiet=True,
         )
         assert omitted_degradations == [
             "host-usage snapshot skipped (grok unsupported) — "
-            "content sync and git/session capture unaffected"
+            "content sync and git/session capture unaffected. "
+            "grok's log format changed in a way this version cannot read. "
+            "Upgrade mm, or run `mm disable-source grok` to stop retrying."
         ]
 
         empty_sources = _sources(events_root, hosts=())
@@ -748,31 +805,37 @@ class TestTailWiring:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=True
         )
 
-        assert [r["type"] for r in _rows(events_root)] == ["mm-push"]
-        assert degradations == [
-            "host-usage snapshot skipped (codex unavailable) — "
-            "content sync and git/session capture unaffected. "
-            "A later substantive push will retry"
-        ]
+        types = [r["type"] for r in _rows(events_root)]
+        assert "mm-push" in types
+        assert degradations[0].startswith("host-usage snapshot skipped (codex unavailable)")
 
     @pytest.mark.parametrize(
         "reason",
         sorted(set(get_args(_mm_host_usage.Reason)) - events_tail._HOST_ABSENT_REASONS),
     )
-    def test_every_failure_reason_omits_the_whole_row(self, tmp_path, monkeypatch, reason):
-        """Every reason that means "I could not read data that exists" keeps
-        the all-or-nothing veto. `_HOST_ABSENT_REASONS` is excluded here and
-        covered by its own test — that set is the ONLY carve-out."""
+    def test_every_failure_reason_drops_that_reader_and_publishes_others(
+        self, tmp_path, monkeypatch, reason
+    ):
+        """T3 rewrite: a single reader failure no longer omits the row.
+        Codex still publishes; the failed reader is named in degradations
+        and ``degraded_sources``."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
-        _stub_hosts(monkeypatch, opencode=_incomplete(reason))
+        _stub_hosts(
+            monkeypatch,
+            codex=_complete({"codex": {"2026-08-15": _usage(9)}}),
+            opencode=_incomplete(reason),
+        )
 
         degradations = events_tail._run_events_tail(
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=True
         )
 
-        assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["token_sources"] == ["codex"]
+        assert row["degraded_sources"] == ["opencode"]
+        assert "opencode" not in row["token_sources"]
         assert len(degradations) == 1
         assert degradations[0].startswith(f"host-usage snapshot skipped (opencode {reason})")
         # Permanent vs transient: never promise a retry for a failure a later
@@ -818,6 +881,8 @@ class TestTailWiring:
         assert "grok" not in row["token_sources"]
 
     def test_pre_success_grok_deadline_drops_grok_and_publishes_others(self, tmp_path, monkeypatch):
+        """FLIP (Track 31A): degradations used to be empty (carve-out silence).
+        Isolation still publishes Codex, but now NAMES grok."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
@@ -826,7 +891,6 @@ class TestTailWiring:
             codex=_complete({"codex": {"2026-08-15": _usage(11)}}),
             grok=_incomplete("deadline"),
         )
-        monkeypatch.setattr(_mm_host_usage, "grok_completed_once", lambda: False)
 
         degradations = events_tail._run_events_tail(
             _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
@@ -835,9 +899,12 @@ class TestTailWiring:
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(11)}}
         assert "grok" not in row["token_sources"]
-        assert degradations == []
+        assert row["degraded_sources"] == ["grok"]
+        assert any("grok deadline" in d for d in degradations)
 
-    def test_post_success_grok_deadline_omits_the_row(self, tmp_path, monkeypatch):
+    def test_post_success_grok_deadline_still_publishes_others(self, tmp_path, monkeypatch):
+        """FLIP: used to omit the row after complete_once latched. Isolation
+        makes the latch irrelevant — Codex publishes, grok is declared."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
@@ -852,15 +919,18 @@ class TestTailWiring:
             _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
-        assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
-        assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["token_sources"] == ["codex", "opencode"]
+        assert row["degraded_sources"] == ["grok"]
+        assert any("grok deadline" in d for d in degradations)
 
-    def test_pre_success_grok_only_keeps_the_veto(self, tmp_path, monkeypatch):
+    def test_grok_only_failure_still_omits_the_row(self, tmp_path, monkeypatch):
+        """FLIP re-derived: grok is the only reader, so no sibling completed
+        → still no row. Isolation does not invent a zero."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root, hosts=())
         _stub_fast_walks(monkeypatch)
         _stub_hosts(monkeypatch, grok=_incomplete("deadline"))
-        monkeypatch.setattr(_mm_host_usage, "grok_completed_once", lambda: False)
 
         degradations = events_tail._run_events_tail(
             _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
@@ -870,7 +940,9 @@ class TestTailWiring:
         assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
 
     @pytest.mark.parametrize("reason", ["malformed", "unsupported", "stale"])
-    def test_pre_success_hard_fail_still_omits_the_row(self, tmp_path, monkeypatch, reason):
+    def test_grok_hard_fail_drops_grok_and_publishes_others(self, tmp_path, monkeypatch, reason):
+        """FLIP: used to omit the row for malformed/unsupported/stale even
+        pre-latch. Now Codex publishes and grok is declared."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
@@ -879,41 +951,88 @@ class TestTailWiring:
             codex=_complete({"codex": {"2026-08-15": _usage(11)}}),
             grok=_incomplete(reason),
         )
-        monkeypatch.setattr(_mm_host_usage, "grok_completed_once", lambda: False)
 
         degradations = events_tail._run_events_tail(
             _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
-        assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
-        assert degradations[0].startswith(f"host-usage snapshot skipped (grok {reason})")
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["hosts"] == {"codex": {"2026-08-15": _usage(11)}}
+        assert row["degraded_sources"] == ["grok"]
+        assert any(f"grok {reason}" in d for d in degradations)
 
-    def test_pre_invoke_grok_deadline_stays_a_sweep_veto(self, tmp_path, monkeypatch):
+    def test_all_readers_fail_omits_the_row(self, tmp_path, monkeypatch):
+        """T3-5: isolation does not invent a row when nobody completed."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
-        monkeypatch.setattr(_mm_host_usage, "grok_completed_once", lambda: False)
-        captures: list[tuple[tuple[str, ...], bool]] = []
-
-        def fake_capture(readers, *, deadline, now=None):
-            names = tuple(name for name, _ in readers)
-            invoked = "grok" not in names
-            captures.append((names, invoked))
-            if "grok" in names:
-                return events_tail.HostUsageCapture(None, "grok", "deadline", invoked=False)
-            return events_tail.HostUsageCapture(
-                {"codex": {"2026-08-15": _usage(11)}}, token_sources=("codex",)
-            )
-
-        monkeypatch.setattr(events_tail, "_capture_host_usage", fake_capture)
+        _stub_hosts(
+            monkeypatch,
+            codex=_incomplete("malformed"),
+            grok=_incomplete("unsupported"),
+            opencode=_incomplete("busy"),
+        )
 
         degradations = events_tail._run_events_tail(
             _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
-        assert captures == [(("codex", "grok", "opencode"), False)]
         assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
-        assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
+        assert any("codex malformed" in d for d in degradations)
+        assert any("grok unsupported" in d for d in degradations)
+        assert any("opencode busy" in d for d in degradations)
+
+    def test_codex_fails_grok_completes_is_symmetric(self, tmp_path, monkeypatch):
+        """T3-8: isolation is per-reader, not Grok-special."""
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root)
+        _stub_fast_walks(monkeypatch)
+        _stub_hosts(
+            monkeypatch,
+            codex=_incomplete("unsupported"),
+            grok=_complete({"grok": {"2026-08-15": _usage(3)}}),
+        )
+
+        degradations = events_tail._run_events_tail(
+            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+        )
+
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["token_sources"] == ["grok", "opencode"]
+        assert row["degraded_sources"] == ["codex"]
+        assert "grok" not in row["degraded_sources"]
+        assert any("codex unsupported" in d for d in degradations)
+
+    def test_degraded_sources_is_disjoint_subsequence(self, tmp_path, monkeypatch):
+        """T3-3: shape pin. Names only, never a reason string or path."""
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root)
+        _stub_fast_walks(monkeypatch)
+        _stub_hosts(
+            monkeypatch,
+            codex=_complete({"codex": {"2026-08-15": _usage(1)}}),
+            grok=_incomplete("unsupported"),
+        )
+        degradations = events_tail._run_events_tail(
+            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+        )
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        universe = list(_mm_events.HOST_USAGE_TOKEN_SOURCES)
+        degraded = row["degraded_sources"]
+        assert degraded == [s for s in universe if s in set(degraded)]
+        assert set(degraded).isdisjoint(row["token_sources"])
+        assert all(isinstance(s, str) and "/" not in s for s in degraded)
+        dumped = json.dumps(row)
+        assert "unsupported" not in dumped
+        assert degradations  # T3-2: the drop reaches degradations
+
+    def test_permanent_skip_phrase_carries_a_fix_clause(self):
+        """T3-9: permanent branch used to append nothing."""
+        phrase = events_tail._host_skip_phrase("grok", "unsupported")
+        assert "Upgrade mm" in phrase
+        assert "mm disable-source grok" in phrase
+        assert "A later substantive push will retry" not in phrase
+        assert "; " not in phrase
 
     def test_disabled_host_source_is_never_read_and_never_claimed(self, tmp_path, monkeypatch):
         """Consent gate end-to-end: no `codex` source → the reader is not
@@ -1020,6 +1139,167 @@ class TestColdCacheWarmAndRetry:
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
         assert "warming host usage cache" in capsys.readouterr().err
 
+    def test_interactive_push_warms_a_dropped_grok_reader_then_retries(self, tmp_path, monkeypatch):
+        """X-2: the warm target comes from ``dropped``, not the no-row labels."""
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=("codex", "grok", "opencode"))
+        _stub_fast_walks(monkeypatch)
+        state = {"warm": False}
+        calls: list[str] = []
+
+        def codex(*, deadline):
+            calls.append("codex")
+            return _complete()
+
+        def grok(*, deadline, consented=False):
+            calls.append("grok")
+            return _complete() if state["warm"] else _incomplete("deadline")
+
+        def opencode(*, deadline):
+            calls.append("opencode")
+            return _complete()
+
+        def warm(*, reader):
+            calls.append(f"warm:{reader}")
+            state["warm"] = True
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "read_opencode_usage", opencode)
+        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+
+        degradations = events_tail._run_events_tail(
+            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
+        )
+
+        assert calls == [
+            "codex",
+            "grok",
+            "opencode",
+            "warm:grok",
+            "grok",
+        ]
+        assert degradations == []
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["token_sources"] == ["codex", "grok", "opencode"]
+        assert "degraded_sources" not in row
+
+    def test_warm_retry_preserves_completed_first_pass_readers(self, tmp_path, monkeypatch):
+        """A warm Grok retry must not replace prior Codex/OpenCode totals.
+
+        The second Codex call deliberately raises: retrying every reader and
+        replacing the first capture would drop its completed totals. Only the
+        deadline-dropped Grok reader is safe to retry.
+        """
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=("codex", "grok", "opencode"))
+        _stub_fast_walks(monkeypatch)
+        state = {"warm": False}
+        calls: list[str] = []
+
+        def codex(*, deadline):
+            calls.append("codex")
+            if state["warm"]:
+                raise AssertionError("completed Codex reader must not be retried")
+            return _complete({"codex": {"2026-08-15": _usage(3)}})
+
+        def grok(*, deadline, consented=False):
+            calls.append("grok")
+            if not state["warm"]:
+                return _incomplete("deadline")
+            return _complete({"grok": {"2026-08-15": _usage(5)}})
+
+        def opencode(*, deadline):
+            calls.append("opencode")
+            return _complete({"codex": {"2026-08-15": _usage(4)}})
+
+        def warm(*, reader):
+            calls.append(f"warm:{reader}")
+            state["warm"] = True
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "read_opencode_usage", opencode)
+        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+
+        degradations = events_tail._run_events_tail(
+            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
+        )
+
+        assert calls == ["codex", "grok", "opencode", "warm:grok", "grok"]
+        assert degradations == []
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["hosts"] == {
+            "codex": {"2026-08-15": _usage(7)},
+            "grok": {"2026-08-15": _usage(5)},
+        }
+        assert row["token_sources"] == ["codex", "grok", "opencode"]
+        assert "degraded_sources" not in row
+
+    def test_warm_retry_keeps_first_pass_data_when_the_reader_still_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """An unsuccessful retry declares Grok without discarding Codex."""
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root, hosts=("codex", "grok"))
+        _stub_fast_walks(monkeypatch)
+        calls: list[str] = []
+
+        def codex(*, deadline):
+            calls.append("codex")
+            return _complete({"codex": {"2026-08-15": _usage(3)}})
+
+        def grok(*, deadline, consented=False):
+            calls.append("grok")
+            return _incomplete("deadline")
+
+        def warm(*, reader):
+            calls.append(f"warm:{reader}")
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+
+        degradations = events_tail._run_events_tail(
+            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
+        )
+
+        assert calls == ["codex", "grok", "warm:grok", "grok"]
+        assert len(degradations) == 1
+        assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["hosts"] == {"codex": {"2026-08-15": _usage(3)}}
+        assert row["token_sources"] == ["codex"]
+        assert row["degraded_sources"] == ["grok"]
+
+    def test_preinvoke_retry_keeps_the_initial_deadline_declarations(self):
+        """A retry that never starts cannot replace first-pass outcomes."""
+        initial = events_tail.HostUsageCapture(
+            {"codex": {"2026-08-15": _usage(3)}},
+            token_sources=("codex",),
+            dropped=(("grok", "deadline"), ("opencode", "deadline")),
+            invoked=True,
+        )
+        retry = events_tail.HostUsageCapture(None, "grok", "deadline", invoked=False)
+
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(
+                ("codex", lambda **_kw: _complete()),
+                ("grok", lambda **_kw: _complete()),
+                ("opencode", lambda **_kw: _complete()),
+            ),
+            retried_names={"grok", "opencode"},
+        )
+
+        assert merged.hosts == {"codex": {"2026-08-15": _usage(3)}}
+        assert merged.token_sources == ("codex",)
+        assert merged.dropped == (("grok", "deadline"), ("opencode", "deadline"))
+
     def test_autopush_never_warms(self, tmp_path, monkeypatch):
         """An unattended hook must not spend seconds on optional analytics.
         A cold autopush converges instead, because an aborted host scan now
@@ -1035,7 +1315,9 @@ class TestColdCacheWarmAndRetry:
         )
 
         assert calls == ["read-cold"], "autopush must not warm or retry"
-        assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert "codex" not in row["token_sources"]
+        assert row["degraded_sources"] == ["codex"]
         assert len(degradations) == 1
         assert degradations[0].startswith("host-usage snapshot skipped (codex deadline)")
 
@@ -1076,7 +1358,7 @@ class TestColdCacheWarmAndRetry:
         )
 
         events_tail._run_events_tail(
-            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
+            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=False
         )
 
         assert "warm" not in calls
@@ -1149,7 +1431,8 @@ class TestColdCacheWarmAndRetry:
         err = capsys.readouterr().err
         assert "host usage cache warm failed: RuntimeError" in err
         assert "events tail failed" not in err, "a failed warm must not abort the tail"
-        assert [r["type"] for r in _rows(events_root)] == ["mm-push"]
+        types = [r["type"] for r in _rows(events_root)]
+        assert "mm-push" in types
         assert len(degradations) == 1
 
     def test_init_backfill_warms(self, tmp_path, monkeypatch):

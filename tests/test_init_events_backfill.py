@@ -355,9 +355,13 @@ class TestBackfillHostSnapshot:
         assert err.count("host-usage snapshot skipped") == 1
         assert (
             "mm: notice: host-usage snapshot skipped (grok unsupported) — "
-            "content sync and git/session capture unaffected\n" in err
+            "content sync and git/session capture unaffected. "
+            "grok's log format changed in a way this version cannot read. "
+            "Upgrade mm, or run `mm disable-source grok` to stop retrying.\n" in err
         )
-        assert "retry" not in err, "unsupported storage is permanent — never promise a retry"
+        assert "A later substantive push will retry" not in err, (
+            "unsupported storage is permanent — never promise a retry"
+        )
         assert "events backfill failed" not in err
 
     def test_absent_mm_events_source_touches_no_host_reader(self, tmp_path, monkeypatch):

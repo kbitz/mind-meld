@@ -945,6 +945,30 @@ def _write_grok_session(
     return path
 
 
+def _grok_turn_usage_less(
+    *,
+    ts: int = 1786731043,
+    prompt_id: str = "33333333-3333-3333-3333-333333333333",
+    stop: str = "cancelled",
+) -> str:
+    return (
+        json.dumps(
+            {
+                "method": "session/update",
+                "timestamp": ts,
+                "params": {
+                    "update": {
+                        "prompt_id": prompt_id,
+                        "sessionUpdate": "turn_completed",
+                        "stop_reason": stop,
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+
+
 def _grok_turn(
     *,
     ts: int = 1786731043,
@@ -1017,6 +1041,26 @@ class TestGrokUsage:
         assert result == hu.HostUsageResult({}, complete=False, reason="no_metadata_ledger")
         assert opened == []
         assert not isolated_adapter_caches[0].exists()
+
+    def test_census_fixtures_parse_as_the_contract_describes(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T4: the extra Grok 1.0.5 census fixtures stay loadable."""
+        cases = {
+            "usage-less": (True, {}),
+            "cancelled-with-usage": (True, 10),
+            "incomplete-usage": (True, 8),
+            "no-ledger": (True, {}),
+        }
+        for name, (complete, expected) in cases.items():
+            root = tmp_path / name
+            shutil.copytree(FIXTURES / "grok" / name, root)
+            result = hu.read_grok_usage(root, consented=True)
+            assert result.complete is complete, name
+            if expected == {}:
+                assert result.hosts == {}, name
+            else:
+                assert result.hosts["grok"]["2026-08-14"]["input"] == expected, name
 
     def test_fixture_turn_is_a_per_prompt_total_with_reasoning_inside_output(
         self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
@@ -1174,6 +1218,8 @@ class TestGrokUsage:
     def test_content_bearing_turn_is_ignored(
         self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
     ) -> None:
+        """T2-6: content-bearing turns short-circuit BEFORE the key-set check.
+        Load-bearing: the usage-less carve-out must not steal this path."""
         root = tmp_path / "sessions"
         _write_grok_session(
             root,
@@ -1333,6 +1379,298 @@ class TestGrokUsage:
         result = hu.read_grok_usage(UnreadableRoot(), consented=True)  # type: ignore[arg-type]
 
         assert result == hu.HostUsageResult({}, complete=False, reason="io_error")
+
+    def test_absent_updates_jsonl_beside_a_healthy_session_completes(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T1-1: a session dir with summary.json and no ledger must not
+        zero the scan. Must fail on HEAD (``_is_regular_non_symlink`` used
+        to turn FileNotFoundError into ``io_error``)."""
+        root = tmp_path / "sessions"
+        _write_grok_session(root, session="healthy", lines=[_grok_turn()])
+        missing = root / "workspace" / "no-ledger"
+        missing.mkdir()
+        (missing / "summary.json").write_text("{}", encoding="utf-8")
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+
+    def test_not_a_directory_on_speculative_probe_is_skipped(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T1-2: ENOTDIR on the speculative path is absence, not io_error."""
+        parent = tmp_path / "file-not-dir"
+        parent.write_text("x", encoding="utf-8")
+        assert hu._is_regular_non_symlink(parent / "updates.jsonl") is False
+
+    def test_permission_error_on_existing_ledger_is_still_io_error(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+    ) -> None:
+        """T1-3: the guardrail on the narrowing. A file that exists but
+        cannot be stated is a real failure."""
+        root = tmp_path / "sessions"
+        path = _write_grok_session(root, lines=[_grok_turn()])
+        real_lstat = Path.lstat
+
+        def boom(self: Path):
+            if self == path:
+                raise PermissionError("denied")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", boom)
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.reason == "io_error"
+
+    def test_codex_rollout_vanishing_between_iterdir_and_lstat_is_skipped(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """T1-4: the Codex TOCTOU window. A rollout reaped after listing
+        used to fail the whole scan; absence is now a skip."""
+        root = tmp_path / "sessions"
+        _write_rollout(root, "rollout-keep.jsonl", [_context(), _token(10)])
+        _write_rollout(root, "rollout-gone.jsonl", [_context(), _token(99)])
+        real_lstat = Path.lstat
+
+        def maybe_gone(self: Path):
+            if self.name == "rollout-gone.jsonl":
+                raise FileNotFoundError("reaped")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", maybe_gone)
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 10
+
+    def test_usage_less_turn_is_skipped_and_sibling_is_counted(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T2-1: must fail on HEAD. The carve-out has to precede the key-set
+        check or this record is ``unsupported`` and the sibling is lost."""
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn_usage_less(),
+                _grok_turn(prompt_id="22222222-2222-2222-2222-222222222222"),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+
+    def test_usage_less_turn_alone_is_completed_empty(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T2-2: the anti-dead-code pin. A carve-out at the usage-handling
+        site never runs — this file's only record fails the key-set check
+        first. Must fail on HEAD."""
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn_usage_less()])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts == {}
+
+    def test_usage_less_then_restated_with_usage_counts_once(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T2-3: same prompt_id, first without usage, then with. No
+        divergent-duplicate raise; counted once."""
+        prompt = "11111111-1111-1111-1111-111111111111"
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn_usage_less(prompt_id=prompt),
+                _grok_turn(prompt_id=prompt),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+
+    def test_usage_less_record_appended_after_cached_parse_resumes(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T2-4: resume path handles a usage-less append."""
+        root = tmp_path / "sessions"
+        path = _write_grok_session(root, lines=[_grok_turn()])
+        first = hu.read_grok_usage(root, consented=True)
+        assert first.complete is True
+
+        path.write_text(
+            path.read_text(encoding="utf-8") + _grok_turn_usage_less(),
+            encoding="utf-8",
+        )
+        second = hu.read_grok_usage(root, consented=True)
+
+        assert second.complete is True
+        assert second.hosts["grok"]["2026-08-14"]["input"] == 10
+        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        assert cache["usage_less_skipped"] == 1
+
+    def test_usage_present_but_not_a_dict_is_still_unsupported(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T2-5: absence and malformed stay different."""
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(extra_update={"usage": "nope"})])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.reason == "unsupported"
+
+    def test_usage_less_skip_tally_is_per_record_and_on_the_cache(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """T2-7 / T2-8: tally increments per skipped record; no turn entry."""
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn_usage_less(prompt_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                _grok_turn_usage_less(
+                    prompt_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", stop="end_turn"
+                ),
+                _grok_turn(),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        assert cache["usage_less_skipped"] == 2
+        dumped = json.dumps(cache)
+        assert "prompt_id" not in dumped
+        for entry in cache["files"].values():
+            assert len(entry["turns"]) == 1
+        assert hu.grok_usage_diag()["usage_less_skipped"] == 2
+
+    def test_partial_scan_persists_usage_less_skip_tally_for_diag(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+    ) -> None:
+        """T2-9: a learned skip remains visible when the next file times out."""
+
+        class _FakeTime:
+            now = 0.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(hu, "time", clock)
+        root = tmp_path / "sessions"
+        first = _write_grok_session(
+            root,
+            session="a-usage-less",
+            lines=[_grok_turn_usage_less()],
+        )
+        _write_grok_session(root, session="b-modeled", lines=[_grok_turn()])
+        real_full_read = hu._read_full_grok_file
+
+        def timed_full_read(path, workspace, session_id, before, deadline):
+            if path == first:
+                entry = real_full_read(path, workspace, session_id, before, deadline)
+                clock.now = 0.1
+                return entry
+            clock.now = 0.2
+            return real_full_read(path, workspace, session_id, before, deadline)
+
+        monkeypatch.setattr(hu, "_read_full_grok_file", timed_full_read)
+
+        result = hu.read_grok_usage(root, deadline=0.15, consented=True)
+
+        assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
+        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        assert cache["usage_less_skipped"] == 1
+        assert hu.grok_usage_diag()["usage_less_skipped"] == 1
+
+    def test_grok_cold_corpus_converges_across_bounded_scans(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+    ) -> None:
+        """X-1: Grok bounded-scan convergence. Mirror of the Codex pin.
+
+        Measured floor on the live corpus (T1+T2 applied): 250 ms converges
+        in 3 passes; 100 ms in 8; 60 ms wedges permanently (no mid-file
+        checkpoint — ``_validated_grok_entry`` requires offset == size).
+        This test pins convergence when the budget can cover at least one
+        file per pass; a budget below per-file cost cannot progress.
+        """
+
+        class _FakeTime:
+            now = 1_000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(hu, "time", clock)
+
+        root = tmp_path / "sessions"
+        for i in range(8):
+            _write_grok_session(
+                root,
+                session=f"session-{i:02d}",
+                lines=[
+                    _grok_turn(
+                        prompt_id=f"{i:08d}-1111-1111-1111-111111111111",
+                        input_tokens=10 + i,
+                        output=2,
+                        reasoning=0,
+                        cache_read=0,
+                        cache_create=0,
+                    )
+                ],
+            )
+
+        real_full_read = hu._read_full_grok_file
+        parses: list[int] = [0]
+
+        def timed_full_read(path, workspace, session_id, before, deadline):
+            parses[0] += 1
+            clock.now += 0.1
+            return real_full_read(path, workspace, session_id, before, deadline)
+
+        monkeypatch.setattr(hu, "_read_full_grok_file", timed_full_read)
+
+        grok_cache = isolated_adapter_caches[0]
+        cached_entries, attempts, result = [], 0, None
+        while attempts < 20:
+            attempts += 1
+            result = hu.read_grok_usage(root, deadline=clock.now + 0.25, consented=True)
+            cached_entries.append(len(json.loads(grok_cache.read_text())["files"]))
+            if result.complete:
+                break
+
+        assert result is not None and result.complete is True, "cold corpus never converged"
+        assert attempts > 1, "budget too generous — this pin proves nothing in one pass"
+        assert cached_entries == sorted(cached_entries)
+        assert parses[0] < 8 * attempts, "the prefix is being re-parsed every scan"
+        assert result.hosts["grok"]["2026-08-14"]["input"] == sum(10 + i for i in range(8))
+
+        clock.now = 2_000.0
+        wedge_root = tmp_path / "wedge"
+        _write_grok_session(wedge_root, lines=[_grok_turn()])
+        wedge_entries: list[int] = []
+        for _ in range(3):
+            wedge = hu.read_grok_usage(wedge_root, deadline=clock.now + 0.05, consented=True)
+            assert wedge.complete is False
+            assert wedge.reason == "deadline"
+            wedge_entries.append(len(json.loads(grok_cache.read_text())["files"]))
+            clock.now += 1.0
+        assert wedge_entries == [wedge_entries[0]] * len(wedge_entries)
 
 
 class TestOpenCodeUsage:

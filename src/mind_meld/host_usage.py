@@ -117,10 +117,10 @@ distinction is load-bearing. It means "this store, by design, exposes no
 metadata-only usage ledger, so there is nothing here to read and there never
 will be" — a standing property of the SOURCE. Every other reason, including
 ``unsupported``, means "I found data and could not safely interpret it", which
-is a FAILURE and must keep its all-or-nothing veto so a caller never publishes
-totals that silently omit real usage. A caller may treat
-``no_metadata_ledger`` as "this source is not installed"; it must not do that
-with any other reason."""
+is a FAILURE of this reader (the whole reader fails; Track 31A isolates that
+to this reader so a caller never silently omits it from coverage). A caller
+may treat ``no_metadata_ledger`` as "this source is not installed"; it must
+not do that with any other reason."""
 HostTokens = dict[str, dict[str, Usage]]
 
 
@@ -325,13 +325,43 @@ def grok_completed_once() -> bool:
     """True after a consented scan finished and saw at least one ledger file.
 
     Missing, corrupt, or lock-contended cache is pre-success (fail safe).
+    Diagnostic only: the host-sweep no longer keys publication policy on this
+    latch (Track 31A). ``mm status`` / ``mm diag`` still do.
+    """
+    return grok_usage_diag()["complete_once"] is True
+
+
+def grok_usage_diag() -> dict[str, Any]:
+    """On-disk Grok usage-reader state. Does not open the host store.
+
+    ``mm diag`` must run without a passphrase and without a valid config, so
+    this reads only the private cache. Absence, lock contention, and
+    unreadable files are reported as ``cache_state``, never raised.
     """
     try:
         with locked_json_snapshot(GROK_CACHE_PATH) as snap:
             data = snap.data
+            state = snap.state
     except OSError:
-        return False
-    return isinstance(data, dict) and data.get("complete_once") is True
+        return {
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": "unreadable",
+        }
+    if state != "valid" or not isinstance(data, dict):
+        cache_state = "missing" if state in {"missing", "empty"} else "unreadable"
+        return {
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": cache_state,
+        }
+    raw_skip = data.get("usage_less_skipped", 0)
+    skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
+    return {
+        "complete_once": data.get("complete_once") is True,
+        "usage_less_skipped": skipped,
+        "cache_state": "ok",
+    }
 
 
 def grok_sessions_root() -> Path:
@@ -382,10 +412,22 @@ def read_grok_usage(
             if not learned and not result.complete:
                 raise _NoCacheCommit(result)
             complete_once = prior_complete or (result.complete and saw_files)
+            files = staged_files if result.complete else {**cached_files, **staged_files}
+            # A partial scan merges durable per-file entries with the existing
+            # cache. Derive the diagnostic tally from that merged view too;
+            # retaining the old root total would make ``mm diag`` hide a
+            # usage-less turn learned before the deadline.
+            skip_total = sum(
+                entry.get("usage_less_skipped", 0)
+                for entry in files.values()
+                if isinstance(entry, dict)
+                and _is_nonnegative_int(entry.get("usage_less_skipped", 0))
+            )
             locked.data = {
                 "version": CACHE_VERSION,
                 "complete_once": complete_once,
-                "files": staged_files if result.complete else {**cached_files, **staged_files},
+                "usage_less_skipped": skip_total,
+                "files": files,
             }
             if not result.complete:
                 return result
@@ -461,7 +503,12 @@ def _read_with_adapter_lock(
 
 
 def _empty_grok_cache() -> dict[str, Any]:
-    return {"version": CACHE_VERSION, "complete_once": False, "files": {}}
+    return {
+        "version": CACHE_VERSION,
+        "complete_once": False,
+        "usage_less_skipped": 0,
+        "files": {},
+    }
 
 
 def _scan_grok_root(
@@ -580,8 +627,8 @@ def _read_full_grok_file(
     before: os.stat_result,
     deadline: float,
 ) -> dict[str, Any]:
-    turns = _read_grok_file(path, workspace, session_id, 0, {}, before, deadline)
-    return _grok_file_entry(path, before, deadline, turns)
+    turns, skipped = _read_grok_file(path, workspace, session_id, 0, {}, before, deadline)
+    return _grok_file_entry(path, before, deadline, turns, skipped)
 
 
 def _resume_grok_file(
@@ -593,12 +640,21 @@ def _resume_grok_file(
     deadline: float,
 ) -> dict[str, Any]:
     prior = {turn["key"]: turn for turn in entry["turns"]}
-    turns = _read_grok_file(path, workspace, session_id, entry["offset"], prior, before, deadline)
-    return _grok_file_entry(path, before, deadline, turns)
+    turns, skipped = _read_grok_file(
+        path, workspace, session_id, entry["offset"], prior, before, deadline
+    )
+    prior_skip = entry.get("usage_less_skipped", 0)
+    if not _is_nonnegative_int(prior_skip):
+        prior_skip = 0
+    return _grok_file_entry(path, before, deadline, turns, prior_skip + skipped)
 
 
 def _grok_file_entry(
-    path: Path, before: os.stat_result, deadline: float, turns: dict[str, dict[str, Any]]
+    path: Path,
+    before: os.stat_result,
+    deadline: float,
+    turns: dict[str, dict[str, Any]],
+    usage_less_skipped: int,
 ) -> dict[str, Any]:
     after = _regular_stat(path)
     if not _same_source(before, after):
@@ -609,6 +665,7 @@ def _grok_file_entry(
     return {
         **_identity_fields(after, fingerprint),
         "turns": [turns[key] for key in sorted(turns)],
+        "usage_less_skipped": usage_less_skipped,
     }
 
 
@@ -620,9 +677,10 @@ def _read_grok_file(
     prior: dict[str, dict[str, Any]],
     before: os.stat_result,
     deadline: float,
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], int]:
     turns = dict(prior)
     last_offset = start_offset
+    usage_less_skipped = 0
     try:
         with path.open("rb") as fp:
             fp.seek(start_offset)
@@ -646,6 +704,9 @@ def _read_grok_file(
                 accepted = _grok_turns_from_record(record, workspace, session_id)
                 if accepted is None:
                     continue
+                if accepted == []:
+                    usage_less_skipped += 1
+                    continue
                 for key, turn in accepted:
                     existing = turns.get(key)
                     if existing is None:
@@ -660,7 +721,7 @@ def _read_grok_file(
         raise _ReadFailure("io_error") from exc
     if not _same_source(before, _regular_stat(path)):
         raise _ReadFailure("stale")
-    return turns
+    return turns, usage_less_skipped
 
 
 def _grok_turns_from_record(
@@ -676,8 +737,18 @@ def _grok_turns_from_record(
         return None
     if update.get("sessionUpdate") != "turn_completed":
         return None
+    # Content-bearing turns short-circuit BEFORE the key-set check. A
+    # content field on a terminal is "not this projection", not "unknown
+    # wire" — load-bearing: the carve-out below would otherwise never
+    # fire for a usage-less record that also carried content.
     if _GROK_CONTENT_FIELDS & update.keys():
         return None
+    # Usage-less `turn_completed` is a zero-token skip, not unsupported.
+    # MUST precede the exact-match key check: a record without `usage`
+    # fails `set(update) != _GROK_TERMINAL_KEYS` first, so a carve-out at
+    # the `usage = update.get("usage")` site is dead code.
+    if set(update) == _GROK_TERMINAL_KEYS - {"usage"}:
+        return []
     if set(update) != _GROK_TERMINAL_KEYS:
         raise _ReadFailure("unsupported")
     day = _grok_outer_day(record.get("timestamp"))
@@ -786,7 +857,14 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
                 "usage": {field: usage[field] for field in TOKEN_FIELDS},
             }
         )
-    return {**_identity_fields_from(value), "turns": normalized}
+    skip = value.get("usage_less_skipped", 0)
+    if not _is_nonnegative_int(skip):
+        return None
+    return {
+        **_identity_fields_from(value),
+        "turns": normalized,
+        "usage_less_skipped": skip,
+    }
 
 
 def _aggregate_grok(entries: Any) -> HostTokens:
@@ -1109,9 +1187,19 @@ def _is_directory(path: Path) -> bool:
 
 
 def _is_regular_non_symlink(path: Path) -> bool:
+    """True for a regular, non-symlink file. Absence is not an I/O error.
+
+    Shared by the Grok walker (speculative ``session / "updates.jsonl"``)
+    and the Codex walker (``iterdir()`` then ``lstat()``). ``FileNotFoundError``
+    and ``NotADirectoryError`` mean the candidate is gone — skip it.
+    Every other ``OSError`` (a permission error on a file that exists) stays
+    fatal so the all-or-nothing reader contract still sees a real failure.
+    """
     try:
         st = path.lstat()
         return not stat.S_ISLNK(st.st_mode) and stat.S_ISREG(st.st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
 
@@ -1634,6 +1722,7 @@ __all__ = [
     "Reason",
     "host_family",
     "grok_completed_once",
+    "grok_usage_diag",
     "read_codex_usage",
     "read_grok_usage",
     "read_opencode_usage",

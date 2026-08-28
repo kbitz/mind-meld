@@ -4521,7 +4521,13 @@ def status(
         grok_present = False
     if grok_on or grok_present:
         if grok_on:
-            console.print("  Grok usage capture: enabled")
+            if _host_usage.grok_completed_once():
+                console.print("  Grok usage capture: enabled; a prior scan completed successfully")
+            else:
+                console.print(
+                    "  Grok usage capture: enabled, but no successful scan yet — "
+                    "run [bold]mm push[/bold]"
+                )
         else:
             console.print(
                 "  Grok usage capture: disabled — "
@@ -4782,6 +4788,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * host_skill_discovery values other than the four extracted fields
         (claude_skills_compat, retro_fleet_resolved, retro_fleet_path,
         grok_version) plus host/status
+      * host_usage values other than consented / complete_once /
+        usage_less_skipped / cache_state (never a path, never a host store)
       * local_emails (this machine's author-email trust set, and peers'
         after a pull merge) — project an allowlist, never render the row
 
@@ -4793,6 +4801,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     # Local config (best-effort — a broken config is itself diag-worthy).
     skill_may_create: frozenset[str] | None = None
     skill_config_error: str | None = None
+    resolved_sources: list[dict] = []
     cfg: dict = {}
     try:
         cfg = load_config()
@@ -4801,7 +4810,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         storage_path = cfg.get("storage", {}).get("path")
         local_fp = cfg.get("crypto", {}).get("root_salt_fp")
         config_state = "ok"
-        skill_may_create = skill_link.consented_agent_keys(cfg, get_sources(cfg))
+        resolved_sources = get_sources(cfg)
+        skill_may_create = skill_link.consented_agent_keys(cfg, resolved_sources)
     except MindMeldError as e:
         dev_id = dev_name = storage_path = local_fp = None
         config_state = f"error: {e}"
@@ -4890,6 +4900,26 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         breadcrumb = {"error": "unreadable"}
 
     discovery = _collect_discovery_diag(cfg)
+    from mind_meld import host_usage as _host_usage
+
+    grok_consented: bool | None = None
+    if config_state == "ok":
+        # Source-enabled is consent (Track 22B), using the exact resolved
+        # source set already needed for skill policy above. The 21A bit remains
+        # an OR. This is cache-only with respect to host usage: get_sources()
+        # resolves configuration but never opens the Grok host store.
+        grok_consented = grok_host_usage_enabled(cfg) or any(
+            source.get("name") == "grok" for source in resolved_sources
+        )
+    grok_diag = _host_usage.grok_usage_diag()
+    host_usage_state = {
+        "grok": {
+            "consented": grok_consented,
+            "complete_once": grok_diag["complete_once"],
+            "usage_less_skipped": grok_diag["usage_less_skipped"],
+            "cache_state": grok_diag["cache_state"],
+        }
+    }
     return {
         "mm_version": __version__,
         "config": {
@@ -4914,6 +4944,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             may_create=skill_may_create, config_error=skill_config_error
         ),
         "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
+        "host_usage": host_usage_state,
         "discovery": discovery,
         "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery),
     }
@@ -5042,6 +5073,24 @@ def diag(
         console.print(
             f"  grok_version:          {safe_str(str(hsd.get('grok_version') or ''))[:200]}"
         )
+
+    hu_state = (state.get("host_usage") or {}).get("grok") or {}
+    console.print("\n[bold]Host usage[/bold]")
+    consented = hu_state.get("consented")
+    if consented is None:
+        consented_shown = "(config unreadable)"
+    else:
+        consented_shown = "yes" if consented else "no"
+    if hu_state.get("complete_once"):
+        scan_shown = "yes"
+    elif hu_state.get("cache_state") == "unreadable":
+        scan_shown = "unreadable"
+    else:
+        scan_shown = "no"
+    console.print(f"  grok consented:          {consented_shown}")
+    console.print(f"  grok prior successful scan: {scan_shown}")
+    console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
+    console.print(f"  grok cache:              {safe_str(str(hu_state.get('cache_state', '')))}")
 
     disc = state.get("discovery") or {}
     console.print("\n[bold]Git-root discovery[/bold] (autopush budget)")
@@ -5724,6 +5773,11 @@ def enable_source(
             "[dim]Syncs ~/.grok skills/, commands/, and rules/ only. "
             "Session files are not synced. Prompts never leave the Mac.[/dim]"
         )
+        console.print(
+            "[dim]Reads terminal token totals from local Grok session updates. "
+            "Session files are not synced. Prompts never leave the Mac.[/dim]"
+        )
+        console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
 
 
 @app.command(name="reconfigure-sources")
