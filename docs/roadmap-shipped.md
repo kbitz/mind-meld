@@ -216,3 +216,23 @@ rather than dropped. The number is retired so that anyone re-anchoring on
 
 Phase 2 (Durable agent skill links) completes here: Groups 24, 25, 26, 28.
 Group 27 stays tombstoned.
+
+### Group 29: Repository discovery ✓ Shipped (v0.12.45)
+
+Phase 3 (Retro fidelity) opens here. The Phase exists because the shipped card was
+not merely incomplete, it was confidently wrong: measured 2026-08-25 for a 7-day
+window, `mm retro-fleet 7d` reported 4 commits / 1 repo / 1 PR reference against a
+ground truth on one device of 41 commits / 4 repos / 26 PR references, with
+mind-meld's own ten in-window commits absent from its own retro.
+
+- Track 29A — _shipped (v0.12.45): git-root discovery finds the repositories that are actually on the machine. `_is_git_toplevel`'s per-candidate `git rev-parse` subprocess (7.84 ms live, 7.11 ms for a path that no longer exists, against 0.0061 ms for a `.git` stat — a 1300x ratio) was replaced by a `.git` + `HEAD` / `gitdir:` sniff, keeping the `.git`-file case that Conductor worktrees need. A `~/conductor/workspaces/*/*` prober was added as a third source, because `_probe_claude` structurally cannot see a workspace with no `~/.claude/projects` entry — four such workspaces had in-window commits. The dead `_probe_gstack` prober was deleted. `ROOT_DISCOVERY_BUDGET_*` was re-tuned from the post-fix measurement and recorded in the invariant doc. Codex `turn_context.cwd` and Grok's URL-encoded session dir names were refused: they would yield more roots but put an encoded cwd on the wire._
+
+### Group 30: Cursor integrity ✓ Shipped (v0.12.46)
+
+- Track 30A — _shipped (v0.12.46): a push whose discovery was incomplete can no longer silently orphan that interval's commits. Of six `git-snapshot` rows in the measured window, three captured zero projects. Incomplete discovery now HOLDS the git cursor, but the mm-push row is still written so diagnosis and author attribution survive. Walk failures never hold the cursor — git-walk cost grows with cursor age (48.6 ms at 1 day, 251.3 ms at 30 days against a 250 ms autopush budget), so holding on a walk abort would wedge unattended autopush. `git_capture` was added to the mm-push row (`since`, `discovery`, `walk_budget_aborts`, `walk_errors`; absence is the version discriminator, fail-open). `mm recapture [WINDOW]` shipped as the dedicated recovery command — deliberately NOT `mm push --recapture`, which would have re-opened the v0.12.2 phantom-change gate. The degradation reaches the autopush `degraded` breadcrumb, satisfying the AGENTS.md rule that a new tail degradation must be appended to the list, not merely printed._
+
+### Group 31: Grok reader tolerance ✓ Shipped (v0.12.47)
+
+- Track 31A — _shipped (v0.12.47): enabling the Grok source stopped advertising a feature guaranteed to publish nothing. Two unmodeled-but-benign wire variants were fatal to the whole scan: one session dir without `updates.jsonl` (`_is_regular_non_symlink` converted `FileNotFoundError` into `io_error`, and 1 of 79 dirs zeroed everything), and four usage-less cancelled `turn_completed` records out of 193 (2% of records destroying 100% of reporting). The absent-file tolerance was narrowed to `FileNotFoundError` / `NotADirectoryError` and shared with the Codex walker, closing an `iterdir()`-then-`lstat()` TOCTOU there too. The usage-less carve-out had to be inserted BEFORE the exact key-set check — placed at the usage site it would have been dead code, which both outside voices caught independently. Reader-scoped failure isolation shipped alongside: a Grok format change drops Grok, declared in additive `degraded_sources`, and Codex still publishes. `mm diag` gained a `host_usage` block and a Grok wire-contract census landed at `tests/fixtures/host_sessions/grok/CONTRACT.md`._
+
+  **Caveat carried forward:** `degraded_sources` reaches the wire and the autopush breadcrumb, but the retro card never reads it — zero references in `aggregator.py`. Found during Track 32A `/review` on 2026-08-28 and placed as Track 34A.
