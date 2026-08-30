@@ -156,7 +156,11 @@ model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
 publication decision. Additive `tokens_by_day` (Track 33A) is `{UTC-day:
 DayBucket}` — omit iff `hosts` is empty, otherwise always present, so its
-absence is the mixed-fleet version discriminator. No `EVENTS_SCHEMA_VERSION`
+absence is the mixed-fleet version discriminator. A sibling that would be
+EMPTY beside non-empty `hosts` is also omitted: that shape is the one every
+peer drops as `active_days_mismatch`, under a remedy blaming the writing
+machine's mm version, and absence already means "pre-33A peer OR no per-model
+data". No `EVENTS_SCHEMA_VERSION`
 bump — legacy consumers already skip unknown types.
 
 **All-or-nothing for FAILURES (premise revised Track 31A, 2026-08-27).**
@@ -481,6 +485,16 @@ does not).
   is still the property that matters — without it a peer can attribute `2**53`
   tokens to one model on a day whose whole family total is 5, and Group 35
   would price it. Reconcile the running sum, not the final one.
+- **The by-model cap runs AFTER the day-window trim, never before.** The host
+  readers aggregate the WHOLE local corpus with no time bound, so a
+  long-history machine carries models on days `max_days` is about to discard.
+  Cap first and those models outrank the current day's under the row-wide cap
+  and empty its `by_model` entirely — silently, and worst on exactly the
+  machines whose per-model data is most worth having. `_copy_tokens_by_day`
+  therefore only COPIES; `make_host_usage_snapshot` applies `_cap_by_model`
+  after the `keep` filter. A per-day cap masks the naive repro (64 models on
+  one day is trimmed to 32 before the row cap sees them), so the shape to test
+  is N days each UNDER the per-day cap.
 - **`day_total - sum(by_model)` is a RESIDUAL, not a bug.** It is usage the
   writer did not attribute to a shown model. A per-model consumer must carry
   it rather than treat the shown models as the whole day. Do not "fix" the
@@ -512,6 +526,14 @@ does not).
   Mac starts selecting a different winner than a v0.12.48 Mac from the same
   synced corpus, which is a cross-version rendering divergence in the product's
   headline claim of fleet accuracy. Do not "simplify" the ordering.
+- **Selection must be TOTAL, and the rank is not the last word.** `tie_key`
+  excludes the sibling and `_detail_rank` only grades present/absent/invalid,
+  so two rows carrying different VALID siblings — or different REJECTION
+  REASONS — compare equal all the way down and the winner falls out of
+  file-iteration order. `_sibling_tie_key` closes both: it keys on
+  `(detail_reason, tokens_by_day)`, because the reason is what the dump renders
+  as the user's remedy, so order would otherwise decide whether a peer is told
+  `invalid_counter` or `active_days_mismatch`.
 - **The HOST acceptor reads `events.EVENTS_SCHEMA_VERSION`**, never a hardcoded
   `2` — both in `_accept_host_usage_snapshot`'s version check and in
   `_tie_break_key`'s normalized projection, so the two cannot disagree about the
@@ -564,9 +586,12 @@ emits per-model ``tokens_by_day`` and a detail status per device. The card
 stays family-only until Group 36. Model ids are sanitized at DUMP time only
 (``_safe_short``), never at accept — and because that truncates at 128 chars
 while the acceptor admits 256 bytes, two distinct accepted ids can sanitize
-to one key. `_sanitize_tokens_by_day` disambiguates with a `~N` suffix in
-accept order rather than letting a dict-key collision silently drop a model
-from the one surface whose job is showing what actually arrived.
+to one key. `_sanitize_tokens_by_day` disambiguates with a `~N` suffix rather
+than letting a dict-key collision silently drop a model from the one surface
+whose job is showing what actually arrived. **Aliases are assigned once per
+ROW, over the sorted raw ids** — never per day off insertion order, which
+would let `a_b` mean `a/b` on Monday and `a?b` on Tuesday and read as per-day
+movement that never happened.
 
 **Its own deadline, started after `walk_done`.**
 `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500), passed
