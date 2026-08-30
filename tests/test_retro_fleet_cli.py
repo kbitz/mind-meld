@@ -86,6 +86,13 @@ class TestRetroFleetCommand:
         result = self._runner().invoke(app, ["retro-fleet", "7d"])
         assert result.exit_code == 2
 
+    def test_dump_host_usage_visible_in_command_help(self):
+        from mind_meld.cli import app
+
+        result = self._runner().invoke(app, ["retro-fleet", "--help"])
+        assert result.exit_code == 0
+        assert "--dump-host-usage" in result.output
+
     def test_command_visible_in_help(self):
         """The command is intentionally NOT hidden — matches the
         ``autopull`` / ``autopush`` / ``install-skills`` precedent of

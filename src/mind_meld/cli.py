@@ -4633,6 +4633,41 @@ def _home_relative_path(path: Path) -> str:
         return str(path)
 
 
+_DIAG_MODELS_SHOWN = 6
+"""How many model ids the plain-text ``mm diag`` names inline.
+
+The producer already caps the list at ``host_usage._DIAG_MODEL_CAP`` (32);
+this second, smaller bound is a readability one — the block is optimized for
+paste into a support chat, and 32 ids on one line is not that. The COUNT is
+always exact, so a truncated list never reads as the whole set.
+"""
+
+
+def _diag_models_line(state: dict) -> str:
+    """One line of locally-cached model ids for a host-usage reader.
+
+    Cache-only, like everything else in this block: these ids come from the
+    reader's own private cache, never from a peer manifest. They still go
+    through ``safe_str`` because a host log wrote them and Rich interprets
+    markup in an f-string — the same reasoning as the breadcrumb ``detail``
+    render above.
+
+    ``0`` is a real answer, not a gap: a cold or mid-rebuild cache has
+    interned no ids yet, which is exactly what ``codex reader state`` two
+    lines up already says.
+    """
+    count = state.get("model_count")
+    count = count if isinstance(count, int) and not isinstance(count, bool) else 0
+    raw = state.get("models")
+    names = [safe_str(str(m))[:60] for m in raw] if isinstance(raw, list) else []
+    if not count or not names:
+        return str(count)
+    shown = names[:_DIAG_MODELS_SHOWN]
+    hidden = count - len(shown)
+    listed = ", ".join(shown) + (f", +{hidden} more" if hidden > 0 else "")
+    return f"{count} ({listed})"
+
+
 _DIAG_CAPTURE_CLAMP = 128
 """Bound on peer-controlled strings in the recorded-capture diag block.
 
@@ -4803,8 +4838,12 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * host_skill_discovery values other than the four extracted fields
         (claude_skills_compat, retro_fleet_resolved, retro_fleet_path,
         grok_version) plus host/status
-      * host_usage values other than consented / complete_once /
-        usage_less_skipped / cache_state (never a path, never a host store)
+      * host_usage values other than the cache-only diag keys: grok's
+        consented / complete_once / usage_less_skipped / cache_state /
+        model_count / models, and Codex's cache_state / state /
+        files_cached / files_migrated / files_pre_track / files_on_disk /
+        pending / model_count / models (never a path, never a host store,
+        never a token magnitude)
       * local_emails (this machine's author-email trust set, and peers'
         after a pull merge) — project an allowlist, never render the row
 
@@ -4933,6 +4972,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "complete_once": grok_diag["complete_once"],
             "usage_less_skipped": grok_diag["usage_less_skipped"],
             "cache_state": grok_diag["cache_state"],
+            "model_count": grok_diag.get("model_count", 0),
+            "models": grok_diag.get("models", []),
         },
         # Codex needs its own block for the same reason Grok does: a reader
         # whose cache is mid-rebuild publishes less than it will, and nothing
@@ -5111,6 +5152,7 @@ def diag(
     console.print(f"  grok prior successful scan: {scan_shown}")
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
     console.print(f"  grok cache:              {safe_str(str(hu_state.get('cache_state', '')))}")
+    console.print(f"  grok models cached:      {_diag_models_line(hu_state)}")
 
     cx_state = (state.get("host_usage") or {}).get("codex") or {}
     console.print(f"  codex cache:             {safe_str(str(cx_state.get('cache_state', '')))}")
@@ -5120,6 +5162,7 @@ def diag(
         f"  codex rollouts cached:   {cx_state.get('files_cached', 0)}"
         f" of {'unknown' if cx_disk is None else cx_disk}"
     )
+    console.print(f"  codex models cached:     {_diag_models_line(cx_state)}")
     if cx_state.get("files_pre_track"):
         # The actionable half: these entries predate per-turn accounting and
         # are re-walked once. Autopush never warms the host cache, so on a
@@ -6297,7 +6340,6 @@ def retro_fleet_cmd(
     dump_host_usage: bool = typer.Option(
         False,
         "--dump-host-usage",
-        hidden=True,
         help="Forensic JSON of accepted host inventory. Skips the markdown retro.",
     ),
 ) -> None:

@@ -38,8 +38,15 @@ def _usage(input_tokens: int = 0, cache_create: int = 0, cache_read: int = 0, ou
     }
 
 
-def _complete(hosts: dict | None = None) -> _mm_host_usage.HostUsageResult:
-    return _mm_host_usage.HostUsageResult(hosts if hosts is not None else {}, complete=True)
+def _complete(
+    hosts: dict | None = None,
+    tokens_by_day: dict | None = None,
+) -> _mm_host_usage.HostUsageResult:
+    return _mm_host_usage.HostUsageResult(
+        hosts if hosts is not None else {},
+        complete=True,
+        tokens_by_day=tokens_by_day or {},
+    )
 
 
 def _incomplete(reason: str) -> _mm_host_usage.HostUsageResult:
@@ -370,6 +377,59 @@ class TestAdditiveMerge:
             "other": {"d": _usage(1)},
         }
 
+    def test_merge_sums_same_model_across_codex_and_opencode(self):
+        capture = events_tail._capture_host_usage(
+            deadline=1_000.0,
+            readers=_readers(
+                (
+                    "codex",
+                    lambda **_kw: _complete(
+                        {"codex": {"2026-08-15": _usage(10)}},
+                        {
+                            "2026-08-15": {
+                                **_usage(10),
+                                "by_model": {"gpt-5": _usage(10)},
+                            }
+                        },
+                    ),
+                ),
+                (
+                    "opencode",
+                    lambda **_kw: _complete(
+                        {"codex": {"2026-08-15": _usage(5)}},
+                        {
+                            "2026-08-15": {
+                                **_usage(5),
+                                "by_model": {"gpt-5": _usage(5)},
+                            }
+                        },
+                    ),
+                ),
+            ),
+            now=lambda: 0.0,
+        )
+        assert capture.hosts["codex"]["2026-08-15"]["input"] == 15
+        assert capture.tokens_by_day["2026-08-15"]["by_model"]["gpt-5"]["input"] == 15
+        assert capture.tokens_by_day["2026-08-15"]["input"] == 15
+
+    def test_merge_does_not_mutate_reader_result_at_model_depth(self):
+        sibling = {"2026-08-15": {**_usage(10), "by_model": {"gpt-5": _usage(10)}}}
+        events_tail._capture_host_usage(
+            deadline=1_000.0,
+            readers=_readers(
+                ("codex", lambda **_kw: _complete({"codex": {"2026-08-15": _usage(10)}}, sibling)),
+                (
+                    "opencode",
+                    lambda **_kw: _complete(
+                        {"codex": {"2026-08-15": _usage(5)}},
+                        {"2026-08-15": {**_usage(5), "by_model": {"gpt-5": _usage(5)}}},
+                    ),
+                ),
+            ),
+            now=lambda: 0.0,
+        )
+        assert sibling["2026-08-15"]["by_model"]["gpt-5"]["input"] == 10
+
     def test_merge_does_not_mutate_a_reader_result(self):
         codex_hosts = {"codex": {"2026-08-15": _usage(10)}}
         events_tail._capture_host_usage(
@@ -666,6 +726,51 @@ class TestTailWiring:
         assert row["active_days"] == ["2026-08-15"]
         assert row["token_sources"] == ["codex", "grok", "opencode"]
 
+    def test_tail_row_reconciles_at_the_acceptor(self, tmp_path, monkeypatch):
+        """End-to-end: the shape the TAIL writes is the shape a peer accepts.
+
+        Everything else proves one hop. ``test_round_trip_writer_to_dump``
+        hand-builds the sibling and calls ``make_host_usage_snapshot``
+        directly, so it never runs ``_capture_host_usage`` or the merge. If
+        the two maps ever diverge in transport, reconciliation drops the
+        sibling on every peer, silently, and the remedy string blames the
+        writing machine's mm version. This is the test that fails instead.
+        """
+        from mind_meld.skills.retro_fleet import aggregator
+
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root)
+        _stub_fast_walks(monkeypatch)
+        _stub_hosts(
+            monkeypatch,
+            codex=_complete(
+                {"codex": {"2026-08-15": _usage(10, 1, 2, 3)}},
+                {"2026-08-15": {**_usage(10, 1, 2, 3), "by_model": {"gpt-5": _usage(10, 1, 2, 3)}}},
+            ),
+            grok=_complete(
+                {"grok": {"2026-08-15": _usage(4, 0, 0, 1)}},
+                {"2026-08-15": {**_usage(4, 0, 0, 1), "by_model": {"grok-4": _usage(4, 0, 0, 1)}}},
+            ),
+            opencode=_complete(
+                {"codex": {"2026-08-15": _usage(1, 1, 1, 1)}},
+                # Same family AND same model id as codex: the collision the
+                # three-level merge exists for.
+                {"2026-08-15": {**_usage(1, 1, 1, 1), "by_model": {"gpt-5": _usage(1, 1, 1, 1)}}},
+            ),
+        )
+
+        events_tail._run_events_tail(
+            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+        )
+
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        accepted = aggregator._accept_host_usage_snapshot(row)
+        assert isinstance(accepted, aggregator._AcceptedHostRow)
+        assert accepted.detail == "present", accepted.detail_reason
+        models = accepted.tokens_by_day["2026-08-15"]["by_model"]
+        assert models["gpt-5"] == _usage(11, 2, 3, 4)
+        assert models["grok-4"] == _usage(4, 0, 0, 1)
+
     def test_incomplete_scan_omits_the_row_but_keeps_every_other_row(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -721,7 +826,14 @@ class TestTailWiring:
         warm_sources = _sources(events_root, hosts=("codex",))
         _stub_hosts(
             monkeypatch,
-            codex=_complete({"codex": {"2026-08-15": _usage(9)}}),
+            # Both maps, because a real reader always returns both. A stub that
+            # returned family totals with no sibling would pin `tokens_by_day:
+            # {}` alongside non-empty `hosts` — the one shape every peer drops
+            # as `active_days_mismatch`, blessed here as expected output.
+            codex=_complete(
+                {"codex": {"2026-08-15": _usage(9)}},
+                {"2026-08-15": {**_usage(9), "by_model": {"gpt-5": _usage(9)}}},
+            ),
         )
         assert (
             events_tail._run_events_tail(
@@ -775,6 +887,7 @@ class TestTailWiring:
                 "token_sources": ["codex"],
                 "hosts": {"codex": {"2026-08-15": _usage(9)}},
                 "active_days": ["2026-08-15"],
+                "tokens_by_day": {"2026-08-15": {**_usage(9), "by_model": {"gpt-5": _usage(9)}}},
             },
             {
                 "v": _mm_events.EVENTS_SCHEMA_VERSION,
@@ -1318,6 +1431,40 @@ class TestColdCacheWarmAndRetry:
         assert merged.hosts == {"codex": {"2026-08-15": _usage(3)}}
         assert merged.token_sources == ("codex",)
         assert merged.dropped == (("grok", "deadline"), ("opencode", "deadline"))
+
+    def test_warm_retry_preserves_first_pass_per_model(self):
+        initial = events_tail.HostUsageCapture(
+            {"codex": {"2026-08-15": _usage(3)}},
+            token_sources=("codex",),
+            dropped=(("grok", "deadline"),),
+            invoked=True,
+            tokens_by_day={
+                "2026-08-15": {**_usage(3), "by_model": {"gpt-5": _usage(3)}},
+            },
+        )
+        retry = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-15": _usage(4)}},
+            token_sources=("grok",),
+            invoked=True,
+            tokens_by_day={
+                "2026-08-15": {**_usage(4), "by_model": {"grok-4": _usage(4)}},
+            },
+        )
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(
+                ("codex", lambda **_kw: _complete()),
+                ("grok", lambda **_kw: _complete()),
+            ),
+            retried_names={"grok"},
+        )
+        assert merged.hosts["codex"]["2026-08-15"]["input"] == 3
+        assert merged.hosts["grok"]["2026-08-15"]["input"] == 4
+        models = merged.tokens_by_day["2026-08-15"]["by_model"]
+        assert models["gpt-5"]["input"] == 3
+        assert models["grok-4"]["input"] == 4
+        assert merged.tokens_by_day["2026-08-15"]["input"] == 7
 
     def test_autopush_never_warms(self, tmp_path, monkeypatch):
         """An unattended hook must not spend seconds on optional analytics.

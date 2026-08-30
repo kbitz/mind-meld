@@ -177,6 +177,30 @@ The retro-fleet aggregator treats v=1 sessions as below-threshold and surfaces
 breadcrumb. Numbers are honestly low, never overcounted. Once the fleet rolls
 to v0.11.0, every peer emits v=2 and the count is exact."""
 
+MAX_HOST_MODELS_PER_DAY = 32
+"""Writer-side ceiling on ``by_model`` keys in one ``tokens_by_day`` day.
+
+Mirrors ``aggregator.MAX_HOST_MODELS_PER_DAY``, which is the READER-side
+trust-boundary defense against a hostile or corrupt peer. This one is the
+opposite job: keep a truthful local machine from ever emitting a row its own
+fleet would drop. Without it a machine that legitimately used more models than
+the cap loses its whole sibling on every peer, under a remedy string that tells
+the user to upgrade an already-current mm.
+
+The two numbers must stay equal. ``events`` cannot import the skills package
+(and must not), so the pin is
+``test_events.py::test_writer_model_caps_mirror_the_acceptor`` rather than a
+shared constant -- the same mirroring convention
+``aggregator.MAX_HOST_MODEL_ID_BYTES`` already uses for
+``host_usage._MAX_MODEL_ID_BYTES``.
+"""
+
+MAX_HOST_MODELS_PER_ROW = 64
+"""Writer-side ceiling on DISTINCT ``by_model`` keys across the whole row.
+Mirrors ``aggregator.MAX_HOST_MODELS_PER_ROW``; see
+``MAX_HOST_MODELS_PER_DAY`` for why this is a mirror and not an import."""
+
+
 _GIT_LOG_FORMAT = "%x1e%H%x09%cI%x09%ae%x09%s"
 """Record-separator (\\x1e) prefix + tab-delimited fields:
 SHA, commit-date (ISO 8601), author email, subject. Commit date matches
@@ -363,9 +387,12 @@ class HostUsageSnapshot(TypedDict, total=False):
     ``hosts`` is a canonical ``host_usage.HostTokens`` map,
     ``{host_family: {UTC-day: Usage}}``, structurally typed here so ``events``
     keeps no dependency on the reader module — ``host_usage`` remains the sole
-    payload and model-family authority. This row carries no ``cwd``, project
-    attribution, model IDs outside the canonical family buckets, or per-source
-    status.
+    payload and model-family authority. ``tokens_by_day`` is the same work as
+    ``{UTC-day: DayBucket}`` (the shape Claude's session snapshot already
+    uses), an additive sibling of ``hosts`` — never nested inside it, because
+    older peers reject an extra family or bucket key by dropping the whole
+    row. This row carries no ``cwd`` and no project attribution: discovery
+    may read host logs locally, but an encoded cwd never goes on the wire.
 
     A row exists when at least one consulted reader completed (or every
     consulted source was absent / empty). ``token_sources`` names the readers
@@ -402,7 +429,18 @@ class HostUsageSnapshot(TypedDict, total=False):
     point-in-time ``as_of`` view. It replaces the prior device view; a consumer
     cannot carry forward individual sources because the payload deliberately
     merges some readers into one family. ``active_days`` names the days present
-    in ``hosts``, nothing more. The complete acceptance and
+    in ``hosts``, nothing more. ``tokens_by_day`` is omitted iff ``hosts`` is
+    empty; otherwise it is always present, so its absence is the mixed-fleet
+    version discriminator.
+
+    **A day's ``by_model`` may be PARTIAL; its four flat counters never are.**
+    The writer caps ``by_model`` at ``MAX_HOST_MODELS_PER_DAY`` /
+    ``MAX_HOST_MODELS_PER_ROW`` so a legitimate machine can never emit a row
+    the fleet rejects, and it caps the breakdown only — the day totals still
+    cover every model. ``day_total - sum(by_model)`` is therefore usage not
+    attributed to a SHOWN model, not a counting error. A per-model consumer
+    (Group 35 pricing) must carry that residual rather than treat the shown
+    models as the whole day. The complete acceptance and
     deterministic-selection rules live in ``docs/invariants/events-retro.md``.
     """
 
@@ -414,6 +452,7 @@ class HostUsageSnapshot(TypedDict, total=False):
     hosts: dict[str, dict[str, token_usage.Usage]]
     active_days: list[str]
     degraded_sources: list[str]
+    tokens_by_day: dict[str, dict]
 
 
 # ---------------------------------------------------------------------------
@@ -1708,6 +1747,74 @@ def make_mm_push_event(
     return event
 
 
+def _model_rank(entry: tuple[str, token_usage.Usage]) -> tuple[int, str]:
+    """Sort key for "which models survive a cap": biggest first, id breaks ties.
+
+    Negated total rather than ``reverse=True`` so the id tie-break stays
+    ASCENDING -- two models with equal totals must resolve the same way on
+    every machine, or the same corpus produces two different rows.
+    """
+    model, usage = entry
+    return (-token_usage.sum_bucket(usage), model)
+
+
+def _cap_by_model(
+    copied: dict[str, token_usage.DayBucket],
+) -> dict[str, token_usage.DayBucket]:
+    """Truncate ``by_model`` to the protocol caps, leaving DAY TOTALS whole.
+
+    Truncation is honest rather than lossy-in-secret: the day's four flat
+    counters still cover every model, so ``day_total - sum(by_model)`` is the
+    usage not attributed to a shown model, and a consumer can compute it. This
+    is exactly why the acceptor reconciles ``by_model`` with ``<=`` and not
+    ``==`` -- an equality check here would forbid the writer's own capping.
+    Do NOT "fix" that asymmetry by pruning the day totals to match.
+
+    Day pass first, then row pass. The row pass only REMOVES ids, so it cannot
+    push a day back over the per-day cap; the reverse order would need a second
+    day pass.
+    """
+    for bucket in copied.values():
+        by_model = bucket["by_model"]
+        if len(by_model) > MAX_HOST_MODELS_PER_DAY:
+            keep = sorted(by_model.items(), key=_model_rank)[:MAX_HOST_MODELS_PER_DAY]
+            bucket["by_model"] = dict(keep)
+
+    row_totals: dict[str, token_usage.Usage] = {}
+    for bucket in copied.values():
+        token_usage.merge_by_model(row_totals, bucket["by_model"])
+    if len(row_totals) > MAX_HOST_MODELS_PER_ROW:
+        survivors = {
+            model
+            for model, _ in sorted(row_totals.items(), key=_model_rank)[:MAX_HOST_MODELS_PER_ROW]
+        }
+        for bucket in copied.values():
+            bucket["by_model"] = {
+                model: usage for model, usage in bucket["by_model"].items() if model in survivors
+            }
+    return copied
+
+
+def _copy_tokens_by_day(
+    raw: dict[str, token_usage.DayBucket],
+) -> dict[str, token_usage.DayBucket]:
+    """Three-level copy so ``by_model`` and nested ``Usage`` do not alias."""
+    copied: dict[str, token_usage.DayBucket] = {}
+    for day, bucket in raw.items():
+        day_copy: token_usage.DayBucket = {
+            field: bucket.get(field, 0) for field in token_usage.TOKEN_FIELDS
+        }  # type: ignore[misc]
+        by_model: dict[str, token_usage.Usage] = {}
+        nested = bucket.get("by_model") or {}
+        if isinstance(nested, dict):
+            for model, usage in nested.items():
+                if isinstance(usage, dict):
+                    by_model[model] = dict(usage)  # type: ignore[arg-type]
+        day_copy["by_model"] = by_model
+        copied[day] = day_copy
+    return _cap_by_model(copied)
+
+
 def make_host_usage_snapshot(
     *,
     device: str,
@@ -1716,6 +1823,7 @@ def make_host_usage_snapshot(
     ts: datetime | None = None,
     max_days: int = token_usage.MAX_BY_DAY_DAYS,
     degraded_sources: Sequence[str] = (),
+    tokens_by_day: dict[str, token_usage.DayBucket] | None = None,
 ) -> HostUsageSnapshot:
     """Construct a ``host-usage-snapshot`` row from completed reader output.
 
@@ -1735,8 +1843,11 @@ def make_host_usage_snapshot(
     ``degraded_sources`` is additive (Track 31A): readers that failed this
     sweep, as a subsequence of ``HOST_USAGE_TOKEN_SOURCES`` disjoint from
     ``token_sources``. Omitted when empty so the happy-path wire shape is
-    unchanged. No ``EVENTS_SCHEMA_VERSION`` bump: ``_accept_host_usage_snapshot``
-    does no key-set check and ``_tie_break_key`` excludes unknown fields.
+    unchanged. ``tokens_by_day`` is additive the same way (Track 33A): omit
+    iff ``hosts`` is empty, otherwise always present, so its *absence* is
+    the mixed-fleet version discriminator. No ``EVENTS_SCHEMA_VERSION`` bump:
+    ``_accept_host_usage_snapshot`` does no key-set check and ``_tie_break_key``
+    excludes unknown fields.
 
     **The payload is capped at the most recent ``max_days`` UTC days.** The
     host readers aggregate the WHOLE local corpus — ``_iter_rollouts`` has no
@@ -1760,18 +1871,21 @@ def make_host_usage_snapshot(
         family: {day: dict(usage) for day, usage in days.items()}  # type: ignore[misc]
         for family, days in hosts.items()
     }
+    sibling = _copy_tokens_by_day(tokens_by_day or {})
     # Cap on the UNION of days, not per family: capping each family separately
     # would keep a different window per host and make cross-host day totals
     # incomparable. ISO-8601 dates lex-sort as they date-sort (same reasoning
-    # as `token_usage._trim_by_day`).
+    # as `token_usage._trim_by_day`). ONE keep set is applied to both maps so
+    # the day sets cannot disagree by construction.
     all_days = sorted({day for days in payload.values() for day in days}, reverse=True)
+    keep = set(all_days[:max_days] if len(all_days) > max_days else all_days)
     if len(all_days) > max_days:
-        keep = set(all_days[:max_days])
         payload = {
             family: {day: usage for day, usage in days.items() if day in keep}
             for family, days in payload.items()
         }
         payload = {family: days for family, days in payload.items() if days}
+    sibling = {day: bucket for day, bucket in sibling.items() if day in keep}
     row: HostUsageSnapshot = {
         "v": EVENTS_SCHEMA_VERSION,
         "type": "host-usage-snapshot",
@@ -1781,6 +1895,8 @@ def make_host_usage_snapshot(
         "hosts": payload,
         "active_days": sorted({day for days in payload.values() for day in days}),
     }
+    if payload:
+        row["tokens_by_day"] = sibling
     excluded = set(token_sources)
     degraded = [
         name

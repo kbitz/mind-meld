@@ -3,7 +3,7 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
@@ -15,6 +15,19 @@ Read BEFORE editing any of these:
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
 Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_host_skill_discovery.py`, `tests/test_diag.py`.
+
+## Contents
+
+- [`mm-events` default source](#mm-events-default-source--bootstrap-load-bearing-v0101)
+- [Events tail in `_push_core`](#events-tail-in-_push_core-load-bearing-v0103-gated-v0122)
+- [Cursor gate + recapture](#cursor-gate--recapture-load-bearing-track-30a)
+- [Host-usage snapshot capture](#host-usage-snapshot-capture-load-bearing-track-19a)
+- [Track 22A consumer](#track-22a-consumer-last-known-good-inventory)
+- [Track 23A renderer contract](#track-23a-renderer-contract)
+- [Init-time event backfill](#init-time-event-backfill-v0118)
+- [Sessions snapshot v=2](#sessions-snapshot-v2-full-inventory-load-bearing-v0110)
+- [Cost estimation](#cost-estimation--one-predicate-honest-degradation-load-bearing-v01213)
+- [Fleet-wide author email](#fleet-wide-author-email-trust-set-load-bearing-v01117)
 
 ---
 
@@ -141,8 +154,10 @@ The tail publishes the local Codex / Grok / OpenCode readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
-publication decision. No `EVENTS_SCHEMA_VERSION` bump — legacy consumers
-already skip unknown types.
+publication decision. Additive `tokens_by_day` (Track 33A) is `{UTC-day:
+DayBucket}` — omit iff `hosts` is empty, otherwise always present, so its
+absence is the mixed-fleet version discriminator. No `EVENTS_SCHEMA_VERSION`
+bump — legacy consumers already skip unknown types.
 
 **All-or-nothing for FAILURES (premise revised Track 31A, 2026-08-27).**
 Sweep-level atomicity is retired. A file/record failure still fails that
@@ -343,13 +358,15 @@ one expired.
 double-counted work shared across forked and resumed rollout files — measured at
 roughly 55% of the reported figure on a 746-rollout corpus. A trend computed
 across that boundary shows a large fake decline.
-- **A count of active DAYS under-counts, and is therefore a LOWER BOUND.** The
-  same restatement *erases* the old day key, so a day that had real activity can
-  vanish. Five weekday sessions resumed on Saturday collapse to one active day,
-  and a fixed window can report FEWER days when re-rendered later. Word it as an
-  observation (``seen on N days``), never as a census, and never diff or chart it
-  — the writer-side note above already forbids treating ``active_days`` as a time
-  series.
+
+- **A count of active DAYS under-counts, and is therefore a LOWER BOUND**, for a
+  changed reason. Restatement no longer erases the old day key: Track 32A made
+  every reader per-turn, so day keys are stable. What remains: a peer on an
+  older mm still publishes the old shape, and a machine that never pushed in a
+  window contributes no days at all. Word it as an observation (``seen on N
+  days``), never as a census, and never diff or chart it. Once ``tokens_by_day``
+  is always present when ``hosts`` is non-empty, its *absence* is the mixed-fleet
+  version discriminator (same pattern as ``skills_by_day`` / ``offset``/``head``).
 
 **Neither is a fleet spend total, and a fleet SUM is separately forbidden**
 because device ledgers are not provably disjoint: ``device_id`` lives in local
@@ -387,6 +404,8 @@ Host totals never enter Claude cost estimation or snapshot
 ``metrics.tokens_total``.
 
 ### Track 23A renderer contract
+
+#### Card vs body
 
 The card carries **rhythm**; the body carries **magnitude**. That split is the
 whole design, and it follows from the two consequences above: a day count can
@@ -434,12 +453,57 @@ does not).
   state that ambiguity rather than falsely diagnosing consent. A vanished block
   must never be the diagnostic interface — seven distinct causes would otherwise
   render identically as nothing.
+#### Acceptor and schema
+
 - **The rejected breadcrumb counts DEVICES, not rows.** `aggregate_host_usage`
   applies no window filter to rejects (only accepted rows are compared against
   `until`), so one malformed writer 89 days ago would light a row-count
   breadcrumb on every 7d retro until retention reaped the file. Window-scoping
   the rejects themselves is impossible for a `naive_timestamp` reject, where the
   timestamp IS the malformed field.
+- **The sibling gets TWO reconciliations, and they are different predicates on
+  purpose.** A day's four flat counters must EQUAL the sum of that day's family
+  buckets across all families — `_add_usage` builds both views in one call, so
+  any inequality is corruption or forgery. The nested `by_model` values must
+  only be BOUNDED BY (`<=`) that day total. The asymmetry is not sloppiness:
+  the writer caps `by_model` at `events.MAX_HOST_MODELS_PER_DAY` /
+  `MAX_HOST_MODELS_PER_ROW` and leaves the day totals whole, so a capped
+  machine's sibling legitimately under-attributes, and an equality check would
+  drop exactly the rows the writer-side cap exists to make deliverable. `<=`
+  is still the property that matters — without it a peer can attribute `2**53`
+  tokens to one model on a day whose whole family total is 5, and Group 35
+  would price it. Reconcile the running sum, not the final one.
+- **`day_total - sum(by_model)` is a RESIDUAL, not a bug.** It is usage the
+  writer did not attribute to a shown model. A per-model consumer must carry
+  it rather than treat the shown models as the whole day. Do not "fix" the
+  gap by pruning day totals to match `by_model` — that would throw away the
+  only complete number on the row.
+- **The writer caps mirror the acceptor caps and cannot be shared.** `events`
+  must not import the skills package, so `events.MAX_HOST_MODELS_PER_DAY` /
+  `_PER_ROW` are a hand-copy of `aggregator.MAX_HOST_MODELS_PER_DAY` /
+  `_PER_ROW`, pinned by
+  `test_events.py::test_writer_model_caps_mirror_the_acceptor` — the same
+  mirroring convention `aggregator.MAX_HOST_MODEL_ID_BYTES` already uses for
+  `host_usage._MAX_MODEL_ID_BYTES`. The writer-side half exists so a truthful
+  local machine can never emit a row its own fleet drops under a remedy string
+  that tells the user to upgrade an already-current mm. Selection under a cap
+  is by descending bucket total with the model id as an ASCENDING tie-break,
+  so two machines reading one corpus emit the same row.
+- **A cap that cannot fire is worse than no cap.** An explicit
+  `MAX_HOST_MODEL_KEY_BYTES_PER_ROW = 16_384` shipped briefly and was removed:
+  at 64 x 256 it was exactly the product of the count cap and the id-byte cap,
+  so the count check always fired first and the byte check was unreachable
+  while reading as protection. Re-add a byte budget only BELOW that product.
+- **The detail quality rank sits STRICTLY below `tie_key`, and that placement
+  is what keeps the card version-independent.** `_row_replaces` compares
+  `as_of`, then `tie_key`, then `_detail_rank` (valid > absent > invalid).
+  `_tie_break_key` projects `hosts` and `active_days` verbatim, so two rows can
+  only reach the rank when their family totals are already byte-identical —
+  the rank therefore decides which *sibling* survives and can never change a
+  rendered `## Agent activity` number. Put it above `tie_key` and a v0.12.49
+  Mac starts selecting a different winner than a v0.12.48 Mac from the same
+  synced corpus, which is a cross-version rendering divergence in the product's
+  headline claim of fleet accuracy. Do not "simplify" the ordering.
 - **The HOST acceptor reads `events.EVENTS_SCHEMA_VERSION`**, never a hardcoded
   `2` — both in `_accept_host_usage_snapshot`'s version check and in
   `_tie_break_key`'s normalized projection, so the two cannot disagree about the
@@ -454,6 +518,8 @@ does not).
   reclassify every fresh `sessions-snapshot` on the next bump. If sessions ever
   needs a v=3, that is a migration with its own compatibility decision, not a
   constant swap — do not "fix" the inconsistency by unifying them.
+#### Isolation
+
 - **Isolation, pinned by test.** Host data reaches exactly two render sites and
   nothing else: not `sessions.tokens_by_model`, not
   `_aggregate_model_families`, not `estimate_cost`, not
@@ -469,12 +535,30 @@ does not).
   and a down-arrow on an artifact you paste into iMessage is public
   self-flagellation. Do not add a trends line to the card.
 
-Forbidden: summing `lifetime_by_family[family][day]` buckets as "tokens this
-window", summing across machines at all, and rendering any ratio against the
-in-window day count.
+#### Forbidden sums
+
+Forbidden: summing across machines at all, and rendering any ratio against the
+in-window day count. Per-machine in-window summing of
+`lifetime_by_family[family][day]` buckets (`_render_agent_inventory`) is
+correct post-32A — buckets are additive and stable — and is the body table's
+"Tokens in this window" column. Cross-machine summing of those buckets is
+still forbidden: host stores move by OS migration, so two device ids can hold
+one history. Host per-model keys in `tokens_by_day` are a separate namespace
+and are never merged into `sessions.tokens_by_model`, even though the keys
+collide (OpenCode running Claude puts `claude-*` ids into the `claude` host
+family).
+
+#### Forensic dump
 
 ``mm retro-fleet --dump-host-usage`` is the forensic hatch. It prints
-the inventory JSON and skips the markdown retro.
+the inventory JSON and skips the markdown retro. As of v0.12.49 the dump
+emits per-model ``tokens_by_day`` and a detail status per device. The card
+stays family-only until Group 36. Model ids are sanitized at DUMP time only
+(``_safe_short``), never at accept — and because that truncates at 128 chars
+while the acceptor admits 256 bytes, two distinct accepted ids can sanitize
+to one key. `_sanitize_tokens_by_day` disambiguates with a `~N` suffix in
+accept order rather than letting a dict-key collision silently drop a model
+from the one surface whose job is showing what actually arrived.
 
 **Its own deadline, started after `walk_done`.**
 `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500), passed
@@ -490,7 +574,12 @@ budget spent on optional analytics.
 the same canonical `codex` family, so two readers can return the same
 `(family, UTC day)` bucket. They are summed with
 `token_usage.merge_usage_bucket`, never shallow-updated — an update would drop
-whichever reader ran first, silently.
+whichever reader ran first, silently. The same rule applies one level down:
+both readers can emit the same `(day, model)` in `tokens_by_day`, and
+`_merge_host_usage_maps` sums that third level too. `_merge_warm_retry_capture`
+fuses both maps, because a sibling that skipped the warm retry would diverge
+from `hosts` on the largest-corpus machines and then be dropped by
+reconciliation.
 
 **A reader exception is contained in `_capture_host_usage`, not at the outer
 guard.** The tail's `try/except` would also discard the git and session rows

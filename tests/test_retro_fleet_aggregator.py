@@ -4474,6 +4474,22 @@ def _usage(n: int = 1) -> dict:
     return {"input": n, "cache_create": 0, "cache_read": 0, "output": 0}
 
 
+def _sibling(hosts: dict, model: str = "gpt-5") -> dict:
+    """Build a reconciling ``tokens_by_day`` for ``hosts`` using one model id."""
+    by_day: dict = {}
+    for family_days in hosts.values():
+        for day, usage in family_days.items():
+            bucket = by_day.setdefault(
+                day, {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0, "by_model": {}}
+            )
+            for field in ("input", "cache_create", "cache_read", "output"):
+                bucket[field] += usage[field]
+            model_bucket = bucket["by_model"].setdefault(model, _usage(0))
+            for field in ("input", "cache_create", "cache_read", "output"):
+                model_bucket[field] += usage[field]
+    return by_day
+
+
 def _host_event(
     device: str,
     ts: str,
@@ -4691,6 +4707,13 @@ class TestHostSnapshotSelection:
         assert self._agg([b, a]).by_device["dev-a"].consulted == expected
 
     def test_additive_field_does_not_change_tie(self):
+        """Unknown top-level fields still cannot change a winner.
+
+        ``tokens_by_day`` is different: once the field carries semantics, a
+        quality rank (valid > absent > invalid) re-breaks equal-``tie_key``
+        rows. That rank sits strictly BELOW ``tie_key``, so this test of
+        unknown-field exclusion stays true.
+        """
         ts = "2026-04-27T12:00:00+00:00"
         a = _host_event("dev-a", ts)
         b = _host_event("dev-a", ts, extra={"zzz": "noise"})
@@ -5000,8 +5023,491 @@ class TestDumpHostUsage:
         out = capsys.readouterr().out
         payload = json.loads(out)
         assert "dev-a" in payload["by_device"]
+        assert payload["by_device"]["dev-a"]["detail"] == "absent"
+        assert "detail_phrase" in payload["by_device"]["dev-a"]
         assert "# Retro" not in out
         assert "MM_THEMES_PROMPT" not in out
+
+
+class TestHostTokensByDayAcceptance:
+    TS = "2026-04-28T12:00:00+00:00"
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _agg(self, events, registered=None):
+        return aggregator.aggregate_host_usage(
+            events, since=self.SINCE, until=self.UNTIL, registered_ids=registered
+        )
+
+    def test_absent_sibling_is_accepted_as_pre_33a_peer(self):
+        ev = _host_event("dev-a", self.TS)
+        assert "tokens_by_day" not in ev
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason is None
+        assert row.tokens_by_day is None
+        inv = self._agg([ev])
+        assert inv.by_device["dev-a"].lifetime_by_family["codex"]
+        assert inv.by_device["dev-a"].detail == "absent"
+
+    def test_present_empty_sibling_is_valid_when_hosts_empty(self):
+        ev = _host_event("dev-a", self.TS, token_sources=(), hosts={})
+        ev["active_days"] = []
+        ev["tokens_by_day"] = {}
+        row = _accepted(ev)
+        assert row.detail == "present"
+        assert row.tokens_by_day == {}
+
+    def test_present_invalid_drops_detail_keeps_row(self):
+        ev = _host_event("dev-a", self.TS, extra={"tokens_by_day": "nope"})
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "unsupported_schema"
+        assert row.lifetime_by_family["codex"]
+        inv = self._agg([ev])
+        assert "dev-a" in inv.by_device
+        assert inv.rejected_rows == 0
+
+    def test_invalid_sibling_never_rejects_the_row(self):
+        ev = _host_event("dev-a", self.TS, extra={"tokens_by_day": {"bad": 1}})
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator._AcceptedHostRow)
+        bad_hosts = _host_event("dev-b", self.TS)
+        bad_hosts["hosts"] = {"codex": {"2026-04-20": {"input": "nope"}}}
+        rejected = aggregator._accept_host_usage_snapshot(bad_hosts)
+        assert isinstance(rejected, aggregator.HostReject)
+
+    def test_day_set_equality_against_active_days(self):
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {"2026-04-21": {**_usage(5), "by_model": {"gpt-5": _usage(5)}}}
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "active_days_mismatch"
+
+    def test_day_level_sum_reconciliation(self):
+        hosts = {
+            "codex": {"2026-04-20": _usage(4)},
+            "grok": {"2026-04-20": _usage(3)},
+        }
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex", "grok"),
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5")},
+        )
+        # One model carrying both families' totals still reconciles day-wise.
+        ev["tokens_by_day"]["2026-04-20"]["by_model"] = {
+            "gpt-5": _usage(4),
+            "grok-4": _usage(3),
+        }
+        row = _accepted(ev)
+        assert row.detail == "present"
+        assert row.tokens_by_day["2026-04-20"]["input"] == 7
+
+    def test_model_this_consumer_would_classify_differently_still_reconciles(self):
+        """T13c: do NOT reconcile per family via host_family().
+
+        A newer peer classified this model as ``other``; this consumer's
+        ``host_family("gpt-5")`` is ``codex``. Day-level sums still match.
+        """
+        assert host_usage.host_family("gpt-5") == "codex"
+        hosts = {"other": {"2026-04-20": _usage(5)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {**_usage(5), "by_model": {"gpt-5": _usage(5)}},
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "present"
+        assert row.tokens_by_day["2026-04-20"]["by_model"]["gpt-5"]["input"] == 5
+
+    def test_non_str_model_id_drops_detail(self):
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {**_usage(5), "by_model": {1: _usage(5)}},
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "unsupported_schema"
+
+    def test_empty_model_id_drops_detail(self):
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {**_usage(5), "by_model": {"": _usage(5)}},
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "unsupported_schema"
+
+    def test_overlong_model_id_drops_detail(self):
+        model = "g" * (aggregator.MAX_HOST_MODEL_ID_BYTES + 1)
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {**_usage(5), "by_model": {model: _usage(5)}},
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "unsupported_schema"
+
+    def test_too_many_models_per_day_drops_detail(self):
+        models = {f"gpt-{i}": _usage(0) for i in range(aggregator.MAX_HOST_MODELS_PER_DAY + 1)}
+        models["gpt-0"] = _usage(5)
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            extra={"tokens_by_day": {"2026-04-20": {**_usage(5), "by_model": models}}},
+        )
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "unsupported_schema"
+
+    def test_too_many_models_per_row_drops_detail(self):
+        days = ("2026-04-18", "2026-04-19", "2026-04-20")
+        hosts = {"codex": {day: _usage(1) for day in days}}
+        sibling: dict = {}
+        idx = 0
+        for day in days:
+            models = {}
+            for _ in range(aggregator.MAX_HOST_MODELS_PER_DAY):
+                models[f"m{idx}"] = _usage(0)
+                idx += 1
+            first = next(iter(models))
+            models[first] = _usage(1)
+            sibling[day] = {**_usage(1), "by_model": models}
+        ev = _host_event("dev-a", self.TS, hosts=hosts, extra={"tokens_by_day": sibling})
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "unsupported_schema"
+
+    def test_reconciliation_overflow_drops_detail(self):
+        almost = (2**53) - 1
+        hosts = {
+            "codex": {
+                "2026-04-20": {
+                    "input": almost,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                }
+            },
+            "grok": {
+                "2026-04-20": {
+                    "input": almost,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                }
+            },
+        }
+        ev = _host_event("dev-a", self.TS, token_sources=("codex", "grok"), hosts=hosts)
+        ev["tokens_by_day"] = {
+            "2026-04-20": {
+                "input": almost,
+                "cache_create": 0,
+                "cache_read": 0,
+                "output": 0,
+                "by_model": {
+                    "gpt-5": {
+                        "input": almost,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    }
+                },
+            }
+        }
+        row = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(row, aggregator._AcceptedHostRow)
+        assert row.detail == "absent"
+        assert row.detail_reason == "invalid_counter"
+
+    def test_equal_ts_quality_rank_prefers_valid_in_both_orders(self):
+        ts = "2026-04-27T12:00:00+00:00"
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+        absent = _host_event("dev-a", ts, hosts=hosts)
+        valid = _host_event("dev-a", ts, hosts=hosts, extra={"tokens_by_day": _sibling(hosts)})
+        invalid = _host_event("dev-a", ts, hosts=hosts, extra={"tokens_by_day": "nope"})
+        assert self._agg([absent, valid]).by_device["dev-a"].detail == "present"
+        assert self._agg([valid, absent]).by_device["dev-a"].detail == "present"
+        assert self._agg([invalid, absent]).by_device["dev-a"].detail == "absent"
+        assert self._agg([invalid, absent]).by_device["dev-a"].detail_reason is None
+        assert self._agg([absent, invalid]).by_device["dev-a"].detail_reason is None
+
+    def test_partial_by_model_is_accepted_because_the_writer_caps_it(self):
+        """``by_model`` reconciles with ``<=``, not ``==``.
+
+        The writer truncates the breakdown at the protocol caps and leaves the
+        day totals whole, so a capped machine's sibling has an unattributed
+        residual BY DESIGN. An equality check here would drop exactly the rows
+        the writer-side cap exists to make deliverable.
+        """
+        hosts = {"codex": {"2026-04-20": _usage(10)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {**_usage(10), "by_model": {"gpt-5": _usage(4)}},
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "present"
+        assert row.tokens_by_day["2026-04-20"]["input"] == 10
+        assert row.tokens_by_day["2026-04-20"]["by_model"]["gpt-5"]["input"] == 4
+
+    def test_by_model_over_claiming_the_day_total_drops_detail(self):
+        """The bound that matters: per-model was otherwise unlimited.
+
+        Without it a peer attributes 2**53 tokens to one model on a day whose
+        whole family total is 5, the row still reconciles at the day level,
+        and the number flows straight into Group 35 pricing.
+        """
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {**_usage(5), "by_model": {"gpt-5": _usage(2**53)}},
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "invalid_counter"
+
+    def test_by_model_over_claim_across_two_models_drops_detail(self):
+        """Each model is legal alone; their SUM is not."""
+        hosts = {"codex": {"2026-04-20": _usage(6)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {
+                        **_usage(6),
+                        "by_model": {"gpt-5": _usage(4), "gpt-4": _usage(4)},
+                    }
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "invalid_counter"
+
+    def test_dump_disambiguates_model_ids_that_sanitize_alike(self):
+        """A dict-key collision would silently drop a model from the FORENSIC
+        dump — the one surface whose job is showing what actually arrived.
+
+        ``_safe_short`` truncates at 128 chars while the acceptor admits 256
+        bytes, so two distinct accepted ids can share a sanitized key."""
+        stem = "g" * aggregator._SHORT_LEN_CAP
+        hosts = {"codex": {"2026-04-20": _usage(3)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {
+                        **_usage(3),
+                        "by_model": {f"{stem}-one": _usage(1), f"{stem}-two": _usage(2)},
+                    }
+                }
+            },
+        )
+        row = _accepted(ev)
+        assert row.detail == "present"
+        dumped = json.loads(aggregator._dump_host_inventory(self._agg([ev])))
+        models = dumped["by_device"]["dev-a"]["tokens_by_day"]["2026-04-20"]["by_model"]
+        assert len(models) == 2, "a collision must not swallow a model"
+        assert sorted(u["input"] for u in models.values()) == [1, 2]
+        assert f"{stem}~2" in models
+
+    def test_writer_capped_row_round_trips_into_the_dump(self):
+        """End-to-end for the cap: >32 models in one day still ships."""
+        from mind_meld import events
+
+        n = events.MAX_HOST_MODELS_PER_DAY + 4
+        by_model = {f"m{i:03d}": _usage(i + 1) for i in range(n)}
+        total = sum(i + 1 for i in range(n))
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts={"codex": {"2026-04-20": _usage(total)}},
+            tokens_by_day={"2026-04-20": {**_usage(total), "by_model": by_model}},
+            ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+        )
+        accepted = aggregator._accept_host_usage_snapshot(row)
+        assert isinstance(accepted, aggregator._AcceptedHostRow)
+        assert accepted.detail == "present", accepted.detail_reason
+        day = accepted.tokens_by_day["2026-04-20"]
+        assert len(day["by_model"]) == events.MAX_HOST_MODELS_PER_DAY
+        assert sum(u["input"] for u in day["by_model"].values()) < day["input"]
+
+    def test_quality_rank_cannot_change_a_rendered_number(self):
+        """The rank sits strictly BELOW ``tie_key``, and that is load-bearing.
+
+        ``_tie_break_key`` projects ``hosts`` and ``active_days`` verbatim, so
+        two rows only reach ``_detail_rank`` when their family totals are
+        already identical. The rank therefore picks which SIBLING survives and
+        can never move a ``## Agent activity`` number — which is why a
+        v0.12.48 and a v0.12.49 Mac render the same card from one corpus.
+        Hoist the rank above ``tie_key`` and this fails.
+        """
+        ts = "2026-04-27T12:00:00+00:00"
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+        absent = _host_event("dev-a", ts, hosts=hosts)
+        valid = _host_event("dev-a", ts, hosts=hosts, extra={"tokens_by_day": _sibling(hosts)})
+        assert _accepted(absent).tie_key == _accepted(valid).tie_key
+        forward = self._agg([absent, valid]).by_device["dev-a"]
+        reverse = self._agg([valid, absent]).by_device["dev-a"]
+        assert forward.lifetime_by_family == reverse.lifetime_by_family == hosts
+        assert forward.detail == reverse.detail == "present"
+
+    def test_zero_only_day_survives_acceptor(self):
+        hosts = {"codex": {"2026-04-20": _usage(0)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts)},
+        )
+        row = _accepted(ev)
+        assert row.detail == "present"
+        assert row.tokens_by_day["2026-04-20"]["input"] == 0
+
+    def test_round_trip_writer_to_dump(self, tmp_path):
+        from mind_meld import events
+
+        hosts = {
+            "codex": {"2026-04-20": _usage(4)},
+            "grok": {"2026-04-20": _usage(3)},
+        }
+        sibling = {
+            "2026-04-20": {
+                **_usage(7),
+                "by_model": {"gpt-5": _usage(4), "grok-4": _usage(3)},
+            }
+        }
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex", "grok"),
+            hosts=hosts,
+            tokens_by_day=sibling,
+            ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+        )
+        events_dir = tmp_path / "events"
+        events.write_push_event(events_dir, "dev-a", [row])
+        raw = json.loads(next(events_dir.glob("*.jsonl")).read_text().strip())
+        inv = aggregator.aggregate_host_usage(
+            [raw], since=self.SINCE, until=self.UNTIL, registered_ids=None
+        )
+        dumped = json.loads(aggregator._dump_host_inventory(inv))
+        snap = dumped["by_device"]["dev-a"]
+        assert snap["detail"] == "present"
+        assert snap["tokens_by_day"]["2026-04-20"]["by_model"]["gpt-5"]["input"] == 4
+        assert "per-model host tokens present" in snap["detail_phrase"]
+
+    def test_dump_sanitizes_hostile_model_ids(self):
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": {
+                    "2026-04-20": {
+                        **_usage(5),
+                        "by_model": {"gpt-5\n|hack": _usage(5)},
+                    }
+                }
+            },
+        )
+        inv = self._agg([ev])
+        dumped = json.loads(aggregator._dump_host_inventory(inv))
+        models = dumped["by_device"]["dev-a"]["tokens_by_day"]["2026-04-20"]["by_model"]
+        assert "gpt-5\n|hack" not in models
+        json.dumps(dumped)
+
+    def test_detail_phrase_names_a_fix_command(self):
+        phrase = aggregator._host_detail_phrase("absent", "unsupported_schema")
+        assert "unsupported_schema" in phrase
+        assert "mm push" in phrase
+
+    def test_wire_row_fixture_measurement(self):
+        """Deterministic size of a 90-day 4-family 2-model-per-day row."""
+        import gzip
+
+        from mind_meld import events
+
+        # Unique ISO dates: use January-April. 90 == MAX_BY_DAY_DAYS, so the
+        # writer's cap does not trim this row and the measurement is taken at
+        # the largest shape the wire can carry.
+        days: list[str] = []
+        for month in (1, 2, 3, 4):
+            for d in range(1, 29):
+                days.append(f"2026-{month:02d}-{d:02d}")
+                if len(days) == 90:
+                    break
+            if len(days) == 90:
+                break
+        hosts = {
+            family: {day: _usage(1) for day in days}
+            for family in ("claude", "codex", "grok", "other")
+        }
+        sibling = {
+            day: {
+                **_usage(4),
+                "by_model": {"gpt-5": _usage(2), "grok-4": _usage(2)},
+            }
+            for day in days
+        }
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex", "grok", "opencode"),
+            hosts=hosts,
+            tokens_by_day=sibling,
+            ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+        )
+        payload = json.dumps(row, separators=(",", ":")).encode("utf-8")
+        gz = gzip.compress(payload)
+        envelope = len(gz) + 12 + 16  # AES-GCM nonce + tag
+        assert len(payload) < 80_000
+        assert len(gz) < 20_000
+        assert envelope < 21_000
 
 
 def _snap(

@@ -110,6 +110,8 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "complete_once",
         "usage_less_skipped",
         "cache_state",
+        "model_count",
+        "models",
     }
 
 
@@ -126,6 +128,10 @@ def test_diag_host_usage_does_not_open_the_host_store(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_usage"]["grok"]["cache_state"] in {"missing", "ok", "unreadable"}
+    grok = payload["host_usage"]["grok"]
+    assert "model_count" in grok
+    assert isinstance(grok["models"], list)
+    assert "model_count" in payload["host_usage"]["codex"]
 
 
 def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
@@ -184,6 +190,57 @@ def test_diag_grok_consent_excludes_an_unresolved_explicit_source(tmp_path, monk
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_usage"]["grok"]["consented"] is False
+
+
+def test_diag_plain_text_names_cached_models(tmp_path, monkeypatch):
+    """v0.12.49 promises "local per-model counts on mm diag". The plain-text
+    block is the surface a user pastes into support; a JSON-only field does
+    not discharge that."""
+    _setup(tmp_path, monkeypatch)
+    host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    host_usage.GROK_CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": host_usage.CACHE_VERSION,
+                "complete_once": True,
+                "usage_less_skipped": 0,
+                "files": {
+                    "a": {
+                        "dev": 1,
+                        "ino": 2,
+                        "size": 3,
+                        "mtime_ns": 4,
+                        "head_len": 0,
+                        "tail_len": 0,
+                        "offset": 3,
+                        "head": "",
+                        "tail": "",
+                        "turns": [
+                            {
+                                "key": "k" * 64,
+                                "day": "2026-08-15",
+                                "model": "grok-4",
+                                "usage": {
+                                    "input": 1,
+                                    "cache_create": 0,
+                                    "cache_read": 0,
+                                    "output": 1,
+                                },
+                            }
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["diag"])
+
+    assert result.exit_code == 0, result.output
+    assert "grok models cached:" in result.output
+    assert "grok-4" in result.output
+    assert "codex models cached:" in result.output
 
 
 # ── Plain text mode ──────────────────────────────────────────────────────

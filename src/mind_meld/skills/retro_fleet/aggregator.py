@@ -146,6 +146,24 @@ larger because a real fleet legitimately has more machines than a warning wants 
 name. Rows are ordered by information content BEFORE this cap applies, so a
 no-snapshot machine can never evict one that has data."""
 
+MAX_HOST_MODEL_ID_BYTES = 256
+"""UTF-8 byte ceiling for a peer-controlled host model id. Writer-side
+``host_usage._MAX_MODEL_ID_BYTES`` is the same number and is NOT a
+trust-boundary defense."""
+
+MAX_HOST_MODELS_PER_DAY = 32
+"""Cap on ``by_model`` keys in one day bucket. A peer chooses N."""
+
+MAX_HOST_MODELS_PER_ROW = 64
+"""Cap on distinct model ids across a host-usage row.
+
+Together with ``MAX_HOST_MODEL_ID_BYTES`` this also bounds total model-key
+bytes on a row at 16 KiB. An explicit byte budget shipped here briefly and was
+removed: at 64 x 256 it was exactly the product of the other two caps, so the
+count check always fired first and the byte check could not be reached. A
+guard that cannot fire is worse than no guard, because it reads as protection.
+Re-adding one is only meaningful BELOW the product."""
+
 HOST_SNAPSHOT_MIN_VERSION = "v0.12.32"
 """First mm release whose event tail publishes ``host-usage-snapshot`` rows. Named
 once because it appears in several user-facing remedies; a machine below it cannot
@@ -454,6 +472,9 @@ class HostDeviceSnapshot:
 
     ``lifetime_by_family`` is the winning row's ``hosts`` map, whole.
     It is inventory as of ``as_of``, not tokens spent in the retro window.
+    ``tokens_by_day`` is the accepted per-model sibling, or None when the
+    field was absent (pre-33A peer) or dropped as invalid. ``detail`` is
+    ``present`` only when that sibling survived validation.
     """
 
     device: str
@@ -462,6 +483,9 @@ class HostDeviceSnapshot:
     lifetime_by_family: dict[str, dict[str, dict[str, int]]]
     stale: bool
     future_dated: bool
+    tokens_by_day: dict[str, dict] | None = None
+    detail: Literal["present", "absent"] = "absent"
+    detail_reason: HostRejectReason | None = None
 
     @property
     def current(self) -> bool:
@@ -534,6 +558,9 @@ class _AcceptedHostRow:
     lifetime_by_family: dict[str, dict[str, dict[str, int]]]
     active_days: tuple[str, ...]
     tie_key: str
+    tokens_by_day: dict[str, dict] | None = None
+    detail: Literal["present", "absent"] = "absent"
+    detail_reason: HostRejectReason | None = None
 
 
 @dataclass
@@ -1330,6 +1357,160 @@ def _copy_usage_bucket(bucket: object) -> dict[str, int] | None:
     return out
 
 
+def _copy_day_bucket(bucket: object) -> dict | None:
+    """Copy a ``DayBucket`` across the trust boundary.
+
+    Exact key-set plus ``_host_counter_ok``. Does NOT use
+    ``token_usage.merge_by_model``: that helper is for trusted local data.
+    """
+    if not isinstance(bucket, dict):
+        return None
+    expected = set(token_usage.TOKEN_FIELDS) | {"by_model"}
+    if set(bucket) != expected:
+        return None
+    out: dict = {}
+    for field_name in token_usage.TOKEN_FIELDS:
+        value = bucket[field_name]
+        if not _host_counter_ok(value):
+            return None
+        out[field_name] = value
+    by_model_raw = bucket["by_model"]
+    if not isinstance(by_model_raw, dict):
+        return None
+    copied_models: dict[str, dict[str, int]] = {}
+    for model, usage in by_model_raw.items():
+        copied = _copy_usage_bucket(usage)
+        if copied is None:
+            return None
+        copied_models[model] = copied
+    out["by_model"] = copied_models
+    return out
+
+
+def _host_model_id_ok(model: object) -> bool:
+    if not isinstance(model, str) or not model:
+        return False
+    try:
+        return len(model.encode("utf-8")) <= MAX_HOST_MODEL_ID_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def _accept_tokens_by_day(
+    raw: object,
+    hosts: dict[str, dict[str, dict[str, int]]],
+    active_days: tuple[str, ...],
+) -> tuple[dict[str, dict], HostRejectReason | None]:
+    """Validate the per-model sibling. Never rejects the row.
+
+    Returns ``(copied, None)`` on success, or ``({}, reason)`` to drop.
+
+    Two reconciliations, and they are deliberately different predicates.
+    The day's four flat counters must EQUAL the family totals for that day,
+    summed across families: the writer builds both views in one call, so any
+    inequality is corruption or a forgery. The nested ``by_model`` values must
+    only be BOUNDED BY that day total, because the writer legitimately caps
+    ``by_model`` (``events.MAX_HOST_MODELS_PER_DAY`` /
+    ``_PER_ROW``) while leaving the day totals whole -- an equality check would
+    drop the sibling of every machine that hit the cap. ``<=`` is still the
+    property that matters: it is what stops a peer claiming 2**53 tokens for
+    one model on a day whose whole family total is 5, which is otherwise
+    unbounded and would flow straight into Group 35 pricing.
+    """
+    if not isinstance(raw, dict):
+        return {}, "unsupported_schema"
+    copied: dict[str, dict] = {}
+    distinct: set[str] = set()
+    for day_key, bucket in raw.items():
+        day = _canonical_day_key(day_key)
+        if day is None:
+            return {}, "invalid_day"
+        day_copy = _copy_day_bucket(bucket)
+        if day_copy is None:
+            return {}, "unsupported_schema"
+        by_model = day_copy["by_model"]
+        if len(by_model) > MAX_HOST_MODELS_PER_DAY:
+            return {}, "unsupported_schema"
+        checked: dict[str, dict[str, int]] = {}
+        for model, usage in by_model.items():
+            if not _host_model_id_ok(model):
+                return {}, "unsupported_schema"
+            distinct.add(model)
+            if len(distinct) > MAX_HOST_MODELS_PER_ROW:
+                return {}, "unsupported_schema"
+            checked[model] = usage
+        day_copy["by_model"] = checked
+        copied[day] = day_copy
+    if set(copied) != set(active_days):
+        return {}, "active_days_mismatch"
+    overflow = 2**53
+    for day in active_days:
+        sibling = copied[day]
+        for field_name in token_usage.TOKEN_FIELDS:
+            total = 0
+            for family_days in hosts.values():
+                bucket = family_days.get(day)
+                if bucket is None:
+                    continue
+                total += bucket[field_name]
+                if total > overflow:
+                    return {}, "invalid_counter"
+            if sibling[field_name] != total:
+                return {}, "invalid_counter"
+            attributed = 0
+            for usage in sibling["by_model"].values():
+                attributed += usage[field_name]
+                if attributed > total:
+                    # Break on the running sum, not the final one: the per-day
+                    # model cap bounds this loop, but summing first would let a
+                    # forged row do the arithmetic before the check.
+                    return {}, "invalid_counter"
+    return copied, None
+
+
+def _host_detail_phrase(detail: str, reason: str | None) -> str:
+    """Problem + cause + fix for host per-model detail status.
+
+    Modeled on ``events_tail._host_skip_phrase``. A raw reason token tells
+    nobody anything; this names the command that repairs each branch.
+    """
+    if detail == "present":
+        return "per-model host tokens present"
+    if reason is None:
+        return (
+            "per-model host tokens absent — this machine is on mm older than "
+            "v0.12.49, or its last push had an empty host scan. Upgrade mm "
+            "and run `mm push` on that machine."
+        )
+    if reason == "active_days_mismatch":
+        return (
+            "per-model host tokens dropped (active_days_mismatch) — the day "
+            "set did not match the family totals. Upgrade mm on that machine "
+            "and run `mm push`."
+        )
+    if reason == "invalid_counter":
+        return (
+            "per-model host tokens dropped (invalid_counter) — a counter did "
+            "not reconcile with the family totals, or overflowed. Upgrade mm "
+            "on that machine and run `mm push`; if it persists, run `mm diag`."
+        )
+    if reason == "unsupported_schema":
+        return (
+            "per-model host tokens dropped (unsupported_schema) — a model id "
+            "or day bucket was malformed, or exceeded the protocol cap. "
+            "Upgrade mm on that machine and run `mm push`."
+        )
+    if reason == "invalid_day":
+        return (
+            "per-model host tokens dropped (invalid_day) — a day key was not "
+            "a canonical UTC date. Upgrade mm on that machine and run `mm push`."
+        )
+    return (
+        f"per-model host tokens dropped ({reason}) — upgrade mm on that "
+        "machine and run `mm push`; run `mm diag` if it persists."
+    )
+
+
 def _accept_hosts_payload(
     raw: object,
 ) -> tuple[dict[str, dict[str, dict[str, int]]], tuple[str, ...]] | HostRejectReason:
@@ -1417,6 +1598,26 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
     if not isinstance(active_raw, list) or active_raw != list(day_union):
         return HostReject(device=device, reason="active_days_mismatch")
     consulted = tuple(consulted_list)
+    # Three-way on KEY PRESENCE, never a falsy check: absent (pre-33A peer),
+    # present-and-empty (valid empty observation), present-and-invalid (drop
+    # the sibling, keep the row). Invalid `hosts` already rejected above.
+    tokens_by_day: dict[str, dict] | None
+    detail: Literal["present", "absent"]
+    detail_reason: HostRejectReason | None
+    if "tokens_by_day" not in ev:
+        tokens_by_day = None
+        detail = "absent"
+        detail_reason = None
+    else:
+        copied, drop_reason = _accept_tokens_by_day(ev.get("tokens_by_day"), hosts, day_union)
+        if drop_reason is None:
+            tokens_by_day = copied
+            detail = "present"
+            detail_reason = None
+        else:
+            tokens_by_day = None
+            detail = "absent"
+            detail_reason = drop_reason
     return _AcceptedHostRow(
         device=device,
         as_of=as_of,
@@ -1430,13 +1631,27 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
             hosts=hosts,
             active_days=day_union,
         ),
+        tokens_by_day=tokens_by_day,
+        detail=detail,
+        detail_reason=detail_reason,
     )
+
+
+def _detail_rank(row: _AcceptedHostRow) -> int:
+    """Quality rank for equal-``tie_key`` rows: valid > absent > invalid."""
+    if row.detail == "present":
+        return 2
+    if row.detail_reason is not None:
+        return 0
+    return 1
 
 
 def _row_replaces(candidate: _AcceptedHostRow, incumbent: _AcceptedHostRow) -> bool:
     if candidate.as_of != incumbent.as_of:
         return candidate.as_of > incumbent.as_of
-    return candidate.tie_key > incumbent.tie_key
+    if candidate.tie_key != incumbent.tie_key:
+        return candidate.tie_key > incumbent.tie_key
+    return _detail_rank(candidate) > _detail_rank(incumbent)
 
 
 def aggregate_host_usage(
@@ -1487,12 +1702,47 @@ def aggregate_host_usage(
             },
             stale=row.as_of < since,
             future_dated=row.as_of > until,
+            tokens_by_day=row.tokens_by_day,
+            detail=row.detail,
+            detail_reason=row.detail_reason,
         )
     return HostUsageInventory(
         by_device=by_device,
         devices_without_accepted_row=missing,
         rejected=tuple(rejected),
     )
+
+
+def _sanitize_tokens_by_day(raw: dict | None) -> dict | None:
+    """Render-time sanitization. Accept-time leaves model ids intact.
+
+    ``_safe_short`` truncates at ``_SHORT_LEN_CAP`` (128 chars) while the
+    acceptor admits ``MAX_HOST_MODEL_ID_BYTES`` (256 bytes), and it maps every
+    character outside its whitelist onto ``_``. Two DISTINCT accepted ids can
+    therefore sanitize to one key -- and a dict key collision would silently
+    drop one model's counters from a FORENSIC dump, the one surface whose
+    whole job is to show what actually arrived. Disambiguate instead, in
+    accept order, which is wire order and so is stable across machines.
+    """
+    if raw is None:
+        return None
+    out: dict = {}
+    for day, bucket in raw.items():
+        copied = {field: bucket[field] for field in token_usage.TOKEN_FIELDS}
+        by_model: dict = {}
+        for model, usage in (bucket.get("by_model") or {}).items():
+            key = _safe_short(str(model))
+            if key in by_model:
+                # `~2`, `~3`, ... `~` is outside _safe_short's whitelist, so a
+                # suffix here can never collide with a sanitized id.
+                n = 2
+                while f"{key}~{n}" in by_model:
+                    n += 1
+                key = f"{key}~{n}"
+            by_model[key] = dict(usage)
+        copied["by_model"] = by_model
+        out[day] = copied
+    return out
 
 
 def _dump_host_inventory(inventory: HostUsageInventory) -> str:
@@ -1502,9 +1752,13 @@ def _dump_host_inventory(inventory: HostUsageInventory) -> str:
                 "as_of": snap.as_of.isoformat(),
                 "consulted": list(snap.consulted),
                 "current": snap.current,
+                "detail": snap.detail,
+                "detail_phrase": _host_detail_phrase(snap.detail, snap.detail_reason),
+                "detail_reason": snap.detail_reason,
                 "future_dated": snap.future_dated,
                 "lifetime_by_family": snap.lifetime_by_family,
                 "stale": snap.stale,
+                "tokens_by_day": _sanitize_tokens_by_day(snap.tokens_by_day),
             }
             for device, snap in sorted(inventory.by_device.items())
         },
@@ -2796,9 +3050,17 @@ def _render_agent_inventory(
     if omitted:
         out.append(f"- (+{len(omitted)} more machines omitted; those with data are shown first.)")
     out.append(
-        "- *A resumed session restates its whole total onto its last-active day, so the "
-        "final column is inflated at the recent edge and day counts elsewhere are lower "
-        f"bounds. Counters cover at most the {cap} most recent active UTC days.*"
+        # The header above calls these counters per-turn, which is true only of
+        # a peer on mm >= v0.12.48. An older peer still publishes last-touch
+        # totals, so ITS token columns overstate the recent edge -- the caveat
+        # the pre-33A wording carried for every machine, now scoped to the
+        # machines it still applies to. Dropping it entirely would make the
+        # table read as exact across a fleet this repo knows is mixed.
+        "- *A peer on an older mm still reports last-touch totals rather than "
+        "per-turn ones, so its token columns overstate the recent edge and its "
+        "day counts are lower bounds; a machine that never pushed in this "
+        "window contributes no days either. Counters cover at most the "
+        f"{cap} most recent active UTC days.*"
     )
     out.append("")
     return out
