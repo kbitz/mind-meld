@@ -16,6 +16,7 @@ All notable changes to Mind Meld will be documented in this file.
 ### Changed
 
 - The shared `_add_usage` reduction now updates family totals and per-model day buckets atomically. `_CacheEntry.models` already interned the ids, so a warm v0.12.48 cache produces the new field without reopening source jsonl.
+- The peer-detail acceptor bounds a `by_model` map's size, and each model id, before copying it, and rejects on day count before walking the days. Rejecting after the copy does a malformed sender's allocation for them.
 - Host-usage selection at equal `as_of` still uses the existing `tie_key`; a quality rank `valid > absent > invalid` only re-breaks ties older versions broke by file-iteration order. `tie_key` already contains `hosts` verbatim, so the winner's family totals are the same either way — the rank decides which sibling survives, never which numbers render.
 - Premise sweep: a day bucket is a day's recorded work. `seen on N days` is still a lower bound, because a peer on an older mm still publishes last-touch totals and a machine that never pushed contributes no days — not because resuming a session erases the old day key.
 

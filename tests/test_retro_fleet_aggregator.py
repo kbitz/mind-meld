@@ -5261,6 +5261,71 @@ class TestHostTokensByDayAcceptance:
         assert self._agg([invalid, absent]).by_device["dev-a"].detail_reason is None
         assert self._agg([absent, invalid]).by_device["dev-a"].detail_reason is None
 
+    def test_oversized_by_model_is_rejected_without_copying_values(self, monkeypatch):
+        """Bound before you copy.
+
+        Copying a peer-chosen map and rejecting it one line later does the
+        attacker's allocation for them. Patching the value copier to raise
+        proves the cardinality check runs FIRST.
+
+        Calls ``_accept_tokens_by_day`` DIRECTLY rather than going through a
+        whole event: ``_copy_usage_bucket`` is shared with
+        ``_accept_hosts_payload``, so a module-level patch would trip on the
+        family payload and prove nothing about the sibling path.
+        """
+
+        def boom(_bucket):
+            raise AssertionError("cardinality must be checked before copying values")
+
+        monkeypatch.setattr(aggregator, "_copy_usage_bucket", boom)
+        models = {f"gpt-{i}": _usage(0) for i in range(aggregator.MAX_HOST_MODELS_PER_DAY + 1)}
+        copied, reason = aggregator._accept_tokens_by_day(
+            {"2026-04-20": {**_usage(5), "by_model": models}},
+            {"codex": {"2026-04-20": _usage(5)}},
+            ("2026-04-20",),
+        )
+        assert copied == {}
+        assert reason == "unsupported_schema"
+
+    def test_bad_model_id_is_rejected_before_its_bucket_is_copied(self, monkeypatch):
+        """Per-KEY validation also precedes the per-value copy."""
+
+        def boom(_bucket):
+            raise AssertionError("model id must be validated before copying its bucket")
+
+        monkeypatch.setattr(aggregator, "_copy_usage_bucket", boom)
+        copied, reason = aggregator._accept_tokens_by_day(
+            {"2026-04-20": {**_usage(5), "by_model": {"": _usage(5)}}},
+            {"codex": {"2026-04-20": _usage(5)}},
+            ("2026-04-20",),
+        )
+        assert copied == {}
+        assert reason == "unsupported_schema"
+
+    def test_day_count_mismatch_short_circuits_before_the_day_loop(self, monkeypatch):
+        """The outer loop is bounded the same way the inner one is.
+
+        `active_days` is already capped at MAX_BY_DAY_DAYS by the `hosts`
+        acceptor, and the two day sets must match exactly, so unequal sizes
+        can never reconcile. Reject on the count and the loop never runs over
+        a peer-chosen number of days.
+        """
+
+        def boom(_bucket):
+            raise AssertionError("day count must be checked before the loop")
+
+        monkeypatch.setattr(aggregator, "_copy_day_bucket", boom)
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+        sibling = {
+            f"2026-04-{d:02d}": {**_usage(1), "by_model": {"gpt-5": _usage(1)}}
+            for d in range(1, 20)
+        }
+        ev = _host_event("dev-a", self.TS, hosts=hosts, extra={"tokens_by_day": sibling})
+        row = _accepted(ev)
+        assert row.detail == "absent"
+        assert row.detail_reason == "active_days_mismatch"
+        assert row.lifetime_by_family["codex"], "the row itself still survives"
+
     def test_partial_by_model_is_accepted_because_the_writer_caps_it(self):
         """``by_model`` reconciles with ``<=``, not ``==``.
 

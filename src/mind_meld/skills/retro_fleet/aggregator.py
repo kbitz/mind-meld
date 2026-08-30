@@ -1362,6 +1362,14 @@ def _copy_day_bucket(bucket: object) -> dict | None:
 
     Exact key-set plus ``_host_counter_ok``. Does NOT use
     ``token_usage.merge_by_model``: that helper is for trusted local data.
+
+    **Bound before you copy.** ``by_model`` is a peer-chosen map of
+    peer-chosen keys, so its cardinality is checked BEFORE the copy loop and
+    each id is validated BEFORE its bucket is copied. Copying first and
+    rejecting after does the attacker's allocation for them: a row with a
+    million model keys would be fully materialized only to be discarded one
+    line later. The caller keeps the row-WIDE distinct check, which needs
+    cross-day state this function does not have.
     """
     if not isinstance(bucket, dict):
         return None
@@ -1377,8 +1385,12 @@ def _copy_day_bucket(bucket: object) -> dict | None:
     by_model_raw = bucket["by_model"]
     if not isinstance(by_model_raw, dict):
         return None
+    if len(by_model_raw) > MAX_HOST_MODELS_PER_DAY:
+        return None
     copied_models: dict[str, dict[str, int]] = {}
     for model, usage in by_model_raw.items():
+        if not _host_model_id_ok(model):
+            return None
         copied = _copy_usage_bucket(usage)
         if copied is None:
             return None
@@ -1419,27 +1431,30 @@ def _accept_tokens_by_day(
     """
     if not isinstance(raw, dict):
         return {}, "unsupported_schema"
+    # Bound the OUTER loop before entering it, for the same reason
+    # `_copy_day_bucket` bounds the inner one. The day sets must match exactly
+    # and both maps have unique canonical keys, so unequal sizes can never
+    # reconcile -- checking that up front is exact, O(1), and caps the work at
+    # `MAX_BY_DAY_DAYS` days (`_accept_hosts_payload` already bounded
+    # `active_days`) instead of at whatever a peer chose to send.
+    if len(raw) != len(active_days):
+        return {}, "active_days_mismatch"
     copied: dict[str, dict] = {}
     distinct: set[str] = set()
     for day_key, bucket in raw.items():
         day = _canonical_day_key(day_key)
         if day is None:
             return {}, "invalid_day"
+        # Per-day cardinality and model-id validity are enforced INSIDE
+        # `_copy_day_bucket`, before it allocates. Only the row-wide distinct
+        # count is left here, because it is the one bound needing cross-day
+        # state.
         day_copy = _copy_day_bucket(bucket)
         if day_copy is None:
             return {}, "unsupported_schema"
-        by_model = day_copy["by_model"]
-        if len(by_model) > MAX_HOST_MODELS_PER_DAY:
+        distinct.update(day_copy["by_model"])
+        if len(distinct) > MAX_HOST_MODELS_PER_ROW:
             return {}, "unsupported_schema"
-        checked: dict[str, dict[str, int]] = {}
-        for model, usage in by_model.items():
-            if not _host_model_id_ok(model):
-                return {}, "unsupported_schema"
-            distinct.add(model)
-            if len(distinct) > MAX_HOST_MODELS_PER_ROW:
-                return {}, "unsupported_schema"
-            checked[model] = usage
-        day_copy["by_model"] = checked
         copied[day] = day_copy
     if set(copied) != set(active_days):
         return {}, "active_days_mismatch"

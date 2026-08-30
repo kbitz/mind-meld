@@ -461,6 +461,14 @@ does not).
   breadcrumb on every 7d retro until retention reaped the file. Window-scoping
   the rejects themselves is impossible for a `naive_timestamp` reject, where the
   timestamp IS the malformed field.
+- **Bound a peer-controlled map BEFORE copying it.** `_copy_day_bucket` checks
+  `by_model`'s cardinality and validates each model id *before* allocating the
+  copy, and `_accept_tokens_by_day` rejects on day COUNT before entering the
+  day loop (the two day sets must match exactly and both have unique canonical
+  keys, so unequal sizes can never reconcile — the check is exact and O(1)).
+  Copying first and rejecting one line later does the sender's allocation for
+  them. Only the row-wide distinct-model count stays in the caller, because it
+  is the one bound that needs cross-day state. Found by Greptile on PR #150.
 - **The sibling gets TWO reconciliations, and they are different predicates on
   purpose.** A day's four flat counters must EQUAL the sum of that day's family
   buckets across all families — `_add_usage` builds both views in one call, so
