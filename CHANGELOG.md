@@ -2,13 +2,13 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.12.49] - 2026-08-28
+## [0.12.49] - 2026-08-30
 
 **Host usage now ships per-model per-day buckets on the wire, derived from the existing v0.12.48 cache with no re-walk.** Family totals in `hosts` are unchanged; the new `tokens_by_day` sibling is the shape Claude's session snapshot already uses. The retro card stays family-only this release — per-model data reaches `mm retro-fleet --dump-host-usage` and local counts on `mm diag`, not the card (that is Group 36). Until every Mac is on ≥ v0.12.49 and has pushed once, `--dump-host-usage` carries per-model detail for some machines and not others — a peer on an older mm sends no sibling at all, and its row is still accepted. `## Agent activity` numbers do NOT diverge: the new quality rank (valid > absent > invalid) sits strictly below the existing tie-break key, which already contains `hosts` verbatim, so it can only re-break ties between rows whose family totals are identical.
 
 ### Added
 
-- **`tokens_by_day` on `host-usage-snapshot`.** Additive, no schema bump. Omitted iff `hosts` is empty; otherwise always present, so its absence is the mixed-fleet version discriminator. All three readers emit it from the shared reduction. Older peers still accept; a malformed sibling is dropped and the family row kept, with a detail status and a fix clause in the dump. A day's totals must EQUAL the family totals for that day; its per-model values must be bounded by them — which is what stops a peer attributing more tokens to one model than the whole day recorded.
+- **`tokens_by_day` on `host-usage-snapshot`.** Additive, no schema bump. Omitted iff `hosts` is empty (or, defensively, when no per-model data was captured); otherwise always present, so its absence is the mixed-fleet version discriminator. All three readers emit it from the shared reduction. Older peers still accept; a malformed sibling is dropped and the family row kept, with a detail status and a fix clause in the dump. A day's totals must EQUAL the family totals for that day; its per-model values must be bounded by them — which is what stops a peer attributing more tokens to one model than the whole day recorded.
 - **`--dump-host-usage` is in `mm retro-fleet --help` and the README command table.** It was the subsystem's only forensic tool and was hidden twice. The aggregator's argparse usage line still suppresses it so a novice's window-parse error does not advertise a maintainer flag.
 - **Local per-model counts on `mm diag`.** Cache-only, passphrase-free, no host store. Distinct from the wire reader. Present in both `mm diag` and `mm diag --json`.
 - **Writer-side caps on `by_model`,** mirroring the acceptor's, so a machine that legitimately used more models than the protocol allows still ships a row instead of losing its whole sibling on every peer. The breakdown is capped; the day totals are not, so `day_total - sum(by_model)` is usage not attributed to a shown model. A per-model consumer must carry that residual.
@@ -22,6 +22,11 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Fixed
 
+- **Long-history Macs would have lost every current-day model.** The by-model cap ran before the 90-day window trim, and the host readers aggregate the whole local corpus with no time bound — so models on days about to be discarded outranked today's and emptied its breakdown completely. Silent, and worst on exactly the machines whose per-model data is most worth having. The cap now runs after the trim.
+- **A model id containing a newline could forge a line in `mm diag`.** The plain-text host-usage block is what users paste into a support chat; `safe_str` strips terminal escapes and Rich markup but not newlines, so `gpt-5\ngrok cache: ok` rendered as an extra, fake field. Model ids on that surface now go through the same conservative whitelist the retro renderer uses.
+- **`--dump-host-usage` aliases are stable across days.** Two model ids that sanitize to the same key were disambiguated per-day off insertion order, so one alias could mean different models on different days — per-day movement that never happened. Aliases are now assigned once per row over the sorted ids.
+- **Snapshot selection is a total order.** Two rows for one device with the same timestamp and the same family totals could pick a different per-model sibling, or report a different drop reason and remedy, depending on file order. Both now tie-break deterministically, so two Macs reading one synced corpus dump the same thing.
+- A writer that captured no per-model data no longer publishes `tokens_by_day: {}` beside populated `active_days` — the one shape every peer rejects, under a remedy telling the user to upgrade an already-current mm. It omits the field instead.
 - The `## Agent activity` footnote no longer claims a resumed session restates its whole total onto its last-active day. That sentence was byte-identical to pre-v0.12.48, four lines under the header that release corrected. It now scopes the caveat to the machines it still applies to: a peer on an older mm reports last-touch totals, so **its** token columns overstate the recent edge, and **its** day counts are lower bounds. The header calls these counters per-turn, which is only true from v0.12.48 forward.
 
 ## [0.12.48] - 2026-08-28
