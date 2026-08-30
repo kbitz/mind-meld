@@ -1746,19 +1746,18 @@ class TestOpenCodeUsage:
 
         result = hu.read_opencode_usage(root)
 
-        assert result == hu.HostUsageResult(
-            {
-                "codex": {
-                    "2025-08-15": {
-                        "input": 120,
-                        "cache_create": 10,
-                        "cache_read": 20,
-                        "output": 42,
-                    }
+        assert result.complete is True
+        assert result.hosts == {
+            "codex": {
+                "2025-08-15": {
+                    "input": 120,
+                    "cache_create": 10,
+                    "cache_read": 20,
+                    "output": 42,
                 }
-            },
-            complete=True,
-        )
+            }
+        }
+        assert result.tokens_by_day["2025-08-15"]["by_model"]["gpt-5"]["input"] == 120
         _, opencode_cache = isolated_adapter_caches
         assert opencode_cache.exists()
         assert opencode_cache.stat().st_mode & 0o777 == 0o600
@@ -2327,3 +2326,145 @@ class TestCodexWireShape:
         for days in result.hosts.values():
             for bucket in days.values():
                 assert set(bucket) == set(tu.TOKEN_FIELDS)
+        assert result.tokens_by_day
+        for day, bucket in result.tokens_by_day.items():
+            assert "by_model" in bucket
+            assert set(bucket) == set(tu.TOKEN_FIELDS) | {"by_model"}
+
+
+class TestHostUsageBuckets:
+    def test_add_usage_updates_both_views_atomically(self) -> None:
+        buckets = hu.HostUsageBuckets()
+        hu._add_usage(
+            buckets,
+            "2026-08-15",
+            "gpt-5",
+            {"input": 10, "cache_create": 1, "cache_read": 2, "output": 3},
+        )
+        hu._add_usage(
+            buckets,
+            "2026-08-15",
+            "grok-4",
+            {"input": 4, "cache_create": 0, "cache_read": 0, "output": 1},
+        )
+        assert buckets.by_family["codex"]["2026-08-15"]["input"] == 10
+        assert buckets.by_family["grok"]["2026-08-15"]["input"] == 4
+        day = buckets.by_day["2026-08-15"]
+        assert day["input"] == 14
+        assert day["by_model"]["gpt-5"]["input"] == 10
+        assert day["by_model"]["grok-4"]["input"] == 4
+
+    def test_zero_transition_still_creates_a_day_key(self) -> None:
+        buckets = hu.HostUsageBuckets()
+        hu._add_usage(
+            buckets,
+            "2026-08-15",
+            "gpt-5",
+            {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
+        )
+        assert "2026-08-15" in buckets.by_family["codex"]
+        assert "2026-08-15" in buckets.by_day
+        assert buckets.by_day["2026-08-15"]["by_model"]["gpt-5"]["input"] == 0
+
+    def test_codex_reader_emits_per_model(self, isolated_cache: Path, tmp_path: Path) -> None:
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-models.jsonl",
+            [_context("gpt-5-codex", turn="t"), _token(40, last=40)],
+        )
+        result = hu.read_codex_usage(root)
+        assert result.complete is True
+        assert "gpt-5-codex" in result.tokens_by_day["2026-08-15"]["by_model"]
+        assert (
+            result.tokens_by_day["2026-08-15"]["input"]
+            == result.hosts["codex"]["2026-08-15"]["input"]
+        )
+
+    def test_grok_two_model_fixture_emits_per_model(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "two-model"
+        shutil.copytree(FIXTURES / "grok" / "two-model", root)
+        result = hu.read_grok_usage(root, consented=True)
+        assert result.complete is True
+        models = result.tokens_by_day["2026-08-14"]["by_model"]
+        assert set(models) == {"grok-4", "grok-3"}
+        assert (
+            result.hosts["grok"]["2026-08-14"]["input"]
+            == models["grok-4"]["input"] + models["grok-3"]["input"]
+        )
+
+    def test_opencode_reader_emits_per_model(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "opencode"
+        _write_opencode_database(root, [_opencode_message()])
+        result = hu.read_opencode_usage(root)
+        assert result.complete is True
+        assert "gpt-5" in result.tokens_by_day["2025-08-15"]["by_model"]
+
+    def test_per_model_view_is_derived_from_warm_cache_without_reread(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """v0.12.48 cache already interns models; this Track must not re-walk."""
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-warm.jsonl",
+            [_context("gpt-5-codex", turn="t"), _token(50, last=50)],
+        )
+        first = hu.read_codex_usage(root)
+        assert first.complete is True
+        assert "gpt-5-codex" in first.tokens_by_day["2026-08-15"]["by_model"]
+
+        def should_not_reread(*args: object, **kwargs: object) -> object:
+            raise AssertionError("warm v0.12.48 cache must not reopen the jsonl")
+
+        monkeypatch.setattr(hu, "_read_full_rollout", should_not_reread)
+        monkeypatch.setattr(hu, "_resume_rollout", should_not_reread)
+        second = hu.read_codex_usage(root)
+        assert second.complete is True
+        assert second.tokens_by_day == first.tokens_by_day
+        assert second.hosts == first.hosts
+
+    def test_historical_day_bucket_is_stable_across_two_snapshots(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        path = _write_rollout(
+            root,
+            "rollout-stable.jsonl",
+            [
+                _context("gpt-5-codex", turn="t"),
+                _token(20, last=20, timestamp="2026-08-14T12:00:00Z"),
+            ],
+        )
+        first = hu.read_codex_usage(root)
+        day = "2026-08-14"
+        first_input = first.tokens_by_day[day]["input"]
+        with path.open("ab") as fp:
+            fp.write(
+                json.dumps(_token(30, last=10, timestamp="2026-08-15T12:00:00Z")).encode("utf-8")
+                + b"\n"
+            )
+        second = hu.read_codex_usage(root)
+        assert second.tokens_by_day[day]["input"] == first_input
+        assert "2026-08-15" in second.tokens_by_day
+
+    def test_resuming_a_session_does_not_erase_a_prior_active_day(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-resume.jsonl",
+            [
+                _context("gpt-5-codex", turn="t"),
+                _token(20, last=20, timestamp="2026-08-14T12:00:00Z"),
+                _token(25, last=5, timestamp="2026-08-16T12:00:00Z"),
+            ],
+        )
+        result = hu.read_codex_usage(root)
+        assert "2026-08-14" in result.tokens_by_day
+        assert "2026-08-16" in result.tokens_by_day

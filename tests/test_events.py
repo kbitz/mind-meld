@@ -1533,11 +1533,31 @@ class TestMakeHostUsageSnapshot:
             },
         }
 
+    def _sibling_for(self, hosts: dict) -> dict:
+        """Reconciling sibling for `hosts` — what a real reader always returns.
+
+        Tests must not hand-build the family map alone: a writer given no
+        per-model data now OMITS the field (it is the one shape peers reject),
+        so a sibling-less call no longer models the production wire row.
+        """
+        out: dict = {}
+        for days in hosts.values():
+            for day, usage in days.items():
+                bucket = out.setdefault(day, {**_u(0), "by_model": {}})
+                for f in ("input", "cache_create", "cache_read", "output"):
+                    bucket[f] += usage[f]
+                model = bucket["by_model"].setdefault("gpt-5", _u(0))
+                for f in ("input", "cache_create", "cache_read", "output"):
+                    model[f] += usage[f]
+        return out
+
     def test_exact_envelope_and_fields(self):
+        hosts = self._hosts()
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            hosts=self._hosts(),
+            hosts=hosts,
             token_sources=_SRC,
+            tokens_by_day=self._sibling_for(hosts),
             ts=datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
         )
         assert set(ev) == {
@@ -1548,6 +1568,7 @@ class TestMakeHostUsageSnapshot:
             "token_sources",
             "hosts",
             "active_days",
+            "tokens_by_day",
         }
         assert ev["type"] == "host-usage-snapshot"
         assert ev["device"] == "dev-a"
@@ -1707,6 +1728,241 @@ class TestMakeHostUsageSnapshot:
             degraded_sources=("grok",),
         )
         assert "degraded_sources" not in ev
+
+    def test_tokens_by_day_omitted_when_hosts_empty(self):
+        ev = events.make_host_usage_snapshot(device="dev-a", token_sources=_SRC, hosts={})
+        assert "tokens_by_day" not in ev
+
+    def test_tokens_by_day_always_present_when_hosts_nonempty(self):
+        hosts = self._hosts()
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts=hosts,
+            tokens_by_day={
+                day: {**usage, "by_model": {"gpt-5": dict(usage)}}
+                for days in hosts.values()
+                for day, usage in days.items()
+            },
+        )
+        assert "tokens_by_day" in ev
+        # Not merely present: the day set must match, or every peer drops it.
+        assert set(ev["tokens_by_day"]) == set(ev["active_days"])
+
+    def test_one_keep_set_caps_hosts_and_tokens_by_day(self):
+        hosts = {
+            "codex": {f"2026-01-{d:02d}": _u(1) for d in range(1, 32)},
+        }
+        sibling = {
+            f"2026-01-{d:02d}": {**_u(1), "by_model": {"gpt-5": _u(1)}} for d in range(1, 32)
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts=hosts,
+            tokens_by_day=sibling,
+            max_days=5,
+        )
+        assert ev["active_days"] == [
+            "2026-01-27",
+            "2026-01-28",
+            "2026-01-29",
+            "2026-01-30",
+            "2026-01-31",
+        ]
+        assert set(ev["tokens_by_day"]) == set(ev["active_days"])
+        assert set(ev["hosts"]["codex"]) == set(ev["active_days"])
+
+    def test_cap_at_one_day_with_sparse_families(self):
+        hosts = {
+            "codex": {"2026-08-12": _u(1)},
+            "grok": {"2026-01-01": _u(5)},
+        }
+        sibling = {
+            "2026-08-12": {**_u(1), "by_model": {"gpt-5": _u(1)}},
+            "2026-01-01": {**_u(5), "by_model": {"grok-4": _u(5)}},
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts=hosts,
+            tokens_by_day=sibling,
+            max_days=1,
+        )
+        assert ev["active_days"] == ["2026-08-12"]
+        assert set(ev["hosts"]) == {"codex"}
+        assert set(ev["tokens_by_day"]) == {"2026-08-12"}
+
+    def test_tokens_by_day_is_copied_three_levels_deep(self):
+        sibling = {
+            "2026-08-15": {
+                **_u(10),
+                "by_model": {"gpt-5": _u(10)},
+            }
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts={"codex": {"2026-08-15": _u(10)}},
+            tokens_by_day=sibling,
+        )
+        sibling["2026-08-15"]["by_model"]["gpt-5"]["input"] = 999_999
+        assert ev["tokens_by_day"]["2026-08-15"]["by_model"]["gpt-5"]["input"] == 10
+
+    def test_writer_model_caps_mirror_the_acceptor(self):
+        """Drift guard for a constant that CANNOT be shared.
+
+        ``events`` must not import the skills package, so the writer caps are
+        a hand-copy of the acceptor's. Let them drift and a truthful machine
+        emits a sibling every peer drops, under a remedy that tells the user
+        to upgrade an already-current mm.
+        """
+        from mind_meld.skills.retro_fleet import aggregator
+
+        assert events.MAX_HOST_MODELS_PER_DAY == aggregator.MAX_HOST_MODELS_PER_DAY
+        assert events.MAX_HOST_MODELS_PER_ROW == aggregator.MAX_HOST_MODELS_PER_ROW
+
+    def test_writer_caps_by_model_per_day_and_keeps_the_day_total_whole(self):
+        n = events.MAX_HOST_MODELS_PER_DAY + 5
+        # Ascending totals, so the models the cap must KEEP are the ones added
+        # last -- a naive `[:cap]` over insertion order would keep the wrong 32.
+        by_model = {f"m{i:03d}": _u(i + 1) for i in range(n)}
+        total = sum(i + 1 for i in range(n))
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts={"codex": {"2026-08-15": _u(total)}},
+            tokens_by_day={"2026-08-15": {**_u(total), "by_model": by_model}},
+        )
+        capped = ev["tokens_by_day"]["2026-08-15"]
+        assert len(capped["by_model"]) == events.MAX_HOST_MODELS_PER_DAY
+        # Day totals are NOT pruned to match: the residual is the contract.
+        assert capped["input"] == total
+        assert sum(u["input"] for u in capped["by_model"].values()) < total
+        assert set(capped["by_model"]) == {f"m{i:03d}" for i in range(5, n)}
+
+    def test_writer_caps_distinct_models_across_the_whole_row(self):
+        per_day = 20
+        days = ["2026-08-13", "2026-08-14", "2026-08-15", "2026-08-16"]
+        hosts: dict = {"codex": {}}
+        sibling: dict = {}
+        idx = 0
+        for day in days:
+            models = {}
+            for _ in range(per_day):
+                models[f"m{idx:03d}"] = _u(idx + 1)
+                idx += 1
+            day_total = sum(u["input"] for u in models.values())
+            hosts["codex"][day] = _u(day_total)
+            sibling[day] = {**_u(day_total), "by_model": models}
+
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=hosts, tokens_by_day=sibling
+        )
+        distinct = {m for b in ev["tokens_by_day"].values() for m in b["by_model"]}
+        assert len(distinct) == events.MAX_HOST_MODELS_PER_ROW
+        assert all(
+            len(b["by_model"]) <= events.MAX_HOST_MODELS_PER_DAY
+            for b in ev["tokens_by_day"].values()
+        )
+        for day in days:
+            assert ev["tokens_by_day"][day]["input"] == hosts["codex"][day]["input"]
+
+    def test_model_cap_selection_is_deterministic_on_equal_totals(self):
+        """Two machines with the same corpus must emit the same row."""
+        n = events.MAX_HOST_MODELS_PER_DAY + 3
+        forward = {f"m{i:03d}": _u(7) for i in range(n)}
+        reverse = {f"m{i:03d}": _u(7) for i in reversed(range(n))}
+        rows = [
+            events.make_host_usage_snapshot(
+                device="dev-a",
+                token_sources=_SRC,
+                hosts={"codex": {"2026-08-15": _u(7 * n)}},
+                tokens_by_day={"2026-08-15": {**_u(7 * n), "by_model": order}},
+            )
+            for order in (forward, reverse)
+        ]
+        left, right = (r["tokens_by_day"]["2026-08-15"]["by_model"] for r in rows)
+        assert left == right
+        assert set(left) == {f"m{i:03d}" for i in range(events.MAX_HOST_MODELS_PER_DAY)}
+
+    def test_trimmed_days_cannot_starve_the_kept_days_models(self):
+        """The by-model cap must run AFTER the day trim.
+
+        Readers aggregate the WHOLE local corpus with no time bound, so a
+        long-history machine carries models on days the window is about to
+        discard. Cap first and those models outrank the current day's, whose
+        `by_model` empties completely — worst on exactly the machines whose
+        per-model data is most worth having. Found by Codex adversarial review.
+        """
+        hosts: dict = {"codex": {}}
+        sibling: dict = {}
+        idx = 0
+        # Each stale day sits UNDER the per-day cap, so only the ROW cap bites.
+        for day_n in range(1, 4):
+            day = f"2020-01-{day_n:02d}"
+            models = {}
+            for _ in range(events.MAX_HOST_MODELS_PER_DAY):
+                models[f"stale-{idx:03d}"] = _u(100)
+                idx += 1
+            hosts["codex"][day] = _u(100 * events.MAX_HOST_MODELS_PER_DAY)
+            sibling[day] = {**_u(100 * events.MAX_HOST_MODELS_PER_DAY), "by_model": models}
+        hosts["codex"]["2026-08-15"] = _u(5)
+        sibling["2026-08-15"] = {**_u(5), "by_model": {"gpt-5-codex": _u(5)}}
+
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts=hosts,
+            tokens_by_day=sibling,
+            max_days=1,
+        )
+        assert ev["active_days"] == ["2026-08-15"]
+        assert list(ev["tokens_by_day"]["2026-08-15"]["by_model"]) == ["gpt-5-codex"]
+
+    def test_discarded_days_are_never_materialized(self):
+        """Copy only the retained days, not all of them then filter.
+
+        The readers aggregate the whole corpus with no time bound, so copying
+        first deep-copies every model on every day the window is about to
+        discard — allocation the row can never use, paid inside a 250ms
+        autopush budget. Found by Codex adversarial review (second pass).
+        """
+        sibling = {
+            "2020-01-01": {**_u(1), "by_model": {f"old-{i}": _u(1) for i in range(20)}},
+            "2026-08-15": {**_u(5), "by_model": {"gpt-5": _u(5)}},
+        }
+        copied = events._copy_tokens_by_day(sibling, {"2026-08-15"})
+        assert set(copied) == {"2026-08-15"}
+        # Not merely filtered afterwards — the discarded day's buckets were
+        # never built, so nothing aliases the caller's input either.
+        assert copied["2026-08-15"]["by_model"] is not sibling["2026-08-15"]["by_model"]
+
+    def test_empty_sibling_beside_nonempty_hosts_is_omitted_not_published(self):
+        """`tokens_by_day: {}` with populated `active_days` is the one shape
+        every peer drops as `active_days_mismatch`, under a remedy that blames
+        the writing machine's mm version. Absence is the honest signal."""
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=self._hosts()
+        )
+        assert "tokens_by_day" not in ev
+        assert ev["active_days"], "the row itself still carries family totals"
+
+    def test_zero_only_day_survives_the_writer(self):
+        sibling = {
+            "2026-08-15": {
+                **_u(0),
+                "by_model": {"gpt-5": _u(0)},
+            }
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts={"codex": {"2026-08-15": _u(0)}},
+            tokens_by_day=sibling,
+        )
+        assert ev["active_days"] == ["2026-08-15"]
+        assert ev["tokens_by_day"]["2026-08-15"]["by_model"]["gpt-5"]["input"] == 0
 
 
 class TestWriteOrderTransactionalPin:

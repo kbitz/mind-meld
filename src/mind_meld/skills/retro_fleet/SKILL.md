@@ -81,9 +81,11 @@ support:
    models` family. `Claude (via agents)` is a legal row — that is OpenCode
    running a Claude model — and it means something different from the `MODELS`
    block's `Claude` row.
-2. **`seen on N days` is a lower bound, not a count.** Resuming a session
-   moves its whole total onto a later day and erases the earlier key, so a
-   week of daily use can report a single day. It can only ever understate.
+2. **`seen on N days` is a lower bound, not a count.** Track 32A made every
+   reader per-turn, so resuming a session no longer moves its total onto a
+   later day. What remains: a peer on an older mm still publishes the old
+   shape, and a machine that never pushed in a window contributes no days.
+   It can only ever understate.
 3. **An absent or empty block is not zero.** The body always names the cause
    (no snapshot yet, no reader contributed, all snapshots stale, nothing active)
    with a remedy. An empty contributor list can mean no source is enabled or
@@ -324,8 +326,10 @@ section is omitted when there is nothing to surface):
   Enable one of those sources if needed, then run `mm push`; do not report a
   consent failure as a fact.
 - `No agent activity observed in this window. Counts are lower bounds…` —
-  readers ran and found nothing dated inside the window. Report it as
-  observed-nothing, not as zero usage.
+  readers ran and found nothing dated inside the window. The bound is
+  because a machine that has not pushed contributes no days, and a peer on
+  an older mm still reports last-touch totals rather than per-turn ones.
+  Report it as observed-nothing, not as zero usage.
 - `Agent-log snapshots all predate this window — run mm push…` — every
   accepted snapshot is older than the window, so no current rhythm exists.
 - `N machine(s) have no agent-log snapshot (unknown, not zero)…` — those
@@ -423,7 +427,11 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
   days as sessions, prompts, hours, or intensity.
 - **It does not attribute agent-log activity to a specific agent.** The rows
   are model families. The body table names which readers ran, per machine;
-  that is the only reader-level claim the data supports.
+  that is the only reader-level claim the data supports. Per-model host
+  totals exist on the wire as of v0.12.49 and reach
+  `mm retro-fleet --dump-host-usage`, **not the card**. The card stays
+  family-only until Group 36. Do not narrate per-model host data as spend,
+  market share, or a cross-machine total.
 - **It does not treat a missing `AGENT LOGS` block as zero activity.** The
   block is omitted only when no snapshot has ever been accepted, and the body
   always names the cause. A stale `mm` also produces no block — Step 0

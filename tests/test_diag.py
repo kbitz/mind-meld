@@ -110,6 +110,8 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "complete_once",
         "usage_less_skipped",
         "cache_state",
+        "model_count",
+        "models",
     }
 
 
@@ -126,6 +128,10 @@ def test_diag_host_usage_does_not_open_the_host_store(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_usage"]["grok"]["cache_state"] in {"missing", "ok", "unreadable"}
+    grok = payload["host_usage"]["grok"]
+    assert "model_count" in grok
+    assert isinstance(grok["models"], list)
+    assert "model_count" in payload["host_usage"]["codex"]
 
 
 def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
@@ -184,6 +190,124 @@ def test_diag_grok_consent_excludes_an_unresolved_explicit_source(tmp_path, monk
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_usage"]["grok"]["consented"] is False
+
+
+def test_diag_plain_text_names_cached_models(tmp_path, monkeypatch):
+    """v0.12.49 promises "local per-model counts on mm diag". The plain-text
+    block is the surface a user pastes into support; a JSON-only field does
+    not discharge that."""
+    _setup(tmp_path, monkeypatch)
+    host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    host_usage.GROK_CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": host_usage.CACHE_VERSION,
+                "complete_once": True,
+                "usage_less_skipped": 0,
+                "files": {
+                    "a": {
+                        "dev": 1,
+                        "ino": 2,
+                        "size": 3,
+                        "mtime_ns": 4,
+                        "head_len": 0,
+                        "tail_len": 0,
+                        "offset": 3,
+                        "head": "",
+                        "tail": "",
+                        "turns": [
+                            {
+                                "key": "k" * 64,
+                                "day": "2026-08-15",
+                                "model": "grok-4",
+                                "usage": {
+                                    "input": 1,
+                                    "cache_create": 0,
+                                    "cache_read": 0,
+                                    "output": 1,
+                                },
+                            }
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["diag"])
+
+    assert result.exit_code == 0, result.output
+    assert "grok models cached:" in result.output
+    assert "grok-4" in result.output
+    assert "codex models cached:" in result.output
+
+
+def test_diag_models_line_branches():
+    """`_diag_models_line` is peer-log-derived text on a support surface.
+
+    The COUNT stays exact while the list truncates, so a capped render can
+    never be read as the whole set. Non-int / non-list come straight off a
+    JSON cache a host wrote, so they are shapes, not hypotheticals.
+    """
+    from mind_meld.cli import _DIAG_MODELS_SHOWN, _diag_models_line
+
+    assert _diag_models_line({}) == "0"
+    assert _diag_models_line({"model_count": 0, "models": []}) == "0"
+    assert (
+        _diag_models_line({"model_count": 2, "models": ["gpt-5", "grok-4"]}) == "2 (gpt-5, grok-4)"
+    )
+
+    n = _DIAG_MODELS_SHOWN + 3
+    line = _diag_models_line({"model_count": n, "models": [f"m{i}" for i in range(n)]})
+    assert line.startswith(f"{n} (")
+    assert "+3 more" in line
+    assert line.count(",") == _DIAG_MODELS_SHOWN  # 5 separators + the "+N more" comma
+
+    # Peer-written cache shapes: never raise, never render a bogus count.
+    assert _diag_models_line({"model_count": None, "models": None}) == "0"
+    assert _diag_models_line({"model_count": True, "models": ["x"]}) == "0"
+    assert _diag_models_line({"model_count": 1, "models": "not-a-list"}) == "1"
+    # Terminal escapes are stripped, not passed through to the console.
+    assert "\x1b" not in _diag_models_line({"model_count": 1, "models": ["a\x1b[31mb"]})
+    # A newline would forge an extra field into a block users paste into
+    # support chats; `safe_str` alone leaves it. Found by Codex adversarial
+    # review. Same whitelist `aggregator._safe_short` applies to the same
+    # class of string — the two surfaces must not disagree.
+    forged = _diag_models_line({"model_count": 1, "models": ["gpt-5\ngrok cache:      ok"]})
+    assert "\n" not in forged
+    assert "\r" not in forged
+
+
+def test_diag_json_reports_cached_codex_models(tmp_path, monkeypatch):
+    """The Codex half of the model diag, with a populated cache.
+
+    `_diag_model_ids` reads the interned `models` table v0.12.48 already
+    wrote, which is what makes this field free of a re-walk.
+    """
+    _setup(tmp_path, monkeypatch)
+    host_usage.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    host_usage.CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": host_usage.CACHE_VERSION,
+                "files": {
+                    "a": {"models": ["gpt-5-codex", "gpt-5"], "states": []},
+                    "b": {"models": ["gpt-5"], "states": []},
+                    "c": {"no_ledger": True},
+                    "d": "not-a-dict",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["diag", "--json"])
+
+    assert result.exit_code == 0, result.output
+    codex = json.loads(result.stdout)["host_usage"]["codex"]
+    assert codex["model_count"] == 2, "deduped across files"
+    assert codex["models"] == ["gpt-5", "gpt-5-codex"], "sorted, not insertion order"
 
 
 # ── Plain text mode ──────────────────────────────────────────────────────

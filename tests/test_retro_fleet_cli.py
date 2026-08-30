@@ -86,6 +86,25 @@ class TestRetroFleetCommand:
         result = self._runner().invoke(app, ["retro-fleet", "7d"])
         assert result.exit_code == 2
 
+    def test_dump_host_usage_visible_in_command_help(self):
+        """v0.12.49 un-hid the flag; this is the pin, and the exact inverse of
+        the ``--no-save`` assertion below.
+
+        STRIP ANSI FIRST. Rich renders a colored option name as several
+        separately-styled runs — ``ESC[1;36m-ESC[0mESC[1;36m-dumpESC[0m
+        ESC[1;36m-host-usageESC[0m`` — so the raw token is not in
+        ``result.output`` at all when color is on. It is on in GitHub Actions
+        and off on a piped local run, which is precisely the shape that passes
+        for the author and fails in CI.
+        """
+        from mind_meld.cli import app
+
+        result = self._runner().invoke(app, ["retro-fleet", "--help"])
+        assert result.exit_code == 0
+        plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.output)
+        options = plain.rsplit("Options", 1)[-1]
+        assert "--dump-host-usage" in options
+
     def test_command_visible_in_help(self):
         """The command is intentionally NOT hidden — matches the
         ``autopull`` / ``autopush`` / ``install-skills`` precedent of

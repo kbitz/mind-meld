@@ -167,6 +167,8 @@ class HostUsageCapture:
     """
     invoked: bool = True
     """False when the sweep expired before calling any reader."""
+    tokens_by_day: dict[str, token_usage.DayBucket] | None = None
+    """Per-model day buckets, same work as ``hosts``. None iff ``hosts`` is None."""
 
     @property
     def complete(self) -> bool:
@@ -322,6 +324,7 @@ def _capture_host_usage(
     deadline behavior are table-testable without touching a real host store.
     """
     merged: dict[str, dict[str, token_usage.Usage]] = {}
+    merged_by_day: dict[str, token_usage.DayBucket] = {}
     contributed: list[str] = []
     dropped: list[tuple[str, str]] = []
     remaining = list(readers)
@@ -336,6 +339,7 @@ def _capture_host_usage(
                         merged,
                         token_sources=tuple(contributed),
                         dropped=tuple(dropped),
+                        tokens_by_day=merged_by_day,
                     )
                 first_reader, first_reason = dropped[0]
                 return HostUsageCapture(
@@ -369,9 +373,14 @@ def _capture_host_usage(
             dropped.append((name, reason))
             continue
         contributed.append(name)
-        _merge_host_usage_maps(merged, result.hosts)
+        _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
     if contributed or not dropped:
-        return HostUsageCapture(merged, token_sources=tuple(contributed), dropped=tuple(dropped))
+        return HostUsageCapture(
+            merged,
+            token_sources=tuple(contributed),
+            dropped=tuple(dropped),
+            tokens_by_day=merged_by_day,
+        )
     first_reader, first_reason = dropped[0]
     return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
 
@@ -379,12 +388,15 @@ def _capture_host_usage(
 def _merge_host_usage_maps(
     target: dict[str, dict[str, token_usage.Usage]],
     source: dict[str, dict[str, token_usage.Usage]],
+    target_by_day: dict[str, token_usage.DayBucket],
+    source_by_day: dict[str, token_usage.DayBucket] | None,
 ) -> None:
     """Add a completed reader's buckets to ``target`` without aliasing it.
 
     Codex and OpenCode both classify into the ``codex`` family, so a collision
-    on (family, UTC day) is ordinary rather than an error. Sum the four
-    TOKEN_FIELDS through the shared helper — a shallow map update would silently
+    on (family, UTC day) is ordinary rather than an error. The same collision
+    exists one level down: both readers can emit the same model id on the same
+    day. Sum TOKEN_FIELDS at every level — a shallow map update would silently
     drop whichever reader landed first.
     """
     for family, days in source.items():
@@ -392,6 +404,8 @@ def _merge_host_usage_maps(
         for day, usage in days.items():
             bucket = target_days.setdefault(day, token_usage.zero_model_bucket())
             token_usage.merge_usage_bucket(bucket, usage)
+    if source_by_day:
+        token_usage.merge_token_days(target_by_day, source_by_day)
 
 
 def _merge_warm_retry_capture(
@@ -409,10 +423,11 @@ def _merge_warm_retry_capture(
     flaky already-completed reader erase truthful first-pass totals.
     """
     merged: dict[str, dict[str, token_usage.Usage]] = {}
+    merged_by_day: dict[str, token_usage.DayBucket] = {}
     if initial.hosts is not None:
-        _merge_host_usage_maps(merged, initial.hosts)
+        _merge_host_usage_maps(merged, initial.hosts, merged_by_day, initial.tokens_by_day)
     if retry.hosts is not None:
-        _merge_host_usage_maps(merged, retry.hosts)
+        _merge_host_usage_maps(merged, retry.hosts, merged_by_day, retry.tokens_by_day)
 
     names_in_order = tuple(name for name, _ in readers)
     contributed = set(initial.token_sources) | set(retry.token_sources)
@@ -435,6 +450,7 @@ def _merge_warm_retry_capture(
             token_sources=token_sources,
             dropped=dropped,
             invoked=True,
+            tokens_by_day=merged_by_day,
         )
     if dropped:
         first_reader, first_reason = dropped[0]
@@ -683,6 +699,7 @@ def _capture_event_snapshots(
                 hosts=host_capture.hosts,
                 token_sources=host_capture.token_sources,
                 degraded_sources=tuple(name for name, _ in host_capture.dropped),
+                tokens_by_day=host_capture.tokens_by_day or {},
             )
         )
 

@@ -3,10 +3,10 @@
 Track 17C supports Codex rollout logs at
 ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``. Track 18D adds a consented
 Grok reader for ``updates.jsonl`` terminal records under ``GROK_HOME/sessions``
-(else ``~/.grok/sessions``). A rollout's last supported
-``event_msg`` / ``payload.type == "token_count"`` record is cumulative, so it
-*replaces* the previous total for that file; summing every token-count record
-would double-count. The model is the most recent preceding
+(else ``~/.grok/sessions``). A ``token_count`` record is a CUMULATIVE reading
+of the host's own counter. The reader differences consecutive readings and
+sums the transitions; summing every token-count record would double-count
+the running total. The model is the most recent preceding
 ``turn_context.payload.model``. Counters map onto Mind Meld's four token
 fields: ``input_tokens`` → input, ``cache_write_input_tokens`` →
 cache-create, ``cached_input_tokens`` → cache-read, and ``output_tokens`` →
@@ -14,15 +14,17 @@ output. ``reasoning_output_tokens`` is already part of output and is never
 added a second time.
 
 Two ordinary Codex shapes are tolerated rather than refused, because one
-unreadable file fails the WHOLE scan and the caller then publishes nothing
-(Track 19A is all-or-nothing). Measured on a 452-rollout machine, refusing
-them cost 167 files — 37% — and the reader returned ``unsupported`` in 5ms
+unreadable file still fails that WHOLE reader. Track 31A isolates that
+failure to the reader: the caller publishes the survivors rather than
+omitting the snapshot. Measured on a 452-rollout machine, refusing them
+cost 167 files — 37% — and the reader returned ``unsupported`` in 5ms
 having died on the first one:
 
 * a ``token_count`` whose ``payload.info`` is null — Codex's start-of-turn
   marker, carrying no ledger (33% of rollouts had one), and
 * a ledger that precedes the first ``turn_context`` and so has no model yet;
-  totals are cumulative, so a later attributable record restates it.
+  it is buffered via ``walk.pending`` / ``_flush_pending`` and attributed
+  to the first model the file names.
 
 Refusal is still correct for a ledger we saw and could NOT attribute to any
 model, and for a malformed (present but non-dict) ``info``. A rollout with no
@@ -66,9 +68,11 @@ from typing import Any, Literal, TypedDict
 from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.token_usage import (
     TOKEN_FIELDS,
+    DayBucket,
     Usage,
     iter_bounded_lines,
     merge_usage_bucket,
+    zero_day_bucket,
     zero_model_bucket,
 )
 
@@ -124,17 +128,35 @@ not do that with any other reason."""
 HostTokens = dict[str, dict[str, Usage]]
 
 
+@dataclass
+class HostUsageBuckets:
+    """The two views of one reduction, built atomically.
+
+    ``by_family`` is the existing ``{host_family: {UTC-day: Usage}}`` wire
+    shape. ``by_day`` is the same work as ``{UTC-day: DayBucket}``, with
+    per-model totals nested under each day's ``by_model``. ``_add_usage``
+    updates both in one call so they cannot drift; do not derive one from
+    the other later.
+    """
+
+    by_family: HostTokens = field(default_factory=dict)
+    by_day: dict[str, DayBucket] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class HostUsageResult:
     """Aggregate totals as ``{host_family: {UTC-day: Usage}}``.
 
     Empty ``hosts`` with ``complete=True`` is a real completed empty scan.
     Empty ``hosts`` with ``complete=False`` is intentionally *not* a zero.
+    ``tokens_by_day`` is the same work as a ``{UTC-day: DayBucket}`` map,
+    built atomically with ``hosts`` so the two views cannot drift.
     """
 
     hosts: HostTokens
     complete: bool
     reason: Reason | None = None
+    tokens_by_day: dict[str, DayBucket] = field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
@@ -433,6 +455,8 @@ def codex_usage_diag() -> dict[str, Any]:
         "files_pre_track": 0,
         "files_on_disk": None,
         "pending": None,
+        "model_count": 0,
+        "models": [],
     }
     try:
         with locked_json_snapshot(CACHE_PATH) as snap:
@@ -471,6 +495,7 @@ def codex_usage_diag() -> dict[str, Any]:
         phase = "migrating"
     else:
         phase = "ready"
+    models = _diag_model_ids(files.values())
     return {
         "cache_state": "ok",
         "state": phase,
@@ -479,6 +504,8 @@ def codex_usage_diag() -> dict[str, Any]:
         "files_pre_track": pre_track,
         "files_on_disk": on_disk,
         "pending": None if on_disk is None else max(0, on_disk - cached),
+        "model_count": models["model_count"],
+        "models": models["models"],
     }
 
 
@@ -498,6 +525,8 @@ def grok_usage_diag() -> dict[str, Any]:
             "complete_once": False,
             "usage_less_skipped": 0,
             "cache_state": "unreadable",
+            "model_count": 0,
+            "models": [],
         }
     if state != "valid" or not isinstance(data, dict):
         cache_state = "missing" if state in {"missing", "empty"} else "unreadable"
@@ -505,14 +534,65 @@ def grok_usage_diag() -> dict[str, Any]:
             "complete_once": False,
             "usage_less_skipped": 0,
             "cache_state": cache_state,
+            "model_count": 0,
+            "models": [],
         }
     raw_skip = data.get("usage_less_skipped", 0)
     skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
+    files = data.get("files")
+    models = _diag_grok_model_ids(files if isinstance(files, dict) else {})
     return {
         "complete_once": data.get("complete_once") is True,
         "usage_less_skipped": skipped,
         "cache_state": "ok",
+        "model_count": models["model_count"],
+        "models": models["models"],
     }
+
+
+_DIAG_MODEL_CAP = 32
+"""How many interned model ids the ``mm diag`` PAYLOAD carries. Counts stay
+exact, so a truncated list never reads as the whole set. The plain-text render
+applies a second, smaller bound of its own (``cli._DIAG_MODELS_SHOWN``)."""
+
+
+def _diag_model_ids(entries: Any) -> dict[str, Any]:
+    """Distinct model ids interned on Codex cache entries. Cache-only.
+
+    Reads the ``models`` string table ``_cache_entry`` already writes, which
+    is why this field costs no re-walk.
+    """
+    found: set[str] = set()
+    for value in entries:
+        if not isinstance(value, dict):
+            continue
+        models = value.get("models")
+        if not isinstance(models, list):
+            continue
+        for model in models:
+            if isinstance(model, str) and model:
+                found.add(model)
+    cleaned = sorted(found)
+    return {"model_count": len(cleaned), "models": cleaned[:_DIAG_MODEL_CAP]}
+
+
+def _diag_grok_model_ids(files: dict[str, Any]) -> dict[str, Any]:
+    """Distinct model ids on Grok cache turns. Cache-only."""
+    found: set[str] = set()
+    for value in files.values():
+        if not isinstance(value, dict):
+            continue
+        turns = value.get("turns")
+        if not isinstance(turns, list):
+            continue
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            model = turn.get("model")
+            if isinstance(model, str) and model:
+                found.add(model)
+    cleaned = sorted(found)
+    return {"model_count": len(cleaned), "models": cleaned[:_DIAG_MODEL_CAP]}
 
 
 def grok_sessions_root() -> Path:
@@ -696,7 +776,7 @@ def _scan_grok_root(
             return _incomplete(failure.reason), staged, learned, True
 
     return (
-        HostUsageResult(_aggregate_grok(staged.values()), complete=True),
+        _result_from_buckets(_aggregate_grok(staged.values())),
         staged,
         learned,
         bool(ledgers),
@@ -1018,7 +1098,7 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
     }
 
 
-def _aggregate_grok(entries: Any) -> HostTokens:
+def _aggregate_grok(entries: Any) -> HostUsageBuckets:
     """Grok's reduction is `_aggregate`'s ``turns`` branch. Kept as a named
     alias because the Grok scan reads better with it, not because the reduction
     differs — it deliberately does not, and a second implementation here is how
@@ -1059,7 +1139,7 @@ def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
             return HostUsageResult({}, complete=True)
     except _ReadFailure as failure:
         return _incomplete(failure.reason)
-    return HostUsageResult(_aggregate(terminals), complete=True)
+    return _result_from_buckets(_aggregate(terminals))
 
 
 def _read_opencode_database(path: Path, deadline: float) -> list[_Terminal]:
@@ -1290,7 +1370,7 @@ def _scan_codex_root(
             # thrown away. See `read_codex_usage` for why that matters.
             return _incomplete(failure.reason), staged, learned
 
-    return HostUsageResult(_aggregate(staged.values()), complete=True), staged, learned
+    return _result_from_buckets(_aggregate(staged.values())), staged, learned
 
 
 def _iter_rollouts(root: Path, deadline: float):
@@ -1758,8 +1838,8 @@ def _counter(totals: dict[str, Any], key: str, *, required: bool) -> int:
     return value
 
 
-def _aggregate(entries: Any) -> HostTokens:
-    """Reduce cached entries to ``{family: {day: Usage}}``.
+def _aggregate(entries: Any) -> HostUsageBuckets:
+    """Reduce cached entries to family totals AND per-model day buckets.
 
     Handles every reader's entry shape, which is why there is one of these and
     not one per reader: OpenCode contributes ``_Terminal`` rows that are
@@ -1810,7 +1890,7 @@ def _aggregate(entries: Any) -> HostTokens:
     is the smaller and rarer error, but it IS an error; do not describe this
     reduction as exact.
     """
-    hosts: HostTokens = {}
+    buckets = HostUsageBuckets()
     lineages = _Lineages()
     staged: list[tuple[list[str], list[tuple[Any, ...]]]] = []
     for entry in entries:
@@ -1820,10 +1900,10 @@ def _aggregate(entries: Any) -> HostTokens:
         if not isinstance(entry, _Terminal) and entry.get("no_ledger"):
             continue
         if isinstance(entry, _Terminal):
-            _add_usage(hosts, entry.day, entry.model, entry.usage)
+            _add_usage(buckets, entry.day, entry.model, entry.usage)
             continue
         for turn in entry.get("turns") or ():
-            _add_usage(hosts, turn["day"], turn["model"], turn["usage"])
+            _add_usage(buckets, turn["day"], turn["model"], turn["usage"])
         parsed = _entry_states(entry)
         if not parsed:
             continue
@@ -1875,8 +1955,8 @@ def _aggregate(entries: Any) -> HostTokens:
             # predecessor and therefore no transition identity of its own —
             # this is the only thing that can disambiguate it.
             continue
-        _add_usage(hosts, day, model, dict(zip(TOKEN_FIELDS, increment)))
-    return hosts
+        _add_usage(buckets, day, model, dict(zip(TOKEN_FIELDS, increment)))
+    return buckets
 
 
 class _Lineages:
@@ -1951,10 +2031,37 @@ def _entry_states(entry: Any) -> list[_StateParts]:
     return [_state_parts(row, turn_ids, days, models) for row in entry.get("states") or ()]
 
 
-def _add_usage(hosts: HostTokens, day: str, model: str, usage: Any) -> None:
-    days = hosts.setdefault(host_family(model), {})
-    bucket = days.setdefault(day, zero_model_bucket())
-    merge_usage_bucket(bucket, usage)
+def _add_usage(buckets: HostUsageBuckets, day: str, model: str, usage: Any) -> None:
+    """Update family totals and per-model day buckets in one call.
+
+    Never prune a zero bucket: a ``t -> t`` transition still creates a day
+    key, and an all-zero bucket is a real accepted shape. Renderers skip
+    zeros at render time; the writer never does. Deriving one view from
+    the other later is how the two maps drift.
+    """
+    family_days = buckets.by_family.setdefault(host_family(model), {})
+    family_bucket = family_days.setdefault(day, zero_model_bucket())
+    merge_usage_bucket(family_bucket, usage)
+
+    day_bucket = buckets.by_day.setdefault(day, zero_day_bucket())
+    merge_usage_bucket(day_bucket, usage)
+    by_model = day_bucket.setdefault("by_model", {})
+    model_bucket = by_model.setdefault(model, zero_model_bucket())
+    merge_usage_bucket(model_bucket, usage)
+
+
+def _result_from_buckets(
+    buckets: HostUsageBuckets,
+    *,
+    complete: bool = True,
+    reason: Reason | None = None,
+) -> HostUsageResult:
+    return HostUsageResult(
+        buckets.by_family,
+        complete=complete,
+        reason=reason,
+        tokens_by_day=buckets.by_day,
+    )
 
 
 _IDENTITY_KEYS = (

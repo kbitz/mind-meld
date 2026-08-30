@@ -406,6 +406,26 @@ def test_every_notes_line_has_a_skill_decoder_entry() -> None:
     )
 
 
+def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:
+    """``--dump-host-usage`` status vocabulary is JSON, not notes.append.
+
+    The Notes decoder cannot see it. Pin the LLM contract here instead:
+    SKILL.md must name the flag, keep the card family-only, and forbid
+    narrating per-model host data as spend.
+    """
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "--dump-host-usage" in skill
+    assert "family-only until Group 36" in skill
+    assert "Do not narrate per-model host data as spend" in skill
+    aggregator_src = (
+        ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "aggregator.py"
+    ).read_text(encoding="utf-8")
+    assert "help=argparse.SUPPRESS" in aggregator_src
+    assert '"--dump-host-usage"' in aggregator_src
+
+
 def test_every_extracted_module_has_a_routing_row() -> None:
     """The Track 16A modules each get at least one row.
 

@@ -55,7 +55,7 @@ The reader validates required counter *presence* inside `usage`, never
 as complete accounting. mm has no partial-fidelity channel on
 `HostUsageResult`. Stated here rather than deferred: the loose `usage` key
 set absorbed this field with silent fidelity loss, not "zero harm". Track
-33A/35A own a coverage state if one is added.
+34A owns a coverage state if one is added.
 
 ## Fatal checks that stay fatal
 
@@ -74,6 +74,7 @@ not `io_error`.
 | path | what it pins |
 |---|---|
 | `workspace/session-a/updates.jsonl` | modeled terminal |
+| `two-model/workspace/session/updates.jsonl` | two distinct Grok models in one session |
 | `usage-less/workspace/session/updates.jsonl` | usage-less cancelled terminal |
 | `cancelled-with-usage/workspace/session/updates.jsonl` | cancelled terminal *with* usage |
 | `incomplete-usage/workspace/session/updates.jsonl` | `usageIsIncomplete: true` |
