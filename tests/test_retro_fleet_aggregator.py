@@ -5421,6 +5421,71 @@ class TestHostTokensByDayAcceptance:
         assert sorted(u["input"] for u in models.values()) == [1, 2]
         assert f"{stem}~2" in models
 
+    def test_dump_aliases_are_stable_across_days(self):
+        """Alias assignment is row-global, not per-day.
+
+        Per-day assignment off insertion order lets `a/b` own `a_b` on Monday
+        and `a?b` own it on Tuesday, so a reader comparing days compares two
+        different models and sees per-day movement that never happened —
+        worse than the collision it replaced. Found by Codex adversarial
+        review.
+        """
+        raw = {
+            "2026-04-20": {**_usage(3), "by_model": {"a/b": _usage(1), "a?b": _usage(2)}},
+            "2026-04-21": {**_usage(3), "by_model": {"a?b": _usage(2), "a/b": _usage(1)}},
+        }
+        out = aggregator._sanitize_tokens_by_day(raw)
+        day1 = out["2026-04-20"]["by_model"]
+        day2 = out["2026-04-21"]["by_model"]
+        assert set(day1) == set(day2) == {"a_b", "a_b~2"}
+        # Same alias, same underlying model, both days.
+        assert day1["a_b"] == day2["a_b"]
+        assert day1["a_b~2"] == day2["a_b~2"]
+
+    def test_selection_is_total_across_differing_valid_siblings(self):
+        """`tie_key` excludes the sibling and `_detail_rank` only grades
+        present/absent/invalid, so two rows with DIFFERENT valid siblings
+        compared equal all the way down and file order picked the winner.
+        Deterministic selection has to be total. Found by Codex."""
+        ts = "2026-04-27T12:00:00+00:00"
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+
+        def row(model: str) -> dict:
+            return _host_event(
+                "dev-a",
+                ts,
+                hosts=hosts,
+                extra={
+                    "tokens_by_day": {"2026-04-20": {**_usage(5), "by_model": {model: _usage(5)}}}
+                },
+            )
+
+        a_row, b_row = row("gpt-a"), row("gpt-b")
+        assert _accepted(a_row).tie_key == _accepted(b_row).tie_key
+        forward = self._agg([a_row, b_row]).by_device["dev-a"]
+        reverse = self._agg([b_row, a_row]).by_device["dev-a"]
+        assert forward.tokens_by_day == reverse.tokens_by_day
+
+    def test_selection_is_total_across_differing_invalid_siblings(self):
+        """Two INVALID siblings both collapse to None + rank 0, so keying on
+        the payload alone left them tied — and `detail_reason` is what the dump
+        renders as the user's remedy. File order must not decide whether a peer
+        is told `invalid_counter` or `active_days_mismatch`. Found by Codex
+        structured review."""
+        ts = "2026-04-27T12:00:00+00:00"
+        hosts = {"codex": {"2026-04-20": _usage(5)}}
+        bad_schema = _host_event("dev-a", ts, hosts=hosts, extra={"tokens_by_day": "nope"})
+        bad_days = _host_event(
+            "dev-a",
+            ts,
+            hosts=hosts,
+            extra={"tokens_by_day": {"2026-04-21": {**_usage(5), "by_model": {"m": _usage(5)}}}},
+        )
+        forward = self._agg([bad_schema, bad_days]).by_device["dev-a"]
+        reverse = self._agg([bad_days, bad_schema]).by_device["dev-a"]
+        assert forward.detail_reason == reverse.detail_reason
+        assert forward.detail == reverse.detail == "absent"
+
     def test_writer_capped_row_round_trips_into_the_dump(self):
         """End-to-end for the cap: >32 models in one day still ships."""
         from mind_meld import events
@@ -5531,6 +5596,36 @@ class TestHostTokensByDayAcceptance:
         phrase = aggregator._host_detail_phrase("absent", "unsupported_schema")
         assert "unsupported_schema" in phrase
         assert "mm push" in phrase
+
+    def test_every_detail_phrase_branch_names_a_remedy(self):
+        """All seven branches, not just the one.
+
+        These strings ARE the diagnostic interface for a dropped sibling —
+        a branch that reaches the user without a fix clause is the
+        "absence as the diagnostic interface" failure this subsystem keeps
+        legislating against. Cheap to pin, invisible when it rots.
+        """
+        assert aggregator._host_detail_phrase("present", None) == "per-model host tokens present"
+
+        absent = aggregator._host_detail_phrase("absent", None)
+        assert "v0.12.49" in absent
+        assert "mm push" in absent
+
+        for reason in (
+            "active_days_mismatch",
+            "invalid_counter",
+            "unsupported_schema",
+            "invalid_day",
+        ):
+            phrase = aggregator._host_detail_phrase("absent", reason)
+            assert reason in phrase, reason
+            assert "mm push" in phrase, reason
+
+        # Unknown reason falls through to the generic branch, still with a fix.
+        fallback = aggregator._host_detail_phrase("absent", "some_future_reason")
+        assert "some_future_reason" in fallback
+        assert "mm push" in fallback
+        assert "mm diag" in fallback
 
     def test_wire_row_fixture_measurement(self):
         """Deterministic size of a 90-day 4-family 2-model-per-day row."""

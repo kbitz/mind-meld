@@ -1773,6 +1773,13 @@ def _cap_by_model(
     Day pass first, then row pass. The row pass only REMOVES ids, so it cannot
     push a day back over the per-day cap; the reverse order would need a second
     day pass.
+
+    **Call this only AFTER the day window has been trimmed.** The row cap ranks
+    models across every day it can see, and the readers aggregate the WHOLE
+    local corpus with no time bound. Capping first lets models from days that
+    are about to be discarded outrank the current day's and empty its
+    ``by_model`` entirely -- worst on exactly the long-history machines whose
+    per-model data is most worth having.
     """
     for bucket in copied.values():
         by_model = bucket["by_model"]
@@ -1780,10 +1787,15 @@ def _cap_by_model(
             keep = sorted(by_model.items(), key=_model_rank)[:MAX_HOST_MODELS_PER_DAY]
             bucket["by_model"] = dict(keep)
 
-    row_totals: dict[str, token_usage.Usage] = {}
-    for bucket in copied.values():
-        token_usage.merge_by_model(row_totals, bucket["by_model"])
-    if len(row_totals) > MAX_HOST_MODELS_PER_ROW:
+    # Count distinct ids with a set union before summing anything. This runs on
+    # the events tail inside a 250ms autopush budget, and the row cap is the
+    # rare branch -- merging every model bucket across every day just to learn
+    # a COUNT pays the whole cost on the common path where nothing is capped.
+    distinct = {model for bucket in copied.values() for model in bucket["by_model"]}
+    if len(distinct) > MAX_HOST_MODELS_PER_ROW:
+        row_totals: dict[str, token_usage.Usage] = {}
+        for bucket in copied.values():
+            token_usage.merge_by_model(row_totals, bucket["by_model"])
         survivors = {
             model
             for model, _ in sorted(row_totals.items(), key=_model_rank)[:MAX_HOST_MODELS_PER_ROW]
@@ -1812,7 +1824,7 @@ def _copy_tokens_by_day(
                     by_model[model] = dict(usage)  # type: ignore[arg-type]
         day_copy["by_model"] = by_model
         copied[day] = day_copy
-    return _cap_by_model(copied)
+    return copied
 
 
 def make_host_usage_snapshot(
@@ -1845,7 +1857,11 @@ def make_host_usage_snapshot(
     ``token_sources``. Omitted when empty so the happy-path wire shape is
     unchanged. ``tokens_by_day`` is additive the same way (Track 33A): omit
     iff ``hosts`` is empty, otherwise always present, so its *absence* is
-    the mixed-fleet version discriminator. No ``EVENTS_SCHEMA_VERSION`` bump:
+    the mixed-fleet version discriminator. A sibling that would be EMPTY beside
+    non-empty ``hosts`` is omitted rather than published: the acceptor rejects
+    that shape outright, and absence is the honest signal. **The by-model cap
+    runs AFTER the day trim** -- see ``_cap_by_model``. No
+    ``EVENTS_SCHEMA_VERSION`` bump:
     ``_accept_host_usage_snapshot`` does no key-set check and ``_tie_break_key``
     excludes unknown fields.
 
@@ -1885,7 +1901,7 @@ def make_host_usage_snapshot(
             for family, days in payload.items()
         }
         payload = {family: days for family, days in payload.items() if days}
-    sibling = {day: bucket for day, bucket in sibling.items() if day in keep}
+    sibling = _cap_by_model({day: b for day, b in sibling.items() if day in keep})
     row: HostUsageSnapshot = {
         "v": EVENTS_SCHEMA_VERSION,
         "type": "host-usage-snapshot",
@@ -1895,7 +1911,13 @@ def make_host_usage_snapshot(
         "hosts": payload,
         "active_days": sorted({day for days in payload.values() for day in days}),
     }
-    if payload:
+    # Omit rather than publish a sibling the acceptor will reject. A caller that
+    # passes no per-model data for non-empty hosts would otherwise emit
+    # `tokens_by_day: {}` beside populated `active_days`, which every peer drops
+    # as `active_days_mismatch` and reports as "upgrade mm on that machine".
+    # Absent is the honest signal: it already means "pre-33A peer OR no
+    # per-model data", and it costs the row nothing.
+    if payload and sibling:
         row["tokens_by_day"] = sibling
     excluded = set(token_sources)
     degraded = [

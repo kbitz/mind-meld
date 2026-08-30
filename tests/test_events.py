@@ -1533,11 +1533,31 @@ class TestMakeHostUsageSnapshot:
             },
         }
 
+    def _sibling_for(self, hosts: dict) -> dict:
+        """Reconciling sibling for `hosts` — what a real reader always returns.
+
+        Tests must not hand-build the family map alone: a writer given no
+        per-model data now OMITS the field (it is the one shape peers reject),
+        so a sibling-less call no longer models the production wire row.
+        """
+        out: dict = {}
+        for days in hosts.values():
+            for day, usage in days.items():
+                bucket = out.setdefault(day, {**_u(0), "by_model": {}})
+                for f in ("input", "cache_create", "cache_read", "output"):
+                    bucket[f] += usage[f]
+                model = bucket["by_model"].setdefault("gpt-5", _u(0))
+                for f in ("input", "cache_create", "cache_read", "output"):
+                    model[f] += usage[f]
+        return out
+
     def test_exact_envelope_and_fields(self):
+        hosts = self._hosts()
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            hosts=self._hosts(),
+            hosts=hosts,
             token_sources=_SRC,
+            tokens_by_day=self._sibling_for(hosts),
             ts=datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc),
         )
         assert set(ev) == {
@@ -1865,6 +1885,50 @@ class TestMakeHostUsageSnapshot:
         left, right = (r["tokens_by_day"]["2026-08-15"]["by_model"] for r in rows)
         assert left == right
         assert set(left) == {f"m{i:03d}" for i in range(events.MAX_HOST_MODELS_PER_DAY)}
+
+    def test_trimmed_days_cannot_starve_the_kept_days_models(self):
+        """The by-model cap must run AFTER the day trim.
+
+        Readers aggregate the WHOLE local corpus with no time bound, so a
+        long-history machine carries models on days the window is about to
+        discard. Cap first and those models outrank the current day's, whose
+        `by_model` empties completely — worst on exactly the machines whose
+        per-model data is most worth having. Found by Codex adversarial review.
+        """
+        hosts: dict = {"codex": {}}
+        sibling: dict = {}
+        idx = 0
+        # Each stale day sits UNDER the per-day cap, so only the ROW cap bites.
+        for day_n in range(1, 4):
+            day = f"2020-01-{day_n:02d}"
+            models = {}
+            for _ in range(events.MAX_HOST_MODELS_PER_DAY):
+                models[f"stale-{idx:03d}"] = _u(100)
+                idx += 1
+            hosts["codex"][day] = _u(100 * events.MAX_HOST_MODELS_PER_DAY)
+            sibling[day] = {**_u(100 * events.MAX_HOST_MODELS_PER_DAY), "by_model": models}
+        hosts["codex"]["2026-08-15"] = _u(5)
+        sibling["2026-08-15"] = {**_u(5), "by_model": {"gpt-5-codex": _u(5)}}
+
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=_SRC,
+            hosts=hosts,
+            tokens_by_day=sibling,
+            max_days=1,
+        )
+        assert ev["active_days"] == ["2026-08-15"]
+        assert list(ev["tokens_by_day"]["2026-08-15"]["by_model"]) == ["gpt-5-codex"]
+
+    def test_empty_sibling_beside_nonempty_hosts_is_omitted_not_published(self):
+        """`tokens_by_day: {}` with populated `active_days` is the one shape
+        every peer drops as `active_days_mismatch`, under a remedy that blames
+        the writing machine's mm version. Absence is the honest signal."""
+        ev = events.make_host_usage_snapshot(
+            device="dev-a", token_sources=_SRC, hosts=self._hosts()
+        )
+        assert "tokens_by_day" not in ev
+        assert ev["active_days"], "the row itself still carries family totals"
 
     def test_zero_only_day_survives_the_writer(self):
         sibling = {

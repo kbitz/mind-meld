@@ -13,6 +13,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -4652,6 +4653,13 @@ def _diag_models_line(state: dict) -> str:
     markup in an f-string — the same reasoning as the breadcrumb ``detail``
     render above.
 
+    ``safe_str`` alone is NOT enough here. It strips terminal escapes and Rich
+    markup but leaves newlines, so a model id of ``"gpt-5\ngrok cache: ok"``
+    forges an extra field into a block a user pastes into a support chat.
+    Bucket to the same conservative whitelist ``aggregator._safe_short`` uses
+    for the identical class of string; the two surfaces should not disagree
+    about what a model id may contain.
+
     ``0`` is a real answer, not a gap: a cold or mid-rebuild cache has
     interned no ids yet, which is exactly what ``codex reader state`` two
     lines up already says.
@@ -4659,7 +4667,11 @@ def _diag_models_line(state: dict) -> str:
     count = state.get("model_count")
     count = count if isinstance(count, int) and not isinstance(count, bool) else 0
     raw = state.get("models")
-    names = [safe_str(str(m))[:60] for m in raw] if isinstance(raw, list) else []
+    names = (
+        [re.sub(r"[^A-Za-z0-9._\-() ]", "_", safe_str(str(m)))[:60] for m in raw]
+        if isinstance(raw, list)
+        else []
+    )
     if not count or not names:
         return str(count)
     shown = names[:_DIAG_MODELS_SHOWN]

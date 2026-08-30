@@ -495,7 +495,7 @@ def codex_usage_diag() -> dict[str, Any]:
         phase = "migrating"
     else:
         phase = "ready"
-    models = _diag_model_ids(files.values(), key="models")
+    models = _diag_model_ids(files.values())
     return {
         "cache_state": "ok",
         "state": phase,
@@ -556,13 +556,17 @@ exact, so a truncated list never reads as the whole set. The plain-text render
 applies a second, smaller bound of its own (``cli._DIAG_MODELS_SHOWN``)."""
 
 
-def _diag_model_ids(entries: Any, *, key: str) -> dict[str, Any]:
-    """Distinct model ids interned on Codex cache entries. Cache-only."""
+def _diag_model_ids(entries: Any) -> dict[str, Any]:
+    """Distinct model ids interned on Codex cache entries. Cache-only.
+
+    Reads the ``models`` string table ``_cache_entry`` already writes, which
+    is why this field costs no re-walk.
+    """
     found: set[str] = set()
     for value in entries:
         if not isinstance(value, dict):
             continue
-        models = value.get(key)
+        models = value.get("models")
         if not isinstance(models, list):
             continue
         for model in models:

@@ -1661,12 +1661,38 @@ def _detail_rank(row: _AcceptedHostRow) -> int:
     return 1
 
 
+def _sibling_tie_key(row: _AcceptedHostRow) -> str:
+    """Total-order fallback over the sibling itself.
+
+    ``tie_key`` deliberately excludes ``tokens_by_day``, and ``_detail_rank``
+    only grades present/absent/invalid — so two rows carrying DIFFERENT valid
+    siblings compare equal all the way down and the winner falls out of
+    file-iteration order. Rare (it needs an identical microsecond ``ts`` and
+    identical family totals) but the deterministic-selection rule this
+    subsystem documents has to be total, or two machines reading one corpus
+    dump different models.
+
+    ``detail_reason`` is part of the key, not just the payload. Two rows whose
+    siblings are BOTH invalid collapse to ``tokens_by_day=None`` and rank 0, so
+    keying on the payload alone leaves them tied — and the reason is exactly
+    what the dump renders as the user's remedy, so file order would decide
+    whether a peer is told `invalid_counter` or `active_days_mismatch`.
+    """
+    return json.dumps(
+        [row.detail_reason or "", row.tokens_by_day or {}],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _row_replaces(candidate: _AcceptedHostRow, incumbent: _AcceptedHostRow) -> bool:
     if candidate.as_of != incumbent.as_of:
         return candidate.as_of > incumbent.as_of
     if candidate.tie_key != incumbent.tie_key:
         return candidate.tie_key > incumbent.tie_key
-    return _detail_rank(candidate) > _detail_rank(incumbent)
+    if _detail_rank(candidate) != _detail_rank(incumbent):
+        return _detail_rank(candidate) > _detail_rank(incumbent)
+    return _sibling_tie_key(candidate) > _sibling_tie_key(incumbent)
 
 
 def aggregate_host_usage(
@@ -1736,26 +1762,36 @@ def _sanitize_tokens_by_day(raw: dict | None) -> dict | None:
     character outside its whitelist onto ``_``. Two DISTINCT accepted ids can
     therefore sanitize to one key -- and a dict key collision would silently
     drop one model's counters from a FORENSIC dump, the one surface whose
-    whole job is to show what actually arrived. Disambiguate instead, in
-    accept order, which is wire order and so is stable across machines.
+    whole job is to show what actually arrived.
+
+    **Aliases are assigned ONCE for the whole row, over the sorted raw ids.**
+    Doing it per-day off insertion order means ``a/b`` owns ``a_b`` on Monday
+    and ``a?b`` owns it on Tuesday, so a reader comparing days silently
+    compares two different models -- worse than the collision it replaced,
+    because it looks like real per-day movement. Sorting also makes the
+    mapping independent of wire order, so two machines dump the same aliases.
     """
     if raw is None:
         return None
+    alias: dict[str, str] = {}
+    used: set[str] = set()
+    for model in sorted({m for b in raw.values() for m in (b.get("by_model") or {})}):
+        key = _safe_short(str(model))
+        if key in used:
+            # `~2`, `~3`, ... `~` is outside _safe_short's whitelist, so a
+            # suffix here can never collide with a sanitized id.
+            n = 2
+            while f"{key}~{n}" in used:
+                n += 1
+            key = f"{key}~{n}"
+        used.add(key)
+        alias[model] = key
     out: dict = {}
     for day, bucket in raw.items():
         copied = {field: bucket[field] for field in token_usage.TOKEN_FIELDS}
-        by_model: dict = {}
-        for model, usage in (bucket.get("by_model") or {}).items():
-            key = _safe_short(str(model))
-            if key in by_model:
-                # `~2`, `~3`, ... `~` is outside _safe_short's whitelist, so a
-                # suffix here can never collide with a sanitized id.
-                n = 2
-                while f"{key}~{n}" in by_model:
-                    n += 1
-                key = f"{key}~{n}"
-            by_model[key] = dict(usage)
-        copied["by_model"] = by_model
+        copied["by_model"] = {
+            alias[model]: dict(usage) for model, usage in (bucket.get("by_model") or {}).items()
+        }
         out[day] = copied
     return out
 
