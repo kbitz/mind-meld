@@ -1809,10 +1809,19 @@ def _cap_by_model(
 
 def _copy_tokens_by_day(
     raw: dict[str, token_usage.DayBucket],
+    keep: set[str],
 ) -> dict[str, token_usage.DayBucket]:
-    """Three-level copy so ``by_model`` and nested ``Usage`` do not alias."""
+    """Three-level copy so ``by_model`` and nested ``Usage`` do not alias.
+
+    Copies ONLY the retained days. The readers aggregate the whole local
+    corpus with no time bound, so copying first and filtering after deep-copies
+    every model on every day the window is about to discard — allocation the
+    row can never use, paid inside a 250ms autopush budget.
+    """
     copied: dict[str, token_usage.DayBucket] = {}
     for day, bucket in raw.items():
+        if day not in keep:
+            continue
         day_copy: token_usage.DayBucket = {
             field: bucket.get(field, 0) for field in token_usage.TOKEN_FIELDS
         }  # type: ignore[misc]
@@ -1887,12 +1896,12 @@ def make_host_usage_snapshot(
         family: {day: dict(usage) for day, usage in days.items()}  # type: ignore[misc]
         for family, days in hosts.items()
     }
-    sibling = _copy_tokens_by_day(tokens_by_day or {})
     # Cap on the UNION of days, not per family: capping each family separately
     # would keep a different window per host and make cross-host day totals
     # incomparable. ISO-8601 dates lex-sort as they date-sort (same reasoning
     # as `token_usage._trim_by_day`). ONE keep set is applied to both maps so
-    # the day sets cannot disagree by construction.
+    # the day sets cannot disagree by construction — and it is computed BEFORE
+    # the sibling copy so discarded days are never materialized at all.
     all_days = sorted({day for days in payload.values() for day in days}, reverse=True)
     keep = set(all_days[:max_days] if len(all_days) > max_days else all_days)
     if len(all_days) > max_days:
@@ -1901,7 +1910,7 @@ def make_host_usage_snapshot(
             for family, days in payload.items()
         }
         payload = {family: days for family, days in payload.items() if days}
-    sibling = _cap_by_model({day: b for day, b in sibling.items() if day in keep})
+    sibling = _cap_by_model(_copy_tokens_by_day(tokens_by_day or {}, keep))
     row: HostUsageSnapshot = {
         "v": EVENTS_SCHEMA_VERSION,
         "type": "host-usage-snapshot",

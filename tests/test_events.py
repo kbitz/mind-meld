@@ -1920,6 +1920,24 @@ class TestMakeHostUsageSnapshot:
         assert ev["active_days"] == ["2026-08-15"]
         assert list(ev["tokens_by_day"]["2026-08-15"]["by_model"]) == ["gpt-5-codex"]
 
+    def test_discarded_days_are_never_materialized(self):
+        """Copy only the retained days, not all of them then filter.
+
+        The readers aggregate the whole corpus with no time bound, so copying
+        first deep-copies every model on every day the window is about to
+        discard — allocation the row can never use, paid inside a 250ms
+        autopush budget. Found by Codex adversarial review (second pass).
+        """
+        sibling = {
+            "2020-01-01": {**_u(1), "by_model": {f"old-{i}": _u(1) for i in range(20)}},
+            "2026-08-15": {**_u(5), "by_model": {"gpt-5": _u(5)}},
+        }
+        copied = events._copy_tokens_by_day(sibling, {"2026-08-15"})
+        assert set(copied) == {"2026-08-15"}
+        # Not merely filtered afterwards — the discarded day's buckets were
+        # never built, so nothing aliases the caller's input either.
+        assert copied["2026-08-15"]["by_model"] is not sibling["2026-08-15"]["by_model"]
+
     def test_empty_sibling_beside_nonempty_hosts_is_omitted_not_published(self):
         """`tokens_by_day: {}` with populated `active_days` is the one shape
         every peer drops as `active_days_mismatch`, under a remedy that blames

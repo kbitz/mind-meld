@@ -22,6 +22,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Fixed
 
+- The writer copies only the days it will keep. Readers aggregate the whole local corpus with no time bound, so copying first and filtering after deep-copied every model on every discarded day — allocation the row can never use, paid inside a 250 ms autopush budget.
 - **Long-history Macs would have lost every current-day model.** The by-model cap ran before the 90-day window trim, and the host readers aggregate the whole local corpus with no time bound — so models on days about to be discarded outranked today's and emptied its breakdown completely. Silent, and worst on exactly the machines whose per-model data is most worth having. The cap now runs after the trim.
 - **A model id containing a newline could forge a line in `mm diag`.** The plain-text host-usage block is what users paste into a support chat; `safe_str` strips terminal escapes and Rich markup but not newlines, so `gpt-5\ngrok cache: ok` rendered as an extra, fake field. Model ids on that surface now go through the same conservative whitelist the retro renderer uses.
 - **`--dump-host-usage` aliases are stable across days.** Two model ids that sanitize to the same key were disambiguated per-day off insertion order, so one alias could mean different models on different days — per-day movement that never happened. Aliases are now assigned once per row over the sorted ids.
