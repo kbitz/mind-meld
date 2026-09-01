@@ -198,9 +198,9 @@ that distinction backwards silently under-reports the fleet.
 
 **Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex and
 Grok to the source name whose being enabled authorizes them. The live set is
-`events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the accepted
-wire vocabulary — a superset that still names `opencode` so a legacy peer
-row is accepted whole.
+`events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
+tuple (same names, same order). Unknown inbound names (retired `opencode`,
+or a future reader) are retained by the aggregator, not listed here.
 `_default_host_readers(sources, grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
 parsed — matching `_enabled_claude_paths`. Grok is a scoped sync source
@@ -258,8 +258,9 @@ is not an I/O error (`FileNotFoundError` / `NotADirectoryError` → skip;
 other `OSError` still `io_error`).
 
 **`token_sources` is therefore per-push, not the constant.**
-`events.ACTIVE_HOST_READERS` is the live reader universe; `events.HOST_USAGE_TOKEN_SOURCES`
-is the accepted wire vocabulary (a superset). A row carries the subset that
+`events.ACTIVE_HOST_READERS` is the live reader universe;
+`events.HOST_USAGE_TOKEN_SOURCES` is the live writer tuple. Unknown inbound
+names are retained by the aggregator. A row carries the subset that
 actually contributed. That is what lets a consumer tell "this host
 reported nothing" from "this host was never consulted". A machine with no host
 sources enabled still emits a row with `token_sources: []` — absence of the ROW

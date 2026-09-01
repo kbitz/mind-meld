@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.53] - 2026-09-01
+
+**mm no longer reads OpenCode usage.** The host-usage snapshot is Codex and Grok only. No local OpenCode file is touched — `~/.config/opencode/`, `opencode.db`, and any leftover `opencode-host-tokens.json` stay on disk. A peer still publishing `"opencode"` in `token_sources` / `degraded_sources` / `partial_sources` is accepted whole (unknown names are retained, not rejected).
+
+### Removed
+
+- The OpenCode host-usage reader (`read_opencode_usage` and its SQLite scan). It never returned a row against a live census: the query projected `json_extract(data,'$.id')` while OpenCode keeps `id` as a table column. Removing it drops one bounded, un-warmable read per substantive push. The sync source and skill-link row stay; those are a later Track.
+
+### Changed
+
+- `events.ACTIVE_HOST_READERS = ("codex", "grok")` is the live reader universe. `HOST_USAGE_TOKEN_SOURCES` matches that live writer set. The consent pin `HOST_READER_SOURCE_GATE == ACTIVE_HOST_READERS` stays a strict equality.
+- `_HOST_READ_REASONS` no longer includes `busy` or `migration` (the OpenCode reader was their only producer). `no_metadata_ledger` stays — Grok still emits it.
+
 ## [0.12.52] - 2026-09-01
 
 **Codex tokens are now counted without double-counting the cache, and the retro prices them as an API list-rate equivalent per machine — never as a fleet "cost".** Host readers were mixing two counter schemas: Codex and Grok CLI report inclusive `input` (cache-read already inside it); OpenCode and Claude are disjoint. Priced naively that was a 7.40x overstatement; `## Agent activity` has been ~1.97x high since v0.12.36. Inclusive extractors now emit disjoint buckets (`uncached = input - cache_read - cache_create`). A new `## API list-rate equivalent (per machine)` section prices the four observed `gpt-*` families at current OpenAI short-context list rates. It is not subscription spend, historical usage is repriced at today's rates, and the figures must not be summed (two device ids can hold one history after an OS migration). Grok rates are held until ingestion is proven. A Mac still on older mm shows `—` until it upgrades and re-pushes.
