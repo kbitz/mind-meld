@@ -288,7 +288,13 @@ rather than fluffing.
 ## Notes section in aggregator output
 
 The body's `## Notes` section consolidates these data-quality lines (the
-section is omitted when there is nothing to surface):
+section is omitted when there is nothing to surface). This list is closed
+and 1:1 with strings the aggregator emits. **An unlisted `## Notes` line
+is reported verbatim and never interpreted** — a stale installed copy of
+this file must not invent a meaning on a surface whose purpose is not
+lying.
+
+Known lines:
 
 - `Fleet incomplete: N registered device(s) haven't pushed events in this
   window.` — activity may be incomplete from those peers.
@@ -355,6 +361,28 @@ section is omitted when there is nothing to surface):
 - `Fleet composition changed between windows:` — the set of devices that
   pushed in the prior Nd differs from this Nd. Report it; never compute the
   trend yourself from the two windows.
+- `Host-usage reader(s) <readers> failed on the latest push from <machines>
+  — on <machine>, run mm diag and inspect host_usage.<reader>.` — that
+  machine's host reader ran and failed. Name the machine and the reader.
+  Do not treat the missing host as zero. Do not promise that `mm push`
+  repairs it; the wire carries which reader failed, not why. Walk over to
+  the named machine if you are not already on it.
+- `Host-usage totals from <readers> on <machines> are incomplete (the host
+  declared those totals incomplete) — on <machine>, run mm diag and inspect
+  host_usage.<reader>.` — the source contributed usable totals, but the
+  host explicitly declared those totals incomplete. Treat the number as a
+  floor, not an estimate. Same remedy as the failed-reader line: `mm diag`
+  on the named machine, never a bare `mm push`.
+- `Git walk ran out of budget on <machines> — some repositories were not
+  captured. On those machines, run mm diag and inspect
+  git_capture.recorded.walk_budget_aborts; this is not a missing push.` — the capture
+  ran and exhausted its budget. Different from a gap. Do not tell the user
+  to `mm recapture` as if nothing was attempted.
+- `Git history has an uncovered interval on <machines> — those windows were
+  never captured. On those machines, run mm recapture for the missing
+  window, then mm diag to confirm.` — a device with no `git_capture` at all
+  is unknown, not a gap; do not invent one. A recapture row covers its
+  interval even though it is not a push.
 
 ## Trends vs prior Nd
 
