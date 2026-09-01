@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from mind_meld.config import (
+    _GENERATED_HOST_SKILL_GLOBS,
     DEFAULT_SOURCES,
     _apply_defaults,
     _validate,
@@ -200,6 +201,84 @@ class TestDefaultSources:
         assert not fnmatch.fnmatch("analytics/skill-usage.jsonl", glob)
         assert not fnmatch.fnmatch("analytics/eureka.jsonl", glob)
 
+    def test_gstack_excludes_derived_caches(self):
+        """v0.12.51: the two derived-cache globs from the 2026-09-01 conflict-log
+        analysis. `decisions.active.json` is gstack's minified one-line snapshot
+        of `decisions.jsonl` (which mm already merges) and was the single most
+        frequent conflict on the fleet -- 18 of 88. `brain-cache/*` is gbrain's
+        per-machine cache -- 7 more."""
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        patterns = gstack.get("exclude_patterns") or []
+        assert "projects/*/decisions.active.json" in patterns
+        assert "projects/*/brain-cache/*" in patterns
+
+    def test_gstack_derived_cache_globs_match_observed_paths(self):
+        """Pin fnmatch behavior against the real observed rel_paths so a glob
+        refactor can't silently stop matching. Critically, the source of truth
+        `decisions.jsonl` must STAY in scope -- it merges cleanly and is what
+        the excluded snapshot is rebuilt from."""
+        import fnmatch
+
+        snapshot = "projects/*/decisions.active.json"
+        brain = "projects/*/brain-cache/*"
+        assert fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.active.json", snapshot)
+        assert fnmatch.fnmatch("projects/cnyfeeds-capsule-cli/decisions.active.json", snapshot)
+        assert fnmatch.fnmatch("projects/kbitz-mind-meld/brain-cache/_meta.json", brain)
+        # The append-only log that feeds the snapshot must NOT be excluded.
+        assert not fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.jsonl", snapshot)
+        assert not fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.jsonl", brain)
+        # Neither may the archive of superseded decisions.
+        assert not fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.archive.jsonl", snapshot)
+
+    def test_codex_excludes_host_managed_system_skills(self):
+        """v0.12.51: `skills/.system/*` is Codex's OWN bundled skill payload,
+        reinstalled by Codex and version-stamped in
+        `.codex-system-skills.marker`. Two Macs on different Codex builds
+        diverge by construction -- this produced 17 conflicts in one pull, none
+        of them a file either machine authored. Codex-only: OpenCode has no
+        `skills/.system`."""
+        import fnmatch
+
+        codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        patterns = codex.get("exclude_patterns") or []
+        assert "skills/.system/*" in patterns
+        glob = "skills/.system/*"
+        for observed in (
+            "skills/.system/.codex-system-skills.marker",
+            "skills/.system/imagegen/SKILL.md",
+            "skills/.system/imagegen/references/cli.md",
+            "skills/.system/plugin-creator/scripts/validate_plugin.py",
+        ):
+            assert fnmatch.fnmatch(observed, glob), observed
+        # User-authored skills stay in scope.
+        assert not fnmatch.fnmatch("skills/my-own-skill/SKILL.md", glob)
+
+        opencode = next(s for s in DEFAULT_SOURCES if s["name"] == "opencode")
+        assert "skills/.system/*" not in (opencode.get("exclude_patterns") or [])
+
+    def test_generated_host_skill_globs_shared_by_codex_and_opencode(self):
+        """v0.12.51: gstack-extend RENDERS these skills per host from one shared
+        source, so each host holds a byte-different copy of the same logical
+        skill and one upstream edit becomes N fleet divergences --
+        `skills/roadmap/SKILL.md` conflicted under BOTH sources in one pull.
+
+        Both entries must carry the full set: a glob added to one host only
+        would leave the other half of the pair conflicting.
+        """
+        for name in ("codex", "opencode"):
+            src = next(s for s in DEFAULT_SOURCES if s["name"] == name)
+            patterns = src.get("exclude_patterns") or []
+            for glob in _GENERATED_HOST_SKILL_GLOBS:
+                assert glob in patterns, f"{name} is missing {glob}"
+
+    def test_generated_host_skill_lists_are_not_aliased(self):
+        """`get_default_source` hands these lists to callers that mutate them,
+        so the codex and opencode entries must own distinct list objects even
+        though they splat the same shared constant."""
+        codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        opencode = next(s for s in DEFAULT_SOURCES if s["name"] == "opencode")
+        assert codex["exclude_patterns"] is not opencode["exclude_patterns"]
+
     def test_gstack_extend_source_present(self):
         assert any(s["name"] == "gstack-extend" and s["type"] == "generic" for s in DEFAULT_SOURCES)
 
@@ -220,6 +299,8 @@ class TestDefaultSources:
             "skills/gstack-*",
             "skills/log-work/*",
             "skills/retro-fleet/*",
+            "skills/.system/*",
+            *_GENERATED_HOST_SKILL_GLOBS,
         ]
 
     def test_opencode_source_syncs_customization_not_session_state(self):
@@ -238,6 +319,7 @@ class TestDefaultSources:
             "skills/gstack-*",
             "skills/log-work/*",
             "skills/retro-fleet/*",
+            *_GENERATED_HOST_SKILL_GLOBS,
         ]
 
     def test_grok_source_is_claude_shaped(self):

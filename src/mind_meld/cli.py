@@ -1310,7 +1310,12 @@ def _prompt_conflict_choice(
         merged_bytes, merge_conflicts = b"", -1
     else:
         merged_bytes, merge_conflicts = lcs_merge(local_bytes, remote_data)
-    merge_available = merge_conflicts >= 0
+    # A single-line side gives lcs_merge nothing to align on, so (m) could only
+    # ever emit one marker region wrapping both versions whole. Suppress it
+    # through the same gate as binary content.
+    merge_available = merge_conflicts >= 0 and conflictdiff.merge_has_line_structure(
+        local_text, remote_text
+    )
 
     safe_rel = safe_str(rel_path)
     diff = list(

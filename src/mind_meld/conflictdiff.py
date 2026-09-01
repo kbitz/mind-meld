@@ -223,6 +223,37 @@ def count_divergent_lines(diff: list[str]) -> tuple[int, int, int]:
     return (m, n, m + n)
 
 
+def merge_has_line_structure(local_lines: Sequence[str], remote_lines: Sequence[str]) -> bool:
+    """True when both sides have enough line structure for ``lcs_merge`` to help.
+
+    ``lcs_merge`` is line-based: it builds a synthetic ancestor from
+    ``LCS(local, remote)`` and can only produce a useful result when the two
+    sides share lines to align on. When EITHER side is a single line, there is
+    nothing to align — the only possible output is one ``<<<<<<<`` region
+    wrapping both versions whole, which is never a valid file of that type.
+    Offering ``(m)erge`` there is strictly worse than ``(l)ocal`` / ``(r)emote``:
+    it costs the user a manual editor round-trip to reach a state one keystroke
+    would have given them.
+
+    This is the shape of the fleet's most common conflict: gstack writes
+    ``decisions.active.json`` as ONE minified ``JSON.stringify`` line, so every
+    collision reported ``merge_available=True, merge_conflicts=1`` on
+    ``local_lines=1, remote_lines=1``. All nine decisions in the 2026-08
+    ``conflict-decisions.jsonl`` sample had that shape.
+
+    A zero-line (empty) side is suppressed too: ``lcs_merge(b"", remote)``
+    returns remote as a "clean" merge, which is just ``(r)emote`` wearing a
+    disguise — see the ``local_read_failed`` guard in ``_prompt_conflict_choice``
+    for the same reasoning applied to an unreadable local.
+
+    Callers AND this predicate together decide ``merge_available``; suppression
+    routes through the existing binary-content path, so the "typed ``m`` while
+    unavailable degrades to keep-both" contract is reused verbatim rather than
+    given a new branch.
+    """
+    return len(local_lines) > 1 and len(remote_lines) > 1
+
+
 def render_capped_diff(diff: Sequence[str], *, cap: int) -> list[Text]:
     """Render a bounded unified diff through the terminal-safety boundary.
 

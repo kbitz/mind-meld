@@ -157,6 +157,20 @@ class TestChangeCategories:
         assert "mm conflicts" in body
         assert "mm resolve" in body
 
+    def test_conflicted_header_states_the_post_inversion_direction(self, tmp_path: Path) -> None:
+        """The header must say REMOTE went to the sidecar, not local.
+
+        Regression pin for v0.12.51. From v0.9.2 (the inversion) until then the
+        header read "local preserved as .sync-conflict-*", which describes the
+        PRE-inversion direction and told the reader their own edits had been
+        moved aside — at exactly the moment they were deciding what to do about
+        it. It survived four months because `test_conflicted_section` above
+        asserts only that the word "Conflicts" appears, never which side moved.
+        """
+        body = self._log(tmp_path, conflicted_files=["projects/-foo/memory/c.md"])
+        assert "remote saved as .sync-conflict-*" in body
+        assert "local preserved" not in body
+
     def test_skipped_section(self, tmp_path: Path) -> None:
         body = self._log(tmp_path, skipped_files=["projects/-foo/memory/s.md"])
         assert "Skipped" in body
