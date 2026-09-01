@@ -154,8 +154,23 @@ class TestReaderOrchestration:
 
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with
-        no consent check at all."""
-        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
+        no consent check at all.
+
+        Equality is against the readers ``_default_host_readers`` actually
+        invokes, not against ``HOST_USAGE_TOKEN_SOURCES``. The tuple is the
+        live set; a just-retired reader can still sit in the gate until its
+        Track deletes the registration. Relaxing this to a subset would let a
+        future reader run with no gate entry. The tuple/reader drift pin is
+        ``test_built_in_constant_matches_the_full_reader_set``.
+        """
+        invoked = [
+            name
+            for name, _ in events_tail._default_host_readers(
+                self._enabled(*events_tail.HOST_READER_SOURCE_GATE),
+                grok_consented=True,
+            )
+        ]
+        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(invoked)
 
     def test_default_readers_resolve_at_call_time(self, monkeypatch):
         """Module-qualified lookup, so patching ``host_usage.read_codex_usage``
@@ -943,19 +958,19 @@ class TestTailWiring:
         _stub_hosts(
             monkeypatch,
             codex=_complete({"codex": {"2026-08-15": _usage(9)}}),
-            opencode=_incomplete(reason),
+            grok=_incomplete(reason),
         )
 
         degradations = events_tail._run_events_tail(
-            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
-        assert row["token_sources"] == ["codex"]
-        assert row["degraded_sources"] == ["opencode"]
-        assert "opencode" not in row["token_sources"]
+        assert "codex" in row["token_sources"]
+        assert row["degraded_sources"] == ["grok"]
+        assert "grok" not in row["token_sources"]
         assert len(degradations) == 1
-        assert degradations[0].startswith(f"host-usage snapshot skipped (opencode {reason})")
+        assert degradations[0].startswith(f"host-usage snapshot skipped (grok {reason})")
         # Permanent vs transient: never promise a retry for a failure a later
         # push cannot fix, and never leave a transient one without a next step.
         promises_retry = "A later substantive push will retry" in degradations[0]

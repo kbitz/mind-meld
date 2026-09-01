@@ -1721,10 +1721,24 @@ class TestMakeHostUsageSnapshot:
             device="dev-a",
             token_sources=("codex",),
             hosts={"codex": {"2026-08-15": _u(1)}},
-            degraded_sources=("grok", "opencode"),
+            degraded_sources=("grok",),
         )
-        assert ev["degraded_sources"] == ["grok", "opencode"]
+        assert ev["degraded_sources"] == ["grok"]
         assert set(ev["degraded_sources"]).isdisjoint(ev["token_sources"])
+
+    def test_writer_does_not_emit_retired_name_in_coverage_fields(self):
+        """Post-retirement provenance: a retired name is peer-only. The local
+        writer filters coverage fields through the live reader set, so passing
+        ``opencode`` as degraded_sources does not put it on the wire."""
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts={"codex": {"2026-08-15": _u(1)}},
+            degraded_sources=("opencode", "grok"),
+        )
+        assert ev["degraded_sources"] == ["grok"]
+        assert "opencode" not in ev["degraded_sources"]
+        assert "opencode" not in ev["token_sources"]
 
     def test_degraded_sources_drops_overlap_with_token_sources(self):
         ev = events.make_host_usage_snapshot(
@@ -2071,17 +2085,17 @@ class TestMakeHostUsageSnapshot:
         }
         ev = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("codex", "grok"),
+            token_sources=("codex",),
             hosts=hosts,
             tokens_by_day=self._sibling_for(hosts),
-            degraded_sources=("opencode",),
-            partial_days={"grok": [recent]},
+            degraded_sources=("grok",),
+            partial_days={"codex": [recent]},
         )
         assert oldest not in ev["active_days"]
         assert "tokens_by_day" in ev
         assert oldest not in ev["tokens_by_day"]
-        assert ev["degraded_sources"] == ["opencode"]
-        assert ev["partial_sources"] == ["grok"]
+        assert ev["degraded_sources"] == ["grok"]
+        assert ev["partial_sources"] == ["codex"]
 
 
 class TestWriteOrderTransactionalPin:

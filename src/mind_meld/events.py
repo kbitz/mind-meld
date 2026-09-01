@@ -394,15 +394,23 @@ class MmPushEvent(TypedDict, total=False):
     git_capture: GitCaptureState
 
 
-HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "opencode")
-"""Every built-in host reader, in the fixed order ``events_tail`` invokes them.
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok")
+"""The live host-reader set, in the fixed order ``events_tail`` invokes them.
 
-This is the FULL set — the universe of readers that can exist. A row's
+This is the readers that exist, not a historical wire vocabulary. A row's
 ``token_sources`` is the per-push SUBSET that actually contributed, which is
 what lets a consumer tell "this host reported nothing" apart from "this host
 was never consulted" (not enabled as a sync source, or its store holds no usage
 ledger). Do not serialize this constant into a row; see
-``make_host_usage_snapshot``."""
+``make_host_usage_snapshot``.
+
+The tuple is append-only in the sense that **reordering it is a breaking
+change**: a reorder flips 3 of 7 accepted wire shapes (worse than a deletion,
+which flips 2) and also changes the emission order of ``degraded_sources``
+and ``partial_sources`` in ``make_host_usage_snapshot``. Unknown names on a
+peer row are retained and labelled by the aggregator, not rejected — version
+skew is not writer corruption. Duplicates and known-name-out-of-order remain
+fatal."""
 
 
 class HostUsageSnapshot(TypedDict, total=False):

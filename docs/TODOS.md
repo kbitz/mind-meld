@@ -43,6 +43,13 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [manual] Track 36B card amendments (post-autoplan; already implemented on this branch)
+- **Description:** 36B shipped as delete-the-name + tolerant acceptor, not the carded pin. Next `/roadmap` regen must rewrite the 36B card (and 36A's `read-first`) to match. Do not hand-edit `docs/ROADMAP.md`.
+- **Why:** The autoplan review rejected the pin. The implementation is on `kbitz/pin-opencode-wire-name`. The live card still describes the rejected mechanism.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** `/autoplan` 2026-09-01. Settled amendments: `read-first:` inverts (36B before 36A — `release.yml` force-pushes `latest` on 36A's version bump); `verify:` becomes `pytest tests/`; `touches:` drops `CLAUDE.md` (symlink) and adds `aggregator.py`, `tests/test_retro_fleet_aggregator.py`, `src/mind_meld/skills/retro_fleet/SKILL.md`; mechanism is delete `"opencode"` from `HOST_USAGE_TOKEN_SOURCES` and retain unknown names in `_token_sources_subsequence`; file count 8 → 7; observed live shape is `["codex","opencode"]`, not `["codex","grok","opencode"]`. The two cheap doc-integrity tests named in the same review (CLAUDE.md symlink, README uninstall loop) are already in `tests/test_docs_routing.py`.
+
 ### [plan-eng-review:severity=high] Nine files hold OpenCode references no Track owns
 - **Description:** A full repo grep at `620ae1e` finds 336 OpenCode references across 34 files. Tracks 36A, 36B and 37B between them own 25 of those files. Nine are unowned by any Track: `tests/test_module_boundaries.py` (10), `tests/fixtures/host_sessions/opencode/` (6 + a `legacy/` tree), `tests/test_init_events_backfill.py` (4), `src/mind_meld/skills/retro_fleet/aggregator.py` prose (4), `tests/conftest.py` (3), `src/mind_meld/skills/retro_fleet/SKILL.md` (3), `src/mind_meld/manifest.py` (3), `docs/designs/grok-build-usage-reader.md` (3), `tests/test_token_usage.py` (1).
 - **Why:** Two are load-bearing, not cosmetic. `tests/test_module_boundaries.py:693` asserts `keys[:3] == ["claude","codex","opencode"]` and `:747` asserts a user-visible string; both break under **Track 37B**, whose `verify:` line does not include that file. `tests/fixtures/host_sessions/opencode/` is a whole fixture tree 36A's card gestures at ("keep any fixture a legacy-peer tolerance test in 36B will need") without owning.
@@ -50,7 +57,7 @@ here by hand, use the H3 form.
 - **Priority:** P2
 - **Context:** `/autoplan` Phase 1 CEO expansion E2, 2026-09-01, branch `kbitz/pin-opencode-wire-name`. 36B deliberately did not absorb these — pulling them in creates `_touches:` collisions with 36A and 37B inside a Group declared parallel.
 
-### [plan-devex-review:severity=high] Track 37B needs a retired-source CLI story, not just "must not resurrect"
+### [manual:severity=high] Track 37B needs a retired-source CLI story, not just "must not resurrect"
 - **Description:** 37B's card requires only that `mm enable-source opencode` "must not resurrect a retired source". Both DX voices found that leaves two user-facing behaviours, and both are wrong. (a) With an explicit `[[sync.sources]]` entry — the documented state, since `mm disable-source` preserves the block by design (`cli.py:5751-5753`) — `enable-source` prints `Enabled source 'opencode' on this device.` and 37B's load-boundary injection silently puts it straight back. Success message, permanent no-op. (b) Without one, `_validate_source_name` (`cli.py:5699-5703`) describes a **retired** source as **"not yet known to mm (forward-compat for not-yet-shipped sources)"** and offers `--force`, which teaches the user how to bypass the retirement.
 - **Why:** `mm sources` will honestly show the row, and its own docstring routes the reader straight into the broken verb. Error-message actionability scored 2/10, the lowest score in the review, with both voices agreeing.
 - **Hypothesis (untested):** a retired-names branch at `cli.py:5688`, before the `name in valid` return, with `--force` explicitly unable to bypass a retired built-in. Codex's shape is the better one: `enable` refuses, `mm sources` shows an explicit `Retired` state, and **`disable` stays idempotently accepted** so cleanup scripts do not start failing.
@@ -58,20 +65,13 @@ here by hand, use the H3 form.
 - **Priority:** P2
 - **Context:** `/autoplan` Phase 2.5 DX, 2026-09-01. Also file against 37B: add `tests/test_module_boundaries.py` to its `verify:`, and take `pyproject.toml:13`'s stale `opencode` keyword (37B already touches that file; 36B must not, or it enters the release-serialization lane).
 
-### [plan-devex-review:severity=medium] No deprecation notice anywhere when a supported agent is retired
+### [manual:severity=medium] No deprecation notice anywhere when a supported agent is retired
 - **Description:** A developer upgrades mm and sees nothing. No release note, no `mm: notice:`, no `mm status` or `mm diag` line, even though `mm sources` flips a row and a previously working source stops syncing. Upgrade-path safety scored 3/10 and 4/10 across the two DX voices.
 - **Why:** The repo already has the pattern — `mm: notice:` lines and the `autopush` `no-sources` breadcrumb precedent, which exists for exactly this class of silent no-op. One line closes it.
 - **Hypothesis (untested):** a one-time notice when a retired source or an mm-owned orphaned skill link is detected. Belongs in Track 37B, which is the Track that creates retirement.
 - **Effort:** S
 - **Priority:** P3
 - **Context:** `/autoplan` Phase 2.5 DX, 2026-09-01.
-
-### [plan-eng-review:severity=medium] Two cheap doc-integrity tests the suite is missing
-- **Description:** (1) `CLAUDE.md` is a symlink to `AGENTS.md`. `tests/test_docs_routing.py:28` reads `ROOT / "CLAUDE.md"` and would keep passing if an agent `Write`s that path and silently replaces the symlink with a copy — the two files would then drift with nothing catching it. Add `assert (ROOT / "CLAUDE.md").is_symlink()`. (2) `README.md:491`'s uninstall loop is executable shell, not prose, and is the only thing that removes an mm-owned `retro-fleet` link; a prose sweep that deletes a path from it strands that link permanently. Pin the loop's contents.
-- **Why:** Both are one-line assertions guarding failures that are invisible in CI today.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** `/autoplan` Phases 2.5 and 3, 2026-09-01. Found independently by three of the four review voices.
 
 ### [plan-eng-review:severity=medium] Decide whether unknown-enum tolerance is a general wire posture or a one-off
 - **Description:** Conditional on the Track 36B decision. If the acceptor is made tolerant of unknown `token_sources` names, the same question applies to the other closed vocabularies on the host-usage wire: host **families** (`_accept_hosts_payload` rejects unknown families as `invalid_counter`), reader **reasons** (`_HOST_READ_REASONS`), and **model ids**. They should not all move together by default — rejecting an unknown host family is correct, because an unattributable counter is not a measurement. Write down which vocabularies are open and which are closed, and why, rather than leaving it to the next retirement.

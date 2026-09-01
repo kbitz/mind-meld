@@ -27,6 +27,24 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "mind_meld"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 
+
+def test_claude_md_is_a_symlink_to_agents_md() -> None:
+    """A Write to CLAUDE.md would replace the symlink with a copy and this
+    suite would keep passing on the copy. Supported-agent claims live in
+    AGENTS.md; CLAUDE.md must stay the link."""
+    assert CLAUDE_MD.is_symlink()
+    assert CLAUDE_MD.resolve() == (ROOT / "AGENTS.md").resolve()
+
+
+def test_readme_uninstall_loop_keeps_the_opencode_skill_path() -> None:
+    """Track 37B leaves the mm-owned OpenCode skill link on disk. This loop
+    is the only cleanup. A mechanical prose sweep must not delete it."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "~/.config/opencode/skills/retro-fleet" in readme
+    assert "~/.claude/skills/retro-fleet" in readme
+    assert "~/.codex/skills/retro-fleet" in readme
+
+
 # `| `foo.py:bar` / `baz` / ... | doc |` — the leading cell names the owning
 # file, then one or more `/`-separated symbols.
 _ROW = re.compile(r"^\|(?P<cell>[^|]*)\|", re.M)
