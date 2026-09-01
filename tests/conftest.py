@@ -248,7 +248,7 @@ def _isolate_token_cache(monkeypatch, tmp_path) -> None:
 def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     """Point every host-usage reader root and cache at a per-test path.
 
-    Since Track 19A the events tail reads the built-in Codex / Grok / OpenCode
+    Since Track 19A the events tail reads the built-in Codex / Grok
     sources on every substantive push and init backfill, so without this every
     test that drives ``mm push`` / ``mm init`` would parse the DEVELOPER'S REAL
     ``~/.codex/sessions`` and write the real ``~/.config/mind-meld/*host-
@@ -272,10 +272,8 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("GROK_HOME", raising=False)
     monkeypatch.setattr(_host_usage, "CODEX_SESSIONS_PATH", root / "codex" / "sessions")
     monkeypatch.setattr(_host_usage, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
-    monkeypatch.setattr(_host_usage, "OPENCODE_DATA_PATH", root / "opencode")
     monkeypatch.setattr(_host_usage, "CACHE_PATH", root / "host-tokens.json")
     monkeypatch.setattr(_host_usage, "GROK_CACHE_PATH", root / "grok-host-tokens.json")
-    monkeypatch.setattr(_host_usage, "OPENCODE_CACHE_PATH", root / "opencode-host-tokens.json")
 
 
 @pytest.fixture(autouse=True)

@@ -4564,6 +4564,42 @@ class TestHostSnapshotAcceptance:
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
 
+    def test_legacy_peer_row_with_opencode_is_accepted_whole(self):
+        """36A deletes the OpenCode reader but not the wire name.
+
+        A peer still emitting ``opencode`` in any of the three source lists
+        must be accepted WHOLE — dropping the field (or the row) would erase
+        that device's host view for the 90-day window. All three route
+        through ``_token_sources_subsequence``.
+        """
+        ts = self.TS
+        token_row = _accepted(_host_event("dev-a", ts, token_sources=("codex", "grok", "opencode")))
+        assert token_row.consulted == ("codex", "grok", "opencode")
+
+        degraded_row = _accepted(
+            _host_event(
+                "dev-a",
+                ts,
+                token_sources=("codex",),
+                extra={"degraded_sources": ["opencode"]},
+            )
+        )
+        assert degraded_row.degraded == ("opencode",)
+        assert degraded_row.degraded_reason is None
+        assert degraded_row.consulted == ("codex",)
+
+        partial_row = _accepted(
+            _host_event(
+                "dev-a",
+                ts,
+                token_sources=("codex", "opencode"),
+                extra={"partial_sources": ["opencode"]},
+            )
+        )
+        assert partial_row.partial == ("opencode",)
+        assert partial_row.partial_reason is None
+        assert partial_row.consulted == ("codex", "opencode")
+
     def test_nonempty_hosts_empty_sources_rejected(self):
         ev = _host_event("dev-a", self.TS, token_sources=())
         result = aggregator._accept_host_usage_snapshot(ev)

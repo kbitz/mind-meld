@@ -394,14 +394,26 @@ class MmPushEvent(TypedDict, total=False):
     git_capture: GitCaptureState
 
 
-HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "opencode")
-"""Every built-in host reader, in the fixed order ``events_tail`` invokes them.
+ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "grok")
+"""The live host readers, in the fixed order ``events_tail`` invokes them.
 
-This is the FULL set — the universe of readers that can exist. A row's
-``token_sources`` is the per-push SUBSET that actually contributed, which is
-what lets a consumer tell "this host reported nothing" apart from "this host
-was never consulted" (not enabled as a sync source, or its store holds no usage
-ledger). Do not serialize this constant into a row; see
+This is the reader universe. ``HOST_USAGE_TOKEN_SOURCES`` is the accepted
+wire vocabulary — a superset that still names retired readers so a legacy
+peer's host row is not dropped whole. Adding a reader means appending here
+AND to ``HOST_USAGE_TOKEN_SOURCES``; retiring a reader means removing it
+from this tuple only. Do not serialize this constant into a row; see
+``make_host_usage_snapshot``."""
+
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "opencode")
+"""Accepted host-usage wire vocabulary, in canonical order.
+
+A row's ``token_sources`` / ``degraded_sources`` / ``partial_sources`` must
+be a subsequence of this tuple. It is a SUPERSET of ``ACTIVE_HOST_READERS``:
+names may remain after their reader is deleted so mixed-fleet peers that
+still emit them are accepted whole. A row's ``token_sources`` is the
+per-push SUBSET that actually contributed, which is what lets a consumer
+tell "this host reported nothing" apart from "this host was never
+consulted". Do not serialize this constant into a row; see
 ``make_host_usage_snapshot``."""
 
 
@@ -1918,7 +1930,7 @@ def make_host_usage_snapshot(
 
     **The payload is capped at the most recent ``max_days`` UTC days.** The
     host readers aggregate the WHOLE local corpus — ``_iter_rollouts`` has no
-    ``since`` and the OpenCode query has no date predicate — so without this
+    ``since`` and the Grok walker has no date predicate — so without this
     the row would carry the machine's entire lifetime of host activity, and
     would carry it again on every substantive push, into a synced
     content-addressed file that is re-uploaded whole. Every sibling is already

@@ -14,16 +14,19 @@ output. ``reasoning_output_tokens`` is already part of output and is never
 added a second time.
 
 Codex and Grok CLI counters are **inclusive**: the host's ``input`` already
-contains ``cache_read`` (and, if ever nonzero, ``cache_create``). OpenCode
-and Claude are **disjoint**. Counter semantics is a property of the
-READER, not the model id — ``grok-4.6`` arrives inclusive via the Grok CLI
-and disjoint via OpenCode. Inclusive extractors therefore emit disjoint
-buckets via ``_normalize_inclusive_usage`` (``uncached = input -
-cache_read - cache_create``). Do **not** normalize in ``_add_usage``: that
-is where the three readers converge, and subtracting ``cache_read`` from
-an already-disjoint OpenCode bucket would clamp real billable tokens to
-zero. Malformed inclusive counters (``cache_read + cache_create > input``)
-raise ``_ReadFailure("malformed")`` so Track 31A isolates that reader.
+contains ``cache_read`` (and, if ever nonzero, ``cache_create``). Claude
+session jsonl is **disjoint**. Counter semantics is a property of the
+READER, not the model id — the same ``grok-4.6`` id can arrive both ways.
+Inclusive extractors therefore emit disjoint buckets via
+``_normalize_inclusive_usage`` (``uncached = input - cache_read -
+cache_create``). Do **not** normalize in ``_add_usage``: that is where
+readers converge, and subtracting ``cache_read`` from an already-disjoint
+bucket (Claude today; historically OpenCode) would clamp real billable
+tokens to zero. Track 42A merges extractors into this path; the prohibition
+is load-bearing for that merge, not a comment about the current two
+inclusive survivors. Malformed inclusive counters
+(``cache_read + cache_create > input``) raise ``_ReadFailure("malformed")``
+so Track 31A isolates that reader.
 
 Two ordinary Codex shapes are tolerated rather than refused, because one
 unreadable file still fails that WHOLE reader. Track 31A isolates that
@@ -68,7 +71,6 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 import stat
 import time
 from contextlib import suppress
@@ -93,9 +95,7 @@ CACHE_PATH = Path.home() / ".config" / "mind-meld" / "host-tokens.json"
 
 CODEX_SESSIONS_PATH = Path.home() / ".codex" / "sessions"
 GROK_SESSIONS_PATH = Path.home() / ".grok" / "sessions"
-OPENCODE_DATA_PATH = Path.home() / ".local" / "share" / "opencode"
 GROK_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "grok-host-tokens.json"
-OPENCODE_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "opencode-host-tokens.json"
 CACHE_VERSION = 1
 DEFAULT_READ_BUDGET_S = 5.0
 
@@ -104,7 +104,6 @@ _TAIL_PROBE_BYTES = 4096
 _MAX_MODEL_ID_BYTES = 256
 _MAX_PROMPT_ID_BYTES = 256
 _MAX_COUNTER = 2**53
-_OPENCODE_SUCCESS_FINISHES = frozenset({"content-filter", "length", "stop", "tool-calls"})
 _GROK_STOPS = frozenset({"end_turn", "cancelled"})
 _GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
 _GROK_TERMINAL_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
@@ -115,12 +114,10 @@ _ROLLOUT_NAME = re.compile(r"^rollout-.*\.jsonl$")
 
 HostFamily = Literal["claude", "codex", "grok", "other"]
 Reason = Literal[
-    "busy",
     "deadline",
     "io_error",
     "locked",
     "malformed",
-    "migration",
     "no_metadata_ledger",
     "partial",
     "stale",
@@ -160,8 +157,8 @@ class HostUsageBuckets:
     every measured live bucket has ``cache_create == 0``, so the three-term
     formula is correct under both hypotheses today. A nonzero write from
     Codex or Grok marks the day unattributable rather than silently
-    pricing it. OpenCode never writes this set — its counters are already
-    disjoint and a cache write is a real priced field.
+    pricing it. A disjoint extractor never writes this set — its cache
+    write is already a real priced field.
     """
 
 
@@ -184,10 +181,10 @@ class HostUsageResult:
 
     Grok writes it for ``usageIsIncomplete`` turns; Codex writes it when
     an inclusive increment carried a nonzero ``cache_create`` (the
-    three-term-formula tripwire). OpenCode leaves it empty. Day-scoped on
-    purpose: a lifetime boolean would let one two-year-old incomplete
-    turn mark every future snapshot partial forever, while the 90-day cap
-    had already dropped that day.
+    three-term-formula tripwire). A disjoint extractor leaves it empty.
+    Day-scoped on purpose: a lifetime boolean would let one two-year-old
+    incomplete turn mark every future snapshot partial forever, while the
+    90-day cap had already dropped that day.
     """
 
     @property
@@ -221,8 +218,8 @@ class _CacheEntry(TypedDict, total=False):
     Entries written before this Track carried ``day`` / ``model`` / ``usage``
     instead. The ABSENCE of ``states`` is the version discriminator and forces
     one full re-walk of that file — deliberately NOT a ``CACHE_VERSION`` bump,
-    which shares a constant with the Grok and OpenCode namespaces and would
-    discard those too. Same call this repo made twice already, for
+    which shares a constant with the Grok namespace and would discard it
+    too. Same call this repo made twice already, for
     ``skills_by_day`` (v0.11.27) and ``offset``/``head`` (v0.12.15), both times
     because a bump throws away valid data that is expensive to rebuild.
 
@@ -275,10 +272,11 @@ class _Fingerprint:
 class _Terminal:
     """One already-reduced ``(day, model, usage)`` contribution.
 
-    Still the OpenCode reader's unit: its sqlite rows are per-message and
-    already disjoint, so there is nothing to dedup and no cumulative counter
-    to difference. The Codex reader stopped using this in favour of
-    ``_TurnState``; do not reintroduce it there.
+    The unit for a reader whose rows are already per-turn and disjoint:
+    nothing to dedup and no cumulative counter to difference. Codex stopped
+    using this in favour of ``_TurnState``; do not reintroduce it there.
+    ``_terminal_from_record`` is the remaining producer (test-only after
+    Track 32A); Track 42A owns its fate.
     """
 
     day: str
@@ -331,9 +329,10 @@ class _NoCacheCommit(RuntimeError):
 def host_family(model: str) -> HostFamily:
     """Return Mind Meld's canonical model-family bucket.
 
-    OpenCode's later reader must pass its model ID here; OpenCode is not a
-    row of its own. Classification is case-insensitive and intentionally
-    small so renderers never grow their own incompatible predicates.
+    Classification is by model-id prefix, not by which reader produced
+    the id — a reader is not a row of its own. Case-insensitive and
+    intentionally small so renderers never grow their own incompatible
+    predicates.
     """
     normalized = model.casefold() if isinstance(model, str) else ""
     if normalized.startswith("claude-"):
@@ -438,8 +437,8 @@ def warm_host_cache_inline(
     visibly, on an attended command instead. Mirrors
     ``token_usage.warm_token_cache_inline``.
 
-    ``reader`` selects which incremental cache to warm. Codex and Grok have
-    one; OpenCode's adapter cache stores no totals and is not warmable.
+    ``reader`` selects which incremental cache to warm. Only names in
+    ``events_tail.WARMABLE_HOST_READERS`` have one.
 
     The result is returned for tests and callers that want it, but the point is
     the side effect. Callers must still publish from a bounded capture, so this
@@ -703,68 +702,6 @@ def read_grok_usage(
         return _incomplete("io_error")
 
 
-def read_opencode_usage(
-    root: Path | None = None,
-    *,
-    deadline: float | None = None,
-) -> HostUsageResult:
-    """Read completed OpenCode assistant messages from allowlisted storage.
-
-    Modern OpenCode keeps messages in ``opencode.db``. Older installations
-    used complete message JSON files, which this reader refuses because there
-    is no metadata-only projection. A directory containing both forms is an
-    unfinished migration and is intentionally not guessed. SQLite is opened
-    read-only, query-only, with an immediate busy policy and one consistent
-    read transaction. Queries project only usage metadata.
-    """
-    source_root = root if root is not None else OPENCODE_DATA_PATH
-    read_deadline = deadline if deadline is not None else time.monotonic() + DEFAULT_READ_BUDGET_S
-    return _read_with_adapter_lock(
-        OPENCODE_CACHE_PATH,
-        read_deadline,
-        lambda: _scan_opencode_root(source_root, read_deadline),
-    )
-
-
-def _read_with_adapter_lock(
-    cache_path: Path,
-    deadline: float,
-    reader: Any,
-) -> HostUsageResult:
-    """Give OpenCode an independent 0600 lock without sharing totals.
-
-    OpenCode has no verified generation token, so it does not reuse Codex's
-    append-only cache. The tiny cache is solely a separate lock namespace
-    today. Grok has its own incremental cache in ``read_grok_usage``.
-    """
-    if _expired(deadline):
-        return _incomplete("deadline")
-    result = reader()
-    if not result.complete:
-        return result
-    if _expired(deadline):
-        return _incomplete("deadline")
-    try:
-        with locked_json_rmw(
-            cache_path,
-            mode=0o600,
-            default_factory=_empty_adapter_cache,
-            retry_intervals=(),
-            on_contention="warn",
-            contention_warning="host token adapter cache was locked; skipping host usage scan",
-        ) as locked:
-            if not locked.is_locked:
-                return _incomplete("locked")
-            if _expired(deadline):
-                raise _NoCacheCommit(_incomplete("deadline"))
-            locked.data = _empty_adapter_cache()
-            return result
-    except _NoCacheCommit as aborted:
-        return aborted.result
-    except OSError:
-        return _incomplete("io_error")
-
-
 def _empty_grok_cache() -> dict[str, Any]:
     return {
         "version": CACHE_VERSION,
@@ -965,13 +902,13 @@ def _grok_file_entry(
         # Always written, including as ``[]``. Absence is the pre-34A
         # discriminator and forces one re-walk; an empty list means this
         # file was walked post-34A and had no incomplete turns. NOT a
-        # CACHE_VERSION bump: that constant is shared with the Codex and
-        # OpenCode namespaces.
+        # CACHE_VERSION bump: that constant is shared with the Codex
+        # namespace.
         "partial_days": sorted(partial_days),
         # Key-absence is the pre-35A discriminator. Inclusive cached turns
         # would be published under a disjoint marker if we reused them;
-        # force one re-walk. NOT a CACHE_VERSION bump (shared with Codex
-        # and OpenCode). Same shape as the v0.12.50 ``partial_days`` gate.
+        # force one re-walk. NOT a CACHE_VERSION bump (shared with Codex).
+        # Same shape as the v0.12.50 ``partial_days`` gate.
         "counter_semantics": "disjoint-v1",
     }
 
@@ -1122,7 +1059,11 @@ def _normalize_inclusive_usage(usage: Usage) -> Usage:
     failure and raises ``_ReadFailure("malformed")`` so Track 31A isolates
     that reader for the capture.
 
-    OpenCode is already disjoint; never call this on its buckets.
+    Never call this on an already-disjoint bucket. Track 42A merges
+    extractors into ``_add_usage``; normalizing there would clamp a
+    disjoint reader's ``cache_read > input`` shape to zero. The live
+    survivors (Codex, Grok CLI) are inclusive — the prohibition is for
+    the merge, not a description of today's readers.
     """
     input_tokens = usage["input"]
     cache_create = usage["cache_create"]
@@ -1217,7 +1158,7 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
     if not _is_nonnegative_int(skip):
         return None
     # Key-absence is the pre-34A discriminator. A bump of CACHE_VERSION
-    # would also invalidate the Codex and OpenCode namespaces. Same shape
+    # would also invalidate the Codex namespace. Same shape
     # as the v0.12.15 offset/head gate and the D2 skills gate: force one
     # re-walk of this file, then persist the marker (possibly empty).
     if "partial_days" not in value:
@@ -1274,199 +1215,6 @@ def _aggregate_grok(entries: Any) -> HostUsageBuckets:
     differs — it deliberately does not, and a second implementation here is how
     the two readers drifted apart in the first place."""
     return _aggregate(entry for entry in entries if isinstance(entry, dict))
-
-
-def _scan_opencode_root(root: Path, deadline: float) -> HostUsageResult:
-    if _expired(deadline):
-        return _incomplete("deadline")
-    try:
-        if not root.exists():
-            return HostUsageResult({}, complete=True)
-        if root.is_symlink():
-            return _incomplete("stale")
-        database = root if root.name == "opencode.db" else root / "opencode.db"
-        legacy_root = (
-            root.parent / "storage" / "message"
-            if root.name == "opencode.db"
-            else root / "storage" / "message"
-        )
-        has_database = database.exists()
-        has_legacy = legacy_root.exists()
-    except OSError:
-        return _incomplete("io_error")
-
-    if has_database and has_legacy:
-        return _incomplete("migration")
-    try:
-        if has_database:
-            terminals = _read_opencode_database(database, deadline)
-        elif has_legacy:
-            # Legacy message files contain complete session content. There is
-            # no metadata-only projection, so do not deserialize transcripts —
-            # a standing property of the source, not a failed read.
-            return _incomplete("no_metadata_ledger")
-        else:
-            return HostUsageResult({}, complete=True)
-    except _ReadFailure as failure:
-        return _incomplete(failure.reason)
-    return _result_from_buckets(_aggregate(terminals))
-
-
-def _read_opencode_database(path: Path, deadline: float) -> list[_Terminal]:
-    before = _regular_stat(path)
-    connection: sqlite3.Connection | None = None
-    try:
-        if _expired(deadline):
-            raise _ReadFailure("deadline")
-        connection = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=0)
-        connection.execute("PRAGMA query_only = ON")
-        connection.execute("PRAGMA busy_timeout = 0")
-        connection.set_progress_handler(lambda: int(_expired(deadline)), 1000)
-        connection.execute("BEGIN")
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message'"
-            )
-        }
-        if tables != {"message"}:
-            raise _ReadFailure("unsupported")
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(message)")}
-        if "data" not in columns:
-            raise _ReadFailure("unsupported")
-        invalid = connection.execute(
-            "SELECT COUNT(*) FROM message WHERE data IS NULL OR NOT json_valid(data)"
-        ).fetchone()
-        if invalid is None or invalid[0] != 0:
-            raise _ReadFailure("malformed")
-        rows = connection.execute(
-            """
-            SELECT
-                json_extract(data, '$.id'),
-                json_extract(data, '$.role'),
-                json_extract(data, '$.modelID'),
-                json_extract(data, '$.time.completed'),
-                json_extract(data, '$.error'),
-                json_extract(data, '$.finish'),
-                json_extract(data, '$.tokens.input'),
-                json_extract(data, '$.tokens.output'),
-                json_extract(data, '$.tokens.reasoning'),
-                json_extract(data, '$.tokens.cache.read'),
-                json_extract(data, '$.tokens.cache.write')
-            FROM message
-            WHERE json_extract(data, '$.role') = 'assistant'
-              AND json_extract(data, '$.time.completed') IS NOT NULL
-              AND json_extract(data, '$.error') IS NULL
-            """
-        )
-        terminals: dict[str, _Terminal] = {}
-        for row in rows:
-            if _expired(deadline):
-                raise _ReadFailure("deadline")
-            (
-                message_id,
-                role,
-                model,
-                completed,
-                error,
-                finish,
-                input_tokens,
-                output,
-                reasoning,
-                cache_read,
-                cache_create,
-            ) = row
-            if role != "assistant" or error is not None:
-                raise _ReadFailure("malformed")
-            if (
-                _is_zero_opencode_ledger(
-                    input_tokens,
-                    output,
-                    reasoning,
-                    cache_read,
-                    cache_create,
-                )
-                and finish is None
-            ):
-                continue
-            terminal = _opencode_terminal(
-                message_id,
-                model,
-                completed,
-                finish,
-                input_tokens,
-                output,
-                reasoning,
-                cache_read,
-                cache_create,
-            )
-            if message_id in terminals:
-                raise _ReadFailure("malformed")
-            terminals[message_id] = terminal
-        connection.execute("COMMIT")
-    except _ReadFailure:
-        raise
-    except sqlite3.OperationalError as exc:
-        message = str(exc).casefold()
-        if _expired(deadline) or "interrupted" in message:
-            raise _ReadFailure("deadline") from exc
-        if "busy" in message or "locked" in message:
-            raise _ReadFailure("busy") from exc
-        raise _ReadFailure("io_error") from exc
-    except sqlite3.DatabaseError as exc:
-        raise _ReadFailure("malformed") from exc
-    except OSError as exc:
-        raise _ReadFailure("io_error") from exc
-    finally:
-        if connection is not None:
-            connection.close()
-    if not _same_source(before, _regular_stat(path)):
-        raise _ReadFailure("stale")
-    return list(terminals.values())
-
-
-def _opencode_terminal(
-    message_id: Any,
-    model: Any,
-    completed: Any,
-    finish: Any,
-    input_tokens: Any,
-    output: Any,
-    reasoning: Any,
-    cache_read: Any,
-    cache_create: Any,
-) -> _Terminal:
-    if not isinstance(message_id, str) or not message_id:
-        raise _ReadFailure("unsupported")
-    if not isinstance(finish, str) or finish not in _OPENCODE_SUCCESS_FINISHES:
-        raise _ReadFailure("unsupported")
-    output_count = _single_counter(output)
-    reasoning_count = _single_counter(reasoning)
-    terminal = _Terminal(
-        _utc_day(completed),
-        _model_id({"model": model}, ("model",)),
-        {
-            "input": _single_counter(input_tokens),
-            "cache_create": _single_counter(cache_create),
-            "cache_read": _single_counter(cache_read),
-            # OpenCode persists non-reasoning completion output separately;
-            # Mind Meld has one output bucket, so preserve both here.
-            "output": output_count + reasoning_count,
-        },
-    )
-    if terminal.usage["output"] > _MAX_COUNTER or not any(terminal.usage.values()):
-        raise _ReadFailure("unsupported")
-    return terminal
-
-
-def _is_zero_opencode_ledger(*values: Any) -> bool:
-    return all(_is_valid_counter(value) for value in values) and not any(values)
-
-
-def _single_counter(value: Any) -> int:
-    if not _is_valid_counter(value):
-        raise _ReadFailure("unsupported")
-    return value
 
 
 def _model_id(record: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -2030,9 +1778,11 @@ def _aggregate(entries: Any) -> HostUsageBuckets:
     """Reduce cached entries to family totals AND per-model day buckets.
 
     Handles every reader's entry shape, which is why there is one of these and
-    not one per reader: OpenCode contributes ``_Terminal`` rows that are
-    already disjoint, Grok contributes pre-deduped ``turns``, and Codex
-    contributes ``states`` that must be deduped HERE, across files.
+    not one per reader: ``_Terminal`` rows are already-reduced (day, model,
+    usage) and already disjoint, Grok contributes pre-deduped ``turns``, and
+    Codex contributes ``states`` that must be deduped HERE, across files.
+    Do not call ``_normalize_inclusive_usage`` on the ``_Terminal`` branch —
+    those buckets are already exclusive. Track 42A merges extractors here.
 
     **Why Codex dedup cannot live in the per-file walk.** A rollout file is not
     the unit of accounting. Measured on a real corpus: 195 ``turn_id`` values
@@ -2362,15 +2112,6 @@ def _empty_cache() -> dict[str, Any]:
     return {"version": CACHE_VERSION, "files": {}}
 
 
-def _empty_adapter_cache() -> dict[str, int]:
-    """Schema marker for non-incremental adapter lock files.
-
-    Keeping this intentionally content-free means an interrupted OpenCode
-    scan cannot cause the next successful scan to replay stale usage.
-    """
-    return {"version": CACHE_VERSION}
-
-
 def _validated_entry(value: Any) -> _CacheEntry | None:
     if not isinstance(value, dict):
         return None
@@ -2399,8 +2140,8 @@ def _validated_entry(value: Any) -> _CacheEntry | None:
         # Rejecting it forces exactly one full re-walk of that file. Measured
         # cost on a 746-file / 694 MB corpus: 801 ms cold, so 3 to 6 passes at
         # the 250 ms autopush budget — the same convergence v0.12.47 shipped.
-        # NOT a CACHE_VERSION bump: that constant is shared with the Grok and
-        # OpenCode namespaces and would discard them too.
+        # NOT a CACHE_VERSION bump: that constant is shared with the Grok
+        # namespace and would discard it too.
         return None
     turn_ids = _validated_table(value.get("turn_ids"), _MAX_PROMPT_ID_BYTES, allow_empty=True)
     days = _validated_table(value.get("days"), 32)
@@ -2629,8 +2370,6 @@ __all__ = [
     "HostFamily",
     "HostTokens",
     "HostUsageResult",
-    "OPENCODE_CACHE_PATH",
-    "OPENCODE_DATA_PATH",
     # `Reason` is a cross-module contract since Track 19A: events_tail derives
     # its entire user-visible reason vocabulary from `get_args(Reason)`.
     "Reason",
@@ -2640,6 +2379,5 @@ __all__ = [
     "grok_usage_diag",
     "read_codex_usage",
     "read_grok_usage",
-    "read_opencode_usage",
     "warm_host_cache_inline",
 ]
