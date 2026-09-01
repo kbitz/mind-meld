@@ -499,13 +499,32 @@ issue". `partial_sources` beside empty `hosts` is rejected as a claim.
 degradation cannot make a row win; a malformed sibling MAY change the
 winner, which is intended.
 
+**The acceptor re-checks BOTH writer contracts against `token_sources`, not
+just the pair against each other.** `degraded_sources ∩ token_sources` must
+be empty and `partial_sources ⊆ token_sources`; a violation drops that field
+alone with `invalid_coverage` and keeps the row. Checking only
+`degraded ∩ partial` is not enough — a peer that lists a contributor in
+`degraded_sources` makes the card say a reader that plainly contributed
+"failed on the latest push", and a `partial_sources` entry outside
+`token_sources` claims a reader nobody consulted returned incomplete totals.
+Both then route the user to `mm diag` for a reader that is fine, on a surface
+whose whole value is that its remedies are true. Found by Greptile on PR #151.
+
 **Git coverage.** `git_capture.since` / `walk_budget_aborts` / `walk_errors`
 on `git-snapshot` rows (Track 30A fields, now also attached to the snapshot
 row itself). Uncovered `[since, ts]` intervals are clamped to
 `_coverage_floor_from_files`. The open interval after a device's latest
 capture is not a gap (the next `mm push` covers it). `discovery` in
 `DISCOVERY_HOLD` (`partial` / `empty`) does not paint coverage — the cursor
-does not advance on those walks either. A device with no `git_capture` is unknown,
+does not advance on those walks either. **But a HOLD capture is still an
+OBSERVATION, and the gap loop keys on observations, never on coverage.** The
+two maps are separate on purpose: keying on `covered` dropped a HOLD-only
+device from the card entirely (no note at all, indistinguishable from a
+healthy machine) and clipped `latest_end` to the last *good* capture, hiding
+every held push after it — exactly the window `mm recapture` is for. The
+trailing clip itself still stands, and is why `latest_end` must come from the
+observation map: a held push at T does prove the device reached T. Found by
+Greptile on PR #151. A device with no `git_capture` is unknown,
 never a gap. `origin: recapture` rows COVER their interval and are EXCLUDED
 from the push tally (`snap_total` / `snap_zero`) — opposite treatment of
 one field. `walk_budget_aborts` is a budget-exhaustion note, not a gap.

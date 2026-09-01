@@ -4721,6 +4721,72 @@ class TestCoverageAcceptor:
         assert kept.degraded == ("grok",)
         assert kept.partial == ("codex",)
 
+    def test_e6c_degraded_naming_a_contributor_is_dropped(self):
+        """Found by Greptile on PR #151.
+
+        The writer keeps ``degraded_sources`` DISJOINT from
+        ``token_sources``. A peer that violates it made the card say a
+        reader that plainly contributed "failed on the latest push", and
+        sent the user to ``mm diag`` for a reader that is fine.
+        """
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"degraded_sources": ["codex"]},
+        )
+        row = _accepted(ev)
+        assert row.degraded == ()
+        assert row.degraded_reason == "invalid_coverage"
+
+    def test_e6d_partial_outside_token_sources_is_dropped(self):
+        """``partial_sources`` is a SUBSET of ``token_sources`` by contract.
+
+        A reader nobody consulted cannot have "reported incomplete totals".
+        """
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"partial_sources": ["grok"]},
+        )
+        row = _accepted(ev)
+        assert row.partial == ()
+        assert row.partial_reason == "invalid_coverage"
+
+    def test_e6e_contradicting_field_drops_alone(self):
+        """Drop the contradicting field, keep the row and its valid sibling."""
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"degraded_sources": ["codex"], "partial_sources": ["codex"]},
+        )
+        row = _accepted(ev)
+        assert row.lifetime_by_family["codex"]
+        assert row.degraded == ()
+        assert row.degraded_reason == "invalid_coverage"
+        assert row.partial == ()
+        assert row.partial_reason == "invalid_coverage"
+
+    def test_e6f_writer_output_survives_the_contract_checks(self):
+        """The real writer never trips them — a round trip stays intact."""
+        from mind_meld import events
+
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex", "grok"),
+            hosts={"codex": {"2026-04-20": _usage(4)}, "grok": {"2026-04-20": _usage(6)}},
+            ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+            degraded_sources=("opencode",),
+            partial_days={"grok": ["2026-04-20"]},
+        )
+        accepted = _accepted(json.loads(json.dumps(row)))
+        assert accepted.degraded == ("opencode",)
+        assert accepted.degraded_reason is None
+        assert accepted.partial == ("grok",)
+        assert accepted.partial_reason is None
+
     def test_e6b_valid_partial_sources_are_accepted(self):
         ev = _host_event(
             "laptop",
@@ -6846,3 +6912,59 @@ class TestGitCoverageAndRecapture:
         _write_events(events_dir, "dev-a", "2026-04-21", [tail, hold])
         data = _aggregate(events_dir)
         assert "dev-a" in data.git.uncovered_git
+
+    def test_h8_hold_only_device_still_reports_a_gap(self, tmp_path):
+        """A device whose every capture HELD must not vanish from the card.
+
+        Found by Greptile on PR #151. The gap loop keyed on ``covered``,
+        which a HOLD capture never joins, so a machine whose walks never
+        landed produced no note at all — indistinguishable from a healthy
+        machine. It is now keyed on the OBSERVATION map.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        rows = [
+            _capture_on(
+                _git_event("dev-a", 0, [_commit("aaa", 0)]),
+                since_days=7,
+                discovery=hold,
+            )
+            for hold in ("partial", "empty")
+        ]
+        _write_events(events_dir, "dev-a", "2026-04-21", rows)
+        data = _aggregate(events_dir)
+        assert "dev-a" in data.git.uncovered_git
+        out = aggregator.format_retro(data)
+        assert "uncovered interval" in out
+
+    def test_h9_trailing_hold_run_after_a_good_capture_is_a_gap(self, tmp_path):
+        """A HOLD push is an observation, so it extends ``latest_end``.
+
+        Clipping to the latest COVERED interval hid every held push after
+        the last good one — the exact window the user needs to recapture.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        good = _capture_on(_git_event("dev-a", 6, [_commit("aaa", 6)]), since_days=7)
+        held = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=6,
+            discovery="empty",
+        )
+        _write_events(events_dir, "dev-a", "2026-04-21", [good, held])
+        data = _aggregate(events_dir)
+        assert "dev-a" in data.git.uncovered_git
+
+    def test_h10_hold_capture_alone_does_not_extend_past_the_window(self, tmp_path):
+        """The trailing clip still holds: a fully covered window stays clean."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        good = _capture_on(_git_event("dev-a", 0, [_commit("aaa", 0)]), since_days=7)
+        held = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=7,
+            discovery="partial",
+        )
+        _write_events(events_dir, "dev-a", "2026-04-21", [good, held])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git

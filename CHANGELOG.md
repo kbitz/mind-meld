@@ -26,6 +26,8 @@ All notable changes to Mind Meld will be documented in this file.
 - Warm-retry merge (deadline-only, i.e. the largest-corpus machines) unions partial days the same way it already unions `token_sources`.
 - Grok resume no longer dies with `unsupported` when `updates.jsonl` restates an incomplete terminal: the incomplete marker stays on the file-level `partial_days` list, never on the cached turn dict, so live==cached equality still holds.
 - Git coverage does not treat today as a gap because yesterday's push landed before UTC midnight, and a `discovery: partial`/`empty` capture does not paint its interval covered. The budget-note remedy is `mm diag` → Git capture → `recorded.walk_budget_aborts`.
+- A machine whose git walks all HELD no longer disappears from the card. The gap loop keys on OBSERVATIONS, not on coverage: a `DISCOVERY_HOLD` capture still paints nothing, but it proves the device pushed, so a HOLD-only device reports its whole window uncovered and a run of held pushes after the last good capture is no longer clipped away. Silence there read as "no known coverage issue" on exactly the machines that needed `mm recapture`.
+- The snapshot acceptor re-checks both writer contracts against `token_sources` — `degraded_sources` disjoint from it, `partial_sources` a subset of it — instead of only checking the two against each other. A malformed peer could otherwise make the card report a reader that plainly contributed as having failed, or a reader nobody consulted as returning incomplete totals, sending you to `mm diag` for a reader that is fine.
 
 ## [0.12.49] - 2026-08-30
 

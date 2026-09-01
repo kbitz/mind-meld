@@ -1007,6 +1007,7 @@ def aggregate_git(
     snap_total: dict[str, int] = {}
     snap_zero: dict[str, int] = {}
     covered: dict[str, list[tuple[datetime, datetime]]] = {}
+    observed: dict[str, datetime] = {}
     budget_aborts: dict[str, int] = {}
     window_start, window_end = _git_coverage_window(since, until, coverage_floor)
     for ev in events:
@@ -1031,6 +1032,19 @@ def aggregate_git(
                 cap_since = _parse_aware_ts(capture.get("since"))
                 cap_ts = _parse_aware_ts(ev.get("ts")) or _parse_iso(ev.get("ts"))
                 if cap_since is not None and cap_ts is not None and cap_since <= cap_ts:
+                    # A HOLD capture paints no coverage but is still an
+                    # OBSERVATION, and the two are tracked separately on
+                    # purpose. ``observed`` is what the gap loop keys on,
+                    # so a device whose every capture held stays visible;
+                    # keying on ``covered`` dropped it from the card
+                    # entirely, which reads as "no known coverage issue"
+                    # when we in fact know the interval was never walked.
+                    # It is also the honest ``latest_end``: the trailing
+                    # clip exists to not blame the not-yet-pushed tail,
+                    # and a HOLD push at T proves the device reached T.
+                    prior = observed.get(device)
+                    if prior is None or cap_ts > prior:
+                        observed[device] = cap_ts
                     # DISCOVERY_HOLD (partial/empty) does not advance the
                     # git cursor because the walk is incomplete. Painting
                     # those intervals covered would let a budget-exceeded
@@ -1139,12 +1153,18 @@ def aggregate_git(
     }
     out.git_budget_aborts = {device: n for device, n in budget_aborts.items() if n > 0}
     uncovered: dict[str, tuple[tuple[str, str], ...]] = {}
-    for device, intervals in covered.items():
-        # The open interval after this device's latest capture is not a
-        # gap: the next ``mm push`` covers it. Treating today as uncovered
+    for device, latest_end in observed.items():
+        # Iterate OBSERVATIONS, not coverage: a device with only HOLD
+        # captures has no ``covered`` entry, and keying here on ``covered``
+        # silently dropped exactly the machines whose walks never landed.
+        # ``_uncovered_intervals`` with an empty list reports the whole
+        # clamped window, which is the truth for that device.
+        #
+        # The open interval after this device's latest capture is still not
+        # a gap: the next ``mm push`` covers it. Treating today as uncovered
         # because yesterday's push landed before midnight UTC made idle
         # Macs nag ``mm recapture`` every day.
-        latest_end = max(end for _start, end in intervals)
+        intervals = covered.get(device, [])
         gaps = _uncovered_intervals(intervals, window_start, min(window_end, latest_end))
         if gaps:
             uncovered[device] = tuple((start.isoformat(), end.isoformat()) for start, end in gaps)
@@ -1820,6 +1840,23 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         partial_reason = "invalid_coverage"
     overlap = set(degraded) & set(partial)
     if overlap:
+        partial = ()
+        partial_reason = "invalid_coverage"
+    # The writer's two contracts against ``token_sources``, enforced on the
+    # read side because the row is peer-controlled. ``degraded_sources`` is
+    # DISJOINT from it (a failed reader contributed nothing) and
+    # ``partial_sources`` is a SUBSET of it (a partial reader contributed,
+    # with known fidelity loss). Checking the pair against each other is not
+    # enough: without these, a malformed peer makes the card say a reader
+    # that plainly contributed "failed on the latest push", or that a reader
+    # nobody consulted "reported incomplete totals" — and the remedy copy
+    # then sends the user to `mm diag` for a reader that is fine. Drop the
+    # contradicting field, keep the row, same posture as the sibling.
+    consulted_set = set(consulted)
+    if set(degraded) & consulted_set:
+        degraded = ()
+        degraded_reason = "invalid_coverage"
+    if not set(partial) <= consulted_set:
         partial = ()
         partial_reason = "invalid_coverage"
     return _AcceptedHostRow(
