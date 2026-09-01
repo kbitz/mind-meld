@@ -16,6 +16,7 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 - **When a Track touches a reader, check the cache shape, not just the behaviour.** Track 34A verified all six of its card premises as TRUE-or-known-false and was still under-priced 2.5x, because premises describe behaviour while the cost sat in `host_usage._validated_grok_entry`, which normalizes every cached turn to `{key, day, model, usage}` and drops the rest. The existing "check the premise at drain time" constraint worked exactly as written and was insufficient.
 - **A Track that prices, sums, or trends a counter must first prove the counter schema of every reader it consumes.** Added 2026-09-01. Track 35A's card was measured against HEAD, its premises were re-verified at drain time, and it was still going to ship a 7.40x error, because every existing constraint checks *behaviour* and *premises* while the defect sat in an undocumented property of the source formats. Codex CLI and Grok CLI report **inclusive** `input` (cache-read already inside it); Claude is **disjoint**. `grok-4.6` appeared under both schemas, so the semantics belong to the READER, not the model id. This is the "check the cache shape" constraint one layer further out: check the SOURCE shape.
 - **A feature nobody uses is deleted, not repaired.** Added 2026-09-01. The OpenCode reader had been discarding its entire store since v0.12.30 and a Track was drafted to fix it; probing first showed `opencode.db` 19 days cold, `~/.config/opencode/` three weeks stale and composed entirely of symlinks into a git repo already under version control. The fix was real and the feature was not. Probe the artifact's liveness before pricing its repair.
+- **A host usage reader may not ship against a synthetic fixture.** Added 2026-09-01. Its `CONTRACT.md` must record a live census against a real corpus and the host version it was taken from. `tests/fixtures/host_sessions/opencode/CONTRACT.md` said outright "the local machine did not have an OpenCode data directory" and "the SQLite schema is a minimal synthetic contract table." It was the only reader built that way and the only one that returned zero — the root cause Track 36A exists to delete.
 
 ---
 
@@ -41,25 +42,25 @@ _**Phase membership changed 2026-09-01.** Group 40 (host cache encoding) was Pha
 #### Group 36: Three hosts
 
 ##### Track 36A: Delete the OpenCode usage reader
-_2 tasks . ~250 LOC (all deletion) . low risk . delete-only_
-_touches: src/mind_meld/host_usage.py, src/mind_meld/events_tail.py, tests/test_host_usage.py, tests/test_host_usage_snapshot.py, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_2 tasks . ~250 LOC . medium risk . 13 files_
+_touches: src/mind_meld/host_usage.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, tests/test_host_usage.py, tests/test_host_usage_snapshot.py, tests/conftest.py, tests/test_integration.py, tests/test_init_events_backfill.py, tests/fixtures/host_sessions/opencode/, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _out: 36B, 37B_
 _read-first: 31A, docs/invariants/events-retro.md (host-usage-snapshot section)_
 _produces: mm stops carrying a reader that has never returned a row_
-_session: fresh · effort: low · verify: pytest tests/; ruff check .; ruff format --check ._
+_session: fresh · effort: medium · verify: ./.venv/bin/python -m pytest tests/ -q ; ./.venv/bin/ruff check . ; ./.venv/bin/ruff format --check ._
 
-_**User decision, 2026-09-01: mm supports Claude Code, Codex and Grok Build. OpenCode is dropped.** This Track replaces a drafted fix for the OpenCode `$.id` defect — `host_usage.py:1345` projects `json_extract(data, '$.id')` while OpenCode keeps `id` as a table column, so every row yields NULL and one bad row fails the whole store (**0 of 35** readable assistant rows, measured 2026-09-01). Deleting the reader dissolves that defect instead of fixing it._
+_**User decision, 2026-09-01: mm supports Claude Code, Codex and Grok Build. OpenCode is dropped.** This Track replaces a drafted fix for the OpenCode `$.id` defect — `host_usage.py:1345` projects `json_extract(data, '$.id')` while OpenCode keeps `id` as a table column, so every row yields NULL and one bad row fails the whole store (**0 of 42** assistant rows, all `grok-4.6`, measured 2026-09-01). Deleting the reader dissolves that defect instead of fixing it._
 
 _Probed before planning, and the probe is why this is a deletion and not a repair: `~/.local/share/opencode/opencode.db` was last written **2026-08-13**, 19 days cold. `~/.config/opencode/` has a directory mtime of **2026-08-14** and its entire contents are symlinks into `~/.dotfiles/agent-config/` plus generated per-host skill renders — the sync source has never carried a byte OpenCode authored, and what it did carry is the exact category `docs/invariants/sync.md` calls "generated files are not sync data"._
 
-_**This Track is deletion-only on purpose**, which is what earns it the `max_files_per_track` exemption. The wire constant, the sync source, the skill link and the prose are three separate Tracks (36B, 37B) because each carries a different risk and only one of them is reversible for free._
+_**Not delete-only.** The `/autoplan` review of 2026-09-01 measured 4 deletable tests vs 39 generic multi-reader contracts that protect Codex and Grok; those are ported to a synthetic third reader. The `max_files_per_track` exemption is withdrawn. `events.ACTIVE_HOST_READERS = ("codex", "grok")` is the live reader universe; **do NOT touch `events.HOST_USAGE_TOKEN_SOURCES` membership** — that is 36B's job and removing `"opencode"` drops every legacy peer's whole host row._
 
-- **Delete the reader** -- `_read_opencode_database`, `_scan_opencode_root`, `_opencode_terminal`, `_is_zero_opencode_ledger` and the OpenCode cache namespace in `host_usage.py` (41 references), plus the reader registration and source gate in `events_tail.py` (9). **Do NOT touch `events.HOST_USAGE_TOKEN_SOURCES` here** — that is 36B's job and removing it naively breaks the fleet. _host_usage.py + events_tail.py, ~150 lines (del)._ (S)
-- **Delete its test coverage** -- 78 references in `tests/test_host_usage.py` and 71 in `tests/test_host_usage_snapshot.py`, deleted rather than ported. Keep any fixture that a legacy-peer tolerance test in 36B will need, and say so in the PR so 36B does not have to rebuild it. _tests, ~100 lines (del)._ (S)
+- **Delete the reader** -- `_read_opencode_database`, `_scan_opencode_root`, `_opencode_terminal`, `_is_zero_opencode_ledger`, `_read_with_adapter_lock`, `_empty_adapter_cache`, `_single_counter`, `import sqlite3`, and the OpenCode cache namespace in `host_usage.py`, plus the reader registration, source gate, and unreachable `migration` skip-phrase in `events_tail.py`. Split `ACTIVE_HOST_READERS` from the wire tuple. **Do NOT touch `events.HOST_USAGE_TOKEN_SOURCES` membership.** _host_usage.py + events_tail.py + events.py, ~200 lines (del)._ (M)
+- **Port the generic multi-reader contracts** -- delete `TestOpenCodeUsage` and the fixture tree; port the 39 isolation/merge/expiry tests onto a synthetic third reader. Repair `tests/conftest.py`'s autouse fixture and the `read_opencode_usage` stubs in `test_integration.py` / `test_init_events_backfill.py`. Pin empty-reader-set publication, consent-gate coverage, and legacy-peer acceptance across `token_sources` / `degraded_sources` / `partial_sources`. _tests, ~900 lines (edit)._ (M)
 
 ##### Track 36B: Pin the OpenCode wire name and sweep the prose
-_2 tasks . ~90 LOC . medium risk . 8 files_
-_touches: src/mind_meld/events.py, src/mind_meld/cli.py, tests/test_events.py, README.md, SPEC.md, AGENTS.md, CLAUDE.md, docs/designs/host-parity.md_
+_2 tasks . ~90 LOC . medium risk . 9 files_
+_touches: src/mind_meld/cli.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_events.py, README.md, SPEC.md, AGENTS.md, docs/designs/host-parity.md, docs/designs/grok-build-usage-reader.md_
 _read-first: 36A, 33A_
 _produces: a legacy peer keeps publishing accepted host rows after OpenCode is gone_
 _session: fresh · effort: medium · verify: pytest tests/test_events.py tests/test_retro_fleet_aggregator.py; ruff check .; ruff format --check ._
@@ -68,8 +69,8 @@ _**This Track exists because the obvious cleanup is a fleet-wide data-loss bug.*
 
 _So the decision is: **the wire keeps the name; only the reader goes.** This is the same shape as every other version discriminator in this codebase — additive, key-absence, never remove. The tuple entry becomes a legacy marker with a comment saying why it may not be deleted, and a test pins it so a future cleanup pass cannot quietly do the tempting thing. Deliberately **not** release-bearing: no behaviour changes, so no version bump, which is why it rooms with 36A instead of costing a wave._
 
-- **Pin the constant** -- keep `"opencode"` in `HOST_USAGE_TOKEN_SOURCES` with a comment naming `_token_sources_subsequence` as the reason, and add a regression test asserting a legacy `["codex", "grok", "opencode"]` snapshot is still accepted whole. Update `cli.py`'s two `enable-source` docstring references so the help text stops offering a host that no longer exists. _events.py + cli.py + tests, ~50 lines._ (M)
-- **Sweep the prose** -- `README.md` (13 references), `SPEC.md` (5), `AGENTS.md` (3), `CLAUDE.md` (3), `docs/designs/host-parity.md` (7). Leaving docs that describe a removed host is worse than leaving the code, because the code is at least honest about returning nothing. `host-parity.md` is a design doc whose premise just changed from four hosts to three — correct it in place or archive it, do not leave it asserting the old shape. _docs, ~40 lines._ (S)
+- **Pin the constant** -- 36A already split `ACTIVE_HOST_READERS` from `HOST_USAGE_TOKEN_SOURCES` and pinned legacy-peer acceptance across all three source lists. This Track must not delete `"opencode"` from the wire tuple. Update `cli.py`'s two `enable-source` docstring references so the help text stops offering a host that no longer exists. _cli.py + tests, ~20 lines._ (S)
+- **Sweep the prose** -- `README.md` (13 references), `SPEC.md` (5), `AGENTS.md` (3 references — `CLAUDE.md` is a **symlink to `AGENTS.md`**, one file not two), `docs/designs/host-parity.md` (7), `docs/designs/grok-build-usage-reader.md`, `skills/retro_fleet/SKILL.md` (mm **copies** it to `~/.local/share/mind-meld/agent-skills/` where every agent reads it as instructions), and `aggregator.py:3711` (the `mm enable-source ... opencode` hint rendered on the retro card). Leaving docs that describe a removed host is worse than leaving the code, because the code is at least honest about returning nothing. `host-parity.md` is a design doc whose premise just changed from four hosts to three — correct it in place or archive it, do not leave it asserting the old shape. _docs + aggregator + SKILL.md, ~50 lines._ (S)
 
 #### Group 37: Workspace bootstrap ∥ Source retirement
 
@@ -88,8 +89,8 @@ _Premise verified in a live workspace at `727f9cd`: no `.venv`, no `.conductor/`
 - **Wire it to Conductor and document it** -- a `.conductor/` setup entry so a new workspace bootstraps itself, plus one README line for the non-Conductor path. _.conductor/ + README.md, ~20 lines._ (S)
 
 ##### Track 37B: Retire the OpenCode sync source and skill link
-_2 tasks . ~120 LOC . medium risk . 4 files_
-_touches: src/mind_meld/config.py, src/mind_meld/skill_link.py, tests/test_config.py, tests/test_skill_link.py, docs/invariants/sync.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_3 tasks . ~160 LOC . medium risk . 5 files_
+_touches: src/mind_meld/config.py, src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_skill_link.py, docs/invariants/sync.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _out: 39A_
 _read-first: 36A, 28A, docs/invariants/sync.md, `cli._filter_disabled_sources` docstring (the P0 tombstone footgun, in full)_
 _produces: an unsupported source stops syncing on every Mac without anyone running a command_
@@ -102,7 +103,8 @@ _**Reuse `disabled_sources`; do not invent a second mechanism.** Dropping a sour
 _**Preferred shape: inject at the load boundary, not the call sites.** Adding retired names to `disabled_sources` inside `load_config` means both consumers are automatically correct and `cli.py` is not touched at all — which is also what keeps this Track inside `max_files_per_track`. **Verify one side effect before committing to it:** `mm enable-source` / `disable-source` save the config back, so an injected name could get persisted to disk. Persisting is arguably fine — it is what a migration would have written — but it must be a decision, not an accident, and `mm enable-source opencode` must not resurrect a retired source._
 
 - **Retire the source name** -- remove the `opencode` entry from `config.DEFAULT_SOURCES` and its half of `_GENERATED_HOST_SKILL_GLOBS` (the five globs are duplicated across the codex and opencode entries; only the opencode copy goes). Add a retired-names set beside `MM_INTERNAL_SOURCE_NAMES` and fold it into the effective `disabled_sources`. **Scope it to retired names only** — `_validate_sources` deliberately does not reject unknown source names, because `[[sync.sources]]` is user-extensible and `gstack` / `gstack-extend` are legitimate non-host entries; a rule like "ignore anything not in `DEFAULT_SOURCES`" would silently stop syncing a user's own custom source. Pin the tombstone behaviour with a test that retires a source holding files and asserts the push emits **no** new tombstones for it. _config.py, ~70 lines._ (M)
-- **Drop the skill-link row** -- remove the `opencode` row from `skill_link.AGENT_ROWS`, which owns `~/.config/opencode/skills/retro-fleet` and its two markers. This is mm retiring a link **it** owns, which is NOT the user-deletion case Track 28A's guard protects — read that guard first so the two paths stay distinguishable, and leave an orphaned link on disk rather than growing a reaper for a directory mm does not own. _skill_link.py, ~50 lines._ (M)
+- **Make `retired` a third source state** -- not a synonym for disabled or unknown. Consumed by `load_config`, `_validate_source_name`, `mm status`, `mm sources` and `reconfigure-sources`. Retired-name branch in `_validate_source_name` BEFORE the known-name check; exit non-zero; `--force` does not override. **Name `skill_link.py:129-134` explicitly** — it derives two marker constants with `next(row ... if row.key == "opencode")` and **no default**, so removing the `AGENT_ROWS` row raises `StopIteration` at module import and `mm --version` dies. Also flag `cli.py:4494`, which would otherwise print a permanent yellow "run `mm enable-source opencode`" line with a remedy that cannot work. _cli.py + skill_link.py, ~40 lines._ (M)
+- **Drop the skill-link row** -- remove the `opencode` row from `skill_link.AGENT_ROWS`, which owns `~/.config/opencode/skills/retro-fleet` and its two markers, **after** the two derived `next()` constants have a default or are deleted. This is mm retiring a link **it** owns, which is NOT the user-deletion case Track 28A's guard protects — read that guard first so the two paths stay distinguishable, and leave an orphaned link on disk rather than growing a reaper for a directory mm does not own. BREAKING marker + `### Migration` CHANGELOG section belong here, the release that actually stops the sync. _skill_link.py, ~50 lines._ (M)
 
 #### Group 38: Conflict sidecar forensics
 
@@ -217,7 +219,7 @@ _Phase 3's end-state lands here. Premise re-verified 2026-09-01 at `727f9cd`: `_
 
 _**One instruction struck 2026-09-01.** The card previously read "OpenCode must keep reporting an honest empty." That empty was a **defect, not an absence of data** — the reader held 35 readable assistant rows and discarded all of them. As written the card would have pinned a bug as intended behaviour in a regression test, which is the same failure mode as Track 35A's struck instruction to retire a passing guard, one Track later. The instruction is moot now that Group 36 removes OpenCode, but it is why this Track is gated on 36A, 37B and 40A: **it renders three real agents, not two real and one empty.**_
 
-_Note the asymmetry 36B creates and this Track must respect: OpenCode is gone from the reader and the config but **still a legal name on the wire**, because a legacy peer's row is rejected whole if it is not. The renderer must therefore ignore an inbound `opencode` source silently rather than surfacing it as a fourth agent or as a coverage gap._
+_Note the asymmetry 36B creates and this Track must respect: OpenCode is gone from the reader and the config but **still a legal name on the wire**, because a legacy peer's row is rejected whole if it is not. The renderer must therefore ignore an inbound `opencode` source silently rather than surfacing it as a fourth agent or as a coverage gap. Widen that inbound tolerance from `token_sources` to `degraded_sources` and `partial_sources` — all three route through `_token_sources_subsequence` (`aggregator.py:1892`)._
 
 - **One block, every agent** -- replace `_render_agent_inventory`'s diagnostic table with a per-model-family tokens-and-cost block shaped like `_render_token_block`, and drop `AGENT_FAMILY_ROWS`' `Claude (via agents)` disambiguation once there is one models block rather than two. Coverage reporting is not optional collateral: `_agent_coverage_notes` exists because "a vanished block must never be the diagnostic interface". An agent with genuinely no data still reports an honest empty — but verify per agent that the empty is absence, not a discard. _aggregator.py + SKILL.md, ~160 lines._ (L)
 - **Everything else aggregates across models** -- commits, LOC, streak, commit-type mix, peak hours, bursts, ship-of-window, top repos, PR references and the trends table are cross-model fleet aggregates and must render as one number each. Pin it so a later per-agent split is a build failure rather than a review catch. Note the standing 24B decision that the card gets no new row. _aggregator.py, ~40 lines._ (S)
@@ -242,12 +244,12 @@ Adjacency list (from the packer):
 Track detail per group:
 ```
 Group 36: Three hosts
-  +-- Track 36A ........... ~S . 2 tasks (delete-only)
+  +-- Track 36A ........... ~M . 2 tasks
   +-- Track 36B ........... ~M . 2 tasks
 
 Group 37: Workspace bootstrap | Source retirement
   +-- Track 37A ........... ~S . 2 tasks
-  +-- Track 37B ........... ~M . 2 tasks
+  +-- Track 37B ........... ~M . 3 tasks
 
 Group 38: Conflict sidecar forensics
   +-- Track 38A ........... ~L . 3 tasks
