@@ -7156,6 +7156,8 @@ class TestHostEconomics:
         )
         out = aggregator.format_retro(_econ_data([ev]))
         assert "| dev-a | — |" in out
+        activity = out.split("## Agent activity", 1)[1].split("## API list-rate equivalent", 1)[0]
+        assert "| dev-a | Codex models | 2026-04-28 | current | — | — |" in activity
         section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
         assert "~$" not in section
         assert "older format" in out

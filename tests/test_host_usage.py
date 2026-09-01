@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -220,6 +221,7 @@ class TestCodexFixture:
         totals = result.hosts["codex"]
         assert sum(day["input"] for day in totals.values()) == 140
         assert sum(day["output"] for day in totals.values()) == 60
+        assert result.partial_days == frozenset({"2026-08-14", "2026-08-15"})
         assert isolated_cache.exists()
         assert isolated_cache.stat().st_mode & 0o777 == 0o600
         assert str(root) not in isolated_cache.read_text(encoding="utf-8")
@@ -2894,3 +2896,61 @@ class TestCounterSemantics:
         assert day["cache_create"] == 2
         assert day["output"] == 15  # 3 + 12 reasoning
         assert result.partial_days == frozenset()
+
+    def test_codex_reader_round_trips_to_per_machine_floor(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Reader normalization and its cache-write tripwire survive the wire."""
+        from mind_meld import events
+        from mind_meld.skills.retro_fleet import aggregator
+
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-priced.jsonl",
+            [
+                _context(model="gpt-5.6-terra", turn="t"),
+                _token(1_000_000, cache_read=100_000, cache_create=40_000),
+            ],
+        )
+        result = hu.read_codex_usage(root)
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"] == {
+            "input": 860_000,
+            "cache_create": 40_000,
+            "cache_read": 100_000,
+            "output": 0,
+        }
+        assert result.partial_days == frozenset({"2026-08-15"})
+
+        since = datetime(2026, 8, 14, tzinfo=timezone.utc)
+        until = datetime(2026, 8, 16, tzinfo=timezone.utc)
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts=result.hosts,
+            tokens_by_day=result.tokens_by_day,
+            partial_days={"codex": result.partial_days},
+            ts=datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
+        )
+        assert row["counter_semantics"] == events.COUNTER_SEMANTICS_DISJOINT_V1
+        assert row["partial_sources"] == ["codex"]
+
+        data = aggregator.RetroData(window_days=2, since=since, until=until)
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [json.loads(json.dumps(row))],
+            since=since,
+            until=until,
+            registered_ids=None,
+        )
+        data.fleet = aggregator.FleetState(
+            devices_in_events={"dev-a"},
+            devices_known=1,
+            devices_known_list=[{"device_id": "dev-a", "device_name": "dev-a"}],
+        )
+        output = aggregator.format_retro(data)
+        economics = output.split("## API list-rate equivalent", 1)[1].split(
+            "## mm sync activity", 1
+        )[0]
+        assert "| dev-a | >=$1.84 |" in economics
+        assert "host declared totals incomplete (codex)" in output
