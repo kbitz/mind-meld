@@ -1964,6 +1964,119 @@ class TestMakeHostUsageSnapshot:
         assert ev["active_days"] == ["2026-08-15"]
         assert ev["tokens_by_day"]["2026-08-15"]["by_model"]["gpt-5"]["input"] == 0
 
+    def test_d1_partial_day_older_than_cap_is_omitted(self):
+        """One ancient incomplete turn must not mark every snapshot forever."""
+        from datetime import date as date_cls
+
+        from mind_meld import token_usage
+
+        end = date_cls(2026, 8, 15)
+        days = [
+            (end - timedelta(days=i)).isoformat() for i in range(token_usage.MAX_BY_DAY_DAYS + 1)
+        ]
+        oldest, recent = days[-1], days[0]
+        hosts = {"grok": {day: _u(1) for day in days}}
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("grok",),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            partial_days={"grok": [oldest]},
+            ts=datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
+        )
+        assert oldest not in ev["active_days"]
+        assert recent in ev["active_days"]
+        assert "partial_sources" not in ev
+
+    def test_d2_partial_day_inside_cap_emits_partial_sources(self):
+        hosts = {"grok": {"2026-08-15": _u(10)}}
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("grok",),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            partial_days={"grok": ["2026-08-15"]},
+        )
+        assert ev["partial_sources"] == ["grok"]
+
+    def test_d3_max_days_zero_omits_partial_sources(self):
+        hosts = {"grok": {"2026-08-15": _u(10)}}
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("grok",),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            partial_days={"grok": ["2026-08-15"]},
+            max_days=0,
+        )
+        assert "partial_sources" not in ev
+
+    def test_d4_effectively_empty_hosts_omits_partial_sources(self):
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("grok",),
+            hosts={"grok": {}},
+            partial_days={"grok": ["2026-08-15"]},
+        )
+        assert "partial_sources" not in ev
+
+    def test_d5_empty_partial_sources_omits_the_key(self):
+        hosts = {"grok": {"2026-08-15": _u(10)}}
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("grok",),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            partial_days={},
+        )
+        assert "partial_sources" not in ev
+
+    def test_d6_partial_sources_intersects_token_sources(self):
+        hosts = {"grok": {"2026-08-15": _u(10)}}
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("grok",),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            degraded_sources=("codex",),
+            partial_days={"grok": ["2026-08-15"], "codex": ["2026-08-15"]},
+        )
+        assert ev["partial_sources"] == ["grok"]
+        assert set(ev["partial_sources"]) <= set(ev["token_sources"])
+        assert ev["degraded_sources"] == ["codex"]
+        assert set(ev["degraded_sources"]).isdisjoint(ev["token_sources"])
+
+    def test_d7_no_events_schema_version_bump(self):
+        assert events.EVENTS_SCHEMA_VERSION == 2
+
+    def test_d8_coverage_fields_are_row_scoped_not_day_scoped(self):
+        from datetime import date as date_cls
+
+        from mind_meld import token_usage
+
+        end = date_cls(2026, 8, 15)
+        days = [
+            (end - timedelta(days=i)).isoformat() for i in range(token_usage.MAX_BY_DAY_DAYS + 1)
+        ]
+        oldest, recent = days[-1], days[0]
+        hosts = {
+            "grok": {day: _u(1) for day in days},
+            "codex": {recent: _u(5)},
+        }
+        ev = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex", "grok"),
+            hosts=hosts,
+            tokens_by_day=self._sibling_for(hosts),
+            degraded_sources=("opencode",),
+            partial_days={"grok": [recent]},
+        )
+        assert oldest not in ev["active_days"]
+        assert "tokens_by_day" in ev
+        assert oldest not in ev["tokens_by_day"]
+        assert ev["degraded_sources"] == ["opencode"]
+        assert ev["partial_sources"] == ["grok"]
+
 
 class TestWriteOrderTransactionalPin:
     def test_partial_write_does_not_advance_cursor(self, tmp_path):

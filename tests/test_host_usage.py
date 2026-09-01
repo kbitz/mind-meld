@@ -1033,6 +1033,7 @@ def _grok_turn(
     cache_create: int = 1,
     model: str = "grok-4",
     extra_update: dict | None = None,
+    usage_incomplete: object | None = None,
 ) -> str:
     usage = {
         "inputTokens": input_tokens,
@@ -1053,6 +1054,8 @@ def _grok_turn(
             }
         },
     }
+    if usage_incomplete is not None:
+        usage["usageIsIncomplete"] = usage_incomplete
     update = {
         "prompt_id": prompt_id,
         "sessionUpdate": "turn_completed",
@@ -1723,6 +1726,265 @@ class TestGrokUsage:
             wedge_entries.append(len(json.loads(grok_cache.read_text())["files"]))
             clock.now += 1.0
         assert wedge_entries == [wedge_entries[0]] * len(wedge_entries)
+
+
+class TestGrokPartialCoverage:
+    """Track 34A — detect ``usageIsIncomplete`` and persist it in the cache."""
+
+    def test_a1_fixture_turn_marks_that_day_partial(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.partial_days == frozenset({"2026-08-14"})
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 8
+
+    def test_a2_absent_flag_is_not_partial(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn()])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.partial_days == frozenset()
+
+    @pytest.mark.parametrize("flag", ["yes", 1, None, "false", False])
+    def test_a3_non_true_identity_is_not_partial(
+        self,
+        flag: object,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(usage_incomplete=flag)])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.partial_days == frozenset()
+
+    def test_a4_any_incomplete_turn_marks_the_day(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn(usage_incomplete=True),
+                _grok_turn(
+                    prompt_id="22222222-2222-2222-2222-222222222222",
+                    input_tokens=4,
+                    output=2,
+                    reasoning=0,
+                    cache_read=0,
+                    cache_create=0,
+                ),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.partial_days == frozenset({"2026-08-14"})
+
+    def test_a5_partial_is_per_day(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn(usage_incomplete=True),
+                _grok_turn(
+                    ts=1786817443,
+                    prompt_id="22222222-2222-2222-2222-222222222222",
+                    input_tokens=20,
+                    output=4,
+                    reasoning=1,
+                    cache_read=0,
+                    cache_create=0,
+                ),
+            ],
+        )
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.partial_days == frozenset({"2026-08-14"})
+        assert "2026-08-15" in result.hosts["grok"]
+        assert "2026-08-15" not in result.partial_days
+
+    def test_a6_read_failure_is_degraded_never_partial(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(stop="interrupted")])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is False
+        assert result.reason == "unsupported"
+        assert result.partial_days == frozenset()
+
+    def test_b1_pre_34a_cache_entry_forces_one_rewalk(
+        self,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Key-absence gate. Without this the live corpus stays invisible."""
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
+        grok_cache, _ = isolated_adapter_caches
+        first = hu.read_grok_usage(root, consented=True)
+        assert first.partial_days == frozenset({"2026-08-14"})
+        cache = json.loads(grok_cache.read_text(encoding="utf-8"))
+        for entry in cache["files"].values():
+            assert "partial_days" in entry
+            del entry["partial_days"]
+        grok_cache.write_text(json.dumps(cache), encoding="utf-8")
+
+        opened: list[Path] = []
+        real_open = Path.open
+
+        def spy(self, *args, **kwargs):
+            opened.append(self)
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", spy)
+        second = hu.read_grok_usage(root, consented=True)
+
+        jsonl_opens = [path for path in opened if path.name == "updates.jsonl"]
+        assert jsonl_opens
+        assert second.partial_days == frozenset({"2026-08-14"})
+        restored = json.loads(grok_cache.read_text(encoding="utf-8"))
+        for entry in restored["files"].values():
+            assert entry["partial_days"] == ["2026-08-14"]
+
+    def test_b2_warm_hit_after_rewalk_does_not_reopen_jsonl(
+        self,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
+        hu.read_grok_usage(root, consented=True)
+
+        calls: list[object] = []
+        original = hu._read_grok_file
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(hu, "_read_grok_file", spy)
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert calls == []
+        assert result.partial_days == frozenset({"2026-08-14"})
+
+    def test_b3_incremental_append_merges_partial_days(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        path = _write_grok_session(root, lines=[_grok_turn()])
+        first = hu.read_grok_usage(root, consented=True)
+        assert first.partial_days == frozenset()
+
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + _grok_turn(
+                ts=1786817443,
+                prompt_id="22222222-2222-2222-2222-222222222222",
+                input_tokens=20,
+                output=4,
+                reasoning=1,
+                cache_read=0,
+                cache_create=0,
+                usage_incomplete=True,
+            ),
+            encoding="utf-8",
+        )
+        second = hu.read_grok_usage(root, consented=True)
+
+        assert second.complete is True
+        assert second.partial_days == frozenset({"2026-08-15"})
+        assert second.hosts["grok"]["2026-08-14"]["input"] == 10
+        assert second.hosts["grok"]["2026-08-15"]["input"] == 20
+
+    def test_b4_gate_is_key_absence_not_a_cache_version_bump(self) -> None:
+        assert hu.CACHE_VERSION == 1
+
+    def test_b5_malformed_partial_field_rejects_the_entry(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
+        grok_cache, _ = isolated_adapter_caches
+        hu.read_grok_usage(root, consented=True)
+        cache = json.loads(grok_cache.read_text(encoding="utf-8"))
+        for entry in cache["files"].values():
+            entry["partial_days"] = "nope"
+        grok_cache.write_text(json.dumps(cache), encoding="utf-8")
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.partial_days == frozenset({"2026-08-14"})
+        restored = json.loads(grok_cache.read_text(encoding="utf-8"))
+        for entry in restored["files"].values():
+            assert entry["partial_days"] == ["2026-08-14"]
+
+    def test_b6_empty_partial_days_is_written_so_the_second_walk_is_warm(
+        self,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn()])
+        grok_cache, _ = isolated_adapter_caches
+        first = hu.read_grok_usage(root, consented=True)
+        assert first.partial_days == frozenset()
+        cache = json.loads(grok_cache.read_text(encoding="utf-8"))
+        for entry in cache["files"].values():
+            assert entry["partial_days"] == []
+        calls: list[object] = []
+        original = hu._read_grok_file
+
+        def spy(*args, **kwargs):
+            calls.append(args)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(hu, "_read_grok_file", spy)
+        second = hu.read_grok_usage(root, consented=True)
+        assert calls == []
+        assert second.partial_days == frozenset()
+
+    def test_b7_restated_incomplete_turn_does_not_fail_resume(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """A jsonl restatement of the same incomplete terminal must not
+        trip resume equality. Pre-34A the dicts matched; stamping
+        ``incomplete`` on the live turn made ``existing == turn`` fail
+        the whole reader."""
+        root = tmp_path / "sessions"
+        path = _write_grok_session(root, lines=[_grok_turn(usage_incomplete=True)])
+        first = hu.read_grok_usage(root, consented=True)
+        assert first.complete is True
+        assert first.partial_days == frozenset({"2026-08-14"})
+        path.write_text(
+            path.read_text(encoding="utf-8") + _grok_turn(usage_incomplete=True),
+            encoding="utf-8",
+        )
+        second = hu.read_grok_usage(root, consented=True)
+        assert second.complete is True
+        assert second.partial_days == frozenset({"2026-08-14"})
+        assert second.hosts["grok"]["2026-08-14"]["input"] == 10
 
 
 class TestOpenCodeUsage:
