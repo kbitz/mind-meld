@@ -24,6 +24,7 @@ Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events
 - [Host-usage snapshot capture](#host-usage-snapshot-capture-load-bearing-track-19a)
 - [Track 22A consumer](#track-22a-consumer-last-known-good-inventory)
 - [Track 23A renderer contract](#track-23a-renderer-contract)
+- [Coverage states (Track 34A)](#coverage-states-track-34a)
 - [Init-time event backfill](#init-time-event-backfill-v0118)
 - [Sessions snapshot v=2](#sessions-snapshot-v2-full-inventory-load-bearing-v0110)
 - [Cost estimation](#cost-estimation--one-predicate-honest-degradation-load-bearing-v01213)
@@ -242,13 +243,13 @@ second-pass Codex/OpenCode read must never erase totals already captured. If
 the retry expires before invoking a reader, it has no replacement outcome, so
 retain the initial deadline declaration.
 
-**Grok terminal skip (Track 31A).** A `turn_completed` whose `params.update`
+**Grok terminal skip (Track 31A, partial discharged Track 34A).** A `turn_completed` whose `params.update`
 key set is exactly `_GROK_TERMINAL_KEYS - {usage}` is a zero-token skip,
 counted on the Grok cache as `usage_less_skipped`. The carve-out MUST
 precede the exact-match key check — placing it at `usage = update.get("usage")`
 is dead code. `usage` present-but-not-a-dict stays fatal. `usageIsIncomplete`
-is accepted-and-ignored (fidelity caveat in
-`tests/fixtures/host_sessions/grok/CONTRACT.md`). An absent `updates.jsonl`
+is an `is True` identity check (never truthiness) and marks that UTC day
+partial; see Coverage states below. An absent `updates.jsonl`
 is not an I/O error (`FileNotFoundError` / `NotADirectoryError` → skip;
 other `OSError` still `io_error`).
 
@@ -457,6 +458,66 @@ does not).
   state that ambiguity rather than falsely diagnosing consent. A vanished block
   must never be the diagnostic interface — seven distinct causes would otherwise
   render identically as nothing.
+
+### Coverage states (Track 34A)
+
+Two additive, omit-when-empty subsequences of `HOST_USAGE_TOKEN_SOURCES` travel
+on the `host-usage-snapshot` row. They have the same shape and opposite
+disjointness contracts. **Do not unify them.**
+
+- **`degraded_sources`** (shipped v0.12.47): readers that failed this sweep.
+  DISJOINT from `token_sources` (enforced at `events.py` by filtering against
+  the contributed set). A failed reader contributed nothing.
+- **`partial_sources`**: readers that contributed usable totals, but the host
+  explicitly declared those totals incomplete. INTERSECTS `token_sources`.
+  A well-meant unification that filters partial the same way as degraded
+  silently drops every partial signal. That is the 1-year failure mode.
+
+**Partial is day-scoped until the writer, then row-scoped.** The Grok reader
+carries `HostUsageResult.partial_days` (UTC days that had a `usageIsIncomplete
+is True` turn — identity check, never truthiness). Both merges union those
+day sets beside `contributed`, never inside `_merge_host_usage_maps` (that
+helper never sees reader identity). `make_host_usage_snapshot` intersects
+with the same `keep` set `hosts` and `tokens_by_day` use, then reduces to
+source names. Coverage fields on the wire are therefore **row-scoped, not
+day-scoped**. A future day-scoped coverage map would have to join `keep` in
+the same pass; a lifetime source-level boolean would let one incomplete turn
+older than `MAX_BY_DAY_DAYS` mark every future snapshot partial forever.
+
+**Cache.** `_validated_grok_entry` persists `partial_days` (possibly empty)
+on the Grok cache entry. Pre-34A entries are detected by **key absence** and
+re-walked once. Not a `CACHE_VERSION` bump: that constant is shared with the
+Codex and OpenCode namespaces. Track 37A rewrites this encoding and must
+carry the marker through.
+
+**Acceptor.** Three-way on key presence, never a falsy check, reusing
+`_token_sources_subsequence`. Absent = no signal, not a broken peer — do not
+nag "too old". Present-but-invalid drops the field, keeps the row, and
+records the drop reason so the dump cannot read as "no known coverage
+issue". `partial_sources` beside empty `hosts` is rejected as a claim.
+`degraded` joins `_sibling_tie_key` (appended, never prepended) so a
+degradation cannot make a row win; a malformed sibling MAY change the
+winner, which is intended.
+
+**Git coverage.** `git_capture.since` / `walk_budget_aborts` / `walk_errors`
+on `git-snapshot` rows (Track 30A fields, now also attached to the snapshot
+row itself). Uncovered `[since, ts]` intervals are clamped to
+`_coverage_floor_from_files`. The open interval after a device's latest
+capture is not a gap (the next `mm push` covers it). `discovery` in
+`DISCOVERY_HOLD` (`partial` / `empty`) does not paint coverage — the cursor
+does not advance on those walks either. A device with no `git_capture` is unknown,
+never a gap. `origin: recapture` rows COVER their interval and are EXCLUDED
+from the push tally (`snap_total` / `snap_zero`) — opposite treatment of
+one field. `walk_budget_aborts` is a budget-exhaustion note, not a gap.
+The budget-note remedy is `mm diag` → Git capture → `recorded.walk_budget_aborts`,
+not a `last_push` key.
+
+**Renderer.** Two host notes and two git notes live in a flat block after
+the existing `_agent_coverage_notes` tree (host) and beside the zero-repo
+note (git). They aggregate across machines. Remedy is `mm diag` on the
+named machine inspecting `host_usage.<reader>` — never a bare `mm push`.
+Absence of the field produces no upgrade nag.
+
 #### Acceptor and schema
 
 - **The rejected breadcrumb counts DEVICES, not rows.** `aggregate_host_usage`

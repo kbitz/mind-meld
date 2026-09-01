@@ -2,6 +2,31 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.50] - 2026-08-31
+
+**The retro card now reports coverage the wire already carried: a dropped host reader, a Grok turn the host flagged incomplete, and a git-capture gap.** Unlike v0.12.49, this release **does** change the card. `degraded_sources` has been on the wire since v0.12.47 with zero readers; `git_capture` shipped in Track 30A unread by the aggregator; `usageIsIncomplete` was thrown away at Grok cache normalization. Connecting those signals is the whole Track. The first `mm push` after upgrading re-walks already-cached Grok `updates.jsonl` files once (key-absence of `partial_days`, not a `CACHE_VERSION` bump — that constant is shared with Codex and OpenCode). Coverage notes name a machine you may have to walk over to: the remedy is `mm diag` on that machine inspecting `host_usage.<reader>`, never a bare `mm push`. A pre-0.12.50 row without `partial_sources` still accepts and renders, and produces no upgrade nag.
+
+### Added
+
+- **`degraded_sources` reaches the card.** Acceptor carries it onto `_AcceptedHostRow` / `HostDeviceSnapshot` via the key-presence three-way, reusing `_token_sources_subsequence`. One aggregated Notes line names the machine and the reader and routes to `mm diag` there.
+- **`partial_sources` on `host-usage-snapshot`.** Additive, omit-when-empty, no schema bump. Grok turns with `usageIsIncomplete: true` (identity check, never truthiness) mark that UTC day partial; the writer intersects with the same 90-day `keep` set `hosts` uses, then reduces to source names. A lifetime flag would have marked every future snapshot partial from one two-year-old turn.
+- **Per-device git coverage intervals.** Uncovered `[since, ts]` windows, clamped to `_coverage_floor_from_files`. `walk_budget_aborts` is a budget note, not a gap. A device with no `git_capture` is unknown, never a gap.
+- **`--dump-host-usage` carries both coverage fields and the reason a field was dropped**, so invalid coverage metadata cannot read as "no known coverage issue".
+- **`SKILL.md` decoder entries** for the new Notes lines, plus a fallback rule: an unlisted `## Notes` line is reported verbatim and never interpreted.
+
+### Changed
+
+- `degraded` joins `_sibling_tie_key` (appended, never prepended) so a degradation cannot make a row win. The pinning test `test_acceptor_ignores_degraded_sources_and_tie_break_is_unchanged` is renamed; its `tie_key` equality assertion stays.
+- Recapture-origin git-snapshot rows are excluded from the "0 repositories on N of M **pushes**" tally. They still cover their interval. Opposite treatment of one field, pinned by a test.
+- Grok cache entries persist `partial_days` (possibly empty). Absence of the key forces one re-walk.
+
+### Fixed
+
+- A duplicate `partial` entry from a naive merge concatenation no longer makes the acceptor drop the field and the card silently render nothing.
+- Warm-retry merge (deadline-only, i.e. the largest-corpus machines) unions partial days the same way it already unions `token_sources`.
+- Grok resume no longer dies with `unsupported` when `updates.jsonl` restates an incomplete terminal: the incomplete marker stays on the file-level `partial_days` list, never on the cached turn dict, so live==cached equality still holds.
+- Git coverage does not treat today as a gap because yesterday's push landed before UTC midnight, and a `discovery: partial`/`empty` capture does not paint its interval covered. The budget-note remedy is `mm diag` → Git capture → `recorded.walk_budget_aborts`.
+
 ## [0.12.49] - 2026-08-30
 
 **Host usage now ships per-model per-day buckets on the wire, derived from the existing v0.12.48 cache with no re-walk.** Family totals in `hosts` are unchanged; the new `tokens_by_day` sibling is the shape Claude's session snapshot already uses. The retro card stays family-only this release — per-model data reaches `mm retro-fleet --dump-host-usage` and local counts on `mm diag`, not the card (that is Group 36). Until every Mac is on ≥ v0.12.49 and has pushed once, `--dump-host-usage` carries per-model detail for some machines and not others — a peer on an older mm sends no sibling at all, and its row is still accepted. `## Agent activity` numbers do NOT diverge: the new quality rank (valid > absent > invalid) sits strictly below the existing tie-break key, which already contains `hosts` verbatim, so it can only re-break ties between rows whose family totals are identical.
