@@ -2,6 +2,39 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.52] - 2026-09-01
+
+**Codex tokens are now counted without double-counting the cache, and the retro prices them as an API list-rate equivalent per machine — never as a fleet "cost".** Host readers were mixing two counter schemas: Codex and Grok CLI report inclusive `input` (cache-read already inside it); OpenCode and Claude are disjoint. Priced naively that was a 7.40x overstatement; `## Agent activity` has been ~1.97x high since v0.12.36. Inclusive extractors now emit disjoint buckets (`uncached = input - cache_read - cache_create`). A new `## API list-rate equivalent (per machine)` section prices the four observed `gpt-*` families at current OpenAI short-context list rates. It is not subscription spend, historical usage is repriced at today's rates, and the figures must not be summed (two device ids can hold one history after an OS migration). Grok rates are held until ingestion is proven. A Mac still on older mm shows `—` until it upgrades and re-pushes.
+
+### Mixed-fleet migration
+
+Until every reporting Mac is on ≥ v0.12.52 and has re-pushed, its economics row (and its host token columns) read `—`. That is unavailable, not zero.
+
+1. Upgrade every reporting Mac: `pipx upgrade mind-meld`.
+2. Run an interactive `mm push` on each (autopush does not warm a cold host cache).
+3. `mm diag` on each — Host usage block, `host counter format` — to confirm the machine writes disjoint counters.
+4. Re-run `mm retro-fleet 30d` (or your window).
+5. An upgraded peer's retained 90 days generally **do** become priceable on that repush. Older history past the 90-day cap stays unavailable.
+
+### Added
+
+- **`counter_semantics: "disjoint-v1"`** on `host-usage-snapshot`. Additive, no schema bump. Key absent means legacy inclusive/unknown. Only the exact known value is priceable; unknown values fail closed. Participates in `_sibling_tie_key` because it is the first *semantic* additive sibling.
+- **`PRICING_FAMILY_BY_MODEL`** (curated exact-id alias registry) and **`VENDOR_FAMILY_TIERS`** (literal four-field OpenAI cards, including GPT-5.6's published cache-write rates) beside the existing Claude tables. `resolve_prices` stays the single priced-predicate and gained exactly one branch.
+- **`## API list-rate equivalent (per machine)`** on the retro. Per device, never a fleet sum. `>=` vs `~` vs `—`; Notes names which of four causes fired (unpriced models, partial, degraded, by-model residual).
+- **`mm diag` `host counter format` line** under Host usage, phrased as a remedy.
+
+### Changed
+
+- Codex and Grok CLI extractors emit disjoint `input`. OpenCode is unchanged (already disjoint; pinned). Malformed inclusive counters (`cache_read + cache_create > input`) degrade that reader. A nonzero `cache_create` from an inclusive reader marks the day unattributable.
+- Grok cache entries persist `counter_semantics` (key-absence forces one re-walk; not a `CACHE_VERSION` bump).
+- Unpriced Notes line names the model ids (sanitized, sorted, capped).
+- `PRICING_LAST_UPDATED` is Anthropic-only; OpenAI has `PRICING_OPENAI_LAST_UPDATED`.
+
+### Fixed
+
+- **`## Agent activity` double-counted cached tokens since v0.12.36** on inclusive host buckets (`sum_bucket` of four fields whose `input` already contained `cache_read`). A peer without the new marker renders `—` in those columns, never a ceiling under `>=`.
+- Stale host snapshots render `—` instead of a confident `~$0.00`; an all-unpriced disjoint snapshot renders the honest `>=$0.00` floor. The per-machine economics cap ranks estimates before unavailable rows and reports omissions.
+
 ## [0.12.51] - 2026-09-01
 
 **More than half of every sync conflict this fleet has ever had was on a file no human authored, so this release stops syncing those files instead of trying to merge them better.** A forensic pass over all 88 `conflicted` records in `pull-history.jsonl` (2026-05-01 → 2026-09-01, a 4.1% conflict rate over 2,153 applied files) found 47 of them — 53% — to be pure generator output: derived caches, host-reinstalled payloads, and per-host renders of one shared source, where both machines are *correct* and simply regenerated at different times. Counting machine-written session state takes it to 56 of 88 (64%). Four new `exclude_patterns` globs retire 43 of the 88. `(m)erge` is no longer offered on files with no line structure for a line-based merger to use. The deferred Phase 2 auto-resolver is cancelled on the evidence, not deprioritized.

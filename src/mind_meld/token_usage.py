@@ -210,12 +210,27 @@ aggregator's render side reference this string."""
 # ---------------------------------------------------------------------------
 
 PRICING_LAST_UPDATED = "2026-08-11"
-"""Date the rates below were last verified against Anthropic's public
-pricing page. Rendered onto the retro card (aggregator's caveat line) so
+"""Date the Anthropic rates below were last verified against Anthropic's
+public pricing page. Rendered onto the Claude token-block caveat line so
 the reader can judge staleness themselves. Deliberately NOT a threshold:
 mm has no network by design, so this table cannot self-update and a
 "warn after N months" rule would be a verdict the code has not earned.
-The v0.12.13 miss was three months inside a six-month window."""
+The v0.12.13 miss was three months inside a six-month window.
+
+This is the Anthropic date only. OpenAI rates have
+``PRICING_OPENAI_LAST_UPDATED``. One date over two vendors' tables would
+be a lie of composition."""
+
+PRICING_OPENAI_LAST_UPDATED = "2026-09-01"
+"""Date the OpenAI short-context list rates in ``VENDOR_FAMILY_TIERS``
+were last verified against https://developers.openai.com/api/docs/pricing
+(also published at https://platform.openai.com/docs/pricing). Standard
+short-context, not Batch / Flex / Fast / long-context.
+
+``gpt-5.6-sol`` is OpenAI's promotional rate (at least through
+2026-11-21). Two public sources disagreed by 20-25% on
+``gpt-5.6-terra`` during review ($2/$12 vs $2.50/$15); this table uses
+the official page on this date, not a third-party aggregator."""
 
 # Cache read/write multipliers. Anthropic prices both as fixed multiples
 # of a model's input rate, uniformly across every tier — a cache read at
@@ -308,6 +323,64 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
     "opus": _tier(5.0, 25.0),
     "sonnet": _tier(3.0, 15.0),
     "haiku": _tier(1.0, 5.0),
+}
+
+# Curated alias registry (Track 35A): exact observed host model id →
+# pricing-family key. NOT a versioned grammar and NOT a substring match.
+# Maps today's identity to today's rate and reprices history. An unknown
+# id matches nothing and degrades to unpriced — the safe direction.
+#
+# Do NOT reach for ``_tier`` here. Its multipliers are Anthropic
+# (cache_read = 0.1x input, cache_create = 2.0x). OpenAI cache-read is
+# also 0.1x on these models, while GPT-5.6 cache writes are 1.25x input.
+# A nonzero write from an inclusive reader still marks that day partial:
+# the write bucket has a published rate, but its relationship to inclusive
+# input has not been censused. Literal four-field cards, one row per family.
+#
+# Grok / xAI is HELD (gate D1, 2026-09-01). No ``grok-4.6-build`` alias,
+# no xAI tier. Two blockers before a follow-up can add it: (1) the
+# ``_validated_grok_entry`` ``offset == size`` wedge (Track 37A) so Grok
+# has never completed a scan on this fleet; (2) the OpenCode ``$.id``
+# defect, which discards the only other path a ``grok-*`` model could
+# take. ``resolve_prices("grok-4.6-build")`` returning None is a
+# decision, not an omission.
+PRICING_FAMILY_BY_MODEL: dict[str, str] = {
+    "gpt-5.6-terra": "gpt-5.6-terra",
+    "gpt-5.6-sol": "gpt-5.6-sol",
+    "gpt-5.4": "gpt-5.4",
+    "gpt-5.5": "gpt-5.5",
+}
+
+# Per-family OpenAI short-context list rates, USD per million tokens.
+# Source: https://developers.openai.com/api/docs/pricing verified
+# PRICING_OPENAI_LAST_UPDATED. The official table publishes cache-write
+# rates for GPT-5.6 and ``-`` for GPT-5.4/5.5; the latter map to 0.0.
+# Do not derive these from ``_tier``.
+VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
+    "gpt-5.6-terra": {
+        "input": 2.00,
+        "cache_read": 0.20,
+        "cache_create": 2.50,
+        "output": 12.00,
+    },
+    "gpt-5.6-sol": {
+        "input": 4.00,
+        "cache_read": 0.40,
+        "cache_create": 5.00,
+        "output": 20.00,
+    },
+    "gpt-5.4": {
+        "input": 2.50,
+        "cache_read": 0.25,
+        "cache_create": 0.0,
+        "output": 15.00,
+    },
+    "gpt-5.5": {
+        "input": 5.00,
+        "cache_read": 0.50,
+        "cache_create": 0.0,
+        "output": 30.00,
+    },
 }
 
 # Models we deliberately count tokens for but exclude from cost. Today
@@ -588,7 +661,10 @@ def resolve_prices(model: str) -> dict[str, float] | None:
 
     Resolution order: ``COST_EXCLUDED_MODELS`` (``<synthetic>``) is not
     this function's concern and is filtered by the caller; exact
-    ``PRICING`` entry wins; else the family tier; else ``None``.
+    ``PRICING`` entry wins; else the Claude family tier via
+    ``model_family``; else the curated host alias
+    ``PRICING_FAMILY_BY_MODEL`` → ``VENDOR_FAMILY_TIERS``; else ``None``.
+    The host-alias branch is exact-key, never substring.
 
     Returns a COPY. The rate cards are module-level and shared; handing
     out the live dict lets one careless caller mutate pricing for the
@@ -598,9 +674,15 @@ def resolve_prices(model: str) -> dict[str, float] | None:
     if prices is not None:
         return dict(prices)
     family = model_family(model)
-    if family is None:
+    if family is not None:
+        return dict(MODEL_FAMILY_TIERS[family])
+    vendor_family = PRICING_FAMILY_BY_MODEL.get(model)
+    if vendor_family is None:
         return None
-    return dict(MODEL_FAMILY_TIERS[family])
+    vendor_prices = VENDOR_FAMILY_TIERS.get(vendor_family)
+    if vendor_prices is None:
+        return None
+    return dict(vendor_prices)
 
 
 def parse_usage(message: Any) -> tuple[Usage, str, str | None] | None:
@@ -1820,7 +1902,10 @@ __all__ = [
     "MAX_BY_DAY_DAYS",
     "MODEL_FAMILY_TIERS",
     "PRICING",
+    "PRICING_FAMILY_BY_MODEL",
     "PRICING_LAST_UPDATED",
+    "PRICING_OPENAI_LAST_UPDATED",
+    "VENDOR_FAMILY_TIERS",
     "SUBSCRIPTION_CAVEAT",
     "SkillBuckets",
     "TAIL_MSG_ID_LOOKBACK",

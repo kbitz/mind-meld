@@ -5189,6 +5189,13 @@ def diag(
             " — run [bold]mm push[/bold] (interactive) to finish the rebuild"
         )
 
+    # Track 35A: a Mac still showing — on the retro reported inclusive
+    # counters. This machine writes disjoint-v1; the remedy is the other
+    # Mac. Routed through the aggregator's phrasebook, not a third copy.
+    from mind_meld.skills.retro_fleet.aggregator import _host_detail_phrase
+
+    console.print("  host counter format:    " + _host_detail_phrase("absent", "legacy_counters"))
+
     disc = state.get("discovery") or {}
     console.print("\n[bold]Git-root discovery[/bold] (autopush budget)")
     console.print(f"  budget_ms:    {disc.get('budget_ms')}")

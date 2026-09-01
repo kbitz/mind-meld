@@ -13,6 +13,7 @@ import os
 import shutil
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -188,9 +189,9 @@ class TestCodexFixture:
         bucket mean "the lifetime of every session that last touched this
         machine that day" rather than "tokens spent that day".
 
-        The fixture is one session with a ledger on each of two days. The sum
-        is unchanged (200/20/40/60) because the same work is being counted;
-        only its attribution moves. 8 of 746 rollouts on a real corpus span
+        The fixture is one session with a ledger on each of two days. Inclusive
+        input 100 contains cache_read 20 and cache_create 10, so the disjoint
+        uncached input is 70 per day. 8 of 746 rollouts on a real corpus span
         more than one UTC day.
         """
         root = tmp_path / "sessions"
@@ -203,23 +204,24 @@ class TestCodexFixture:
         assert result.hosts == {
             "codex": {
                 "2026-08-14": {
-                    "input": 100,
+                    "input": 70,
                     "cache_create": 10,
                     "cache_read": 20,
                     "output": 30,
                 },
                 "2026-08-15": {
-                    "input": 100,
+                    "input": 70,
                     "cache_create": 10,
                     "cache_read": 20,
                     "output": 30,
                 },
             }
         }
-        # The window total is preserved; only its distribution changed.
+        # Disjoint uncached input: 70 + 70. Cache fields pass through.
         totals = result.hosts["codex"]
-        assert sum(day["input"] for day in totals.values()) == 200
+        assert sum(day["input"] for day in totals.values()) == 140
         assert sum(day["output"] for day in totals.values()) == 60
+        assert result.partial_days == frozenset({"2026-08-14", "2026-08-15"})
         assert isolated_cache.exists()
         assert isolated_cache.stat().st_mode & 0o777 == 0o600
         assert str(root) not in isolated_cache.read_text(encoding="utf-8")
@@ -1029,8 +1031,8 @@ def _grok_turn(
     input_tokens: int = 10,
     output: int = 6,
     reasoning: int = 2,
-    cache_read: int = 3,
-    cache_create: int = 1,
+    cache_read: int = 0,
+    cache_create: int = 0,
     model: str = "grok-4",
     extra_update: dict | None = None,
     usage_incomplete: object | None = None,
@@ -1103,7 +1105,7 @@ class TestGrokUsage:
         """T4: the extra Grok 1.0.5 census fixtures stay loadable."""
         cases = {
             "usage-less": (True, {}),
-            "cancelled-with-usage": (True, 10),
+            "cancelled-with-usage": (True, 6),
             "incomplete-usage": (True, 8),
             "no-ledger": (True, {}),
         }
@@ -1129,7 +1131,7 @@ class TestGrokUsage:
         assert result.hosts == {
             "grok": {
                 "2026-08-14": {
-                    "input": 10,
+                    "input": 6,
                     "cache_create": 1,
                     "cache_read": 3,
                     "output": 6,
@@ -1403,7 +1405,7 @@ class TestGrokUsage:
         result = hu.read_grok_usage(consented=True)
 
         assert result.complete is True
-        assert result.hosts["grok"]["2026-08-14"]["input"] == 10
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 6
 
     @pytest.mark.parametrize("source_kind", ["file", "symlink"])
     def test_rejects_non_directory_or_symlink_session_roots(
@@ -1864,6 +1866,39 @@ class TestGrokPartialCoverage:
         restored = json.loads(grok_cache.read_text(encoding="utf-8"))
         for entry in restored["files"].values():
             assert entry["partial_days"] == ["2026-08-14"]
+
+    def test_b1_pre_35a_counter_cache_entry_forces_one_rewalk(
+        self,
+        isolated_adapter_caches: tuple[Path, Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An inclusive pre-35A cache must never inherit disjoint-v1."""
+        root = tmp_path / "sessions"
+        shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
+        grok_cache, _ = isolated_adapter_caches
+        first = hu.read_grok_usage(root, consented=True)
+        cache = json.loads(grok_cache.read_text(encoding="utf-8"))
+        for entry in cache["files"].values():
+            assert entry["counter_semantics"] == "disjoint-v1"
+            del entry["counter_semantics"]
+        grok_cache.write_text(json.dumps(cache), encoding="utf-8")
+
+        opened: list[Path] = []
+        real_open = Path.open
+
+        def spy(self, *args, **kwargs):
+            opened.append(self)
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", spy)
+        second = hu.read_grok_usage(root, consented=True)
+
+        assert any(path.name == "updates.jsonl" for path in opened)
+        assert second.hosts == first.hosts
+        restored = json.loads(grok_cache.read_text(encoding="utf-8"))
+        for entry in restored["files"].values():
+            assert entry["counter_semantics"] == "disjoint-v1"
 
     def test_b2_warm_hit_after_rewalk_does_not_reopen_jsonl(
         self,
@@ -2730,3 +2765,192 @@ class TestHostUsageBuckets:
         result = hu.read_codex_usage(root)
         assert "2026-08-14" in result.tokens_by_day
         assert "2026-08-16" in result.tokens_by_day
+
+
+class TestCounterSemantics:
+    """Track 35A: inclusive readers emit disjoint buckets. OpenCode does not."""
+
+    def test_reader_totals_reconcile_codex(self) -> None:
+        """Three identities from a real-shaped Codex token_count record.
+
+        Raw inclusive: input 2,801,950 + output 11,813 == total 2,813,763
+        and cached_input 2,668,288 is NOT added. Measured 2026-09-01.
+        """
+        raw_input, raw_cache_read, raw_cache_create, raw_output = 2_801_950, 2_668_288, 0, 11_813
+        raw_total = 2_813_763
+        assert raw_input + raw_output == raw_total
+        record = _token(
+            raw_input,
+            cache_create=raw_cache_create,
+            cache_read=raw_cache_read,
+            output=raw_output,
+        )
+        usage = hu._terminal_from_record(record, "gpt-5.6-terra").usage
+        assert usage["input"] + usage["cache_read"] + usage["cache_create"] == raw_input
+        assert (
+            usage["input"] + usage["cache_read"] + usage["cache_create"] + usage["output"]
+            == raw_total
+        )
+
+    def test_reader_totals_reconcile_grok(self) -> None:
+        """Three identities from a real-shaped Grok turn_completed record.
+
+        Raw inclusive: input 304,748 + output 1,277 == total 306,025
+        and cachedRead 303,872 is NOT added. Measured 2026-09-01.
+        """
+        raw_input, raw_cache_read, raw_cache_create, raw_output = 304_748, 303_872, 0, 1_277
+        raw_total = 306_025
+        assert raw_input + raw_output == raw_total
+        usage = hu._validate_grok_counters(
+            {
+                "inputTokens": raw_input,
+                "outputTokens": raw_output,
+                "reasoningTokens": 0,
+                "cachedReadTokens": raw_cache_read,
+                "cacheCreationTokens": raw_cache_create,
+                "totalTokens": raw_total,
+            }
+        )
+        assert usage["input"] + usage["cache_read"] + usage["cache_create"] == raw_input
+        assert (
+            usage["input"] + usage["cache_read"] + usage["cache_create"] + usage["output"]
+            == raw_total
+        )
+
+    def test_synthetic_nonzero_cache_create_still_reconciles(self) -> None:
+        raw_input, cache_read, cache_create, output = 1_000, 100, 50, 10
+        usage = hu._normalize_inclusive_usage(
+            {
+                "input": raw_input,
+                "cache_read": cache_read,
+                "cache_create": cache_create,
+                "output": output,
+            }
+        )
+        assert usage["input"] + usage["cache_read"] + usage["cache_create"] == raw_input
+        assert usage["input"] == 850
+
+    def test_nonzero_cache_create_from_inclusive_reader_is_unattributable(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        _write_grok_session(
+            root,
+            lines=[
+                _grok_turn(
+                    input_tokens=100,
+                    cache_read=10,
+                    cache_create=5,
+                    output=6,
+                    reasoning=2,
+                )
+            ],
+        )
+        result = hu.read_grok_usage(root, consented=True)
+        assert result.complete is True
+        assert result.hosts["grok"]["2026-08-14"]["input"] == 85
+        assert result.partial_days == frozenset({"2026-08-14"})
+
+    def test_malformed_counters_degrade_the_reader_not_the_row(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """cache_read + cache_create > input → that reader is incomplete."""
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-malformed.jsonl",
+            [_context(turn="t"), _token(10, cache_read=20, cache_create=0)],
+        )
+        result = hu.read_codex_usage(root)
+        assert result.complete is False
+        assert result.reason == "malformed"
+        assert result.hosts == {}
+
+    def test_cache_create_greater_than_input_is_malformed(self) -> None:
+        with pytest.raises(hu._ReadFailure) as caught:
+            hu._normalize_inclusive_usage(
+                {"input": 10, "cache_read": 0, "cache_create": 11, "output": 1}
+            )
+        assert caught.value.reason == "malformed"
+
+    def test_cache_read_plus_create_greater_than_input_is_malformed(self) -> None:
+        with pytest.raises(hu._ReadFailure) as caught:
+            hu._normalize_inclusive_usage(
+                {"input": 10, "cache_read": 6, "cache_create": 5, "output": 1}
+            )
+        assert caught.value.reason == "malformed"
+
+    def test_opencode_is_pass_through_disjoint(
+        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+    ) -> None:
+        """OpenCode is already disjoint: cache_read may exceed input.
+        The extractor must not subtract. 32 of 36 live rows had this shape."""
+        root = tmp_path / "opencode"
+        assistant = _opencode_message(input_tokens=10, cache_read=50, cache_create=2, output=3)
+        _write_opencode_database(root, [assistant])
+        result = hu.read_opencode_usage(root)
+        assert result.complete is True
+        day = result.hosts["codex"]["2025-08-15"]
+        assert day["input"] == 10
+        assert day["cache_read"] == 50
+        assert day["cache_create"] == 2
+        assert day["output"] == 15  # 3 + 12 reasoning
+        assert result.partial_days == frozenset()
+
+    def test_codex_reader_round_trips_to_per_machine_floor(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        """Reader normalization and its cache-write tripwire survive the wire."""
+        from mind_meld import events
+        from mind_meld.skills.retro_fleet import aggregator
+
+        root = tmp_path / "sessions"
+        _write_rollout(
+            root,
+            "rollout-priced.jsonl",
+            [
+                _context(model="gpt-5.6-terra", turn="t"),
+                _token(1_000_000, cache_read=100_000, cache_create=40_000),
+            ],
+        )
+        result = hu.read_codex_usage(root)
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"] == {
+            "input": 860_000,
+            "cache_create": 40_000,
+            "cache_read": 100_000,
+            "output": 0,
+        }
+        assert result.partial_days == frozenset({"2026-08-15"})
+
+        since = datetime(2026, 8, 14, tzinfo=timezone.utc)
+        until = datetime(2026, 8, 16, tzinfo=timezone.utc)
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex",),
+            hosts=result.hosts,
+            tokens_by_day=result.tokens_by_day,
+            partial_days={"codex": result.partial_days},
+            ts=datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
+        )
+        assert row["counter_semantics"] == events.COUNTER_SEMANTICS_DISJOINT_V1
+        assert row["partial_sources"] == ["codex"]
+
+        data = aggregator.RetroData(window_days=2, since=since, until=until)
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [json.loads(json.dumps(row))],
+            since=since,
+            until=until,
+            registered_ids=None,
+        )
+        data.fleet = aggregator.FleetState(
+            devices_in_events={"dev-a"},
+            devices_known=1,
+            devices_known_list=[{"device_id": "dev-a", "device_name": "dev-a"}],
+        )
+        output = aggregator.format_retro(data)
+        economics = output.split("## API list-rate equivalent", 1)[1].split(
+            "## mm sync activity", 1
+        )[0]
+        assert "| dev-a | >=$1.84 |" in economics
+        assert "host declared totals incomplete (codex)" in output

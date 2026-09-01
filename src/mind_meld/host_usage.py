@@ -13,6 +13,18 @@ cache-create, ``cached_input_tokens`` → cache-read, and ``output_tokens`` →
 output. ``reasoning_output_tokens`` is already part of output and is never
 added a second time.
 
+Codex and Grok CLI counters are **inclusive**: the host's ``input`` already
+contains ``cache_read`` (and, if ever nonzero, ``cache_create``). OpenCode
+and Claude are **disjoint**. Counter semantics is a property of the
+READER, not the model id — ``grok-4.6`` arrives inclusive via the Grok CLI
+and disjoint via OpenCode. Inclusive extractors therefore emit disjoint
+buckets via ``_normalize_inclusive_usage`` (``uncached = input -
+cache_read - cache_create``). Do **not** normalize in ``_add_usage``: that
+is where the three readers converge, and subtracting ``cache_read`` from
+an already-disjoint OpenCode bucket would clamp real billable tokens to
+zero. Malformed inclusive counters (``cache_read + cache_create > input``)
+raise ``_ReadFailure("malformed")`` so Track 31A isolates that reader.
+
 Two ordinary Codex shapes are tolerated rather than refused, because one
 unreadable file still fails that WHOLE reader. Track 31A isolates that
 failure to the reader: the caller publishes the survivors rather than
@@ -141,6 +153,16 @@ class HostUsageBuckets:
 
     by_family: HostTokens = field(default_factory=dict)
     by_day: dict[str, DayBucket] = field(default_factory=dict)
+    unattributable_days: set[str] = field(default_factory=set)
+    """UTC days whose inclusive source emitted a nonzero ``cache_create``.
+
+    Inclusive ``input`` may or may not contain cache-*created* tokens;
+    every measured live bucket has ``cache_create == 0``, so the three-term
+    formula is correct under both hypotheses today. A nonzero write from
+    Codex or Grok marks the day unattributable rather than silently
+    pricing it. OpenCode never writes this set — its counters are already
+    disjoint and a cache write is a real priced field.
+    """
 
 
 @dataclass(frozen=True)
@@ -158,12 +180,14 @@ class HostUsageResult:
     reason: Reason | None = None
     tokens_by_day: dict[str, DayBucket] = field(default_factory=dict)
     partial_days: frozenset[str] = frozenset()
-    """UTC days on which this reader accepted a turn the host flagged
-    incomplete. Empty means no such turn in the retained scan. Day-scoped
-    on purpose: a lifetime boolean would let one two-year-old incomplete
+    """UTC days whose totals this reader declared unattributable.
+
+    Grok writes it for ``usageIsIncomplete`` turns; Codex writes it when
+    an inclusive increment carried a nonzero ``cache_create`` (the
+    three-term-formula tripwire). OpenCode leaves it empty. Day-scoped on
+    purpose: a lifetime boolean would let one two-year-old incomplete
     turn mark every future snapshot partial forever, while the 90-day cap
-    had already dropped that day. Codex and OpenCode leave this empty —
-    only Grok's ledger carries ``usageIsIncomplete``.
+    had already dropped that day.
     """
 
     @property
@@ -944,6 +968,11 @@ def _grok_file_entry(
         # CACHE_VERSION bump: that constant is shared with the Codex and
         # OpenCode namespaces.
         "partial_days": sorted(partial_days),
+        # Key-absence is the pre-35A discriminator. Inclusive cached turns
+        # would be published under a disjoint marker if we reused them;
+        # force one re-walk. NOT a CACHE_VERSION bump (shared with Codex
+        # and OpenCode). Same shape as the v0.12.50 ``partial_days`` gate.
+        "counter_semantics": "disjoint-v1",
     }
 
 
@@ -1054,6 +1083,7 @@ def _grok_turns_from_record(
     # {key, day, model, usage}, and resume compares live==cached.
     incomplete = usage.get("usageIsIncomplete") is True
     accepted: list[tuple[str, dict[str, Any]]] = []
+    cache_create_nonzero = False
     for model, entry in models.items():
         if not isinstance(model, str) or not model:
             raise _ReadFailure("unsupported")
@@ -1062,6 +1092,8 @@ def _grok_turns_from_record(
         if not isinstance(entry, dict):
             raise _ReadFailure("unsupported")
         counters = _validate_grok_counters(entry)
+        if counters["cache_create"] > 0:
+            cache_create_nonzero = True
         model_key = _grok_terminal_key(workspace, session_id, prompt_id, model)
         accepted.append(
             (
@@ -1074,8 +1106,35 @@ def _grok_turns_from_record(
                 },
             )
         )
-    days = frozenset({day} if incomplete and accepted else ())
+    days = frozenset({day} if (incomplete or cache_create_nonzero) and accepted else ())
     return accepted, days
+
+
+def _normalize_inclusive_usage(usage: Usage) -> Usage:
+    """Convert inclusive host counters into mutually exclusive billable buckets.
+
+    Inclusive schema (Codex CLI, Grok CLI): ``input`` already contains
+    ``cache_read`` and, if the host ever emits it, ``cache_create``. The
+    three-term formula is correct under both "create is inside input" and
+    "create is not" while ``cache_create == 0`` — the live corpus. Do not
+    clamp a negative uncached value to zero and publish it: that destroys
+    the evidence. ``cache_read + cache_create > input`` is a reader-level
+    failure and raises ``_ReadFailure("malformed")`` so Track 31A isolates
+    that reader for the capture.
+
+    OpenCode is already disjoint; never call this on its buckets.
+    """
+    input_tokens = usage["input"]
+    cache_create = usage["cache_create"]
+    cache_read = usage["cache_read"]
+    if cache_read + cache_create > input_tokens:
+        raise _ReadFailure("malformed")
+    return {
+        "input": input_tokens - cache_read - cache_create,
+        "cache_create": cache_create,
+        "cache_read": cache_read,
+        "output": usage["output"],
+    }
 
 
 def _validate_grok_counters(usage: dict[str, Any]) -> Usage:
@@ -1084,12 +1143,14 @@ def _validate_grok_counters(usage: dict[str, Any]) -> Usage:
     if reasoning > output:
         raise _ReadFailure("unsupported")
     _grok_counter(usage, "totalTokens")
-    return {
-        "input": _grok_counter(usage, "inputTokens"),
-        "cache_create": _grok_counter(usage, "cacheCreationTokens"),
-        "cache_read": _grok_counter(usage, "cachedReadTokens"),
-        "output": output,
-    }
+    return _normalize_inclusive_usage(
+        {
+            "input": _grok_counter(usage, "inputTokens"),
+            "cache_create": _grok_counter(usage, "cacheCreationTokens"),
+            "cache_read": _grok_counter(usage, "cachedReadTokens"),
+            "output": output,
+        }
+    )
 
 
 def _grok_counter(usage: dict[str, Any], key: str) -> int:
@@ -1164,11 +1225,15 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
     partial_days = _validated_grok_partial_days(value.get("partial_days"))
     if partial_days is None:
         return None
+    # Pre-35A entries stored inclusive counters. Re-walk once.
+    if value.get("counter_semantics") != "disjoint-v1":
+        return None
     return {
         **_identity_fields_from(value),
         "turns": normalized,
         "usage_less_skipped": skip,
         "partial_days": partial_days,
+        "counter_semantics": "disjoint-v1",
     }
 
 
@@ -1475,7 +1540,15 @@ def _scan_codex_root(
             # thrown away. See `read_codex_usage` for why that matters.
             return _incomplete(failure.reason), staged, learned
 
-    return _result_from_buckets(_aggregate(staged.values())), staged, learned
+    try:
+        buckets = _aggregate(staged.values())
+    except _ReadFailure as failure:
+        return _incomplete(failure.reason), staged, learned
+    return (
+        _result_from_buckets(buckets, partial_days=frozenset(buckets.unattributable_days)),
+        staged,
+        learned,
+    )
 
 
 def _iter_rollouts(root: Path, deadline: float):
@@ -1832,6 +1905,14 @@ def _reading_from_record(
 
 
 def _counters(totals: dict[str, Any]) -> tuple[int, ...]:
+    """Raw inclusive Codex cumulative reading, in ``TOKEN_FIELDS`` order.
+
+    Do NOT normalize here. These tuples are the host's own running
+    counter and the transition identity ``(previous, total)``. Inclusive
+    → disjoint conversion happens on the INCREMENT in ``_aggregate``,
+    after differencing, so a warm cache of pre-35A inclusive cumulatives
+    still differences correctly against a new reading.
+    """
     return (
         _counter(totals, "input_tokens", required=True),
         _counter(totals, "cache_write_input_tokens", required=False),
@@ -1912,12 +1993,14 @@ def _terminal_from_record(record: dict[str, Any], model: str) -> _Terminal:
     totals = info.get("total_token_usage") if isinstance(info, dict) else None
     if not isinstance(totals, dict):
         raise _ReadFailure("unsupported")
-    usage: Usage = {
-        "input": _counter(totals, "input_tokens", required=True),
-        "cache_create": _counter(totals, "cache_write_input_tokens", required=False),
-        "cache_read": _counter(totals, "cached_input_tokens", required=True),
-        "output": _counter(totals, "output_tokens", required=True),
-    }
+    usage: Usage = _normalize_inclusive_usage(
+        {
+            "input": _counter(totals, "input_tokens", required=True),
+            "cache_create": _counter(totals, "cache_write_input_tokens", required=False),
+            "cache_read": _counter(totals, "cached_input_tokens", required=True),
+            "output": _counter(totals, "output_tokens", required=True),
+        }
+    )
     # These fields are deliberately validated but never summed: total_tokens
     # omits cache counters and reasoning_output_tokens is inside output_tokens.
     _counter(totals, "reasoning_output_tokens", required=False)
@@ -2060,7 +2143,10 @@ def _aggregate(entries: Any) -> HostUsageBuckets:
             # predecessor and therefore no transition identity of its own —
             # this is the only thing that can disambiguate it.
             continue
-        _add_usage(buckets, day, model, dict(zip(TOKEN_FIELDS, increment)))
+        usage = _normalize_inclusive_usage(dict(zip(TOKEN_FIELDS, increment)))
+        if usage["cache_create"] > 0:
+            buckets.unattributable_days.add(day)
+        _add_usage(buckets, day, model, usage)
     return buckets
 
 

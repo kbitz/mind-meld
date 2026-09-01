@@ -499,10 +499,20 @@ class HostDeviceSnapshot:
     partial: tuple[str, ...] = ()
     degraded_reason: str | None = None
     partial_reason: str | None = None
+    counter_semantics: str | None = None
+    """Exact ``disjoint-v1`` when the winning row published disjoint
+    counters. ``None`` is legacy inclusive/unknown — token columns and
+    API-list-rate figures render ``—``, never a number (a ceiling up to
+    ~2x high, the one caveat that points the wrong way).
+    """
 
     @property
     def current(self) -> bool:
         return not self.stale and not self.future_dated
+
+    @property
+    def counters_disjoint(self) -> bool:
+        return self.counter_semantics == mm_events.COUNTER_SEMANTICS_DISJOINT_V1
 
 
 @dataclass
@@ -578,6 +588,7 @@ class _AcceptedHostRow:
     partial: tuple[str, ...] = ()
     degraded_reason: str | None = None
     partial_reason: str | None = None
+    counter_semantics: str | None = None
 
 
 @dataclass
@@ -1668,12 +1679,51 @@ def _accept_tokens_by_day(
     return copied, None
 
 
-def _host_detail_phrase(detail: str, reason: str | None) -> str:
+_MAX_COUNTER_SEMANTICS_LEN = 32
+"""Hostile-length cap on the peer-controlled ``counter_semantics`` sibling.
+The only legal value is 12 bytes; anything longer is fail-closed."""
+
+_UNPRICED_MODEL_NOTE_CAP = 8
+"""Named unpriced ids in the Notes line. Ordered, sanitized, truncated."""
+
+
+def _accept_counter_semantics(raw: object) -> str | None:
+    """Exact known value, or None (legacy / fail-closed).
+
+    Key absent, wrong type, unknown value, or hostile length all fail
+    closed: the row is kept, but it is not priceable and its token
+    columns render ``—``. Never treat an unknown future string as
+    disjoint-compatible.
+    """
+    if not isinstance(raw, str):
+        return None
+    if len(raw) > _MAX_COUNTER_SEMANTICS_LEN:
+        return None
+    if raw != mm_events.COUNTER_SEMANTICS_DISJOINT_V1:
+        return None
+    return mm_events.COUNTER_SEMANTICS_DISJOINT_V1
+
+
+def _host_detail_phrase(detail: str, reason: str | None, *, device: str | None = None) -> str:
     """Problem + cause + fix for host per-model detail status.
 
     Modeled on ``events_tail._host_skip_phrase``. A raw reason token tells
     nobody anything; this names the command that repairs each branch.
     """
+    if reason == "legacy_counters":
+        if device:
+            return (
+                "Not available for `"
+                + _safe_short(device)
+                + "`: that Mac runs an mm that reported token counters in an "
+                "older format. Run `pipx upgrade mind-meld` and `mm push` "
+                "there, then re-run."
+            )
+        return (
+            "A Mac still showing — on the retro reported token counters in an "
+            "older format. Run `pipx upgrade mind-meld` and `mm push` there, "
+            "then re-run `mm retro-fleet`."
+        )
     if detail == "present":
         return "per-model host tokens present"
     if reason is None:
@@ -1868,6 +1918,12 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
     if not set(partial) <= consulted_set:
         partial = ()
         partial_reason = "invalid_coverage"
+    # Three-way on KEY PRESENCE: absent (legacy inclusive), present-and-
+    # exact (priceable), present-and-invalid (fail closed, keep the row).
+    if "counter_semantics" not in ev:
+        counter_semantics = None
+    else:
+        counter_semantics = _accept_counter_semantics(ev.get("counter_semantics"))
     return _AcceptedHostRow(
         device=device,
         as_of=as_of,
@@ -1888,6 +1944,7 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         partial=partial,
         degraded_reason=degraded_reason,
         partial_reason=partial_reason,
+        counter_semantics=counter_semantics,
     )
 
 
@@ -1924,6 +1981,13 @@ def _sibling_tie_key(row: _AcceptedHostRow) -> str:
     among them is unchanged. A present-but-invalid sibling MAY change the
     winner — intended, the same argument this function already makes for
     ``detail_reason``.
+
+    Neutral additive siblings (``skills_by_day``, ``offset``/``head``,
+    ``tokens_by_day``, ``partial_days``, ``degraded_sources``,
+    ``partial_sources``) cannot change a winner they otherwise leave
+    semantically unchanged, which is why they stay out of the CORE
+    ``tie_key``. ``counter_semantics`` is the first *semantic* additive
+    sibling — it changes what the numbers mean — so it is in THIS key.
     """
     return json.dumps(
         [
@@ -1933,6 +1997,14 @@ def _sibling_tie_key(row: _AcceptedHostRow) -> str:
             row.degraded_reason or "",
             list(row.partial),
             row.partial_reason or "",
+            # Semantic additive sibling (Track 35A). Neutral additives
+            # (skills_by_day, tokens_by_day, partial_days, degraded_sources)
+            # cannot change a winner they otherwise leave semantically
+            # unchanged, which is why they were excluded from the CORE
+            # tie_key. This field changes what the numbers *mean*, so two
+            # equal-ts rows differing only in semantics must not select
+            # by encounter order. APPENDED, never prepended.
+            row.counter_semantics or "",
         ],
         sort_keys=True,
         separators=(",", ":"),
@@ -2004,6 +2076,7 @@ def aggregate_host_usage(
             partial=row.partial,
             degraded_reason=row.degraded_reason,
             partial_reason=row.partial_reason,
+            counter_semantics=row.counter_semantics,
         )
     return HostUsageInventory(
         by_device=by_device,
@@ -2077,6 +2150,7 @@ def _dump_host_inventory(inventory: HostUsageInventory) -> str:
                 ),
                 "partial_reason": snap.partial_reason,
                 "stale": snap.stale,
+                "counter_semantics": snap.counter_semantics,
                 "tokens_by_day": _sanitize_tokens_by_day(snap.tokens_by_day),
             }
             for device, snap in sorted(inventory.by_device.items())
@@ -2782,7 +2856,7 @@ def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
 
     total_cost, per_model_cost = token_usage.estimate_cost(sessions.tokens_by_model)
     # Any unpriced volume makes the figure a lower bound, not an estimate.
-    unpriced_tokens, _ = _unpriced_token_summary(sessions.tokens_by_model)
+    unpriced_tokens, _, _ = _unpriced_token_summary(sessions.tokens_by_model)
     if total_cost > 0:
         # Sort per-model by cost descending; render compact "Sonnet $X, Opus $Y".
         per_model_sorted = sorted(per_model_cost.items(), key=lambda kv: kv[1], reverse=True)
@@ -2839,18 +2913,24 @@ def _format_usd(amount: float) -> str:
     return f"${amount:,.2f}"
 
 
-def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple[int, int]:
-    """Return ``(total_tokens, model_count)`` for models the pricing table
-    cannot resolve at all, excluding ``COST_EXCLUDED_MODELS``.
+def _unpriced_token_summary(
+    tokens_by_model: dict[str, dict[str, int]],
+) -> tuple[int, int, tuple[str, ...]]:
+    """Return ``(total_tokens, model_count, model_ids)`` for models the
+    pricing table cannot resolve at all, excluding ``COST_EXCLUDED_MODELS``.
 
     Shares ``resolve_prices`` with ``estimate_cost`` rather than
     re-testing ``model in PRICING``. That duplication is exactly what
     would make the cost line and this Notes line contradict each other
     once family-tier fallback landed: the cost line would price
     ``claude-opus-6`` while this line still called it unpriced. One
-    predicate, one answer — see ``token_usage.resolve_prices``."""
+    predicate, one answer — see ``token_usage.resolve_prices``.
+
+    ``model_ids`` is sorted for deterministic Notes text. Sanitization
+    and the display cap happen at the render site, not here.
+    """
     total = 0
-    n = 0
+    names: list[str] = []
     for model, mbucket in (tokens_by_model or {}).items():
         if (
             model in token_usage.COST_EXCLUDED_MODELS
@@ -2861,8 +2941,20 @@ def _unpriced_token_summary(tokens_by_model: dict[str, dict[str, int]]) -> tuple
             continue
         for k in token_usage.TOKEN_FIELDS:
             total += _safe_int(mbucket.get(k))
-        n += 1
-    return total, n
+        names.append(model)
+    names.sort()
+    return total, len(names), tuple(names)
+
+
+def _format_unpriced_model_ids(models: tuple[str, ...] | list[str]) -> str:
+    """Sanitize, order, cap. Peer-controlled ids in LLM-consumed markdown."""
+    ordered = sorted({_safe_short(m) for m in models if m})
+    shown = ordered[:_UNPRICED_MODEL_NOTE_CAP]
+    text = ", ".join(shown)
+    extra = len(ordered) - len(shown)
+    if extra:
+        text += f" (+{extra} more)"
+    return text
 
 
 def _short_model_name(model: str) -> str:
@@ -3319,6 +3411,7 @@ def _render_agent_inventory(
         ceiling = _snapshot_day_ceiling(snap, hi)
         as_of = snap.as_of.date().isoformat()
         emitted = False
+        priceable = snap.counters_disjoint
         for family, family_label in AGENT_FAMILY_ROWS:
             days = families.get(family)
             if not isinstance(days, dict):
@@ -3335,17 +3428,28 @@ def _render_agent_inventory(
             if retained <= 0:
                 continue
             state = _agent_state_label(snap, has_window_activity=in_window > 0)
+            if priceable:
+                retained_cell = _format_token_count(retained)
+                window_cell = _format_token_count(in_window)
+            else:
+                # Inclusive counters would be a ceiling up to ~2x high.
+                # Never show that under ``>=``; ``—`` means unavailable.
+                retained_cell = "—"
+                window_cell = "—"
             rows.append(
                 f"| {label} | {family_label} | {as_of} | {state} "
-                f"| {_format_token_count(retained)} | {_format_token_count(in_window)} |"
+                f"| {retained_cell} | {window_cell} |"
             )
             emitted = True
         if not emitted:
-            # Accepted snapshot, nothing observed. `0` not `—`: zero is KNOWN
-            # data here, whereas `—` means unavailable, and conflating them is
-            # the absence-as-zero error in reverse.
+            # Accepted snapshot, nothing observed. Zero is known only for a
+            # disjoint-v1 peer; a legacy inclusive counter is unavailable even
+            # when its retained map is empty. Otherwise this fallback bypasses
+            # the pre-marker guard used by the populated-family rows above.
             state = _agent_state_label(snap, has_window_activity=False)
-            rows.append(f"| {label} | — | {as_of} | {state} | 0 | 0 |")
+            retained_cell = "0" if priceable else "—"
+            window_cell = "0" if priceable else "—"
+            rows.append(f"| {label} | — | {as_of} | {state} | {retained_cell} | {window_cell} |")
 
     cap = token_usage.MAX_BY_DAY_DAYS
     out = [
@@ -3384,6 +3488,170 @@ def _render_agent_inventory(
     )
     out.append("")
     return out
+
+
+def _windowed_host_by_model(
+    snap: HostDeviceSnapshot, lo: str, hi: str
+) -> tuple[dict[str, dict[str, int]], bool]:
+    """Merge in-window per-model buckets. ``residual`` is True when any day's
+    family total exceeds ``sum(by_model)`` — the writer caps ``by_model`` at
+    ``MAX_HOST_MODELS_PER_DAY`` while leaving day totals whole, so the
+    leftover is unattributable and unpriceable.
+    """
+    merged: dict[str, dict[str, int]] = {}
+    residual = False
+    days = snap.tokens_by_day or {}
+    ceiling = _snapshot_day_ceiling(snap, hi)
+    for day, bucket in days.items():
+        if not isinstance(day, str) or not isinstance(bucket, dict):
+            continue
+        if not (lo <= day <= ceiling):
+            continue
+        by_model = bucket.get("by_model") or {}
+        if not isinstance(by_model, dict):
+            by_model = {}
+        for field_name in token_usage.TOKEN_FIELDS:
+            attributed = 0
+            for usage in by_model.values():
+                if isinstance(usage, dict):
+                    attributed += _safe_int(usage.get(field_name))
+            total = _safe_int(bucket.get(field_name))
+            if attributed < total:
+                residual = True
+        for model, usage in by_model.items():
+            if not isinstance(model, str) or not isinstance(usage, dict):
+                continue
+            dest = merged.setdefault(model, {k: 0 for k in token_usage.TOKEN_FIELDS})
+            token_usage.merge_usage_bucket(dest, usage)
+    return merged, residual
+
+
+def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
+    """Per-device API list-rate equivalent. Never a fleet sum.
+
+    Host totals never enter ``_render_token_block``. ``estimate_cost`` is
+    called per device. A currency table invites mental summation, so the
+    do-not-sum rule is a prominent subheading, not a Notes footnote.
+    """
+    inventory = data.host_inventory
+    if not isinstance(inventory, HostUsageInventory):
+        return [], []
+    snaps = [
+        (device, snap)
+        for device, snap in inventory.by_device.items()
+        if isinstance(snap, HostDeviceSnapshot)
+    ]
+    if not snaps:
+        return [], []
+
+    lo, hi = _window_day_keys(data.since, data.until)
+    evaluated: list[tuple[str, str, list[str]]] = []
+    for device, snap in snaps:
+        cell, device_notes = _device_economics_cell(snap, lo, hi)
+        evaluated.append((device, cell, device_notes))
+
+    # ORDER BY INFORMATION CONTENT before capping, mirroring Agent activity.
+    # Alphabetical truncation can otherwise hide the fleet's only estimate
+    # behind twelve unavailable rows. A known zero is still more informative
+    # than unavailable, but positive/floor estimates come first.
+    def _rank(row: tuple[str, str, list[str]]) -> tuple[int, str]:
+        device, cell, _notes = row
+        if cell == "—":
+            return (2, device)
+        if cell == f"~{_format_usd(0.0)}":
+            return (1, device)
+        return (0, device)
+
+    ordered = sorted(evaluated, key=_rank)
+    shown = ordered[:MAX_AGENT_INVENTORY_MACHINES]
+    omitted = ordered[MAX_AGENT_INVENTORY_MACHINES:]
+    lines = [
+        "## API list-rate equivalent (per machine)",
+        "",
+        "OpenAI short-context list rates, verified "
+        f"{token_usage.PRICING_OPENAI_LAST_UPDATED} against "
+        "https://developers.openai.com/api/docs/pricing. Anthropic list "
+        f"rates, verified {token_usage.PRICING_LAST_UPDATED}. Historical "
+        "usage is repriced at current rates. Not subscription spend. "
+        f"{token_usage.SUBSCRIPTION_CAVEAT} ``>=`` means at least one of: "
+        "unpriced models, a host reader that declared incomplete totals, "
+        "a dropped reader, or tokens the per-day model cap left "
+        "unattributed. ``—`` means the figure is unavailable, not zero.",
+        "",
+        "### Do not sum these values",
+        "",
+        "Machines may hold duplicated history (OS migration, a fresh "
+        "`mm init`) and these values must not be summed.",
+        "",
+        "| Machine | API list-rate equivalent |",
+        "|---|---|",
+    ]
+    notes: list[str] = []
+    for device, cell, device_notes in shown:
+        label = _safe_short(device) or "(unnamed)"
+        lines.append(f"| {label} | {cell} |")
+        notes.extend(device_notes)
+    lines.append("")
+    if omitted:
+        lines.append(
+            f"- (+{len(omitted)} more machines omitted; those with an estimate are shown first.)"
+        )
+        lines.append("")
+    return lines, notes
+
+
+def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[str, list[str]]:
+    """One per-device cell and the Notes lines that diagnose it."""
+    device = snap.device
+    notes: list[str] = []
+    if not snap.counters_disjoint:
+        notes.append(_host_detail_phrase("absent", "legacy_counters", device=device))
+        return "—", notes
+    if snap.stale:
+        notes.append(
+            "API list-rate equivalent unavailable for `"
+            + _safe_short(device)
+            + "`: its agent-log snapshot predates this window. Run `mm push` "
+            "on that Mac, then re-run."
+        )
+        return "—", notes
+    if snap.tokens_by_day is None:
+        notes.append(
+            "Not available for `"
+            + _safe_short(device)
+            + "`: "
+            + _host_detail_phrase(snap.detail, snap.detail_reason, device=device)
+        )
+        return "—", notes
+
+    by_model, residual = _windowed_host_by_model(snap, lo, hi)
+    total_cost, _per_model = token_usage.estimate_cost(by_model)
+    unpriced_tokens, unpriced_n, unpriced_ids = _unpriced_token_summary(by_model)
+    causes: list[str] = []
+    if unpriced_tokens > 0:
+        named = _format_unpriced_model_ids(unpriced_ids)
+        causes.append(f"{unpriced_n} unpriced model(s) ({named})")
+    if snap.partial:
+        causes.append("host declared totals incomplete (" + ", ".join(snap.partial) + ")")
+    if snap.degraded:
+        causes.append("a host reader failed (" + ", ".join(snap.degraded) + ")")
+    if residual:
+        causes.append("some tokens were not attributed to a named model (the per-day model cap)")
+    if not by_model and total_cost == 0 and unpriced_tokens == 0 and not causes:
+        # Known empty window, not unavailable.
+        return f"~{_format_usd(0.0)}", notes
+    marker = ">=" if causes else "~"
+    if causes:
+        notes.append(
+            "API list-rate equivalent for `"
+            + _safe_short(device)
+            + "` is a floor (>=): "
+            + "; ".join(causes)
+            + "."
+        )
+    if total_cost == 0:
+        return f"{marker}{_format_usd(0.0)}", notes
+    return f"{marker}{_format_usd(total_cost)}", notes
 
 
 def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = None) -> list[str]:
@@ -3818,6 +4086,8 @@ def format_retro(
       both passes. Unavailable renders the heading with the reason inline.
     * Claude Code activity — sessions and token block.
     * Skills used — fleet-wide invocation rollup.
+    * Agent activity — per-machine token inventory.
+    * API list-rate equivalent — per machine, never summed.
     * mm sync activity — push counts.
     * Notes — every aside consolidated.
     * MM_THEMES_PROMPT — JSON sidecar for LLM theme synthesis.
@@ -3957,6 +4227,12 @@ def format_retro(
     # Agent-log inventory (per machine, never summed across machines).
     lines.extend(_render_agent_inventory(data))
 
+    # Per-device API list-rate equivalent. Never a fleet sum; never
+    # enters ``_render_token_block``.
+    econ_lines, econ_notes = _render_host_economics(data)
+    lines.extend(econ_lines)
+    notes.extend(econ_notes)
+
     # mm sync activity.
     lines.append("## mm sync activity")
     lines.append(
@@ -3999,11 +4275,14 @@ def format_retro(
     # the displayed token totals (they're real API traffic) but are skipped
     # by ``estimate_cost``. Surface the volume so a reader knows the cost
     # line is an under-estimate rather than authoritative.
-    unpriced_tokens, unpriced_models = _unpriced_token_summary(data.sessions.tokens_by_model)
+    unpriced_tokens, unpriced_models, unpriced_ids = _unpriced_token_summary(
+        data.sessions.tokens_by_model
+    )
     if unpriced_tokens > 0:
+        named = _format_unpriced_model_ids(unpriced_ids)
         notes.append(
             f"{_format_token_count(unpriced_tokens)} tokens from {unpriced_models} unpriced "
-            f"model(s) excluded from cost estimate."
+            f"model(s) excluded from cost estimate: {named}."
         )
     # Agent-log diagnostics. The card block goes quiet in several distinct
     # states; a vanished block must never BE the diagnostic, so name the cause

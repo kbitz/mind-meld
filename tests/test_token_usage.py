@@ -847,8 +847,57 @@ class TestResolvePrices:
     def test_every_rate_card_has_all_token_fields(self) -> None:
         """estimate_cost indexes prices[k] for k in TOKEN_FIELDS — a rate
         card missing a field is a KeyError at render time."""
-        for card in (*tu.PRICING.values(), *tu.MODEL_FAMILY_TIERS.values()):
+        for card in (
+            *tu.PRICING.values(),
+            *tu.MODEL_FAMILY_TIERS.values(),
+            *tu.VENDOR_FAMILY_TIERS.values(),
+        ):
             assert set(card) == set(tu.TOKEN_FIELDS)
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            (
+                "gpt-5.6-terra",
+                {"input": 2.0, "cache_read": 0.2, "cache_create": 2.5, "output": 12.0},
+            ),
+            ("gpt-5.6-sol", {"input": 4.0, "cache_read": 0.4, "cache_create": 5.0, "output": 20.0}),
+            ("gpt-5.4", {"input": 2.5, "cache_read": 0.25, "cache_create": 0.0, "output": 15.0}),
+            ("gpt-5.5", {"input": 5.0, "cache_read": 0.5, "cache_create": 0.0, "output": 30.0}),
+        ],
+    )
+    def test_gpt_models_resolve_literal_four_field_cards(
+        self, model: str, expected: dict[str, float]
+    ) -> None:
+        assert tu.resolve_prices(model) == pytest.approx(expected)
+
+    def test_grok_is_held_unpriced(self) -> None:
+        """Gate D1: Grok rates are held until ingestion is proven.
+        Two blockers: Track 37A offset==size wedge, OpenCode $.id defect."""
+        assert tu.resolve_prices("grok-4.6-build") is None
+        assert "grok-4.6-build" not in tu.PRICING_FAMILY_BY_MODEL
+        assert "grok" not in tu.VENDOR_FAMILY_TIERS
+
+    def test_unknown_gpt_stays_unpriced(self) -> None:
+        assert tu.resolve_prices("gpt-5.7-whatever") is None
+
+    def test_host_alias_lookup_is_exact_key_never_substring(self) -> None:
+        assert tu.resolve_prices("x-gpt-5.6-terra") is None
+        assert tu.resolve_prices("gpt-5.6-terra-extra") is None
+        assert tu.resolve_prices("GPT-5.6-terra") is None
+        assert tu.resolve_prices("gpt-5.6-terra") is not None
+
+    def test_aliases_point_at_existing_vendor_tiers(self) -> None:
+        for model, family in tu.PRICING_FAMILY_BY_MODEL.items():
+            assert family in tu.VENDOR_FAMILY_TIERS, model
+            assert set(tu.VENDOR_FAMILY_TIERS[family]) == set(tu.TOKEN_FIELDS)
+
+    def test_vendor_tiers_are_not_derived_from_anthropic_multiples(self) -> None:
+        """Do not reach for ``_tier``. A 0.1x cache_read would be an
+        accident for OpenAI and wrong for xAI; cache-write rates are literal."""
+        for family, card in tu.VENDOR_FAMILY_TIERS.items():
+            anthropic_shaped = tu._tier(card["input"], card["output"])
+            assert card != anthropic_shaped, family
 
 
 # ---------------------------------------------------------------------------
