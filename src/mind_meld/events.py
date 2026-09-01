@@ -140,8 +140,14 @@ BENIGN_SKIP_REASONS = frozenset({WALK_SKIP_NO_COMMITS})
 
 _NO_COMMITS_NEEDLE = "does not have any commits yet"
 
+DISCOVERY_EMPTY = "empty"
+"""A prober ran and found zero git roots. Named because it is the one HOLD
+value that is a FACT about the machine, not a loss: there is no history to
+have missed, so a consumer must not turn it into a "recapture the missing
+window" prompt. The zero-repo push note already covers that machine."""
+
 DISCOVERY_ADVANCE = frozenset({"complete", "not-run"})
-DISCOVERY_HOLD = frozenset({"partial", "empty"})
+DISCOVERY_HOLD = frozenset({"partial", DISCOVERY_EMPTY})
 """Cursor policy allowlist for ``git_capture.discovery``.
 
 Walk failures NEVER affect the cursor. A denylist would default every

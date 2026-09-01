@@ -6913,8 +6913,8 @@ class TestGitCoverageAndRecapture:
         data = _aggregate(events_dir)
         assert "dev-a" in data.git.uncovered_git
 
-    def test_h8_hold_only_device_still_reports_a_gap(self, tmp_path):
-        """A device whose every capture HELD must not vanish from the card.
+    def test_h8_partial_only_device_still_reports_a_gap(self, tmp_path):
+        """A device whose every walk HELD must not vanish from the card.
 
         Found by Greptile on PR #151. The gap loop keyed on ``covered``,
         which a HOLD capture never joins, so a machine whose walks never
@@ -6925,11 +6925,11 @@ class TestGitCoverageAndRecapture:
         events_dir.mkdir()
         rows = [
             _capture_on(
-                _git_event("dev-a", 0, [_commit("aaa", 0)]),
+                _git_event("dev-a", day, [_commit("aaa", day)]),
                 since_days=7,
-                discovery=hold,
+                discovery="partial",
             )
-            for hold in ("partial", "empty")
+            for day in (3, 0)
         ]
         _write_events(events_dir, "dev-a", "2026-04-21", rows)
         data = _aggregate(events_dir)
@@ -6937,8 +6937,8 @@ class TestGitCoverageAndRecapture:
         out = aggregator.format_retro(data)
         assert "uncovered interval" in out
 
-    def test_h9_trailing_hold_run_after_a_good_capture_is_a_gap(self, tmp_path):
-        """A HOLD push is an observation, so it extends ``latest_end``.
+    def test_h9_trailing_partial_run_after_a_good_capture_is_a_gap(self, tmp_path):
+        """A held push is an observation, so it extends ``latest_end``.
 
         Clipping to the latest COVERED interval hid every held push after
         the last good one — the exact window the user needs to recapture.
@@ -6949,7 +6949,7 @@ class TestGitCoverageAndRecapture:
         held = _capture_on(
             _git_event("dev-a", 0, [_commit("bbb", 0)]),
             since_days=6,
-            discovery="empty",
+            discovery="partial",
         )
         _write_events(events_dir, "dev-a", "2026-04-21", [good, held])
         data = _aggregate(events_dir)
@@ -6966,5 +6966,41 @@ class TestGitCoverageAndRecapture:
             discovery="partial",
         )
         _write_events(events_dir, "dev-a", "2026-04-21", [good, held])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+
+    def test_h11_empty_discovery_is_a_fact_not_a_gap(self, tmp_path):
+        """A repo-less Mac must never be told to `mm recapture`.
+
+        ``empty`` means a prober RAN and found zero git roots — there is
+        no history to have missed. That machine already gets the zero-repo
+        push note, whose copy is the right one. Counting it as an
+        observation would nag every repo-less Mac on every retro forever.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        rows = []
+        for day in (3, 0):
+            ev = _git_event("dev-a", day, [])
+            ev["projects"] = []
+            rows.append(_capture_on(ev, since_days=7, discovery="empty"))
+        _write_events(events_dir, "dev-a", "2026-04-21", rows)
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+        out = aggregator.format_retro(data)
+        assert "uncovered interval" not in out
+        # The signal the user actually needs is still there.
+        assert data.git.zero_repo_captures["dev-a"] == (2, 2)
+        assert "captured 0 repositories" in out
+
+    def test_h12_empty_run_after_a_good_capture_is_not_a_gap(self, tmp_path):
+        """``empty`` does not extend ``latest_end`` either."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        good = _capture_on(_git_event("dev-a", 6, [_commit("aaa", 6)]), since_days=7)
+        gone = _git_event("dev-a", 0, [])
+        gone["projects"] = []
+        gone = _capture_on(gone, since_days=6, discovery="empty")
+        _write_events(events_dir, "dev-a", "2026-04-21", [good, gone])
         data = _aggregate(events_dir)
         assert "dev-a" not in data.git.uncovered_git

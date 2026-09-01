@@ -1032,19 +1032,28 @@ def aggregate_git(
                 cap_since = _parse_aware_ts(capture.get("since"))
                 cap_ts = _parse_aware_ts(ev.get("ts")) or _parse_iso(ev.get("ts"))
                 if cap_since is not None and cap_ts is not None and cap_since <= cap_ts:
-                    # A HOLD capture paints no coverage but is still an
+                    # A `partial` capture paints no coverage but is still an
                     # OBSERVATION, and the two are tracked separately on
                     # purpose. ``observed`` is what the gap loop keys on,
-                    # so a device whose every capture held stays visible;
+                    # so a device whose every walk held stays visible;
                     # keying on ``covered`` dropped it from the card
                     # entirely, which reads as "no known coverage issue"
                     # when we in fact know the interval was never walked.
                     # It is also the honest ``latest_end``: the trailing
                     # clip exists to not blame the not-yet-pushed tail,
-                    # and a HOLD push at T proves the device reached T.
-                    prior = observed.get(device)
-                    if prior is None or cap_ts > prior:
-                        observed[device] = cap_ts
+                    # and a held push at T proves the device reached T.
+                    #
+                    # ``empty`` is the ONE hold value excluded here. It
+                    # means a prober ran and found zero git roots, so
+                    # there is no history to have missed and `mm recapture`
+                    # has nothing to do; that machine already gets the
+                    # zero-repo push note, whose copy is the right one.
+                    # Counting it would nag every repo-less Mac forever —
+                    # the idle-Mac false gap in a new costume.
+                    if capture.get("discovery") != mm_events.DISCOVERY_EMPTY:
+                        prior = observed.get(device)
+                        if prior is None or cap_ts > prior:
+                            observed[device] = cap_ts
                     # DISCOVERY_HOLD (partial/empty) does not advance the
                     # git cursor because the walk is incomplete. Painting
                     # those intervals covered would let a budget-exceeded

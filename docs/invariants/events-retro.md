@@ -516,16 +516,26 @@ row itself). Uncovered `[since, ts]` intervals are clamped to
 `_coverage_floor_from_files`. The open interval after a device's latest
 capture is not a gap (the next `mm push` covers it). `discovery` in
 `DISCOVERY_HOLD` (`partial` / `empty`) does not paint coverage — the cursor
-does not advance on those walks either. **But a HOLD capture is still an
+does not advance on those walks either. **But a `partial` capture is still an
 OBSERVATION, and the gap loop keys on observations, never on coverage.** The
-two maps are separate on purpose: keying on `covered` dropped a HOLD-only
+two maps are separate on purpose: keying on `covered` dropped a held-only
 device from the card entirely (no note at all, indistinguishable from a
 healthy machine) and clipped `latest_end` to the last *good* capture, hiding
 every held push after it — exactly the window `mm recapture` is for. The
 trailing clip itself still stands, and is why `latest_end` must come from the
 observation map: a held push at T does prove the device reached T. Found by
-Greptile on PR #151. A device with no `git_capture` is unknown,
-never a gap. `origin: recapture` rows COVER their interval and are EXCLUDED
+Greptile on PR #151.
+
+**`DISCOVERY_EMPTY` is the one HOLD value excluded from the observation map**,
+and the asymmetry is the whole reason it has a name. `partial` is a LOSS
+(budget exceeded, or a prober raised); `empty` is a FACT (a prober ran and
+found zero git roots), so there is no history to have missed and `mm recapture`
+has nothing to do. Counting it would nag every repo-less Mac on every retro
+forever — the idle-Mac false gap in a new costume — and that machine already
+gets the zero-repo push note, whose copy is the right one. Do not collapse the
+two back into a bare `DISCOVERY_HOLD` test here; the cursor policy and the
+gap-reporting policy agree on `partial` and disagree on `empty` on purpose.
+A device with no `git_capture` is unknown, never a gap. `origin: recapture` rows COVER their interval and are EXCLUDED
 from the push tally (`snap_total` / `snap_zero`) — opposite treatment of
 one field. `walk_budget_aborts` is a budget-exhaustion note, not a gap.
 The budget-note remedy is `mm diag` → Git capture → `recorded.walk_budget_aborts`,
