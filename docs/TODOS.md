@@ -8,6 +8,39 @@ Single source of truth — there is no root-level `TODOS.md`. The two files were
 reconciled on 2026-08-14; the root file's live inbox won and moved here, and the
 `## Inbox` heading was renamed to `## Unprocessed` (what `/roadmap` drains).
 
+## Item format (load-bearing — `/roadmap` cannot see items written any other way)
+
+Every item is an **H3 heading** carrying a bracketed source tag, optionally
+followed by attribute bullets and free-form prose:
+
+```markdown
+### [full-review:severity=critical] Short title, not a paragraph
+- **Description:** reviewer's framing of the issue (full-review, review)
+- **Symptom:** what was observed (pair-review, investigate)
+- **Repro:** numbered steps to re-verify before fixing
+- **Why:** problem statement (manual, ship — you authored it and stand behind it)
+- **Hypothesis (untested):** a direction to investigate, not a fix to apply
+- **Effort:** S | M | L
+- **Priority:** P1 | P2 | P3
+- **Context:** provenance, branch, prior decisions
+
+Free-form prose, measurements, snippets — preserved verbatim, not parsed.
+```
+
+`<source>` is one of `pair-review`, `full-review`, `review`, `review-apparatus`,
+`test-plan`, `investigate`, `ship`, `manual`, `discovered`, `plan-ceo-review`,
+`plan-eng-review`. Keys are lowercase `[a-z-]+`; values may not contain `[`, `]`,
+`,` or `;` (pipe-separate file lists: `files=a.py|b.py`). A missing tag routes as
+`[manual]`. Full grammar: `gstack-extend/docs/source-tag-contract.md`.
+
+**Why this is load-bearing.** `bin/roadmap-audit` counts items by matching `###`
+headings inside `## Unprocessed`. A flat `- **Bold title.** …` bullet is
+invisible to it — the section reports `ITEMS: 0` and `/roadmap` skips the drain
+entirely. That is not hypothetical: **38 items filed as bullets between
+2026-08-30 and 2026-09-01 were reported as `ITEMS: 0` for three days** and were
+only drained because a human noticed the roadmap looked stale. If you append
+here by hand, use the H3 form.
+
 ## Unprocessed
 
 _Empty. Drained 2026-09-01 by `/roadmap` — see the drain record below._
