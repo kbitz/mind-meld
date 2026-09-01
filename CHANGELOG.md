@@ -4,7 +4,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ## [0.12.51] - 2026-09-01
 
-**72% of every sync conflict this fleet has ever had was on a file no human authored, so this release stops syncing those files instead of trying to merge them better.** A forensic pass over all 88 `conflicted` records in `pull-history.jsonl` (2026-05-01 → 2026-09-01, a 4.1% conflict rate over 2,153 applied files) found the population dominated by derived caches, host-reinstalled payloads, and per-host renders of one shared source — files where both machines are *correct* and simply regenerated at different times. Four new `exclude_patterns` globs retire 44 of the 88. `(m)erge` is no longer offered on files with no line structure for a line-based merger to use. The deferred Phase 2 auto-resolver is cancelled on the evidence, not deprioritized.
+**More than half of every sync conflict this fleet has ever had was on a file no human authored, so this release stops syncing those files instead of trying to merge them better.** A forensic pass over all 88 `conflicted` records in `pull-history.jsonl` (2026-05-01 → 2026-09-01, a 4.1% conflict rate over 2,153 applied files) found 47 of them — 53% — to be pure generator output: derived caches, host-reinstalled payloads, and per-host renders of one shared source, where both machines are *correct* and simply regenerated at different times. Counting machine-written session state takes it to 56 of 88 (64%). Four new `exclude_patterns` globs retire 43 of the 88. `(m)erge` is no longer offered on files with no line structure for a line-based merger to use. The deferred Phase 2 auto-resolver is cancelled on the evidence, not deprioritized.
 
 ### Added
 
@@ -14,7 +14,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Changed
 
-- **Four new default `exclude_patterns`, retiring 44 of 88 recorded conflicts.** `projects/*/decisions.active.json` (gstack, 18 conflicts + 66 mtime-skips) and `projects/*/brain-cache/*` (gstack, 7 + 40); `skills/.system/*` (codex, 17); `_GENERATED_HOST_SKILL_GLOBS` (codex + opencode, 2). Existing configs opt in with `mm migrate-config` — autopull/autopush still never auto-mutate config.
+- **Four new default `exclude_patterns`, retiring 43 of 88 recorded conflicts.** `projects/*/decisions.active.json` (gstack, 18 conflicts + 66 mtime-skips) and `projects/*/brain-cache/*` (gstack, 7 + 40); `skills/.system/*` (codex, 16); `_GENERATED_HOST_SKILL_GLOBS` (codex + opencode, 2). Counted by matching each glob against the 88 records, not by eye: an earlier draft said 44 and credited `.system` with 17, double-counting the `skills/roadmap/SKILL.md` conflict that belongs to the generated-renders group. Existing configs opt in with `mm migrate-config` — autopull/autopush still never auto-mutate config.
 
   `decisions.active.json` was the single most frequent conflict file on the fleet, and the reason is worth stating: it is gstack's bounded active-decision snapshot, derived from `projects/*/decisions.jsonl` — **which mm already merges cleanly, 37 times over the same window.** Same data, one serialized as an append-only log we handle perfectly and one as a single minified `JSON.stringify` line that a line-based merger cannot touch. Dropping it is lossless: `decisions.jsonl` stays in scope, and `gstack-decision-search` self-heals via `rebuildSnapshot()` when the snapshot is absent or empty.
 

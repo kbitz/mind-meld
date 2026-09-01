@@ -2925,6 +2925,29 @@ class TestSuppressMergeWithoutLineStructure:
         assert choice == "keep-both"
         assert merged is None
 
+    def test_inline_prompt_still_offers_merge_on_multiline_file(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Positive control for the INLINE site specifically.
+
+        The resolve-site control below is not a substitute: the two sites
+        compute `merge_available` independently, so an inverted or dropped
+        predicate at the inline site would leave every other test in this class
+        passing. Nothing else in the suite asserts that the inline prompt offers
+        `(m)erge` at all — the pre-existing `_prompt_conflict_choice` merge
+        tests all use single-line content on both sides and only exercise the
+        `b`/`both` aliases.
+        """
+        local = tmp_path / "notes.md"
+        local.write_bytes(b"line one\nline two\n")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+        choice, merged = _prompt_conflict_choice(
+            "notes.md", local, b"line one\nline two\nline three\n"
+        )
+        assert "(m)erge" in capsys.readouterr().out
+        assert choice == "merge"
+        assert merged == b"line one\nline two\nline three\n"
+
     def test_multiline_file_still_offers_merge(self, tmp_path: Path, monkeypatch, capsys) -> None:
         # Regression guard: the suppression must be narrow. A genuinely
         # line-structured file keeps (m)erge exactly as before.

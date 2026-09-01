@@ -162,6 +162,16 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 # Inspected 2026-08-17 against Grok 1.0.4 user-guide + live ~/.grok.
 GROK_SYNCED_SUBDIRS = ["skills", "commands", "rules"]
 # Generated host links are per-machine routing, matching Codex/OpenCode.
+#
+# Deliberately does NOT mirror v0.12.51's additions to the Codex/OpenCode
+# entries (`skills/.system/*` and `config._GENERATED_HOST_SKILL_GLOBS`).
+# Verified 2026-09-01 against the live `~/.grok`: no `skills/.system`, no
+# `.extend-root` marker anywhere in the tree, and none of the five
+# gstack-extend-rendered skill names present. gstack-extend's
+# `setup --host auto` renders into Claude, Codex and OpenCode only, and the
+# Codex system payload is Codex's own. The asymmetry is a measured absence,
+# not an oversight — if gstack-extend ever grows a Grok target, add the
+# globs here at the same time.
 GROK_EXCLUDE_PATTERNS = [
     "skills/gstack-*",
     "skills/log-work/*",
