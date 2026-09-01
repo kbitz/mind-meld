@@ -358,7 +358,7 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 **Token usage and API list-rate equivalent (v0.11.14, hosts in v0.12.52).** Under **Claude Code activity** the retro answers: how much did Claude Code consume this window, was it Sonnet- or Opus-heavy, did the cache do its job, what would this have cost at API list rates. Those numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
 
-From v0.12.52 the body also has **`## API list-rate equivalent (per machine)`** for Codex (and, later, Grok). It is not subscription spend: all three hosts on this fleet are subscription products, and the figure is today's short-context list rate applied to historical tokens. Sample:
+From v0.12.52 the body also has **`## API list-rate equivalent (per machine)`** for the four observed `gpt-*` host models (and, later, Grok). It is not subscription spend: all three hosts on this fleet are subscription products, and the figure is today's short-context list rate applied to historical tokens. Sample:
 
 ```text
 ## API list-rate equivalent (per machine)
