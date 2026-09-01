@@ -11,7 +11,6 @@ import fcntl
 import json
 import os
 import shutil
-import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,48 +97,6 @@ def _write_rollout(root: Path, name: str, records: list[dict], *, partial: bytes
     return path
 
 
-def _write_opencode_database(root: Path, records: list[dict]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "opencode.db"
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute("CREATE TABLE message (data TEXT NOT NULL)")
-        connection.executemany(
-            "INSERT INTO message (data) VALUES (?)",
-            [(json.dumps(record),) for record in records],
-        )
-        connection.commit()
-    finally:
-        connection.close()
-    return path
-
-
-def _opencode_message(
-    message_id: str = "message-a",
-    *,
-    model: str = "gpt-5",
-    completed: int = 1_755_216_001_000,
-    input_tokens: int = 120,
-    output: int = 30,
-    cache_read: int = 20,
-    cache_create: int = 10,
-    role: str = "assistant",
-) -> dict:
-    return {
-        "id": message_id,
-        "role": role,
-        "modelID": model,
-        "time": {"completed": completed},
-        "finish": "stop",
-        "tokens": {
-            "input": input_tokens,
-            "output": output,
-            "reasoning": 12,
-            "cache": {"read": cache_read, "write": cache_create},
-        },
-    }
-
-
 @pytest.fixture
 def isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     cache = tmp_path / "config" / "host-tokens.json"
@@ -148,12 +105,10 @@ def isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def isolated_adapter_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+def isolated_adapter_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     grok_cache = tmp_path / "config" / "grok-host-tokens.json"
-    opencode_cache = tmp_path / "config" / "opencode-host-tokens.json"
     monkeypatch.setattr(hu, "GROK_CACHE_PATH", grok_cache)
-    monkeypatch.setattr(hu, "OPENCODE_CACHE_PATH", opencode_cache)
-    return grok_cache, opencode_cache
+    return grok_cache
 
 
 class TestHostFamily:
@@ -1080,7 +1035,7 @@ def _grok_turn(
 
 class TestGrokUsage:
     def test_closed_default_does_not_open_the_store(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+        self, isolated_adapter_caches: Path, tmp_path: Path, monkeypatch
     ) -> None:
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "workspace", root / "workspace")
@@ -1097,10 +1052,10 @@ class TestGrokUsage:
 
         assert result == hu.HostUsageResult({}, complete=False, reason="no_metadata_ledger")
         assert opened == []
-        assert not isolated_adapter_caches[0].exists()
+        assert not isolated_adapter_caches.exists()
 
     def test_census_fixtures_parse_as_the_contract_describes(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T4: the extra Grok 1.0.5 census fixtures stay loadable."""
         cases = {
@@ -1120,7 +1075,7 @@ class TestGrokUsage:
                 assert result.hosts["grok"]["2026-08-14"]["input"] == expected, name
 
     def test_fixture_turn_is_a_per_prompt_total_with_reasoning_inside_output(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "workspace", root / "workspace")
@@ -1138,14 +1093,14 @@ class TestGrokUsage:
                 }
             }
         }
-        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
         dumped = json.dumps(cache)
         assert "11111111-1111-1111-1111-111111111111" not in dumped
         assert "prompt_id" not in dumped
         assert str(root) not in dumped
 
     def test_two_turns_are_summed_not_replaced(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(
@@ -1174,7 +1129,7 @@ class TestGrokUsage:
         assert days["2026-08-15"]["output"] == 4
 
     def test_replayed_equal_prompt_counts_once(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         line = _grok_turn()
@@ -1185,7 +1140,7 @@ class TestGrokUsage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 10
 
     def test_conflicting_duplicate_prompt_refuses(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(
@@ -1201,7 +1156,7 @@ class TestGrokUsage:
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
 
     def test_multi_model_turn_counts_each_model_once(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         record = json.loads(_grok_turn())
@@ -1223,7 +1178,7 @@ class TestGrokUsage:
         assert result.hosts["codex"]["2026-08-14"]["input"] == 4
 
     def test_single_then_multi_model_replay_does_not_double_count(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         first = _grok_turn()
@@ -1245,7 +1200,7 @@ class TestGrokUsage:
         assert result.hosts["codex"]["2026-08-14"]["input"] == 4
 
     def test_same_session_name_in_two_workspaces_does_not_refuse(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -1263,7 +1218,7 @@ class TestGrokUsage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 17
 
     def test_extra_non_content_key_on_terminal_is_unsupported(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn(extra_update={"durationMs": 12})])
@@ -1273,7 +1228,7 @@ class TestGrokUsage:
         assert result.reason == "unsupported"
 
     def test_content_bearing_turn_is_ignored(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T2-6: content-bearing turns short-circuit BEFORE the key-set check.
         Load-bearing: the usage-less carve-out must not steal this path."""
@@ -1292,7 +1247,7 @@ class TestGrokUsage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 10
 
     def test_reasoning_above_output_is_unsupported(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn(output=2, reasoning=5)])
@@ -1302,7 +1257,7 @@ class TestGrokUsage:
         assert result.reason == "unsupported"
 
     def test_incomplete_final_line_is_partial(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         path = _write_grok_session(root, lines=[_grok_turn()])
@@ -1313,9 +1268,9 @@ class TestGrokUsage:
         assert result.reason == "partial"
 
     def test_absent_root_and_expired_deadline_preserve_empty_vs_incomplete(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
-        grok_cache, _ = isolated_adapter_caches
+        grok_cache = isolated_adapter_caches
         assert hu.read_grok_usage(tmp_path / "absent", consented=True) == hu.HostUsageResult(
             {}, complete=True
         )
@@ -1327,7 +1282,7 @@ class TestGrokUsage:
         assert json.loads(grok_cache.read_text(encoding="utf-8"))["complete_once"] is False
 
     def test_complete_scan_that_saw_files_sets_complete_once(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "workspace", root / "workspace")
@@ -1337,7 +1292,7 @@ class TestGrokUsage:
         assert hu.grok_completed_once() is True
 
     def test_empty_ledger_is_completed_zero_and_arms_complete_once(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[])
@@ -1348,7 +1303,7 @@ class TestGrokUsage:
         assert hu.grok_completed_once() is True
 
     def test_appended_turn_resumes_and_sums(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         path = _write_grok_session(root, lines=[_grok_turn()])
@@ -1375,7 +1330,7 @@ class TestGrokUsage:
         assert second.hosts["grok"]["2026-08-15"]["input"] == 20
 
     def test_cancelled_stop_is_accepted_and_unknown_stop_is_not(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn(stop="cancelled")])
@@ -1386,7 +1341,7 @@ class TestGrokUsage:
         assert hu.read_grok_usage(other, consented=True).reason == "unsupported"
 
     def test_iso_timestamp_is_attributed_to_utc_day(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn(ts="2026-08-14T23:00:00Z")])
@@ -1396,7 +1351,7 @@ class TestGrokUsage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 10
 
     def test_grok_home_env_selects_the_sessions_root(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+        self, isolated_adapter_caches: Path, tmp_path: Path, monkeypatch
     ) -> None:
         home = tmp_path / "custom-grok"
         shutil.copytree(FIXTURES / "grok" / "workspace", home / "sessions" / "workspace")
@@ -1411,7 +1366,7 @@ class TestGrokUsage:
     def test_rejects_non_directory_or_symlink_session_roots(
         self,
         source_kind: str,
-        isolated_adapter_caches: tuple[Path, Path],
+        isolated_adapter_caches: Path,
         tmp_path: Path,
     ) -> None:
         root = tmp_path / "sessions"
@@ -1427,7 +1382,7 @@ class TestGrokUsage:
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
 
     def test_filesystem_error_is_incomplete_without_creating_a_cache(
-        self, isolated_adapter_caches: tuple[Path, Path]
+        self, isolated_adapter_caches: Path
     ) -> None:
         class UnreadableRoot:
             def exists(self) -> bool:
@@ -1438,7 +1393,7 @@ class TestGrokUsage:
         assert result == hu.HostUsageResult({}, complete=False, reason="io_error")
 
     def test_absent_updates_jsonl_beside_a_healthy_session_completes(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T1-1: a session dir with summary.json and no ledger must not
         zero the scan. Must fail on HEAD (``_is_regular_non_symlink`` used
@@ -1455,7 +1410,7 @@ class TestGrokUsage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 10
 
     def test_not_a_directory_on_speculative_probe_is_skipped(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T1-2: ENOTDIR on the speculative path is absence, not io_error."""
         parent = tmp_path / "file-not-dir"
@@ -1463,7 +1418,7 @@ class TestGrokUsage:
         assert hu._is_regular_non_symlink(parent / "updates.jsonl") is False
 
     def test_permission_error_on_existing_ledger_is_still_io_error(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+        self, isolated_adapter_caches: Path, tmp_path: Path, monkeypatch
     ) -> None:
         """T1-3: the guardrail on the narrowing. A file that exists but
         cannot be stated is a real failure."""
@@ -1505,7 +1460,7 @@ class TestGrokUsage:
         assert result.hosts["codex"]["2026-08-15"]["input"] == 10
 
     def test_usage_less_turn_is_skipped_and_sibling_is_counted(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T2-1: must fail on HEAD. The carve-out has to precede the key-set
         check or this record is ``unsupported`` and the sibling is lost."""
@@ -1524,7 +1479,7 @@ class TestGrokUsage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 10
 
     def test_usage_less_turn_alone_is_completed_empty(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T2-2: the anti-dead-code pin. A carve-out at the usage-handling
         site never runs — this file's only record fails the key-set check
@@ -1538,7 +1493,7 @@ class TestGrokUsage:
         assert result.hosts == {}
 
     def test_usage_less_then_restated_with_usage_counts_once(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T2-3: same prompt_id, first without usage, then with. No
         divergent-duplicate raise; counted once."""
@@ -1558,7 +1513,7 @@ class TestGrokUsage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 10
 
     def test_usage_less_record_appended_after_cached_parse_resumes(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T2-4: resume path handles a usage-less append."""
         root = tmp_path / "sessions"
@@ -1574,11 +1529,11 @@ class TestGrokUsage:
 
         assert second.complete is True
         assert second.hosts["grok"]["2026-08-14"]["input"] == 10
-        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
         assert cache["usage_less_skipped"] == 1
 
     def test_usage_present_but_not_a_dict_is_still_unsupported(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T2-5: absence and malformed stay different."""
         root = tmp_path / "sessions"
@@ -1589,7 +1544,7 @@ class TestGrokUsage:
         assert result.reason == "unsupported"
 
     def test_usage_less_skip_tally_is_per_record_and_on_the_cache(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """T2-7 / T2-8: tally increments per skipped record; no turn entry."""
         root = tmp_path / "sessions"
@@ -1607,7 +1562,7 @@ class TestGrokUsage:
         result = hu.read_grok_usage(root, consented=True)
 
         assert result.complete is True
-        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
         assert cache["usage_less_skipped"] == 2
         dumped = json.dumps(cache)
         assert "prompt_id" not in dumped
@@ -1616,7 +1571,7 @@ class TestGrokUsage:
         assert hu.grok_usage_diag()["usage_less_skipped"] == 2
 
     def test_partial_scan_persists_usage_less_skip_tally_for_diag(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+        self, isolated_adapter_caches: Path, tmp_path: Path, monkeypatch
     ) -> None:
         """T2-9: a learned skip remains visible when the next file times out."""
 
@@ -1650,12 +1605,12 @@ class TestGrokUsage:
         result = hu.read_grok_usage(root, deadline=0.15, consented=True)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
-        cache = json.loads(isolated_adapter_caches[0].read_text(encoding="utf-8"))
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
         assert cache["usage_less_skipped"] == 1
         assert hu.grok_usage_diag()["usage_less_skipped"] == 1
 
     def test_grok_cold_corpus_converges_across_bounded_scans(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path, monkeypatch
+        self, isolated_adapter_caches: Path, tmp_path: Path, monkeypatch
     ) -> None:
         """X-1: Grok bounded-scan convergence. Mirror of the Codex pin.
 
@@ -1702,7 +1657,7 @@ class TestGrokUsage:
 
         monkeypatch.setattr(hu, "_read_full_grok_file", timed_full_read)
 
-        grok_cache = isolated_adapter_caches[0]
+        grok_cache = isolated_adapter_caches
         cached_entries, attempts, result = [], 0, None
         while attempts < 20:
             attempts += 1
@@ -1734,7 +1689,7 @@ class TestGrokPartialCoverage:
     """Track 34A — detect ``usageIsIncomplete`` and persist it in the cache."""
 
     def test_a1_fixture_turn_marks_that_day_partial(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
@@ -1746,7 +1701,7 @@ class TestGrokPartialCoverage:
         assert result.hosts["grok"]["2026-08-14"]["input"] == 8
 
     def test_a2_absent_flag_is_not_partial(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn()])
@@ -1760,7 +1715,7 @@ class TestGrokPartialCoverage:
     def test_a3_non_true_identity_is_not_partial(
         self,
         flag: object,
-        isolated_adapter_caches: tuple[Path, Path],
+        isolated_adapter_caches: Path,
         tmp_path: Path,
     ) -> None:
         root = tmp_path / "sessions"
@@ -1772,7 +1727,7 @@ class TestGrokPartialCoverage:
         assert result.partial_days == frozenset()
 
     def test_a4_any_incomplete_turn_marks_the_day(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(
@@ -1794,9 +1749,7 @@ class TestGrokPartialCoverage:
 
         assert result.partial_days == frozenset({"2026-08-14"})
 
-    def test_a5_partial_is_per_day(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
+    def test_a5_partial_is_per_day(self, isolated_adapter_caches: Path, tmp_path: Path) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(
             root,
@@ -1821,7 +1774,7 @@ class TestGrokPartialCoverage:
         assert "2026-08-15" not in result.partial_days
 
     def test_a6_read_failure_is_degraded_never_partial(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn(stop="interrupted")])
@@ -1834,14 +1787,14 @@ class TestGrokPartialCoverage:
 
     def test_b1_pre_34a_cache_entry_forces_one_rewalk(
         self,
-        isolated_adapter_caches: tuple[Path, Path],
+        isolated_adapter_caches: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Key-absence gate. Without this the live corpus stays invisible."""
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
-        grok_cache, _ = isolated_adapter_caches
+        grok_cache = isolated_adapter_caches
         first = hu.read_grok_usage(root, consented=True)
         assert first.partial_days == frozenset({"2026-08-14"})
         cache = json.loads(grok_cache.read_text(encoding="utf-8"))
@@ -1869,14 +1822,14 @@ class TestGrokPartialCoverage:
 
     def test_b1_pre_35a_counter_cache_entry_forces_one_rewalk(
         self,
-        isolated_adapter_caches: tuple[Path, Path],
+        isolated_adapter_caches: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An inclusive pre-35A cache must never inherit disjoint-v1."""
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
-        grok_cache, _ = isolated_adapter_caches
+        grok_cache = isolated_adapter_caches
         first = hu.read_grok_usage(root, consented=True)
         cache = json.loads(grok_cache.read_text(encoding="utf-8"))
         for entry in cache["files"].values():
@@ -1902,7 +1855,7 @@ class TestGrokPartialCoverage:
 
     def test_b2_warm_hit_after_rewalk_does_not_reopen_jsonl(
         self,
-        isolated_adapter_caches: tuple[Path, Path],
+        isolated_adapter_caches: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1924,7 +1877,7 @@ class TestGrokPartialCoverage:
         assert result.partial_days == frozenset({"2026-08-14"})
 
     def test_b3_incremental_append_merges_partial_days(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         path = _write_grok_session(root, lines=[_grok_turn()])
@@ -1956,11 +1909,11 @@ class TestGrokPartialCoverage:
         assert hu.CACHE_VERSION == 1
 
     def test_b5_malformed_partial_field_rejects_the_entry(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES / "grok" / "incomplete-usage", root)
-        grok_cache, _ = isolated_adapter_caches
+        grok_cache = isolated_adapter_caches
         hu.read_grok_usage(root, consented=True)
         cache = json.loads(grok_cache.read_text(encoding="utf-8"))
         for entry in cache["files"].values():
@@ -1976,13 +1929,13 @@ class TestGrokPartialCoverage:
 
     def test_b6_empty_partial_days_is_written_so_the_second_walk_is_warm(
         self,
-        isolated_adapter_caches: tuple[Path, Path],
+        isolated_adapter_caches: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn()])
-        grok_cache, _ = isolated_adapter_caches
+        grok_cache = isolated_adapter_caches
         first = hu.read_grok_usage(root, consented=True)
         assert first.partial_days == frozenset()
         cache = json.loads(grok_cache.read_text(encoding="utf-8"))
@@ -2001,7 +1954,7 @@ class TestGrokPartialCoverage:
         assert second.partial_days == frozenset()
 
     def test_b7_restated_incomplete_turn_does_not_fail_resume(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         """A jsonl restatement of the same incomplete terminal must not
         trip resume equality. Pre-34A the dicts matched; stamping
@@ -2020,239 +1973,6 @@ class TestGrokPartialCoverage:
         assert second.complete is True
         assert second.partial_days == frozenset({"2026-08-14"})
         assert second.hosts["grok"]["2026-08-14"]["input"] == 10
-
-
-class TestOpenCodeUsage:
-    def test_reads_read_only_sqlite_projection_without_message_content(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        assistant = _opencode_message()
-        assistant["parts"] = [{"text": "do-not-cache-or-return-this"}]
-        in_progress = _opencode_message("message-b")
-        del in_progress["time"]["completed"]
-        wrapper = _opencode_message("message-c")
-        wrapper["tokens"] = {
-            "input": 0,
-            "output": 0,
-            "reasoning": 0,
-            "cache": {"read": 0, "write": 0},
-        }
-        del wrapper["finish"]
-        _write_opencode_database(root, [assistant, in_progress, wrapper])
-
-        result = hu.read_opencode_usage(root)
-
-        assert result.complete is True
-        assert result.hosts == {
-            "codex": {
-                "2025-08-15": {
-                    "input": 120,
-                    "cache_create": 10,
-                    "cache_read": 20,
-                    "output": 42,
-                }
-            }
-        }
-        assert result.tokens_by_day["2025-08-15"]["by_model"]["gpt-5"]["input"] == 120
-        _, opencode_cache = isolated_adapter_caches
-        assert opencode_cache.exists()
-        assert opencode_cache.stat().st_mode & 0o777 == 0o600
-        assert "do-not-cache-or-return-this" not in opencode_cache.read_text(encoding="utf-8")
-
-    def test_refuses_legacy_message_fixture_without_deserializing_it(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        shutil.copytree(FIXTURES / "opencode" / "legacy", root)
-
-        result = hu.read_opencode_usage(root)
-
-        # Legacy message files are whole-transcript blobs with no metadata-only
-        # projection — the same standing-property category as Grok, not a
-        # failed read. See `Reason`.
-        assert result == hu.HostUsageResult({}, complete=False, reason="no_metadata_ledger")
-
-    def test_migration_schema_drift_and_busy_database_are_incomplete(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        _write_opencode_database(root, [_opencode_message()])
-        (root / "storage" / "message").mkdir(parents=True)
-        assert hu.read_opencode_usage(root).reason == "migration"
-
-        shutil.rmtree(root / "storage")
-        connection = sqlite3.connect(root / "opencode.db")
-        try:
-            connection.execute("DROP TABLE message")
-            connection.execute("CREATE TABLE other (data TEXT NOT NULL)")
-            connection.commit()
-        finally:
-            connection.close()
-        assert hu.read_opencode_usage(root).reason == "unsupported"
-
-        shutil.rmtree(root)
-        database = _write_opencode_database(root, [_opencode_message()])
-        writer = sqlite3.connect(database)
-        try:
-            writer.execute("BEGIN EXCLUSIVE")
-            result = hu.read_opencode_usage(root, deadline=time.monotonic() + 1.0)
-        finally:
-            writer.rollback()
-            writer.close()
-        assert result == hu.HostUsageResult({}, complete=False, reason="busy")
-
-    def test_missing_source_is_empty_and_malformed_terminal_is_refused(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        assert hu.read_opencode_usage(root) == hu.HostUsageResult({}, complete=True)
-
-        malformed = _opencode_message()
-        malformed["tokens"]["input"] = "120"
-        _write_opencode_database(root, [malformed])
-        assert hu.read_opencode_usage(root).reason == "unsupported"
-
-    def test_nonzero_terminal_without_known_finish_is_refused(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        recovered = _opencode_message()
-        recovered["finish"] = "recovered"
-        _write_opencode_database(root, [recovered])
-
-        assert hu.read_opencode_usage(root).reason == "unsupported"
-
-    def test_completed_zero_usage_response_is_refused_but_zero_wrapper_is_ignored(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        zero_response = _opencode_message()
-        zero_response["tokens"] = {
-            "input": 0,
-            "output": 0,
-            "reasoning": 0,
-            "cache": {"read": 0, "write": 0},
-        }
-        _write_opencode_database(root, [zero_response])
-
-        assert hu.read_opencode_usage(root).reason == "unsupported"
-
-    def test_direct_database_path_and_empty_directory_are_complete(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        database = _write_opencode_database(root, [_opencode_message()])
-
-        direct = hu.read_opencode_usage(database)
-        empty = hu.read_opencode_usage(tmp_path / "empty")
-
-        assert direct.hosts["codex"]["2025-08-15"]["input"] == 120
-        assert empty == hu.HostUsageResult({}, complete=True)
-        assert isolated_adapter_caches[1].exists()
-
-    def test_symlink_root_and_changed_database_are_incomplete_without_a_cache(
-        self,
-        isolated_adapter_caches: tuple[Path, Path],
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        target = tmp_path / "real-opencode"
-        database = _write_opencode_database(target, [_opencode_message()])
-        root = tmp_path / "opencode"
-        root.symlink_to(target, target_is_directory=True)
-        assert hu.read_opencode_usage(root).reason == "stale"
-
-        before = database.stat()
-        regular_stat = hu._regular_stat
-        calls = 0
-
-        def mutate_before_final_stat(path: Path) -> os.stat_result:
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1))
-            return regular_stat(path)
-
-        monkeypatch.setattr(hu, "_regular_stat", mutate_before_final_stat)
-        result = hu.read_opencode_usage(target)
-
-        assert result == hu.HostUsageResult({}, complete=False, reason="stale")
-        assert not isolated_adapter_caches[1].exists()
-
-    def test_malformed_json_and_duplicate_terminal_ids_are_incomplete(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        malformed_root = tmp_path / "malformed"
-        malformed_database = _write_opencode_database(malformed_root, [])
-        connection = sqlite3.connect(malformed_database)
-        try:
-            connection.execute("INSERT INTO message (data) VALUES (?)", ('{"id":',))
-            connection.commit()
-        finally:
-            connection.close()
-        assert hu.read_opencode_usage(malformed_root).reason == "malformed"
-
-        duplicate_root = tmp_path / "duplicate"
-        _write_opencode_database(
-            duplicate_root,
-            [_opencode_message(), _opencode_message()],
-        )
-        result = hu.read_opencode_usage(duplicate_root)
-
-        assert result == hu.HostUsageResult({}, complete=False, reason="malformed")
-        assert not isolated_adapter_caches[1].exists()
-
-    @pytest.mark.parametrize(
-        ("completed", "expected_day"),
-        [
-            ("2025-08-15T00:00:01Z", "2025-08-15"),
-            (1_755_216_001, "2025-08-15"),
-            ("2025-08-15T00:00:01", None),
-            ("not-a-timestamp", None),
-        ],
-    )
-    def test_completion_timestamp_variants_are_attributed_or_refused(
-        self,
-        completed: object,
-        expected_day: str | None,
-        isolated_adapter_caches: tuple[Path, Path],
-        tmp_path: Path,
-    ) -> None:
-        root = tmp_path / "opencode"
-        _write_opencode_database(root, [_opencode_message(completed=completed)])
-
-        result = hu.read_opencode_usage(root)
-
-        if expected_day is None:
-            assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
-            assert not isolated_adapter_caches[1].exists()
-        else:
-            assert result.hosts["codex"][expected_day]["input"] == 120
-
-    def test_error_rows_are_excluded_and_cache_contention_is_incomplete(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        errored = _opencode_message("message-error", input_tokens=999)
-        errored["error"] = {"name": "provider_error"}
-        _write_opencode_database(root, [_opencode_message(), errored])
-
-        result = hu.read_opencode_usage(root)
-
-        assert result.hosts["codex"]["2025-08-15"]["input"] == 120
-        opencode_cache = isolated_adapter_caches[1]
-        cache_before = opencode_cache.read_bytes()
-        fd = os.open(str(opencode_cache), os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            locked = hu.read_opencode_usage(root, deadline=time.monotonic() + 1.0)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
-
-        assert locked == hu.HostUsageResult({}, complete=False, reason="locked")
-        assert opencode_cache.read_bytes() == cache_before
 
 
 class TestCodexTurnDedup:
@@ -2679,7 +2399,7 @@ class TestHostUsageBuckets:
         )
 
     def test_grok_two_model_fixture_emits_per_model(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "two-model"
         shutil.copytree(FIXTURES / "grok" / "two-model", root)
@@ -2691,15 +2411,6 @@ class TestHostUsageBuckets:
             result.hosts["grok"]["2026-08-14"]["input"]
             == models["grok-4"]["input"] + models["grok-3"]["input"]
         )
-
-    def test_opencode_reader_emits_per_model(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        root = tmp_path / "opencode"
-        _write_opencode_database(root, [_opencode_message()])
-        result = hu.read_opencode_usage(root)
-        assert result.complete is True
-        assert "gpt-5" in result.tokens_by_day["2025-08-15"]["by_model"]
 
     def test_per_model_view_is_derived_from_warm_cache_without_reread(
         self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2768,7 +2479,7 @@ class TestHostUsageBuckets:
 
 
 class TestCounterSemantics:
-    """Track 35A: inclusive readers emit disjoint buckets. OpenCode does not."""
+    """Track 35A: inclusive readers emit disjoint buckets."""
 
     def test_reader_totals_reconcile_codex(self) -> None:
         """Three identities from a real-shaped Codex token_count record.
@@ -2831,7 +2542,7 @@ class TestCounterSemantics:
         assert usage["input"] == 850
 
     def test_nonzero_cache_create_from_inclusive_reader_is_unattributable(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
+        self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
         root = tmp_path / "sessions"
         _write_grok_session(
@@ -2880,22 +2591,26 @@ class TestCounterSemantics:
             )
         assert caught.value.reason == "malformed"
 
-    def test_opencode_is_pass_through_disjoint(
-        self, isolated_adapter_caches: tuple[Path, Path], tmp_path: Path
-    ) -> None:
-        """OpenCode is already disjoint: cache_read may exceed input.
-        The extractor must not subtract. 32 of 36 live rows had this shape."""
-        root = tmp_path / "opencode"
-        assistant = _opencode_message(input_tokens=10, cache_read=50, cache_create=2, output=3)
-        _write_opencode_database(root, [assistant])
-        result = hu.read_opencode_usage(root)
-        assert result.complete is True
-        day = result.hosts["codex"]["2025-08-15"]
+    def test_aggregate_does_not_normalize_terminal_buckets(self) -> None:
+        """Disjoint extractors emit ``cache_read`` that may exceed ``input``.
+
+        ``_aggregate``'s ``_Terminal`` branch must pass those buckets through
+        ``_add_usage`` without ``_normalize_inclusive_usage``. Track 42A merges
+        extractors here; a normalize call would clamp those tokens to zero.
+        Historically OpenCode was the live counterexample; the shape is the
+        pin, not the reader.
+        """
+        terminal = hu._Terminal(
+            "2026-08-15",
+            "gpt-5",
+            {"input": 10, "cache_create": 2, "cache_read": 50, "output": 15},
+        )
+        buckets = hu._aggregate([terminal])
+        day = buckets.by_family["codex"]["2026-08-15"]
         assert day["input"] == 10
         assert day["cache_read"] == 50
         assert day["cache_create"] == 2
-        assert day["output"] == 15  # 3 + 12 reasoning
-        assert result.partial_days == frozenset()
+        assert day["output"] == 15
 
     def test_codex_reader_round_trips_to_per_machine_floor(
         self, isolated_cache: Path, tmp_path: Path

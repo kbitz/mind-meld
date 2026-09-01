@@ -3735,7 +3735,6 @@ class TestTrack7BEventsTail:
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", record("codex"))
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", record("grok"))
-        monkeypatch.setattr(_mm_host_usage, "read_opencode_usage", record("opencode"))
 
         # Nothing changed since the first push → no-op.
         result = runner.invoke(app, ["push"])

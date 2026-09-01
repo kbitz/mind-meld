@@ -87,16 +87,16 @@ _HOST_ABSENT_REASONS = frozenset({"no_metadata_ledger"})
 """Reasons that mean "this source is not installed", not "this read failed".
 
 A store that exposes no metadata-only usage ledger (closed-default Grok
-consent, OpenCode's legacy message files) can never produce data on this
-machine. That is a known, permanent ABSENCE — categorically unlike a failed
-read — so the sweep drops the reader from ``token_sources`` and carries on
-with the rest rather than vetoing the whole snapshot.
+consent) can never produce data on this machine. That is a known, permanent
+ABSENCE — categorically unlike a failed read — so the sweep drops the
+reader from ``token_sources`` and carries on with the rest rather than
+vetoing the whole snapshot.
 
-This is deliberately NOT keyed on ``unsupported``. Codex returns ``unsupported``
-when it finds a ledger it cannot attribute, and OpenCode when a row is
-malformed: those mean "real usage exists here that I could not read". Track
-31A isolates that to the failing reader (dropped and declared); it is still
-not treated as absence.
+This is deliberately NOT keyed on ``unsupported``. Codex returns
+``unsupported`` when it finds a ledger it cannot attribute: that means
+"real usage exists here that I could not read". Track 31A isolates that
+to the failing reader (dropped and declared); it is still not treated as
+absence.
 
 Pinned as a SUBSET of ``_HOST_READ_REASONS`` by
 ``test_absent_reasons_are_real_reader_reasons``: a rename on the
@@ -114,7 +114,6 @@ HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     # consent, matching Codex. The 21A [retro].grok_host_usage bit remains
     # an OR so a prior usage-only opt-in does not go dark.
     "grok": "grok",
-    "opencode": "opencode",
 }
 """Which enabled sync source each reader's consent derives from.
 
@@ -127,8 +126,11 @@ but "we read it unless you read the README" is the wrong default for a tool
 whose whole premise is scoped, opt-in sync."""
 
 WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok"})
-"""Readers with an incremental cache a warm can populate. OpenCode's
-adapter cache stores no totals and is not warmable."""
+"""Readers with an incremental cache a warm can populate.
+
+A future reader whose cache stores no totals must not be added here.
+Both live readers happen to be warmable; that coincidence is not the
+contract — the useful pin is that every warmable name is a live reader."""
 
 
 @dataclass(frozen=True)
@@ -304,8 +306,6 @@ def _default_host_readers(
             return host_usage.read_grok_usage(deadline=deadline, consented=True)
 
         chosen.append(("grok", _read_grok))
-    if HOST_READER_SOURCE_GATE["opencode"] in enabled:
-        chosen.append(("opencode", host_usage.read_opencode_usage))
     return tuple(chosen)
 
 
@@ -416,11 +416,14 @@ def _merge_host_usage_maps(
 ) -> None:
     """Add a completed reader's buckets to ``target`` without aliasing it.
 
-    Codex and OpenCode both classify into the ``codex`` family, so a collision
-    on (family, UTC day) is ordinary rather than an error. The same collision
-    exists one level down: both readers can emit the same model id on the same
-    day. Sum TOKEN_FIELDS at every level — a shallow map update would silently
-    drop whichever reader landed first.
+    A (family, UTC day) collision is possible whenever two readers classify
+    into the same canonical family — historically Codex and OpenCode both
+    landed GPT in ``codex``. After the OpenCode reader was removed, no two
+    surviving readers collide in production, but the merge still sums
+    TOKEN_FIELDS at every level: a shallow map update would silently drop
+    whichever reader landed first, and a synthetic or future reader that
+    shares a family would regress without this. The same collision exists
+    one level down on model id.
     """
     for family, days in source.items():
         target_days = target.setdefault(family, {})
@@ -558,19 +561,7 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
             f"cannot read. Upgrade mm, or run `mm disable-source {reader}` "
             "to stop retrying."
         )
-    if reason == "migration":
-        # Exactly one site produces this: `host_usage._scan_opencode_root` when
-        # OpenCode holds BOTH `opencode.db` and a legacy `storage/message`
-        # directory. It is a property of that host's own storage migration and
-        # has nothing to do with mm's caches, so the copy must not send the
-        # user off to rebuild one. mm cannot fix it and neither can a retry.
-        return (
-            f"{phrase}. {reader} is part-way through its own storage migration "
-            f"and has two stores on disk at once. Finish or complete the "
-            f"{reader} upgrade, then the next push reads it."
-        )
     if reason in {"deadline", "partial"}:
-        # THIS is what a cold or rebuilding cache produces, not `migration`.
         # The generic promise below is false here on a quiet Mac: the events
         # tail only runs on a SUBSTANTIVE push and `autopush` passes
         # `warm_host_cache=None`, so an unattended machine never warms and

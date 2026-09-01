@@ -7,7 +7,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
-- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `HOST_USAGE_TOKEN_SOURCES`
+- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
@@ -151,7 +151,7 @@ Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk a
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok / OpenCode readers as one additive
+The tail publishes the local Codex / Grok readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
@@ -189,15 +189,18 @@ signal for real sync degradation — the exact failure mode the `claude_paths`
 guard a few lines away exists to prevent.
 
 `_HOST_ABSENT_REASONS` (today: `no_metadata_ledger`) marks a store that, by
-design, holds no metadata-only usage ledger and never will. That reader is
-dropped from `token_sources` and the sweep continues. **This is deliberately
-not keyed on `unsupported`:** Codex returns `unsupported` for a ledger it
-cannot attribute and OpenCode for a malformed row, which both mean "real usage
-is here and I could not read it" — those keep the veto. Getting that
-distinction backwards silently under-reports the fleet.
+design, holds no metadata-only usage ledger and never will. Grok produces
+this on closed-default consent. That reader is dropped from `token_sources`
+and the sweep continues. **This is deliberately not keyed on `unsupported`:**
+Codex returns `unsupported` for a ledger it cannot attribute, which means
+"real usage is here and I could not read it" — that keeps the veto. Getting
+that distinction backwards silently under-reports the fleet.
 
-**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex, Grok, and
-OpenCode to the source name whose being enabled authorizes them.
+**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex and
+Grok to the source name whose being enabled authorizes them. The live set is
+`events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
+tuple (same names, same order). Unknown inbound names (retired `opencode`,
+or a future reader) are retained by the aggregator, not listed here.
 `_default_host_readers(sources, grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
 parsed — matching `_enabled_claude_paths`. Grok is a scoped sync source
@@ -239,7 +242,8 @@ sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
 sweep-level `reader`/`reason` for a pre-any-reader expiry); autopush never
 warms. After a successful warm, retry only deadline-dropped readers and merge
 their fresh outcomes with the first pass's completed readers — a flaky
-second-pass Codex/OpenCode read must never erase totals already captured. If
+second-pass read of an already-completed reader must never erase totals
+already captured. If
 the retry expires before invoking a reader, it has no replacement outcome, so
 retain the initial deadline declaration.
 
@@ -254,8 +258,10 @@ is not an I/O error (`FileNotFoundError` / `NotADirectoryError` → skip;
 other `OSError` still `io_error`).
 
 **`token_sources` is therefore per-push, not the constant.**
-`events.HOST_USAGE_TOKEN_SOURCES` is the universe of readers; a row carries the
-subset that actually contributed. That is what lets a consumer tell "this host
+`events.ACTIVE_HOST_READERS` is the live reader universe;
+`events.HOST_USAGE_TOKEN_SOURCES` is the live writer tuple. Unknown inbound
+names are retained by the aggregator. A row carries the subset that
+actually contributed. That is what lets a consumer tell "this host
 reported nothing" from "this host was never consulted". A machine with no host
 sources enabled still emits a row with `token_sources: []` — absence of the ROW
 has to keep meaning "something failed".
@@ -281,9 +287,10 @@ per device.
   init backfill (which has no ``mm-push`` anchor). Do not infer a failure from
   an absent row or correlate it to a later ``mm-push``.
 - A complete later row replaces the entire accepted view for that device.
-  There is no per-source carry-forward: Codex and OpenCode can already merge
-  into one ``codex`` family, so the wire lacks the source-to-family precision
-  required to merge partial observations safely.
+  There is no per-source carry-forward: historically Codex and OpenCode
+  merged into one ``codex`` family, and after 36A a legacy peer may still
+  emit both, so the wire lacks the source-to-family precision required to
+  merge partial observations safely.
 - ``ts`` is the snapshot's sole supported ``as_of`` signal. A retained row is
   a last-known-good point-in-time view, not a claim that host state is current.
   Renderers must keep its coverage and ``as_of`` context rather than reducing
@@ -333,12 +340,18 @@ encounter order is not a safe physical-time signal.
 **Counter semantics (Track 35A).** Host readers do not share a counter
 schema. Codex CLI and Grok CLI are **inclusive** (``input`` already
 contains ``cache_read``; ``cache_create`` is subtracted too, because no
-local corpus can prove it is outside ``input``). OpenCode and Claude are
-**disjoint**. Semantics is a property of the READER, not the model id —
-``grok-4.6`` arrives both ways. Inclusive extractors emit disjoint
-buckets via ``uncached = input - cache_read - cache_create``. Malformed
-inclusive counters (``cache_read + cache_create > input``) degrade that
-reader (Track 31A isolation), not a fabricated zero bucket.
+local corpus can prove it is outside ``input``). Claude session jsonl is
+**disjoint**. OpenCode was disjoint too; its reader is gone as of v0.12.53.
+Semantics is a property of the READER, not the model id — ``grok-4.6``
+arrives both ways. Inclusive extractors emit disjoint buckets via
+``uncached = input - cache_read - cache_create``. Do **not** call
+``_normalize_inclusive_usage`` in ``_add_usage``: that is where readers
+converge, and subtracting ``cache_read`` from an already-disjoint bucket
+would clamp real billable tokens to zero. Track 42A merges extractors
+into this path; a bare "every current reader is inclusive" assertion
+would not survive that merge. Malformed inclusive counters
+(``cache_read + cache_create > input``) degrade that reader (Track 31A
+isolation), not a fabricated zero bucket.
 
 The wire sibling is ``"counter_semantics": "disjoint-v1"``. Key **absent**
 means legacy inclusive/unknown. Only that exact string is priceable;
@@ -380,9 +393,9 @@ recorded on that UTC day*: Codex differences the host's own cumulative counter
 between consecutive readings (`host_usage._read_rollout` collects `_TurnState`
 readings, `_aggregate` keys transitions by `(lineage, previous, current)` and
 sums them), Grok has been per-turn since v0.12.47 (`_aggregate_grok` over
-`entry["turns"]`), and OpenCode's sqlite rows are per-message and already
-disjoint. Buckets are therefore additive and stable: a fixed day's value no
-longer moves when an old session is resumed.
+`entry["turns"]`). `_aggregate` still accepts already-reduced `_Terminal`
+rows (disjoint; do not normalize them). Buckets are therefore additive and
+stable: a fixed day's value no longer moves when an old session is resumed.
 
 **This retired three derived prohibitions and kept one.** Retired: "a window
 slice over-counts at the recent edge", "active DAYS is a lower bound because
@@ -463,8 +476,9 @@ does not).
   it still renders, so the provenance count cannot vanish exactly when it
   matters.
 - **Rows are MODEL FAMILIES, not agents.** The row carries no per-source status
-  and `host_usage.host_family` buckets by model-id prefix, so the Codex and
-  OpenCode readers both land GPT in the `codex` family. `AGENT_FAMILY_ROWS`
+  and `host_usage.host_family` buckets by model-id prefix, so GPT ids land in
+  the `codex` family regardless of which reader produced them (historically
+  Codex and OpenCode both did). `AGENT_FAMILY_ROWS`
   labels them accordingly (`Codex models`), and labels the legal `claude` family
   `Claude (via agents)` so it cannot be confused with the MODELS block's own
   `Claude` row. Its keys must stay equal to `MODEL_FAMILY_ROWS` and
@@ -524,8 +538,8 @@ older than `MAX_BY_DAY_DAYS` mark every future snapshot partial forever.
 **Cache.** `_validated_grok_entry` persists `partial_days` (possibly empty)
 on the Grok cache entry. Pre-34A entries are detected by **key absence** and
 re-walked once. Not a `CACHE_VERSION` bump: that constant is shared with the
-Codex and OpenCode namespaces. Track 37A rewrites this encoding and must
-carry the marker through.
+Codex namespace. Track 40A rewrites this encoding and must carry the marker
+through.
 
 **Acceptor.** Three-way on key presence, never a falsy check, reusing
 `_token_sources_subsequence`. Absent = no signal, not a broken peer — do not
@@ -702,8 +716,8 @@ correct post-32A — buckets are additive and stable — and is the body table's
 still forbidden: host stores move by OS migration, so two device ids can hold
 one history. Host per-model keys in `tokens_by_day` are a separate namespace
 and are never merged into `sessions.tokens_by_model`, even though the keys
-collide (OpenCode running Claude puts `claude-*` ids into the `claude` host
-family).
+collide (a host reader running Claude puts `claude-*` ids into the `claude`
+host family).
 
 #### Forensic dump
 
@@ -730,16 +744,16 @@ busy machines where it is most interesting. No caller may fall through to
 `host_usage.DEFAULT_READ_BUDGET_S` (5s), which is 20x an entire autopush walk
 budget spent on optional analytics.
 
-**Codex and OpenCode collide by design.** OpenCode classifies GPT models into
-the same canonical `codex` family, so two readers can return the same
-`(family, UTC day)` bucket. They are summed with
-`token_usage.merge_usage_bucket`, never shallow-updated — an update would drop
-whichever reader ran first, silently. The same rule applies one level down:
-both readers can emit the same `(day, model)` in `tokens_by_day`, and
-`_merge_host_usage_maps` sums that third level too. `_merge_warm_retry_capture`
-fuses both maps, because a sibling that skipped the warm retry would diverge
-from `hosts` on the largest-corpus machines and then be dropped by
-reconciliation.
+**Same-family day collisions still sum.** Historically Codex and OpenCode
+classified GPT models into the same canonical `codex` family, so two readers
+could return the same `(family, UTC day)` bucket. After 36A no two live
+readers collide in production, but the merge still sums
+`token_usage.merge_usage_bucket` at every level — a shallow update would drop
+whichever reader landed first, and a synthetic or future reader that shares
+a family would regress without this. The same rule applies one level down
+on `(day, model)` in `tokens_by_day`. `_merge_warm_retry_capture` fuses both
+maps, because a sibling that skipped the warm retry would diverge from
+`hosts` on the largest-corpus machines and then be dropped by reconciliation.
 
 **A reader exception is contained in `_capture_host_usage`, not at the outer
 guard.** The tail's `try/except` would also discard the git and session rows
@@ -846,7 +860,7 @@ series all produce wrong numbers. Track 20A locks this contract above, before
 Track 21 adds the first consumer.
 
 **The payload is capped at `MAX_BY_DAY_DAYS`, because the readers are not.**
-`_iter_rollouts` has no `since` and the OpenCode query has no date predicate,
+`_iter_rollouts` has no `since` and the Grok walker has no date predicate,
 so `hosts` is the machine's LIFETIME activity unless the writer bounds it —
 and it would be re-serialized into a synced, content-addressed day file on
 every substantive push, growing linearly with calendar time forever. Every
@@ -871,9 +885,11 @@ turning a file that just gained its first response into a whole-store refusal.
 Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
-`warm_host_cache_inline(reader=...)` warms Codex or Grok
-(`WARMABLE_HOST_READERS`). A `deadline` charged to OpenCode cannot be helped
-by it. Without the reader half of the gate an interactive push pays
+`warm_host_cache_inline(reader=...)` warms names in `WARMABLE_HOST_READERS`
+(today: Codex and Grok, which happens to equal `ACTIVE_HOST_READERS`). A
+`deadline` charged to a non-warmable reader cannot be helped by it; a future
+reader whose cache stores no totals must not be added to the set. Without
+the reader half of the gate an interactive push pays
 bounded-attempt + up to 5s warm + bounded-retry — ~6s, on every push, forever,
 still publishing nothing.
 A cold scan does not fit the per-capture budget (573 ms vs 250/500 ms), so

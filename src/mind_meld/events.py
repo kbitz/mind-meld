@@ -394,23 +394,29 @@ class MmPushEvent(TypedDict, total=False):
     git_capture: GitCaptureState
 
 
-HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok")
-"""The live host-reader set, in the fixed order ``events_tail`` invokes them.
+ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "grok")
+"""The live host readers, in the fixed order ``events_tail`` invokes them.
 
-This is the readers that exist, not a historical wire vocabulary. A row's
-``token_sources`` is the per-push SUBSET that actually contributed, which is
-what lets a consumer tell "this host reported nothing" apart from "this host
-was never consulted" (not enabled as a sync source, or its store holds no usage
-ledger). Do not serialize this constant into a row; see
-``make_host_usage_snapshot``.
+This is the reader universe. Adding a reader means appending here AND to
+``HOST_USAGE_TOKEN_SOURCES``; retiring a reader means removing it from this
+tuple (the writer) and from the gate. Do not serialize this constant into a
+row; see ``make_host_usage_snapshot``."""
+
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok")
+"""Live host-reader names, in the same order ``events_tail`` invokes them.
+
+A row's ``token_sources`` is the per-push SUBSET that actually contributed,
+which is what lets a consumer tell "this host reported nothing" apart from
+"this host was never consulted". Do not serialize this constant into a row;
+see ``make_host_usage_snapshot``.
 
 The tuple is append-only in the sense that **reordering it is a breaking
 change**: a reorder flips 3 of 7 accepted wire shapes (worse than a deletion,
 which flips 2) and also changes the emission order of ``degraded_sources``
 and ``partial_sources`` in ``make_host_usage_snapshot``. Unknown names on a
-peer row are retained and labelled by the aggregator, not rejected — version
-skew is not writer corruption. Duplicates and known-name-out-of-order remain
-fatal."""
+peer row (retired or not-yet-known readers) are retained and labelled by
+the aggregator, not rejected — version skew is not writer corruption.
+Duplicates and known-name-out-of-order remain fatal."""
 
 
 class HostUsageSnapshot(TypedDict, total=False):
@@ -1926,7 +1932,7 @@ def make_host_usage_snapshot(
 
     **The payload is capped at the most recent ``max_days`` UTC days.** The
     host readers aggregate the WHOLE local corpus — ``_iter_rollouts`` has no
-    ``since`` and the OpenCode query has no date predicate — so without this
+    ``since`` and the Grok walker has no date predicate — so without this
     the row would carry the machine's entire lifetime of host activity, and
     would carry it again on every substantive push, into a synced
     content-addressed file that is re-uploaded whole. Every sibling is already

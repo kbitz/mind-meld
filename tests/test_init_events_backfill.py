@@ -63,7 +63,7 @@ def _make_sources(
     expects (output of ``get_sources(config)``).
 
     ``hosts`` names host sources to enable — the host readers are consent-gated
-    on them, so a test that expects the codex/opencode readers to run must
+    on them, so a test that expects the codex/grok readers to run must
     enable them here."""
     sources: list[dict] = []
     if claude_dir is not None:
@@ -246,7 +246,7 @@ class TestBackfillHostSnapshot:
     failure policy: one safe notice, no ``mm-push`` row, no autorun
     breadcrumb (init has neither)."""
 
-    def _stub(self, monkeypatch, *, codex=None, grok=None, opencode=None, calls=None):
+    def _stub(self, monkeypatch, *, codex=None, grok=None, calls=None):
         monkeypatch.setattr(
             _mm_events,
             "discover_git_roots",
@@ -285,9 +285,6 @@ class TestBackfillHostSnapshot:
         empty = _mm_host_usage.HostUsageResult({}, complete=True)
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", reader("codex", codex or empty))
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", reader("grok", grok or empty))
-        monkeypatch.setattr(
-            _mm_host_usage, "read_opencode_usage", reader("opencode", opencode or empty)
-        )
 
     def test_row_order_is_git_sessions_host_and_never_mm_push(self, tmp_path, monkeypatch):
         events_root = tmp_path / "events_root"
