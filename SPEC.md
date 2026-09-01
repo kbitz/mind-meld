@@ -749,7 +749,7 @@ v2 manifests carry a `sources` dict keyed by source name. Compat with older on-d
 
 ## Host Interchangeability
 
-Claude, Codex, OpenCode, and Grok are peers for **fleet usage display**, not for **whole-home-directory sync**. Grok also has a narrow customization source. The design and the remaining work live in `docs/designs/host-parity.md`. This section is the product contract.
+Claude, Codex, and Grok are peers for **fleet usage display**, not for **whole-home-directory sync**. Grok also has a narrow customization source. OpenCode is no longer a usage-reader host; an `opencode` sync source still ships until it is retired. The design and the remaining work live in `docs/designs/host-parity.md`. This section is the product contract.
 
 ### What "parity" means
 

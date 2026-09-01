@@ -1491,13 +1491,15 @@ def _parse_aware_ts(ts: object) -> datetime | None:
 
 
 def _accept_optional_source_list(ev: dict, key: str) -> tuple[tuple[str, ...], str | None]:
-    """Three-way on KEY PRESENCE for a subsequence-of-universe source list.
+    """Three-way on KEY PRESENCE for a source-name list.
 
     Never a falsy check. Absent (pre-34A peer / no signal) → ``((), None)``.
     Present-and-valid, including empty → the validated tuple. Present-and-
     invalid → ``((), reason)`` so the row is kept and the dump can say why
     the field was dropped. Reuses ``_token_sources_subsequence`` verbatim:
-    subsequence-of-universe, no duplicates, closed vocabulary.
+    known names are a subsequence of the live universe; unknown names
+    (retired or future readers) are retained if they pass the identifier
+    bound; duplicates and known-name-out-of-order stay fatal.
     """
     if key not in ev:
         return (), None
@@ -1507,10 +1509,24 @@ def _accept_optional_source_list(ev: dict, key: str) -> tuple[tuple[str, ...], s
     return tuple(parsed), None
 
 
+# Same char class as ``_safe_short``, as a *match* rather than a mutate: a
+# name that would be mangled or truncated is corruption, not version skew.
+# The closed vocabulary used to bound these strings for free; once unknown
+# names are retained, the bound has to be explicit. Length matches
+# ``_SHORT_LEN_CAP``.
+_TOKEN_SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9._\-() ]{1,128}$")
+
+
+def _is_retainable_source_id(name: str) -> bool:
+    """Conservative identifier bound for unknown peer source names."""
+    return _TOKEN_SOURCE_ID_RE.fullmatch(name) is not None
+
+
 def _token_sources_subsequence(raw: object) -> list[str] | None:
     if not isinstance(raw, list):
         return None
     universe = mm_events.HOST_USAGE_TOKEN_SOURCES
+    universe_set = set(universe)
     seen: set[str] = set()
     ui = 0
     out: list[str] = []
@@ -1518,6 +1534,15 @@ def _token_sources_subsequence(raw: object) -> list[str] | None:
         if not isinstance(item, str) or item in seen:
             return None
         seen.add(item)
+        if item not in universe_set:
+            # Version skew (retired or not-yet-known reader). RETAIN the
+            # name so a failed reader still shows up in degraded_sources;
+            # do not advance the known-name cursor, or a later known name
+            # in the wrong slot would be accepted-by-dropping-the-gap.
+            if not _is_retainable_source_id(item):
+                return None
+            out.append(item)
+            continue
         while ui < len(universe) and universe[ui] != item:
             ui += 1
         if ui >= len(universe):
@@ -3331,6 +3356,20 @@ def _agent_state_label(snap: HostDeviceSnapshot, *, has_window_activity: bool) -
     return "current"
 
 
+_UNKNOWN_READER_LABEL = "unknown/retired reader"
+
+
+def _reader_display_labels(readers: Iterable[object]) -> tuple[str, ...]:
+    """Bound reader prose to the live vocabulary plus one generic label."""
+    values = tuple(readers)
+    live = mm_events.HOST_USAGE_TOKEN_SOURCES
+    live_set = set(live)
+    labels = [reader for reader in live if reader in values]
+    if any(not isinstance(reader, str) or reader not in live_set for reader in values):
+        labels.append(_UNKNOWN_READER_LABEL)
+    return tuple(labels)
+
+
 def _render_agent_inventory(
     data: RetroData,
 ) -> list[str]:
@@ -3401,11 +3440,9 @@ def _render_agent_inventory(
         if not isinstance(snap, HostDeviceSnapshot):
             rows.append(f"| {label} | — | — | no snapshot | — | — |")
             continue
-        # `consulted` is a closed vocabulary after the acceptor, but this
-        # dataclass is public and hand-built in tests, so defang it the same
-        # way the device id one line up is defanged. Unsanitized it can inject
-        # a markdown bullet or a live ANSI escape into LLM-consumed output.
-        consulted = ", ".join(_safe_short(str(c)) for c in snap.consulted) or "none"
+        # The acceptor retains identifier-bounded unknown names for wire
+        # compatibility, but peer-controlled reader ids never become prose.
+        consulted = ", ".join(_reader_display_labels(snap.consulted)) or "none"
         readers.append(f"{label} {consulted}")
         families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
         ceiling = _snapshot_day_ceiling(snap, hi)
@@ -3632,9 +3669,15 @@ def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[
         named = _format_unpriced_model_ids(unpriced_ids)
         causes.append(f"{unpriced_n} unpriced model(s) ({named})")
     if snap.partial:
-        causes.append("host declared totals incomplete (" + ", ".join(snap.partial) + ")")
+        causes.append(
+            "host declared totals incomplete ("
+            + ", ".join(_reader_display_labels(snap.partial))
+            + ")"
+        )
     if snap.degraded:
-        causes.append("a host reader failed (" + ", ".join(snap.degraded) + ")")
+        causes.append(
+            "a host reader failed (" + ", ".join(_reader_display_labels(snap.degraded)) + ")"
+        )
     if residual:
         causes.append("some tokens were not attributed to a named model (the per-day model cap)")
     if not by_model and total_cost == 0 and unpriced_tokens == 0 and not causes:
@@ -3708,7 +3751,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             # the latter as a consent failure.
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
-                "enable with `mm enable-source codex` (or `grok`, `opencode`) and run "
+                "enable with `mm enable-source codex` (or `grok`) and run "
                 "`mm push`; readers with no attributable local ledger are also omitted."
             )
         elif not view.any_activity:
@@ -3785,9 +3828,10 @@ def _reader_issue_note(
         return None
     names = _format_coverage_peer_names({device for device, _ in rows})
     seen_readers = {reader for _, readers in rows for reader in readers}
-    readers_txt = ", ".join(
-        reader for reader in mm_events.HOST_USAGE_TOKEN_SOURCES if reader in seen_readers
-    )
+    live_set = set(mm_events.HOST_USAGE_TOKEN_SOURCES)
+    # Do not interpolate a retained peer string into the card. A retired or
+    # future reader has no ``host_usage.<name>`` diag key.
+    readers_txt = ", ".join(_reader_display_labels(seen_readers))
     if kind == "degraded":
         problem = f"Host-usage reader(s) {readers_txt} failed on the latest push from {names}"
     else:
@@ -3795,13 +3839,21 @@ def _reader_issue_note(
             f"Host-usage totals from {readers_txt} on {names} are incomplete "
             "(the host declared those totals incomplete)"
         )
+    live_named = [r for _, readers in rows for r in readers if r in live_set]
     if len(rows) == 1:
         device, readers = rows[0]
         machine = _safe_short(device)
-        reader = readers[0] if len(readers) == 1 else "<reader>"
-        remedy = f"on `{machine}`, run `mm diag` and inspect `host_usage.{reader}`"
-    else:
+        live_here = [r for r in readers if r in live_set]
+        if len(live_here) == 1 and len(readers) == 1:
+            remedy = f"on `{machine}`, run `mm diag` and inspect `host_usage.{live_here[0]}`"
+        elif live_here:
+            remedy = f"on `{machine}`, run `mm diag` and inspect `host_usage.<reader>`"
+        else:
+            remedy = f"on `{machine}`, run `mm diag`"
+    elif live_named:
         remedy = "on each named machine, run `mm diag` and inspect `host_usage.<reader>`"
+    else:
+        remedy = "on each named machine, run `mm diag`"
     return f"{problem} — {remedy}."
 
 

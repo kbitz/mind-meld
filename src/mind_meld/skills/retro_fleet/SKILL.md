@@ -60,7 +60,7 @@ than zero. The header states that source coverage directly
 coverage is incomplete.
 
 The `AGENT LOGS` block (v0.12.37) is the second-pass sibling for **other**
-coding agents — Codex, Grok, OpenCode. It reports **rhythm, never magnitude**:
+coding agents — Codex and Grok Build. It reports **rhythm, never magnitude**:
 
 ```text
 AGENT LOGS (1 of 3 machines with agent activity)
@@ -77,10 +77,11 @@ support:
 
 1. **A row is a model family, not an agent.** The wire carries no
    reader-to-family attribution at all, and model IDs are bucketed by prefix,
-   so the Codex and OpenCode readers both land GPT models in the `Codex
-   models` family. `Claude (via agents)` is a legal row — that is OpenCode
-   running a Claude model — and it means something different from the `MODELS`
-   block's `Claude` row.
+   so the Codex reader (and a legacy OpenCode peer still publishing host
+   snapshots) both land GPT models in the `Codex models` family.
+   `Claude (via agents)` is a legal row on a legacy peer that still names a
+   retired reader — it is not a live "OpenCode running a Claude model" claim —
+   and it means something different from the `MODELS` block's `Claude` row.
 2. **`seen on N days` is a lower bound, not a count.** Track 32A made every
    reader per-turn, so resuming a session no longer moves its total onto a
    later day. What remains: a peer on an older mm still publishes the old
