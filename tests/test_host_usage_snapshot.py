@@ -16,6 +16,7 @@ Read ``docs/invariants/events-retro.md`` before changing any of this.
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,11 +42,13 @@ def _usage(input_tokens: int = 0, cache_create: int = 0, cache_read: int = 0, ou
 def _complete(
     hosts: dict | None = None,
     tokens_by_day: dict | None = None,
+    partial_days: frozenset[str] = frozenset(),
 ) -> _mm_host_usage.HostUsageResult:
     return _mm_host_usage.HostUsageResult(
         hosts if hosts is not None else {},
         complete=True,
         tokens_by_day=tokens_by_day or {},
+        partial_days=partial_days,
     )
 
 
@@ -1650,6 +1653,208 @@ class TestHostCaptureDoesNotDisturbTheWalkBudget:
         assert "events tail failed" not in err
         assert "events tail budget exceeded" not in err
         assert degradations == []
+
+
+class TestPartialDayMerges:
+    """Track 34A — partial days accumulate beside contributed, both merges."""
+
+    def test_c1_partial_first_pass_and_different_retry_both_survive(self):
+        initial = events_tail.HostUsageCapture(
+            {"codex": {"2026-08-15": _usage(3)}},
+            token_sources=("codex",),
+            dropped=(("grok", "deadline"),),
+            invoked=True,
+            partial_days={"codex": frozenset({"2026-08-15"})},
+            partial=("codex",),
+        )
+        retry = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-15": _usage(4)}},
+            token_sources=("grok",),
+            invoked=True,
+        )
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(
+                ("codex", lambda **_kw: _complete()),
+                ("grok", lambda **_kw: _complete()),
+            ),
+            retried_names={"grok"},
+        )
+        assert merged.partial == ("codex",)
+        assert merged.partial_days["codex"] == frozenset({"2026-08-15"})
+        assert merged.token_sources == ("codex", "grok")
+
+    def test_c2_partial_retry_result_appears(self):
+        initial = events_tail.HostUsageCapture(
+            {"codex": {"2026-08-15": _usage(3)}},
+            token_sources=("codex",),
+            dropped=(("grok", "deadline"),),
+            invoked=True,
+        )
+        retry = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-15": _usage(4)}},
+            token_sources=("grok",),
+            invoked=True,
+            partial_days={"grok": frozenset({"2026-08-15"})},
+            partial=("grok",),
+        )
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(
+                ("codex", lambda **_kw: _complete()),
+                ("grok", lambda **_kw: _complete()),
+            ),
+            retried_names={"grok"},
+        )
+        assert merged.partial == ("grok",)
+        assert merged.partial_days["grok"] == frozenset({"2026-08-15"})
+
+    def test_c3_retry_failure_cannot_erase_initial_partial(self):
+        initial = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-15": _usage(3)}},
+            token_sources=("grok",),
+            dropped=(("codex", "deadline"),),
+            invoked=True,
+            partial_days={"grok": frozenset({"2026-08-14"})},
+            partial=("grok",),
+        )
+        retry = events_tail.HostUsageCapture(None, "codex", "deadline", invoked=True)
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(
+                ("codex", lambda **_kw: _complete()),
+                ("grok", lambda **_kw: _complete()),
+            ),
+            retried_names={"codex"},
+        )
+        assert merged.partial == ("grok",)
+        assert merged.partial_days["grok"] == frozenset({"2026-08-14"})
+        assert merged.hosts is not None
+
+    def test_c4_merge_is_set_union_then_canonical_rebuild(self):
+        initial = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-15": _usage(3)}},
+            token_sources=("grok",),
+            invoked=True,
+            partial_days={"grok": frozenset({"2026-08-15"})},
+            partial=("grok",),
+        )
+        retry = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-16": _usage(1)}},
+            token_sources=("grok",),
+            invoked=True,
+            partial_days={"grok": frozenset({"2026-08-15"})},
+            partial=("grok",),
+        )
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(("grok", lambda **_kw: _complete())),
+            retried_names={"grok"},
+        )
+        assert merged.partial == ("grok",)
+        assert merged.partial != ("grok", "grok")
+
+    def test_c5_merge_does_not_alias_input_maps(self):
+        initial_days = {"grok": frozenset({"2026-08-15"})}
+        retry_days = {"grok": frozenset({"2026-08-16"})}
+        initial = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-15": _usage(3)}},
+            token_sources=("grok",),
+            invoked=True,
+            partial_days=initial_days,
+            partial=("grok",),
+        )
+        retry = events_tail.HostUsageCapture(
+            {"grok": {"2026-08-16": _usage(1)}},
+            token_sources=("grok",),
+            invoked=True,
+            partial_days=retry_days,
+            partial=("grok",),
+        )
+        merged = events_tail._merge_warm_retry_capture(
+            initial,
+            retry,
+            readers=_readers(("grok", lambda **_kw: _complete())),
+            retried_names={"grok"},
+        )
+        initial_days["grok"] = frozenset()
+        retry_days.clear()
+        assert merged.partial_days["grok"] == frozenset({"2026-08-15", "2026-08-16"})
+
+    def test_c6_bucket_helper_never_sees_reader_identity(self):
+        params = inspect.signature(events_tail._merge_host_usage_maps).parameters
+        assert "partial" not in params
+        assert "partial_days" not in params
+        assert "name" not in params
+        assert "reader" not in params
+
+    def test_c7_capture_copies_reader_partial_days(self):
+        grok = _complete(
+            {"grok": {"2026-08-15": _usage(4)}},
+            {"2026-08-15": {**_usage(4), "by_model": {"grok-4": _usage(4)}}},
+            partial_days=frozenset({"2026-08-15"}),
+        )
+        capture = events_tail._capture_host_usage(
+            _readers(("grok", lambda **_kw: grok)),
+            deadline=1_000.0,
+            now=lambda: 0.0,
+        )
+        assert capture.partial_days["grok"] == frozenset({"2026-08-15"})
+        assert capture.partial == ("grok",)
+
+    def test_c8_tail_writes_partial_sources_on_the_snapshot_row(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root)
+        _stub_fast_walks(monkeypatch)
+        _stub_hosts(
+            monkeypatch,
+            grok=_complete(
+                {"grok": {"2026-08-15": _usage(4)}},
+                {"2026-08-15": {**_usage(4), "by_model": {"grok-4": _usage(4)}}},
+                partial_days=frozenset({"2026-08-15"}),
+            ),
+        )
+        events_tail._run_events_tail(
+            _tail_config(sources, grok=True),
+            sources,
+            "dev-a",
+            dry_run=False,
+            quiet=True,
+        )
+        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
+        assert row["partial_sources"] == ["grok"]
+
+    def test_c9_git_snapshot_rows_carry_git_capture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root)
+        _stub_fast_walks(
+            monkeypatch,
+            git_rows=[
+                {
+                    "v": _mm_events.EVENTS_SCHEMA_VERSION,
+                    "type": "git-snapshot",
+                    "ts": "2026-08-15T00:00:00+00:00",
+                    "device": "",
+                    "projects": [],
+                    "skipped": [],
+                }
+            ],
+        )
+        _stub_hosts(monkeypatch)
+        events_tail._run_events_tail(
+            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=True
+        )
+        row = next(r for r in _rows(events_root) if r["type"] == "git-snapshot")
+        assert "since" in row["git_capture"]
+        assert row["git_capture"]["walk_budget_aborts"] == 0
 
 
 if __name__ == "__main__":  # pragma: no cover

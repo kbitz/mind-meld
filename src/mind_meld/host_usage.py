@@ -157,6 +157,14 @@ class HostUsageResult:
     complete: bool
     reason: Reason | None = None
     tokens_by_day: dict[str, DayBucket] = field(default_factory=dict)
+    partial_days: frozenset[str] = frozenset()
+    """UTC days on which this reader accepted a turn the host flagged
+    incomplete. Empty means no such turn in the retained scan. Day-scoped
+    on purpose: a lifetime boolean would let one two-year-old incomplete
+    turn mark every future snapshot partial forever, while the 90-day cap
+    had already dropped that day. Codex and OpenCode leave this empty —
+    only Grok's ledger carries ``usageIsIncomplete``.
+    """
 
     @property
     def empty(self) -> bool:
@@ -776,7 +784,10 @@ def _scan_grok_root(
             return _incomplete(failure.reason), staged, learned, True
 
     return (
-        _result_from_buckets(_aggregate_grok(staged.values())),
+        _result_from_buckets(
+            _aggregate_grok(staged.values()),
+            partial_days=_grok_partial_days(staged.values()),
+        ),
         staged,
         learned,
         bool(ledgers),
@@ -858,8 +869,10 @@ def _read_full_grok_file(
     before: os.stat_result,
     deadline: float,
 ) -> dict[str, Any]:
-    turns, skipped = _read_grok_file(path, workspace, session_id, 0, {}, before, deadline)
-    return _grok_file_entry(path, before, deadline, turns, skipped)
+    turns, skipped, new_partial = _read_grok_file(
+        path, workspace, session_id, 0, {}, before, deadline
+    )
+    return _grok_file_entry(path, before, deadline, turns, skipped, new_partial=new_partial)
 
 
 def _resume_grok_file(
@@ -871,13 +884,22 @@ def _resume_grok_file(
     deadline: float,
 ) -> dict[str, Any]:
     prior = {turn["key"]: turn for turn in entry["turns"]}
-    turns, skipped = _read_grok_file(
+    turns, skipped, new_partial = _read_grok_file(
         path, workspace, session_id, entry["offset"], prior, before, deadline
     )
     prior_skip = entry.get("usage_less_skipped", 0)
     if not _is_nonnegative_int(prior_skip):
         prior_skip = 0
-    return _grok_file_entry(path, before, deadline, turns, prior_skip + skipped)
+    prior_partial = entry.get("partial_days") or ()
+    return _grok_file_entry(
+        path,
+        before,
+        deadline,
+        turns,
+        prior_skip + skipped,
+        prior_partial=prior_partial,
+        new_partial=new_partial,
+    )
 
 
 def _grok_file_entry(
@@ -886,6 +908,9 @@ def _grok_file_entry(
     deadline: float,
     turns: dict[str, dict[str, Any]],
     usage_less_skipped: int,
+    *,
+    prior_partial: Any = (),
+    new_partial: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     after = _regular_stat(path)
     if not _same_source(before, after):
@@ -893,10 +918,32 @@ def _grok_file_entry(
     fingerprint = _fingerprint(path, after, deadline)
     if not _same_source(after, _regular_stat(path)):
         raise _ReadFailure("stale")
+    # Days live on the file entry, never on stored turns. A turn-level
+    # ``incomplete`` key made resume equality fail when jsonl restated the
+    # same terminal: cache turns omit the key, live turns had it, and
+    # ``existing == turn`` raised unsupported for the whole reader.
+    partial_days: set[str] = set(new_partial)
+    if isinstance(prior_partial, (list, tuple, set, frozenset)):
+        partial_days.update(day for day in prior_partial if isinstance(day, str))
+    stored_turns = [
+        {
+            "key": turns[key]["key"],
+            "day": turns[key]["day"],
+            "model": turns[key]["model"],
+            "usage": turns[key]["usage"],
+        }
+        for key in sorted(turns)
+    ]
     return {
         **_identity_fields(after, fingerprint),
-        "turns": [turns[key] for key in sorted(turns)],
+        "turns": stored_turns,
         "usage_less_skipped": usage_less_skipped,
+        # Always written, including as ``[]``. Absence is the pre-34A
+        # discriminator and forces one re-walk; an empty list means this
+        # file was walked post-34A and had no incomplete turns. NOT a
+        # CACHE_VERSION bump: that constant is shared with the Codex and
+        # OpenCode namespaces.
+        "partial_days": sorted(partial_days),
     }
 
 
@@ -908,10 +955,11 @@ def _read_grok_file(
     prior: dict[str, dict[str, Any]],
     before: os.stat_result,
     deadline: float,
-) -> tuple[dict[str, dict[str, Any]], int]:
+) -> tuple[dict[str, dict[str, Any]], int, frozenset[str]]:
     turns = dict(prior)
     last_offset = start_offset
     usage_less_skipped = 0
+    incomplete_days: set[str] = set()
     try:
         with path.open("rb") as fp:
             fp.seek(start_offset)
@@ -932,12 +980,14 @@ def _read_grok_file(
                     record = json.loads(raw)
                 except (TypeError, ValueError, UnicodeDecodeError) as exc:
                     raise _ReadFailure("malformed") from exc
-                accepted = _grok_turns_from_record(record, workspace, session_id)
-                if accepted is None:
+                parsed = _grok_turns_from_record(record, workspace, session_id)
+                if parsed is None:
                     continue
+                accepted, record_days = parsed
                 if accepted == []:
                     usage_less_skipped += 1
                     continue
+                incomplete_days.update(record_days)
                 for key, turn in accepted:
                     existing = turns.get(key)
                     if existing is None:
@@ -952,12 +1002,12 @@ def _read_grok_file(
         raise _ReadFailure("io_error") from exc
     if not _same_source(before, _regular_stat(path)):
         raise _ReadFailure("stale")
-    return turns, usage_less_skipped
+    return turns, usage_less_skipped, frozenset(incomplete_days)
 
 
 def _grok_turns_from_record(
     record: Any, workspace: str, session_id: str
-) -> list[tuple[str, dict[str, Any]]] | None:
+) -> tuple[list[tuple[str, dict[str, Any]]], frozenset[str]] | None:
     if not isinstance(record, dict):
         raise _ReadFailure("malformed")
     params = record.get("params")
@@ -979,7 +1029,7 @@ def _grok_turns_from_record(
     # fails `set(update) != _GROK_TERMINAL_KEYS` first, so a carve-out at
     # the `usage = update.get("usage")` site is dead code.
     if set(update) == _GROK_TERMINAL_KEYS - {"usage"}:
-        return []
+        return [], frozenset()
     if set(update) != _GROK_TERMINAL_KEYS:
         raise _ReadFailure("unsupported")
     day = _grok_outer_day(record.get("timestamp"))
@@ -998,6 +1048,11 @@ def _grok_turns_from_record(
     if not isinstance(models, dict) or not models:
         raise _ReadFailure("unsupported")
     _validate_grok_counters(usage)
+    # Identity check, never truthiness: usageIsIncomplete is peer-controlled.
+    # ``"yes"`` / ``1`` / ``null`` / ``"false"`` must not become a claim.
+    # Do NOT stamp the flag onto the turn dict: stored turns are
+    # {key, day, model, usage}, and resume compares live==cached.
+    incomplete = usage.get("usageIsIncomplete") is True
     accepted: list[tuple[str, dict[str, Any]]] = []
     for model, entry in models.items():
         if not isinstance(model, str) or not model:
@@ -1009,9 +1064,18 @@ def _grok_turns_from_record(
         counters = _validate_grok_counters(entry)
         model_key = _grok_terminal_key(workspace, session_id, prompt_id, model)
         accepted.append(
-            (model_key, {"key": model_key, "day": day, "model": model, "usage": counters})
+            (
+                model_key,
+                {
+                    "key": model_key,
+                    "day": day,
+                    "model": model,
+                    "usage": counters,
+                },
+            )
         )
-    return accepted
+    days = frozenset({day} if incomplete and accepted else ())
+    return accepted, days
 
 
 def _validate_grok_counters(usage: dict[str, Any]) -> Usage:
@@ -1091,11 +1155,52 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
     skip = value.get("usage_less_skipped", 0)
     if not _is_nonnegative_int(skip):
         return None
+    # Key-absence is the pre-34A discriminator. A bump of CACHE_VERSION
+    # would also invalidate the Codex and OpenCode namespaces. Same shape
+    # as the v0.12.15 offset/head gate and the D2 skills gate: force one
+    # re-walk of this file, then persist the marker (possibly empty).
+    if "partial_days" not in value:
+        return None
+    partial_days = _validated_grok_partial_days(value.get("partial_days"))
+    if partial_days is None:
+        return None
     return {
         **_identity_fields_from(value),
         "turns": normalized,
         "usage_less_skipped": skip,
+        "partial_days": partial_days,
     }
+
+
+def _validated_grok_partial_days(value: Any) -> list[str] | None:
+    """Normalize a cached ``partial_days`` list, or reject the entry.
+
+    Malformed is a re-walk, never a silent empty. Duplicates and
+    non-canonical days are malformed, not coerced.
+    """
+    if not isinstance(value, list):
+        return None
+    seen: set[str] = set()
+    out: list[str] = []
+    for day in value:
+        if not isinstance(day, str) or not _CANONICAL_DAY.fullmatch(day):
+            return None
+        if day in seen:
+            return None
+        seen.add(day)
+        out.append(day)
+    return sorted(out)
+
+
+def _grok_partial_days(entries: Any) -> frozenset[str]:
+    days: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for day in entry.get("partial_days") or ():
+            if isinstance(day, str):
+                days.add(day)
+    return frozenset(days)
 
 
 def _aggregate_grok(entries: Any) -> HostUsageBuckets:
@@ -2055,12 +2160,14 @@ def _result_from_buckets(
     *,
     complete: bool = True,
     reason: Reason | None = None,
+    partial_days: frozenset[str] = frozenset(),
 ) -> HostUsageResult:
     return HostUsageResult(
         buckets.by_family,
         complete=complete,
         reason=reason,
         tokens_by_day=buckets.by_day,
+        partial_days=partial_days,
     )
 
 

@@ -66,7 +66,7 @@ from concurrent.futures import (
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Sequence, TypedDict
+from typing import Callable, Mapping, Sequence, TypedDict
 from urllib.parse import urlsplit
 
 from mind_meld import fsutil, token_usage
@@ -140,8 +140,14 @@ BENIGN_SKIP_REASONS = frozenset({WALK_SKIP_NO_COMMITS})
 
 _NO_COMMITS_NEEDLE = "does not have any commits yet"
 
+DISCOVERY_EMPTY = "empty"
+"""A prober ran and found zero git roots. Named because it is the one HOLD
+value that is a FACT about the machine, not a loss: there is no history to
+have missed, so a consumer must not turn it into a "recapture the missing
+window" prompt. The zero-repo push note already covers that machine."""
+
 DISCOVERY_ADVANCE = frozenset({"complete", "not-run"})
-DISCOVERY_HOLD = frozenset({"partial", "empty"})
+DISCOVERY_HOLD = frozenset({"partial", DISCOVERY_EMPTY})
 """Cursor policy allowlist for ``git_capture.discovery``.
 
 Walk failures NEVER affect the cursor. A denylist would default every
@@ -295,6 +301,7 @@ class GitSnapshot(TypedDict, total=False):
     projects: list[GitSnapshotProject]
     skipped: list[GitSnapshotSkip]
     origin: str
+    git_capture: GitCaptureState
 
 
 class GitCaptureState(TypedDict, total=False):
@@ -398,7 +405,10 @@ class HostUsageSnapshot(TypedDict, total=False):
     consulted source was absent / empty). ``token_sources`` names the readers
     that contributed; additive ``degraded_sources`` names readers that failed
     this sweep (a subsequence of ``HOST_USAGE_TOKEN_SOURCES``, disjoint from
-    ``token_sources``). ``hosts == {}`` is a real completed empty observation
+    ``token_sources``). Additive ``partial_sources`` names readers that
+    contributed usable totals the host declared incomplete — INTERSECTS
+    ``token_sources``, never unified with ``degraded_sources``.
+    ``hosts == {}`` is a real completed empty observation
     only for that row's coverage; ``token_sources == []`` means no reader
     contributed, never fleet-wide zero. A sweep that completed no reader omits
     the whole row. An ABSENT row is no new complete observation — not a zero,
@@ -453,6 +463,7 @@ class HostUsageSnapshot(TypedDict, total=False):
     active_days: list[str]
     degraded_sources: list[str]
     tokens_by_day: dict[str, dict]
+    partial_sources: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -1845,6 +1856,7 @@ def make_host_usage_snapshot(
     max_days: int = token_usage.MAX_BY_DAY_DAYS,
     degraded_sources: Sequence[str] = (),
     tokens_by_day: dict[str, token_usage.DayBucket] | None = None,
+    partial_days: Mapping[str, Sequence[str]] | None = None,
 ) -> HostUsageSnapshot:
     """Construct a ``host-usage-snapshot`` row from completed reader output.
 
@@ -1864,13 +1876,20 @@ def make_host_usage_snapshot(
     ``degraded_sources`` is additive (Track 31A): readers that failed this
     sweep, as a subsequence of ``HOST_USAGE_TOKEN_SOURCES`` disjoint from
     ``token_sources``. Omitted when empty so the happy-path wire shape is
-    unchanged. ``tokens_by_day`` is additive the same way (Track 33A): omit
-    iff ``hosts`` is empty, otherwise always present, so its *absence* is
-    the mixed-fleet version discriminator. A sibling that would be EMPTY beside
-    non-empty ``hosts`` is omitted rather than published: the acceptor rejects
-    that shape outright, and absence is the honest signal. **The by-model cap
-    runs AFTER the day trim** -- see ``_cap_by_model``. No
-    ``EVENTS_SCHEMA_VERSION`` bump:
+    unchanged. ``partial_sources`` is additive the same way (Track 34A):
+    readers that contributed usable totals the host explicitly declared
+    incomplete. **These two fields have opposite disjointness contracts —
+    do not unify them.** ``degraded_sources`` is DISJOINT from
+    ``token_sources`` (a failed reader contributed nothing); ``partial_sources``
+    INTERSECTS it (the reader contributed, with known fidelity loss). A
+    well-meant unification that filters partial the same way as degraded
+    silently drops every partial signal. ``tokens_by_day`` is additive the
+    same way (Track 33A): omit iff ``hosts`` is empty, otherwise always
+    present, so its *absence* is the mixed-fleet version discriminator. A
+    sibling that would be EMPTY beside non-empty ``hosts`` is omitted rather
+    than published: the acceptor rejects that shape outright, and absence is
+    the honest signal. **The by-model cap runs AFTER the day trim** -- see
+    ``_cap_by_model``. No ``EVENTS_SCHEMA_VERSION`` bump:
     ``_accept_host_usage_snapshot`` does no key-set check and ``_tie_break_key``
     excludes unknown fields.
 
@@ -1936,4 +1955,21 @@ def make_host_usage_snapshot(
     ]
     if degraded:
         row["degraded_sources"] = degraded
+    # Intersect partial days with the SAME keep set hosts/tokens_by_day use,
+    # then reduce to source names. A lifetime boolean would let one incomplete
+    # turn older than the cap mark every future snapshot partial forever.
+    # Gate on a real observation (payload with at least one day), mirroring
+    # ``if payload and sibling``. Coverage fields are row-scoped after this
+    # reduction; a future day-scoped field would have to join ``keep`` here.
+    has_observation = any(days for days in payload.values())
+    days_by_reader = partial_days or {}
+    partial = [
+        name
+        for name in HOST_USAGE_TOKEN_SOURCES
+        if name in excluded
+        and name not in set(degraded)
+        and (set(days_by_reader.get(name, ())) & keep)
+    ]
+    if has_observation and partial:
+        row["partial_sources"] = partial
     return row

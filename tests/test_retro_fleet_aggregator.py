@@ -4646,6 +4646,205 @@ class TestHostSnapshotAcceptance:
             assert aggregator._host_counter_ok(sample) == host_usage._is_valid_counter(sample)
 
 
+class TestCoverageAcceptor:
+    TS = "2026-04-28T12:00:00+00:00"
+
+    def test_e1_three_way_on_key_presence(self):
+        absent = _accepted(_host_event("dev-a", self.TS))
+        assert absent.degraded == ()
+        assert absent.degraded_reason is None
+        assert absent.partial == ()
+        assert absent.partial_reason is None
+
+        empty = _host_event("dev-a", self.TS, extra={"degraded_sources": [], "partial_sources": []})
+        present_empty = _accepted(empty)
+        assert present_empty.degraded == ()
+        assert present_empty.degraded_reason is None
+
+        invalid = _host_event("dev-a", self.TS, extra={"degraded_sources": "grok"})
+        row = aggregator._accept_host_usage_snapshot(invalid)
+        assert isinstance(row, aggregator._AcceptedHostRow)
+        assert row.degraded == ()
+        assert row.degraded_reason == "invalid_token_sources"
+
+    def test_e2_unknown_reader_name_drops_field_keeps_row(self):
+        ev = _host_event("dev-a", self.TS, extra={"degraded_sources": ["gemini"]})
+        row = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(row, aggregator._AcceptedHostRow)
+        assert row.degraded == ()
+        assert row.degraded_reason == "invalid_token_sources"
+
+    def test_e3_duplicates_non_list_and_oversize_drop_the_field(self):
+        for raw in (["grok", "grok"], {"grok": True}, ["codex", "grok", "opencode", "codex"]):
+            ev = _host_event("dev-a", self.TS, extra={"partial_sources": raw})
+            row = aggregator._accept_host_usage_snapshot(ev)
+            assert isinstance(row, aggregator._AcceptedHostRow)
+            assert row.partial == ()
+            assert row.partial_reason == "invalid_token_sources"
+
+    def test_e4_drop_reason_is_recorded(self):
+        ev = _host_event("dev-a", self.TS, extra={"degraded_sources": ["not-a-reader"]})
+        row = _accepted(ev)
+        assert row.degraded_reason == "invalid_token_sources"
+
+    def test_e5_partial_beside_empty_hosts_is_rejected(self):
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=(),
+            hosts={},
+            extra={"partial_sources": ["grok"]},
+        )
+        ev["active_days"] = []
+        row = _accepted(ev)
+        assert row.lifetime_by_family == {}
+        assert row.partial == ()
+        assert row.partial_reason == "invalid_coverage"
+
+    def test_e6_overlap_drops_all_partial_disjoint_pair_survives(self):
+        ts = self.TS
+        overlap = _host_event(
+            "dev-a",
+            ts,
+            extra={"degraded_sources": ["grok"], "partial_sources": ["grok"]},
+        )
+        row = _accepted(overlap)
+        assert row.degraded == ("grok",)
+        assert row.partial == ()
+        assert row.partial_reason == "invalid_coverage"
+        both = _host_event(
+            "dev-a",
+            ts,
+            extra={"degraded_sources": ["grok"], "partial_sources": ["codex"]},
+        )
+        kept = _accepted(both)
+        assert kept.degraded == ("grok",)
+        assert kept.partial == ("codex",)
+
+    def test_e6c_degraded_naming_a_contributor_is_dropped(self):
+        """Found by Greptile on PR #151.
+
+        The writer keeps ``degraded_sources`` DISJOINT from
+        ``token_sources``. A peer that violates it made the card say a
+        reader that plainly contributed "failed on the latest push", and
+        sent the user to ``mm diag`` for a reader that is fine.
+        """
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"degraded_sources": ["codex"]},
+        )
+        row = _accepted(ev)
+        assert row.degraded == ()
+        assert row.degraded_reason == "invalid_coverage"
+
+    def test_e6d_partial_outside_token_sources_is_dropped(self):
+        """``partial_sources`` is a SUBSET of ``token_sources`` by contract.
+
+        A reader nobody consulted cannot have "reported incomplete totals".
+        """
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"partial_sources": ["grok"]},
+        )
+        row = _accepted(ev)
+        assert row.partial == ()
+        assert row.partial_reason == "invalid_coverage"
+
+    def test_e6e_contradicting_field_drops_alone(self):
+        """Drop the contradicting field, keep the row and its valid sibling."""
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            extra={"degraded_sources": ["codex"], "partial_sources": ["codex"]},
+        )
+        row = _accepted(ev)
+        assert row.lifetime_by_family["codex"]
+        assert row.degraded == ()
+        assert row.degraded_reason == "invalid_coverage"
+        assert row.partial == ()
+        assert row.partial_reason == "invalid_coverage"
+
+    def test_e6f_writer_output_survives_the_contract_checks(self):
+        """The real writer never trips them — a round trip stays intact."""
+        from mind_meld import events
+
+        row = events.make_host_usage_snapshot(
+            device="dev-a",
+            token_sources=("codex", "grok"),
+            hosts={"codex": {"2026-04-20": _usage(4)}, "grok": {"2026-04-20": _usage(6)}},
+            ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+            degraded_sources=("opencode",),
+            partial_days={"grok": ["2026-04-20"]},
+        )
+        accepted = _accepted(json.loads(json.dumps(row)))
+        assert accepted.degraded == ("opencode",)
+        assert accepted.degraded_reason is None
+        assert accepted.partial == ("grok",)
+        assert accepted.partial_reason is None
+
+    def test_e6b_valid_partial_sources_are_accepted(self):
+        ev = _host_event(
+            "laptop",
+            self.TS,
+            token_sources=("grok",),
+            hosts={"grok": {"2026-04-20": _usage(5)}},
+            extra={"partial_sources": ["grok"]},
+        )
+        row = _accepted(ev)
+        assert row.partial == ("grok",)
+        assert row.partial_reason is None
+        inv = aggregator.aggregate_host_usage(
+            [ev],
+            since=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            until=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+            registered_ids=None,
+        )
+        dumped = json.loads(aggregator._dump_host_inventory(inv))["by_device"]["laptop"]
+        assert dumped["partial"] == ["grok"]
+        assert "incomplete totals" in dumped["partial_phrase"]
+
+    def test_e7_genuinely_absent_coverage_selects_identically_in_both_orders(self):
+        a = _host_event("dev-a", self.TS, hosts={"codex": {"2026-04-20": _usage(4)}})
+        b = _host_event("dev-a", self.TS, hosts={"codex": {"2026-04-20": _usage(4)}})
+        b["hosts"]["codex"]["2026-04-20"]["output"] = 0
+        b["hosts"]["codex"]["2026-04-20"]["input"] = 4
+        # Same family totals, no coverage fields. Selection must match reversed input.
+        first = aggregator.aggregate_host_usage(
+            [a, b],
+            since=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            until=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+            registered_ids=None,
+        )
+        second = aggregator.aggregate_host_usage(
+            [b, a],
+            since=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            until=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+            registered_ids=None,
+        )
+        assert (
+            first.by_device["dev-a"].lifetime_by_family
+            == second.by_device["dev-a"].lifetime_by_family
+        )
+        ra = aggregator._accept_host_usage_snapshot(a)
+        rb = aggregator._accept_host_usage_snapshot(b)
+        assert aggregator._sibling_tie_key(ra) == aggregator._sibling_tie_key(rb)
+
+    def test_e8_present_but_invalid_may_change_the_winner(self):
+        ts = self.TS
+        plain = _host_event("dev-a", ts)
+        malformed = _host_event("dev-a", ts, extra={"degraded_sources": ["gemini"]})
+        ra = _accepted(plain)
+        rb = aggregator._accept_host_usage_snapshot(malformed)
+        assert isinstance(rb, aggregator._AcceptedHostRow)
+        assert ra.tie_key == rb.tie_key
+        assert aggregator._sibling_tie_key(ra) != aggregator._sibling_tie_key(rb)
+
+
 class TestHostSnapshotSelection:
     SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
     UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
@@ -4785,9 +4984,14 @@ class TestHostSnapshotNoWindowSpend:
         raw = json.loads(json.dumps(row))
         assert isinstance(aggregator._accept_host_usage_snapshot(raw), aggregator._AcceptedHostRow)
 
-    def test_acceptor_ignores_degraded_sources_and_tie_break_is_unchanged(self):
-        """T3-4: no schema bump. Additive field is ignored; tie-break key
-        excludes unknown top-level fields so it cannot flip selection."""
+    def test_acceptor_carries_degraded_sources_and_tie_key_excludes_it(self):
+        """T2: degraded joins ``_sibling_tie_key``, never ``_tie_break_key``.
+
+        A degradation must not make a row *win*. The ``tie_key`` equality
+        assertion is a real invariant and stays. Present-but-invalid MAY
+        change the sibling-key winner, which is intended — the same
+        argument ``_sibling_tie_key`` already makes for ``detail_reason``.
+        """
         from mind_meld import events
 
         ts = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
@@ -4809,6 +5013,10 @@ class TestHostSnapshotNoWindowSpend:
         assert isinstance(accepted_plain, aggregator._AcceptedHostRow)
         assert isinstance(accepted_degraded, aggregator._AcceptedHostRow)
         assert accepted_plain.tie_key == accepted_degraded.tie_key
+        assert accepted_degraded.degraded == ("grok",)
+        assert aggregator._sibling_tie_key(accepted_plain) != aggregator._sibling_tie_key(
+            accepted_degraded
+        )
 
     def test_mutating_input_does_not_change_view(self):
         ev = _host_event("dev-a", "2026-04-27T12:00:00+00:00")
@@ -5025,8 +5233,28 @@ class TestDumpHostUsage:
         assert "dev-a" in payload["by_device"]
         assert payload["by_device"]["dev-a"]["detail"] == "absent"
         assert "detail_phrase" in payload["by_device"]["dev-a"]
+        assert "degraded" in payload["by_device"]["dev-a"]
+        assert "partial" in payload["by_device"]["dev-a"]
+        assert "degraded_phrase" in payload["by_device"]["dev-a"]
+        assert "partial_phrase" in payload["by_device"]["dev-a"]
         assert "# Retro" not in out
         assert "MM_THEMES_PROMPT" not in out
+
+    def test_f7_dump_carries_drop_reason_for_malformed_coverage(self):
+        ev = _host_event(
+            "dev-a", "2026-04-27T12:00:00+00:00", extra={"degraded_sources": ["gemini"]}
+        )
+        inv = aggregator.aggregate_host_usage(
+            [ev],
+            since=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            until=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
+            registered_ids=None,
+        )
+        payload = json.loads(aggregator._dump_host_inventory(inv))
+        snap = payload["by_device"]["dev-a"]
+        assert snap["degraded"] == []
+        assert snap["degraded_reason"] == "invalid_token_sources"
+        assert "invalid coverage metadata" in snap["degraded_phrase"]
 
 
 class TestHostTokensByDayAcceptance:
@@ -5678,6 +5906,8 @@ def _snap(
     consulted: tuple[str, ...] = ("codex",),
     since: datetime | None = None,
     until: datetime | None = None,
+    degraded: tuple[str, ...] = (),
+    partial: tuple[str, ...] = (),
 ) -> aggregator.HostDeviceSnapshot:
     """Build a HostDeviceSnapshot directly, so rhythm tests never touch a clock."""
     ref_since = since or datetime(2026, 4, 21, tzinfo=timezone.utc)
@@ -5689,6 +5919,8 @@ def _snap(
         lifetime_by_family={} if families is None else families,
         stale=as_of < ref_since,
         future_dated=as_of > ref_until,
+        degraded=degraded,
+        partial=partial,
     )
 
 
@@ -6001,6 +6233,108 @@ class TestAgentCoverageNotes:
         )
         notes = aggregator._agent_coverage_notes(data)
         assert any("were rejected" in n for n in notes)
+
+    def test_f1_one_degraded_machine_names_machine_reader_and_diag(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data(
+                [
+                    _snap(
+                        "laptop",
+                        self.UNTIL,
+                        families={"codex": {"2026-04-22": _usage(1)}},
+                        consulted=("codex",),
+                        degraded=("grok",),
+                    )
+                ]
+            )
+        )
+        hit = [n for n in notes if "failed on the latest push" in n]
+        assert len(hit) == 1
+        assert "laptop" in hit[0]
+        assert "grok" in hit[0]
+        assert "mm diag" in hit[0]
+        assert "host_usage.grok" in hit[0]
+        assert "mm push" not in hit[0]
+
+    def test_f1b_one_partial_machine_names_machine_reader_and_diag(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data(
+                [
+                    _snap(
+                        "laptop",
+                        self.UNTIL,
+                        families={"grok": {"2026-04-22": _usage(1)}},
+                        consulted=("grok",),
+                        partial=("grok",),
+                    )
+                ]
+            )
+        )
+        hit = [n for n in notes if "are incomplete" in n]
+        assert len(hit) == 1
+        assert "laptop" in hit[0]
+        assert "grok" in hit[0]
+        assert "mm diag" in hit[0]
+        assert "host_usage.grok" in hit[0]
+        assert "mm push" not in hit[0]
+
+    def test_f2_n_degraded_machines_is_one_aggregated_note(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data(
+                [
+                    _snap("laptop", self.UNTIL, degraded=("grok",)),
+                    _snap("desktop", self.UNTIL, degraded=("grok",)),
+                ]
+            )
+        )
+        hits = [n for n in notes if "failed on the latest push" in n]
+        assert len(hits) == 1
+        assert "laptop" in hits[0]
+        assert "desktop" in hits[0]
+
+    def test_f3_zero_degraded_emits_no_coverage_note(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data([_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})])
+        )
+        assert not any("failed on the latest push" in n for n in notes)
+        assert not any("are incomplete" in n for n in notes)
+
+    def test_f4_note_uses_safe_short_not_raw_peer_bytes(self):
+        nasty = "dev\x1b[31m-evil"
+        notes = aggregator._agent_coverage_notes(
+            self._data([_snap(nasty, self.UNTIL, degraded=("grok",))])
+        )
+        joined = " ".join(notes)
+        assert "\x1b" not in joined
+        assert "[31m" not in joined
+
+    def test_f5_absent_partial_sources_does_not_nag_peer_too_old(self):
+        notes = aggregator._agent_coverage_notes(
+            self._data([_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})])
+        )
+        joined = " ".join(notes)
+        assert "too old" not in joined
+        assert "partial_sources" not in joined
+
+    def test_f6_each_new_note_prefix_appears_in_skill_md(self):
+        skill = Path(__file__).resolve().parents[1] / "src/mind_meld/skills/retro_fleet/SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+        start, end = "## Notes section in aggregator output", "## Trends vs prior"
+        assert start in text and end in text
+        i0, i1 = text.index(start), text.index(end)
+        assert i0 < i1
+        notes = text[i0:i1]
+        for prefix in (
+            "Host-usage reader(s)",
+            "Host-usage totals from",
+            "Git walk ran out of budget on",
+            "Git history has an uncovered interval on",
+        ):
+            assert prefix in notes, prefix
+        assert "reported verbatim" in notes
+        assert "never interpreted" in notes
+        assert "git_capture.recorded.walk_budget_aborts" in notes
+        assert "last_push.walk_budget_aborts" not in notes
 
 
 class TestAgentInventoryBody:
@@ -6413,3 +6747,260 @@ class TestZeroRepoCaptureNotes:
         out = aggregator.format_retro(data)
         assert "run mm diag" in out
         assert "stderr breadcrumbs" not in out
+
+
+def _capture_on(
+    ev: dict,
+    *,
+    since_days: float,
+    aborts: int = 0,
+    errors: int = 0,
+    discovery: str = "complete",
+) -> dict:
+    ev = dict(ev)
+    ev["git_capture"] = {
+        "since": _ts(since_days),
+        "discovery": discovery,
+        "walk_budget_aborts": aborts,
+        "walk_errors": errors,
+    }
+    return ev
+
+
+class TestGitCoverageAndRecapture:
+    def test_g1_recapture_rows_excluded_from_push_tally(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        recapture = {
+            "v": 2,
+            "type": "git-snapshot",
+            "ts": _ts(1),
+            "device": "dev-a",
+            "projects": [],
+            "origin": "recapture",
+        }
+        recapture = _capture_on(recapture, since_days=30)
+        empty_push = {
+            "v": 2,
+            "type": "git-snapshot",
+            "ts": _ts(1),
+            "device": "dev-a",
+            "projects": [],
+        }
+        empty_push = _capture_on(empty_push, since_days=7)
+        _write_events(events_dir, "dev-a", "2026-04-27", [recapture, empty_push])
+        data = _aggregate(events_dir)
+        assert data.git.zero_repo_captures["dev-a"] == (1, 1)
+
+    def test_g2_missing_origin_key_counts_as_a_push(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        empty = {
+            "v": 2,
+            "type": "git-snapshot",
+            "ts": _ts(1),
+            "device": "dev-a",
+            "projects": [],
+        }
+        _write_events(events_dir, "dev-a", "2026-04-27", [empty])
+        data = _aggregate(events_dir)
+        assert data.git.zero_repo_captures["dev-a"] == (1, 1)
+
+    def test_g3_device_with_only_recapture_rows_has_no_zero_repo_note(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        recapture = _git_event("dev-a", 1, [])
+        recapture["projects"] = []
+        recapture["origin"] = "recapture"
+        recapture = _capture_on(recapture, since_days=30)
+        _write_events(events_dir, "dev-a", "2026-04-27", [recapture])
+        data = _aggregate(events_dir)
+        assert data.git.zero_repo_captures == {}
+        out = aggregator.format_retro(data)
+        assert "captured 0 repositories" not in out
+
+    def test_h1_recapture_row_closes_an_interval(self, tmp_path):
+        """T8 includes recapture as covering; T9 excludes it from the push tally."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        recapture = _git_event("dev-a", 0, [_commit("aaa", 1)])
+        recapture["origin"] = "recapture"
+        recapture = _capture_on(recapture, since_days=7)
+        _write_events(events_dir, "dev-a", "2026-04-28", [recapture])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+        assert "dev-a" not in data.git.zero_repo_captures
+
+    def test_h2_budget_abort_renders_budget_note_not_gap_note(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        row = _capture_on(_git_event("dev-a", 0, [_commit("aaa", 1)]), since_days=7, aborts=3)
+        _write_events(events_dir, "dev-a", "2026-04-28", [row])
+        data = _aggregate(events_dir)
+        assert data.git.git_budget_aborts["dev-a"] == 3
+        assert "dev-a" not in data.git.uncovered_git
+        out = aggregator.format_retro(data)
+        assert "ran out of budget" in out
+        assert "git_capture.recorded.walk_budget_aborts" in out
+        assert "last_push.walk_budget_aborts" not in out
+        assert "uncovered interval" not in out
+
+    def test_h3_window_before_coverage_floor_clamps(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Filename date is 2026-04-27. A 7d window starts 2026-04-21.
+        # Capture covers [2026-04-27, now], so without the floor there is a
+        # 6-day gap; with the floor the gap is clamped away.
+        row = _capture_on(_git_event("dev-a", 0, [_commit("aaa", 0)]), since_days=1)
+        _write_events(events_dir, "dev-a", "2026-04-27", [row])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+
+    def test_h4_device_without_git_capture_is_unknown_never_a_gap(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        _write_events(
+            events_dir, "dev-a", "2026-04-27", [_git_event("dev-a", 1, [_commit("aaa", 1)])]
+        )
+        data = _aggregate(events_dir)
+        assert data.git.uncovered_git == {}
+        out = aggregator.format_retro(data)
+        assert "uncovered interval" not in out
+
+    def test_h5_git_coverage_note_aggregates_across_machines(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Two devices, each with a capture that starts after the window
+        # and so leaves a gap — except the coverage floor will clamp.
+        # Force a gap by covering only the last instant, with a filename
+        # date at the start of the window so the floor does not swallow it.
+        a = _capture_on(_git_event("laptop", 0, [_commit("aaa", 0)]), since_days=0.1)
+        b = _capture_on(_git_event("desktop", 0, [_commit("bbb", 0)]), since_days=0.1)
+        _write_events(events_dir, "laptop", "2026-04-21", [a])
+        _write_events(events_dir, "desktop", "2026-04-21", [b])
+        data = _aggregate(events_dir)
+        assert "laptop" in data.git.uncovered_git
+        assert "desktop" in data.git.uncovered_git
+        out = aggregator.format_retro(data)
+        assert out.count("uncovered interval") == 1
+        assert "laptop" in out
+        assert "desktop" in out
+
+    def test_h6_trailing_day_after_latest_capture_is_not_a_gap(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # Capture through yesterday. Until is NOW (today noon). Date math
+        # without the clip treats today as uncovered and nags recapture.
+        row = _capture_on(_git_event("dev-a", 1, [_commit("aaa", 1)]), since_days=7)
+        _write_events(events_dir, "dev-a", "2026-04-21", [row])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+        out = aggregator.format_retro(data)
+        assert "uncovered interval" not in out
+
+    def test_h7_discovery_hold_does_not_paint_coverage(self, tmp_path):
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        # A complete capture of only the last instant leaves an early-window
+        # gap. A HOLD (partial) capture of the whole window must not fill it.
+        tail = _capture_on(_git_event("dev-a", 0, [_commit("aaa", 0)]), since_days=0.1)
+        hold = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=7,
+            discovery="partial",
+        )
+        _write_events(events_dir, "dev-a", "2026-04-21", [tail, hold])
+        data = _aggregate(events_dir)
+        assert "dev-a" in data.git.uncovered_git
+
+    def test_h8_partial_only_device_still_reports_a_gap(self, tmp_path):
+        """A device whose every walk HELD must not vanish from the card.
+
+        Found by Greptile on PR #151. The gap loop keyed on ``covered``,
+        which a HOLD capture never joins, so a machine whose walks never
+        landed produced no note at all — indistinguishable from a healthy
+        machine. It is now keyed on the OBSERVATION map.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        rows = [
+            _capture_on(
+                _git_event("dev-a", day, [_commit("aaa", day)]),
+                since_days=7,
+                discovery="partial",
+            )
+            for day in (3, 0)
+        ]
+        _write_events(events_dir, "dev-a", "2026-04-21", rows)
+        data = _aggregate(events_dir)
+        assert "dev-a" in data.git.uncovered_git
+        out = aggregator.format_retro(data)
+        assert "uncovered interval" in out
+
+    def test_h9_trailing_partial_run_after_a_good_capture_is_a_gap(self, tmp_path):
+        """A held push is an observation, so it extends ``latest_end``.
+
+        Clipping to the latest COVERED interval hid every held push after
+        the last good one — the exact window the user needs to recapture.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        good = _capture_on(_git_event("dev-a", 6, [_commit("aaa", 6)]), since_days=7)
+        held = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=6,
+            discovery="partial",
+        )
+        _write_events(events_dir, "dev-a", "2026-04-21", [good, held])
+        data = _aggregate(events_dir)
+        assert "dev-a" in data.git.uncovered_git
+
+    def test_h10_hold_capture_alone_does_not_extend_past_the_window(self, tmp_path):
+        """The trailing clip still holds: a fully covered window stays clean."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        good = _capture_on(_git_event("dev-a", 0, [_commit("aaa", 0)]), since_days=7)
+        held = _capture_on(
+            _git_event("dev-a", 0, [_commit("bbb", 0)]),
+            since_days=7,
+            discovery="partial",
+        )
+        _write_events(events_dir, "dev-a", "2026-04-21", [good, held])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+
+    def test_h11_empty_discovery_is_a_fact_not_a_gap(self, tmp_path):
+        """A repo-less Mac must never be told to `mm recapture`.
+
+        ``empty`` means a prober RAN and found zero git roots — there is
+        no history to have missed. That machine already gets the zero-repo
+        push note, whose copy is the right one. Counting it as an
+        observation would nag every repo-less Mac on every retro forever.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        rows = []
+        for day in (3, 0):
+            ev = _git_event("dev-a", day, [])
+            ev["projects"] = []
+            rows.append(_capture_on(ev, since_days=7, discovery="empty"))
+        _write_events(events_dir, "dev-a", "2026-04-21", rows)
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+        out = aggregator.format_retro(data)
+        assert "uncovered interval" not in out
+        # The signal the user actually needs is still there.
+        assert data.git.zero_repo_captures["dev-a"] == (2, 2)
+        assert "captured 0 repositories" in out
+
+    def test_h12_empty_run_after_a_good_capture_is_not_a_gap(self, tmp_path):
+        """``empty`` does not extend ``latest_end`` either."""
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        good = _capture_on(_git_event("dev-a", 6, [_commit("aaa", 6)]), since_days=7)
+        gone = _git_event("dev-a", 0, [])
+        gone["projects"] = []
+        gone = _capture_on(gone, since_days=6, discovery="empty")
+        _write_events(events_dir, "dev-a", "2026-04-21", [good, gone])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git

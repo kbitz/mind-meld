@@ -291,7 +291,16 @@ class GitAggregate:
     # device_id -> (zero-project snapshots, total snapshots) in-window.
     # A Notes line fires when any device captured 0 repositories on some
     # of its pushes: that machine's commits are missing from the window.
+    # Recapture-origin rows are excluded from both counts (they are not
+    # pushes); a row with no ``origin`` key is a pre-30A peer and IS a push.
     zero_repo_captures: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # device_id -> uncovered [start, end] date pairs inside the retro
+    # window, clamped to ``_coverage_floor_from_files``. A device with no
+    # ``git_capture`` at all (pre-30A peer) is unknown, never a gap.
+    uncovered_git: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+    # device_id -> walk_budget_aborts summed across in-window captures
+    # that carried the field. Different remedy from a genuine gap.
+    git_budget_aborts: dict[str, int] = field(default_factory=dict)
 
     @property
     def pull_requests(self) -> int:
@@ -486,6 +495,10 @@ class HostDeviceSnapshot:
     tokens_by_day: dict[str, dict] | None = None
     detail: Literal["present", "absent"] = "absent"
     detail_reason: HostRejectReason | None = None
+    degraded: tuple[str, ...] = ()
+    partial: tuple[str, ...] = ()
+    degraded_reason: str | None = None
+    partial_reason: str | None = None
 
     @property
     def current(self) -> bool:
@@ -561,6 +574,10 @@ class _AcceptedHostRow:
     tokens_by_day: dict[str, dict] | None = None
     detail: Literal["present", "absent"] = "absent"
     detail_reason: HostRejectReason | None = None
+    degraded: tuple[str, ...] = ()
+    partial: tuple[str, ...] = ()
+    degraded_reason: str | None = None
+    partial_reason: str | None = None
 
 
 @dataclass
@@ -665,6 +682,92 @@ def _coverage_floor_from_files(files: Iterable[Path]) -> date | None:
     """
     dates = [d for f in files if (d := _event_file_date(f)) is not None]
     return min(dates) if dates else None
+
+
+def _git_coverage_window(
+    since: datetime, until: datetime, coverage_floor: date | None
+) -> tuple[datetime, datetime]:
+    """Clamp the retro window's start to the filename-date coverage floor.
+
+    A 7d window on a 3-day-old install must not report a 4-day "gap" that
+    is just absence of history. Reuses ``_coverage_floor_from_files``;
+    do not compute a second floor.
+    """
+    start = since
+    if coverage_floor is not None:
+        floor_dt = datetime(
+            coverage_floor.year,
+            coverage_floor.month,
+            coverage_floor.day,
+            tzinfo=timezone.utc,
+        )
+        if floor_dt > start:
+            start = floor_dt
+    return start, until
+
+
+def _project_git_capture(raw: object) -> dict | None:
+    """Allowlisted projection of a git-snapshot ``git_capture`` object.
+
+    Copied from ``events.project_recorded_capture``'s validation: absence
+    of the object is a pre-30A peer, not an error, and must never become
+    a gap. Malformed values are dropped the same way.
+    """
+    if not isinstance(raw, dict):
+        return None
+    since = raw.get("since") if isinstance(raw.get("since"), str) else None
+    aborts = raw.get("walk_budget_aborts")
+    errors = raw.get("walk_errors")
+    discovery = raw.get("discovery") if isinstance(raw.get("discovery"), str) else None
+    if since is None and aborts is None and errors is None and discovery is None:
+        return None
+    return {
+        "since": since,
+        "discovery": discovery,
+        "walk_budget_aborts": aborts if type(aborts) is int else None,
+        "walk_errors": errors if isinstance(errors, int) else None,
+    }
+
+
+def _uncovered_intervals(
+    covered: list[tuple[datetime, datetime]],
+    window_start: datetime,
+    window_end: datetime,
+) -> list[tuple[date, date]]:
+    """Date-granularity gaps in ``[window_start, window_end]``.
+
+    A capture that starts at noon on the coverage-floor day still covers
+    that calendar day. Datetime arithmetic would report a midnight-to-noon
+    "gap" that is just the floor's time-of-day, not missing history.
+    """
+    start_d = window_start.date()
+    end_d = window_end.date()
+    if start_d > end_d:
+        return []
+    covered_dates: set[date] = set()
+    for start, end in covered:
+        cs = max(start.date(), start_d)
+        ce = min(end.date(), end_d)
+        if cs > ce:
+            continue
+        cursor = cs
+        while cursor <= ce:
+            covered_dates.add(cursor)
+            cursor += timedelta(days=1)
+    gaps: list[tuple[date, date]] = []
+    gap_start: date | None = None
+    cursor = start_d
+    while cursor <= end_d:
+        if cursor not in covered_dates:
+            if gap_start is None:
+                gap_start = cursor
+        elif gap_start is not None:
+            gaps.append((gap_start, cursor - timedelta(days=1)))
+            gap_start = None
+        cursor += timedelta(days=1)
+    if gap_start is not None:
+        gaps.append((gap_start, end_d))
+    return gaps
 
 
 def _coverage_allows_prior(coverage_floor: date | None, prior_start: datetime) -> bool:
@@ -879,6 +982,7 @@ def aggregate_git(
     until: datetime,
     author_emails: frozenset[str] | None,
     window_days: int = 0,
+    coverage_floor: date | None = None,
 ) -> GitAggregate:
     """Walk git-snapshot events, dedup commits by ``(canonical, sha)``,
     apply the window + author filter, return totals.
@@ -902,6 +1006,10 @@ def aggregate_git(
     weekly_active_days: dict[str, set[str]] = {}
     snap_total: dict[str, int] = {}
     snap_zero: dict[str, int] = {}
+    covered: dict[str, list[tuple[datetime, datetime]]] = {}
+    observed: dict[str, datetime] = {}
+    budget_aborts: dict[str, int] = {}
+    window_start, window_end = _git_coverage_window(since, until, coverage_floor)
     for ev in events:
         if ev.get("type") != "git-snapshot":
             continue
@@ -909,10 +1017,52 @@ def aggregate_git(
         if not isinstance(projects, list):
             continue
         device = ev.get("device")
-        if isinstance(device, str) and device and _within_window(ev.get("ts"), since, until):
-            snap_total[device] = snap_total.get(device, 0) + 1
-            if not projects:
-                snap_zero[device] = snap_zero.get(device, 0) + 1
+        if isinstance(device, str) and device:
+            origin = ev.get("origin")
+            in_window = _within_window(ev.get("ts"), since, until)
+            # T9: recapture is not a push. A row with no origin key is a
+            # pre-30A peer and IS a push. T8 still counts recapture as
+            # covering its interval — opposite treatment of one field.
+            if in_window and origin != mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE:
+                snap_total[device] = snap_total.get(device, 0) + 1
+                if not projects:
+                    snap_zero[device] = snap_zero.get(device, 0) + 1
+            capture = _project_git_capture(ev.get("git_capture"))
+            if capture is not None:
+                cap_since = _parse_aware_ts(capture.get("since"))
+                cap_ts = _parse_aware_ts(ev.get("ts")) or _parse_iso(ev.get("ts"))
+                if cap_since is not None and cap_ts is not None and cap_since <= cap_ts:
+                    # A `partial` capture paints no coverage but is still an
+                    # OBSERVATION, and the two are tracked separately on
+                    # purpose. ``observed`` is what the gap loop keys on,
+                    # so a device whose every walk held stays visible;
+                    # keying on ``covered`` dropped it from the card
+                    # entirely, which reads as "no known coverage issue"
+                    # when we in fact know the interval was never walked.
+                    # It is also the honest ``latest_end``: the trailing
+                    # clip exists to not blame the not-yet-pushed tail,
+                    # and a held push at T proves the device reached T.
+                    #
+                    # ``empty`` is the ONE hold value excluded here. It
+                    # means a prober ran and found zero git roots, so
+                    # there is no history to have missed and `mm recapture`
+                    # has nothing to do; that machine already gets the
+                    # zero-repo push note, whose copy is the right one.
+                    # Counting it would nag every repo-less Mac forever —
+                    # the idle-Mac false gap in a new costume.
+                    if capture.get("discovery") != mm_events.DISCOVERY_EMPTY:
+                        prior = observed.get(device)
+                        if prior is None or cap_ts > prior:
+                            observed[device] = cap_ts
+                    # DISCOVERY_HOLD (partial/empty) does not advance the
+                    # git cursor because the walk is incomplete. Painting
+                    # those intervals covered would let a budget-exceeded
+                    # recapture silently close a gap while missing repos.
+                    if capture.get("discovery") not in mm_events.DISCOVERY_HOLD:
+                        covered.setdefault(device, []).append((cap_since, cap_ts))
+                    aborts = capture.get("walk_budget_aborts")
+                    if in_window and type(aborts) is int and aborts > 0:
+                        budget_aborts[device] = budget_aborts.get(device, 0) + aborts
         for proj in projects:
             if not isinstance(proj, dict):
                 continue
@@ -1010,6 +1160,24 @@ def aggregate_git(
     out.zero_repo_captures = {
         device: (snap_zero[device], snap_total[device]) for device in snap_zero if snap_zero[device]
     }
+    out.git_budget_aborts = {device: n for device, n in budget_aborts.items() if n > 0}
+    uncovered: dict[str, tuple[tuple[str, str], ...]] = {}
+    for device, latest_end in observed.items():
+        # Iterate OBSERVATIONS, not coverage: a device with only HOLD
+        # captures has no ``covered`` entry, and keying here on ``covered``
+        # silently dropped exactly the machines whose walks never landed.
+        # ``_uncovered_intervals`` with an empty list reports the whole
+        # clamped window, which is the truth for that device.
+        #
+        # The open interval after this device's latest capture is still not
+        # a gap: the next ``mm push`` covers it. Treating today as uncovered
+        # because yesterday's push landed before midnight UTC made idle
+        # Macs nag ``mm recapture`` every day.
+        intervals = covered.get(device, [])
+        gaps = _uncovered_intervals(intervals, window_start, min(window_end, latest_end))
+        if gaps:
+            uncovered[device] = tuple((start.isoformat(), end.isoformat()) for start, end in gaps)
+    out.uncovered_git = uncovered
     return out
 
 
@@ -1311,6 +1479,23 @@ def _parse_aware_ts(ts: object) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _accept_optional_source_list(ev: dict, key: str) -> tuple[tuple[str, ...], str | None]:
+    """Three-way on KEY PRESENCE for a subsequence-of-universe source list.
+
+    Never a falsy check. Absent (pre-34A peer / no signal) → ``((), None)``.
+    Present-and-valid, including empty → the validated tuple. Present-and-
+    invalid → ``((), reason)`` so the row is kept and the dump can say why
+    the field was dropped. Reuses ``_token_sources_subsequence`` verbatim:
+    subsequence-of-universe, no duplicates, closed vocabulary.
+    """
+    if key not in ev:
+        return (), None
+    parsed = _token_sources_subsequence(ev.get(key))
+    if parsed is None:
+        return (), "invalid_token_sources"
+    return tuple(parsed), None
+
+
 def _token_sources_subsequence(raw: object) -> list[str] | None:
     if not isinstance(raw, list):
         return None
@@ -1526,6 +1711,27 @@ def _host_detail_phrase(detail: str, reason: str | None) -> str:
     )
 
 
+def _host_coverage_phrase(kind: str, sources: tuple[str, ...], reason: str | None) -> str:
+    """Why a coverage field is present, absent, or was dropped.
+
+    Dropping a malformed field silently would turn "invalid coverage
+    metadata" into "no known coverage issue", which is the wrong posture
+    on a truth-reporting surface. Mirror 33A's ``detail_reason``.
+    """
+    if reason is not None:
+        return (
+            f"{kind}_sources dropped ({reason}) — invalid coverage metadata, "
+            "not 'no known coverage issue'. Inspect this dump; on the named "
+            "machine run `mm diag` and inspect `host_usage`."
+        )
+    if sources:
+        names = ", ".join(sources)
+        if kind == "degraded":
+            return f"readers failed this sweep: {names}"
+        return f"readers reported incomplete totals: {names}"
+    return f"{kind}_sources absent — no signal, not a broken peer"
+
+
 def _accept_hosts_payload(
     raw: object,
 ) -> tuple[dict[str, dict[str, dict[str, int]]], tuple[str, ...]] | HostRejectReason:
@@ -1633,6 +1839,35 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
             tokens_by_day = None
             detail = "absent"
             detail_reason = drop_reason
+    degraded, degraded_reason = _accept_optional_source_list(ev, "degraded_sources")
+    partial, partial_reason = _accept_optional_source_list(ev, "partial_sources")
+    # A partial claim beside empty hosts is meaningless: the writer gates
+    # on a real observation, but a hand-crafted row can still send it.
+    # Reject the claim, keep the row.
+    if partial and not hosts:
+        partial = ()
+        partial_reason = "invalid_coverage"
+    overlap = set(degraded) & set(partial)
+    if overlap:
+        partial = ()
+        partial_reason = "invalid_coverage"
+    # The writer's two contracts against ``token_sources``, enforced on the
+    # read side because the row is peer-controlled. ``degraded_sources`` is
+    # DISJOINT from it (a failed reader contributed nothing) and
+    # ``partial_sources`` is a SUBSET of it (a partial reader contributed,
+    # with known fidelity loss). Checking the pair against each other is not
+    # enough: without these, a malformed peer makes the card say a reader
+    # that plainly contributed "failed on the latest push", or that a reader
+    # nobody consulted "reported incomplete totals" — and the remedy copy
+    # then sends the user to `mm diag` for a reader that is fine. Drop the
+    # contradicting field, keep the row, same posture as the sibling.
+    consulted_set = set(consulted)
+    if set(degraded) & consulted_set:
+        degraded = ()
+        degraded_reason = "invalid_coverage"
+    if not set(partial) <= consulted_set:
+        partial = ()
+        partial_reason = "invalid_coverage"
     return _AcceptedHostRow(
         device=device,
         as_of=as_of,
@@ -1649,6 +1884,10 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         tokens_by_day=tokens_by_day,
         detail=detail,
         detail_reason=detail_reason,
+        degraded=degraded,
+        partial=partial,
+        degraded_reason=degraded_reason,
+        partial_reason=partial_reason,
     )
 
 
@@ -1677,9 +1916,24 @@ def _sibling_tie_key(row: _AcceptedHostRow) -> str:
     keying on the payload alone leaves them tied — and the reason is exactly
     what the dump renders as the user's remedy, so file order would decide
     whether a peer is told `invalid_counter` or `active_days_mismatch`.
+
+    Coverage fields are APPENDED, never inserted: the key is compared as a
+    string, so prepending would re-order rows that differ only in
+    ``detail_reason``. Genuinely-absent coverage (empty tuples, no drop
+    reason) serializes to the same suffix on every such row, so selection
+    among them is unchanged. A present-but-invalid sibling MAY change the
+    winner — intended, the same argument this function already makes for
+    ``detail_reason``.
     """
     return json.dumps(
-        [row.detail_reason or "", row.tokens_by_day or {}],
+        [
+            row.detail_reason or "",
+            row.tokens_by_day or {},
+            list(row.degraded),
+            row.degraded_reason or "",
+            list(row.partial),
+            row.partial_reason or "",
+        ],
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -1746,6 +2000,10 @@ def aggregate_host_usage(
             tokens_by_day=row.tokens_by_day,
             detail=row.detail,
             detail_reason=row.detail_reason,
+            degraded=row.degraded,
+            partial=row.partial,
+            degraded_reason=row.degraded_reason,
+            partial_reason=row.partial_reason,
         )
     return HostUsageInventory(
         by_device=by_device,
@@ -1803,11 +2061,21 @@ def _dump_host_inventory(inventory: HostUsageInventory) -> str:
                 "as_of": snap.as_of.isoformat(),
                 "consulted": list(snap.consulted),
                 "current": snap.current,
+                "degraded": list(snap.degraded),
+                "degraded_phrase": _host_coverage_phrase(
+                    "degraded", snap.degraded, snap.degraded_reason
+                ),
+                "degraded_reason": snap.degraded_reason,
                 "detail": snap.detail,
                 "detail_phrase": _host_detail_phrase(snap.detail, snap.detail_reason),
                 "detail_reason": snap.detail_reason,
                 "future_dated": snap.future_dated,
                 "lifetime_by_family": snap.lifetime_by_family,
+                "partial": list(snap.partial),
+                "partial_phrase": _host_coverage_phrase(
+                    "partial", snap.partial, snap.partial_reason
+                ),
+                "partial_reason": snap.partial_reason,
                 "stale": snap.stale,
                 "tokens_by_day": _sanitize_tokens_by_day(snap.tokens_by_day),
             }
@@ -2288,6 +2556,7 @@ def aggregate(
         until=until,
         author_emails=effective_emails,
         window_days=window_days,
+        coverage_floor=coverage_floor,
     )
     sessions, skills = aggregate_sessions(events, since=since, until=until)
     pushes = aggregate_pushes(events, since=since, until=until)
@@ -3212,7 +3481,60 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             f"Agent-log snapshots from {' plus '.join(who)} were rejected "
             f"({reasons}) — upgrade those machines; a version mismatch is the usual cause."
         )
+
+    # Coverage notes are orthogonal to "why is the block quiet": a machine
+    # can be fully active AND have a degraded reader. Flat block after the
+    # existing tree keeps complexity down and preserves most-actionable-first
+    # ordering of the quiet-block notes above. Aggregate across machines;
+    # never one line per device.
+    notes.extend(_host_reader_coverage_notes(snaps))
     return notes
+
+
+def _host_reader_coverage_notes(snaps: list[HostDeviceSnapshot]) -> list[str]:
+    """One aggregated note per coverage class, never one per device."""
+    notes: list[str] = []
+    degraded_note = _reader_issue_note(
+        "degraded",
+        [(s.device, s.degraded) for s in snaps if s.degraded],
+    )
+    if degraded_note:
+        notes.append(degraded_note)
+    partial_note = _reader_issue_note(
+        "partial",
+        [(s.device, s.partial) for s in snaps if s.partial],
+    )
+    if partial_note:
+        notes.append(partial_note)
+    return notes
+
+
+def _reader_issue_note(
+    kind: str,
+    rows: list[tuple[str, tuple[str, ...]]],
+) -> str | None:
+    if not rows:
+        return None
+    names = _format_coverage_peer_names({device for device, _ in rows})
+    seen_readers = {reader for _, readers in rows for reader in readers}
+    readers_txt = ", ".join(
+        reader for reader in mm_events.HOST_USAGE_TOKEN_SOURCES if reader in seen_readers
+    )
+    if kind == "degraded":
+        problem = f"Host-usage reader(s) {readers_txt} failed on the latest push from {names}"
+    else:
+        problem = (
+            f"Host-usage totals from {readers_txt} on {names} are incomplete "
+            "(the host declared those totals incomplete)"
+        )
+    if len(rows) == 1:
+        device, readers = rows[0]
+        machine = _safe_short(device)
+        reader = readers[0] if len(readers) == 1 else "<reader>"
+        remedy = f"on `{machine}`, run `mm diag` and inspect `host_usage.{reader}`"
+    else:
+        remedy = "on each named machine, run `mm diag` and inspect `host_usage.<reader>`"
+    return f"{problem} — {remedy}."
 
 
 def _format_loc_short(n: int) -> str:
@@ -3698,6 +4020,20 @@ def format_retro(
     if data.pushes.discovery_errors:
         notes.append(
             f"{len(data.pushes.discovery_errors)} discovery error(s) recorded — run mm diag."
+        )
+    if data.git.git_budget_aborts:
+        abort_names = _format_coverage_peer_names(set(data.git.git_budget_aborts))
+        notes.append(
+            f"Git walk ran out of budget on {abort_names} — some repositories "
+            "were not captured. On those machines, run `mm diag` and inspect "
+            "`git_capture.recorded.walk_budget_aborts`; this is not a missing push."
+        )
+    if data.git.uncovered_git:
+        gap_names = _format_coverage_peer_names(set(data.git.uncovered_git))
+        notes.append(
+            f"Git history has an uncovered interval on {gap_names} — those "
+            "windows were never captured. On those machines, run `mm recapture` "
+            "for the missing window, then `mm diag` to confirm."
         )
     for device, (n_zero, n_total) in sorted(data.git.zero_repo_captures.items()):
         notes.append(
