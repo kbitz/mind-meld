@@ -46,6 +46,31 @@ MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
 # set())` since this is module-level state.
 _BOOTSTRAP_WARNED_PATHS: set[str] = set()
 
+# Skill directories that gstack-extend RENDERS per host (`setup --host auto`)
+# from one shared source. Each host gets a byte-different copy of the same
+# logical skill, so one upstream edit becomes N divergences across the fleet
+# and mm cannot know the copies are related — `skills/roadmap/SKILL.md`
+# conflicted under BOTH the codex and opencode sources in the same pull.
+# Generated + regenerable + already version-controlled upstream = not sync
+# data. Shared by the codex and opencode entries below; splatted into a fresh
+# list at each use site because `get_default_source` hands these lists to
+# callers that mutate them.
+#
+# Detection is by NAME, matching the established `skills/gstack-*` convention.
+# The generic marker is the `.extend-root` file gstack-extend drops in each
+# rendered dir, but exclude_patterns are fnmatch globs against a relative
+# path and cannot express "skip the directory CONTAINING this file" — a
+# marker-aware walker skip is tracked as follow-up work. Until then, a new
+# gstack-extend skill needs a new glob here. `gstack-extend-init` and
+# `gstack-extend-upgrade` are already covered by `skills/gstack-*`.
+_GENERATED_HOST_SKILL_GLOBS: list[str] = [
+    "skills/roadmap/*",
+    "skills/full-review/*",
+    "skills/test-plan/*",
+    "skills/pair-review/*",
+    "skills/review-apparatus/*",
+]
+
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
@@ -93,6 +118,19 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         # track each device's progress through gstack's local analytics
         # jsonls. Definitionally per-machine — syncing them produces a
         # conflict file on every pull from any peer (v0.11.13).
+        # projects/*/decisions.active.json: gstack's bounded ACTIVE-decision
+        # snapshot, derived from projects/*/decisions.jsonl — which mm
+        # already merges cleanly. Serialized by `JSON.stringify(active)` as
+        # ONE minified line, so line-based lcs_merge sees a single wholly-
+        # divergent line and every collision becomes a total conflict: the
+        # single highest-frequency conflict file on the fleet (18 of 88
+        # recorded conflicts, plus 66 mtime-skips). Safe to drop because
+        # `gstack-decision-search` self-heals via `rebuildSnapshot()` when
+        # the snapshot is missing or empty. Do NOT "fix" this with a
+        # union-by-id JSON merge instead: `computeActive()` deliberately
+        # OMITS superseded decisions, so a union would resurrect them.
+        # projects/*/brain-cache/*: gbrain's per-machine cache, `_meta.json`
+        # included. Definitionally derived (7 conflicts + 40 mtime-skips).
         # Excluding at the per-source glob level keeps the global EXCLUDED
         # list focused on universal junk (.git, *.tmp, etc.).
         "exclude_patterns": [
@@ -100,6 +138,8 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             "projects/*/repo-mode.json",
             "projects/*/land-deploy-confirmed",
             "analytics/.last-sync-*",
+            "projects/*/decisions.active.json",
+            "projects/*/brain-cache/*",
         ],
     },
     {
@@ -130,7 +170,20 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         # Generated host links are per-machine routing, not portable skill
         # content. Keep user-authored skills in scope; the walker also rejects
         # every symlink as defense in depth for explicit legacy configs.
-        "exclude_patterns": ["skills/gstack-*", "skills/log-work/*", "skills/retro-fleet/*"],
+        # skills/.system/*: Codex's OWN bundled system skills (imagegen,
+        # plugin-creator, skill-creator, skill-installer, ...), reinstalled by
+        # Codex itself and version-stamped in `.codex-system-skills.marker`.
+        # Two Macs on different Codex builds diverge by construction: this
+        # produced 17 conflicts in a single pull, every one of them a file
+        # neither machine authored. Codex-specific — OpenCode has no
+        # `skills/.system`, so the glob is NOT mirrored onto that entry.
+        "exclude_patterns": [
+            "skills/gstack-*",
+            "skills/log-work/*",
+            "skills/retro-fleet/*",
+            "skills/.system/*",
+            *_GENERATED_HOST_SKILL_GLOBS,
+        ],
     },
     {
         # OpenCode config JSON can embed provider/MCP credentials. Its rules,
@@ -143,7 +196,12 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "include_files": [
             "AGENTS.md",
         ],
-        "exclude_patterns": ["skills/gstack-*", "skills/log-work/*", "skills/retro-fleet/*"],
+        "exclude_patterns": [
+            "skills/gstack-*",
+            "skills/log-work/*",
+            "skills/retro-fleet/*",
+            *_GENERATED_HOST_SKILL_GLOBS,
+        ],
     },
     {
         # Claude-shaped: name/path/type only. The walker hardcodes

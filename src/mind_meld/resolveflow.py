@@ -44,6 +44,7 @@ from mind_meld.config import get_sources
 from mind_meld.conflictdiff import (
     count_divergent_lines,
     format_age_delta,
+    merge_has_line_structure,
     newer_side,
     render_banner,
     render_capped_diff,
@@ -591,7 +592,13 @@ def _resolve_interactive_loop(
             merged_bytes, merge_conflicts = lcs_merge(cpath_bytes, canonical_bytes)
         else:
             merged_bytes, merge_conflicts = lcs_merge(canonical_bytes, cpath_bytes)
-        merge_available = merge_conflicts >= 0
+        # A single-line side gives lcs_merge nothing to align on, so (m) could
+        # only ever emit one marker region wrapping both versions whole.
+        # Suppress it through the same gate as binary content. Order-independent
+        # predicate, so the inversion-mode argument swap above doesn't matter.
+        merge_available = merge_conflicts >= 0 and merge_has_line_structure(
+            canonical_text, cpath_text
+        )
 
         # Banner attribution: pull the device-short out of the conflict
         # filename and look it up against the cached devices list.

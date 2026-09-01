@@ -19,6 +19,7 @@ from mind_meld.conflictdiff import (
     count_divergent_lines,
     format_age_delta,
     format_ts,
+    merge_has_line_structure,
     newer_side,
     render_banner,
     render_capped_diff,
@@ -375,6 +376,43 @@ class TestCountDivergentLines:
         # precisely so this isn't misread as two independent edits.
         diff = ["@@ -1,1 +1,1 @@", "-foo", "+bar"]
         assert count_divergent_lines(diff) == (1, 1, 2)
+
+
+class TestMergeHasLineStructure:
+    """(m)erge suppression for sides with no line structure to align on.
+
+    A one-line file gives lcs_merge nothing to build a synthetic ancestor
+    from, so the only possible output is one <<<<<<< region wrapping both
+    versions whole -- never a valid file of that type.
+    """
+
+    def test_both_sides_multiline_is_mergeable(self) -> None:
+        assert merge_has_line_structure(["a", "b"], ["a", "c"]) is True
+
+    def test_single_line_local_suppresses(self) -> None:
+        assert merge_has_line_structure(["{...}"], ["a", "b", "c"]) is False
+
+    def test_single_line_remote_suppresses(self) -> None:
+        assert merge_has_line_structure(["a", "b", "c"], ["{...}"]) is False
+
+    def test_both_single_line_suppresses(self) -> None:
+        # The fleet's most common conflict: gstack writes
+        # decisions.active.json as ONE minified JSON.stringify line, so both
+        # sides are a single wholly-divergent line.
+        assert merge_has_line_structure(['[{"id":"a"}]'], ['[{"id":"b"}]']) is False
+
+    def test_empty_side_suppresses(self) -> None:
+        # lcs_merge(b"", remote) returns remote as a "clean" merge, which is
+        # just (r)emote in disguise -- offering (m) there is noise.
+        assert merge_has_line_structure([], ["a", "b"]) is False
+        assert merge_has_line_structure(["a", "b"], []) is False
+
+    def test_predicate_is_order_independent(self) -> None:
+        # mm resolve swaps the argument order by inversion mode, so the
+        # predicate must not care which side is which.
+        assert merge_has_line_structure(["x"], ["a", "b"]) == merge_has_line_structure(
+            ["a", "b"], ["x"]
+        )
 
 
 class TestNewerPromptOption:

@@ -22,6 +22,29 @@ Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the
 
 **Visible-failure contract for migration UX (v0.9.1).** Existing configs need to opt in by running `mm migrate-config`. autopull / autopush NEVER auto-mutate config — they record the missing-excludes signal to `~/.config/mind-meld/migration-state.json` and let `mm status` surface it. Interactive `mm pull` / `mm push` prompt-once. Silent config mutation in a hook would be exactly the class of "wedged sync I never noticed" failure the visible-failure contract exists to prevent. Add the new "config missing recommended excludes" warning to the existing curated stderr signal set (corrupt-manifest recovery, fsync failures, no-sources misconfig, etc.).
 
+## Generated files are not sync data (load-bearing, v0.12.51)
+
+**The rule: if a file has a generator on every machine, it does not belong in `exclude_patterns`' complement.** Derived from a forensic pass over all 88 `conflicted` records in `~/.config/mind-meld/pull-history.jsonl{,.1}` (2026-05-01 → 2026-09-01). 63 of 88 — 72% — were files no human authored on either machine. They cannot be fixed by a better merger, because both machines are *correct* and simply regenerated at different times. Adding a glob is the only fix that converges.
+
+Proof the mechanism works, and the precedent for trusting it: `analytics/.last-sync-line` conflicted 4× on 2026-05-01, was added to the gstack `exclude_patterns` in v0.11.13, and has conflicted **zero** times in the four months since.
+
+The four v0.12.51 additions, each with the observed conflict count:
+
+| glob | source | n | why it can never merge |
+|---|---|---|---|
+| `projects/*/decisions.active.json` | gstack | 18 | Derived snapshot, ONE minified `JSON.stringify` line |
+| `skills/.system/*` | codex | 17 | Codex's own bundled payload, version-stamped in `.codex-system-skills.marker` |
+| `projects/*/brain-cache/*` | gstack | 7 | gbrain per-machine cache |
+| `_GENERATED_HOST_SKILL_GLOBS` | codex + opencode | 2 | gstack-extend renders one shared skill per host, byte-differently |
+
+**`decisions.active.json` — do NOT "fix" this with a JSON merge strategy.** It is a JSON array of records each carrying a unique `id`, so a union-by-`id` merge in `merge.py` looks obviously right and is wrong: `computeActive()` in gstack deliberately **omits superseded decisions**, so a union would resurrect every decision any machine had retired. Exclusion is the only correct resolution. It is also lossless — the source of truth `projects/*/decisions.jsonl` stays in scope and merges cleanly (37 clean merges on record over the same window), and `gstack-decision-search` self-heals via `rebuildSnapshot()` when the snapshot is absent or empty. Pinned by `test_gstack_derived_cache_globs_match_observed_paths`, which asserts `decisions.jsonl` and `decisions.archive.jsonl` are NOT matched by either new glob.
+
+**`_GENERATED_HOST_SKILL_GLOBS` must stay symmetric across the codex and opencode entries.** These are the same logical skill rendered twice; excluding it from one host only leaves the other half of the pair conflicting on every pull. Pinned by `test_generated_host_skill_globs_shared_by_codex_and_opencode`. The list is splatted (`*_GENERATED_HOST_SKILL_GLOBS`) rather than shared by reference because `get_default_source` hands these lists to callers that mutate them — pinned by `test_generated_host_skill_lists_are_not_aliased`.
+
+**Detection is by name, not by marker — and that is a known limitation.** gstack-extend drops a `.extend-root` file in each dir it renders, which is the robust signal, but `exclude_patterns` are fnmatch globs against a relative path and cannot express "skip the directory CONTAINING this file." Until a marker-aware walker skip lands, a new gstack-extend skill needs a new glob in `_GENERATED_HOST_SKILL_GLOBS`. Same shape as the pre-existing `skills/gstack-*` convention.
+
+**What is deliberately NOT excluded.** `~/.gstack/projects/*/pair-review/` and `full-review/` (31 of the 88 conflicts — `session.yaml`, `deploy.md`, `report.md`, `parked-bugs.md`) are live per-machine session state, but pair-review advertises cross-machine resume as a feature, so blanket exclusion would remove capability rather than noise. Left in scope pending a device-scoping design; `session.yaml` is the narrow candidate if that stalls.
+
 ## disabled_sources + consumer-boundary filter (load-bearing, v0.10.0)
 Per-machine source toggle. `[sync].disabled_sources: list[str]` lists source
 names to skip on this device only (config.toml is per-machine, never synced).

@@ -96,7 +96,12 @@ def write_sync_log(
             lines.append("")
 
         if changes["conflicted"]:
-            lines.append("## Conflicts (remote differed, local preserved as .sync-conflict-*)")
+            # Post-v0.9.2 inversion: LOCAL stays at canonical and the REMOTE
+            # bytes go to the sidecar. This header said "local preserved as
+            # .sync-conflict-*" until v0.12.51, which described the
+            # pre-inversion direction and told the reader their own edits had
+            # been moved aside.
+            lines.append("## Conflicts (remote differed, remote saved as .sync-conflict-*)")
             for name in sorted(changes["conflicted"]):
                 lines.append(f"- {name}")
             lines.append("")

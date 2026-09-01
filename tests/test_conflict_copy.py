@@ -2866,6 +2866,77 @@ class TestNeverDefaultToMerge:
         assert not conflict.exists()
 
 
+class TestSuppressMergeWithoutLineStructure:
+    """(m)erge is not offered when either side is a single line.
+
+    lcs_merge is line-based, so a minified one-line file (gstack's
+    `decisions.active.json`, the fleet's most frequent conflict) can only
+    produce one <<<<<<< region wrapping both versions whole -- invalid JSON
+    and a guaranteed manual editor round-trip. Suppression routes through the
+    existing binary-content gate, so a typed `m` degrades to keep-both
+    exactly as it does for binary input.
+    """
+
+    _MINIFIED_LOCAL = b'[{"id":"a","decision":"one"}]'
+    _MINIFIED_REMOTE = b'[{"id":"b","decision":"two"}]'
+
+    def _one_line_pair(self, tmp_path: Path) -> tuple[Path, Path]:
+        canonical = tmp_path / "decisions.active.json"
+        canonical.write_bytes(self._MINIFIED_LOCAL)
+        conflict = tmp_path / "decisions.active.sync-conflict-20260901-114040-devA1234.json"
+        conflict.write_bytes(self._MINIFIED_REMOTE)
+        return canonical, conflict
+
+    def test_resolve_loop_does_not_offer_merge_on_one_line_file(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        canonical, conflict = self._one_line_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert "(m)erge" not in capsys.readouterr().out
+
+    def test_resolve_loop_typed_m_is_refused_and_keeps_both(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Same contract as binary content: (m) was never offered, so the
+        # literal letter must not write a marker-laden file over canonical.
+        canonical, conflict = self._one_line_pair(tmp_path)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert canonical.read_bytes() == self._MINIFIED_LOCAL
+        assert conflict.read_bytes() == self._MINIFIED_REMOTE
+
+    def test_inline_prompt_does_not_offer_merge_on_one_line_file(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        local = tmp_path / "decisions.active.json"
+        local.write_bytes(self._MINIFIED_LOCAL)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        _prompt_conflict_choice("decisions.active.json", local, self._MINIFIED_REMOTE)
+        assert "(m)erge" not in capsys.readouterr().out
+
+    def test_inline_prompt_typed_m_returns_keep_both(self, tmp_path: Path, monkeypatch) -> None:
+        local = tmp_path / "decisions.active.json"
+        local.write_bytes(self._MINIFIED_LOCAL)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
+        choice, merged = _prompt_conflict_choice(
+            "decisions.active.json", local, self._MINIFIED_REMOTE
+        )
+        assert choice == "keep-both"
+        assert merged is None
+
+    def test_multiline_file_still_offers_merge(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        # Regression guard: the suppression must be narrow. A genuinely
+        # line-structured file keeps (m)erge exactly as before.
+        canonical = tmp_path / "notes.md"
+        canonical.write_bytes(b"line one\nline two\n")
+        conflict = tmp_path / "notes.sync-conflict-20260901-114040-devA1234.md"
+        conflict.write_bytes(b"line one\nline two\nline three\n")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert "(m)erge" in capsys.readouterr().out
+
+
 # ── Component 2: (p)romote helpers ───────────────────────────────────
 
 
