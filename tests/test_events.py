@@ -1569,7 +1569,9 @@ class TestMakeHostUsageSnapshot:
             "hosts",
             "active_days",
             "tokens_by_day",
+            "counter_semantics",
         }
+        assert ev["counter_semantics"] == events.COUNTER_SEMANTICS_DISJOINT_V1
         assert ev["type"] == "host-usage-snapshot"
         assert ev["device"] == "dev-a"
         assert ev["ts"] == "2026-08-15T12:00:00+00:00"
@@ -1580,6 +1582,10 @@ class TestMakeHostUsageSnapshot:
         look like it regressed."""
         ev = events.make_host_usage_snapshot(device="dev-a", token_sources=_SRC, hosts={})
         assert ev["v"] == events.EVENTS_SCHEMA_VERSION == 2
+        assert ev["counter_semantics"] == events.COUNTER_SEMANTICS_DISJOINT_V1
+        assert "hosts" in ev
+        # Empty scan still carries the marker so an upgraded peer with
+        # nothing to report is distinguishable from a pre-35A peer.
 
     def test_token_sources_is_the_per_push_subset_not_the_constant(self):
         """Names which hosts were actually CONSULTED. Serializing the built-in

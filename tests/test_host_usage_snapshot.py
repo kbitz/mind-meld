@@ -891,6 +891,7 @@ class TestTailWiring:
                 "hosts": {"codex": {"2026-08-15": _usage(9)}},
                 "active_days": ["2026-08-15"],
                 "tokens_by_day": {"2026-08-15": {**_usage(9), "by_model": {"gpt-5": _usage(9)}}},
+                "counter_semantics": "disjoint-v1",
             },
             {
                 "v": _mm_events.EVENTS_SCHEMA_VERSION,
@@ -899,6 +900,7 @@ class TestTailWiring:
                 "token_sources": [],
                 "hosts": {},
                 "active_days": [],
+                "counter_semantics": "disjoint-v1",
             },
         ]
         assert [row["type"] for row in rows] == [

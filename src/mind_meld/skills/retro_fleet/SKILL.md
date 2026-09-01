@@ -346,8 +346,24 @@ Known lines:
   **machines**, not rows, so one broken writer cannot inflate it.
 - `Known-fleet count unavailable (`mm devices --format=json` failed).` — the
   header drops the "of M known" tail. Not a data-loss signal.
-- `N tokens from N unpriced model(s) excluded from cost estimate.` — those
-  models contribute to the token total but not the cost line.
+- `N tokens from N unpriced model(s) excluded from cost estimate: <ids>.` —
+  those models contribute to the token total but not the cost line. The ids
+  are sanitized, sorted, and capped. Do not invent a rate for a named id.
+- Not available for `<device>`: that Mac runs an mm that reported token
+  counters in an older format. Run `pipx upgrade mind-meld` and `mm push`
+  there, then re-run. — the economics row (and that machine's token columns)
+  show `—`, never a number. Inclusive counters would be a ceiling up to ~2x
+  high; do not treat `—` as zero and do not estimate the missing dollars.
+- API list-rate equivalent unavailable for `<device>`: its agent-log
+  snapshot predates this window. Run `mm push` on that Mac, then re-run. —
+  no observation exists inside the requested window, so the economics row
+  shows `—`, never a confident `$0`.
+- API list-rate equivalent for `<device>` is a floor (>=): <causes>. —
+  the marker is binary; the causes name which of: unpriced models, a host
+  that declared totals incomplete, a dropped reader, or tokens the per-day
+  model cap left unattributed. An all-unpriced device renders `>=$0.00`, not
+  unavailable: zero is the priced subtotal and the named tokens sit above
+  that floor. Report the named cause. Do not sum the per-machine figures.
 - `N discovery error(s) recorded — run mm diag.` —
   forensic; do not invent a cause. Those notices go to an unattended hook's
   stderr and are persisted nowhere.
@@ -447,19 +463,24 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
   the v1 save story. A `--save` flag is deferred to v2.
 - **It does not compare `MODELS` to `AGENT LOGS`.** Never infer relative
   usage, share, spend, cost, productivity, adoption, or "dominance" between
-  them. They differ in source (Claude Code session snapshots vs local agent
-  logs), in unit (tokens vs distinct days), in time semantics (a window sum vs
-  a lower-bound day count), and in completeness. Allowed: *"Codex-family
-  models appeared on five UTC activity days."* Not allowed: *"Claude did most
-  of the work"*, or any ratio between the two blocks. Also never read active
-  days as sessions, prompts, hours, or intensity.
+  them. Those two card blocks still differ in unit (tokens vs distinct days),
+  source (Claude Code session snapshots vs local agent logs), and completeness
+  (Claude tokens are a window sum; host activity is last-known-good inventory
+  per machine). The two body economics sections are also incomparable:
+  host ledgers can overlap after an OS migration, which is why host dollars
+  are per machine and must never be summed. Allowed: *"Codex-family models
+  appeared on five UTC activity days."* Not allowed: *"Claude did most of the
+  work"*, *"Codex cost more than Claude"*, or any ratio between the two
+  blocks. Also never read active days as sessions, prompts, hours, or
+  intensity.
 - **It does not attribute agent-log activity to a specific agent.** The rows
   are model families. The body table names which readers ran, per machine;
   that is the only reader-level claim the data supports. Per-model host
   totals exist on the wire as of v0.12.49 and reach
-  `mm retro-fleet --dump-host-usage`, **not the card**. The card stays
-  family-only until Group 36. Do not narrate per-model host data as spend,
-  market share, or a cross-machine total.
+  `mm retro-fleet --dump-host-usage` and the per-machine API list-rate
+  equivalent section. The Agent activity table stays family-only until Group
+  36. Do not narrate raw per-model host data as actual spend, market share, or
+  a cross-machine total.
 - **It does not treat a missing `AGENT LOGS` block as zero activity.** The
   block is omitted only when no snapshot has ever been accepted, and the body
   always names the cause. A stale `mm` also produces no block — Step 0

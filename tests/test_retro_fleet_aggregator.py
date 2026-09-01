@@ -2187,7 +2187,7 @@ class TestCostLineHonesty:
             },
         }
         _, per_model = estimate_cost(by_model)
-        unpriced_tokens, unpriced_models = _unpriced_token_summary(by_model)
+        unpriced_tokens, unpriced_models, _ids = _unpriced_token_summary(by_model)
 
         # Priced by one path => must NOT be counted unpriced by the other.
         assert "claude-opus-6" in per_model
@@ -4509,9 +4509,12 @@ def _host_event(
         "token_sources": list(token_sources),
         "hosts": hosts,
         "active_days": days,
+        "counter_semantics": "disjoint-v1",
     }
     if extra:
         ev.update(extra)
+        if extra.get("counter_semantics", "disjoint-v1") is None:
+            ev.pop("counter_semantics", None)
     return ev
 
 
@@ -5090,7 +5093,9 @@ class TestHostSnapshotNoWindowSpend:
             feature; what must NOT move is any Claude-side line."""
             out, skipping = [], False
             for line in text.splitlines():
-                if line.startswith("## Agent activity"):
+                if line.startswith("## Agent activity") or line.startswith(
+                    "## API list-rate equivalent"
+                ):
                     skipping = True
                     continue
                 if skipping:
@@ -5098,7 +5103,12 @@ class TestHostSnapshotNoWindowSpend:
                         skipping = False
                     else:
                         continue
-                if line.startswith("- ") and "agent" in line.lower():
+                if line.startswith("- ") and (
+                    "agent" in line.lower()
+                    or "API list-rate" in line
+                    or "Not available for" in line
+                    or "token counters in an older format" in line
+                ):
                     continue
                 out.append(line)
             return out
@@ -5908,6 +5918,8 @@ def _snap(
     until: datetime | None = None,
     degraded: tuple[str, ...] = (),
     partial: tuple[str, ...] = (),
+    tokens_by_day: dict | None = None,
+    counter_semantics: str | None = "disjoint-v1",
 ) -> aggregator.HostDeviceSnapshot:
     """Build a HostDeviceSnapshot directly, so rhythm tests never touch a clock."""
     ref_since = since or datetime(2026, 4, 21, tzinfo=timezone.utc)
@@ -5921,6 +5933,9 @@ def _snap(
         future_dated=as_of > ref_until,
         degraded=degraded,
         partial=partial,
+        tokens_by_day=tokens_by_day,
+        counter_semantics=counter_semantics,
+        detail="present" if tokens_by_day is not None else "absent",
     )
 
 
@@ -7004,3 +7019,425 @@ class TestGitCoverageAndRecapture:
         _write_events(events_dir, "dev-a", "2026-04-21", [good, gone])
         data = _aggregate(events_dir)
         assert "dev-a" not in data.git.uncovered_git
+
+
+# ---------------------------------------------------------------------------
+# Track 35A — counter semantics, per-device API list-rate equivalent
+# ---------------------------------------------------------------------------
+
+
+def _priced_hosts(n: int = 1_000_000, day: str = "2026-04-22") -> dict:
+    return {"codex": {day: {"input": n, "cache_create": 0, "cache_read": 0, "output": 0}}}
+
+
+def _econ_data(events, *, since=None, until=None) -> aggregator.RetroData:
+    since = since or datetime(2026, 4, 21, tzinfo=timezone.utc)
+    until = until or datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+    data = aggregator.RetroData(window_days=7, since=since, until=until)
+    data.host_inventory = aggregator.aggregate_host_usage(
+        events, since=since, until=until, registered_ids=None
+    )
+    ids = list(data.host_inventory.by_device)
+    data.fleet = aggregator.FleetState(
+        devices_in_events=set(ids),
+        devices_known=len(ids) or None,
+        devices_known_list=[{"device_id": d, "device_name": d} for d in ids],
+    )
+    return data
+
+
+class TestCounterSemanticsMarker:
+    TS = "2026-04-28T12:00:00+00:00"
+
+    def test_semantics_marker_absent_means_legacy_inclusive(self):
+        ev = _host_event("dev-a", self.TS, extra={"counter_semantics": None})
+        row = _accepted(ev)
+        assert row.counter_semantics is None
+
+    def test_semantics_marker_unknown_value_fails_closed(self):
+        ev = _host_event("dev-a", self.TS, extra={"counter_semantics": "disjoint-v2"})
+        row = _accepted(ev)
+        assert row.counter_semantics is None
+
+    def test_semantics_marker_wrong_type_or_hostile_length_rejected(self):
+        for value in (True, 1, ["disjoint-v1"], "x" * 64):
+            ev = _host_event("dev-a", self.TS, extra={"counter_semantics": value})
+            row = _accepted(ev)
+            assert row.counter_semantics is None, value
+
+    def test_semantics_marker_participates_in_sibling_tie_key(self):
+        plain = _host_event("dev-a", self.TS)
+        legacy = _host_event("dev-a", self.TS, extra={"counter_semantics": None})
+        a = _accepted(plain)
+        b = _accepted(legacy)
+        assert a.tie_key == b.tie_key
+        assert aggregator._sibling_tie_key(a) != aggregator._sibling_tie_key(b)
+
+    def test_equal_ts_legacy_and_disjoint_rows_select_deterministically(self):
+        disjoint = _host_event("dev-a", self.TS)
+        legacy = _host_event("dev-a", self.TS, extra={"counter_semantics": None})
+        since = datetime(2026, 4, 21, tzinfo=timezone.utc)
+        until = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+        first = aggregator.aggregate_host_usage(
+            [disjoint, legacy], since=since, until=until, registered_ids=None
+        )
+        second = aggregator.aggregate_host_usage(
+            [legacy, disjoint], since=since, until=until, registered_ids=None
+        )
+        assert (
+            first.by_device["dev-a"].counter_semantics
+            == second.by_device["dev-a"].counter_semantics
+        )
+        assert first.by_device["dev-a"].counter_semantics == "disjoint-v1"
+
+    def test_events_schema_version_is_not_bumped(self):
+        from mind_meld import events as mm_events
+
+        assert mm_events.EVENTS_SCHEMA_VERSION == 2
+        ev = _host_event("dev-a", self.TS)
+        assert ev["v"] == 2
+
+    def test_marker_present_tokens_by_day_absent(self):
+        ev = _host_event("dev-a", self.TS)
+        assert "tokens_by_day" not in ev
+        assert ev["counter_semantics"] == "disjoint-v1"
+        row = _accepted(ev)
+        assert row.counter_semantics == "disjoint-v1"
+        assert row.tokens_by_day is None
+
+    def test_disjoint_marker_plus_invalid_per_model_sibling(self):
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            extra={"tokens_by_day": "not-a-map"},
+        )
+        row = _accepted(ev)
+        assert row.counter_semantics == "disjoint-v1"
+        assert row.tokens_by_day is None
+        assert row.detail_reason == "unsupported_schema"
+
+
+class TestHostEconomics:
+    TS = "2026-04-28T12:00:00+00:00"
+
+    def test_per_device_cost_from_tokens_by_day(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "## API list-rate equivalent (per machine)" in out
+        assert "Do not sum these values" in out
+        assert "~$2.00" in out or "~$2" in out
+        section = out.split("## API list-rate equivalent (per machine)")[1].split("## ")[0]
+        assert "## Cost" not in out
+        assert section.lstrip().startswith("OpenAI")
+
+    def test_tokens_by_day_none_renders_em_dash_never_zero_dollars(self):
+        ev = _host_event("dev-a", self.TS, hosts=_priced_hosts())
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | — |" in out
+        section = out.split("## API list-rate equivalent")[1].split("## ")[0]
+        assert "$0" not in section
+
+    def test_pre_d2_peer_renders_no_cost(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
+                "counter_semantics": None,
+            },
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | — |" in out
+        section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
+        assert "~$" not in section
+        assert "older format" in out
+        assert "pipx upgrade mind-meld" in out
+
+    def test_pre_d2_empty_peer_renders_no_host_token_numbers(self):
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts={},
+            extra={"counter_semantics": None},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        section = out.split("## Agent activity", 1)[1].split("## API list-rate equivalent", 1)[0]
+        assert "| dev-a | — | 2026-04-28 | current, no agent activity observed | — | — |" in section
+        assert "| 0 | 0 |" not in section
+
+    def test_marker_unpriced_flips_to_floor(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.7-sol")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "gpt-5.7-sol" in out
+        assert "unpriced" in out.lower()
+        assert "| dev-a | >=$0.00 |" in out
+
+    def test_stale_snapshot_renders_unavailable_never_confident_zero(self):
+        hosts = _priced_hosts(day="2026-04-20")
+        ev = _host_event(
+            "dev-a",
+            "2026-04-20T12:00:00+00:00",
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        section = out.split("## API list-rate equivalent", 1)[1].split("## mm sync activity", 1)[0]
+        assert "| dev-a | — |" in section
+        assert "~$0" not in section
+        assert "snapshot predates this window" in out
+        assert "Run `mm push` on that Mac" in out
+
+    def test_marker_partial_flips_to_floor(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            hosts=hosts,
+            extra={
+                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
+                "partial_sources": ["codex"],
+            },
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert ">=$" in out or "| dev-a | >=" in out
+
+    def test_marker_degraded_flips_to_floor(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            hosts=hosts,
+            extra={
+                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
+                "degraded_sources": ["grok"],
+            },
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert ">=$" in out or "| dev-a | >=" in out
+
+    def test_by_model_residual_flips_to_floor(self):
+        day = "2026-04-22"
+        hosts = {"codex": {day: {"input": 100, "cache_create": 0, "cache_read": 0, "output": 0}}}
+        priced = {"gpt-5.6-terra": {"input": 32, "cache_create": 0, "cache_read": 0, "output": 0}}
+        extras = {
+            f"gpt-5.6-terra-cap-{i}": {
+                "input": 1,
+                "cache_create": 0,
+                "cache_read": 0,
+                "output": 0,
+            }
+            for i in range(31)
+        }
+        # 32 models (the cap). Priced terra has 32; extras 31; day total 100.
+        # Residual 100 - 63 = 37, unattributable.
+        extras.update(priced)
+        sibling = {
+            day: {
+                "input": 100,
+                "cache_create": 0,
+                "cache_read": 0,
+                "output": 0,
+                "by_model": extras,
+            }
+        }
+        ev = _host_event("dev-a", self.TS, hosts=hosts, extra={"tokens_by_day": sibling})
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert ">=$" in out or "| dev-a | >=" in out
+        assert "not attributed" in out or "model cap" in out
+
+    def test_notes_name_which_cause_fired(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            hosts=hosts,
+            extra={
+                "tokens_by_day": _sibling(hosts, "gpt-5.7-mystery"),
+                "partial_sources": ["codex"],
+            },
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "gpt-5.7-mystery" in out
+        assert "incomplete" in out.lower() or "declared" in out.lower()
+
+    def test_unpriced_notes_name_ids_sanitized_ordered_capped(self):
+        hosts = {
+            "codex": {
+                "2026-04-22": {
+                    "input": 110,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                }
+            }
+        }
+        long_id = "gpt-long-" + ("x" * 180)
+        model_ids = ["gpt-00\nINJECT", *(f"gpt-{i:02d}" for i in range(1, 10)), long_id]
+        by_model = {
+            model: {"input": 10, "cache_create": 0, "cache_read": 0, "output": 0}
+            for model in reversed(model_ids)
+        }
+        sibling = {
+            "2026-04-22": {
+                "input": 110,
+                "cache_create": 0,
+                "cache_read": 0,
+                "output": 0,
+                "by_model": by_model,
+            }
+        }
+        ev = _host_event("dev-a", self.TS, hosts=hosts, extra={"tokens_by_day": sibling})
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "\nINJECT" not in out
+        assert "gpt-00_INJECT" in out
+        assert long_id not in out
+        assert "(+3 more)" in out
+        named = out[out.index("gpt-00_INJECT") : out.index("(+3 more)")]
+        assert named.index("gpt-00_INJECT") < named.index("gpt-01") < named.index("gpt-07")
+        assert "gpt-08" not in named
+        assert "gpt-long" not in named
+
+    def test_two_devices_with_duplicate_history_render_no_fleet_currency(self, monkeypatch):
+        hosts = _priced_hosts()
+        tbd = _sibling(hosts, "gpt-5.6-terra")
+        a = _host_event("aaa", self.TS, hosts=hosts, extra={"tokens_by_day": tbd})
+        b = _host_event("bbb", self.TS, hosts=hosts, extra={"tokens_by_day": tbd})
+        received: list = []
+        real = aggregator.token_usage.estimate_cost
+
+        def spy(by_model):
+            received.append(dict(by_model))
+            return real(by_model)
+
+        monkeypatch.setattr(aggregator.token_usage, "estimate_cost", spy)
+        first = aggregator.format_retro(_econ_data([a, b]))
+        first_calls = [call for call in received if "gpt-5.6-terra" in call]
+        received.clear()
+        second = aggregator.format_retro(_econ_data([b, a]))
+        assert first == second
+        econ = first.split("## API list-rate equivalent", 1)[1].split("## mm sync activity", 1)[0]
+        assert "| aaa | ~$2.00 |" in econ
+        assert "| bbb | ~$2.00 |" in econ
+        assert "$4.00" not in econ
+        assert len(first_calls) == 2
+        assert all(
+            call
+            == {
+                "gpt-5.6-terra": {
+                    "input": 1_000_000,
+                    "cache_create": 0,
+                    "cache_read": 0,
+                    "output": 0,
+                }
+            }
+            for call in first_calls
+        )
+
+    def test_economics_cap_keeps_estimate_and_states_omission(self):
+        unavailable = [
+            _host_event(
+                f"aaa-{i:03d}",
+                self.TS,
+                hosts={},
+                extra={"counter_semantics": None},
+            )
+            for i in range(aggregator.MAX_AGENT_INVENTORY_MACHINES)
+        ]
+        hosts = _priced_hosts()
+        priced = _host_event(
+            "zzz-priced",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        out = aggregator.format_retro(_econ_data([*unavailable, priced]))
+        section = out.split("## API list-rate equivalent", 1)[1].split("## mm sync activity", 1)[0]
+        assert "| zzz-priced | ~$2.00 |" in section
+        assert section.count("| aaa-") == aggregator.MAX_AGENT_INVENTORY_MACHINES - 1
+        assert "(+1 more machines omitted; those with an estimate are shown first.)" in section
+
+    def test_host_cost_never_enters_token_block(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        data = _econ_data([ev])
+        lines: list[str] = []
+        aggregator._render_token_block(lines, data.sessions)
+        joined = "\n".join(lines)
+        assert "gpt-5.6-terra" not in joined
+        assert "API list-rate" not in joined
+
+    def test_hostile_qa_inclusive_looking_row_without_marker(self):
+        day = "2026-04-22"
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("grok",),
+            hosts={"grok": {day: {"input": 0, "cache_create": 0, "cache_read": 100, "output": 0}}},
+            extra={
+                "tokens_by_day": {
+                    day: {
+                        "input": 0,
+                        "cache_create": 0,
+                        "cache_read": 100,
+                        "output": 0,
+                        "by_model": {
+                            "gpt-5.6-terra": {
+                                "input": 0,
+                                "cache_create": 0,
+                                "cache_read": 100,
+                                "output": 0,
+                            }
+                        },
+                    }
+                },
+                "partial_sources": ["grok"],
+                "counter_semantics": None,
+            },
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        econ = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
+        assert "| dev-a | — |" in out
+        assert "$-" not in econ
+        assert "~$" not in econ
+        assert "older format" in out
+
+    def test_upgraded_peer_repush_makes_history_priceable(self):
+        hosts = _priced_hosts()
+        tbd = _sibling(hosts, "gpt-5.6-terra")
+        legacy = _host_event(
+            "dev-a",
+            "2026-04-27T12:00:00+00:00",
+            hosts=hosts,
+            extra={"tokens_by_day": tbd, "counter_semantics": None},
+        )
+        upgraded = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": tbd},
+        )
+        out = aggregator.format_retro(_econ_data([legacy, upgraded]))
+        section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
+        assert "~$" in section

@@ -356,7 +356,31 @@ The card is generated via a two-pass flow: the first invocation emits an `MM_THE
 
 Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the same CLI surface is available directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`) or terminal use, just without the LLM judgment layer the skill adds (natural-language window parsing, error translation). The earlier `python -m mind_meld.skills.retro_fleet.aggregator` form is a development-checkout fallback only; pipx-installed mm lives in an isolated venv that bare `python` / `python3` can't import from, so the skill's documented invocation routes through the `mm` console-script (always on PATH wherever mm is installed).
 
-**Token usage and cost (v0.11.14).** Under the "Claude Code activity" section the retro now answers: how much did Claude Code consume this window, was it Sonnet- or Opus-heavy, did the cache do its job, what would this have cost at API list rates. The numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days. Cost estimates use API list prices and explicitly say so — they don't account for subscription plan pricing.
+**Token usage and API list-rate equivalent (v0.11.14, hosts in v0.12.52).** Under **Claude Code activity** the retro answers: how much did Claude Code consume this window, was it Sonnet- or Opus-heavy, did the cache do its job, what would this have cost at API list rates. Those numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
+
+From v0.12.52 the body also has **`## API list-rate equivalent (per machine)`** for Codex (and, later, Grok). It is not subscription spend: all three hosts on this fleet are subscription products, and the figure is today's short-context list rate applied to historical tokens. Sample:
+
+```text
+## API list-rate equivalent (per machine)
+
+OpenAI short-context list rates, verified 2026-09-01 against
+https://developers.openai.com/api/docs/pricing. …
+### Do not sum these values
+Machines may hold duplicated history … and these values must not be summed.
+
+| Machine   | API list-rate equivalent |
+|-----------|--------------------------|
+| 3a6c7dc9  | ~$1,269                  |
+| 889e42c0  | —                        |
+```
+
+Legend: `~` is an estimate over complete priced data; `>=` is a floor (unpriced models, a host that declared totals incomplete, a dropped reader, or tokens the per-day model cap left unattributed — Notes names which); `—` is unavailable, not zero. An all-unpriced device therefore shows `>=$0.00` plus the named cause, while a snapshot that predates the window shows `—`. A Mac on mm older than v0.12.52 reported inclusive token counters that would read up to ~2x high, so its row is also `—` until that Mac upgrades and re-pushes. The table shows estimates before unavailable rows when its 12-machine display cap applies, and states how many machines were omitted.
+
+`--dump-host-usage` is the structured equivalent: it already carries `tokens_by_day`, so a script can compute the same number. Host totals never enter the Claude cost line, and there is no fleet sum.
+
+**Rate provenance.** Anthropic list rates: `PRICING_LAST_UPDATED` in `token_usage.py`, verified against Anthropic's public pricing page. OpenAI short-context Standard: `PRICING_OPENAI_LAST_UPDATED`, verified against https://developers.openai.com/api/docs/pricing. Grok / xAI rates are held until Grok ingestion is proven. mm has no network, so a rate change is a code change.
+
+**Adding an alias or refreshing a rate.** Exact observed model id → `PRICING_FAMILY_BY_MODEL` (never a substring). Family → literal four-field card in `VENDOR_FAMILY_TIERS` (do not use `_tier`; those multipliers are Anthropic). Refresh the matching `PRICING_*_LAST_UPDATED` in the same commit. `resolve_prices` is the only "is this priced" predicate; a test fails the build if an alias points at a missing tier.
 
 Session jsonls only ever grow, so from v0.12.15 each push re-reads only the bytes appended since the last one rather than the whole file. That's what stopped `mm push` periodically printing `mm: notice: events tail budget exceeded` on machines with a lot of large sessions. If your token cache has gone stale from long-deleted workspaces, `mm gc` reaps those entries and shrinks what every push has to read.
 
@@ -403,7 +427,9 @@ Managing conflicts:
 
 **Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm`, `mm --version`, `mm diag`, and an interactive `mm push`. If `mm status` or `mm diag` shows an incomplete git capture, recover on that Mac with `mm recapture 30d`, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 
-**I enabled Grok, but no Grok activity appears.** Upgrade is not enough — run `mm enable-source grok` on that Mac, then one interactive `mm push`. `mm status` reports outcome, not config: `enabled; a prior scan completed successfully` vs `enabled, but no successful scan yet`. `mm diag` shows consent, whether a prior scan completed, and how many usage-less turns were skipped, without opening `~/.grok/sessions`. If push stderr names `grok` with `unsupported`, the log format changed; upgrade mm, or `mm disable-source grok` to stop retrying. Codex totals are unaffected.
+**Why is my host cost missing (`—` on the economics table)?** That Mac reported token counters in an older format (mm < v0.12.52), has not pushed per-model `tokens_by_day` yet (mm < v0.12.49), or its latest snapshot predates the requested window. On **that** Mac: `pipx upgrade mind-meld`, then an interactive `mm push`. Confirm with `mm diag` (Host usage block, `host counter format`). Then re-run `mm retro-fleet 30d` here. An upgraded peer's retained 90 days generally **do** become priceable on repush. `—` is unavailable, not zero; do not add the other machines' figures to fill it in.
+
+**I enabled Grok, but no Grok activity appears.** Upgrade is not enough — run `mm enable-source grok` on that Mac, then one interactive `mm push`. `mm status` reports outcome, not config: `enabled; a prior scan completed successfully` vs `enabled, but no successful scan yet`. `mm diag` shows consent, whether a prior scan completed, and how many usage-less turns were skipped, without opening `~/.grok/sessions`. If push stderr names `grok` with `unsupported`, the log format changed; upgrade mm, or `mm disable-source grok` to stop retrying. Codex totals are unaffected. Grok API-list-rate figures are not in v0.12.52: ingestion is not yet proven on this fleet.
 
 **`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either.
 

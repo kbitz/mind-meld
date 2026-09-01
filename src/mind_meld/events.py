@@ -183,6 +183,23 @@ The retro-fleet aggregator treats v=1 sessions as below-threshold and surfaces
 breadcrumb. Numbers are honestly low, never overcounted. Once the fleet rolls
 to v0.11.0, every peer emits v=2 and the count is exact."""
 
+COUNTER_SEMANTICS_DISJOINT_V1 = "disjoint-v1"
+"""Exact value of the additive ``counter_semantics`` sibling on a
+``host-usage-snapshot`` (Track 35A).
+
+Key **absent** means legacy inclusive/unknown counters. Only this exact
+string is priceable. Unknown values fail closed — never treated as
+future-compatible disjoint data. Describes both ``hosts`` and
+``tokens_by_day``. Do NOT bump ``EVENTS_SCHEMA_VERSION`` for this field:
+current readers require the exact version, so a bump would reject every
+legacy row wholesale.
+
+This is the first *semantic* additive sibling: unlike ``skills_by_day``,
+``tokens_by_day``, ``partial_days``, and ``degraded_sources``, it changes
+what the numbers mean, so it participates in ``_sibling_tie_key``.
+"""
+
+
 MAX_HOST_MODELS_PER_DAY = 32
 """Writer-side ceiling on ``by_model`` keys in one ``tokens_by_day`` day.
 
@@ -408,6 +425,11 @@ class HostUsageSnapshot(TypedDict, total=False):
     ``token_sources``). Additive ``partial_sources`` names readers that
     contributed usable totals the host declared incomplete — INTERSECTS
     ``token_sources``, never unified with ``degraded_sources``.
+    Additive ``counter_semantics`` (Track 35A) is ``"disjoint-v1"`` when
+    this writer published the row: host counters are mutually exclusive
+    billable buckets. Key absent means a pre-35A peer whose ``input`` may
+    still contain ``cache_read``. Unknown values fail closed.
+
     ``hosts == {}`` is a real completed empty observation
     only for that row's coverage; ``token_sources == []`` means no reader
     contributed, never fleet-wide zero. A sweep that completed no reader omits
@@ -464,6 +486,7 @@ class HostUsageSnapshot(TypedDict, total=False):
     degraded_sources: list[str]
     tokens_by_day: dict[str, dict]
     partial_sources: list[str]
+    counter_semantics: str
 
 
 # ---------------------------------------------------------------------------
@@ -1972,4 +1995,8 @@ def make_host_usage_snapshot(
     ]
     if has_observation and partial:
         row["partial_sources"] = partial
+    # Additive sibling, always present from this writer. Absence is the
+    # mixed-fleet discriminator: a pre-35A peer's counters are inclusive
+    # and must not be priced. No EVENTS_SCHEMA_VERSION bump.
+    row["counter_semantics"] = COUNTER_SEMANTICS_DISJOINT_V1
     return row

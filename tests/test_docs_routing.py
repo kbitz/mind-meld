@@ -404,21 +404,26 @@ def test_every_notes_line_has_a_skill_decoder_entry() -> None:
         "aggregator Notes identifying fragments with no SKILL.md decoder "
         "entry: " + "; ".join(missing)
     )
+    # ``notes.append(_host_detail_phrase(...))`` is not a string literal, so
+    # the AST walk above cannot discover this critical fail-closed decoder.
+    decoder_one_line = " ".join(decoder.split())
+    assert "that Mac runs an mm that reported token counters in an older format" in decoder_one_line
 
 
 def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:
     """``--dump-host-usage`` status vocabulary is JSON, not notes.append.
 
     The Notes decoder cannot see it. Pin the LLM contract here instead:
-    SKILL.md must name the flag, keep the card family-only, and forbid
-    narrating per-model host data as spend.
+    SKILL.md must name the flag, keep Agent activity family-only, and explain
+    the per-model data's tightly scoped economics use.
     """
     skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     assert "--dump-host-usage" in skill
-    assert "family-only until Group 36" in skill
-    assert "Do not narrate per-model host data as spend" in skill
+    assert "Agent activity table stays family-only until Group" in skill
+    assert "and the per-machine API list-rate" in skill
+    assert "Do not narrate raw per-model host data as actual spend" in skill
     aggregator_src = (
         ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "aggregator.py"
     ).read_text(encoding="utf-8")

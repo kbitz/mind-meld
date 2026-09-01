@@ -317,10 +317,43 @@ UTC instant and select the greatest. On an exact instant tie, compare the
 lexicographically greatest stable compact JSON serialization (sorted keys,
 fixed separators) of only the normalized known-core projection: ``v``,
 ``type``, normalized-UTC ``ts``, ``device``, ``token_sources``, ``hosts``, and
-``active_days``. Additive top-level fields are deliberately excluded, so they
-cannot change a winner they otherwise leave semantically unchanged. A
-clock-backdated row remains older by ``as_of``; JSONL encounter order is not a
-safe physical-time signal.
+``active_days``. **Neutral** additive top-level fields
+(``skills_by_day``, ``offset``/``head``, ``tokens_by_day``, ``partial_days``,
+``degraded_sources``, ``partial_sources``) are deliberately excluded from
+that core projection, so they cannot change a winner they otherwise leave
+semantically unchanged. **Semantic** additive siblings are different:
+``counter_semantics`` (Track 35A) changes what the numbers *mean*, so it
+participates in ``_sibling_tie_key`` (appended, never prepended). Two
+equal-``ts`` rows that differ only in semantics must not select by
+encounter order. A clock-backdated row remains older by ``as_of``; JSONL
+encounter order is not a safe physical-time signal.
+
+**Counter semantics (Track 35A).** Host readers do not share a counter
+schema. Codex CLI and Grok CLI are **inclusive** (``input`` already
+contains ``cache_read``; ``cache_create`` is subtracted too, because no
+local corpus can prove it is outside ``input``). OpenCode and Claude are
+**disjoint**. Semantics is a property of the READER, not the model id —
+``grok-4.6`` arrives both ways. Inclusive extractors emit disjoint
+buckets via ``uncached = input - cache_read - cache_create``. Malformed
+inclusive counters (``cache_read + cache_create > input``) degrade that
+reader (Track 31A isolation), not a fabricated zero bucket.
+
+The wire sibling is ``"counter_semantics": "disjoint-v1"``. Key **absent**
+means legacy inclusive/unknown. Only that exact string is priceable;
+unknown values fail closed. It describes both ``hosts`` and
+``tokens_by_day``. Do **not** bump ``EVENTS_SCHEMA_VERSION`` for it, and
+do **not** nest it inside ``hosts`` (unknown family keys reject the whole
+row). A peer without the marker renders ``—`` for host token columns and
+API-list-rate figures, never a number: inclusive counters would be a
+ceiling up to ~2x high, the one caveat that points the wrong way.
+
+**Host economics rendering.** A snapshot that predates the requested
+window also renders ``—``: it contains no observation in that window, so a
+confident ``~$0`` is absence-as-zero. An all-unpriced disjoint snapshot is
+different: its known priced subtotal is zero and the unpriced volume sits
+above it, so it renders ``>=$0.00`` plus the named-cause Note. The per-machine
+table caps only after information-content ranking and states how many rows it
+omitted; unavailable alphabetic rows must not evict the only estimate.
 
 ### Track 22A consumer: last-known-good inventory
 
@@ -1707,16 +1740,35 @@ wrong on the model everybody runs. Do not "fix" this by adding retired
 models to `PRICING` unless they actually show up in fleet data. Pinned by
 `test_retired_model_prices_at_current_family_tier`.
 
-**`PRICING` is an OVERRIDE table and ships EMPTY.** Every current model
-prices at its family's rate, so a per-model entry would be duplication
-that recreates the multi-site drift this release removed: an Opus rate
-change would need five identical edits plus the tier, and missing one
-would silently price some models at the old rate. Two independent
-reviewers flagged the first draft (which listed all six) for exactly
-this. Add an entry ONLY when a model permanently departs from its tier;
-`test_pricing_holds_no_redundant_entries` fails the build if an entry
-duplicates its family. (Claude Sonnet 5's introductory `$2/$10` through
-2026-08-31 is *not* such a case — mm reports list price.)
+**`PRICING` is an OVERRIDE table.** It shipped empty at v0.12.13's first
+draft; since that release it carries the two Opus 4.0/4.1 rows whose
+rates permanently depart from the modern Opus tier (`$15/$75` vs
+`$5/$25`). Every *current* Claude model still prices at its family
+tier. A per-model entry that *duplicates* its family recreates the
+multi-site drift this release removed: an Opus rate change would need N
+identical edits plus the tier, and missing one would silently price
+some models at the old rate. Add an entry ONLY when a model permanently
+departs from its tier; `test_pricing_holds_no_redundant_entries` fails
+the build if an entry duplicates its family. (Claude Sonnet 5's
+introductory `$2/$10` through 2026-08-31 is *not* such a case — mm
+reports list price.)
+
+Host model ids (Track 35A) do not go through `model_family`. They resolve
+via the curated alias registry `PRICING_FAMILY_BY_MODEL` (exact-key,
+never substring) onto `VENDOR_FAMILY_TIERS` literal four-field cards.
+Do not reach for `_tier` for non-Anthropic rates: its cache multipliers
+are Anthropic-specific. `resolve_prices` stays the single priced-
+predicate and gained exactly one branch. Grok / xAI rates are held
+until ingestion is proven (gate D1); `resolve_prices("grok-4.6-build")`
+returning `None` is a decision, not an omission.
+
+Provenance is per vendor, because one date over two vendors' tables is
+a lie of composition. Anthropic: `PRICING_LAST_UPDATED` (verified
+against Anthropic's public pricing page). OpenAI:
+`PRICING_OPENAI_LAST_UPDATED` (verified against
+https://developers.openai.com/api/docs/pricing, short-context Standard).
+mm has no network by design, so provenance is a comment or it does not
+exist.
 
 **Invariant 3 — `model_family` matches POSITIONALLY against a literal
 allowlist, never by substring.** Model ids are peer-controlled (peer's
