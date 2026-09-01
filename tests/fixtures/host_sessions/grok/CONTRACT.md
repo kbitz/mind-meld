@@ -49,13 +49,23 @@ The reader validates required counter *presence* inside `usage`, never
 | shape | disposition |
 |---|---|
 | required counters present | accepted |
-| required counters plus `usageIsIncomplete: true`, minus `costUsdTicks` | **accepted-and-ignored** |
+| required counters plus `usageIsIncomplete: true`, minus `costUsdTicks` | **accepted, day marked partial** |
 
-**Fidelity caveat.** Turns Grok flags `usageIsIncomplete: true` are counted
-as complete accounting. mm has no partial-fidelity channel on
-`HostUsageResult`. Stated here rather than deferred: the loose `usage` key
-set absorbed this field with silent fidelity loss, not "zero harm". Track
-34A owns a coverage state if one is added.
+Live census 2026-08-30, Grok 1.0.5, 91 `updates.jsonl` / 219 terminal
+records: exactly two distinct `usage` key sets. `usageIsIncomplete: true`
+⟺ `costUsdTicks` absent, 100% correlation, no third shape. 3 flagged
+turns = 1.4% of records but 8.43% of four-counter volume; the largest
+turn in the corpus is one of them. The count did not grow while the
+corpus went 193 → 219 in three days.
+
+**Fidelity caveat — discharged, Track 34A / v0.12.50.** Turns Grok flags
+`usageIsIncomplete: true` still contribute their counters (they are
+usable totals) and the UTC day is carried in `HostUsageResult.partial_days`,
+persisted on the Grok cache entry, intersected with the snapshot `keep`
+set, and emitted as additive `partial_sources`. Pre-34A cache entries
+are detected by key-absence of `partial_days` and re-walked once — not a
+`CACHE_VERSION` bump. The caveat is kept so the discharge is visible;
+do not delete it.
 
 ## Fatal checks that stay fatal
 

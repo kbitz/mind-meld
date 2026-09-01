@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Literal, Sequence, get_args
@@ -169,6 +169,21 @@ class HostUsageCapture:
     """False when the sweep expired before calling any reader."""
     tokens_by_day: dict[str, token_usage.DayBucket] | None = None
     """Per-model day buckets, same work as ``hosts``. None iff ``hosts`` is None."""
+    partial_days: dict[str, frozenset[str]] = field(default_factory=dict)
+    """Reader name → UTC days that reader flagged incomplete this sweep.
+
+    Accumulated beside ``contributed`` in ``_capture_host_usage``, never
+    inside ``_merge_host_usage_maps`` (that helper never sees reader
+    identity). Day-scoped so ``make_host_usage_snapshot`` can intersect
+    with the same ``keep`` set ``hosts`` uses.
+    """
+    partial: tuple[str, ...] = ()
+    """Canonical-order reader names with a nonempty partial-day set.
+
+    Set-union then ``readers``-order rebuild, copying the shipped
+    ``token_sources`` idiom. A naive concatenation produces duplicates,
+    the acceptor drops the field, and the card silently renders nothing.
+    """
 
     @property
     def complete(self) -> bool:
@@ -327,7 +342,9 @@ def _capture_host_usage(
     merged_by_day: dict[str, token_usage.DayBucket] = {}
     contributed: list[str] = []
     dropped: list[tuple[str, str]] = []
+    partial_days: dict[str, frozenset[str]] = {}
     remaining = list(readers)
+    names_in_order = tuple(name for name, _ in readers)
     invoked = False
     while remaining:
         name, read = remaining[0]
@@ -340,6 +357,8 @@ def _capture_host_usage(
                         token_sources=tuple(contributed),
                         dropped=tuple(dropped),
                         tokens_by_day=merged_by_day,
+                        partial_days=dict(partial_days),
+                        partial=_canonical_partial(names_in_order, partial_days),
                     )
                 first_reader, first_reason = dropped[0]
                 return HostUsageCapture(
@@ -373,6 +392,8 @@ def _capture_host_usage(
             dropped.append((name, reason))
             continue
         contributed.append(name)
+        if result.partial_days:
+            partial_days[name] = frozenset(result.partial_days)
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
     if contributed or not dropped:
         return HostUsageCapture(
@@ -380,6 +401,8 @@ def _capture_host_usage(
             token_sources=tuple(contributed),
             dropped=tuple(dropped),
             tokens_by_day=merged_by_day,
+            partial_days=dict(partial_days),
+            partial=_canonical_partial(names_in_order, partial_days),
         )
     first_reader, first_reason = dropped[0]
     return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
@@ -406,6 +429,25 @@ def _merge_host_usage_maps(
             token_usage.merge_usage_bucket(bucket, usage)
     if source_by_day:
         token_usage.merge_token_days(target_by_day, source_by_day)
+
+
+def _merge_partial_days(
+    *maps: dict[str, frozenset[str]],
+) -> dict[str, frozenset[str]]:
+    """Set-union per reader, copying so mutating an input cannot alias out."""
+    days: dict[str, set[str]] = {}
+    for mapping in maps:
+        for name, values in mapping.items():
+            days.setdefault(name, set()).update(values)
+    return {name: frozenset(values) for name, values in days.items() if values}
+
+
+def _canonical_partial(
+    names_in_order: Sequence[str],
+    partial_days: dict[str, frozenset[str]],
+) -> tuple[str, ...]:
+    """Rebuild the partial reader list in ``readers`` order. No duplicates."""
+    return tuple(name for name in names_in_order if name in partial_days)
 
 
 def _merge_warm_retry_capture(
@@ -443,6 +485,8 @@ def _merge_warm_retry_capture(
         for name in names_in_order
         if name in dropped_by_name and name not in contributed
     )
+    partial_days = _merge_partial_days(initial.partial_days, retry.partial_days)
+    partial = _canonical_partial(names_in_order, partial_days)
 
     if initial.complete or retry.complete:
         return HostUsageCapture(
@@ -451,6 +495,8 @@ def _merge_warm_retry_capture(
             dropped=dropped,
             invoked=True,
             tokens_by_day=merged_by_day,
+            partial_days=partial_days,
+            partial=partial,
         )
     if dropped:
         first_reader, first_reason = dropped[0]
@@ -700,6 +746,7 @@ def _capture_event_snapshots(
                 token_sources=host_capture.token_sources,
                 degraded_sources=tuple(name for name, _ in host_capture.dropped),
                 tokens_by_day=host_capture.tokens_by_day or {},
+                partial_days=host_capture.partial_days,
             )
         )
 
@@ -738,12 +785,19 @@ def _capture_git_rows(
     )
     roots, _discovery_errors = root_discovery
     git_rows = events.walk_git_projects(roots, since=since, total_budget_ms=walk_budget_ms)
-    for row in git_rows:
-        row["device"] = device_id
-        if origin is not None:
-            row["origin"] = origin
     skipped = git_rows[0].get("skipped") or [] if git_rows else []
     aborts, errs = events.walk_skip_counts(skipped)
+    capture = events.make_git_capture(
+        since=since,
+        discovery=events.classify_discovery(root_discovery),
+        walk_budget_aborts=aborts,
+        walk_errors=errs,
+    )
+    for row in git_rows:
+        row["device"] = device_id
+        row["git_capture"] = capture
+        if origin is not None:
+            row["origin"] = origin
     return git_rows, root_discovery, aborts, errs
 
 
