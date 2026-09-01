@@ -30,18 +30,18 @@ either upload prompts or mint a fake `grok` sync source.
 
 ## Capability matrix
 
-| Capability | Claude | Codex | OpenCode | Grok |
-|---|---|---|---|---|
-| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render |
-| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted agents / commands / modes / plugins / skills / tools / `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` |
-| Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No |
-| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | `~/.config/opencode/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C |
-| Session / transcript sync | Never | Never | Never | Never |
+| Capability | Claude | Codex | Grok |
+|---|---|---|---|
+| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render |
+| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` |
+| Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No |
+| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C |
+| Session / transcript sync | Never | Never | Never |
 
 Claude is not the template for "sync the home directory." Claude does
-not sync `~/.claude/projects/**/*.jsonl`. Codex and OpenCode only roam
-because they have a documented customization subtree that is not
-credentials or chat. Grok's installed root is the opposite mix.
+not sync `~/.claude/projects/**/*.jsonl`. Codex only roams because it
+has a documented customization subtree that is not credentials or chat.
+Grok's installed root is the opposite mix.
 
 ## What 18D / 21A / 22A / 23A already are
 
@@ -169,11 +169,10 @@ forbids a parallel agent-name list; a second registry of non-linked
 hosts is the same mistake. Exit criterion, as a decision procedure
 rather than a property of hosts: **mm maintains a skill link only for
 hosts that do not discover `~/.claude/skills`.** Re-check with
-`grok inspect --json`. Codex and OpenCode show no evidence of that
-discovery (`~/.codex/AGENTS.md` mentions are the user's own instruction
-prose; OpenCode's `"~/.claude/**": "allow"` is a permission rule, not
-skill discovery — and gstack's `setup --host auto` plus `machine-setup`
-copy into both dirs).
+`grok inspect --json`. Codex shows no evidence of that discovery
+(`~/.codex/AGENTS.md` mentions are the user's own instruction prose —
+and gstack's `setup --host auto` plus `machine-setup` copy into that
+dir).
 
 What `mm diag` reports instead is `host_skill_discovery`: whether Grok
 can load the skill. That is a sibling JSON key, never a fourth
@@ -234,6 +233,6 @@ Plan C is independent of the usage-card work. It is not a prerequisite for
 - Writer / consumer contract: `docs/invariants/events-retro.md`
   (host-usage snapshot + sessions-snapshot sections)
 - Default allowlists that B must resemble: `config.py:DEFAULT_SOURCES`
-  (`codex`, `opencode`)
+  (`codex`)
 - Execution: `docs/ROADMAP.md` Groups 18, 21, 22, 23; Future items
   for B and C

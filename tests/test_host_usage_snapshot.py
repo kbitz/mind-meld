@@ -13,8 +13,8 @@ that needs data supplies it explicitly.
 
 Three-reader isolation tests inject a synthetic third reader named ``synth``.
 ``_capture_host_usage(readers=...)`` does no name validation, so any name
-works. The name is deliberately not ``opencode``: that string is still
-accepted wire vocabulary (``HOST_USAGE_TOKEN_SOURCES``), not a live reader.
+works. The name is deliberately not ``opencode``: that string is a retired
+peer name the aggregator retains, not a live reader.
 
 Read ``docs/invariants/events-retro.md`` before changing any of this.
 """
@@ -162,8 +162,17 @@ class TestReaderOrchestration:
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with
         no consent check at all. Strict equality against the live reader set
-        — not the wire vocabulary — is the consent guarantee."""
+        is the consent guarantee. Relaxing this to a subset would let a
+        future reader run with no gate entry."""
         assert set(events_tail.HOST_READER_SOURCE_GATE) == set(_mm_events.ACTIVE_HOST_READERS)
+        invoked = [
+            name
+            for name, _ in events_tail._default_host_readers(
+                self._enabled(*events_tail.HOST_READER_SOURCE_GATE),
+                grok_consented=True,
+            )
+        ]
+        assert set(events_tail.HOST_READER_SOURCE_GATE) == set(invoked)
 
     def test_gate_keys_are_all_live_readers(self):
         """Every gate key must resolve to a reader ``_default_host_readers``
@@ -174,11 +183,12 @@ class TestReaderOrchestration:
         assert set(names) == set(events_tail.HOST_READER_SOURCE_GATE)
 
     def test_active_readers_are_a_subset_of_the_wire_vocabulary(self):
-        """The wire tuple is the accepted vocabulary (superset), not the
-        reader list. Relaxing GATE == ACTIVE to <= would retire the consent
-        pin this file exists to keep."""
+        """Live readers must be named on the writer tuple. 36B dropped
+        retired names from the tuple; unknown inbound names are retained
+        by the aggregator, not listed here. Relaxing GATE == ACTIVE to
+        <= would retire the consent pin this file exists to keep."""
         assert set(_mm_events.ACTIVE_HOST_READERS) <= set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
-        assert "opencode" in _mm_events.HOST_USAGE_TOKEN_SOURCES
+        assert "opencode" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
         assert "opencode" not in _mm_events.ACTIVE_HOST_READERS
 
     def test_default_readers_resolve_at_call_time(self, monkeypatch):

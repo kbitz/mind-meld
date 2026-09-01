@@ -302,10 +302,12 @@ core fields are valid:
   ``host-usage-snapshot``, ``ts`` is a timezone-aware ISO-8601 timestamp, and
   ``device`` is a nonempty string. The current short-device-id convention is
   not itself a UUID-format parser requirement.
-- ``token_sources`` is an order-preserving, duplicate-free subsequence of
-  ``HOST_USAGE_TOKEN_SOURCES``. A nonempty ``hosts`` payload requires a
-  nonempty ``token_sources``; ``hosts == {}`` with ``token_sources == []`` is
-  valid and means no source contributed.
+- ``token_sources`` is an order-preserving, duplicate-free list: known names
+  must be a subsequence of ``HOST_USAGE_TOKEN_SOURCES``; unknown names
+  (retired or future readers) are retained if they pass the identifier bound.
+  A nonempty ``hosts`` payload requires a nonempty ``token_sources``;
+  ``hosts == {}`` with ``token_sources == []`` is valid and means no source
+  contributed.
 - ``hosts`` is either ``{}`` or only canonical, nonempty host-family maps.
   Every key is a real UTC ``YYYY-MM-DD`` date; every bucket contains exactly
   the four ``TOKEN_FIELDS`` as non-boolean integers in ``[0, 2**53]``; and the
@@ -507,9 +509,11 @@ does not).
 
 ### Coverage states (Track 34A)
 
-Two additive, omit-when-empty subsequences of `HOST_USAGE_TOKEN_SOURCES` travel
-on the `host-usage-snapshot` row. They have the same shape and opposite
-disjointness contracts. **Do not unify them.**
+Two additive, omit-when-empty source-name lists travel on the
+`host-usage-snapshot` row. The local writer emits duplicate-free subsequences
+of `HOST_USAGE_TOKEN_SOURCES`; the acceptor also retains identifier-bounded
+unknown names without relaxing the known-name order. The fields have the same
+shape and opposite disjointness contracts. **Do not unify them.**
 
 - **`degraded_sources`** (shipped v0.12.47): readers that failed this sweep.
   DISJOINT from `token_sources` (enforced at `events.py` by filtering against

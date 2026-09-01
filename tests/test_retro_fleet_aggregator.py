@@ -22,6 +22,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import date, datetime, timedelta, timezone
+from itertools import combinations
 from pathlib import Path
 from typing import get_args, get_type_hints
 
@@ -4558,19 +4559,27 @@ class TestHostSnapshotAcceptance:
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
 
-    def test_unknown_token_source_rejected(self):
+    def test_unknown_token_source_retained_not_rejected(self):
+        """Unknown source names are version skew, not writer corruption.
+
+        A closed vocabulary rejected the whole row, which dropped valid Codex
+        totals from a legacy peer that still named a retired reader. Retain
+        the unknown name (so degraded_sources evidence survives) and keep
+        the row. Duplicates and known-name-out-of-order stay fatal.
+        """
         ev = _host_event("dev-a", self.TS, token_sources=("windsurf",))
-        result = aggregator._accept_host_usage_snapshot(ev)
-        assert isinstance(result, aggregator.HostReject)
-        assert result.reason == "invalid_token_sources"
+        row = _accepted(ev)
+        assert row.consulted == ("windsurf",)
+        assert "codex" in row.lifetime_by_family
 
     def test_legacy_peer_row_with_opencode_is_accepted_whole(self):
-        """36A deletes the OpenCode reader but not the wire name.
+        """36A deletes the OpenCode reader; 36B dropped the wire name.
 
         A peer still emitting ``opencode`` in any of the three source lists
-        must be accepted WHOLE — dropping the field (or the row) would erase
-        that device's host view for the 90-day window. All three route
-        through ``_token_sources_subsequence``.
+        must be accepted WHOLE — the aggregator retains unknown names.
+        Dropping the field (or the row) would erase that device's host view
+        for the 90-day window. All three route through
+        ``_token_sources_subsequence``.
         """
         ts = self.TS
         token_row = _accepted(_host_event("dev-a", ts, token_sources=("codex", "grok", "opencode")))
@@ -4685,6 +4694,135 @@ class TestHostSnapshotAcceptance:
             assert aggregator._host_counter_ok(sample) == host_usage._is_valid_counter(sample)
 
 
+# Frozen history of the host-usage wire vocabulary as shipped through
+# v0.12.52. Never edit this: it is the compatibility contract, not the
+# live reader set. Deleting a name here would silently drop the
+# parametrized coverage of that shape.
+_SHIPPED_WIRE_SOURCE_NAMES = ("codex", "grok", "opencode")
+
+
+def _ordered_nonempty_subsequences(names: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    out = []
+    for r in range(1, len(names) + 1):
+        for combo in combinations(range(len(names)), r):
+            out.append(tuple(names[i] for i in combo))
+    return tuple(out)
+
+
+class TestHostSnapshotWireCompat:
+    """Acceptor-side compatibility for the shipped wire vocabulary.
+
+    The pin lives on the acceptor, never the writer. ``make_host_usage_snapshot``
+    echoes ``token_sources`` verbatim, so a writer-side assertion passes at
+    100% while the acceptor rejects the row.
+    """
+
+    TS = "2026-04-28T12:00:00+00:00"
+
+    def test_observed_live_shape_codex_opencode_accepted(self):
+        """Device 3a6c7dc9's latest row (2026-08-30): token_sources=['codex','opencode']."""
+        ev = _host_event("dev-a", self.TS, token_sources=("codex", "opencode"))
+        row = _accepted(ev)
+        assert row.consulted == ("codex", "opencode")
+        assert "codex" in row.lifetime_by_family
+        rendered = aggregator.format_retro(_econ_data([ev]))
+        assert aggregator._UNKNOWN_READER_LABEL in rendered
+        assert "opencode" not in rendered
+
+    def test_shipped_three_name_shape_accepted_on_acceptor(self):
+        """The carded ['codex','grok','opencode'] shape, asserted on the acceptor."""
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex", "grok", "opencode"),
+            hosts={
+                "codex": {"2026-04-20": _usage(5)},
+                "grok": {"2026-04-20": _usage(3)},
+            },
+        )
+        row = _accepted(ev)
+        assert row.consulted == ("codex", "grok", "opencode")
+        assert "codex" in row.lifetime_by_family
+        assert "grok" in row.lifetime_by_family
+
+    @pytest.mark.parametrize("sources", _ordered_nonempty_subsequences(_SHIPPED_WIRE_SOURCE_NAMES))
+    def test_every_ordered_subsequence_of_shipped_vocabulary_accepted(self, sources):
+        ev = _host_event("dev-a", self.TS, token_sources=sources)
+        row = _accepted(ev)
+        assert row.consulted == sources
+        assert "codex" in row.lifetime_by_family
+
+    def test_degraded_opencode_is_accepted_and_renders_visible_note(self):
+        """The 2am test. Device 889e42c0 (2026-09-01): token_sources=['codex'],
+        degraded_sources=['opencode']. Skipping the unknown name would erase
+        the failure signal and report healthy coverage."""
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("codex",),
+            hosts=hosts,
+            extra={
+                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
+                "degraded_sources": ["opencode"],
+            },
+        )
+        row = _accepted(ev)
+        assert row.consulted == ("codex",)
+        assert row.degraded == ("opencode",)
+        rendered = aggregator.format_retro(_econ_data([ev]))
+        assert "failed" in rendered
+        assert aggregator._UNKNOWN_READER_LABEL in rendered
+        assert "opencode" not in rendered
+        assert "mm diag" in rendered
+
+    def test_known_name_out_of_order_still_rejected(self):
+        ev = _host_event("dev-a", self.TS, token_sources=("grok", "codex"))
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_unknown_name_does_not_mask_known_name_out_of_order(self):
+        """A naive continue-on-unknown would accept this by dropping grok's
+        successor check. Membership is tested before the positional scan,
+        and an unknown name must not advance the known-name cursor."""
+        ev = _host_event("dev-a", self.TS, token_sources=("grok", "opencode", "codex"))
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_retired_name_first_then_known_is_accepted(self):
+        ev = _host_event("dev-a", self.TS, token_sources=("opencode", "codex"))
+        row = _accepted(ev)
+        assert row.consulted == ("opencode", "codex")
+
+    def test_duplicate_still_rejected(self):
+        ev = _host_event("dev-a", self.TS, token_sources=("codex", "codex"))
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_duplicate_unknown_name_still_rejected(self):
+        ev = _host_event("dev-a", self.TS, token_sources=("opencode", "opencode"))
+        result = aggregator._accept_host_usage_snapshot(ev)
+        assert isinstance(result, aggregator.HostReject)
+        assert result.reason == "invalid_token_sources"
+
+    def test_unknown_token_source_failing_identifier_bound_rejected(self):
+        for bad in ("foo/bar", "x" * 200, "codex\n", "a:b"):
+            ev = _host_event("dev-a", self.TS, token_sources=(bad,))
+            result = aggregator._accept_host_usage_snapshot(ev)
+            assert isinstance(result, aggregator.HostReject), bad
+            assert result.reason == "invalid_token_sources", bad
+
+    def test_degraded_sources_failing_identifier_bound_drops_field_keeps_row(self):
+        ev = _host_event("dev-a", self.TS, extra={"degraded_sources": ["foo/bar"]})
+        row = _accepted(ev)
+        assert row.degraded == ()
+        assert row.degraded_reason == "invalid_token_sources"
+        assert "codex" in row.lifetime_by_family
+
+
 class TestCoverageAcceptor:
     TS = "2026-04-28T12:00:00+00:00"
 
@@ -4706,12 +4844,14 @@ class TestCoverageAcceptor:
         assert row.degraded == ()
         assert row.degraded_reason == "invalid_token_sources"
 
-    def test_e2_unknown_reader_name_drops_field_keeps_row(self):
+    def test_e2_unknown_reader_name_is_retained_on_degraded_sources(self):
+        """Valid unknown names are version skew. RETAIN them so a failed
+        retired reader still shows up as degraded coverage, not as healthy."""
         ev = _host_event("dev-a", self.TS, extra={"degraded_sources": ["gemini"]})
         row = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(row, aggregator._AcceptedHostRow)
-        assert row.degraded == ()
-        assert row.degraded_reason == "invalid_token_sources"
+        assert row.degraded == ("gemini",)
+        assert row.degraded_reason is None
 
     def test_e3_duplicates_non_list_and_oversize_drop_the_field(self):
         for raw in (["grok", "grok"], {"grok": True}, ["codex", "grok", "opencode", "codex"]):
@@ -4722,8 +4862,9 @@ class TestCoverageAcceptor:
             assert row.partial_reason == "invalid_token_sources"
 
     def test_e4_drop_reason_is_recorded(self):
-        ev = _host_event("dev-a", self.TS, extra={"degraded_sources": ["not-a-reader"]})
+        ev = _host_event("dev-a", self.TS, extra={"degraded_sources": ["foo/bar"]})
         row = _accepted(ev)
+        assert row.degraded == ()
         assert row.degraded_reason == "invalid_token_sources"
 
     def test_e5_partial_beside_empty_hosts_is_rejected(self):
@@ -4814,16 +4955,16 @@ class TestCoverageAcceptor:
 
         row = events.make_host_usage_snapshot(
             device="dev-a",
-            token_sources=("codex", "grok"),
-            hosts={"codex": {"2026-04-20": _usage(4)}, "grok": {"2026-04-20": _usage(6)}},
+            token_sources=("codex",),
+            hosts={"codex": {"2026-04-20": _usage(4)}},
             ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
-            degraded_sources=("opencode",),
-            partial_days={"grok": ["2026-04-20"]},
+            degraded_sources=("grok",),
+            partial_days={"codex": ["2026-04-20"]},
         )
         accepted = _accepted(json.loads(json.dumps(row)))
-        assert accepted.degraded == ("opencode",)
+        assert accepted.degraded == ("grok",)
         assert accepted.degraded_reason is None
-        assert accepted.partial == ("grok",)
+        assert accepted.partial == ("codex",)
         assert accepted.partial_reason is None
 
     def test_e6b_valid_partial_sources_are_accepted(self):
@@ -4876,7 +5017,7 @@ class TestCoverageAcceptor:
     def test_e8_present_but_invalid_may_change_the_winner(self):
         ts = self.TS
         plain = _host_event("dev-a", ts)
-        malformed = _host_event("dev-a", ts, extra={"degraded_sources": ["gemini"]})
+        malformed = _host_event("dev-a", ts, extra={"degraded_sources": ["foo/bar"]})
         ra = _accepted(plain)
         rb = aggregator._accept_host_usage_snapshot(malformed)
         assert isinstance(rb, aggregator._AcceptedHostRow)
@@ -5288,7 +5429,7 @@ class TestDumpHostUsage:
 
     def test_f7_dump_carries_drop_reason_for_malformed_coverage(self):
         ev = _host_event(
-            "dev-a", "2026-04-27T12:00:00+00:00", extra={"degraded_sources": ["gemini"]}
+            "dev-a", "2026-04-27T12:00:00+00:00", extra={"degraded_sources": ["foo/bar"]}
         )
         inv = aggregator.aggregate_host_usage(
             [ev],
@@ -6237,6 +6378,7 @@ class TestAgentCoverageNotes:
             and "If no source is enabled" in n
             and "mm enable-source codex" in n
             and "no attributable local ledger" in n
+            and "opencode" not in n
             for n in notes
         )
 
