@@ -524,7 +524,7 @@ That command bootstraps `.venv` if needed, then runs `ruff check .`, `ruff forma
 ./bin/check tests/test_config.py
 ```
 
-A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. See `./bin/check --help`.
+A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Use `--serial` to disable pytest-xdist. `MM_PYTHON` selects the bootstrap interpreter; `MM_VENV` validates and uses an existing environment without mutating it; `VIRTUAL_ENV` and `--no-bootstrap` use the current environment. `MM_PYTEST_WORKERS` sets the xdist worker count. See `./bin/check --help`.
 
 Manual fallback (separate lines; quote `'.[dev]'` — macOS zsh globs it):
 
