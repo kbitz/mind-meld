@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -96,6 +97,32 @@ class TestArgv:
 
 
 class TestInterpreter:
+    def test_mm_python_takes_precedence_over_preferred_path_candidate(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        mod = load_check()
+        bindir = tmp_path / "bin"
+        explicit = _stub_python(bindir, "explicit-python", "3.12.9")
+        _stub_python(bindir, "python3.13", "3.13.15")
+        monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.setenv("MM_PYTHON", str(explicit))
+
+        path, ver = mod.resolve_interpreter()
+
+        assert path == str(explicit)
+        assert ver == (3, 12, 9)
+
+    @pytest.mark.parametrize("output", ["", "3", "three.thirteen", "3.13.bad"])
+    def test_python_version_rejects_malformed_output(self, monkeypatch, output: str) -> None:
+        mod = load_check()
+        monkeypatch.setattr(
+            mod.subprocess,
+            "run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(["python"], 0, stdout=output),
+        )
+
+        assert mod.python_version("python") is None
+
     def test_prefers_3_13_when_present(self, tmp_path: Path, monkeypatch) -> None:
         mod = load_check()
         bindir = tmp_path / "bin"
@@ -253,18 +280,45 @@ class TestBootstrap:
         assert "mv .venv .venv.bak" in err
 
     def test_pip_install_passes_a_timeout(self, tmp_path: Path, monkeypatch) -> None:
-        import subprocess as sp
-
         mod = load_check()
         seen: dict[str, object] = {}
 
         def fake_run(*_a, **kwargs):
             seen.update(kwargs)
-            return sp.CompletedProcess(["pip"], 0)
+            return subprocess.CompletedProcess(["pip"], 0)
 
         monkeypatch.setattr(mod.subprocess, "run", fake_run)
         mod._pip_install(sys.executable, tmp_path)
         assert seen.get("timeout") == mod.PIP_TIMEOUT_S
+
+    def test_pip_install_failure_preserves_its_exit_code(self, tmp_path: Path, monkeypatch) -> None:
+        mod = load_check()
+        monkeypatch.setattr(
+            mod.subprocess,
+            "run",
+            lambda *_args, **_kwargs: subprocess.CompletedProcess(["pip"], 47),
+        )
+
+        with pytest.raises(SystemExit) as ei:
+            mod._pip_install(sys.executable, tmp_path)
+
+        assert ei.value.code == 47
+
+    def test_pip_install_timeout_has_manual_recovery(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        mod = load_check()
+
+        def timeout(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired(["pip"], mod.PIP_TIMEOUT_S)
+
+        monkeypatch.setattr(mod.subprocess, "run", timeout)
+        with pytest.raises(SystemExit):
+            mod._pip_install(sys.executable, tmp_path)
+
+        err = capsys.readouterr().err
+        assert f"timed out after {mod.PIP_TIMEOUT_S}s" in err
+        assert "manual fallback" in err
 
     def test_unowned_broken_venv_is_not_deleted(self, tmp_path: Path, monkeypatch, capsys) -> None:
         mod = load_check()
@@ -301,6 +355,49 @@ class TestBootstrap:
         assert list(venv.iterdir()) == [marker]
         err = capsys.readouterr().err
         assert "never mutated" in err or "validate-and-use" in err
+
+    def test_valid_mm_venv_is_used_without_bootstrap(self, tmp_path: Path, monkeypatch) -> None:
+        mod = load_check()
+        venv = tmp_path / "external"
+        py = _fake_venv(venv)
+        sentinel = venv / "sentinel"
+        sentinel.write_text("stay\n", encoding="utf-8")
+        monkeypatch.setenv("MM_VENV", str(venv))
+        monkeypatch.setattr(mod, "venv_healthy", lambda _python: True)
+
+        assert mod._mm_venv_python() == py
+        assert sentinel.read_text(encoding="utf-8") == "stay\n"
+
+    def test_owned_broken_venv_is_rebuilt(self, tmp_path: Path, monkeypatch) -> None:
+        mod = load_check()
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+        _fake_venv(root / ".venv")
+        (root / ".venv" / "stale").write_text("old\n", encoding="utf-8")
+        pip_calls: list[str] = []
+        monkeypatch.setattr(mod, "venv_healthy", lambda _python: False)
+        monkeypatch.setattr(mod, "_create_venv", lambda _python, venv: _fake_venv(venv))
+        monkeypatch.setattr(mod, "_pip_install", lambda python, _root: pip_calls.append(python))
+
+        rebuilt = mod.ensure_venv(root, sys.executable, (3, 13, 0), rebuild=False)
+
+        assert rebuilt == root / ".venv"
+        assert not (rebuilt / "stale").exists()
+        assert mod.venv_owned(rebuilt)
+        assert len(pip_calls) == 1
+
+    def test_virtual_env_is_used_when_bootstrap_is_skipped(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        mod = load_check()
+        venv = tmp_path / "external"
+        py = _fake_venv(venv)
+        args = mod.parse_argv(["--no-bootstrap"])
+        monkeypatch.delenv("MM_VENV", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+
+        assert mod.tool_python(args, tmp_path, None) == py
 
     def test_two_runs_serialize_on_bootstrap_lock(self, tmp_path: Path) -> None:
         mod = load_check()
