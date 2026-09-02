@@ -4,6 +4,11 @@
 
 ## Future
 
+- **`/roadmap` does not own the `verify:` field it regenerates** — every card carries `_session: … · verify: …`, but the card template has no such field (four "verify" hits in the skill are prose about checking claims against git). Track 37A fixed the cause (`AGENTS.md ## Testing` now names `./bin/check`) and normalized the live strings once. Teaching the skill the field, or carrying only a scope with the runner implied, is a change to a skill outside this repo. `[source:manual]` 2026-09-01.
+- **No dependency lockfile** — `pyproject.toml` declares six `>=` ranges with no lockfile and no hashes. Content-hash staleness in `bin/check` answers "does this venv match declared inputs," not reproducibility. A `.conductor` setup hook makes an unpinned `pip install` automatic. Real decision, real cost; not a workspace fix. `[source:manual]` 2026-09-01.
+- **Do not smuggle a `uv` / `hatch` / `tox` migration under a workspace fix** — none is installed here. `hatchling` as a build backend does not mean Hatch environments. `bin/check` holds the option: if the driver body changes later, every caller keeps working. `[source:manual]` 2026-09-01.
+- **Unknown-enum wire posture** — conditional on Track 36B's acceptor. If unknown `token_sources` names are tolerated, write down which other closed vocabularies (host families, reader reasons, model ids) are open vs closed, rather than leaving it to the next retirement. `[source:plan-eng-review]` 2026-09-01.
+
 - **cli.py micro-cleanups** — retain only the unresolved `_resolve_mm_events_dir` and status-enum follow-up; Track 18A owns the import and `_empty_outcomes` portions.
 - **`_resolve_interactive_loop` decomposition** — collector removal fired its old trigger, but the 630-line function still needs a dedicated discovery/design pass before code commitment.
 - **Two-machine test bootstrap duplication** — consolidate the repeated setup only when adjacent test work touches both modules.
