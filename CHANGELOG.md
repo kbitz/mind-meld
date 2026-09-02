@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.13.0] - 2026-09-02
+
+**The OpenCode skill-link row is gone.** mm no longer maintains `~/.config/opencode/skills/retro-fleet`. On the next interactive push, init, or `mm install-skills`, mm removes the link **it** created (a `readlink` that equals the mm-owned store). A regular file, a directory, or a link you made yourself is left alone.
+
+### Removed
+
+- The OpenCode row from `skill_link.AGENT_ROWS`. Claude Code and Codex remain. The mm-owned store stays; those two hosts still link to it.
+
+### Changed
+
+- `_real_guard_paths` still refuses writes to `~/.config/opencode/skills` from tests (retired but still guarded).
+- `[skills] agents` that names only retired agents now emits a notice instead of silently declining every link.
+- Interactive `mm push` runs the OpenCode reaper even when the 24h skill-link drift gate is shut (fresh Claude/Codex markers). `mm autopush` still does not.
+
 ## [0.12.55] - 2026-09-02
 
 **The OpenCode sync source is retired.** mm no longer walks `~/.config/opencode`. Measured fleet payload was 0 live files on the probed Mac and at most 14 regenerable gstack-extend renders elsewhere. `mm migrate-config` removes the leftover `[[sync.sources]]` opencode block on the next interactive push or pull and records the name in `disabled_sources` so that push does not mint deletion tombstones. `mm enable-source opencode` refuses through the ordinary unknown-name path.

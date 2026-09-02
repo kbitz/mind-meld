@@ -202,7 +202,7 @@ installer "complete."
 
 ### Explicitly not planned
 
-- Uploading Grok, Codex, OpenCode, or Claude session transcripts.
+- Uploading Grok, Codex, or Claude session transcripts.
 - Parsing Grok `chat_history.jsonl`, `signals.json`, `summary.json`,
   or `updates.jsonl` content-bearing shapes as a fallback usage
   source. 18D already refuses those.
