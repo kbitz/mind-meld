@@ -152,11 +152,6 @@ def codex_target(_isolate_paths):
 
 
 @pytest.fixture
-def opencode_target(_isolate_paths):
-    return _target_for(_isolate_paths, "opencode")
-
-
-@pytest.fixture
 def config_dir(_isolate_paths):
     return _isolate_paths / ".config" / "mind-meld"
 
@@ -207,14 +202,6 @@ class TestTargetAbsent:
         _install("codex")
         _assert_store_link(codex_target)
         marker = config_dir / f".{skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER}"
-        assert marker.exists()
-
-    def test_creates_opencode_symlink_when_target_absent(
-        self, opencode_target, skill_src, config_dir
-    ):
-        _install("opencode")
-        _assert_store_link(opencode_target)
-        marker = config_dir / f".{skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER}"
         assert marker.exists()
 
     @pytest.mark.parametrize("key", [row.key for row in skill_link.AGENT_ROWS])
@@ -425,15 +412,15 @@ class TestSkillLinkCheckDue:
         codex_target.symlink_to(codex_target.parent / "not-the-store")
         assert skill_link._skill_links_check_due(may_create=None) is True
 
-    def test_combined_gate_repairs_opencode_when_other_agents_are_healthy(
-        self, target, codex_target, opencode_target, skill_src, config_dir
+    def test_combined_gate_repairs_claude_when_codex_is_healthy(
+        self, target, codex_target, skill_src, config_dir
     ):
-        """Fresh Claude/Codex markers must not suppress stale OpenCode repair."""
+        """A fresh Codex marker must not suppress an independently stale Claude link."""
         skill_link._ensure_retro_skill_links(may_create=None)
         assert skill_link._skill_links_check_due(may_create=None) is False
 
-        opencode_target.unlink()
-        opencode_target.symlink_to(opencode_target.parent / "not-the-store")
+        target.unlink()
+        target.symlink_to(target.parent / "not-the-store")
         assert skill_link._skill_links_check_due(may_create=None) is True
 
     def test_fresh_marker_with_correct_link_means_not_due(self, target, skill_src, config_dir):
@@ -635,7 +622,6 @@ class TestInstallerResults:
         by_key = {result.descriptor.key: result for result in results}
         assert by_key["claude"].status == "installed"
         assert by_key["codex"].status == "declined"
-        assert by_key["opencode"].status == "declined"
 
     def test_dangling_symlink_reports_conflict_without_unlinking(
         self, target, skill_src, _isolate_paths, monkeypatch
@@ -860,39 +846,20 @@ class TestInstallSkillsCommand:
         _assert_store_link(codex_target)
         assert str(codex_target) in result.output
 
-    def test_installs_when_only_opencode_skills_dir_exists(
-        self, target, codex_target, opencode_target, skill_src, _isolate_paths
+    def test_installs_when_codex_root_exists_without_skills_directory(
+        self, target, codex_target, skill_src, _isolate_paths
     ):
         import shutil
 
         from mind_meld.cli import app
 
         shutil.rmtree(_isolate_paths / ".claude")
-        shutil.rmtree(_isolate_paths / ".codex")
+        shutil.rmtree(codex_target.parent)
         result = self._runner().invoke(app, ["install-skills"])
         assert result.exit_code == 0, result.output
         assert not target.exists()
-        assert not codex_target.exists()
-        assert opencode_target.is_symlink()
-        _assert_store_link(opencode_target)
-        assert str(opencode_target) in result.output
-
-    def test_installs_when_opencode_root_exists_without_skills_directory(
-        self, target, codex_target, opencode_target, skill_src, _isolate_paths
-    ):
-        import shutil
-
-        from mind_meld.cli import app
-
-        shutil.rmtree(_isolate_paths / ".claude")
-        shutil.rmtree(_isolate_paths / ".codex")
-        shutil.rmtree(opencode_target.parent)
-        result = self._runner().invoke(app, ["install-skills"])
-        assert result.exit_code == 0, result.output
-        assert not target.exists()
-        assert not codex_target.exists()
-        assert opencode_target.is_symlink()
-        _assert_store_link(opencode_target)
+        assert codex_target.is_symlink()
+        _assert_store_link(codex_target)
 
     def test_reports_conflict_without_undoing_codex_install(self, target, codex_target, skill_src):
         from mind_meld.cli import app
@@ -2140,6 +2107,58 @@ class TestUserRemovedLink:
         assert result.exit_code == 0, result.output
         assert "Left removed" in result.output
         assert "installation failed" not in result.output
+
+
+class TestRetiredOpencodeSkillLink:
+    def test_mm_owned_opencode_link_is_removed_but_a_user_link_is_left(
+        self, _isolate_paths, skill_src, store, config_dir
+    ):
+        """Track 37C reaper: mm unlinks only a store-backed symlink."""
+        skill_link._ensure_retro_skill_links(may_create=None)
+        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
+        opencode_link.parent.mkdir(parents=True, exist_ok=True)
+        checked = config_dir / ".opencode-skill-link-checked"
+        conflict = config_dir / ".opencode-skill-link-conflict"
+
+        opencode_link.symlink_to(store)
+        checked.touch()
+        conflict.touch()
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert not opencode_link.exists()
+        assert not opencode_link.is_symlink()
+        assert not checked.exists()
+        assert not conflict.exists()
+
+        opencode_link.write_text("user file")
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert opencode_link.read_text() == "user file"
+
+        opencode_link.unlink()
+        opencode_link.mkdir()
+        (opencode_link / "SKILL.md").write_text("user dir")
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert opencode_link.is_dir()
+        assert (opencode_link / "SKILL.md").read_text() == "user dir"
+
+        import shutil
+
+        shutil.rmtree(opencode_link)
+        elsewhere = _isolate_paths / "elsewhere-skill"
+        elsewhere.mkdir()
+        opencode_link.symlink_to(elsewhere)
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert opencode_link.is_symlink()
+        assert os.readlink(opencode_link) == str(elsewhere)
+
+    def test_skills_agents_that_becomes_empty_after_retirement_surfaces_a_notice(
+        self, _isolate_paths, capsys
+    ):
+        cfg = _write_mm_config(_isolate_paths, agents=["opencode"])
+        granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
+        assert granted == frozenset()
+        err = capsys.readouterr().err
+        assert "lists no currently supported" in err
+        assert "maintain_links" in err
 
 
 class TestShellCompletion:

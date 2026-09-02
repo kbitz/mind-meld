@@ -553,29 +553,24 @@ def test_marker_literals_are_byte_identical_to_v0_12_18() -> None:
     assert skill_link._SKILL_LINK_CONFLICT_MARKER == "skill-link-conflict"
     assert skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER == "codex-skill-link-checked"
     assert skill_link._CODEX_SKILL_LINK_CONFLICT_MARKER == "codex-skill-link-conflict"
-    assert skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER == "opencode-skill-link-checked"
-    assert skill_link._OPENCODE_SKILL_LINK_CONFLICT_MARKER == "opencode-skill-link-conflict"
     # Claude's success name is a suffix of the others, so startswith is unusable.
     names = [
         skill_link._SKILL_LINK_SUCCESS_MARKER,
         skill_link._SKILL_LINK_CONFLICT_MARKER,
         skill_link._CODEX_SKILL_LINK_SUCCESS_MARKER,
         skill_link._CODEX_SKILL_LINK_CONFLICT_MARKER,
-        skill_link._OPENCODE_SKILL_LINK_SUCCESS_MARKER,
-        skill_link._OPENCODE_SKILL_LINK_CONFLICT_MARKER,
     ]
-    assert len(set(names)) == 6, names
+    assert len(set(names)) == 4, names
 
 
 def test_first_three_agent_keys_are_stable() -> None:
-    """Result order is append-only. The original three stay at the front."""
+    """Active supported agents; removal is a deliberate retirement, not a
+    reordering. Claude and Codex stay at the front. Do not rewrite this
+    to a two-key literal list — the AST gate's exemption is a slice."""
     from mind_meld import skill_link
 
-    assert [row.key for row in skill_link.AGENT_ROWS[:3]] == [
-        "claude",
-        "codex",
-        "opencode",
-    ]
+    assert skill_link.AGENT_ROWS[0].key == "claude"
+    assert skill_link.AGENT_ROWS[1].key == "codex"
 
 
 def test_production_overrides_default_is_empty() -> None:
@@ -690,7 +685,8 @@ def test_synthetic_row_is_covered_with_no_other_edit(monkeypatch, tmp_path) -> N
 
     descriptors = skill_link._skill_target_descriptors()
     keys = [d.key for d in descriptors]
-    assert keys[:3] == ["claude", "codex", "opencode"]
+    assert keys[0] == "claude"
+    assert keys[1] == "codex"
     assert keys[-1] == "synthetic"
     synth_desc = skill_link._descriptor_for("synthetic")
     assert synth_desc.display_name == "Synthetic Agent"
@@ -754,6 +750,7 @@ def test_synthetic_row_is_covered_with_no_other_edit(monkeypatch, tmp_path) -> N
 def test_no_consumer_owned_agent_name_lists() -> None:
     """A parallel agent-name list is the failure class this Track exists to kill."""
     import ast
+    import re
 
     from mind_meld import skill_link
 
@@ -788,7 +785,7 @@ def test_no_consumer_owned_agent_name_lists() -> None:
             if not (literal_values <= keys or literal_values <= names):
                 continue
             src_line = lines[node.lineno - 1] if node.lineno <= len(lines) else ""
-            if "[:3]" in src_line:
+            if re.search(r"\[:\d+\]", src_line):
                 continue
             offenders.append(f"{path.name}:{node.lineno}:{src_line.strip()}")
     assert offenders == [], "parallel agent-name list:\n" + "\n".join(offenders)

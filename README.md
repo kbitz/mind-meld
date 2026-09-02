@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, and Grok. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code, Codex, and — until that source is retired — OpenCode; verified 2026-08-24). Grok 1.0.5 already loads that directory via its default-on Claude compatibility layer, so `mm diag` reports Grok under `host_skill_discovery`, not as a fourth `skill_links` row.
+Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, and Grok. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code and Codex; verified 2026-08-24). Grok 1.0.5 already loads that directory via its default-on Claude compatibility layer, so `mm diag` reports Grok under `host_skill_discovery`, not as a third `skill_links` row.
 
 ## Install
 
@@ -122,21 +122,19 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 ## Codex Integration
 
-Mind Meld treats Codex as a first-class peer of Claude Code. Grok is the other usage-reader host (see [Grok usage in fleet retro](#grok-usage-in-fleet-retro)). An `opencode` sync source still ships in the default config — `mm init` still asks about it and `mm enable-source opencode` still enables file sync — but OpenCode is no longer a usage-reader host.
+Mind Meld treats Codex as a first-class peer of Claude Code. Grok is the other usage-reader host (see [Grok usage in fleet retro](#grok-usage-in-fleet-retro)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`.
-- `opencode` still syncs `~/.config/opencode/` customizations: rules, agents, commands, modes, plugins, skills, and tools. That source remains until it is retired; do not add it on a new machine expecting usage capture.
-- Account credentials, session databases, logs, tool output, and whole-file `config.toml` / `opencode.json{,c}` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
-- Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source grok` is the same verb: it adds a scoped Grok source (`skills/`, `commands/`, and `rules/` only — same idea as Claude's `memory/` + `todos/`) and opts this Mac into reading terminal token totals from local `updates.jsonl` records. Session files, prompts, and chat history stay on the Mac. Enabling `opencode` still syncs that host's customizations and still consents a skill link; it does not turn on a usage reader.
-- The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`. OpenCode's Claude compatibility remains useful for existing gstack skills, and its skill link still works even when compatibility is disabled.
+- Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
+- Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source grok` is the same verb: it adds a scoped Grok source (`skills/`, `commands/`, and `rules/` only — same idea as Claude's `memory/` + `todos/`) and opts this Mac into reading terminal token totals from local `updates.jsonl` records. Session files, prompts, and chat history stay on the Mac.
+- The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
 
 Symlinks inside any sync source are local routing, not portable content: Mind Meld does not upload them and leaves existing local links untouched on pull, including dangling links and linked directories. A source root itself may be a symlink.
 
-Fresh installs are asked about the `codex` and `opencode` sources during `mm init`. That choice also decides whether mm maintains a `retro-fleet` skill link in that agent's skills directory. Existing installations remain opt-in. `mm enable-source opencode` still succeeds (it is a shipped sync source, not yet retired) and does not authorize a usage reader:
+Fresh installs are asked about the `codex` source during `mm init`. That choice also decides whether mm maintains a `retro-fleet` skill link in that agent's skills directory. Existing installations remain opt-in:
 
 ```bash
 mm enable-source codex
-mm enable-source opencode
 mm enable-source grok
 ```
 
@@ -163,7 +161,7 @@ At the end of each completed task or conversation, run `mm autopush`.
 If either command has output, summarize it for the user. If it is silent, continue silently.
 ```
 
-OpenCode reads `~/.claude/CLAUDE.md` as its global fallback, so this works immediately when Claude compatibility is enabled. If you use `OPENCODE_DISABLE_CLAUDE_CODE*` or have `~/.config/opencode/AGENTS.md`, put the same block there. This makes every agent feed the same gstack and `mm-events` history used by `retro-fleet`; Claude-only session and token breakdowns remain explicitly labeled as Claude-only.
+This makes every agent feed the same gstack and `mm-events` history used by `retro-fleet`; Claude-only session and token breakdowns remain explicitly labeled as Claude-only.
 
 ### Manual commands
 
@@ -288,7 +286,7 @@ maintain_links = true          # false disables every row
 
 `mm diag` is the authoritative resolved view. `mm sources` structurally cannot show a `[skills] agents` override.
 
-Grok is not a skill-link row. Verified 2026-08-24: Grok 1.0.5 discovers `~/.claude/skills` at the same documented priority tier as `~/.grok/skills` (`grok inspect --json`, then `name == "retro-fleet"`). Codex shows no evidence of that discovery (`~/.codex/AGENTS.md` mentions are the user's own instruction prose — and gstack's `setup --host auto` plus `machine-setup` *copy into* that dir, which you would not do for a dir the host already reads). An OpenCode skill link still exists until that source is retired; `~/.config/opencode/opencode.jsonc`'s `"~/.claude/**": "allow"` is a permission rule, not skill discovery. Exit criterion: **mm maintains a skill link only for hosts that do not discover `~/.claude/skills`.** Re-check with `grok inspect --json`.
+Grok is not a skill-link row. Verified 2026-08-24: Grok 1.0.5 discovers `~/.claude/skills` at the same documented priority tier as `~/.grok/skills` (`grok inspect --json`, then `name == "retro-fleet"`). Codex shows no evidence of that discovery (`~/.codex/AGENTS.md` mentions are the user's own instruction prose — and gstack's `setup --host auto` plus `machine-setup` *copy into* that dir, which you would not do for a dir the host already reads). Exit criterion: **mm maintains a skill link only for hosts that do not discover `~/.claude/skills`.** Re-check with `grok inspect --json`.
 
 Two Grok levers, and they are not interchangeable:
 
@@ -435,6 +433,8 @@ Managing conflicts:
 
 **`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
 
+**`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.54. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` opencode block and records the name in `disabled_sources` so that push does not mint deletion tombstones. mm also removes the `~/.config/opencode/skills/retro-fleet` link it created (v0.12.55); a link you made yourself is left alone. To keep syncing that directory, give the source a name mm does not own — `[[sync.sources]]` accepts any name, so `name = "opencode-local"` with the same `path` and `include_dirs` syncs it as an ordinary generic source today, unchanged.
+
 **`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
@@ -487,9 +487,10 @@ pipx uninstall mind-meld
 # at that path is left alone. Installation now also requires source consent
 # (or `mm install-skills --agent`); cleanup still matches on readlink.
 # Covers every agent mm has ever created a store-backed skill link for,
-# including the retired OpenCode path. Track 37B leaves that link on disk
-# rather than growing a reaper; this loop is the only cleanup. Do not
-# delete the opencode path as a "prose sweep" — it is an explicit exception.
+# including the retired OpenCode path. mm removes its own OpenCode link on
+# upgrade (v0.12.55); this loop is belt-and-braces for a machine that
+# uninstalls without ever running the retirement release. Do not delete
+# the opencode path as a "prose sweep" — it is an explicit exception.
 # `mm diag` prints the authoritative live list if you still have `mm`; this
 # loop does not need it.
 for l in ~/.claude/skills/retro-fleet ~/.codex/skills/retro-fleet ~/.config/opencode/skills/retro-fleet; do
