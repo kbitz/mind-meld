@@ -30,7 +30,7 @@ Claude Code stores sessions, todos, artifacts, and tool results locally in `~/.c
 - Multi-user collaboration or sharing sessions between users.
 - GUI or web interface.
 - Cross-platform support (Mac-only — uses iCloud Drive).
-- Syncing host session transcripts (Claude, Codex, OpenCode, or Grok).
+- Syncing host session transcripts (Claude, Codex, or Grok).
 - Walking a host home directory that mixes credentials and chat as a sync source.
 
 ---
@@ -588,7 +588,7 @@ Each sync source has a type that determines how files are discovered:
 SYNCED_SUBDIRS = ["memory", "todos"]
 ```
 
-**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for `~/.gstack` and for the Codex / OpenCode customization allowlists.
+**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for `~/.gstack` and for the Codex customization allowlist.
 
 **`grok` type** — Claude-shaped walker for `~/.grok`. Hardcodes `skills/`, `commands/`, and `rules/` at the source root. Sessions, credentials, and `config.toml` are never entered. See [Host Interchangeability](#host-interchangeability).
 
@@ -705,13 +705,12 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
 - **`grok`** — Claude-shaped walker. Scans `skills/`, `commands/`, and `rules/` at `~/.grok`. Sessions and `auth.json` are never synced.
-- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex / OpenCode customization allowlists.
+- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex customization allowlist.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):
 
 - **`gstack` / `gstack-extend` / `mm-events`** — structured activity and the fleet event log.
 - **`codex`** — `skills/`, `plugins/`, `AGENTS.md`. Not `config.toml` (credentials). Not `sessions/`.
-- **`opencode`** — agents / commands / modes / plugins / skills / tools / `AGENTS.md`. Whole-file config stays local.
 
 **`grok` is a source type** (`type: "grok"`). The walker hardcodes `skills/`, `commands/`, and `rules/` at the source root — the same shape as Claude's hardcoded `memory/` + `todos/`. Sessions, `auth.json`, and `config.toml` are never walked. `mm enable-source grok` is the one verb: it appends the source and keeps the usage-consent bit so token totals still publish. See [Host Interchangeability](#host-interchangeability).
 
@@ -749,7 +748,7 @@ v2 manifests carry a `sources` dict keyed by source name. Compat with older on-d
 
 ## Host Interchangeability
 
-Claude, Codex, and Grok are peers for **fleet usage display**, not for **whole-home-directory sync**. Grok also has a narrow customization source. OpenCode is no longer a usage-reader host; an `opencode` sync source still ships until it is retired. The design and the remaining work live in `docs/designs/host-parity.md`. This section is the product contract.
+Claude, Codex, and Grok are the three hosts. They are peers for **fleet usage display**, not for **whole-home-directory sync**. Grok also has a narrow customization source. There is no OpenCode sync source and no OpenCode skill-link row. The design and the remaining work live in `docs/designs/host-parity.md`. This section is the product contract.
 
 ### What "parity" means
 

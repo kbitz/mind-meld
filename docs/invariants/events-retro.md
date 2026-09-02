@@ -977,10 +977,14 @@ Source dir on disk is `retro_fleet/` (underscore — Python identifier so
 
 **`AGENT_ROWS` is the one table.** Every consumer — descriptors,
 `skill_targets()`, the installer, diagnosis, test isolation, and the
-real-home guard — derives from it. Canonical `~`-relative roots live on
+real-home guard — derives from it. It lists **active supported agents**;
+removal is a deliberate retirement, not a reordering (Track 37C dropped
+the OpenCode row). Canonical `~`-relative roots live on
 the row; `_TEST_SKILL_ROOT_OVERRIDES` is empty in production and is the
 only thing tests patch to redirect paths. The guard derives from
-`AGENT_ROWS`, never from the override map. A call-time `SkillTarget`
+`AGENT_ROWS`, never from the override map. `_real_guard_paths` keeps
+`~/.config/opencode/skills` as an explicit extra after that retirement
+("retired but still guarded — the link is still on disk"). A call-time `SkillTarget`
 descriptor owns each agent root. `SkillInstallResult` reports
 `installed`, `unchanged`, `unavailable`, `dangling-ours`,
 `dangling-ours-legacy`, `foreign`, `failed`, or `declined`. `skill_src` is provenance
@@ -1056,7 +1060,11 @@ owns every `[skills]` check. Config absent (`None`) → every registry key
 `agents` present → that list ∩ known keys; use **key-absence** (`"agents"
 in skills`), never a falsy check — `[]` is a `ConfigError` pointing at
 `maintain_links = false`. Else derive from the passed-in source names.
-Unknown names in `agents` are accepted and inert.
+Unknown names in `agents` are accepted and inert. A non-empty `agents`
+list whose intersection with known keys is empty emits one `mm: notice:`
+per process (`_EMPTY_AGENTS_NOTICE_EMITTED`); every link is then
+`declined`. That is how `[skills] agents = ["opencode"]` behaves after
+Track 37C.
 
 `_row_is_consented(key, may_create)` is `may_create is None or key in
 may_create`. `None` still means allow-all (fresh-machine intent). The
@@ -1125,7 +1133,13 @@ whose row has a success marker means the user removed a link mm created, and
 why a `mm uninstall-skills` verb, a `[skills] revoked` denylist, and a whole
 third policy axis all looked necessary. None of them were. No normal CLI tool
 needs a denylist to make `uninstall` stick; it needs an installer that does not
-resurrect.
+resurrect. Track 37C's one-shot OpenCode reaper is a different path: mm
+removing a link **it** created and no longer maintains, guarded by
+`readlink(target) == store`. Interactive `mm push` calls it from
+`_push_core` even when the 24h skill-link gate is shut; `mm init` and
+`mm install-skills` reach it through `_ensure_retro_skill_links`. An
+absent link after that reaper is not user intent in the 28A sense, and
+28A does not forbid mm from deleting its own retired link.
 
 Absent-plus-marker is the ONLY state that means intent. Every other broken state
 keeps the link itself — `dangling-ours` (store gone), `dangling-ours-legacy`
