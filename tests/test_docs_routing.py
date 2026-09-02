@@ -635,6 +635,17 @@ def test_bin_check_exists_and_is_executable() -> None:
         f"git mode for bin/check is {listed.stdout!r}, not 100755 — "
         "CI would die with permission denied before this test runs"
     )
+    setup = ROOT / "bin" / "conductor-setup"
+    assert setup.is_file()
+    setup_listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-s", "--", "bin/conductor-setup"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert setup_listed.stdout.startswith("100755"), (
+        f"git mode for bin/conductor-setup is {setup_listed.stdout!r}, not 100755"
+    )
 
 
 def test_agents_md_testing_names_bin_check() -> None:

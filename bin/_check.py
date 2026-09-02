@@ -509,15 +509,15 @@ def main(argv: list[str] | None = None) -> int:
             "invoke ./bin/check via its real path in a mind-meld clone",
         )
 
-    python, version = resolve_interpreter()
-
-    mm_venv = os.environ.get("MM_VENV")
+    skip_bootstrap = (
+        bool(os.environ.get("MM_VENV")) or args.no_bootstrap or bool(os.environ.get("VIRTUAL_ENV"))
+    )
+    python: str | None = None
     bootstrapped: Path | None = None
-    if mm_venv:
-        pass
-    elif args.no_bootstrap or os.environ.get("VIRTUAL_ENV"):
-        log("bootstrap skipped (--no-bootstrap or VIRTUAL_ENV)")
+    if skip_bootstrap:
+        log("bootstrap skipped (--no-bootstrap, VIRTUAL_ENV, or MM_VENV)")
     else:
+        python, version = resolve_interpreter()
         bootstrapped = ensure_venv(root, python, version, rebuild=args.rebuild)
 
     tool = tool_python(args, root, bootstrapped)
@@ -531,6 +531,7 @@ def main(argv: list[str] | None = None) -> int:
             "bootstrap did not produce a venv python, and --no-bootstrap had nothing to use",
             manual_recipe(python),
         )
+    log("tool %s" % tool)
 
     run_lint = not args.tests_only
     run_tests = not args.lint

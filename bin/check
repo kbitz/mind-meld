@@ -40,12 +40,20 @@ if [ -z "$launcher_py" ]; then
 fi
 
 if [ -z "$launcher_py" ]; then
-  printf '%s\n' \
-    "bin/check: no Python interpreter on PATH." \
-    "cause: looked for python3.13, python3.12, python3.11, python3." \
-    "fix: install Python 3.13 (or 3.12 / 3.11) and put it on PATH." \
-    "     do not run xcode-select --install: /usr/bin/python3 is 3.9.6," \
-    "     below requires-python >=3.11, and that advice causes a second failure." >&2
+  if [ "${CONDUCTOR_IS_LOCAL:-}" = "0" ]; then
+    printf '%s\n' \
+      "bin/check: no Python interpreter on PATH." \
+      "cause: looked for python3.13, python3.12, python3.11, python3." \
+      "fix: install Python 3.13 (or 3.12 / 3.11) and put it on PATH." \
+      "     this is a Linux cloud workspace; brew / xcode-select will not help." >&2
+  else
+    printf '%s\n' \
+      "bin/check: no Python interpreter on PATH." \
+      "cause: looked for python3.13, python3.12, python3.11, python3." \
+      "fix: install Python 3.13 (or 3.12 / 3.11) and put it on PATH." \
+      "     do not run xcode-select --install: /usr/bin/python3 is 3.9.6," \
+      "     below requires-python >=3.11, and that advice causes a second failure." >&2
+  fi
   exit 1
 fi
 
