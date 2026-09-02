@@ -1135,9 +1135,11 @@ third policy axis all looked necessary. None of them were. No normal CLI tool
 needs a denylist to make `uninstall` stick; it needs an installer that does not
 resurrect. Track 37C's one-shot OpenCode reaper is a different path: mm
 removing a link **it** created and no longer maintains, guarded by
-`readlink(target) == store`. An absent link after that reaper is not user
-intent in the 28A sense, and 28A does not forbid mm from deleting its own
-retired link.
+`readlink(target) == store`. Interactive `mm push` calls it from
+`_push_core` even when the 24h skill-link gate is shut; `mm init` and
+`mm install-skills` reach it through `_ensure_retro_skill_links`. An
+absent link after that reaper is not user intent in the 28A sense, and
+28A does not forbid mm from deleting its own retired link.
 
 Absent-plus-marker is the ONLY state that means intent. Every other broken state
 keeps the link itself — `dangling-ours` (store gone), `dangling-ours-legacy`

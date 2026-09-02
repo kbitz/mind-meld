@@ -2962,6 +2962,13 @@ def _push_core(
     # gate stays open and runs the full installer prologue on every push.
     if not dry_run:
         try:
+            if not quiet:
+                # OpenCode retirement is independent of the 24h drift gate.
+                # Interactive push is the advertised trigger; a fresh
+                # Claude/Codex marker must not skip the reaper. Autopush
+                # still does not mutate. Init / install-skills reach the
+                # same function via _ensure_retro_skill_links.
+                skill_link._reap_retired_opencode_skill_link()
             if skill_link._skill_links_check_due(may_create=may_create):
                 skill_link._ensure_retro_skill_links(
                     dry_run=False,

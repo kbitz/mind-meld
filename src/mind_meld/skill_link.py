@@ -847,12 +847,14 @@ def _ensure_retro_skill_links(
     """
     write = bool(allow_mutate and not dry_run)
     if write:
-        # One-shot retirement of the OpenCode skill link mm created.
-        # This function already runs behind the 24h drift gate on push,
-        # and mm init / mm install-skills also reach it. Not on mm status
-        # or mm diag — those are read-only. Track 28A says an ABSENT link
-        # is user intent and must not be recreated; this path is mm
-        # removing a link it created and no longer maintains.
+        # Retirement of the OpenCode skill link mm created. Init and
+        # mm install-skills reach it here. Interactive mm push also
+        # calls it from _push_core even when the 24h drift gate is
+        # shut, so a fresh Claude/Codex marker cannot skip cleanup.
+        # Not on mm status or mm diag — those are read-only. Track 28A
+        # says an ABSENT link is user intent and must not be recreated;
+        # this path is mm removing a link it created and no longer
+        # maintains.
         _reap_retired_opencode_skill_link()
     descriptors = _skill_target_descriptors()
     results: list[SkillInstallResult | None] = [None] * len(descriptors)

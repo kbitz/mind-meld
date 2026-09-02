@@ -2185,6 +2185,44 @@ class TestRetiredOpencodeSkillLink:
         assert checked.exists()
         assert conflict.exists()
 
+    def test_interactive_push_reaps_even_when_drift_gate_is_shut(
+        self, _isolate_paths, skill_src, store, monkeypatch
+    ):
+        skill_link._ensure_retro_skill_links(may_create=None)
+        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
+        opencode_link.parent.mkdir(parents=True, exist_ok=True)
+        opencode_link.symlink_to(store)
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create: False)
+        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
+        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "sync": {"max_file_size": 1024},
+        }
+        assert cli_module._push_core(config, "pw", 1024) is None
+        assert not opencode_link.exists()
+        assert not opencode_link.is_symlink()
+
+    def test_autopush_does_not_reap_when_drift_gate_is_shut(
+        self, _isolate_paths, skill_src, store, monkeypatch
+    ):
+        skill_link._ensure_retro_skill_links(may_create=None)
+        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
+        opencode_link.parent.mkdir(parents=True, exist_ok=True)
+        opencode_link.symlink_to(store)
+        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create: False)
+        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
+        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+        config = {
+            "device": {"id": "dev-a", "name": "Mac A"},
+            "sync": {"max_file_size": 1024},
+        }
+        assert cli_module._push_core(config, "pw", 1024, quiet=True) is None
+        assert opencode_link.is_symlink()
+        assert os.readlink(opencode_link) == str(store)
+
     def test_skills_agents_that_becomes_empty_after_retirement_surfaces_a_notice(
         self, _isolate_paths, capsys, monkeypatch
     ):

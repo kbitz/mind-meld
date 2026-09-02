@@ -14,6 +14,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 - `_real_guard_paths` still refuses writes to `~/.config/opencode/skills` from tests (retired but still guarded).
 - `[skills] agents` that names only retired agents now emits a notice instead of silently declining every link.
+- Interactive `mm push` runs the OpenCode reaper even when the 24h skill-link drift gate is shut (fresh Claude/Codex markers). `mm autopush` still does not.
 
 ## [0.12.54] - 2026-09-02
 
