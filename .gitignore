@@ -1,4 +1,5 @@
 .venv/
+.mm-check.lock
 __pycache__/
 *.pyc
 *.egg-info/

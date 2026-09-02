@@ -1,0 +1,52 @@
+#!/bin/sh
+# bin/check — POSIX launcher for the stdlib driver.
+#
+# Resolves the repo root from THIS script's location, not $PWD: agent
+# threads reset cwd between Bash calls and this fleet forbids `cd` in
+# caller commands, so relative invocation is a genuine third blocker
+# alongside the missing PATH and the compound-command rule.
+#
+# Not bash. /bin/bash is 3.2.57 (2007) on macOS; `#!/usr/bin/env bash`
+# finds Homebrew 5 on this machine and 3.2 elsewhere — the silent
+# portability trap this Track exists to remove.
+#
+# The driver is stdlib-only and must start even on /usr/bin/python3
+# (3.9.6) so it can print the "need >=3.11, CLT is 3.9.6" remedy
+# itself rather than dying on a syntax the launcher cannot explain.
+
+set -eu
+
+# FIRST executable line: repo root from the script's own location.
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+DRIVER="$ROOT/bin/_check.py"
+export MM_CHECK_ROOT="$ROOT"
+
+launcher_py=
+if [ -n "${MM_PYTHON:-}" ]; then
+  if [ -x "$MM_PYTHON" ]; then
+    launcher_py=$MM_PYTHON
+  elif command -v "$MM_PYTHON" >/dev/null 2>&1; then
+    launcher_py=$(command -v "$MM_PYTHON")
+  fi
+fi
+
+if [ -z "$launcher_py" ]; then
+  for cand in python3.13 python3.12 python3.11 python3; do
+    if command -v "$cand" >/dev/null 2>&1; then
+      launcher_py=$(command -v "$cand")
+      break
+    fi
+  done
+fi
+
+if [ -z "$launcher_py" ]; then
+  printf '%s\n' \
+    "bin/check: no Python interpreter on PATH." \
+    "cause: looked for python3.13, python3.12, python3.11, python3." \
+    "fix: install Python 3.13 (or 3.12 / 3.11) and put it on PATH." \
+    "     do not run xcode-select --install: /usr/bin/python3 is 3.9.6," \
+    "     below requires-python >=3.11, and that advice causes a second failure." >&2
+  exit 1
+fi
+
+exec "$launcher_py" "$DRIVER" "$@"

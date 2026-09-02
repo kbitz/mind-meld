@@ -92,9 +92,18 @@ Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `
 Version source of truth: `pyproject.toml` (read by `__init__.py` via `importlib.metadata.version("mind-meld")`, fallback `"0.0.0+dev"` for uninstalled source-tree runs). No `VERSION` file.
 
 ## Testing
-pytest. Use tmp_path for local backend. Run: `pytest tests/`
+`./bin/check` is the verification entry point. It bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest, in that order (cheap gates first). Default pytest scope is `tests/`. pytest. Use tmp_path for local backend.
 
-Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). Run `ruff check .` and `ruff format --check .` locally before pushing — CI runs both as a separate `lint` job and will block merges on drift. Rule set: `E`/`F`/`W`/`I` (isort enforcement).
+```
+./bin/check                         # full portable checks
+./bin/check tests/test_config.py    # scoped pytest; still lints the whole repo
+```
+
+A scoped pytest still lints the whole repo — that is intended (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Cards describe verification *scope*; they must not know where Python lives.
+
+**Card convention:** every roadmap `verify:` field is `./bin/check <scope>`. `/roadmap`'s card template has no `verify:` field, so the drafting agent copies this documented command on every regeneration. Do not write bare `pytest` or `./.venv/bin/...` into cards.
+
+Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). `./bin/check` runs `ruff check .` and `ruff format --check .` before pytest. CI runs those same two as steps inside the single `ci` job (not a separate `lint` job) and will block merges on drift. Rule set: `E`/`F`/`W`/`I` (isort enforcement).
 
 The PYTEST_CURRENT_TEST guard on `crypto.store_passphrase_in_keyring` (v0.11.11) is load-bearing — see `docs/invariants/init-devices.md` for the rationale.
 
