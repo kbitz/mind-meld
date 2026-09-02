@@ -194,6 +194,78 @@ class TestBootstrap:
         mod.ensure_venv(root, python, version, rebuild=False)
         assert len(pip_calls) == 2, "stamp did not invalidate after pyproject.toml changed"
 
+    def test_unowned_healthy_venv_is_used_not_claimed(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """A developer-managed .venv must stay unowned. Claiming it
+        would let a later --rebuild or health miss rmtree it."""
+        mod = load_check()
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+        venv = root / ".venv"
+        venv.mkdir()
+        sentinel = venv / "keep-me"
+        sentinel.write_text("stay\n", encoding="utf-8")
+        (venv / "bin").mkdir()
+        py = venv / "bin" / "python"
+        py.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        py.chmod(py.stat().st_mode | stat.S_IXUSR)
+
+        monkeypatch.setattr(mod, "venv_healthy", lambda _p: True)
+
+        def boom_create(*_a, **_k):
+            raise AssertionError("must not create a venv when one already exists")
+
+        pip_calls: list[object] = []
+        monkeypatch.setattr(mod, "_create_venv", boom_create)
+        monkeypatch.setattr(mod, "_pip_install", lambda *_a, **_k: pip_calls.append(1))
+
+        got = mod.ensure_venv(root, sys.executable, (3, 13, 0), rebuild=False)
+        assert got == venv
+        assert sentinel.is_file(), "unowned venv was mutated"
+        assert not (venv / ".mm-check-owner").is_file(), "claimed a venv we did not create"
+        assert pip_calls == []
+        err = capsys.readouterr().err
+        assert "unowned" in err
+        assert "will not rebuild or delete" in err
+
+    def test_rebuild_refuses_unowned_venv(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        mod = load_check()
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+        venv = root / ".venv"
+        venv.mkdir()
+        sentinel = venv / "keep-me"
+        sentinel.write_text("stay\n", encoding="utf-8")
+        (venv / "bin").mkdir()
+        py = venv / "bin" / "python"
+        py.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        py.chmod(py.stat().st_mode | stat.S_IXUSR)
+        monkeypatch.setattr(mod, "venv_healthy", lambda _p: True)
+        with pytest.raises(SystemExit) as ei:
+            mod.ensure_venv(root, sys.executable, (3, 13, 0), rebuild=True)
+        assert ei.value.code != 0
+        assert sentinel.is_file(), "--rebuild deleted a venv it does not own"
+        err = capsys.readouterr().err
+        assert "not owned" in err
+        assert "mv .venv .venv.bak" in err
+
+    def test_pip_install_passes_a_timeout(self, tmp_path: Path, monkeypatch) -> None:
+        import subprocess as sp
+
+        mod = load_check()
+        seen: dict[str, object] = {}
+
+        def fake_run(*_a, **kwargs):
+            seen.update(kwargs)
+            return sp.CompletedProcess(["pip"], 0)
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        mod._pip_install(sys.executable, tmp_path)
+        assert seen.get("timeout") == mod.PIP_TIMEOUT_S
+
     def test_unowned_broken_venv_is_not_deleted(self, tmp_path: Path, monkeypatch, capsys) -> None:
         mod = load_check()
         root = tmp_path / "repo"

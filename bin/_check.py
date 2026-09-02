@@ -24,6 +24,7 @@ OWNER_NAME = ".mm-check-owner"
 OWNER_BODY = "mind-meld-bin-check\n"
 STAMP_NAME = ".mm-check-stamp"
 LOCK_NAME = ".mm-check.lock"
+PIP_TIMEOUT_S = 300
 
 
 class Args:
@@ -270,11 +271,19 @@ def bootstrap_lock(root: Path):
 
 def _pip_install(python: str, root: Path) -> None:
     log("pip install -e '.[dev]'")
-    proc = subprocess.run(
-        [python, "-m", "pip", "install", "-e", ".[dev]"],
-        cwd=str(root),
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [python, "-m", "pip", "install", "-e", ".[dev]"],
+            cwd=str(root),
+            check=False,
+            timeout=PIP_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        die(
+            f"pip install timed out after {PIP_TIMEOUT_S}s",
+            "PyPI hung, or a wheel compile ran long",
+            "retry, or run the manual fallback:\n" + manual_recipe(python),
+        )
     if proc.returncode != 0:
         die(
             f"pip install failed (exit {proc.returncode})",
@@ -329,9 +338,18 @@ def ensure_venv(root: Path, python: str, version: tuple[int, int, int], rebuild:
                     "refusing to delete a venv we did not create",
                     "  mv .venv .venv.bak\n  ./bin/check",
                 )
-            mark_owned(venv)
-            owned = True
-            log("claimed existing .venv (was healthy, unowned)")
+            if rebuild:
+                die(
+                    "--rebuild refused: .venv is not owned by bin/check",
+                    f"no ownership marker at {venv / OWNER_NAME}; "
+                    "refusing to delete a venv we did not create",
+                    "  mv .venv .venv.bak\n  ./bin/check",
+                )
+            # Use it. Do not stamp, pip-install, or rmtree: claiming
+            # ownership would let a later --rebuild / health miss delete
+            # a developer-managed environment.
+            log("using existing unowned .venv (will not rebuild or delete it)")
+            return venv
 
         if rebuild and owned:
             log("rebuilding .venv (--rebuild)")

@@ -5,10 +5,12 @@
 # run on every Mac that creates a workspace. Keep this file a pointer
 # target with no inline policy — the review surface is a normal PR.
 #
-# Never block workspace creation. trap EXIT 0 so a missing log dir or a
-# hung-looking pip still cannot sit between the user and the workspace.
-# CONDUCTOR_IS_LOCAL is echoed here; remedy-line branching lives in
-# bin/_check.py.
+# Never block workspace creation. trap EXIT 0 covers the parent (missing
+# log dir, etc). The pre-warm itself is backgrounded: trap EXIT does not
+# fire until the child terminates, so a hung pip in the foreground would
+# still stall create. The next ./bin/check serializes on the bootstrap
+# lock if this job is still running. CONDUCTOR_IS_LOCAL is echoed here;
+# remedy-line branching lives in bin/_check.py.
 
 trap 'exit 0' EXIT
 
@@ -27,4 +29,4 @@ LOG="$LOG_DIR/.conductor-setup.log"
   else
     echo "conductor-setup: bin/check --lint exited $?"
   fi
-} >"$LOG" 2>&1 || echo "conductor-setup: could not write $LOG" >&2
+} >"$LOG" 2>&1 &

@@ -646,6 +646,14 @@ def test_bin_check_exists_and_is_executable() -> None:
     assert setup_listed.stdout.startswith("100755"), (
         f"git mode for bin/conductor-setup is {setup_listed.stdout!r}, not 100755"
     )
+    setup_body = _code_without_comments(setup.read_text(encoding="utf-8"))
+    assert "trap 'exit 0' EXIT" in setup_body
+    # trap EXIT 0 fires after the child exits. A hung pip in the
+    # foreground would still stall workspace create; the redirected
+    # group must be backgrounded.
+    assert "2>&1 &" in setup_body, (
+        "bin/conductor-setup must background the pre-warm; trap EXIT 0 is not a timeout"
+    )
 
 
 def test_agents_md_testing_names_bin_check() -> None:
