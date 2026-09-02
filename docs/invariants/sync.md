@@ -37,11 +37,11 @@ The four v0.12.51 additions, each with the observed conflict count:
 | `projects/*/decisions.active.json` | gstack | 18 | Derived snapshot, ONE minified `JSON.stringify` line |
 | `skills/.system/*` | codex | 16 | Codex's own bundled payload, version-stamped in `.codex-system-skills.marker` |
 | `projects/*/brain-cache/*` | gstack | 7 | gbrain per-machine cache |
-| `_GENERATED_HOST_SKILL_GLOBS` | codex + opencode | 2 | gstack-extend renders one shared skill per host, byte-differently |
+| `_GENERATED_HOST_SKILL_GLOBS` | codex | 2 | gstack-extend renders one shared skill per host, byte-differently. Historically also opencode; that source was retired in Track 37B. |
 
 **`decisions.active.json` — do NOT "fix" this with a JSON merge strategy.** It is a JSON array of records each carrying a unique `id`, so a union-by-`id` merge in `merge.py` looks obviously right and is wrong: `computeActive()` in gstack deliberately **omits superseded decisions**, so a union would resurrect every decision any machine had retired. Exclusion is the only correct resolution. It is also lossless — the source of truth `projects/*/decisions.jsonl` stays in scope and merges cleanly (37 clean merges on record over the same window), and `gstack-decision-search` self-heals via `rebuildSnapshot()` when the snapshot is absent or empty. Pinned by `test_gstack_derived_cache_globs_match_observed_paths`, which asserts `decisions.jsonl` and `decisions.archive.jsonl` are NOT matched by either new glob.
 
-**`_GENERATED_HOST_SKILL_GLOBS` must stay symmetric across the codex and opencode entries.** These are the same logical skill rendered twice; excluding it from one host only leaves the other half of the pair conflicting on every pull. Pinned by `test_generated_host_skill_globs_shared_by_codex_and_opencode`. The list is splatted (`*_GENERATED_HOST_SKILL_GLOBS`) rather than shared by reference because `get_default_source` hands these lists to callers that mutate them — pinned by `test_generated_host_skill_lists_are_not_aliased`.
+**`_GENERATED_HOST_SKILL_GLOBS` is kept as a shared constant even though only the codex entry consumes it after Track 37B retired the opencode source.** The symmetry with opencode is historical — the same logical skill used to be rendered twice, and excluding it from one host only left the other half of the pair conflicting on every pull. Track 39A is `blocked-by: 37B` so it can inherit this mechanism rather than re-extracting the list. The list is still splatted (`*_GENERATED_HOST_SKILL_GLOBS`) rather than shared by reference because `get_default_source` hands these lists to callers that mutate them — pinned by `test_codex_entry_carries_every_generated_host_skill_glob` and `test_generated_host_skill_lists_are_not_aliased` (`codex["exclude_patterns"] is not _GENERATED_HOST_SKILL_GLOBS`).
 
 **Detection is by name, not by marker — and that is a known limitation with TWO directions.** gstack-extend drops a `.extend-root` file in each dir it renders, which is the robust signal, but `exclude_patterns` are fnmatch globs against a relative path and cannot express "skip the directory CONTAINING this file." Same shape as the pre-existing `skills/gstack-*` convention.
 
@@ -74,13 +74,16 @@ and a filtered manifest there orphans live peer blobs (codex-2 #1 hazard,
 mirrored from exclude_patterns).
 
 **Tombstone-suppression invariant.** Disabling a source on machine A and
-pushing must NOT generate deletion tombstones for that source's files (would
-propagate fleet-wide deletion). Re-enabling brings the source's files back as
+pushing must NOT generate deletion tombstones for that source's files.
+Spurious tombstones suppress restoration and propagation of a missing path
+across upgraded and stale peers until expiry (`manifest.TOMBSTONE_TTL_DAYS
+= 30`, re-broadcast newest-wins by `collect_tombstones`). Existing local
+bytes are never removed. Re-enabling brings the source's files back as
 fresh entries (not tombstones). Sidecar recovery filters too so a corrupt-
 manifest recovery on a freshly-disabled config doesn't re-introduce
 disabled-source paths via the sidecar. All five scenarios (push, re-enable,
-pull, sidecar recovery, gc) pinned in
-`tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`.
+pull, sidecar recovery, gc) plus the Track 37B retirement transition pinned
+in `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`.
 
 `seen_sources.py` (new module, mirrors pullhistory.py shape) tracks per-machine
 acknowledgment of source names at `~/.config/mind-meld/seen-sources.json`
@@ -159,6 +162,6 @@ The omission is tombstone-safe only because `_push_core` filters the recovered p
 
 On pull, `_download_and_apply` checks each destination before containment resolution. It returns `skipped` with a breadcrumb when the destination itself is a symlink (including dangling) or any component strictly below the source root is one. This prevents `atomic_write_bytes` from replacing a local link or following it outside the source. `_apply_incoming_file` repeats the leaf check for direct callers. A symlinked source root remains allowed. Skipping is intentional rather than a conflict: a conflict outcome would create a new `.sync-conflict-*` sidecar on every pull beside a link that can never become writable.
 
-Default Codex/OpenCode exclusions additionally cover the known generated skill namespaces (`skills/gstack-*`, `skills/log-work/*`, and `skills/retro-fleet/*`) while leaving hand-authored skill trees syncable. v0.12.51 extended that set: `skills/.system/*` (Codex only — its own bundled payload) and `config._GENERATED_HOST_SKILL_GLOBS` (both hosts — gstack-extend's per-host renders). See "Generated files are not sync data" above for the counts and the reasoning. `manifest.GROK_EXCLUDE_PATTERNS` deliberately did NOT follow; the omission is a measured absence documented at that constant. These globs are migration-safe through the existing exclude consumer-boundary filter; dynamic symlink filtering remains the forward-compatible safety net for new installer layouts and explicit source configurations.
+Default Codex exclusions additionally cover the known generated skill namespaces (`skills/gstack-*`, `skills/log-work/*`, and `skills/retro-fleet/*`) while leaving hand-authored skill trees syncable. v0.12.51 extended that set: `skills/.system/*` (Codex only — its own bundled payload) and `config._GENERATED_HOST_SKILL_GLOBS` (gstack-extend's per-host renders; historically shared with the opencode source, which Track 37B retired). See "Generated files are not sync data" above for the counts and the reasoning. `manifest.GROK_EXCLUDE_PATTERNS` deliberately did NOT follow; the omission is a measured absence documented at that constant. These globs are migration-safe through the existing exclude consumer-boundary filter; dynamic symlink filtering remains the forward-compatible safety net for new installer layouts and explicit source configurations.
 
 Honest writers (`manifest.walk_*`) build rel keys via `path.relative_to(base)` which by construction NEVER produces `..` segments or absolute paths, so the validator only fires on attacker-crafted manifests; legitimate sync is unaffected. Mirrors `storage/keys.py:_validate_component`'s sibling defense for the sha256 component (sha is hex-bounded, rel_path is free-form, so rel_path is strictly the more reachable surface). Pinned by `tests/test_manifest.py::TestLoadManifestRelPathTraversal` (load-boundary rejection: 11 cases) and `tests/test_pull_helpers.py::TestDownloadAndApplyPathTraversalGuard` (apply-site belt-and-braces: 3 cases). Fuzz strategies in `tests/test_manifest_fuzz.py` were narrowed to the new `valid_rel_path_strategy` for round-trip tests; the wild-input invariant (normalize tolerates garbage) remains covered by `arbitrary_dict_strategy` because `normalize_manifest` itself is unchanged.
