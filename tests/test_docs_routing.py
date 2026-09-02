@@ -1,4 +1,5 @@
-"""CLAUDE.md's invariant pointer table must route to code that exists.
+"""Doc-integrity pins: CLAUDE.md's invariant pointer table, and the
+hand-written files that must not drift (AGENTS.md, README, .github/).
 
 The table is the first thing an agent reads before editing a load-bearing
 surface. Before Track 16A it was keyed entirely on ``cli.py:<function>``, so the
@@ -11,12 +12,18 @@ each opening one of the new modules.
 `docs/ROADMAP.md` Track 18A notes every pinned LINE number in the invariant docs
 has already drifted at least once. This is the durable answer: cite symbols, and
 make CI prove the citations resolve.
+
+.github/ joined this file in Track 37A. Workflows are load-bearing contracts,
+not comments in a routing table: ``assert "bin/check" in ci_yml`` passes on a
+comment, which is why those tests strip comments before asserting.
 """
 
 from __future__ import annotations
 
 import ast
+import os
 import re
+import stat
 from pathlib import Path
 
 import pytest
@@ -594,3 +601,81 @@ def test_readme_diag_json_fields_match_emitted_keys() -> None:
     assert missing_hsd == [], f"README does not name host_skill_discovery fields {missing_hsd}"
     missing_rows = [k for k in _SKILL_LINKS_ROW_FIELDS if f"`{k}`" not in readme]
     assert missing_rows == [], f"README does not name skill_links row fields {missing_rows}"
+
+
+def _code_without_comments(text: str) -> str:
+    """Strip `# ...` tails so a mention in a comment cannot satisfy the pin."""
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def test_bin_check_exists_and_is_executable() -> None:
+    """Closes the lost-mode-bit failure.
+
+    git can add a new file as 100644; CI then dies with permission denied
+    on the first run of the script that exists to make CI and local match.
+    os.access is the working-tree half; ``git ls-files -s`` showing 100755
+    is the committed half — this test runs in CI on a fresh checkout, so
+    a missing +x bit fails here before the job tries to exec the script.
+    """
+    path = ROOT / "bin" / "check"
+    assert path.is_file(), "bin/check is missing — ./bin/check is the verify contract"
+    mode = path.stat().st_mode
+    assert mode & stat.S_IXUSR, f"{path} is not executable (mode {oct(mode)})"
+    assert os.access(path, os.X_OK)
+    driver = ROOT / "bin" / "_check.py"
+    assert driver.is_file(), "bin/_check.py is missing — the launcher execs it"
+
+
+def test_agents_md_testing_names_bin_check() -> None:
+    """Root-cause pin for the eight bare-pytest verify: fields.
+
+    AGENTS.md ## Testing said ``Run: pytest tests/``. /roadmap's card template
+    has no verify: field, so the drafting agent copies this documented command
+    on every regeneration (at 620ae1e all 10 lines were bare pytest). Without
+    this assertion the doc drifts back and the next regen silently undoes
+    Track 37A. Do not police ROADMAP.md's verify: strings — that file is
+    regenerated wholesale by a generator with no such field, so that would
+    be a tripwire on normal output.
+    """
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "## Testing" in text
+    start = text.index("## Testing")
+    end = text.index("## CI", start)
+    section = text[start:end]
+    assert "./bin/check" in section, (
+        "AGENTS.md ## Testing must name ./bin/check — that is the command "
+        "the next /roadmap regeneration will copy into every verify: field"
+    )
+    assert "pytest tests/" not in section, (
+        "AGENTS.md ## Testing still documents bare `pytest tests/`, which is "
+        "how the eight unrunnable verify: fields were authored"
+    )
+
+
+def test_ci_yml_invokes_bin_check_as_a_command() -> None:
+    """ci.yml's portable-check step must actually run ./bin/check.
+
+    ``assert "bin/check" in ci_yml`` passes on the comment that explains
+    why we call it. Strip comments first. Do not assert "ci.yml has no
+    other verification step" — keyring and the wheel smoke correctly stay.
+    """
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    body = _code_without_comments(ci)
+    assert "./bin/check --no-bootstrap" in body, (
+        "ci.yml must invoke ./bin/check --no-bootstrap as a command, not "
+        "only mention bin/check in a comment"
+    )
+
+
+def test_release_yml_latest_advance_compares_tag_to_head() -> None:
+    """latest must not move to an untagged commit.
+
+    The step used to force-push HEAD unconditionally, so any pyproject.toml
+    edit published an untagged commit under the already-released version
+    string. Comments describe the comparison; this asserts the shell runs it.
+    """
+    text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    body = _code_without_comments(text)
+    assert 'git rev-parse "$tag^{commit}"' in body
+    assert "git rev-parse HEAD" in body
+    assert "::warning::" in body
