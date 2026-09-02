@@ -77,6 +77,14 @@ jobs:
 
       - name: Extract CHANGELOG body for this version
         id: notes
+        # Skip when this push is not a release: the version's tag AND Release
+        # already exist, so there is nothing to publish. Without this guard a
+        # non-release pyproject.toml edit (dev-dep bump, classifier tweak)
+        # still extracts notes successfully, then no-ops the tag/Release
+        # steps, and the only remaining way to turn main's Release run red
+        # is this step failing on a missing/empty section — which it
+        # shouldn't even be running.
+        if: ${{ steps.check.outputs.tag_exists == 'false' || steps.check.outputs.release_exists == 'false' }}
         run: |
           version="${{ steps.ver.outputs.version }}"
           notes_file="${RUNNER_TEMP}/release-notes.md"
@@ -127,16 +135,38 @@ jobs:
         # at released commits, so installs never get untagged WIP off main.
         #
         # Runs AFTER tag + Release so a transient push hiccup on this convenience
-        # ref never delays the primary artifacts. Unconditional + force =
-        # idempotent: a re-run force-pushes the same commit, and the tag/Release
-        # steps above no-op via their existence checks. `latest` is NOT a
-        # protected branch, so the workflow token can push to it directly
-        # (unlike main). HEAD is this release's commit.
+        # ref never delays the primary artifacts. Force-push is still how a
+        # re-run is idempotent, but the step is NOT unconditional: compare
+        # `$tag^{commit}` to HEAD inside the step (evaluated AFTER the
+        # tag-creation step). `if: tag_exists == 'true'` would invert the
+        # logic and skip latest-advance on every genuine first release.
+        # Lightweight tags (created at the tag step with `git tag "$tag"`)
+        # need `^{commit}` to resolve the pointed-at commit.
+        #
+        # Skip with ::warning::, not silence: a same-version-twice push
+        # otherwise looks green while `latest` stays frozen as main moves.
+        # Partial-failure re-runs still pass: (a) tag pushed / Release failed
+        # → tag points at HEAD, advance proceeds; (b) tag push failed → the
+        # tag step re-runs, then this comparison sees HEAD.
+        #
+        # `latest` is NOT a protected branch, so the workflow token can push
+        # to it directly (unlike main).
         run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          if ! git rev-parse "$tag^{commit}" >/dev/null 2>&1; then
+            echo "::warning::Skipping latest-advance: tag $tag is not in this checkout. latest stays put so it never tracks an untagged commit."
+            exit 0
+          fi
+          tag_commit=$(git rev-parse "$tag^{commit}")
+          head_commit=$(git rev-parse HEAD)
+          if [ "$tag_commit" != "$head_commit" ]; then
+            echo "::warning::Skipping latest-advance: tag $tag points at $tag_commit, HEAD is $head_commit. latest stays put so it never tracks an untagged commit."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git push origin "+HEAD:refs/heads/latest"
-          echo "Advanced latest -> $(git rev-parse HEAD) (${{ steps.ver.outputs.tag }})"
+          echo "Advanced latest -> $(git rev-parse HEAD) ($tag)"
 
       - name: Verify PROGRESS.md row exists
         run: |

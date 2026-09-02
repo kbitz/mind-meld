@@ -42,11 +42,19 @@ install's recorded `package_or_url` onto `@latest`, so the one nudge command bot
 un-sticks the old pin AND makes future plain `pipx upgrade mind-meld` work.
 
 The `latest` branch is force-advanced to each tagged release commit by the
-"Advance latest branch" step in `release.yml`. It only ever points at *released*
-commits, which is how `@latest` reconciles with the "tag = release; `main` may
-carry untagged WIP" discipline below: tracking `main` directly would leak WIP on
-a `--force` reinstall, tracking `latest` cannot. Keep README Install / Upgrading
-and `INSTALL_CMD` on `@latest`; never reintroduce a `@{tag}` pin.
+"Advance latest branch" step in `release.yml`. The step compares
+`git rev-parse "$tag^{commit}"` against `git rev-parse HEAD` *after* the
+tag-creation step and skips with `::warning::` when they differ, so a
+non-release `pyproject.toml` edit (dev-dep bump, no version change) cannot
+move `latest` onto an untagged commit. `^{commit}` is required because the
+tag step creates lightweight tags. Do not replace that comparison with
+`if: steps.check.outputs.tag_exists == 'true'` — that inverts the logic and
+skips latest-advance on every genuine first release. It only ever points at
+*released* commits, which is how `@latest` reconciles with the "tag = release;
+`main` may carry untagged WIP" discipline below: tracking `main` directly
+would leak WIP on a `--force` reinstall, tracking `latest` cannot. Keep
+README Install / Upgrading and `INSTALL_CMD` on `@latest`; never reintroduce
+a `@{tag}` pin.
 
 **Version source: tag-based.** `/repos/kbitz/mind-meld/tags?per_page=100` →
 `packaging.Version` filter (skip `is_prerelease` AND skip `local is not None` —

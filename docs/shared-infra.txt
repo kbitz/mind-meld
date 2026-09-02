@@ -4,13 +4,13 @@
 #
 # pyproject.toml is deliberately NOT here, even though mind-meld has no VERSION
 # file and pyproject is its version source of truth. Two Tracks that both claim
-# the same version merge cleanly in git, and .github/workflows/release.yml
-# guards tag and Release creation behind existence checks but force-advances
-# `latest` unconditionally (`git push origin "+HEAD:refs/heads/latest"`). The
-# second merge would therefore leave `latest` -- the ref `pipx install ...@latest`
-# and the upgrade nudge both track -- pointing at an untagged commit published
-# under an already-released version. Letting the packer serialize
-# release-bearing Tracks is the cheap guard against that, so keep it.
+# the same version merge cleanly in git, but only one tag can exist for that
+# version: the first merge creates it, and the second's code never gets tagged
+# at all. release.yml will not force-advance `latest` to an untagged commit
+# (the latest-advance step compares `git rev-parse "$tag^{commit}"` against
+# HEAD and skips with a warning), so a dev-dep-only pyproject.toml edit is
+# safe. Serialization of version-claiming Tracks is still the cheap guard
+# against the silent-lost-code case, so keep pyproject.toml out of this set.
 # See CLAUDE.md: parallel-workspace version collisions are a known deferred gap.
 
 CHANGELOG.md
