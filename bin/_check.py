@@ -24,15 +24,6 @@ OWNER_NAME = ".mm-check-owner"
 OWNER_BODY = "mind-meld-bin-check\n"
 STAMP_NAME = ".mm-check-stamp"
 LOCK_NAME = ".mm-check.lock"
-OUR_FLAGS = {
-    "-h",
-    "--help",
-    "--no-bootstrap",
-    "--lint",
-    "--tests",
-    "--serial",
-    "--rebuild",
-}
 
 
 class Args:
@@ -91,7 +82,7 @@ def parse_argv(argv: list[str]) -> Args:
             args.serial = True
         elif a == "--rebuild":
             args.rebuild = True
-        elif a.startswith("-") and a not in OUR_FLAGS:
+        elif a.startswith("-"):
             args.pytest_extra.extend(argv[i:])
             break
         else:
@@ -210,7 +201,6 @@ def resolve_interpreter() -> tuple[str, tuple[int, int, int]]:
             + (f"; MM_PYTHON={explicit}" if explicit else ""),
             _fix_no_python(found_notes),
         )
-        raise AssertionError("unreachable")
 
     path, ver = picked
     log("interpreter %s (%d.%d.%d)" % (path, ver[0], ver[1], ver[2]))
@@ -500,6 +490,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.help:
         print_help()
         return 0
+    if args.lint and args.tests_only:
+        die(
+            "--lint and --tests together do nothing",
+            "each flag skips the other, so both would skip every check and exit 0",
+            "  ./bin/check           # lint then pytest\n"
+            "  ./bin/check --lint    # ruff only\n"
+            "  ./bin/check --tests   # pytest only",
+        )
 
     root = repo_root()
     try:

@@ -74,6 +74,14 @@ class TestArgv:
         args = mod.parse_argv([])
         assert args.scope == ["tests/"]
 
+    def test_lint_and_tests_together_is_an_error(self, capsys) -> None:
+        mod = load_check()
+        with pytest.raises(SystemExit) as ei:
+            mod.main(["--lint", "--tests"])
+        assert ei.value.code != 0
+        err = capsys.readouterr().err
+        assert "--lint and --tests together" in err
+
 
 class TestInterpreter:
     def test_prefers_3_13_when_present(self, tmp_path: Path, monkeypatch) -> None:
@@ -274,10 +282,14 @@ def test_clean_clone_end_to_end(tmp_path: Path) -> None:
     env.pop("VIRTUAL_ENV", None)
     env.pop("MM_VENV", None)
     env.pop("MM_CHECK_ROOT", None)
+    env.pop("PYTEST_XDIST_WORKER", None)
+    env.pop("PYTEST_XDIST_WORKER_COUNT", None)
+    env.pop("PYTEST_CURRENT_TEST", None)
     proc = subprocess.run(
         [
             str(dest / "bin" / "check"),
             "--tests",
+            "--serial",
             "tests/test_docs_routing.py::test_claude_md_is_a_symlink_to_agents_md",
         ],
         cwd=str(dest),
