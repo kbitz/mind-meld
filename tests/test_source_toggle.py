@@ -213,6 +213,17 @@ class TestEnableSource:
         assert result.exit_code != 0
         assert "unknown source" in result.output
 
+    def test_enable_source_refuses_opencode_after_migration(self, cfg, isolated_seen_sources):
+        """After Track 37B, opencode is an ordinary unknown name — not a
+        not-yet-shipped source, and --force is not offered as a way in."""
+        result = runner.invoke(app, ["enable-source", "opencode"])
+        assert result.exit_code != 0
+        combined = " ".join((result.output + (result.stderr or "")).split())
+        assert "unknown source 'opencode'" in combined
+        assert "retired in v0.12.54" in combined
+        assert "not yet shipped" not in combined
+        assert "--force" not in combined
+
     def test_unknown_name_force_accepted(self, cfg, isolated_seen_sources):
         # First pre-disable codex via --force.
         runner.invoke(app, ["disable-source", "codex", "--force"])
@@ -260,7 +271,7 @@ class TestEnableSource:
         names = [s["name"] for s in on_disk["sync"]["sources"]]
         assert "gstack" in names
 
-    @pytest.mark.parametrize("source_name", ["codex", "opencode", "grok"])
+    @pytest.mark.parametrize("source_name", ["codex", "grok"])
     def test_appends_exact_agent_default_for_explicit_legacy_config(
         self, cfg, isolated_seen_sources, source_name
     ):
@@ -578,6 +589,35 @@ class TestStatusBreadcrumbs:
         assert result.exit_code == 0
         assert "Disabled sources" not in result.output
         assert "Grok usage capture" not in result.output
+
+    def test_status_omits_disabled_names_with_no_resolvable_source(
+        self, cfg, isolated_seen_sources, monkeypatch
+    ):
+        """Pre-existing: `mm disable-source foo --force` used to print a
+        re-enable breadcrumb for a name that cannot resolve. Intersection
+        with `_resolve_all_configured_sources` drops those names."""
+        from mind_meld import crypto
+        from mind_meld.crypto import bootstrap_crypto_init
+        from mind_meld.devices import register_device
+        from mind_meld.storage.local import LocalBackend
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "test-passphrase")
+
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        backend = LocalBackend(on_disk["storage"]["path"])
+        bootstrap_crypto_init(backend, "test-passphrase", argon2_memory_kb=1024)
+        register_device(backend, "abc123", "MacBook")
+        crypto.clear_crypto_session()
+
+        forced = runner.invoke(app, ["disable-source", "not-a-real-source", "--force"])
+        assert forced.exit_code == 0, forced.output
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Disabled sources" not in result.output
+        assert "not-a-real-source" not in result.output
 
     def test_grok_status_when_enabled_or_present(self, cfg, isolated_seen_sources, monkeypatch):
         from mind_meld import crypto

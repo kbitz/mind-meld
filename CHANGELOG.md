@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.54] - 2026-09-02
+
+**The OpenCode sync source is retired.** mm no longer walks `~/.config/opencode`. Measured fleet payload was 0 live files on the probed Mac and at most 14 regenerable gstack-extend renders elsewhere. `mm migrate-config` removes the leftover `[[sync.sources]]` opencode block on the next interactive push or pull and records the name in `disabled_sources` so that push does not mint deletion tombstones. `mm enable-source opencode` refuses through the ordinary unknown-name path.
+
+### Removed
+
+- The `opencode` entry from `DEFAULT_SOURCES` and its auto-detect. `mm init` no longer offers it. `_GENERATED_HOST_SKILL_GLOBS` stays for the remaining Codex consumer (and Track 39A).
+
+### Changed
+
+- `mm migrate-config` (and the interactive push/pull/recapture prompt) removes a leftover `[[sync.sources]]` opencode block and appends `"opencode"` to `disabled_sources` in one patch. Auto-commands never mutate config.
+- `mm status` no longer prints a "run mm enable-source <name> to re-enable" breadcrumb for disabled names that do not resolve to a source.
+
 ## [0.12.53] - 2026-09-01
 
 **mm no longer reads OpenCode usage.** The host-usage snapshot is Codex and Grok only. No local OpenCode file is touched — `~/.config/opencode/`, `opencode.db`, and any leftover `opencode-host-tokens.json` stay on disk. A peer still publishing `"opencode"` in `token_sources` / `degraded_sources` / `partial_sources` is accepted whole (unknown names are retained, not rejected).

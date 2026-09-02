@@ -253,31 +253,23 @@ class TestDefaultSources:
         # User-authored skills stay in scope.
         assert not fnmatch.fnmatch("skills/my-own-skill/SKILL.md", glob)
 
-        opencode = next(s for s in DEFAULT_SOURCES if s["name"] == "opencode")
-        assert "skills/.system/*" not in (opencode.get("exclude_patterns") or [])
-
-    def test_generated_host_skill_globs_shared_by_codex_and_opencode(self):
-        """v0.12.51: gstack-extend RENDERS these skills per host from one shared
-        source, so each host holds a byte-different copy of the same logical
-        skill and one upstream edit becomes N fleet divergences --
-        `skills/roadmap/SKILL.md` conflicted under BOTH sources in one pull.
-
-        Both entries must carry the full set: a glob added to one host only
-        would leave the other half of the pair conflicting.
+    def test_codex_entry_carries_every_generated_host_skill_glob(self):
+        """v0.12.51/37B: gstack-extend RENDERS these skills per host from one
+        shared source. The opencode consumer is gone; the codex entry must
+        still carry the full set so a glob added to the constant actually
+        takes effect.
         """
-        for name in ("codex", "opencode"):
-            src = next(s for s in DEFAULT_SOURCES if s["name"] == name)
-            patterns = src.get("exclude_patterns") or []
-            for glob in _GENERATED_HOST_SKILL_GLOBS:
-                assert glob in patterns, f"{name} is missing {glob}"
+        src = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        patterns = src.get("exclude_patterns") or []
+        for glob in _GENERATED_HOST_SKILL_GLOBS:
+            assert glob in patterns, f"codex is missing {glob}"
 
     def test_generated_host_skill_lists_are_not_aliased(self):
         """`get_default_source` hands these lists to callers that mutate them,
-        so the codex and opencode entries must own distinct list objects even
-        though they splat the same shared constant."""
+        so the codex entry must own a distinct list object from the shared
+        constant even though it is now the only consumer."""
         codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
-        opencode = next(s for s in DEFAULT_SOURCES if s["name"] == "opencode")
-        assert codex["exclude_patterns"] is not opencode["exclude_patterns"]
+        assert codex["exclude_patterns"] is not _GENERATED_HOST_SKILL_GLOBS
 
     def test_gstack_extend_source_present(self):
         assert any(s["name"] == "gstack-extend" and s["type"] == "generic" for s in DEFAULT_SOURCES)
@@ -300,25 +292,6 @@ class TestDefaultSources:
             "skills/log-work/*",
             "skills/retro-fleet/*",
             "skills/.system/*",
-            *_GENERATED_HOST_SKILL_GLOBS,
-        ]
-
-    def test_opencode_source_syncs_customization_not_session_state(self):
-        opencode = next(s for s in DEFAULT_SOURCES if s["name"] == "opencode")
-        assert opencode["type"] == "generic"
-        assert opencode["include_dirs"] == [
-            "agents",
-            "commands",
-            "modes",
-            "plugins",
-            "skills",
-            "tools",
-        ]
-        assert opencode["include_files"] == ["AGENTS.md"]
-        assert opencode["exclude_patterns"] == [
-            "skills/gstack-*",
-            "skills/log-work/*",
-            "skills/retro-fleet/*",
             *_GENERATED_HOST_SKILL_GLOBS,
         ]
 
@@ -662,7 +635,7 @@ class TestGetSources:
 
         names = [source["name"] for source in get_sources(config)]
         assert "codex" in names
-        assert "opencode" in names
+        assert "opencode" not in names
 
     def test_does_not_auto_detect_grok_when_only_home_exists(self, tmp_path, monkeypatch):
         claude_dir = tmp_path / ".claude"
