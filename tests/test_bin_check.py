@@ -229,9 +229,7 @@ def test_help_lists_flags_and_non_compound_fallback() -> None:
     assert "pip install -e '.[dev]'" in out
     recipe = out.split("manual fallback", 1)[-1]
     commands = [
-        line.strip()
-        for line in recipe.splitlines()
-        if line.strip().startswith(("python", "./"))
+        line.strip() for line in recipe.splitlines() if line.strip().startswith(("python", "./"))
     ]
     assert commands, recipe
     for line in commands:
