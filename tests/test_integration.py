@@ -697,9 +697,10 @@ class TestDisabledSourcesTombstoneSuppression:
     `_pull_core`) and MUST NOT apply at `_fetch_remote_manifest` (mm gc
     reads raw manifests there).
 
-    Failing these tests blocks ship: a regression here means disabling a
-    source on one machine propagates fleet-wide deletion of that source's
-    content on the next push.
+    Failing these tests blocks ship: a regression here mints spurious
+    tombstones that freeze restoration and propagation of a missing path
+    across upgraded and stale peers for 30 days. Existing local bytes are
+    never removed.
     """
 
     def _make_two_source_config(
@@ -756,13 +757,14 @@ class TestDisabledSourcesTombstoneSuppression:
         return backend
 
     def test_disable_source_does_not_generate_tombstones_on_next_push(self, tmp_path, monkeypatch):
-        """P0 fleet-wide-data-loss prevention: disable gstack on machine A
+        """P0 propagation-freeze prevention: disable gstack on machine A
         and push. The new manifest must NOT contain deletion tombstones
         for any gstack file. Without the consumer-boundary filter on the
         prior_manifest, generate_tombstones would emit a tombstone per
         gstack file (because the local-walked manifest no longer has
-        gstack via get_sources()'s filter), peers would pull the
-        tombstones, and gstack content would vanish fleet-wide.
+        gstack via get_sources's filter). Spurious tombstones freeze
+        restoration and propagation for 30 days; existing local bytes
+        are never removed.
         """
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / ".claude"
@@ -1020,6 +1022,157 @@ class TestDisabledSourcesTombstoneSuppression:
             "boundary used by gc — the consumer-boundary contract."
         )
 
+    def test_retired_source_emits_no_tombstones_across_the_transition(self, tmp_path, monkeypatch):
+        """Track 37B: a prior manifest that still has sources.opencode must
+        not mint new opencode:* tombstones on the first post-retirement
+        push. The consumer-boundary filter keys on disabled_sources, so
+        the post-migration config writes that name even after the
+        [[sync.sources]] block is gone.
+
+        Failing this blocks ship.
+        """
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        opencode_dir = tmp_path / "opencode-root"
+        self._populate_claude(claude_dir)
+        skill = opencode_dir / "skills" / "my-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("hello from opencode")
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+
+        config_path = tmp_path / "config_dev-a.toml"
+        config = {
+            "device": {"id": "dev-a", "name": "A"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                    {
+                        "name": "opencode",
+                        "path": str(opencode_dir),
+                        "type": "generic",
+                        "include_dirs": ["skills"],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        # The test drives the post-retirement config itself; do not let
+        # the interactive migration prompt rewrite it mid-setup.
+        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config: None)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        prior = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        # Non-vacuity guard: the seeded prior must actually contain the file.
+        assert "skills/my-skill/SKILL.md" in prior["sources"]["opencode"]["files"]
+
+        prior.setdefault("tombstones", {})["opencode:skills/gone/SKILL.md"] = {
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "device_id": "dev-a",
+        }
+        backend.put(
+            "manifests/dev-a/manifest.json.enc",
+            encrypt(serialize_manifest(prior), PASSPHRASE, memory_kb=MEMORY_KB),
+        )
+
+        config["sync"]["sources"] = [
+            {"name": "claude", "path": str(claude_dir), "type": "claude"},
+        ]
+        config["sync"]["disabled_sources"] = ["opencode"]
+        save_config(config, config_path)
+        (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "Data scientist after retirement"
+        )
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        assert "opencode" not in remote.get("sources", {})
+        new_tombstones = [
+            k
+            for k in remote.get("tombstones", {})
+            if k.startswith("opencode:") and k != "opencode:skills/gone/SKILL.md"
+        ]
+        assert new_tombstones == [], (
+            f"Retiring opencode must not mint new tombstones; got {new_tombstones}"
+        )
+        assert "opencode:skills/gone/SKILL.md" in remote.get("tombstones", {})
+
+    def test_legacy_peer_opencode_section_is_not_pulled(self, tmp_path, monkeypatch):
+        """Mixed fleet: a peer still publishing sources.opencode must not
+        land files under the local opencode path, and pull must not error."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "a" / ".claude"
+        opencode_a = tmp_path / "a" / "opencode-root"
+        claude_b = tmp_path / "b" / ".claude"
+        opencode_b = tmp_path / "b" / "opencode-root"
+        self._populate_claude(claude_a)
+        skill_b = opencode_b / "skills" / "peer-skill"
+        skill_b.mkdir(parents=True)
+        (skill_b / "SKILL.md").write_text("peer opencode file")
+        claude_b.mkdir(parents=True)
+        opencode_a.mkdir(parents=True)
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+
+        config_b = {
+            "device": {"id": "dev-b", "name": "B"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_a), "type": "claude"},
+                    {
+                        "name": "opencode",
+                        "path": str(opencode_b),
+                        "type": "generic",
+                        "include_dirs": ["skills"],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        config_path_b = tmp_path / "config_dev-b.toml"
+        save_config(config_b, config_path_b)
+
+        config_a = {
+            "device": {"id": "dev-a", "name": "A"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude_b), "type": "claude"},
+                ],
+                "disabled_sources": ["opencode"],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        config_path_a = tmp_path / "config_dev-a.toml"
+        save_config(config_a, config_path_a)
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config: None)
+        self._activate(monkeypatch, config_path_b)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        self._activate(monkeypatch, config_path_a)
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+        landed = list(opencode_a.rglob("SKILL.md")) if opencode_a.exists() else []
+        assert landed == [], f"Retired source must not pull peer content; got {landed}"
+        claude_landed = list(claude_b.rglob("user_role.md"))
+        assert claude_landed, "Non-retired claude content should still pull"
+
 
 class TestMigrateConfigCommand:
     """Track 5C: mm migrate-config adds missing recommended excludes,
@@ -1107,6 +1260,109 @@ class TestMigrateConfigCommand:
         assert "my-custom-pattern.txt" in gstack["exclude_patterns"]
         assert "projects/*/repo-mode.json" in gstack["exclude_patterns"]
         assert "config.yaml" in gstack["exclude_patterns"]  # v0.9.3
+
+    def _write_opencode_block_config(self, tmp_path):
+        """gstack already has recommended excludes so the only pending
+        migration is the leftover opencode [[sync.sources]] block."""
+        from mind_meld.config import DEFAULT_SOURCES
+
+        gstack_default = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        config_path = tmp_path / "config.toml"
+        opencode_dir = tmp_path / "opencode-root"
+        opencode_dir.mkdir()
+        gstack_dir = tmp_path / ".gstack"
+        gstack_dir.mkdir()
+        config = {
+            "device": {"id": "dev-a", "name": "A"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(gstack_dir),
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "exclude_patterns": list(gstack_default["exclude_patterns"]),
+                    },
+                    {
+                        "name": "opencode",
+                        "path": str(opencode_dir),
+                        "type": "generic",
+                        "include_dirs": ["skills"],
+                    },
+                ],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        }
+        save_config(config, config_path)
+        return config_path
+
+    def test_migrate_config_removes_the_dead_opencode_source_block(self, tmp_path, monkeypatch):
+        config_path = self._write_opencode_block_config(tmp_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        result = runner.invoke(app, ["migrate-config", "--yes"])
+        assert result.exit_code == 0, result.output
+
+        import tomllib
+
+        with open(config_path, "rb") as f:
+            on_disk = tomllib.load(f)
+        names = [s["name"] for s in on_disk["sync"]["sources"]]
+        assert "opencode" not in names
+        assert "gstack" in names
+        assert "opencode" in on_disk["sync"]["disabled_sources"]
+
+    def test_maybe_prompt_migration_non_tty_warns_without_writing(self, tmp_path, monkeypatch):
+        config_path = self._write_opencode_block_config(tmp_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        class _NonTTY:
+            def isatty(self) -> bool:
+                return False
+
+        captured: list[str] = []
+        monkeypatch.setattr(cli_module.sys, "stdin", _NonTTY())
+        monkeypatch.setattr(cli_module.sys, "stdout", _NonTTY())
+        monkeypatch.setattr(
+            cli_module.stderr_console,
+            "print",
+            lambda message, *a, **k: captured.append(str(message)),
+        )
+
+        before = config_path.read_bytes()
+        config = config_module.load_config(config_path)
+        cli_module._maybe_prompt_migration(config)
+        assert config_path.read_bytes() == before
+        joined = " ".join(captured)
+        assert "retired" in joined.lower() or "opencode" in joined
+        assert "migrate-config" in joined
+
+    def test_autopush_does_not_mutate_retired_opencode_block(self, tmp_path, monkeypatch):
+        config_path = self._write_opencode_block_config(tmp_path)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+        sidecar_dir = tmp_path / "sidecar"
+        sidecar_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+
+        backend = LocalBackend(tmp_path / "storage")
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0, result.output
+        import tomllib
+
+        with open(config_path, "rb") as f:
+            on_disk = tomllib.load(f)
+        names = [s["name"] for s in on_disk["sync"]["sources"]]
+        assert "opencode" in names
+        assert "opencode" not in (on_disk["sync"].get("disabled_sources") or [])
 
 
 class TestMmStatusMissingExcludesWarning:

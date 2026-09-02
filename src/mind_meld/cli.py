@@ -732,8 +732,12 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     and pushing would generate a deletion tombstone for every file in that
     source (because `generate_tombstones` compares prior_manifest with
     new_manifest, and the new manifest no longer has the disabled source
-    via get_sources's filter). Peers pull tombstones, delete content
-    fleet-wide. P0 footgun.
+    via get_sources's filter). Spurious tombstones suppress restoration
+    and propagation of a missing path across upgraded and stale peers
+    until expiry (`manifest.TOMBSTONE_TTL_DAYS = 30`, re-broadcast
+    newest-wins by `collect_tombstones`). Existing local bytes are never
+    removed. The consumer-boundary filter is still required: a 30-day
+    fleet-wide propagation freeze is the failure it prevents.
 
     **Asymmetric filter — sources stripped, tombstones preserved.** Codex
     adversarial review 2026-04-25 caught this: if A deletes `gstack:x`,
@@ -4493,11 +4497,14 @@ def status(
     #      spurious hints for already-shipped claude/gstack.
     disabled_list = list(config.get("sync", {}).get("disabled_sources", []) or [])
     if disabled_list:
-        console.print(
-            f"  [yellow]Disabled sources (this device):[/yellow] "
-            f"{', '.join(safe_str(name) for name in sorted(disabled_list))} — "
-            "run [bold]mm enable-source <name>[/bold] to re-enable."
-        )
+        resolvable = {s["name"] for s in _resolve_all_configured_sources(config)}
+        shown_disabled = [name for name in disabled_list if name in resolvable]
+        if shown_disabled:
+            console.print(
+                f"  [yellow]Disabled sources (this device):[/yellow] "
+                f"{', '.join(safe_str(name) for name in sorted(shown_disabled))} — "
+                "run [bold]mm enable-source <name>[/bold] to re-enable."
+            )
 
     explicit_names = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
     currently_resolved = [s["name"] for s in sources_configs]
@@ -5696,6 +5703,12 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
         return
     matches = difflib.get_close_matches(name, valid, n=1, cutoff=0.6)
     suggestion = f" Did you mean '{matches[0]}'?" if matches else ""
+    if name == "opencode":
+        raise ConfigError(
+            f"unknown source '{name}' — valid: {', '.join(valid)}.{suggestion} "
+            "The opencode sync source was retired in v0.12.54; see the README "
+            "troubleshooting entry."
+        )
     raise ConfigError(
         f"unknown source '{name}' — valid: {', '.join(valid)}.{suggestion} "
         "Use --force to accept a name not yet known to mm "
@@ -5803,7 +5816,7 @@ def enable_source(
 
     Enabling `codex` or `grok` ALSO authorizes that host's local
     usage reader, whose activity shows up in the `retro-fleet` AGENT LOGS
-    block, and (for `codex` / `opencode` / `claude`) authorizes mm to
+    block, and (for `codex` / `claude`) authorizes mm to
     maintain a `retro-fleet` skill link in that agent's skills directory.
     That consent coupling is the feature's default switch, so it is stated
     here at the point of decision (see HOST_READER_SOURCE_GATE). To keep a
@@ -6032,6 +6045,20 @@ def _config_missing_recommended_excludes(config: dict) -> list[str]:
     return [name for name, _missing, _current in _compute_recommended_excludes_diff(sources)]
 
 
+def _explicit_opencode_source_present(sources: list[dict] | None) -> bool:
+    """True when an explicit ``[[sync.sources]]`` entry is named ``opencode``.
+
+    Track 37B dropped that name from ``DEFAULT_SOURCES``. A leftover block
+    is a user-defined generic source until ``mm migrate-config`` removes it
+    and records the name in ``disabled_sources`` (the consumer-boundary
+    filter that keeps ``generate_tombstones`` from minting a deletion
+    tombstone for every file the source ever pushed).
+    """
+    if not sources:
+        return False
+    return any(s.get("name") == "opencode" for s in sources)
+
+
 def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
     """Body of `mm migrate-config`. Extracted so the interactive
     `_maybe_prompt_migration` can call it directly without going through
@@ -6049,15 +6076,24 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
         return
 
     diffs = _compute_recommended_excludes_diff(sources)
-    if not diffs:
+    retire_opencode = _explicit_opencode_source_present(sources)
+    if not diffs and not retire_opencode:
         console.print("[green]Config is already up to date.[/green]")
         return
 
-    console.print("\n[bold]Recommended exclude_patterns updates:[/bold]")
-    for name, missing, current in diffs:
-        console.print(f"\n  [bold]{name}[/bold]  (current: {current!r})")
-        for p in missing:
-            console.print(f"    [green]+ {p}[/green]")
+    if diffs:
+        console.print("\n[bold]Recommended exclude_patterns updates:[/bold]")
+        for name, missing, current in diffs:
+            console.print(f"\n  [bold]{name}[/bold]  (current: {current!r})")
+            for p in missing:
+                console.print(f"    [green]+ {p}[/green]")
+    if retire_opencode:
+        console.print("\n[bold]Retired source:[/bold]")
+        console.print(
+            "  [bold]opencode[/bold] — remove the leftover [[sync.sources]] "
+            "block and record the name in disabled_sources so the next "
+            "push does not mint deletion tombstones."
+        )
 
     if dry_run:
         console.print("\n[dim]Dry run — no changes written.[/dim]")
@@ -6076,6 +6112,8 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
         diff_map = {name: missing for name, missing, _current in diffs}
         new_sources: list[dict] = []
         for src in sources:
+            if src.get("name") == "opencode":
+                continue
             if src.get("name") in diff_map:
                 merged = dict(src)
                 current = list(src.get("exclude_patterns") or [])
@@ -6084,10 +6122,18 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
             else:
                 new_sources.append(src)
 
-        # patch_config_on_disk replaces the sources array wholesale (per its
-        # contract). max_file_size and other [sync] scalars survive because
-        # the section-level merge is per-field.
-        patch_config_on_disk({"sync": {"sources": new_sources}})
+        # One patch for both halves. patch_config_on_disk is section-level
+        # shallow and REPLACES sync.sources wholesale; disabled_sources is
+        # a sibling field in the same section. The disabled_sources write
+        # is what feeds _filter_disabled_sources so generate_tombstones
+        # sees an empty diff for the retired name.
+        sync_updates: dict[str, Any] = {"sources": new_sources}
+        if retire_opencode:
+            disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
+            if "opencode" not in disabled:
+                disabled.append("opencode")
+            sync_updates["disabled_sources"] = sorted(disabled)
+        patch_config_on_disk({"sync": sync_updates})
         # Clear any prior migration breadcrumb — config now matches.
         breadcrumb = _migration_state_path()
         try:
@@ -6096,9 +6142,13 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
             pass
         except OSError:
             pass
+        parts: list[str] = []
+        if diffs:
+            parts.append(f"Updated {len(diffs)} source(s)")
+        if retire_opencode:
+            parts.append("removed the retired opencode source block")
         console.print(
-            f"[green]Updated {len(diffs)} source(s).[/green] "
-            f"Config written to {_config_module.CONFIG_PATH}."
+            f"[green]{'; '.join(parts)}.[/green] Config written to {_config_module.CONFIG_PATH}."
         )
     finally:
         release_lock()
@@ -6114,8 +6164,10 @@ def migrate_config(
     """Add recommended `exclude_patterns` to existing `[[sync.sources]]`.
 
     Compares each user-configured source against the matching DEFAULT_SOURCES
-    entry and proposes adding any missing recommended globs. Idempotent —
-    re-running on a fully-migrated config exits with "already up to date".
+    entry and proposes adding any missing recommended globs. Also removes a
+    leftover ``opencode`` source block (retired in v0.12.54) and records the
+    name in ``disabled_sources``. Idempotent — re-running on a fully-migrated
+    config exits with "already up to date".
 
     Acquires the mm lockfile so a concurrent push/pull can't read a half-
     written config.
@@ -7221,35 +7273,50 @@ def _write_migration_breadcrumb(missing: list[str]) -> None:
 
 
 def _maybe_prompt_migration(config: dict) -> None:
-    """Once-per-invocation interactive prompt for missing recommended excludes.
+    """Once-per-invocation interactive prompt for pending config migrations.
 
-    Called from the top of `mm push` / `mm pull` ONLY (interactive verbs).
-    Auto-commands (autopull/autopush) NEVER prompt and NEVER mutate config —
-    they write a `migration-state.json` breadcrumb instead and let `mm status`
-    surface the signal. Visible-failure contract: silent config mutation
-    in a hook would be exactly the class of "wedged sync I never noticed"
-    failure the contract exists to prevent.
+    Called from the top of `mm push` / `mm pull` / `mm recapture` ONLY
+    (interactive verbs). Auto-commands (autopull/autopush) NEVER prompt and
+    NEVER mutate config — they write a `migration-state.json` breadcrumb
+    instead and let `mm status` surface the signal. Visible-failure
+    contract: silent config mutation in a hook would be exactly the class
+    of "wedged sync I never noticed" failure the contract exists to prevent.
     """
     missing = _config_missing_recommended_excludes(config)
-    if not missing:
+    retire_opencode = _explicit_opencode_source_present(config.get("sync", {}).get("sources"))
+    if not missing and not retire_opencode:
         return
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         # Non-TTY interactive verb (CI, piped invocation): warn to stderr
         # but don't block on a prompt nobody can answer.
+        bits: list[str] = []
+        if missing:
+            bits.append(f"config missing recommended excludes for source(s) {', '.join(missing)}")
+        if retire_opencode:
+            bits.append("config still has a retired [[sync.sources]] opencode block")
         stderr_console.print(
-            f"[yellow]warning:[/yellow] config missing recommended excludes "
-            f"for source(s) {', '.join(missing)}. Run "
-            f"[bold]mm migrate-config[/bold] to add them."
+            f"[yellow]warning:[/yellow] {'; '.join(bits)}. Run "
+            f"[bold]mm migrate-config[/bold] to update."
         )
         return
-    console.print(
-        f"\n[yellow]Config is missing recommended exclude_patterns for "
-        f"source(s):[/yellow] {', '.join(missing)}"
-    )
-    console.print(
-        "  These per-machine artifacts (e.g. gstack repo-mode caches) "
-        "produce churn on every pull when synced."
-    )
+    if missing:
+        console.print(
+            f"\n[yellow]Config is missing recommended exclude_patterns for "
+            f"source(s):[/yellow] {', '.join(missing)}"
+        )
+        console.print(
+            "  These per-machine artifacts (e.g. gstack repo-mode caches) "
+            "produce churn on every pull when synced."
+        )
+    if retire_opencode:
+        console.print(
+            "\n[yellow]The opencode sync source was retired in v0.12.54.[/yellow] "
+            "This config still has a leftover [[sync.sources]] opencode block."
+        )
+        console.print(
+            "  mm migrate-config will remove it and record the name in "
+            "disabled_sources so the next push does not mint deletion tombstones."
+        )
     if typer.confirm("Run 'mm migrate-config' now?", default=True):
         # Call the core directly so typer's option machinery isn't in the
         # way; the inner "Apply these updates?" prompt still confirms

@@ -26,7 +26,6 @@ DEFAULT_MAX_FILE_SIZE = 52_428_800  # 50MB
 DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_CODEX_DIR = "~/.codex"
-DEFAULT_OPENCODE_DIR = "~/.config/opencode"
 DEFAULT_GROK_DIR = "~/.grok"
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
@@ -50,11 +49,13 @@ _BOOTSTRAP_WARNED_PATHS: set[str] = set()
 # from one shared source. Each host gets a byte-different copy of the same
 # logical skill, so one upstream edit becomes N divergences across the fleet
 # and mm cannot know the copies are related — `skills/roadmap/SKILL.md`
-# conflicted under BOTH the codex and opencode sources in the same pull.
-# Generated + regenerable + already version-controlled upstream = not sync
-# data. Shared by the codex and opencode entries below; splatted into a fresh
-# list at each use site because `get_default_source` hands these lists to
-# callers that mutate them.
+# historically conflicted under BOTH the codex and opencode sources in the
+# same pull (the opencode source was retired in Track 37B). Generated +
+# regenerable + already version-controlled upstream = not sync data.
+# Only the codex entry consumes this list today; the constant is kept so
+# Track 39A (blocked-by: 37B) inherits the mechanism rather than
+# re-extracting it. Splatted into a fresh list at each use site because
+# `get_default_source` hands these lists to callers that mutate them.
 #
 # Detection is by NAME, matching the established `skills/gstack-*` convention.
 # The generic marker is the `.extend-root` file gstack-extend drops in each
@@ -182,24 +183,6 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             "skills/log-work/*",
             "skills/retro-fleet/*",
             "skills/.system/*",
-            *_GENERATED_HOST_SKILL_GLOBS,
-        ],
-    },
-    {
-        # OpenCode config JSON can embed provider/MCP credentials. Its rules,
-        # skills, commands, plugins, and agents are safe to sync by default;
-        # the whole-file config stays local until mm supports field filtering.
-        "name": "opencode",
-        "path": DEFAULT_OPENCODE_DIR,
-        "type": "generic",
-        "include_dirs": ["agents", "commands", "modes", "plugins", "skills", "tools"],
-        "include_files": [
-            "AGENTS.md",
-        ],
-        "exclude_patterns": [
-            "skills/gstack-*",
-            "skills/log-work/*",
-            "skills/retro-fleet/*",
             *_GENERATED_HOST_SKILL_GLOBS,
         ],
     },
@@ -579,11 +562,10 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
 
     # Keep legacy configs on the same agent-parity path as fresh installs.
     # Explicit `sync.sources` is intentional user curation, so it remains an
-    # opt-in surface (via `mm enable-source codex` / `opencode`).
+    # opt-in surface (via `mm enable-source codex`).
     if not explicit_sources:
         for source_name, source_path in (
             ("codex", Path.home() / ".codex"),
-            ("opencode", Path.home() / ".config" / "opencode"),
             ("grok", Path.home() / ".grok"),
         ):
             present = (
