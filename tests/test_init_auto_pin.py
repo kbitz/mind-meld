@@ -38,6 +38,16 @@ def _make_completed(returncode: int) -> subprocess.CompletedProcess:
     )
 
 
+def _notice(capsys) -> str:
+    """Collapse Rich wrapping. Rendered line length depends on terminal
+    width AND tmp_path length; Rich folds between words (and even inside
+    them) at some lengths, so a raw ``"Keep Downloaded" in out`` is a
+    function of the machine, not of the UX. Whitespace-normalized text
+    is the house pattern for wrap-sensitive assertions.
+    """
+    return " ".join(capsys.readouterr().out.split())
+
+
 class TestAutoPinStorageForIcloud:
     def test_auto_pins_icloud_storage_on_success(
         self, fake_icloud_root, monkeypatch, capsys
@@ -108,7 +118,7 @@ class TestAutoPinStorageForIcloud:
         # Rich wraps long paths at arbitrary characters in non-TTY capture
         # mode; the meaningful UX signal is that the Finder tip surfaces,
         # not the exact path rendering.
-        out = capsys.readouterr().out
+        out = _notice(capsys)
         assert "right-click" in out
         assert "Keep Downloaded" in out
 
@@ -126,7 +136,7 @@ class TestAutoPinStorageForIcloud:
 
         cli_module._auto_pin_storage_for_icloud(storage)
 
-        out = capsys.readouterr().out
+        out = _notice(capsys)
         assert "right-click" in out
         assert "Keep Downloaded" in out
 
@@ -146,10 +156,34 @@ class TestAutoPinStorageForIcloud:
 
         cli_module._auto_pin_storage_for_icloud(storage)
 
-        out = capsys.readouterr().out
+        out = _notice(capsys)
         assert "Storage pinned" not in out, (
             "non-zero exit must NOT claim success; user needs to know to act"
         )
+        assert "right-click" in out
+        assert "Keep Downloaded" in out
+
+    def test_finder_notice_survives_hostile_path_length(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Rendered length is a function of tmp_path length. A 72-char
+        basetemp folds 'Keep Downloaded' in half under serial pytest;
+        this storage path is long enough to hit that window regardless
+        of pytest's default --basetemp. Pinning COLUMNS does not fix it.
+        """
+        root = tmp_path / ("icloud-" + "x" * 80)
+        root.mkdir()
+        monkeypatch.setattr(cli_module, "_ICLOUD_DRIVE_ROOT", root)
+        storage = root / "mind-meld"
+        storage.mkdir()
+
+        def boom(_args, **_kwargs):
+            raise FileNotFoundError(2, "No such file or directory: 'brctl'")
+
+        monkeypatch.setattr(cli_module.subprocess, "run", boom)
+        cli_module._auto_pin_storage_for_icloud(storage)
+
+        out = _notice(capsys)
         assert "right-click" in out
         assert "Keep Downloaded" in out
 
