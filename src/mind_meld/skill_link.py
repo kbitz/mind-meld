@@ -53,9 +53,10 @@ _REAL_HOME = Path(os.path.expanduser("~")).resolve()
 class AgentRow:
     """One supported agent's skill-link identity.
 
-    ``key`` is lowercase and matches ``events_tail.HOST_READER_SOURCE_GATE``
-    vocabulary for the three hosts that have a skill dir (claude is gated
-    separately via ``_enabled_claude_paths``, so 3 of 4).
+    ``key`` is lowercase. Skill-link keys (``AGENT_ROWS``) and usage-reader
+    keys (``events_tail.HOST_READER_SOURCE_GATE``) are separate vocabularies;
+    they currently overlap only on ``codex``. Claude's skill link is gated
+    via ``consent_source="claude"``, not the host-reader map.
 
     ``skills_root`` is a ``~``-relative STRING, never a Path.
     ``expanduser()`` must run at CALL time, or every agent path freezes at
@@ -79,10 +80,11 @@ class AgentRow:
     consent_source: str
 
 
-# Append-only. Result order is a documented contract:
-# ``_ensure_retro_skill_links`` docstring + ordered-list assertions.
-# Ordinary isolation never patches this; exactly one structural-extension
-# test does, via ``redirect_skill_paths(..., extra_rows=...)``.
+# Active supported agents. Result order is a documented contract
+# (``_ensure_retro_skill_links`` docstring + ordered-list assertions).
+# Removal is a deliberate retirement, not a reordering. Ordinary isolation
+# never patches this; exactly one structural-extension test does, via
+# ``redirect_skill_paths(..., extra_rows=...)``.
 AGENT_ROWS: tuple[AgentRow, ...] = (
     AgentRow(
         key="claude",
@@ -100,14 +102,6 @@ AGENT_ROWS: tuple[AgentRow, ...] = (
         conflict_marker="codex-skill-link-conflict",
         consent_source="codex",
     ),
-    AgentRow(
-        key="opencode",
-        display_name="OpenCode",
-        skills_root="~/.config/opencode/skills",
-        success_marker="opencode-skill-link-checked",
-        conflict_marker="opencode-skill-link-conflict",
-        consent_source="opencode",
-    ),
 )
 
 # Empty in production. Tests patch this (together with AGENT_ROWS) so
@@ -116,7 +110,7 @@ AGENT_ROWS: tuple[AgentRow, ...] = (
 _TEST_SKILL_ROOT_OVERRIDES: dict[str, str] = {}
 
 # Bound to the row values so nothing that imported the old module-level
-# names breaks. A rename of any of these six literals silently resets
+# names breaks. A rename of any of these four literals silently resets
 # every fleet machine's 24h TTL and re-emits one notice.
 _SKILL_LINK_SUCCESS_MARKER = next(row.success_marker for row in AGENT_ROWS if row.key == "claude")
 _SKILL_LINK_CONFLICT_MARKER = next(row.conflict_marker for row in AGENT_ROWS if row.key == "claude")
@@ -125,12 +119,6 @@ _CODEX_SKILL_LINK_SUCCESS_MARKER = next(
 )
 _CODEX_SKILL_LINK_CONFLICT_MARKER = next(
     row.conflict_marker for row in AGENT_ROWS if row.key == "codex"
-)
-_OPENCODE_SKILL_LINK_SUCCESS_MARKER = next(
-    row.success_marker for row in AGENT_ROWS if row.key == "opencode"
-)
-_OPENCODE_SKILL_LINK_CONFLICT_MARKER = next(
-    row.conflict_marker for row in AGENT_ROWS if row.key == "opencode"
 )
 
 
@@ -151,13 +139,18 @@ def _real_guard_paths() -> tuple[Path, ...]:
     """Canonical real-home paths the pytest guard must refuse.
 
     Derived from ``AGENT_ROWS`` (never from ``_TEST_SKILL_ROOT_OVERRIDES``)
-    plus the two explicit extras: the marker dir and the 24A skill store.
+    plus the explicit extras: the retired OpenCode skills dir, the marker
+    dir, and the 24A skill store.
     Ordinary test isolation patches the override map; if this derived from
     that map the guard's target set would become the tmp paths and go
     blind to every real agent dir, with a green suite.
     """
     return (
         *(_REAL_HOME / _home_relative(row.skills_root) for row in AGENT_ROWS),
+        # Retired but still guarded — the OpenCode link may still be on
+        # disk until the one-shot reaper runs, and 67 measured tests once
+        # wrote the developer's real agent dirs.
+        _REAL_HOME / ".config" / "opencode" / "skills",
         _REAL_HOME / ".config" / "mind-meld",
         _REAL_HOME / ".local" / "share" / "mind-meld" / "agent-skills",
     )
@@ -172,7 +165,7 @@ def _is_real_agent_dir_under_pytest(target: Path) -> bool:
     the installer mutated the developer's real agent config dirs —
     **67 tests**, measured.
 
-    Matches the registry's canonical agent paths plus the two explicit
+    Matches the registry's canonical agent paths plus the explicit
     extras, not "anything under ``$HOME``". A developer whose ``TMPDIR``
     lives under ``$HOME`` (common on macOS with a custom setting) would
     otherwise see every skill-link test fail with a message accusing the
@@ -356,7 +349,10 @@ def consented_agent_keys(config: dict | None, sources: list[dict]) -> frozenset[
       every registry key. Not an error.
     * ``[skills] maintain_links`` is false → empty, ``agents`` ignored.
     * ``agents`` present (key-absence, never a falsy check) → that list
-      ∩ known keys. Unknown names are inert.
+      ∩ known keys. Unknown names are inert. A non-empty list whose
+      intersection is empty emits one ``mm: notice:`` per process
+      (``_EMPTY_AGENTS_NOTICE_EMITTED``) so a config that only names
+      retired agents does not silently decline every link.
     * else → rows whose ``consent_source`` is in the passed-in source
       names. On a non-explicit config ``get_sources`` auto-detects by
       directory existence, so this is the same bit the host-usage read
@@ -371,7 +367,18 @@ def consented_agent_keys(config: dict | None, sources: list[dict]) -> frozenset[
     if not skills.get("maintain_links", True):
         return frozenset()
     if "agents" in skills:
-        return frozenset(key for key in skills["agents"] if key in known)
+        requested = skills["agents"]
+        granted = frozenset(key for key in requested if key in known)
+        if requested and not granted:
+            global _EMPTY_AGENTS_NOTICE_EMITTED
+            if not _EMPTY_AGENTS_NOTICE_EMITTED:
+                _EMPTY_AGENTS_NOTICE_EMITTED = True
+                sys.stderr.write(
+                    "mm: notice: [skills] agents lists no currently supported "
+                    "agent; every skill link is declined. Use maintain_links = "
+                    "false to say none, or name a currently supported agent.\n"
+                )
+        return granted
     names = {src.get("name") for src in sources}
     return frozenset(row.key for row in AGENT_ROWS if row.consent_source in names)
 
@@ -416,6 +423,7 @@ def _reason(error: BaseException) -> str:
 
 
 _MM_SKILLS_DIR_REJECTION_EMITTED = False
+_EMPTY_AGENTS_NOTICE_EMITTED = False
 
 
 def _skill_store_dir() -> Path:
@@ -757,6 +765,52 @@ def render_skill_status(result: SkillInstallResult) -> str:
     return f"{target}: {result.status}"
 
 
+def _reap_retired_opencode_skill_link() -> None:
+    """One-shot, best-effort removal of the retro-fleet link mm created
+    under ``~/.config/opencode/skills``.
+
+    Ownership proof is ``os.readlink(target) == store``. A regular file, a
+    directory, or a link pointing anywhere else is the user's and is left
+    untouched. A dangling store-backed symlink is still ours and is
+    unlinked — ``os.readlink`` does not care about liveness. ``lstat``,
+    never ``resolve()`` — following the symlink defeats the check.
+    Re-readlink immediately before ``unlink`` so a same-uid swap between
+    the check and the delete is not applied. ``except OSError: pass``.
+    Idempotent: later runs are no-ops once the link is gone. Do not add
+    a persistent "did I reap it" marker.
+
+    This does not conflict with Track 28A. That guard says an ABSENT link
+    is user intent and must not be recreated. It says nothing about mm
+    removing a link it created and no longer maintains.
+    """
+    target = Path("~/.config/opencode/skills/retro-fleet").expanduser()
+    if _is_real_agent_dir_under_pytest(target):
+        return
+    store = str(_skill_store_dir())
+    try:
+        st = os.lstat(target)
+    except OSError:
+        pass
+    else:
+        if stat.S_ISLNK(st.st_mode):
+            try:
+                if os.readlink(target) == store:
+                    still = os.readlink(target)
+                    if still == store:
+                        os.unlink(target)
+            except OSError:
+                pass
+    marker_dir = _marker_dir()
+    for name in (
+        "opencode-skill-link-checked",
+        "opencode-skill-link-conflict",
+    ):
+        try:
+            os.unlink(marker_dir / f".{name}")
+        except OSError:
+            pass
+
+
 def _ensure_retro_skill_links(
     *,
     dry_run: bool = False,
@@ -766,8 +820,9 @@ def _ensure_retro_skill_links(
 ) -> tuple[SkillInstallResult, ...]:
     """Best-effort install for every ``AGENT_ROWS`` entry.
 
-    Results are complete and ordered as ``AGENT_ROWS`` (append-only: new
-    agents are appended, never inserted). Expected filesystem failures are
+    Results are complete and ordered as ``AGENT_ROWS`` (active supported
+    agents; removal is a deliberate retirement, not a reordering). Expected
+    filesystem failures are
     values, never exceptions, so init and push keep their best-effort
     contract while ``mm install-skills`` can report truthfully.
 
@@ -791,6 +846,16 @@ def _ensure_retro_skill_links(
     absent store is created only when at least one row is consented.
     """
     write = bool(allow_mutate and not dry_run)
+    if write:
+        # Retirement of the OpenCode skill link mm created. Init and
+        # mm install-skills reach it here. Interactive mm push also
+        # calls it from _push_core even when the 24h drift gate is
+        # shut, so a fresh Claude/Codex marker cannot skip cleanup.
+        # Not on mm status or mm diag — those are read-only. Track 28A
+        # says an ABSENT link is user intent and must not be recreated;
+        # this path is mm removing a link it created and no longer
+        # maintains.
+        _reap_retired_opencode_skill_link()
     descriptors = _skill_target_descriptors()
     results: list[SkillInstallResult | None] = [None] * len(descriptors)
     available: list[tuple[int, SkillTarget]] = []

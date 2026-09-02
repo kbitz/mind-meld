@@ -49,7 +49,7 @@ still controls whether accepted host-usage snapshots render on the card.
 | Consent | Add a local, explicit `[retro].grok_host_usage = true` setting, controlled by `mm enable-source grok` / `mm disable-source grok`. Absent means false. Flat bool, not a nested table: `patch_config_on_disk` cannot nest-patch. |
 | Why not a zero-file `grok` sync source? | A zero-file source would mint an empty remote manifest and imply whole-home sync. Track 22B added a real Claude-shaped `type: "grok"` walker (`skills/` / `commands/` / `rules/` only) instead. |
 | Data sent to the fleet | Existing encrypted `host-usage-snapshot` aggregate only: canonical model family, UTC day, four token counters, active-day coverage, and source name. |
-| Unknown or changed Grok format | Fail closed per reader. Drop and declare Grok while retaining any completed Codex/OpenCode readers; omit the row only when no reader completed. |
+| Unknown or changed Grok format | Fail closed per reader. Drop and declare Grok while retaining any completed Codex readers; omit the row only when no reader completed. |
 | Cost | Do not estimate Grok subscription/API cost in this work. Usage volume and cost are different claims. |
 
 Track 22B supersedes the source part of this original 21A design: `grok` is
@@ -161,7 +161,7 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
    / `mm disable-source grok`. Track 22B later added the same-name,
    hardcoded `type: "grok"` source and keeps this bit as a compatibility OR.
 2. Change the reader gate so Grok is not invoked unless the source or local
-   compatibility bit authorizes it. Codex and OpenCode remain source-gated.
+   compatibility bit authorizes it. Codex remains source-gated.
 3. Replace `_scan_grok_root` with the strict reader and migrate its marker-only
    cache to the versioned incremental form. Generalize the warm dispatch from
    one reader to an explicit set of warmable readers.
@@ -201,7 +201,7 @@ MODELS card: Claude sessions + coverage-aware Codex/Grok/other host totals
    as whole last-known-good inventory, and labels unavailable, stale, or
    disabled device coverage without converting it to zero or presenting it as
    requested-window spend.
-8. Existing Codex, OpenCode, Claude-only token/cost, encryption, retention,
+8. Existing Codex, Claude-only token/cost, encryption, retention,
    and no-daemon behavior remain unchanged.
 
 ## Test matrix
