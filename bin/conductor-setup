@@ -1,0 +1,29 @@
+#!/bin/sh
+# Pre-warm .venv on Conductor workspace creation.
+#
+# Security-relevant: anyone who can merge to the default branch gets this
+# run on every Mac that creates a workspace. Keep this file a pointer
+# target with no inline policy — the review surface is a normal PR.
+#
+# Never block workspace creation: tee to a log and exit 0. Branch on
+# CONDUCTOR_IS_LOCAL (documented), not uname — cloud workspaces are
+# Linux/bash where brew / xcode-select advice is nonsense.
+
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+LOG_DIR=${CONDUCTOR_WORKSPACE_PATH:-"$ROOT"}
+LOG="$LOG_DIR/.conductor-setup.log"
+
+{
+  echo "conductor-setup: start"
+  echo "CONDUCTOR_IS_LOCAL=${CONDUCTOR_IS_LOCAL:-unset}"
+  echo "ROOT=$ROOT"
+  if "$ROOT/bin/check" --lint; then
+    echo "conductor-setup: bin/check --lint ok"
+  else
+    echo "conductor-setup: bin/check --lint exited $?"
+  fi
+} >"$LOG" 2>&1
+
+exit 0

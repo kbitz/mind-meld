@@ -1,0 +1,14 @@
+# Executes on workspace creation. Security-relevant: anyone who can merge
+# to the default branch gets this run on every Mac that creates a
+# workspace. Review this file like you review CI.
+#
+# The Mac app reads settings.toml from the remote default branch, so this
+# hook cannot be verified pre-merge. Local-vs-shared [scripts] precedence
+# is documented nowhere — see docs/designs/track-37A.md.
+#
+# Cloud workspaces are Linux (CONDUCTOR_IS_LOCAL=0). Keep this a pointer
+# to a repo-tracked script so the review surface is a normal PR, not
+# inline shell in a TOML string.
+
+[scripts]
+setup = "./bin/conductor-setup"
