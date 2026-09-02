@@ -24,6 +24,7 @@ import ast
 import os
 import re
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -624,6 +625,16 @@ def test_bin_check_exists_and_is_executable() -> None:
     assert os.access(path, os.X_OK)
     driver = ROOT / "bin" / "_check.py"
     assert driver.is_file(), "bin/_check.py is missing — the launcher execs it"
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-s", "--", "bin/check"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert listed.stdout.startswith("100755"), (
+        f"git mode for bin/check is {listed.stdout!r}, not 100755 — "
+        "CI would die with permission denied before this test runs"
+    )
 
 
 def test_agents_md_testing_names_bin_check() -> None:
@@ -677,5 +688,5 @@ def test_release_yml_latest_advance_compares_tag_to_head() -> None:
     text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     body = _code_without_comments(text)
     assert 'git rev-parse "$tag^{commit}"' in body
-    assert "git rev-parse HEAD" in body
-    assert "::warning::" in body
+    assert 'if [ "$tag_commit" != "$head_commit" ]' in body
+    assert "::warning::Skipping latest-advance" in body

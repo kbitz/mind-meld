@@ -74,6 +74,18 @@ class TestArgv:
         args = mod.parse_argv([])
         assert args.scope == ["tests/"]
 
+    def test_xdist_args_serial_and_pdb_suppress_n(self, monkeypatch) -> None:
+        mod = load_check()
+        monkeypatch.setenv("MM_PYTEST_WORKERS", "4")
+        py = Path(sys.executable)
+        assert mod.xdist_args(py, serial=True, extra=[]) == []
+        assert mod.xdist_args(py, serial=False, extra=["--pdb"]) == []
+        assert mod.xdist_args(py, serial=False, extra=["-x"]) == []
+        assert mod.xdist_args(py, serial=False, extra=["-n", "2"]) == []
+        got = mod.xdist_args(py, serial=False, extra=[])
+        if got:
+            assert got == ["-n", "4"]
+
     def test_lint_and_tests_together_is_an_error(self, capsys) -> None:
         mod = load_check()
         with pytest.raises(SystemExit) as ei:
@@ -116,12 +128,28 @@ class TestInterpreter:
         _stub_python(bindir, "python3", "3.9.6")
         monkeypatch.setenv("PATH", str(bindir))
         monkeypatch.delenv("MM_PYTHON", raising=False)
+        monkeypatch.delenv("CONDUCTOR_IS_LOCAL", raising=False)
         with pytest.raises(SystemExit) as ei:
             mod.resolve_interpreter()
         assert ei.value.code != 0
         err = capsys.readouterr().err
         assert "do not run xcode-select" in err
         assert ">= 3.11" in err or ">=3.11" in err
+
+    def test_cloud_workspace_remedy_is_not_xcode_select(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        mod = load_check()
+        bindir = tmp_path / "bin"
+        _stub_python(bindir, "python3", "3.9.6")
+        monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.delenv("MM_PYTHON", raising=False)
+        monkeypatch.setenv("CONDUCTOR_IS_LOCAL", "0")
+        with pytest.raises(SystemExit):
+            mod.resolve_interpreter()
+        err = capsys.readouterr().err
+        assert "Linux cloud workspace" in err
+        assert "xcode-select --install" not in err
 
 
 class TestBootstrap:
@@ -150,6 +178,21 @@ class TestBootstrap:
         assert len(pip_calls) == 1
         mod.ensure_venv(root, python, version, rebuild=False)
         assert len(pip_calls) == 1, "second run reinstalled — stamp is broken"
+
+    def test_pyproject_change_reinstalls(self, tmp_path: Path, monkeypatch) -> None:
+        mod = load_check()
+        root = tmp_path / "repo"
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+        pip_calls: list[object] = []
+        monkeypatch.setattr(mod, "_create_venv", lambda python, venv: _fake_venv(venv))
+        monkeypatch.setattr(mod, "_pip_install", lambda python, repo: pip_calls.append(1))
+        monkeypatch.setattr(mod, "venv_healthy", lambda _p: True)
+        python, version = sys.executable, (3, 13, 0)
+        mod.ensure_venv(root, python, version, rebuild=False)
+        (root / "pyproject.toml").write_text("[project]\nname = 'y'\n", encoding="utf-8")
+        mod.ensure_venv(root, python, version, rebuild=False)
+        assert len(pip_calls) == 2, "stamp did not invalidate after pyproject.toml changed"
 
     def test_unowned_broken_venv_is_not_deleted(self, tmp_path: Path, monkeypatch, capsys) -> None:
         mod = load_check()
