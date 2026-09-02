@@ -1060,7 +1060,11 @@ owns every `[skills]` check. Config absent (`None`) → every registry key
 `agents` present → that list ∩ known keys; use **key-absence** (`"agents"
 in skills`), never a falsy check — `[]` is a `ConfigError` pointing at
 `maintain_links = false`. Else derive from the passed-in source names.
-Unknown names in `agents` are accepted and inert.
+Unknown names in `agents` are accepted and inert. A non-empty `agents`
+list whose intersection with known keys is empty emits one `mm: notice:`
+per process (`_EMPTY_AGENTS_NOTICE_EMITTED`); every link is then
+`declined`. That is how `[skills] agents = ["opencode"]` behaves after
+Track 37C.
 
 `_row_is_consented(key, may_create)` is `may_create is None or key in
 may_create`. `None` still means allow-all (fresh-machine intent). The

@@ -563,14 +563,16 @@ def test_marker_literals_are_byte_identical_to_v0_12_18() -> None:
     assert len(set(names)) == 4, names
 
 
-def test_first_three_agent_keys_are_stable() -> None:
+def test_leading_agent_keys_are_stable() -> None:
     """Active supported agents; removal is a deliberate retirement, not a
     reordering. Claude and Codex stay at the front. Do not rewrite this
-    to a two-key literal list — the AST gate's exemption is a slice."""
+    to a two-key literal list — the AST gate's exemption is a slice, and
+    these assertions use index access so they never need it."""
     from mind_meld import skill_link
 
     assert skill_link.AGENT_ROWS[0].key == "claude"
     assert skill_link.AGENT_ROWS[1].key == "codex"
+    assert "opencode" not in {row.key for row in skill_link.AGENT_ROWS}
 
 
 def test_production_overrides_default_is_empty() -> None:

@@ -53,9 +53,10 @@ _REAL_HOME = Path(os.path.expanduser("~")).resolve()
 class AgentRow:
     """One supported agent's skill-link identity.
 
-    ``key`` is lowercase and matches ``events_tail.HOST_READER_SOURCE_GATE``
-    vocabulary for the two hosts that have a skill dir (claude is gated
-    separately via ``_enabled_claude_paths``, so 2 of 3).
+    ``key`` is lowercase. Skill-link keys (``AGENT_ROWS``) and usage-reader
+    keys (``events_tail.HOST_READER_SOURCE_GATE``) are separate vocabularies;
+    they currently overlap only on ``codex``. Claude's skill link is gated
+    via ``consent_source="claude"``, not the host-reader map.
 
     ``skills_root`` is a ``~``-relative STRING, never a Path.
     ``expanduser()`` must run at CALL time, or every agent path freezes at
@@ -348,7 +349,10 @@ def consented_agent_keys(config: dict | None, sources: list[dict]) -> frozenset[
       every registry key. Not an error.
     * ``[skills] maintain_links`` is false → empty, ``agents`` ignored.
     * ``agents`` present (key-absence, never a falsy check) → that list
-      ∩ known keys. Unknown names are inert.
+      ∩ known keys. Unknown names are inert. A non-empty list whose
+      intersection is empty emits one ``mm: notice:`` per process
+      (``_EMPTY_AGENTS_NOTICE_EMITTED``) so a config that only names
+      retired agents does not silently decline every link.
     * else → rows whose ``consent_source`` is in the passed-in source
       names. On a non-explicit config ``get_sources`` auto-detects by
       directory existence, so this is the same bit the host-usage read
@@ -366,11 +370,14 @@ def consented_agent_keys(config: dict | None, sources: list[dict]) -> frozenset[
         requested = skills["agents"]
         granted = frozenset(key for key in requested if key in known)
         if requested and not granted:
-            sys.stderr.write(
-                "mm: notice: [skills] agents lists no currently supported "
-                "agent; every skill link is declined. Use maintain_links = "
-                "false to say none, or name a currently supported agent.\n"
-            )
+            global _EMPTY_AGENTS_NOTICE_EMITTED
+            if not _EMPTY_AGENTS_NOTICE_EMITTED:
+                _EMPTY_AGENTS_NOTICE_EMITTED = True
+                sys.stderr.write(
+                    "mm: notice: [skills] agents lists no currently supported "
+                    "agent; every skill link is declined. Use maintain_links = "
+                    "false to say none, or name a currently supported agent.\n"
+                )
         return granted
     names = {src.get("name") for src in sources}
     return frozenset(row.key for row in AGENT_ROWS if row.consent_source in names)
@@ -416,6 +423,7 @@ def _reason(error: BaseException) -> str:
 
 
 _MM_SKILLS_DIR_REJECTION_EMITTED = False
+_EMPTY_AGENTS_NOTICE_EMITTED = False
 
 
 def _skill_store_dir() -> Path:
@@ -762,10 +770,14 @@ def _reap_retired_opencode_skill_link() -> None:
     under ``~/.config/opencode/skills``.
 
     Ownership proof is ``os.readlink(target) == store``. A regular file, a
-    directory, a dangling link, or a link pointing anywhere else is the
-    user's and is left untouched. ``lstat``, never ``resolve()`` — following
-    the symlink defeats the check. ``except OSError: pass``. Do not retry
-    on later runs; do not add a persistent "did I reap it" marker.
+    directory, or a link pointing anywhere else is the user's and is left
+    untouched. A dangling store-backed symlink is still ours and is
+    unlinked — ``os.readlink`` does not care about liveness. ``lstat``,
+    never ``resolve()`` — following the symlink defeats the check.
+    Re-readlink immediately before ``unlink`` so a same-uid swap between
+    the check and the delete is not applied. ``except OSError: pass``.
+    Idempotent: later runs are no-ops once the link is gone. Do not add
+    a persistent "did I reap it" marker.
 
     This does not conflict with Track 28A. That guard says an ABSENT link
     is user intent and must not be recreated. It says nothing about mm
@@ -783,7 +795,9 @@ def _reap_retired_opencode_skill_link() -> None:
         if stat.S_ISLNK(st.st_mode):
             try:
                 if os.readlink(target) == store:
-                    os.unlink(target)
+                    still = os.readlink(target)
+                    if still == store:
+                        os.unlink(target)
             except OSError:
                 pass
     marker_dir = _marker_dir()

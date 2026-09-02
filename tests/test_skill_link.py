@@ -87,12 +87,10 @@ def _write_mm_config(home: Path, *, source_names=("claude",), maintain_links=Tru
             path = home / ".claude"
         elif name == "codex":
             path = home / ".codex"
-        elif name == "opencode":
-            path = home / ".config" / "opencode"
         else:
             path = home / name
         path.mkdir(parents=True, exist_ok=True)
-        src_type = name if name in ("claude", "codex", "opencode", "grok") else "generic"
+        src_type = name if name in ("claude", "codex", "grok") else "generic"
         sources.append({"name": name, "path": str(path), "type": src_type})
     cfg: dict = {
         "device": {"id": "dev-a", "name": "Mac A"},
@@ -2150,15 +2148,77 @@ class TestRetiredOpencodeSkillLink:
         assert opencode_link.is_symlink()
         assert os.readlink(opencode_link) == str(elsewhere)
 
-    def test_skills_agents_that_becomes_empty_after_retirement_surfaces_a_notice(
-        self, _isolate_paths, capsys
+        opencode_link.unlink()
+        opencode_link.symlink_to(store)
+        shutil.rmtree(store)
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert not opencode_link.exists()
+        assert not opencode_link.is_symlink()
+
+        missing = _isolate_paths / "missing-skill"
+        opencode_link.symlink_to(missing)
+        skill_link._ensure_retro_skill_links(may_create=None)
+        assert opencode_link.is_symlink()
+        assert os.readlink(opencode_link) == str(missing)
+
+    def test_reaper_is_a_no_op_on_dry_run_and_autopush(
+        self, _isolate_paths, skill_src, store, config_dir
     ):
+        skill_link._ensure_retro_skill_links(may_create=None)
+        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
+        opencode_link.parent.mkdir(parents=True, exist_ok=True)
+        checked = config_dir / ".opencode-skill-link-checked"
+        conflict = config_dir / ".opencode-skill-link-conflict"
+        opencode_link.symlink_to(store)
+        checked.touch()
+        conflict.touch()
+
+        skill_link._ensure_retro_skill_links(dry_run=True, may_create=None)
+        assert opencode_link.is_symlink()
+        assert os.readlink(opencode_link) == str(store)
+        assert checked.exists()
+        assert conflict.exists()
+
+        skill_link._ensure_retro_skill_links(allow_mutate=False, may_create=None)
+        assert opencode_link.is_symlink()
+        assert os.readlink(opencode_link) == str(store)
+        assert checked.exists()
+        assert conflict.exists()
+
+    def test_skills_agents_that_becomes_empty_after_retirement_surfaces_a_notice(
+        self, _isolate_paths, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
         cfg = _write_mm_config(_isolate_paths, agents=["opencode"])
         granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
         assert granted == frozenset()
+        skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
         err = capsys.readouterr().err
-        assert "lists no currently supported" in err
+        assert err.startswith("mm: notice:")
+        assert err.count("lists no currently supported") == 1
         assert "maintain_links" in err
+
+    def test_mixed_agents_list_does_not_emit_empty_intersection_notice(
+        self, _isolate_paths, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
+        cfg = _write_mm_config(_isolate_paths, agents=["opencode", "claude"])
+        granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
+        assert granted == frozenset({"claude"})
+        err = capsys.readouterr().err
+        assert "lists no currently supported" not in err
+        assert "mm: notice:" not in err
+
+    def test_maintain_links_false_stays_silent_even_with_retired_agents(
+        self, _isolate_paths, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
+        cfg = _write_mm_config(_isolate_paths, agents=["opencode"], maintain_links=False)
+        granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
+        assert granted == frozenset()
+        err = capsys.readouterr().err
+        assert "lists no currently supported" not in err
+        assert "mm: notice:" not in err
 
 
 class TestShellCompletion:
