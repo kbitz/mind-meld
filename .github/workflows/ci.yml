@@ -31,6 +31,9 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -e .[dev]
 
       - name: Verify keyring backend
+        # macOS-CI-only: tests runner provisioning (the real Keychain backend
+        # loaded, not fail.Keyring). A hard false failure in a Linux cloud
+        # workspace, so this stays out of ./bin/check.
         run: |
           python -c "
           import keyring
@@ -39,53 +42,49 @@ jobs:
           print(backend)
           "
 
-      # Track 16A: the decomposition's one structural rule. Nothing under src/
-      # may import cli -- that is the cli<->resolveflow / cli<->retention cycle
-      # the extraction exists to avoid.
-      #
-      # Keys on the MODULE, not the imported name: the first version of this
-      # regex required a bare `cli` token after `import`, so it missed
-      # `from mind_meld.cli import _pull_core` -- the single most likely form.
-      # Relative shapes (`from .cli import x`, `from . import cli`) are covered
-      # too. tests/test_module_boundaries.py has the authoritative AST check
-      # (it also sees function-local imports, which ruff F811 cannot); this
-      # grep is the cheap pre-test tripwire that names the offending line.
-      - name: No module imports cli
+      - name: Portable checks
+        # Local and CI share one command for the portable checks (ruff check,
+        # ruff format --check, pytest). They do not run the same complete
+        # qualification — keyring and the wheel smoke stay CI-only.
+        #
+        # --no-bootstrap + MM_PYTHON=setup-python's interpreter: do not build
+        # a second environment, and do not let `python3.13` on PATH silently
+        # resolve to brew instead of this job's pin.
         run: |
-          if grep -rnE '^[[:space:]]*(from[[:space:]]+(mind_meld\.cli|\.cli)([[:space:]]|\.)|from[[:space:]]+(mind_meld|\.)[[:space:]]+import[[:space:]].*\bcli\b|import[[:space:]]+mind_meld\.cli\b)' \
-               src/mind_meld --include='*.py' | grep -v '^src/mind_meld/cli.py:'; then
-            echo "::error::a module under src/ imports mind_meld.cli — see tests/test_module_boundaries.py"
-            exit 1
-          fi
+          python -c "import sys; print('setup-python:', sys.executable, sys.version)"
+          MM_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          export MM_PYTHON
+          echo "MM_PYTHON=$MM_PYTHON"
+          ./bin/check --no-bootstrap
 
-      - name: Lint (ruff check)
-        run: ruff check .
-
-      - name: Lint (ruff format)
-        run: ruff format --check .
-
-      - name: Run tests
-        run: pytest tests/
-
-      - name: Build and install wheel
+      - name: Build and smoke the wheel
+        # Isolated disposable venv. `pip install --force-reinstall dist/*.whl`
+        # into THIS job's env would replace the editable install; with a src/
+        # layout, `import mind_meld` then resolves to site-packages and later
+        # steps silently test stale code. `devices --format json` against a
+        # real ~/.config/mind-meld/config.toml reaches iCloud and the Keychain,
+        # so HOME is a throwaway directory.
         run: |
           python -m pip install build
           python -m build
-          python -m pip install --force-reinstall dist/*.whl
-          mm --version
+          smoke=$(mktemp -d)
+          python -m venv "$smoke/venv"
+          "$smoke/venv/bin/python" -m pip install dist/*.whl
+          "$smoke/venv/bin/mm" --version
           # The `-m` path is what the shipped retro-fleet skill actually uses:
           # aggregator.get_known_devices() runs
           # `sys.executable -m mind_meld.cli devices --format json` and parses
           # the stdout as JSON. It degrades to (None, []) on ANY failure, so a
           # break here is silent -- every retro card just quietly drops its
           # "of M devices" tail. CI only ever smoked the console-script path.
-          python -m mind_meld.cli --version
-          # Prove the JSON path actually parses. `... || true` would make this
-          # line unfailable — the appearance of coverage with none of it. On a
-          # fresh runner mm is uninitialized, so `devices` exits non-zero by
-          # design; assert on THAT, and that it did not die with a traceback.
-          if python -m mind_meld.cli devices --format json > /tmp/devices.out 2>/tmp/devices.err; then
-            python -c "import json,sys; json.load(open('/tmp/devices.out'))"
+          "$smoke/venv/bin/python" -m mind_meld.cli --version
+          iso_home=$(mktemp -d)
+          if HOME="$iso_home" "$smoke/venv/bin/python" -m mind_meld.cli devices --format json > /tmp/devices.out 2>/tmp/devices.err; then
+            "$smoke/venv/bin/python" -c "import json,sys; json.load(open('/tmp/devices.out'))"
           else
-            grep -q 'Traceback' /tmp/devices.err && { echo "::error::-m entrypoint crashed"; cat /tmp/devices.err; exit 1; } || true
+            if grep -q 'Traceback' /tmp/devices.err; then
+              echo "::error::-m entrypoint crashed"
+              cat /tmp/devices.err
+              exit 1
+            fi
           fi
