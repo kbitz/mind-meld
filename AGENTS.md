@@ -92,14 +92,23 @@ Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `
 Version source of truth: `pyproject.toml` (read by `__init__.py` via `importlib.metadata.version("mind-meld")`, fallback `"0.0.0+dev"` for uninstalled source-tree runs). No `VERSION` file.
 
 ## Testing
-pytest. Use tmp_path for local backend. Run: `pytest tests/`
+`./bin/check` is the verification entry point. It bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest, in that order (cheap gates first). Default pytest scope is `tests/`. pytest. Use tmp_path for local backend.
 
-Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). Run `ruff check .` and `ruff format --check .` locally before pushing — CI runs both as a separate `lint` job and will block merges on drift. Rule set: `E`/`F`/`W`/`I` (isort enforcement).
+```
+./bin/check                         # full portable checks
+./bin/check tests/test_config.py    # scoped pytest; still lints the whole repo
+```
+
+A scoped pytest still lints the whole repo — that is intended (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Cards describe verification *scope*; they must not know where Python lives.
+
+**Card convention:** every roadmap `verify:` field is `./bin/check <scope>`. `/roadmap`'s card template has no `verify:` field, so the drafting agent copies this documented command on every regeneration. Do not write bare `pytest` or `./.venv/bin/...` into cards.
+
+Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). `./bin/check` runs `ruff check .` and `ruff format --check .` before pytest. CI runs those same two as steps inside the single `ci` job (not a separate `lint` job) and will block merges on drift. Rule set: `E`/`F`/`W`/`I` (isort enforcement).
 
 The PYTEST_CURRENT_TEST guard on `crypto.store_passphrase_in_keyring` (v0.11.11) is load-bearing — see `docs/invariants/init-devices.md` for the rationale.
 
 ## CI
-GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool — multi-OS + multi-Python matrix is theater for this project). Runs ruff check + ruff format --check + pytest + wheel build + `mm --version` smoke. Asserts the real Keychain backend loads (guards against silent `fail.Keyring` fallback). pip cache keyed on `pyproject.toml`. No `paths:` filter — every PR runs CI (avoids the branch-protection pending-forever footgun for path-skipped required checks).
+GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool — multi-OS + multi-Python matrix is theater for this project). Local and CI share one command for the portable checks (`./bin/check`: ruff check, ruff format --check, pytest). They do not run the same complete qualification: CI also asserts the real Keychain backend (macOS-runner provisioning) and builds the wheel into a fresh disposable venv for `mm --version` / `-m` smokes. pip cache keyed on `pyproject.toml`. No `paths:` filter — every PR runs CI (avoids the branch-protection pending-forever footgun for path-skipped required checks).
 
 `.github/workflows/release.yml` (v0.11.24+, PROGRESS auto-append removed v0.11.26) — auto-tag + auto-create-Release on push to main, gated on changes to `pyproject.toml` or `CHANGELOG.md`. Each step independently idempotent (re-run-safe after partial failure). Tag detection branches on `git rev-parse "$tag"` and release detection on `gh release view "$tag"`. Bot identity is `github-actions[bot]`. The "Verify PROGRESS.md row exists" tail step emits a warning (not a failure) when the row is missing, so the release still ships and you see the gap.
 

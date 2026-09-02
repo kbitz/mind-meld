@@ -9,7 +9,7 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 - **mm maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills`.** Verified 2026-08-24 against Grok 1.0.5 with `grok inspect --json`. A proposal to add an agent row must first show the host does not already find the directory. This criterion killed Track 27A, and it is why **Grok Build needs no skill link and no sync source** — probed 2026-09-01, `~/.grok/` has no `skills/`, `commands/` or `rules/` directory at all. Grok Build's entire mm surface is the usage reader.
 - **A card's premise is checked against HEAD at drain time, not carried forward from when it was filed.** Seven Tracks have now run on falsified premises. If the premise is false, discharge or kill it — do not emit the task.
 - **A command that only exists to undo an automatic action is refused until the automatic action is shown to be correct.** v0.12.44 killed `mm uninstall-skills` this way: a revoke command, a `[skills] revoked` denylist, and a third policy axis were all downstream of one defect — the installer recreated a link the user deleted. Fixing the installer made all three unnecessary. Before filing an inverse, check whether the forward action should have happened at all.
-- **Release-bearing Tracks serialize.** `pyproject.toml` is deliberately absent from `docs/shared-infra.txt`; two Tracks claiming one version force-advance `latest` to an untagged commit. See that file for the full argument.
+- **Release-bearing Tracks serialize.** `pyproject.toml` is deliberately absent from `docs/shared-infra.txt`. Two Tracks claiming one version merge cleanly in git, but only one tag can exist for that version — the second's code never gets tagged at all. A dev-dep-only `pyproject.toml` edit no longer force-pushes `latest`: `release.yml` compares `git rev-parse "$tag^{commit}"` to HEAD and skips with a warning. Serialization is still the cheap guard against the silent-lost-code case. See `docs/shared-infra.txt`.
 - **The roadmap-staleness gate stays dead.** Track 28B was killed 2026-08-25 on the grounds that an empty Current Plan leaves nothing to drift. Groups 29–35 removed that ground, the question was re-put on 2026-08-25 with seven Groups in flight, and the answer was the same. Do not re-propose it; the design remains recorded in the Group 28 entry of `docs/roadmap-shipped.md` for whoever overrides this.
 - **Discovery may read host logs locally, but an encoded cwd never goes on the wire.** Track 29A's prober is a two-level scan of `~/conductor/workspaces/*/*` whose only wire output is a canonical remote URL. Codex `turn_context.cwd` and Grok's URL-encoded session dir names would both yield more roots and are refused — see the Future bullet "Do not add a Codex or Grok sessions-snapshot". Confirmed 2026-08-25.
 - **A Track that puts a field on a wire, in a cache, or in a log must name its reader in the same card, or declare the reader's Track by number.** Track 34A's review found FOUR producer-without-consumer instances in one pass: `degraded_sources` (shipped v0.12.47, zero readers), `git_capture` (shipped Track 30A, unread by the aggregator), `usageIsIncomplete` (discarded at cache normalization), and the SKILL.md decoder's missing fallback. Reinforced 2026-09-01 by the v0.12.51 conflict-log analysis, which found the conflict-decision collector had been deleted on a premise nobody read, and `synclog.py` still describing the pre-inversion direction four months after the inversion. A write with no reader is not half a feature, it is a liability that reads as one.
@@ -22,7 +22,23 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 
 ## In Progress
 
-_Nothing in flight._
+#### Group 37: Verification contract
+
+_Depends on: none_
+
+##### Track 37A: One self-bootstrapping verification command
+_2 tasks . ~M . medium risk . 7 files_
+_touches: bin/ (new), .github/workflows/, tests/test_init_auto_pin.py, tests/test_docs_routing.py, tests/test_bin_check.py (new), pyproject.toml, AGENTS.md, README.md, .gitignore, docs/designs/track-37A.md (new), .conductor/ (new), docs/invariants/auto-upgrade.md, docs/shared-infra.txt_
+_read-first: docs/designs/track-37A.md_
+_produces: `./bin/check` is the verify contract for agents, humans, and CI_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_bin_check.py tests/test_docs_routing.py tests/test_init_auto_pin.py_
+
+_User decision 2026-09-02: ships as **one Track / one PR**, superseding the six-Track split `/autoplan` proposed on 2026-09-01. Review residue lives in `docs/designs/track-37A.md`. Re-priced M / medium: the ~45-line estimate was carried unchanged through two reshapes while the requirement list grew to 14 items._
+
+_Cards describe verification SCOPE. They must not know where Python lives. The eight bare-`pytest` `verify:` fields existed because `AGENTS.md ## Testing` said `Run: pytest tests/` and `/roadmap`'s card template has no `verify:` field — fix the doc, not the generator output._
+
+- **The verification command** -- POSIX launcher + stdlib driver. Cheap gates first. Content-hash staleness, fcntl lock, interpreter policy (prefer 3.13, notice otherwise, never `xcode-select`). `AGENTS.md ## Testing` is the root-cause pin; README `## Development` is the human entry. Behavioural tests plus the docs-routing pins. _bin/ + tests + AGENTS.md + README.md, ~600 lines._ (M)
+- **Make it shippable** -- guard `release.yml` latest-advance on `$tag^{commit}` == HEAD; fix width-coupled Rich assertions (do not pin `COLUMNS`); add pytest-xdist (no version bump); `ci.yml` calls `./bin/check --no-bootstrap` with CI-only keyring and an isolated wheel smoke; optional Conductor setup that exits 0. _.github/workflows/ + pyproject.toml + tests + .conductor/, ~200 lines._ (M)
 
 ---
 
@@ -37,17 +53,19 @@ _tombstone: 27_
 
 _Groups 29-35 shipped (v0.12.45 → v0.12.52) and moved to `docs/roadmap-shipped.md`. They answered the reported symptoms — git history was being lost, Grok published nothing, Codex was double-counted, the card could not see a dropped reader, and host tokens were priced against the wrong counter schema._
 
-_**Phase membership changed 2026-09-01.** Group 40 (host cache encoding) was Phase 4's first Group. It moves here because its actual content is "make Grok Build's data reach the card" — the `_validated_grok_entry` `offset == size` wedge is now the ONLY reason Grok is invisible on this fleet. That is retro fidelity, not reader consolidation. Phase 4 is left with one Group (42) and its wrapper is dropped; a Phase spans ≥2 Groups or it is just a Group with extra ceremony. Groups 37, 38, 39 and 41 are unphased — Phases are optional and a mixed lane does not need one._
+_**Phase membership changed 2026-09-01.** Group 40 (host cache encoding) was Phase 4's first Group. It moves here because its actual content is "make Grok Build's data reach the card" — the `_validated_grok_entry` `offset == size` wedge is now the ONLY reason Grok is invisible on this fleet. That is retro fidelity, not reader consolidation. Phase 4 is left with one Group (42) and its wrapper is dropped; a Phase spans ≥2 Groups or it is just a Group with extra ceremony. Groups 37, 38, 39, 41 and 44 are unphased — Phases are optional and a mixed lane does not need one._
 
 #### Group 36: Three hosts
+
+_Depends on: Group 37_
 
 ##### Track 36A: Delete the OpenCode usage reader
 _2 tasks . ~250 LOC . medium risk . 13 files_
 _touches: src/mind_meld/host_usage.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, tests/test_host_usage.py, tests/test_host_usage_snapshot.py, tests/conftest.py, tests/test_integration.py, tests/test_init_events_backfill.py, tests/fixtures/host_sessions/opencode/, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_out: 36B, 37B_
+_out: 36B, 44A_
 _read-first: 31A, docs/invariants/events-retro.md (host-usage-snapshot section)_
 _produces: mm stops carrying a reader that has never returned a row_
-_session: fresh · effort: medium · verify: ./.venv/bin/python -m pytest tests/ -q ; ./.venv/bin/ruff check . ; ./.venv/bin/ruff format --check ._
+_session: fresh · effort: medium · verify: ./bin/check_
 
 _**User decision, 2026-09-01: mm supports Claude Code, Codex and Grok Build. OpenCode is dropped.** This Track replaces a drafted fix for the OpenCode `$.id` defect — `host_usage.py:1345` projects `json_extract(data, '$.id')` while OpenCode keeps `id` as a table column, so every row yields NULL and one bad row fails the whole store (**0 of 42** assistant rows, all `grok-4.6`, measured 2026-09-01). Deleting the reader dissolves that defect instead of fixing it._
 
@@ -63,7 +81,7 @@ _2 tasks . ~90 LOC . medium risk . 9 files_
 _touches: src/mind_meld/cli.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_events.py, README.md, SPEC.md, AGENTS.md, docs/designs/host-parity.md, docs/designs/grok-build-usage-reader.md_
 _read-first: 36A, 33A_
 _produces: a legacy peer keeps publishing accepted host rows after OpenCode is gone_
-_session: fresh · effort: medium · verify: pytest tests/test_events.py tests/test_retro_fleet_aggregator.py; ruff check .; ruff format --check ._
+_session: fresh · effort: medium · verify: ./bin/check tests/test_events.py tests/test_retro_fleet_aggregator.py_
 
 _**This Track exists because the obvious cleanup is a fleet-wide data-loss bug.** `aggregator._token_sources_subsequence` (`aggregator.py:1510`) validates a peer's `token_sources` list as a **subsequence of `events.HOST_USAGE_TOKEN_SOURCES`**, and returns `None` — `"invalid_token_sources"`, rejecting the WHOLE row — the moment it meets a name outside that tuple. A Mac on older mm keeps emitting `["codex", "grok", "opencode"]` for the full 90-day retention window. Deleting `"opencode"` from the tuple would therefore drop every legacy peer's entire host row, which is precisely the fail-the-whole-row pathology Track 33A documented and Track 31A removed._
 
@@ -72,29 +90,20 @@ _So the decision is: **the wire keeps the name; only the reader goes.** This is 
 - **Pin the constant** -- 36A already split `ACTIVE_HOST_READERS` from `HOST_USAGE_TOKEN_SOURCES` and pinned legacy-peer acceptance across all three source lists. This Track must not delete `"opencode"` from the wire tuple. Update `cli.py`'s two `enable-source` docstring references so the help text stops offering a host that no longer exists. _cli.py + tests, ~20 lines._ (S)
 - **Sweep the prose** -- `README.md` (13 references), `SPEC.md` (5), `AGENTS.md` (3 references — `CLAUDE.md` is a **symlink to `AGENTS.md`**, one file not two), `docs/designs/host-parity.md` (7), `docs/designs/grok-build-usage-reader.md`, `skills/retro_fleet/SKILL.md` (mm **copies** it to `~/.local/share/mind-meld/agent-skills/` where every agent reads it as instructions), and `aggregator.py:3711` (the `mm enable-source ... opencode` hint rendered on the retro card). Leaving docs that describe a removed host is worse than leaving the code, because the code is at least honest about returning nothing. `host-parity.md` is a design doc whose premise just changed from four hosts to three — correct it in place or archive it, do not leave it asserting the old shape. _docs + aggregator + SKILL.md, ~50 lines._ (S)
 
-#### Group 37: Workspace bootstrap ∥ Source retirement
+#### Group 44: Source retirement
 
-_Depends on: Group 36_
+_Depends on: Group 36, Group 37_
 
-##### Track 37A: Make a fresh workspace able to run `verify:`
-_2 tasks . ~60 LOC . low risk . 3 files_
-_touches: .conductor/ (new), README.md, docs/ROADMAP.md_
-_read-first: 36B_
-_produces: every Track's `verify:` line is runnable in a fresh Conductor workspace_
-_session: fresh · effort: low · verify: run the script from a clean clone, then run any Track's `verify:` line_
-
-_Premise verified in a live workspace at `727f9cd`: no `.venv`, no `.conductor/`, no `bin/`, no `Makefile`; `python3` resolves to Homebrew 3.14 and `import mind_meld` raises `ModuleNotFoundError`. **Every card in this plan carries a `verify: pytest …` line that cannot run as written on a fresh workspace.** Reaching a baseline currently takes `python3.13 -m venv .venv` + `pip install -e .[dev]` by hand, rediscovered per workspace. Not release-bearing, which is why it rooms with 37B._
-
-- **One bootstrap script** -- create the venv against a supported interpreter and `pip install -e .[dev]`, idempotent on re-run. Must not assume `python` is on PATH; macOS ships `python3` only, and Homebrew's `python3` is not necessarily a supported minor — resolve the interpreter explicitly rather than trusting the first match. _new script, ~40 lines._ (S)
-- **Wire it to Conductor and document it** -- a `.conductor/` setup entry so a new workspace bootstraps itself, plus one README line for the non-Conductor path. _.conductor/ + README.md, ~20 lines._ (S)
-
-##### Track 37B: Retire the OpenCode sync source and skill link
-_3 tasks . ~160 LOC . medium risk . 5 files_
+##### Track 44A: Retire the OpenCode sync source and skill link
+_5 tasks . ~220 LOC . medium risk . 5 files_
 _touches: src/mind_meld/config.py, src/mind_meld/skill_link.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_skill_link.py, docs/invariants/sync.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _out: 39A_
 _read-first: 36A, 28A, docs/invariants/sync.md, `cli._filter_disabled_sources` docstring (the P0 tombstone footgun, in full)_
 _produces: an unsupported source stops syncing on every Mac without anyone running a command_
-_session: fresh · effort: medium · verify: pytest tests/test_config.py tests/test_skill_link.py tests/test_source_toggle.py tests/test_integration.py tests/test_docs_routing.py; ruff check .; ruff format --check ._
+_blocked-by: Track 36A_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_config.py tests/test_skill_link.py tests/test_source_toggle.py tests/test_integration.py tests/test_docs_routing.py_
+
+_Split from Group 37 on 2026-09-02: Track 37A now touches `pyproject.toml`, which 37B (this card) already claimed, and Group 37 was declared parallel. Packer put the verification command in its own layer-0 Group (37, in progress) and this retirement Track in a later layer._
 
 _**No migration command. User decision 2026-09-01: mm ignores sources it does not support.** An earlier draft of this card required `mm migrate-config` plus a documented `mm disable-source opencode`, which is per-machine manual work to un-ship a feature the user never used. Retirement is automatic instead._
 
@@ -105,17 +114,19 @@ _**Preferred shape: inject at the load boundary, not the call sites.** Adding re
 - **Retire the source name** -- remove the `opencode` entry from `config.DEFAULT_SOURCES` and its half of `_GENERATED_HOST_SKILL_GLOBS` (the five globs are duplicated across the codex and opencode entries; only the opencode copy goes). Add a retired-names set beside `MM_INTERNAL_SOURCE_NAMES` and fold it into the effective `disabled_sources`. **Scope it to retired names only** — `_validate_sources` deliberately does not reject unknown source names, because `[[sync.sources]]` is user-extensible and `gstack` / `gstack-extend` are legitimate non-host entries; a rule like "ignore anything not in `DEFAULT_SOURCES`" would silently stop syncing a user's own custom source. Pin the tombstone behaviour with a test that retires a source holding files and asserts the push emits **no** new tombstones for it. _config.py, ~70 lines._ (M)
 - **Make `retired` a third source state** -- not a synonym for disabled or unknown. Consumed by `load_config`, `_validate_source_name`, `mm status`, `mm sources` and `reconfigure-sources`. Retired-name branch in `_validate_source_name` BEFORE the known-name check; exit non-zero; `--force` does not override. **Name `skill_link.py:129-134` explicitly** — it derives two marker constants with `next(row ... if row.key == "opencode")` and **no default**, so removing the `AGENT_ROWS` row raises `StopIteration` at module import and `mm --version` dies. Also flag `cli.py:4494`, which would otherwise print a permanent yellow "run `mm enable-source opencode`" line with a remedy that cannot work. _cli.py + skill_link.py, ~40 lines._ (M)
 - **Drop the skill-link row** -- remove the `opencode` row from `skill_link.AGENT_ROWS`, which owns `~/.config/opencode/skills/retro-fleet` and its two markers, **after** the two derived `next()` constants have a default or are deleted. This is mm retiring a link **it** owns, which is NOT the user-deletion case Track 28A's guard protects — read that guard first so the two paths stay distinguishable, and leave an orphaned link on disk rather than growing a reaper for a directory mm does not own. BREAKING marker + `### Migration` CHANGELOG section belong here, the release that actually stops the sync. _skill_link.py, ~50 lines._ (M)
+- **Retired CLI verbs** -- `enable` refuses a retired name (no "Enabled source" success on a silent no-op). `mm sources` shows an explicit `Retired` state. `disable` stays idempotently accepted so cleanup scripts do not start failing. `--force` cannot bypass a retired built-in. Include `tests/test_module_boundaries.py` in verify (it asserts `keys[:3] == ["claude","codex","opencode"]`). _cli.py + tests, ~40 lines._ (S)
+- **One-time retirement notice** -- a developer who upgrades mm currently sees nothing. One `mm: notice:` when a retired source or an mm-owned orphaned skill link is detected, following the `autopush` `no-sources` breadcrumb precedent. _cli.py, ~20 lines._ (S)
 
 #### Group 38: Conflict sidecar forensics
 
-_Depends on: Group 36, Group 37_
+_Depends on: Group 36, Group 37, Group 44_
 
 ##### Track 38A: Find and fix what deletes conflict sidecars
 _3 tasks . ~220 LOC . high risk . 5 files_
 _touches: src/mind_meld/cli.py, src/mind_meld/resolveflow.py, tests/test_conflict_copy.py, docs/invariants/conflicts.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _read-first: docs/invariants/conflicts.md (the inversion and sidecar-dedup sections in full)_
 _produces: the deleter is named, and fixed if it is mm_
-_session: fresh · effort: high · verify: pytest tests/test_conflict_copy.py tests/test_docs_routing.py; ruff check .; ruff format --check ._
+_session: fresh · effort: high · verify: ./bin/check tests/test_conflict_copy.py tests/test_docs_routing.py_
 
 _Diagnose FIRST, then fix. The prohibition is on shipping a blind mitigation — a retry-on-vanish that papers over whatever is deleting user data — NOT on fixing the cause once it is named. If the cause is in mm, it is fixed in this PR. If the fix turns out to be large, it splits to a follow-up Track rather than bloating this card; if the cause is external, task 2 is discharged and says so._
 
@@ -131,24 +142,24 @@ _**One dependency edge deleted 2026-09-01.** This card previously carried `block
 
 #### Group 39: Sync surface
 
-_Depends on: Group 37_
+_Depends on: Group 44_
 
 ##### Track 39A: Narrow the sync surface structurally
 _2 tasks . ~180 LOC . medium risk . 4 files_
 _touches: src/mind_meld/manifest.py, src/mind_meld/config.py, tests/test_manifest.py, tests/test_config.py, docs/invariants/sync.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_read-first: 37B, docs/invariants/sync.md ("Generated files are not sync data", added v0.12.51)_
+_read-first: 44A, docs/invariants/sync.md ("Generated files are not sync data", added v0.12.51)_
 _produces: a generated directory drops out of sync without anyone adding a glob for it_
-_blocked-by: Track 37B_
-_session: fresh · effort: medium · verify: pytest tests/test_manifest.py tests/test_config.py tests/test_integration.py tests/test_docs_routing.py; ruff check .; ruff format --check ._
+_blocked-by: Track 44A_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_manifest.py tests/test_config.py tests/test_integration.py tests/test_docs_routing.py_
 
-_Both halves are follow-ups v0.12.51 named as its own known limitations. That release excluded 43 of 88 recorded conflicts by glob; these two close the parts a glob cannot express. **`blocked-by: 37B` is a real edge, not sequencing:** 37B deletes the opencode copy of `_GENERATED_HOST_SKILL_GLOBS`, and this Track rewrites the mechanism those globs implement. Running it first would re-add the copy 37B is removing._
+_Both halves are follow-ups v0.12.51 named as its own known limitations. That release excluded 43 of 88 recorded conflicts by glob; these two close the parts a glob cannot express. **`blocked-by: 44A` is a real edge, not sequencing:** 44A deletes the opencode copy of `_GENERATED_HOST_SKILL_GLOBS`, and this Track rewrites the mechanism those globs implement. Running it first would re-add the copy 44A is removing._
 
 - **Marker-aware directory skip in the walker** -- v0.12.51 excludes gstack-extend's per-host skill renders BY NAME because `exclude_patterns` are fnmatch globs against a relative path and cannot express "skip the directory CONTAINING this file." gstack-extend already drops `.extend-root` in every dir it renders. Until the walker can see it, every new gstack-extend skill silently starts conflicting fleet-wide until someone adds a glob. Touches `manifest.walk_generic_source`: read the tombstone-suppression invariant first, because a marker skip must not generate deletion tombstones, exactly as adding a glob must not. All four scenarios are pinned in `tests/test_integration.py::TestExcludePatterns5C`. _manifest.py + config.py, ~120 lines._ (M)
 - **Exclude the pair-review state machine only** -- `projects/*/pair-review/session.yaml` (8 of the 88 conflicts) is a live per-machine state machine and definitionally cannot be shared. The prose artifacts (`deploy.md`, `report.md`, `parked-bugs.md` — 23 more conflicts) STAY in scope: pair-review advertises cross-machine resume as a feature, so excluding them removes capability rather than noise. **The measurement that makes that call defensible: across the same window these paths took 31 conflicts against 178 mtime-skips**, so the existing local-is-newer gate already absorbs 85% of the collisions and the residual does not justify removing a feature. The fuller fix is device-scoped artifact paths (`pair-review/<device>/`) in GSTACK, not an mm exclusion — file that upstream rather than absorbing it here. _config.py, ~60 lines._ (S)
 
 #### Group 40: Cache encoding
 
-_Depends on: Group 36, Group 37, Group 39_
+_Depends on: Group 36, Group 39, Group 44_
 
 ##### Track 40A: Shrink the host cache encoding
 _2 tasks . ~140 LOC . medium risk . 3 files_
@@ -156,8 +167,8 @@ _touches: src/mind_meld/host_usage.py, tests/test_host_usage.py, docs/invariants
 _out: 42A, 43A_
 _read-first: 32A, 34A, 36A_
 _produces: the host cache stops scaling its per-push cost with corpus size, and Grok Build completes a scan_
-_blocked-by: Track 36A, Track 37B_
-_session: fresh · effort: medium · verify: pytest tests/test_host_usage.py tests/test_docs_routing.py; ruff check .; ruff format --check ._
+_blocked-by: Track 36A, Track 44A_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_host_usage.py tests/test_docs_routing.py_
 
 _Filed from Track 32A's `/review`. Measured 2026-08-28 on a 747-rollout / 694 MB corpus: 72,654 states, cache **0.40 MB → 13.48 MB**, json round-trip **56.3 ms of the 250 ms** autopush host budget. `locked_json_rmw` parses and re-serialises the whole file every push, so the cost is paid per push and scales linearly. At roughly 4x this corpus it consumes the budget and the reader can never converge. **Trigger: round-trip above 100 ms, or cache above 25 MB.** Gate confirmed 2026-09-01 in `host_usage._validated_grok_entry` (`host_usage.py:1179`), written `value["offset"] != value["size"]` — grep the symbol, not the line._
 
@@ -170,14 +181,14 @@ _**`read-first: 34A` added 2026-09-01** (filed from Track 34A's `/autoplan`, und
 
 #### Group 41: Git environment hygiene
 
-_Depends on: Group 36, Group 37, Group 38_
+_Depends on: Group 36, Group 37, Group 38, Group 44_
 
 ##### Track 41A: Scrub the git environment for mm's git subprocesses
 _1 task . ~40 LOC . low risk . 2 files_
 _touches: src/mind_meld/events.py, tests/test_events.py, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _read-first: 36B, docs/invariants/events-retro.md_
 _produces: an inherited `GIT_DIR` can no longer misattribute one repo's commits to another_
-_session: fresh · effort: low · verify: pytest tests/test_events.py tests/test_docs_routing.py; ruff check .; ruff format --check ._
+_session: fresh · effort: low · verify: ./bin/check tests/test_events.py tests/test_docs_routing.py_
 
 _Filed as S2 from Track 29A's `/autoplan` (2026-08-25) and re-verified at `727f9cd`: neither `subprocess.run` in `events.py` (`:1011` git log, `:1053` `remote.origin.url`) passes an `env=`, so `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_COMMON_DIR` are inherited. After Track 29A, classification is a `.git` **stat** that ignores the environment while `git log` still honours it, so every `.git`-bearing candidate can emit the env repo's `(canonical_remote, sha)` paired with its own `local_path` — the aggregator's exact dedup key. Exotic, but `autopush` runs from a hook whose environment mm does not control, which is precisely the unattended path._
 
@@ -193,7 +204,7 @@ _touches: src/mind_meld/host_usage.py, src/mind_meld/token_usage.py, tests/test_
 _read-first: 40A, 36A, 33A, docs/invariants/events-retro.md (incremental-resume section)_
 _produces: one cache/resume/fingerprint implementation shared by Claude, Codex and Grok Build_
 _blocked-by: Track 40A_
-_session: fresh · effort: high · verify: pytest tests/test_host_usage.py tests/test_token_usage.py tests/test_module_boundaries.py tests/test_docs_routing.py; ruff check .; ruff format --check ._
+_session: fresh · effort: high · verify: ./bin/check tests/test_host_usage.py tests/test_token_usage.py tests/test_module_boundaries.py tests/test_docs_routing.py_
 
 _**Retitled and re-scoped 2026-09-01** from "three adapters" — Group 36 deletes the OpenCode reader, so the host side is Codex and Grok Build over the shared Claude walker. One of the four cache files goes with it, which is why the estimate dropped from ~400 to ~350 lines even as the premise strengthened._
 
@@ -205,19 +216,19 @@ _**Literal corrected 2026-09-01.** This card said `host_usage.py` is 1,730 lines
 
 #### Group 43: Unified reporting
 
-_Depends on: Group 36, Group 37, Group 40, Group 42_
+_Depends on: Group 36, Group 40, Group 42, Group 44_
 
 ##### Track 43A: Report every agent the same way
 _2 tasks . ~200 LOC . medium risk . 4 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _read-first: 36A, 36B, 40A, 33A, docs/invariants/events-retro.md (Track 23A renderer contract, as revised)_
 _produces: tokens and cost split per model family for all three agents; commits, LOC and PRs aggregate across all of them_
-_blocked-by: Track 36A, Track 37B, Track 40A_
-_session: fresh · effort: high · verify: pytest tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py; ruff check .; ruff format --check ._
+_blocked-by: Track 36A, Track 44A, Track 40A_
+_session: fresh · effort: high · verify: ./bin/check tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
 
 _Phase 3's end-state lands here. Premise re-verified 2026-09-01 at `727f9cd`: `_render_agent_inventory` and `AGENT_FAMILY_ROWS` are both still present in `aggregator.py`._
 
-_**One instruction struck 2026-09-01.** The card previously read "OpenCode must keep reporting an honest empty." That empty was a **defect, not an absence of data** — the reader held 35 readable assistant rows and discarded all of them. As written the card would have pinned a bug as intended behaviour in a regression test, which is the same failure mode as Track 35A's struck instruction to retire a passing guard, one Track later. The instruction is moot now that Group 36 removes OpenCode, but it is why this Track is gated on 36A, 37B and 40A: **it renders three real agents, not two real and one empty.**_
+_**One instruction struck 2026-09-01.** The card previously read "OpenCode must keep reporting an honest empty." That empty was a **defect, not an absence of data** — the reader held 35 readable assistant rows and discarded all of them. As written the card would have pinned a bug as intended behaviour in a regression test, which is the same failure mode as Track 35A's struck instruction to retire a passing guard, one Track later. The instruction is moot now that Group 36 removes OpenCode, but it is why this Track is gated on 36A, 44A and 40A: **it renders three real agents, not two real and one empty.**_
 
 _Note the asymmetry 36B creates and this Track must respect: OpenCode is gone from the reader and the config but **still a legal name on the wire**, because a legacy peer's row is rejected whole if it is not. The renderer must therefore ignore an inbound `opencode` source silently rather than surfacing it as a fourth agent or as a coverage gap. Widen that inbound tolerance from `token_sources` to `degraded_sources` and `partial_sources` — all three route through `_token_sources_subsequence` (`aggregator.py:1892`)._
 
@@ -231,25 +242,28 @@ of document order; document order is priority, not gating.
 
 Adjacency list (from the packer):
 ```
-- Group 36 ← {}
-- Group 37 ← {36}
-- Group 38 ← {36, 37}
-- Group 39 ← {37}
-- Group 40 ← {36, 37, 39}
-- Group 41 ← {36, 37, 38}
+- Group 37 ← {}
+- Group 36 ← {37}
+- Group 44 ← {36, 37}
+- Group 38 ← {36, 37, 44}
+- Group 39 ← {44}
+- Group 40 ← {36, 39, 44}
+- Group 41 ← {36, 37, 38, 44}
 - Group 42 ← {40}
-- Group 43 ← {36, 37, 40, 42}
+- Group 43 ← {36, 40, 42, 44}
 ```
 
 Track detail per group:
 ```
+Group 37: Verification contract   (in progress)
+  +-- Track 37A ........... ~M . 2 tasks
+
 Group 36: Three hosts
   +-- Track 36A ........... ~M . 2 tasks
   +-- Track 36B ........... ~M . 2 tasks
 
-Group 37: Workspace bootstrap | Source retirement
-  +-- Track 37A ........... ~S . 2 tasks
-  +-- Track 37B ........... ~M . 3 tasks
+Group 44: Source retirement
+  +-- Track 44A ........... ~M . 5 tasks
 
 Group 38: Conflict sidecar forensics
   +-- Track 38A ........... ~L . 3 tasks
@@ -270,13 +284,13 @@ Group 43: Unified reporting
   +-- Track 43A ........... ~L . 2 tasks
 ```
 
-**Total: 8 groups . 10 tracks remaining. Critical path: 6 waves.**
+**Total: 9 groups . 10 tracks remaining. Critical path: 7 waves through 37A → 36B → 44A → 39A → 40A → 42A → 43A.**
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (70 items)
+Deferred: docs/roadmap-future.md (74 items)
 
 ## Shipped
 

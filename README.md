@@ -510,6 +510,29 @@ security delete-generic-password -s mind-meld -a passphrase
 
 Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
+## Development
+
+From a clone (no environment required):
+
+```
+./bin/check
+```
+
+That command bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest. Cards describe verification *scope*; they do not know where Python lives:
+
+```
+./bin/check tests/test_config.py
+```
+
+A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Use `--serial` to disable pytest-xdist. `MM_PYTHON` selects the bootstrap interpreter; `MM_VENV` validates and uses an existing environment without mutating it; `VIRTUAL_ENV` and `--no-bootstrap` use the current environment. `MM_PYTEST_WORKERS` sets the xdist worker count. See `./bin/check --help`.
+
+Manual fallback (separate lines; quote `'.[dev]'` — macOS zsh globs it):
+
+```
+python3.13 -m venv .venv
+./.venv/bin/python -m pip install -e '.[dev]'
+```
+
 ## Architecture
 
 See [SPEC.md](SPEC.md) for full documentation.

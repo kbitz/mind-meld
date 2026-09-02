@@ -133,7 +133,10 @@ def test_recover_refuses_when_sidecar_present(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["recover", "--abandon-manifest"])
     assert result.exit_code != 0
-    out = (result.stderr or "") + result.output
+    # Rich wraps the sidecar path. A raw `"mm push" in out` is a function
+    # of tmp_path length (xdist worker dirs on the CI runner fold the
+    # quoted command). Whitespace-normalized text is the house pattern.
+    out = " ".join(((result.stderr or "") + result.output).split())
     assert "sidecar" in out
     assert "mm push" in out
 

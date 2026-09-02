@@ -2,6 +2,27 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.12.54] - 2026-09-02
+
+**Mind Meld now has one portable verification command: `./bin/check`.** It selects a supported Python interpreter, safely bootstraps only the virtual environments it owns, runs Ruff before pytest, and makes Conductor workspace setup non-blocking. Local development and CI now share that command, while macOS Keychain and wheel-install smoke checks remain CI-only.
+
+### Added
+
+- `bin/check` and its stdlib-only driver `bin/_check.py`, with interpreter guidance, an owned-venv marker and lock, content-hash dependency freshness, `MM_PYTHON` / `MM_VENV` / `VIRTUAL_ENV` handling, and optional pytest-xdist workers.
+- An optional Conductor workspace hook that pre-warms the portable lint environment in the background and records failures without blocking workspace creation.
+- Focused regression coverage for interpreter selection, external-environment safety, bootstrap recovery, and pip failure/timeout guidance.
+
+### Changed
+
+- `AGENTS.md`, README, and roadmap verification cards now name `./bin/check` rather than assuming a local Python interpreter or bare `pytest` command.
+- CI runs the portable checks through `./bin/check --no-bootstrap` using its pinned Python 3.13 interpreter; macOS Keychain validation and isolated wheel smoke coverage stay CI-only.
+- The dev suite includes `pytest-xdist` and `./bin/check` uses it by default when available, while retaining serial/debug escape hatches.
+
+### Fixed
+
+- The release workflow advances `latest` only when the version tag resolves to the pushed commit, preventing untagged `pyproject.toml` edits from being published through `@latest`.
+- Tests no longer make Rich-output assertions depend on the temporary-directory width.
+
 ## [0.12.53] - 2026-09-01
 
 **mm no longer reads OpenCode usage.** The host-usage snapshot is Codex and Grok only. No local OpenCode file is touched — `~/.config/opencode/`, `opencode.db`, and any leftover `opencode-host-tokens.json` stay on disk. A peer still publishing `"opencode"` in `token_sources` / `degraded_sources` / `partial_sources` is accepted whole (unknown names are retained, not rejected).

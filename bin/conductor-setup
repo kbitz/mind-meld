@@ -1,0 +1,32 @@
+#!/bin/sh
+# Pre-warm .venv on Conductor workspace creation.
+#
+# Security-relevant: anyone who can merge to the default branch gets this
+# run on every Mac that creates a workspace. Keep this file a pointer
+# target with no inline policy — the review surface is a normal PR.
+#
+# Never block workspace creation. trap EXIT 0 covers the parent (missing
+# log dir, etc). The pre-warm itself is backgrounded: trap EXIT does not
+# fire until the child terminates, so a hung pip in the foreground would
+# still stall create. The next ./bin/check serializes on the bootstrap
+# lock if this job is still running. CONDUCTOR_IS_LOCAL is echoed here;
+# remedy-line branching lives in bin/_check.py.
+
+trap 'exit 0' EXIT
+
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+LOG_DIR=${CONDUCTOR_WORKSPACE_PATH:-"$ROOT"}
+LOG="$LOG_DIR/.conductor-setup.log"
+
+{
+  echo "conductor-setup: start"
+  echo "CONDUCTOR_IS_LOCAL=${CONDUCTOR_IS_LOCAL:-unset}"
+  echo "ROOT=$ROOT"
+  if "$ROOT/bin/check" --lint; then
+    echo "conductor-setup: bin/check --lint ok"
+  else
+    echo "conductor-setup: bin/check --lint exited $?"
+  fi
+} >"$LOG" 2>&1 &
