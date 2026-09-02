@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.12.55] - 2026-09-02
+## [0.13.0] - 2026-09-02
 
 **The OpenCode skill-link row is gone.** mm no longer maintains `~/.config/opencode/skills/retro-fleet`. On the next interactive push, init, or `mm install-skills`, mm removes the link **it** created (a `readlink` that equals the mm-owned store). A regular file, a directory, or a link you made yourself is left alone.
 
