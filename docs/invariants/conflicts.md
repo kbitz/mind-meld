@@ -42,7 +42,13 @@ A sidecar carries THREE distinct facts on THREE carriers. Conflating them is how
 
 **Surface asymmetry.** `_find_conflict_files` does NOT consult `exclude_patterns`. Discovery, gc, resolve, and the pull-top migration sweep all reach trees that sync does not. A sidecar stranded in an excluded tree can never converge.
 
-**Live-conflict gc refuse.** `_gc_old_conflict_files` will not reap a sidecar whose canonical still exists and still differs, regardless of age. A 30-day destruction deadline on unresolved user data with no countdown is not shippable. Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`.
+**Live-conflict gc refuse.** `_gc_old_conflict_files` reaps a sidecar ONLY when its canonical exists and holds IDENTICAL bytes — the converged, provably-redundant case. Everything else is live, regardless of age:
+
+* **canonical exists and differs** — the decision is still open. A 30-day destruction deadline on unresolved user data with no countdown is not shippable.
+* **canonical is MISSING** — `_resolve_interactive_loop`'s `canonical is None` branch offers `(p)romote` to make the sidecar canonical, so this is a supported recovery state the resolver actively advertises, not an orphan. The sidecar can be the only copy left on disk: the user deleted their local file, and the peer's blob survives in storage only while the peer's manifest still references that sha. Do NOT "optimize" this back to reapable — it was, and Greptile caught it on PR #161. Note the `v0-` skip immediately above already applied this reasoning; the two branches must agree.
+* **hash failure** — cannot tell, so refuse.
+
+Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`. The consequence is deliberate: a sidecar the user never resolves is never reaped automatically. `mm resolve` is the intended path, and `mm conflicts` tells the user they can `rm` manually. Pinned by `tests/test_conflict_copy.py::TestGcOldConflictFiles` (`test_missing_canonical_is_never_reaped`, `test_live_conflict_is_never_reaped`, and the converged case in `test_reaps_files_older_than_cutoff`).
 
 ## Conflict-prompt UX (load-bearing, v0.11.1 BREAKING — interactive prompt)
 

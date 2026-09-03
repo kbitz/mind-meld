@@ -378,16 +378,29 @@ def _gc_old_conflict_files(
 
 
 def _is_live_conflict(cpath: Path, canonical: Path | None) -> bool:
-    """True when canonical exists and still differs from the sidecar.
+    """True when the sidecar still represents an unresolved user decision.
 
-    Hash failure degrades to live (refuse to reap) — we cannot tell.
-    Canonical-missing is not live: the sidecar is an orphan leftover.
+    Live (never reap):
+      * canonical exists and differs — the conflict is open.
+      * canonical is MISSING — `_resolve_interactive_loop`'s `canonical is
+        None` branch offers `(p)romote` to make the sidecar canonical, so
+        this is a supported recovery state, not an orphan. The sidecar can
+        be the only copy left on disk: the user deleted their local file,
+        and the peer's blob is only in storage while the peer's manifest
+        still references that sha. Reaping it at day 30 destroys data the
+        resolver is actively offering to restore. This matches the
+        reasoning the `v0-` branch above already applies.
+      * hash failure — we cannot tell, so refuse.
+
+    Reapable is therefore the one provably-safe case: canonical exists and
+    its bytes are IDENTICAL to the sidecar, i.e. the conflict converged and
+    the copy is genuinely redundant.
     """
     if canonical is None:
-        return False
+        return True
     try:
         if not canonical.is_file():
-            return False
+            return True
         return hash_file(canonical) != hash_file(cpath)
     except OSError:
         return True

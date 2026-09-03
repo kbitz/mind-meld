@@ -315,7 +315,15 @@ def marker_skip_globs(source_config: dict[str, Any]) -> list[str]:
             # A marker sitting ON the include-dir root would prefix the
             # entire source tree (`skills/.extend-root` → skip `skills/`).
             # gstack-extend drops the marker in each rendered child dir.
-            if rel_dir == dir_name:
+            #
+            # Compare NORMALIZED forms. `rel_dir` came from `as_posix()`,
+            # but `dir_name` is raw config and `include_dirs` entries are
+            # not validated or normalized anywhere (`_validate_sources`
+            # checks only name/path/type). A user writing
+            # `include_dirs = ["skills/"]` or `["./skills"]` would miss
+            # this exemption and silently drop the WHOLE tree — including
+            # hand-authored files — out of sync.
+            if rel_dir == Path(dir_name).as_posix():
                 continue
             if rel_dir not in seen:
                 seen.add(rel_dir)

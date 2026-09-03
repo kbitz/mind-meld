@@ -1158,6 +1158,34 @@ class TestMarkerSkipGlobs:
         files = walk_generic_source(cfg)
         assert "skills/my-own/SKILL.md" in files
 
+    @pytest.mark.parametrize("configured", ["skills/", "./skills", "skills"])
+    def test_include_root_exemption_survives_unnormalized_config(
+        self, tmp_path: Path, configured: str
+    ):
+        """`include_dirs` entries are never validated or normalized.
+
+        A trailing slash or a `./` prefix must not defeat the include-root
+        exemption: `rel_dir` comes from `as_posix()`, `dir_name` is raw
+        config, and a mismatch turns the whole configured tree into a skip
+        prefix — silently dropping hand-authored files out of sync.
+        (Greptile review, PR #161.)
+        """
+        base = tmp_path / "codex"
+        skills = base / "skills"
+        skills.mkdir(parents=True)
+        (skills / MARKER_SKIP_NAME).write_text("misplaced")
+        mine = skills / "my-own"
+        mine.mkdir()
+        (mine / "SKILL.md").write_text("hand-authored")
+        cfg = {
+            "name": "codex",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": [configured],
+        }
+        assert marker_skip_globs(cfg) == []
+        assert "skills/my-own/SKILL.md" in walk_generic_source(cfg)
+
     def test_literal_star_directory_is_a_prefix_not_a_glob(self, tmp_path: Path):
         """A marker under a directory named ``*`` must not exclude siblings."""
         from mind_meld.manifest import _under_skip_prefix

@@ -550,7 +550,13 @@ class TestConflictDiscovery:
 class TestGcOldConflictFiles:
     def test_reaps_files_older_than_cutoff(self, tmp_path: Path, monkeypatch) -> None:
         """_gc_old_conflict_files deletes .sync-conflict-* files older than
-        CONFLICT_AGE_DAYS. Fresh files are preserved."""
+        CONFLICT_AGE_DAYS. Fresh files are preserved.
+
+        Both canonicals exist and hold bytes IDENTICAL to their sidecar —
+        the converged case, which is the only state `_is_live_conflict`
+        lets the reaper touch. Canonical-differs and canonical-missing are
+        both live; see the two tests below.
+        """
 
         src = tmp_path / "src"
         (src / "memory").mkdir(parents=True)
@@ -560,8 +566,10 @@ class TestGcOldConflictFiles:
         fresh_ts = pinned_now.strftime("%Y%m%d-%H%M%S")
         old_conflict = src / "memory" / f"a.sync-conflict-{old_ts}-devA1234.md"
         old_conflict.write_bytes(b"old")
+        (src / "memory" / "a.md").write_bytes(b"old")
         new_conflict = src / "memory" / f"b.sync-conflict-{fresh_ts}-devA1234.md"
         new_conflict.write_bytes(b"new")
+        (src / "memory" / "b.md").write_bytes(b"new")
 
         config = {
             "sync": {
@@ -581,6 +589,68 @@ class TestGcOldConflictFiles:
         assert reaped.deleted == 1
         assert not old_conflict.exists(), "old conflict should be reaped"
         assert new_conflict.exists(), "fresh conflict should survive"
+
+    def test_missing_canonical_is_never_reaped(self, tmp_path: Path) -> None:
+        """A sidecar whose canonical is gone is a RECOVERY state, not an orphan.
+
+        `_resolve_interactive_loop`'s `canonical is None` branch offers
+        `(p)romote` to make the sidecar canonical, so the user is actively
+        being offered a restore. The sidecar can be the only copy left on
+        disk. Reaping it at day 30 destroys exactly the bytes the resolver
+        is offering back. (Greptile review, PR #161.)
+        """
+        src = tmp_path / "src"
+        (src / "memory").mkdir(parents=True)
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        ancient = (pinned_now - timedelta(days=400)).strftime("%Y%m%d-%H%M%S")
+        orphan = src / "memory" / f"gone.sync-conflict-{ancient}-v1-devA1234.md"
+        orphan.write_bytes(b"the only remaining copy of the peer's bytes")
+        assert not (src / "memory" / "gone.md").exists()
+
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
+        }
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
+        assert reaped.deleted == 0
+        assert reaped.skipped == 1
+        assert orphan.exists(), "canonical-missing sidecar must survive gc"
+
+    def test_live_conflict_is_never_reaped(self, tmp_path: Path) -> None:
+        """Canonical exists and still DIFFERS — the decision is open."""
+        src = tmp_path / "src"
+        (src / "memory").mkdir(parents=True)
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        ancient = (pinned_now - timedelta(days=400)).strftime("%Y%m%d-%H%M%S")
+        sidecar = src / "memory" / f"note.sync-conflict-{ancient}-v1-devA1234.md"
+        sidecar.write_bytes(b"peer version")
+        (src / "memory" / "note.md").write_bytes(b"my version")
+
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            },
+        }
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
+        assert reaped.deleted == 0
+        assert sidecar.exists(), "unresolved conflict must survive gc regardless of age"
 
     def test_dry_run_does_not_delete(self, tmp_path: Path) -> None:
         """dry_run=True lists but preserves everything."""
@@ -619,6 +689,10 @@ class TestGcOldConflictFiles:
         conflict = src / "memory" / "a.sync-conflict-20000101-000000-devA1234.md"
         conflict.parent.mkdir(parents=True)
         conflict.write_bytes(b"old")
+        # Canonical must exist AND match: that is the only state
+        # `_is_live_conflict` lets the reaper reach, so it is what puts
+        # this file on the unlink path at all.
+        (src / "memory" / "a.md").write_bytes(b"old")
         ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
         os.utime(conflict, (ancient, ancient))
         config = {
