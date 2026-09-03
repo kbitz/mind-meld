@@ -347,7 +347,7 @@ arrives both ways. Inclusive extractors emit disjoint buckets via
 ``uncached = input - cache_read - cache_create``. Do **not** call
 ``_normalize_inclusive_usage`` in ``_add_usage``: that is where readers
 converge, and subtracting ``cache_read`` from an already-disjoint bucket
-would clamp real billable tokens to zero. Track 42A merges extractors
+would clamp real billable tokens to zero. Track 49A merges extractors
 into this path; a bare "every current reader is inclusive" assertion
 would not survive that merge. Malformed inclusive counters
 (``cache_read + cache_create > input``) degrade that reader (Track 31A
@@ -538,7 +538,7 @@ older than `MAX_BY_DAY_DAYS` mark every future snapshot partial forever.
 **Cache.** `_validated_grok_entry` persists `partial_days` (possibly empty)
 on the Grok cache entry. Pre-34A entries are detected by **key absence** and
 re-walked once. Not a `CACHE_VERSION` bump: that constant is shared with the
-Codex namespace. Track 40A rewrites this encoding and must carry the marker
+Codex namespace. Track 46A rewrites this encoding and must carry the marker
 through.
 
 **Acceptor.** Three-way on key presence, never a falsy check, reusing
@@ -724,7 +724,7 @@ host family).
 ``mm retro-fleet --dump-host-usage`` is the forensic hatch. It prints
 the inventory JSON and skips the markdown retro. As of v0.12.49 the dump
 emits per-model ``tokens_by_day`` and a detail status per device. The card
-stays family-only until Group 36. Model ids are sanitized at DUMP time only
+stays family-only until Group 50 (unified reporting, Track 50A — numbered Group 36 when this was written, Group 43 until 2026-09-03; today's Group 36 is the shipped Three-hosts group). Model ids are sanitized at DUMP time only
 (``_safe_short``), never at accept — and because that truncates at 128 chars
 while the acceptor admits 256 bytes, two distinct accepted ids can sanitize
 to one key. `_sanitize_tokens_by_day` disambiguates with a `~N` suffix rather
