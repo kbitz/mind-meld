@@ -293,6 +293,116 @@ class TestPushPullRoundTrip:
         assert original_role != role_b.read_text()
 
 
+class TestConflictClockSeparation:
+    """B7 / F1 / F2: v1 mint, fresh-marker device, vanish self-heal."""
+
+    def _make_config(self, tmp_path, storage_dir, claude_dir, device_id, device_name):
+        config_path = tmp_path / f"config_{device_id}.toml"
+        config = {
+            "device": {"id": device_id, "name": device_name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        save_config(config, config_path)
+        return config_path
+
+    def _populate(self, claude_dir, role="Data scientist"):
+        memory = claude_dir / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "user_role.md").write_text(f"---\nname: role\n---\n{role}")
+
+    def _conflict_on_b(self, tmp_path, monkeypatch, *, wipe_marker: bool):
+        from mind_meld import sidecar as sidecar_mod
+        from mind_meld.manifest import is_pre_inversion_conflict_filename, is_v1_conflict_filename
+
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        self._populate(claude_a, role="Principal engineer")
+        claude_b.mkdir(parents=True)
+
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+        config_a = self._make_config(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        config_b = self._make_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+
+        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        role_b.write_text("---\nname: role\n---\nSomething else entirely")
+        os.utime(role_b, (time.time() - 3600, time.time() - 3600))
+
+        if wipe_marker:
+            marker = sidecar_mod.SIDECAR_DIR / "inversion-installed-at"
+            marker.unlink(missing_ok=True)
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "---\nname: role\n---\nEven newer from A"
+        )
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        assert runner.invoke(app, ["pull", "--conflict-mode", "keep-both"]).exit_code == 0
+
+        memory_b = role_b.parent
+        sidecars = list(memory_b.glob("user_role.sync-conflict-*.md"))
+        assert len(sidecars) == 1, sidecars
+        sidecar = sidecars[0]
+        assert is_v1_conflict_filename(sidecar.name)
+        assert not is_pre_inversion_conflict_filename(sidecar.name)
+        assert role_b.read_text() == "---\nname: role\n---\nSomething else entirely"
+        return config_b, role_b, sidecar
+
+    def test_conflicting_pull_mints_v1_sidecar(self, tmp_path, monkeypatch):
+        """F1."""
+        _cfg, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=False)
+        assert "v1" in sidecar.name
+        assert sidecar.read_text() == "---\nname: role\n---\nEven newer from A"
+        assert role_b.read_bytes() != sidecar.read_bytes()
+
+    def test_fresh_marker_device_does_not_migrate_on_next_pull(self, tmp_path, monkeypatch):
+        """B7: inversion-installed-at = now; sidecar survives a second pull."""
+        from mind_meld.manifest import is_pre_inversion_conflict_filename, is_v1_conflict_filename
+
+        config_b, _role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=True)
+        name_before = sidecar.name
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        assert sidecar.exists()
+        assert sidecar.name == name_before
+        assert is_v1_conflict_filename(sidecar.name)
+        assert not is_pre_inversion_conflict_filename(sidecar.name)
+        v0 = list(sidecar.parent.glob("user_role.sync-conflict-v0-*.md"))
+        assert v0 == []
+
+    def test_unlinked_sidecar_returns_on_repull(self, tmp_path, monkeypatch):
+        """F2 / W2 self-heal."""
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=False)
+        sidecar.unlink()
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        assert runner.invoke(app, ["pull", "--conflict-mode", "keep-both"]).exit_code == 0
+        sidecars = list(role_b.parent.glob("user_role.sync-conflict-*.md"))
+        assert len(sidecars) == 1
+        assert sidecars[0].read_text() == "---\nname: role\n---\nEven newer from A"
+
+    def test_status_mentions_unresolved_conflicts(self, tmp_path, monkeypatch):
+        config_b, _role, _sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=False)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert "Unresolved conflicts: 1" in result.output
+
+
 class TestExcludePatterns5C:
     """Track 5C IRON RULE regression pins.
 
@@ -461,6 +571,56 @@ class TestExcludePatterns5C:
         assert offending == [], f"Excluded path must NOT generate a tombstone; got {offending}"
         # And the file is dropped from sources.gstack.files (walker filtered it).
         assert "projects/myapp/repo-mode.json" not in remote["sources"]["gstack"]["files"]
+
+    def test_marker_skip_does_not_emit_tombstone(self, tmp_path, monkeypatch):
+        """A `.extend-root` skip must not generate deletion tombstones,
+        exactly as adding a glob must not."""
+        storage_dir = tmp_path / "storage"
+        root = tmp_path / "codex"
+        skill = root / "skills" / "new-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("generated v1")
+        (root / "skills" / "keep").mkdir(parents=True)
+        (root / "skills" / "keep" / "SKILL.md").write_text("hand-authored")
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        config_path = tmp_path / "config_dev-a.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "codex",
+                            "path": str(root),
+                            "type": "generic",
+                            "include_dirs": ["skills"],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_path,
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        assert "skills/new-skill/SKILL.md" in remote["sources"]["codex"]["files"]
+
+        (skill / ".extend-root").write_text("gstack-extend")
+        (root / "skills" / "keep" / "SKILL.md").write_text("hand-authored v2")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        offending = [k for k in remote.get("tombstones", {}) if "new-skill" in k]
+        assert offending == [], f"marker skip must not tombstone; got {offending}"
+        assert "skills/new-skill/SKILL.md" not in remote["sources"]["codex"]["files"]
+        assert "skills/keep/SKILL.md" in remote["sources"]["codex"]["files"]
 
     def test_no_spurious_tombstone_on_unexclude_transition(self, tmp_path, monkeypatch):
         """Removing a glob brings the path back into sync as new — push
@@ -686,6 +846,63 @@ class TestFilterExcludedPathsHelper:
         assert out["sources"]["claude"]["files"]["projects/-foo/memory/role.md"]["sha256"] == "b"
         # gstack source filtered.
         assert "projects/myapp/repo-mode.json" not in out["sources"]["gstack"]["files"]
+
+    def test_strips_conflict_shaped_rel_paths_even_with_empty_map(self):
+        """E1: a peer-chosen conflict-shaped name is rejected on pull."""
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {
+                "gstack": {
+                    "files": {
+                        "foo.sync-conflict-19700101-000000-deadbeef.md": {"sha256": "a"},
+                        "foo.md": {"sha256": "b"},
+                    }
+                }
+            },
+            "tombstones": {},
+        }
+        out = _filter_excluded_paths(m, {})
+        assert out is not m
+        kept = out["sources"]["gstack"]["files"]
+        assert "foo.md" in kept
+        assert "foo.sync-conflict-19700101-000000-deadbeef.md" not in kept
+
+    def test_strips_conflict_shaped_tombstones_even_with_empty_map(self):
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {"gstack": {"files": {"foo.md": {"sha256": "b"}}}},
+            "tombstones": {
+                "gstack:foo.sync-conflict-19700101-000000-deadbeef.md": {
+                    "deleted_at": "2026-01-01T00:00:00+00:00"
+                },
+                "gstack:foo.md": {"deleted_at": "2026-01-01T00:00:00+00:00"},
+            },
+        }
+        out = _filter_excluded_paths(m, {})
+        assert out is not m
+        assert "gstack:foo.md" in out["tombstones"]
+        assert "gstack:foo.sync-conflict-19700101-000000-deadbeef.md" not in out["tombstones"]
+
+    def test_strips_extend_root_basename_even_with_empty_map(self):
+        from mind_meld.cli import _filter_excluded_paths
+
+        m = {
+            "sources": {
+                "codex": {
+                    "files": {
+                        "skills/.extend-root": {"sha256": "a"},
+                        "skills/keep/SKILL.md": {"sha256": "b"},
+                    }
+                }
+            },
+            "tombstones": {},
+        }
+        out = _filter_excluded_paths(m, {})
+        kept = out["sources"]["codex"]["files"]
+        assert "skills/keep/SKILL.md" in kept
+        assert "skills/.extend-root" not in kept
 
 
 class TestDisabledSourcesTombstoneSuppression:
@@ -1899,6 +2116,110 @@ class TestShipFixes5E:
         import stat as _stat
 
         assert _stat.S_IMODE(marker_path.stat().st_mode) == 0o600
+
+    def test_backdated_peer_mtime_does_not_migrate_v1_sidecar(self, tmp_path, monkeypatch):
+        """B6: a fresh sidecar carrying a 90-day peer mtime is NOT migrated."""
+        from mind_meld.cli import conflict_filename
+        from mind_meld.manifest import is_pre_inversion_conflict_filename, is_v1_conflict_filename
+        from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+        marker_ts = _ensure_inversion_marker()
+        assert marker_ts is not None
+        canonical = tmp_path / "doc.md"
+        canonical.write_bytes(b"local")
+        sidecar_path = conflict_filename(canonical, "devAAAA1234")
+        sidecar_path.write_bytes(b"remote")
+        ancient = time.time() - 90 * 86400
+        os.utime(sidecar_path, (ancient, ancient))
+        assert ancient < marker_ts
+        result = _migrate_pre_inversion_conflict(sidecar_path)
+        assert result == sidecar_path
+        assert sidecar_path.exists()
+        assert is_v1_conflict_filename(sidecar_path.name)
+        assert not is_pre_inversion_conflict_filename(sidecar_path.name)
+
+    def test_unprefixed_sidecar_newer_than_marker_not_migrated_despite_old_mtime(
+        self, tmp_path, monkeypatch
+    ):
+        """Filename-clock gate, not the v1 short-circuit: unprefixed post-
+        inversion files with a filename timestamp after the marker must
+        not be v0-tagged even when st_mtime is ancient."""
+        from datetime import datetime, timezone
+
+        from mind_meld.manifest import is_pre_inversion_conflict_filename
+        from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+        marker_ts = _ensure_inversion_marker()
+        assert marker_ts is not None
+        future = datetime.fromtimestamp(marker_ts + 3600, tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+        sidecar = tmp_path / f"doc.sync-conflict-{future}-devA1234.md"
+        sidecar.write_bytes(b"remote")
+        os.utime(sidecar, (marker_ts - 90 * 86400, marker_ts - 90 * 86400))
+        result = _migrate_pre_inversion_conflict(sidecar)
+        assert result == sidecar
+        assert sidecar.exists()
+        assert not is_pre_inversion_conflict_filename(sidecar.name)
+
+    def test_unprefixed_post_inversion_not_migrated_when_marker_is_recreated(
+        self, tmp_path, monkeypatch
+    ):
+        """A sidecar minted after v0.9.2 (unprefixed, filename 2026-08)
+        must not be v0-tagged when inversion-installed-at is recreated
+        as 'now'."""
+        from mind_meld.manifest import is_pre_inversion_conflict_filename
+        from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+        _ensure_inversion_marker()
+        sidecar = tmp_path / "doc.sync-conflict-20260815-120000-devA1234.md"
+        sidecar.write_bytes(b"remote")
+        result = _migrate_pre_inversion_conflict(sidecar)
+        assert result == sidecar
+        assert sidecar.exists()
+        assert not is_pre_inversion_conflict_filename(sidecar.name)
+
+    def test_unparseable_filename_refuses_to_migrate(self, tmp_path, monkeypatch):
+        """B8: unparseable filename → refuse, not fall back to st_mtime."""
+        from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+        _ensure_inversion_marker()
+        legacy = tmp_path / "doc.sync-conflict-20261345-999999-devA1234.md"
+        legacy.write_bytes(b"x")
+        old = time.time() - 86400
+        os.utime(legacy, (old, old))
+        result = _migrate_pre_inversion_conflict(legacy)
+        assert result == legacy
+        assert legacy.exists()
+
+    def test_double_infix_does_not_accrete_v0(self, tmp_path, monkeypatch):
+        """B9 / E2: rindex inserts v0- at the LAST infix, once."""
+        from mind_meld.manifest import is_pre_inversion_conflict_filename
+        from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+        _ensure_inversion_marker()
+        original = tmp_path / ("notes.sync-conflict-log.sync-conflict-20260101-000000-abcd1234.md")
+        original.write_bytes(b"divergent")
+        first = _migrate_pre_inversion_conflict(original)
+        assert first != original
+        assert first.name == (
+            "notes.sync-conflict-log.sync-conflict-v0-20260101-000000-abcd1234.md"
+        )
+        assert is_pre_inversion_conflict_filename(first.name)
+        second = _migrate_pre_inversion_conflict(first)
+        third = _migrate_pre_inversion_conflict(second)
+        assert second == first
+        assert third == first
+        assert first.exists()
+        assert not original.exists()
 
     def test_pre_inversion_file_still_migrated_when_older_than_marker(self, tmp_path, monkeypatch):
         """F1 fix complement: pre-existing legacy files (mtime < marker)

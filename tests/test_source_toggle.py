@@ -220,7 +220,7 @@ class TestEnableSource:
         assert result.exit_code != 0
         combined = " ".join((result.output + (result.stderr or "")).split())
         assert "unknown source 'opencode'" in combined
-        assert "retired in v0.12.54" in combined
+        assert "retired in v0.12.55" in combined
         assert "not yet shipped" not in combined
         assert "--force" not in combined
 

@@ -7,7 +7,9 @@ Extracted from ``cli.py`` in Track 16A. Four reapers behind ``mm gc``:
 * ``_sweep_local_tmp_files`` — ``.tmp`` blobs left by a crashed push
 * ``_gc_old_event_files`` — mm-events JSONLs past ``EVENTS_RETENTION_DAYS``
 * ``_gc_old_conflict_files`` — ``.sync-conflict-*`` sidecars past
-  ``CONFLICT_AGE_DAYS`` (only with ``--conflicts``)
+  ``CONFLICT_AGE_DAYS`` (apply with ``--conflicts``; previewed by
+  bare ``mm gc --dry-run``). Age is the filename timestamp, not
+  ``st_mtime`` (the sidecar's mtime is the peer file's clock).
 * ``_gc_orphan_retros_dir`` — leftover v0.12.0 ``YYYY-MM-DD-NNN.json``
   snapshot files, then ``rmdir`` if empty (never ``rm -rf``)
 
@@ -37,6 +39,11 @@ from pathlib import Path
 from mind_meld import resolveflow, token_usage
 from mind_meld.config import get_sources
 from mind_meld.consoles import console
+from mind_meld.manifest import (
+    hash_file,
+    is_pre_inversion_conflict_filename,
+    parse_conflict_created_at,
+)
 from mind_meld.safety import safe_str
 from mind_meld.storage.local import LocalBackend
 
@@ -302,7 +309,18 @@ def _gc_old_conflict_files(
     *,
     now: datetime | None = None,
 ) -> ReapOutcome:
-    """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS."""
+    """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS.
+
+    Age is ``parse_conflict_created_at`` (the filename timestamp mm
+    stamped at mint), NOT ``st_mtime``. The sidecar's mtime is the peer
+    file's clock, restored by ``_apply_conflict``; reading it as the
+    sidecar's own age reaps a day-0 copy of a 90-day-old peer file.
+
+    Unparseable filename → do not reap (falling back to st_mtime is the
+    bug). A live conflict (canonical exists and still differs) is never
+    reaped, regardless of age. Paths print on delete / would-delete,
+    not only under ``-v``.
+    """
     try:
         hits = resolveflow._find_conflict_files(config)
     except OSError as e:
@@ -317,38 +335,75 @@ def _gc_old_conflict_files(
     deleted = 0
     failed = 0
     skipped = 0
-    for _src_name, cpath, _canonical in hits:
-        try:
-            mtime = datetime.fromtimestamp(cpath.stat().st_mtime, tz=timezone.utc)
-        except OSError as e:
+    for _src_name, cpath, canonical in hits:
+        created = parse_conflict_created_at(cpath.name)
+        if created is None:
             skipped += 1
             if verbose:
                 console.print(
-                    f"  [yellow]conflict stat skipped:[/yellow] {safe_str(cpath)} — {safe_str(e)}"
+                    f"  [yellow]conflict age unreadable, not reaping:[/yellow] {safe_str(cpath)}"
                 )
             continue
-        if mtime < cutoff:
-            candidates += 1
-            age_days = (current_time - mtime).days
-            if dry_run:
-                if verbose:
-                    console.print(f"  [dim]would delete (age {age_days}d):[/dim] {safe_str(cpath)}")
-                continue
-            try:
-                cpath.unlink()
-            except OSError as e:
-                failed += 1
-                if verbose:
-                    console.print(
-                        f"  [yellow]delete failed:[/yellow] {safe_str(cpath)} — {safe_str(e)}"
-                    )
-                continue
-            deleted += 1
+        if is_pre_inversion_conflict_filename(cpath.name):
+            # v0- sidecar holds the user's local bytes and may be the
+            # only remaining copy. Canonical-missing is the promote-later
+            # case, not an orphan.
+            skipped += 1
             if verbose:
-                console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(cpath)}")
+                console.print(f"  [dim]pre-inversion sidecar, not reaping:[/dim] {safe_str(cpath)}")
+            continue
+        if created >= cutoff:
+            continue
+        if _is_live_conflict(cpath, canonical):
+            skipped += 1
+            if verbose:
+                console.print(f"  [dim]live conflict, not reaping:[/dim] {safe_str(cpath)}")
+            continue
+        candidates += 1
+        age_days = (current_time - created).days
+        if dry_run:
+            console.print(f"  [dim]would delete (age {age_days}d):[/dim] {safe_str(cpath)}")
+            continue
+        try:
+            cpath.unlink()
+        except OSError as e:
+            failed += 1
+            console.print(f"  [yellow]delete failed:[/yellow] {safe_str(cpath)} — {safe_str(e)}")
+            continue
+        deleted += 1
+        console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(cpath)}")
     outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
     _render_reap_outcome("Conflicts", outcome, dry_run=dry_run)
     return outcome
+
+
+def _is_live_conflict(cpath: Path, canonical: Path | None) -> bool:
+    """True when the sidecar still represents an unresolved user decision.
+
+    Live (never reap):
+      * canonical exists and differs — the conflict is open.
+      * canonical is MISSING — `_resolve_interactive_loop`'s `canonical is
+        None` branch offers `(p)romote` to make the sidecar canonical, so
+        this is a supported recovery state, not an orphan. The sidecar can
+        be the only copy left on disk: the user deleted their local file,
+        and the peer's blob is only in storage while the peer's manifest
+        still references that sha. Reaping it at day 30 destroys data the
+        resolver is actively offering to restore. This matches the
+        reasoning the `v0-` branch above already applies.
+      * hash failure — we cannot tell, so refuse.
+
+    Reapable is therefore the one provably-safe case: canonical exists and
+    its bytes are IDENTICAL to the sidecar, i.e. the conflict converged and
+    the copy is genuinely redundant.
+    """
+    if canonical is None:
+        return True
+    try:
+        if not canonical.is_file():
+            return True
+        return hash_file(canonical) != hash_file(cpath)
+    except OSError:
+        return True
 
 
 def _gc_orphan_retros_dir(

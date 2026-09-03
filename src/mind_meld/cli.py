@@ -69,6 +69,7 @@ from mind_meld.config import (
 )
 from mind_meld.conflictdiff import (
     count_divergent_lines,
+    format_age_delta,
     render_banner,
     render_prompt,
     render_time_line,
@@ -115,7 +116,10 @@ from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
+    CONFLICT_V1_MARKER,
+    MARKER_SKIP_NAME,
     DiffResult,
+    _under_skip_prefix,
     build_manifest_v2,
     collect_tombstones,
     deserialize_manifest,
@@ -126,8 +130,10 @@ from mind_meld.manifest import (
     is_pre_inversion_conflict_filename,
     is_tombstoned,
     load_manifest,
+    marker_skip_globs,
     mtime_from_manifest,
     mtime_from_path,
+    parse_conflict_created_at,
     parse_conflict_device_short,
     read_and_hash,
     serialize_manifest,
@@ -581,28 +587,46 @@ def _fetch_remote_manifest(
     return ManifestFetch(status="ok", manifest=_merge_manifests(manifests))
 
 
-def _build_exclude_map(config: dict) -> dict[str, list[str]]:
-    """Map source name -> exclude_patterns list from local config.
+def _build_exclude_map(
+    config: dict,
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Map source name -> exclude_patterns and marker-skip prefixes.
 
-    Empty entries are pruned so callers can use truthiness as the no-op gate.
-    Sources without `exclude_patterns` are absent (not present-with-[]) so
-    `_filter_excluded_paths` short-circuits via the `not exclude_map` check.
+    Empty glob entries are pruned. Marker-skip prefixes (directories
+    containing `.extend-root`) are returned separately so the consumer-
+    boundary filter can prefix-match rather than fnmatch. Without that
+    merge, a walker-only skip would emit deletion tombstones for
+    previously-synced generated files.
     """
     out: dict[str, list[str]] = {}
+    prefixes: dict[str, list[str]] = {}
     for src in get_sources(config):
-        patterns = src.get("exclude_patterns")
+        patterns = list(src.get("exclude_patterns") or [])
+        prefs = marker_skip_globs(src)
         if patterns:
-            out[src["name"]] = list(patterns)
-    return out
+            out[src["name"]] = patterns
+        if prefs:
+            prefixes[src["name"]] = prefs
+    return out, prefixes
 
 
-def _filter_excluded_paths(manifest: dict, exclude_map: dict[str, list[str]]) -> dict:
+def _filter_excluded_paths(
+    manifest: dict,
+    exclude_map: dict[str, list[str]],
+    skip_prefixes: dict[str, list[str]] | None = None,
+) -> dict:
     """Return a shallow copy of `manifest` with excluded source-paths stripped.
 
     Drops entries from `sources.<name>.files` and `tombstones` whose relative
-    path matches any glob in `exclude_map[name]`. Empty `exclude_map` returns
-    `manifest` unchanged (load-bearing for hot paths: avoid copying large
-    manifests when no source declares excludes).
+    path matches any glob in `exclude_map[name]`, AND any conflict-shaped
+    basename (mirroring the push-side ``manifest._is_excluded`` gate). A
+    peer-chosen ``foo.sync-conflict-19700101-000000-deadbeef.md`` must not
+    materialize — after the gc bar reads the filename timestamp, that
+    string would drive the reap age directly.
+
+    Empty `exclude_map` still strips conflict-shaped names; if none are
+    present it returns `manifest` unchanged (load-bearing for hot paths:
+    avoid copying large manifests when no source declares excludes).
 
     Apply at the CONSUMER boundary (_pull_core, _push_core), NOT inside
     `_fetch_remote_manifest`. `mm gc` walks raw manifests via
@@ -615,29 +639,52 @@ def _filter_excluded_paths(manifest: dict, exclude_map: dict[str, list[str]]) ->
     (legacy v1 manifests) default to the `claude` source per the same
     promotion rule `normalize_manifest` applies.
     """
-    if not exclude_map:
-        return manifest
+
+    def _conflict_shaped(rel_path: str) -> bool:
+        filename = rel_path.rsplit("/", 1)[-1]
+        return is_conflict_filename(filename) or filename == MARKER_SKIP_NAME
 
     def _excluded(src_name: str, rel_path: str) -> bool:
+        if _conflict_shaped(rel_path):
+            return True
+        if _under_skip_prefix(rel_path, (skip_prefixes or {}).get(src_name)):
+            return True
         patterns = exclude_map.get(src_name)
         if not patterns:
             return False
         return any(fnmatch.fnmatch(rel_path, p) for p in patterns)
 
+    if not exclude_map and not skip_prefixes:
+        has_conflict = False
+        for src_data in manifest.get("sources", {}).values():
+            for rel in src_data.get("files", {}):
+                if _conflict_shaped(rel):
+                    has_conflict = True
+                    break
+            if has_conflict:
+                break
+        if not has_conflict:
+            for key in manifest.get("tombstones", {}):
+                if isinstance(key, str) and ":" in key:
+                    _, _, rel = key.partition(":")
+                else:
+                    rel = key
+                if isinstance(rel, str) and _conflict_shaped(rel):
+                    has_conflict = True
+                    break
+        if not has_conflict:
+            return manifest
+
     out = dict(manifest)
 
     new_sources: dict[str, dict] = {}
     for src_name, src_data in manifest.get("sources", {}).items():
-        patterns = exclude_map.get(src_name)
-        if not patterns:
+        files = src_data.get("files", {})
+        new_files = {rel: info for rel, info in files.items() if not _excluded(src_name, rel)}
+        if new_files == files:
             new_sources[src_name] = src_data
-            continue
-        new_files = {
-            rel: info
-            for rel, info in src_data.get("files", {}).items()
-            if not _excluded(src_name, rel)
-        }
-        new_sources[src_name] = {**src_data, "files": new_files}
+        else:
+            new_sources[src_name] = {**src_data, "files": new_files}
     out["sources"] = new_sources
 
     new_tombstones: dict[str, dict] = {}
@@ -1215,9 +1262,17 @@ def conflict_filename(
     device_id: str,
     now: datetime | None = None,
 ) -> Path:
-    """Compute the sibling path used to preserve a local divergent version.
+    """Compute the sibling path used to preserve a remote divergent version.
 
-    Syncthing convention: <stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device_short>.<ext>
+    Syncthing convention, v1-era (v0.14.0+):
+    <stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device_short>.<ext>
+
+    The ``v1`` token goes AFTER the timestamp, never as a ``v0-``-style
+    prefix: a prefix form fails ``is_conflict_filename``, so
+    ``_is_excluded`` is False, so the conflict copy would upload to the
+    fleet. The timestamp is UTC (``datetime.now(timezone.utc)``) and is
+    the sidecar's own birth time; ``st_mtime`` is restored to the peer
+    file's clock separately.
 
     If the computed path already exists (same-second double-conflict on the
     same device), append a 4-char random suffix. Filenames are never overwritten.
@@ -1235,7 +1290,7 @@ def conflict_filename(
 
     stem = canonical.stem
     suffix = canonical.suffix
-    base_name = f"{stem}{CONFLICT_INFIX}{ts}-{device_short}"
+    base_name = f"{stem}{CONFLICT_INFIX}{ts}-{CONFLICT_V1_MARKER}-{device_short}"
     path = canonical.with_name(f"{base_name}{suffix}")
 
     if path.exists():
@@ -1715,9 +1770,9 @@ def _apply_conflict(
     # Inverted semantics: write remote bytes to the .sync-conflict-* sidecar.
     # Canonical (local) is untouched \u2014 no rename + rollback dance needed
     # because we never overwrite local in the conflict path. The sidecar
-    # filename has no `v0-` prefix \u2014 that prefix is reserved for
-    # pre-inversion files migrated by `_migrate_pre_inversion_conflict`,
-    # NOT new files produced post-inversion.
+    # filename carries a `v1` era marker AFTER the timestamp (v0.14.0+).
+    # The `v0-` prefix is reserved for pre-inversion files migrated by
+    # `_migrate_pre_inversion_conflict`, NOT new files produced post-inversion.
     try:
         fsutil.atomic_write_bytes(conflict_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
@@ -3047,11 +3102,11 @@ def _push_core(
     # Order matters: disable first, then exclude. Disabling drops the
     # whole source; excluding-then-filtering would walk a soon-to-be-
     # dropped source's exclude_patterns for nothing.
-    exclude_map = _build_exclude_map(config)
+    exclude_map, skip_prefixes = _build_exclude_map(config)
     disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
     if remote_manifest is not None:
         remote_manifest = _filter_disabled_sources(remote_manifest, disabled_sources)
-        remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map)
+        remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
         remote_manifest = _filter_symlinked_paths(remote_manifest, sources)
 
     # Generate tombstones for files that disappeared since last push
@@ -3246,9 +3301,9 @@ def pull(
         "--conflict-mode",
         help=(
             "How to handle conflicts (local edited, remote differs). "
-            "'keep-both' (default): auto-rename local to .sync-conflict-*, "
-            "remote wins canonical. 'prompt': ask per-file. 'fail': preflight "
-            "all files and exit 2 (no writes) if any would conflict -- for CI."
+            "'keep-both' (default): local stays at canonical, remote saved as "
+            ".sync-conflict-*. 'prompt': ask per-file. 'fail': preflight "
+            "all files and exit 3 (no writes) if any would conflict -- for CI."
         ),
         case_sensitive=False,
     ),
@@ -3256,7 +3311,7 @@ def pull(
     """Pull session data from storage to local.
 
     Conflicts (local edited, remote differs) resolve per `--conflict-mode`:
-    - keep-both (default): remote wins canonical, local renamed to
+    - keep-both (default): local stays at canonical, remote saved as
       .sync-conflict-*. Files preserved either way.
     - prompt: interactively pick per file at pull time.
     - fail: preflight all files via `_predict_pull_outcome`; if any would
@@ -4040,46 +4095,47 @@ def _pull_core(
     # filter strips entire `sources.<name>` entries so the per-peer
     # download loop never tries to land a disabled source's files locally.
     # P0 invariant — see _filter_disabled_sources docstring.
-    exclude_map = _build_exclude_map(config)
+    exclude_map, skip_prefixes = _build_exclude_map(config)
     disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
     if disabled_sources:
         manifest_cache = {
             did: (None if m is None else _filter_disabled_sources(m, disabled_sources))
             for did, m in manifest_cache.items()
         }
-    if exclude_map:
-        filtered_cache: dict[str, dict | None] = {}
-        for did, m in manifest_cache.items():
-            if m is None:
-                filtered_cache[did] = None
-                continue
-            filtered = _filter_excluded_paths(m, exclude_map)
-            # Log "excluded" per peer-path so `mm log --action excluded`
-            # shows what the user is NOT pulling because of their config.
-            #
-            # 5E ship-fix: skip logging in quiet (autopull/autopush) mode.
-            # Without this gate, autopull writes one record per peer ×
-            # source × excluded-path tuple on every hook fire — at
-            # ~100 projects × hourly pulls, the 1MB pullhistory cap
-            # rotates within hours and evicts real `written / merged /
-            # conflicted / failed` records to `.1`. The forensic-aid
-            # contract becomes useless. Interactive `mm pull` still
-            # logs the full set so users can audit their excludes.
-            if not quiet:
-                for src_name, src_data in m.get("sources", {}).items():
-                    kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
-                    for rel_path, info in src_data.get("files", {}).items():
-                        if rel_path not in kept:
-                            pullhistory.append(
-                                verb="pull",
-                                device=did,
-                                source=src_name,
-                                rel_path=rel_path,
-                                action="excluded",
-                                remote_sha=info.get("sha256"),
-                            )
-            filtered_cache[did] = filtered
-        manifest_cache = filtered_cache
+    # Always run: conflict-shaped names and `.extend-root` are stripped even
+    # when no source declares exclude_patterns (claude-only installs).
+    filtered_cache: dict[str, dict | None] = {}
+    for did, m in manifest_cache.items():
+        if m is None:
+            filtered_cache[did] = None
+            continue
+        filtered = _filter_excluded_paths(m, exclude_map, skip_prefixes)
+        # Log "excluded" per peer-path so `mm log --action excluded`
+        # shows what the user is NOT pulling because of their config.
+        #
+        # 5E ship-fix: skip logging in quiet (autopull/autopush) mode.
+        # Without this gate, autopull writes one record per peer ×
+        # source × excluded-path tuple on every hook fire — at
+        # ~100 projects × hourly pulls, the 1MB pullhistory cap
+        # rotates within hours and evicts real `written / merged /
+        # conflicted / failed` records to `.1`. The forensic-aid
+        # contract becomes useless. Interactive `mm pull` still
+        # logs the full set so users can audit their excludes.
+        if not quiet:
+            for src_name, src_data in m.get("sources", {}).items():
+                kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
+                for rel_path, info in src_data.get("files", {}).items():
+                    if rel_path not in kept:
+                        pullhistory.append(
+                            verb="pull",
+                            device=did,
+                            source=src_name,
+                            rel_path=rel_path,
+                            action="excluded",
+                            remote_sha=info.get("sha256"),
+                        )
+        filtered_cache[did] = filtered
+    manifest_cache = filtered_cache
 
     # Group 7 preflight #6 + D11: pull-time case-collision detection.
     # On case-insensitive local FS (APFS default, NTFS), two manifest
@@ -4461,6 +4517,17 @@ def status(
             f"  [yellow]Config missing recommended excludes for source(s):[/yellow] "
             f"{', '.join(safe_str(name) for name in missing_excludes)} — "
             "run [bold]mm migrate-config[/bold] to add."
+        )
+
+    try:
+        n_conflicts = len(resolveflow._find_conflict_files(config))
+    except OSError:
+        n_conflicts = 0
+    if n_conflicts:
+        console.print(
+            f"  [yellow]Unresolved conflicts: {n_conflicts}[/yellow] — "
+            "run [bold]mm conflicts[/bold] to review, "
+            "[bold]mm resolve[/bold] to pick a winner."
         )
 
     # Allowlist the BROKEN states, never a denylist of healthy ones. The full
@@ -5458,8 +5525,9 @@ def gc(
 ) -> None:
     """Garbage collect orphaned blobs and local retention data.
 
-    ``--dry-run`` reports blob and retention candidates without changing files.
-    ``--conflicts`` opt-in reaps stale conflict sidecars as well.
+    ``--dry-run`` reports blob and retention candidates without changing files,
+    including a preview of the conflict-sidecar reaper. ``--conflicts`` is
+    required to actually reap stale conflict copies.
     """
     config = _get_config()
     passphrase = _get_passphrase_or_exit()
@@ -5486,7 +5554,9 @@ def gc(
         # v0.12.39: leftover v0.12.0 trend-snapshot files. Best-effort,
         # filename-matched only, then rmdir if empty. Never rm -rf.
         retention._gc_orphan_retros_dir(dry_run, verbose)
-        if prune_conflicts:
+        # Bare `--dry-run` previews the conflict reaper (the one that
+        # touches user content). Apply still requires `--conflicts`.
+        if prune_conflicts or dry_run:
             retention._gc_old_conflict_files(config, dry_run, verbose)
     finally:
         release_lock()
@@ -5713,7 +5783,7 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
     if name == "opencode":
         raise ConfigError(
             f"unknown source '{name}' — valid: {', '.join(valid)}.{suggestion} "
-            "The opencode sync source was retired in v0.12.54; see the README "
+            "The opencode sync source was retired in v0.12.55; see the README "
             "troubleshooting entry."
         )
     raise ConfigError(
@@ -6172,7 +6242,7 @@ def migrate_config(
 
     Compares each user-configured source against the matching DEFAULT_SOURCES
     entry and proposes adding any missing recommended globs. Also removes a
-    leftover ``opencode`` source block (retired in v0.12.54) and records the
+    leftover ``opencode`` source block (retired in v0.12.55) and records the
     name in ``disabled_sources``. Idempotent — re-running on a fully-migrated
     config exits with "already up to date".
 
@@ -6904,29 +6974,34 @@ def conflicts() -> None:
     table.add_column("Mode")
     table.add_column("local", no_wrap=False, overflow="fold")
     table.add_column("remote", no_wrap=False, overflow="fold")
-    table.add_column("Age")
+    table.add_column("Conflict age")
+    table.add_column("Peer edit age")
     now = datetime.now(timezone.utc)
     pre_inversion_seen = False
     for src_name, cpath, canonical in sorted(hits, key=lambda h: str(h[1])):
+        created = parse_conflict_created_at(cpath.name)
+        if created is None:
+            conflict_age = "?"
+        else:
+            conflict_age = format_age_delta((now - created).total_seconds())
         try:
             mtime = datetime.fromtimestamp(cpath.stat().st_mtime, tz=timezone.utc)
-            age = now - mtime
-            age_str = f"{age.days}d" if age.days else f"{age.seconds // 3600}h"
+            peer_age = format_age_delta((now - mtime).total_seconds())
         except OSError:
-            age_str = "?"
+            peer_age = "?"
         is_pre = is_pre_inversion_conflict_filename(cpath.name)
         if is_pre:
             pre_inversion_seen = True
             mode = "[yellow]pre-v0.9.2[/yellow]"
             # Pre-inversion: sidecar = local, canonical = remote.
-            local_display = str(cpath)
-            remote_display = str(canonical) if canonical else "[dim](gone)[/dim]"
+            local_display = safe_str(cpath)
+            remote_display = safe_str(canonical) if canonical else "[dim](gone)[/dim]"
         else:
             mode = "v0.9.2+"
             # Post-inversion: canonical = local, sidecar = remote.
-            local_display = str(canonical) if canonical else "[dim](gone)[/dim]"
-            remote_display = str(cpath)
-        table.add_row(src_name, mode, local_display, remote_display, age_str)
+            local_display = safe_str(canonical) if canonical else "[dim](gone)[/dim]"
+            remote_display = safe_str(cpath)
+        table.add_row(src_name, mode, local_display, remote_display, conflict_age, peer_age)
     console.print(table)
     console.print(
         "\nRun [bold]mm resolve[/bold] to keep local, remote, or both "
@@ -7317,7 +7392,7 @@ def _maybe_prompt_migration(config: dict) -> None:
         )
     if retire_opencode:
         console.print(
-            "\n[yellow]The opencode sync source was retired in v0.12.54.[/yellow] "
+            "\n[yellow]The opencode sync source was retired in v0.12.55.[/yellow] "
             "This config still has a leftover [[sync.sources]] opencode block."
         )
         console.print(

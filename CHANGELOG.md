@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.0] - 2026-09-03
+
+**A conflict sidecar's `st_mtime` is the peer's clock, not the sidecar's age.** Two consumers read it as age and destroyed data. The pre-inversion migration sweep renamed a fresh sidecar `v0-`, after which `mm resolve` `(l)ocal` promoted **peer bytes over your own file** — and because `_ensure_inversion_marker` mints "now" on first call, that was 100% of sidecars on a newly initialized Mac. `mm gc --conflicts` could reap a copy on the day it was written. Age and era now live in the filename, which mm already stamped and never read.
+
+### Fixed
+
+- `resolveflow._migrate_pre_inversion_conflict` gates on `manifest.parse_conflict_created_at` (the UTC timestamp in the filename) plus an explicit era token, never `st_mtime`. Unparseable filename refuses to migrate rather than falling back. A hard `_INVERSION_SHIPPED_AT` floor covers a restored home directory meeting a fresh marker.
+- That function used `str.find` for the conflict infix where every sibling parser uses `rindex`. On a double-infix name — which mm mints itself when a documented non-conflict canonical like `notes.sync-conflict-log.md` conflicts — `v0-` accreted forever, one rename per pull.
+- `retention._gc_old_conflict_files` ages off the filename, refuses to reap on an unparseable name, and never reaps a `v0-` copy. `_is_live_conflict` treats a **missing** canonical as live: `mm resolve` offers `(p)romote` there, so it is a recovery state and the sidecar can be the only copy left on disk. Reapable is narrowed to canonical-exists-and-matches.
+- `manifest.marker_skip_globs` compares normalized include-dir roots. `include_dirs = ["skills/"]` or `["./skills"]` previously defeated the include-root exemption and dropped the entire configured tree out of sync, hand-authored files included.
+- `README.md` described the pre-v0.9.2 conflict direction in two places, telling you the sidecar held your own edits when it holds the peer's — and contradicting its own `(l)ocal` / `(r)emote` copy two paragraphs later.
+
+### Added
+
+- `manifest.parse_conflict_created_at` and `is_v1_conflict_filename`. New sidecars carry `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device8>[-<rand4>]<ext>` — the era token sits **after** the timestamp, never as a `v0-`-style prefix, because a prefix fails `CONFLICT_PATTERN` and would un-exclude conflict copies onto the fleet.
+- `mm conflicts` splits `Age` into `Conflict age` and `Peer edit age`, so a 20-minute-old conflict no longer displays as `186d`.
+- `mm status` lists unresolved conflicts. Bare `mm gc --dry-run` previews the conflict reaper and prints paths on delete.
+- Marker-aware directory skip: a directory containing `.extend-root` drops out of sync without generating deletion tombstones, so a new gstack-extend skill no longer needs a hand-added glob. `projects/*/pair-review/session.yaml` is excluded; the prose artifacts stay.
+
 ## [0.13.0] - 2026-09-02
 
 **The OpenCode skill-link row is gone.** mm no longer maintains `~/.config/opencode/skills/retro-fleet`. On the next interactive push, init, or `mm install-skills`, mm removes the link **it** created (a `readlink` that equals the mm-owned store). A regular file, a directory, or a link you made yourself is left alone.

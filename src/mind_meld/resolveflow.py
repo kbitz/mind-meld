@@ -63,10 +63,16 @@ from mind_meld.manifest import (
     SYNCED_SUBDIRS,
     is_conflict_filename,
     is_pre_inversion_conflict_filename,
+    is_v1_conflict_filename,
+    parse_conflict_created_at,
     parse_conflict_device_short,
 )
 from mind_meld.merge import lcs_merge
 from mind_meld.safety import safe_str
+
+# v0.9.2 inversion ship date (CHANGELOG). Unprefixed sidecars whose
+# filename timestamp is on or after this are post-inversion mints.
+_INVERSION_SHIPPED_AT = datetime(2026, 4, 25, tzinfo=timezone.utc)
 
 _LEGACY_SKIP_ALIAS_NOTICE = (
     "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward (alias removed at 1.0)."
@@ -141,19 +147,18 @@ def _ensure_inversion_marker() -> float | None:
     failure (fail-safe: the caller treats None as "skip migration").
 
     Critical safety property: distinguishes pre-inversion conflict files
-    (mtime predates the marker — produced by pre-v0.9.2 code on this
-    machine) from post-inversion conflict files (mtime is at-or-after
-    the marker — produced by THIS version's `_apply_conflict`, which
-    emits unprefixed filenames). Without this gate, the migration sweep
-    re-tags every fresh post-inversion sidecar as `v0-` on the next
-    pull and resolve silently dispatches them backwards, causing data
-    loss (the CRITICAL bug caught by /ship pre-landing review and
-    independently confirmed by both adversarial and reviewer subagents).
+    from post-inversion ones. The gate (in `_migrate_pre_inversion_conflict`)
+    reads the filename era marker / filename timestamp, NOT ``st_mtime``.
+    ``_apply_conflict`` restores the sidecar's mtime to the *peer file's*
+    clock, so a fresh sidecar is essentially always in the past; using
+    that clock as "sidecar age" mis-tags post-inversion files as `v0-`
+    and resolve's `(l)ocal` then overwrites local with peer bytes.
 
-    First-call semantics: writes the marker at "now" so any pre-existing
-    `.sync-conflict-*` files already on disk (mtime < now) get migrated
-    on this pull, and every NEW conflict file produced from here on
-    (mtime > now) is correctly skipped.
+    First-call semantics: writes the marker at "now". Combined with the
+    filename-clock gate: this sweep runs at the TOP of the pull, before
+    any `_apply_conflict`, so every sidecar this device mints has a
+    filename timestamp ``>= marker_ts`` by construction. The `v1` era
+    token is belt-and-braces for a deleted or restored marker file.
 
     Best-effort: directory creation and file write may fail (perms,
     disk full). Failure returns None — the caller MUST treat None as
@@ -184,14 +189,19 @@ def _migrate_pre_inversion_conflict(path: Path) -> Path:
     """Rename a pre-inversion conflict file to carry the `v0-` prefix.
 
     Idempotent: a path already prefixed with `v0-` returns unchanged.
-    Skips files whose mtime is at-or-after the inversion-install marker
-    (those are post-inversion files produced by THIS version's
-    `_apply_conflict`, which emits unprefixed filenames — re-tagging
-    them as `v0-` would silently invert resolve's dispatch and cause
-    data loss). Failure (rename error, target collision, missing marker)
-    logs a warning to stderr and returns the original path so the
-    caller can keep walking — losing one migration attempt is preferable
-    to aborting the whole conflict-discovery sweep.
+    `v1` era files (minted by v0.14.0+) are definitively post-inversion
+    and return immediately. Anything else is gated on
+    ``parse_conflict_created_at`` against the inversion-install marker:
+    unparseable → refuse to migrate (mirrors ``marker_ts is None``).
+    Do NOT fall back to ``st_mtime`` — that IS the clock-conflation bug
+    (sidecar mtime is the peer's clock, restored by `_apply_conflict`).
+
+    Uses ``rindex`` (not ``find``) so a double-infix name — mm mints
+    this itself when a documented non-conflict canonical like
+    ``notes.sync-conflict-log.md`` conflicts — inserts ``v0-`` before
+    the LAST infix. ``find`` accretes ``v0-`` forever, one rename per
+    pull, because the prefix lands before the inner segment and
+    ``is_pre_inversion_conflict_filename`` never latches.
 
     MUST only be called from a lock-protected context (mm pull, mm
     resolve). `mm conflicts` is intentionally read-only and lockless;
@@ -203,30 +213,36 @@ def _migrate_pre_inversion_conflict(path: Path) -> Path:
         return path
     if not is_conflict_filename(name):
         return path
+    # v1 era token is definitive post-inversion, independent of the
+    # marker file (which can be deleted or restored).
+    if is_v1_conflict_filename(name):
+        return path
 
-    # Mtime gate (5E ship-fix): only migrate files whose mtime predates
-    # the inversion-install marker. Without this, fresh post-inversion
-    # sidecars produced by `_apply_conflict` (which has the same
-    # unprefixed shape as legacy pre-inversion files) get false-tagged
-    # `v0-` on the very next pull, then `_resolve_interactive_loop`
-    # dispatches them backwards (silent data loss).
     marker_ts = _ensure_inversion_marker()
     if marker_ts is None:
         # Fail-safe: marker unreadable / unwriteable. Refuse to migrate
         # rather than risk mis-tagging.
         return path
-    try:
-        file_mtime = path.stat().st_mtime
-    except OSError:
+    created = parse_conflict_created_at(name)
+    if created is None:
+        # Unparseable filename. Refuse — falling back to st_mtime is
+        # the clock-conflation bug this helper exists to close.
         return path
-    if file_mtime >= marker_ts:
-        # Post-inversion file — produced after this version was installed.
-        # Leave its filename unprefixed (the resolve dual-mode dispatch
-        # treats no-prefix as post-inversion semantics).
+    # v0.9.2 (2026-04-25) inverted conflict direction. Unprefixed
+    # sidecars minted on or after that date are post-inversion even
+    # if a deleted marker is recreated as "now". Without this floor,
+    # restoring ~/.claude onto a fresh mm init v0-tags the whole
+    # 0.9.2–0.13 fleet and resolve `(l)ocal` overwrites local with peer.
+    if created >= _INVERSION_SHIPPED_AT:
+        return path
+    if created.timestamp() >= marker_ts:
+        # Filename birth is at-or-after this install's first
+        # post-inversion pull. Leave unprefixed.
         return path
 
-    idx = name.find(CONFLICT_INFIX)
-    if idx == -1:
+    try:
+        idx = name.rindex(CONFLICT_INFIX)
+    except ValueError:
         return path  # defensive — is_conflict_filename guarantees presence
     before = name[: idx + len(CONFLICT_INFIX)]
     after = name[idx + len(CONFLICT_INFIX) :]
@@ -277,8 +293,14 @@ def _find_conflict_files(
     pre-inversion conflict files to carry the `v0-` prefix before
     returning. Lock-protected callers ONLY (mm pull, mm resolve).
     Pass False from `mm conflicts` (read-only; lockless — would race
-    autopull) and from `_gc_old_conflict_files` (mtime-based reaping
+    autopull) and from `_gc_old_conflict_files` (filename-clock reaping
     doesn't need the prefix discrimination, codex-2 #5).
+
+    Surface asymmetry (load-bearing, currently surprising): this walk
+    does NOT consult `exclude_patterns`. Discovery, gc, resolve, and the
+    pull-top migration sweep all reach trees that sync does not. A
+    sidecar stranded in an excluded tree can never converge — `(l)`/`(r)`
+    operate on a file that will never sync again.
 
     Dedup: scan strategies (1) and (2) overlap when an `include_files`
     entry sits inside an `include_dirs` directory (e.g. user customizes

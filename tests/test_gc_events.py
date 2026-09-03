@@ -290,6 +290,9 @@ class TestGcDryRunRetentionReport:
         old_event = _make_events_file(events_dir, "dev-a", old)
         old_conflict = events_dir / "notes.sync-conflict-20260101-120000-peer0001.jsonl"
         old_conflict.write_text("conflict")
+        # Converged canonical: the only state `_is_live_conflict` lets the
+        # reaper reach, so it is what makes this a dry-run candidate at all.
+        (events_dir / "notes.jsonl").write_text("conflict")
         ancient = (datetime.now(timezone.utc) - timedelta(days=31)).timestamp()
         os.utime(old_conflict, (ancient, ancient))
         tmp_file = storage_dir / "data" / "dev-a" / "tmp-upload.tmp"
@@ -324,7 +327,7 @@ class TestGcDryRunRetentionReport:
 
         without_conflicts = runner.invoke(app, ["gc", "--dry-run"])
         assert without_conflicts.exit_code == 0, without_conflicts.output
-        assert "Conflicts dry-run:" not in without_conflicts.output
+        assert "Conflicts dry-run:" in without_conflicts.output
 
     def test_gc_help_describes_complete_dry_run_scope(self) -> None:
         result = runner.invoke(app, ["gc", "--help"])
