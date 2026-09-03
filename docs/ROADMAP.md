@@ -38,6 +38,7 @@ _Depends on: none_
 _3 tasks . ~220 LOC . high risk . 5 files_
 _touches: src/mind_meld/cli.py, src/mind_meld/resolveflow.py, tests/test_conflict_copy.py, docs/invariants/conflicts.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _read-first: docs/invariants/conflicts.md (the inversion and sidecar-dedup sections in full)_
+_out: 47A_
 _produces: the deleter is named, and fixed if it is mm_
 _session: fresh · effort: high · verify: ./bin/check tests/test_conflict_copy.py tests/test_docs_routing.py_
 
@@ -157,7 +158,11 @@ _**One instruction discharged 2026-09-03.** The card used to require widening th
 ### Execution Map
 
 A Group may launch when every Group in its ← set has landed, regardless
-of document order; document order is priority, not gating.
+of document order; document order is priority, not gating. One standing
+exception: all six Tracks are release-bearing (every `_touches:` claims
+`pyproject.toml`), so same-wave Groups still serialize their VERSION
+claim per the "Release-bearing Tracks serialize" constraint — waves count
+semantic gating only, not release order.
 
 Adjacency list (from the packer):
 ```
