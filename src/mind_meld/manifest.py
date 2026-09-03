@@ -50,12 +50,22 @@ from mind_meld.errors import ManifestError
 # or pre-inversion code that mm rewrote during migration. The dual-pattern
 # match keeps `mm gc --conflicts` and walker exclusion working uniformly
 # across both eras.
+#
+# Track 45A (v0.14.0): post-inversion files mint a `v1` era marker AFTER
+# the timestamp: <stem>.sync-conflict-<8d>-<6d>-v1-<dev8>[-<rand4>]<ext>.
+# NEVER as a v0-style prefix — `*.sync-conflict-v1-<8d>-...` fails
+# CONFLICT_PATTERN, so is_conflict_filename is False, so _is_excluded is
+# False, so the conflict copy would upload to the fleet.
 CONFLICT_INFIX = ".sync-conflict-"
 CONFLICT_V0_PREFIX = "v0-"
+CONFLICT_V1_MARKER = "v1"
 _DIGITS_8 = "[0-9]" * 8
 _DIGITS_6 = "[0-9]" * 6
 CONFLICT_PATTERN = f"*{CONFLICT_INFIX}{_DIGITS_8}-{_DIGITS_6}-*"
 CONFLICT_PATTERN_V0 = f"*{CONFLICT_INFIX}{CONFLICT_V0_PREFIX}{_DIGITS_8}-{_DIGITS_6}-*"
+# gstack-extend drops this file in every directory it renders. The walker
+# skips the containing directory; see marker_skip_globs.
+MARKER_SKIP_NAME = ".extend-root"
 
 
 def is_conflict_filename(name: str) -> bool:
@@ -72,42 +82,65 @@ def is_conflict_filename(name: str) -> bool:
     return fnmatch.fnmatch(name, CONFLICT_PATTERN) or fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
 
 
-def parse_conflict_device_short(name: str) -> str | None:
-    """Extract the device-short id from a conflict filename, if present.
+def _conflict_metadata_parts(name: str) -> list[str] | None:
+    """Split the conflict metadata block into hyphen segments, or None.
 
-    Returns the 8-char device prefix `conflict_filename()` stamped into the
-    name, or ``None`` if `name` doesn't match the conflict pattern. Handles
-    both post-inversion (no prefix) and pre-inversion (`v0-`) shapes, plus
-    the optional 4-char same-second random suffix.
-
-    Filename grammar produced by ``conflict_filename``:
-      ``<stem>.sync-conflict-[v0-]<8d>-<6d>-<device8>[-<rand4>]<ext>``
-
-    The device is the segment immediately after the 8-digit date and 6-digit
-    time. If the conflict portion ends with the optional ``-<rand4>`` collision
-    suffix, the device is the last-but-one segment; otherwise it's the last
-    one before the file extension.
-
-    Used by ``mm resolve`` to attribute the REMOTE side of a conflict to a
-    peer device-name rather than the bare hex id.
+    Uses ``rindex`` so a documented non-conflict name that itself contains
+    the infix (``notes.sync-conflict-log.md``) plus mm's own appended infix
+    parses the LAST infix. Strips an optional ``v0-`` prefix and the file
+    extension. Does not raise.
     """
     if not is_conflict_filename(name):
         return None
-    # Find the conflict infix; everything to the right is the metadata
-    # block plus optional file extension.
     try:
         infix_at = name.rindex(CONFLICT_INFIX)
     except ValueError:
         return None
     after = name[infix_at + len(CONFLICT_INFIX) :]
-    # Strip optional v0- prefix that marks pre-inversion-migrated files.
     if after.startswith(CONFLICT_V0_PREFIX):
         after = after[len(CONFLICT_V0_PREFIX) :]
-    # Strip the file extension (last "." in `after`, if any). Conflict
-    # files always carry the original extension at the very end.
     last_dot = after.rfind(".")
     metadata = after[:last_dot] if last_dot != -1 else after
-    parts = metadata.split("-")
+    return metadata.split("-")
+
+
+def parse_conflict_device_short(name: str) -> str | None:
+    """Extract the device-short id from a conflict filename, if present.
+
+    Returns the 8-char device prefix `conflict_filename()` stamped into the
+    name, or ``None`` if `name` doesn't match the conflict pattern. Handles
+    pre-inversion (``v0-``), unprefixed post-inversion, and v1-era
+    (``-v1-`` after the timestamp) shapes, plus the optional 4-char
+    same-second random suffix.
+
+    Filename grammar produced by ``conflict_filename`` (v0.14.0+):
+      ``<stem>.sync-conflict-[v0-]<8d>-<6d>[-v1]-<device8>[-<rand4>]<ext>``
+
+    After stripping ``v0-`` and the extension, parts are one of::
+
+        [<8d>, <6d>, <device8>]
+        [<8d>, <6d>, <device8>, <rand4>]
+        [<8d>, <6d>, v1, <device8>]
+        [<8d>, <6d>, v1, <device8>, <rand4>]
+
+    The ``v1`` token is skipped when present so the device is still the
+    segment after the timestamp (or after ``v1``). If the conflict portion
+    ends with the optional ``-<rand4>`` collision suffix, the device is the
+    last-but-one remaining segment; otherwise it's the last one.
+
+    Used by ``mm resolve`` to attribute the REMOTE side of a conflict to a
+    peer device-name rather than the bare hex id, and by
+    ``_existing_post_inversion_sidecars_from_peer`` to dedup.
+    """
+    parts = _conflict_metadata_parts(name)
+    if parts is None:
+        return None
+    # Skip the v1 era marker (after timestamp, before device). The v1
+    # token is 2 chars, not 4, so the rand4 heuristic below would NOT
+    # skip it — we have to drop it explicitly or a future "return the
+    # last 8-char hex segment" rewrite silently breaks attribution.
+    if len(parts) >= 4 and parts[2] == CONFLICT_V1_MARKER:
+        parts = parts[:2] + parts[3:]
     # parts shape: [<8d>, <6d>, <device8>] OR [<8d>, <6d>, <device8>, <rand4>]
     # `is_conflict_filename` already enforced the leading shape, so any
     # length < 3 here is a malformed file we can't attribute.
@@ -118,6 +151,48 @@ def parse_conflict_device_short(name: str) -> str | None:
     if len(parts) >= 4 and len(parts[-1]) == 4 and all(c in "0123456789abcdef" for c in parts[-1]):
         return parts[-2]
     return parts[-1]
+
+
+def parse_conflict_created_at(name: str) -> datetime | None:
+    """Parse the UTC timestamp mm stamped into a conflict filename.
+
+    This is the sidecar's own birth time — distinct from ``st_mtime``,
+    which ``_apply_conflict`` restores to the *peer file's* mtime. Age
+    consumers (migration gate, gc bar, ``mm conflicts`` Conflict-age
+    column) MUST use this, not ``st_mtime``.
+
+    Index math off ``rindex(CONFLICT_INFIX)`` (not ``find``), skips an
+    optional ``v0-``, takes ``<8d>-<6d>``, parses as UTC. Returns ``None``
+    on anything unparseable — never raises. ``is_conflict_filename``
+    validates digit SHAPE, not date validity, so
+    ``a.sync-conflict-20261345-999999-abcd1234.md`` reaches ``strptime``
+    and must be caught here.
+
+    None-policy is per consumer, not uniform: migration refuses to
+    migrate, gc refuses to reap, display renders ``?``. Falling back to
+    ``st_mtime`` re-opens the clock-conflation bug.
+    """
+    parts = _conflict_metadata_parts(name)
+    if parts is None or len(parts) < 2:
+        return None
+    stamp = f"{parts[0]}-{parts[1]}"
+    try:
+        return datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def is_v1_conflict_filename(name: str) -> bool:
+    """Return True iff `name` is a v1-era (post-v0.14.0) conflict copy.
+
+    The ``v1`` token sits AFTER the timestamp, never as a ``v0-``-style
+    prefix. A prefix form fails ``is_conflict_filename`` and would upload
+    the conflict copy to the fleet.
+    """
+    parts = _conflict_metadata_parts(name)
+    if parts is None:
+        return False
+    return len(parts) >= 3 and parts[2] == CONFLICT_V1_MARKER
 
 
 def is_pre_inversion_conflict_filename(name: str) -> bool:
@@ -150,6 +225,7 @@ EXCLUDED = [
     "__pycache__/",
     "*.pyc",
     ".mind-meld-log.md",
+    MARKER_SKIP_NAME,  # gstack-extend render marker; never a sync file
 ]
 
 # Only sync these subdirectories within each project.
@@ -179,6 +255,74 @@ GROK_EXCLUDE_PATTERNS = [
 ]
 
 
+def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
+    """True if ``rel_path`` is a skip-prefix or a file under one.
+
+    Prefix match, not fnmatch: a directory literally named ``*`` with a
+    marker must not exclude ``projects/myapp/foo``.
+    """
+    if not prefixes:
+        return False
+    for prefix in prefixes:
+        if rel_path == prefix or rel_path.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def marker_skip_globs(source_config: dict[str, Any]) -> list[str]:
+    """Return relative-dir prefixes for directories that contain ``.extend-root``.
+
+    gstack-extend drops ``.extend-root`` in every directory it renders.
+    ``exclude_patterns`` cannot express "skip the directory CONTAINING this
+    file," so the walker and the consumer-boundary filter both call this
+    helper. Results are PATH PREFIXES, not fnmatch globs — interpolating
+    ``rel_dir`` into ``{rel_dir}/*`` would let a peer-chosen ``*`` in the
+    path exclude unrelated files. A marker skip must not generate deletion
+    tombstones, exactly as adding a glob must not.
+
+    Best-effort: any OSError on a scan dir is skipped. Symlinked scan
+    dirs and symlink markers are ignored (same as the walker). Generic
+    sources only — callers with no ``include_dirs`` get ``[]``.
+    """
+    include_dirs: list[str] = source_config.get("include_dirs") or []
+    if not include_dirs:
+        return []
+    try:
+        base = Path(source_config["path"]).expanduser().resolve()
+    except (OSError, KeyError, TypeError):
+        return []
+    if not base.exists():
+        return []
+    globs: list[str] = []
+    seen: set[str] = set()
+    for dir_name in include_dirs:
+        scan_dir = base / dir_name
+        if scan_dir.is_symlink():
+            continue
+        if not scan_dir.is_dir():
+            continue
+        try:
+            markers = list(scan_dir.rglob(MARKER_SKIP_NAME))
+        except OSError:
+            continue
+        for marker in markers:
+            try:
+                if marker.is_symlink() or not marker.is_file():
+                    continue
+                rel_dir = marker.parent.relative_to(base).as_posix()
+            except (OSError, ValueError):
+                continue
+            # A marker sitting ON the include-dir root would prefix the
+            # entire source tree (`skills/.extend-root` → skip `skills/`).
+            # gstack-extend drops the marker in each rendered child dir.
+            if rel_dir == dir_name:
+                continue
+            if rel_dir not in seen:
+                seen.add(rel_dir)
+                globs.append(rel_dir)
+    return globs
+
+
 def mtime_from_manifest(iso_str: str) -> datetime:
     """Parse a manifest mtime ISO-8601 string to a timezone-aware UTC datetime.
 
@@ -198,7 +342,11 @@ def mtime_from_path(path: Path) -> datetime:
     return datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
 
-def _is_excluded(rel_path: str, exclude_patterns: list[str] | None = None) -> bool:
+def _is_excluded(
+    rel_path: str,
+    exclude_patterns: list[str] | None = None,
+    skip_prefixes: list[str] | None = None,
+) -> bool:
     """Check if a relative path matches any exclude pattern.
 
     The hardcoded EXCLUDED list covers universal junk (.git, *.tmp, etc.).
@@ -208,6 +356,7 @@ def _is_excluded(rel_path: str, exclude_patterns: list[str] | None = None) -> bo
     can scope to subtrees like `projects/*/repo-mode.json`), unlike the
     EXCLUDED list which mixes basename (`*.pyc`) and dir-segment (`.git/`)
     semantics for backward compatibility.
+    ``skip_prefixes`` are path prefixes (not globs) for marker-skip dirs.
     """
     parts = rel_path.split("/")
     filename = parts[-1]
@@ -215,6 +364,8 @@ def _is_excluded(rel_path: str, exclude_patterns: list[str] | None = None) -> bo
     # Syncthing-style preservation model (one local conflict turns into N
     # cross-device conflict files).
     if is_conflict_filename(filename):
+        return True
+    if _under_skip_prefix(rel_path, skip_prefixes):
         return True
     for pattern in EXCLUDED:
         # Directory patterns (ending with /)
@@ -281,6 +432,7 @@ def _record_file(
     max_file_size: int,
     on_skip: Any = None,
     exclude_patterns: list[str] | None = None,
+    skip_prefixes: list[str] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Apply the per-file walker pipeline to `path` under `base`.
 
@@ -298,7 +450,7 @@ def _record_file(
     """
     rel = str(path.relative_to(base))
 
-    if _is_excluded(rel, exclude_patterns):
+    if _is_excluded(rel, exclude_patterns, skip_prefixes):
         return None
 
     try:
@@ -473,7 +625,10 @@ def walk_generic_source(
             include_dirs: List of directory names to walk recursively
             include_files: List of filenames to check at root level
             exclude_patterns: Optional fnmatch globs evaluated against the
-                relative path; matches are silently skipped.
+                relative path; matches are silently skipped. Directories
+                containing `.extend-root` are also skipped (see
+                `marker_skip_globs`); that skip is a path-prefix match so
+                it does not generate deletion tombstones.
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files.
 
@@ -486,7 +641,13 @@ def walk_generic_source(
 
     include_dirs: list[str] = source_config.get("include_dirs", [])
     include_files: list[str] = source_config.get("include_files", [])
-    exclude_patterns: list[str] = source_config.get("exclude_patterns", [])
+    exclude_patterns: list[str] = list(source_config.get("exclude_patterns") or [])
+    # Marker-aware skip: directories containing `.extend-root` drop out of
+    # the local manifest the same way a glob would, but as PATH PREFIXES
+    # not fnmatch globs. `_build_exclude_map` threads the same prefixes
+    # for tombstone suppression. Do NOT skip this — a walker-only skip
+    # would tombstone previously-synced files on the next push.
+    skip_prefixes = marker_skip_globs(source_config)
 
     files: dict[str, dict[str, Any]] = {}
     collected_paths: list[Path] = []
@@ -549,7 +710,9 @@ def walk_generic_source(
         if identity in seen:
             continue
         seen.add(identity)
-        if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
+        if result := _record_file(
+            path, base, max_file_size, on_skip, exclude_patterns, skip_prefixes
+        ):
             rel, info = result
             files[rel] = info
 

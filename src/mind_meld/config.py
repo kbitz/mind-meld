@@ -50,20 +50,20 @@ _BOOTSTRAP_WARNED_PATHS: set[str] = set()
 # logical skill, so one upstream edit becomes N divergences across the fleet
 # and mm cannot know the copies are related — `skills/roadmap/SKILL.md`
 # historically conflicted under BOTH the codex and opencode sources in the
-# same pull (the opencode source was retired in Track 37B). Generated +
+# same pull (the opencode source was retired in Track 44A). Generated +
 # regenerable + already version-controlled upstream = not sync data.
 # Only the codex entry consumes this list today; the constant is kept so
-# Track 39A (blocked-by: 37B) inherits the mechanism rather than
-# re-extracting it. Splatted into a fresh list at each use site because
-# `get_default_source` hands these lists to callers that mutate them.
+# Track 47A inherits the mechanism rather than re-extracting it. Splatted
+# into a fresh list at each use site because `get_default_source` hands
+# these lists to callers that mutate them.
 #
-# Detection is by NAME, matching the established `skills/gstack-*` convention.
-# The generic marker is the `.extend-root` file gstack-extend drops in each
-# rendered dir, but exclude_patterns are fnmatch globs against a relative
-# path and cannot express "skip the directory CONTAINING this file" — a
-# marker-aware walker skip is tracked as follow-up work. Until then, a new
-# gstack-extend skill needs a new glob here. `gstack-extend-init` and
-# `gstack-extend-upgrade` are already covered by `skills/gstack-*`.
+# Detection is by NAME, matching the established `skills/gstack-*` convention,
+# PLUS a marker-aware walker skip (Track 47A): `manifest.marker_skip_globs`
+# drops any directory containing `.extend-root`. The globs remain as
+# belt-and-braces for dirs that lost their marker; a new gstack-extend
+# skill no longer needs a new glob here to drop out of sync.
+# `gstack-extend-init` and `gstack-extend-upgrade` are already covered by
+# `skills/gstack-*`.
 _GENERATED_HOST_SKILL_GLOBS: list[str] = [
     "skills/roadmap/*",
     "skills/full-review/*",
@@ -134,6 +134,10 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         # included. Definitionally derived (7 conflicts + 40 mtime-skips).
         # Excluding at the per-source glob level keeps the global EXCLUDED
         # list focused on universal junk (.git, *.tmp, etc.).
+        # projects/*/pair-review/session.yaml: live per-machine state
+        # machine, definitionally unshareable. The prose artifacts
+        # (deploy.md, report.md, parked-bugs.md) STAY — pair-review
+        # advertises cross-machine resume as a feature.
         "exclude_patterns": [
             "config.yaml",
             "projects/*/repo-mode.json",
@@ -141,6 +145,7 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             "analytics/.last-sync-*",
             "projects/*/decisions.active.json",
             "projects/*/brain-cache/*",
+            "projects/*/pair-review/session.yaml",
         ],
     },
     {

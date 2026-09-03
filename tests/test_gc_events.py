@@ -324,7 +324,7 @@ class TestGcDryRunRetentionReport:
 
         without_conflicts = runner.invoke(app, ["gc", "--dry-run"])
         assert without_conflicts.exit_code == 0, without_conflicts.output
-        assert "Conflicts dry-run:" not in without_conflicts.output
+        assert "Conflicts dry-run:" in without_conflicts.output
 
     def test_gc_help_describes_complete_dry_run_scope(self) -> None:
         result = runner.invoke(app, ["gc", "--help"])

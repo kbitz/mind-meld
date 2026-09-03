@@ -15,7 +15,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - **End-to-end encrypted.** All synced data (manifests, artifacts, and allowlisted agent context) is encrypted client-side with AES-256-GCM before touching storage. The storage layer never sees plaintext. This is a hard invariant — no code path may write unencrypted sync data to storage.
 - **Scoped sync.** Built-in sources are allowlisted: Claude Code syncs its `memory/` and `todos/` project data; Codex syncs its documented customizations; Grok syncs only hardcoded `skills/`, `commands/`, and `rules/`. Session databases, credentials, and whole-file settings that may contain credentials stay local.
 - **Truth-based manifests.** Manifests are complete snapshots of local state. Deletions propagate automatically — no separate prune step.
-- **Conflict resolution.** Detects and resolves iCloud and Dropbox-style conflict copies on manifest files. For source files with divergent local edits, INVERTED in v0.9.2: local stays at canonical, REMOTE bytes go to `<stem>.sync-conflict-<ts>-<device>.<ext>` (Syncthing convention's actual direction — visible sidecar holds the surprising bytes). Mtime-skip: if the local file is newer than remote, pull leaves it alone. Pre-v0.9.2 conflict files are migrated to a `v0-` prefix on first lock-protected discovery (mm pull / mm resolve only); resolve dispatches by filename prefix (`v0-` = pre-inversion semantics, no prefix = post-inversion).
+- **Conflict resolution.** Detects and resolves iCloud and Dropbox-style conflict copies on manifest files. For source files with divergent local edits, INVERTED in v0.9.2: local stays at canonical, REMOTE bytes go to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` (Syncthing convention's actual direction — visible sidecar holds the surprising bytes; `v1` sits AFTER the timestamp, never as a `v0-` prefix). Mtime-skip: if the local file is newer than remote, pull leaves it alone. Pre-v0.9.2 conflict files are migrated to a `v0-` prefix on first lock-protected discovery (mm pull / mm resolve only); resolve dispatches by filename prefix (`v0-` = pre-inversion semantics, no prefix / `v1` = post-inversion). Sidecar `st_mtime` is the peer clock (do not read it as sidecar age); filename timestamp is birth.
 - **Sync log.** After pull, writes `.mind-meld-log.md` per project so Claude Code knows what changed from other machines.
 - Manifest-based diffing: SHA-256 hash every file, only upload/download changes.
 - Content-addressed storage: blobs stored by hash, not by path.
@@ -130,17 +130,18 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 |---|---|
 | `cli.py:_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests` | `docs/invariants/sync.md` |
 | `cli.py:_download_and_apply` / (rel_path + base_path concatenation site) | `docs/invariants/sync.md` |
-| `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` | `docs/invariants/sync.md` |
+| `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
 | `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) | `docs/invariants/sync.md` |
 | `conflictmtime.py:_restore_mtime_best_effort` / `_MTIME_RESTORE_MAX_SKEW_SECONDS` (future-clamp) | `docs/invariants/sync.md` |
-| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` | `docs/invariants/conflicts.md` |
+| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename` / `_filter_excluded_paths` | `docs/invariants/conflicts.md` |
+| `retention.py:_gc_old_conflict_files` / `_is_live_conflict` | `docs/invariants/conflicts.md` |
 | `resolveflow.py:_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_synced_scan_dirs` / `_canonical_for_conflict` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
 | `conflictmtime.py:_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` (both prompt sites share these) | `docs/invariants/conflicts.md` |
 | `cli.py:_record_inline_bump` / `_invalidate_inline_bump` / `_drain_inline_bumps` / `_CANONICAL_WRITE_OUTCOMES` / `pending_inline_bumps` plumbing through `_pull_core` / `_pull_one_source` / `_download_and_apply` (outcome-gated invalidation) | `docs/invariants/conflicts.md` |
-| `conflictdiff.py` (incl. `format_ts` / `format_age_delta` / `newer_side` / `render_time_line` / `render_verdict` / `merge_has_line_structure`) / `merge.py:lcs_merge` / `manifest.py:parse_conflict_device_short` / either prompt site's `merge_available` computation | `docs/invariants/conflicts.md` |
+| `conflictdiff.py` (incl. `format_ts` / `format_age_delta` / `newer_side` / `render_time_line` / `render_verdict` / `merge_has_line_structure`) / `merge.py:lcs_merge` / `manifest.py:parse_conflict_device_short` / `parse_conflict_created_at` / `is_v1_conflict_filename` / either prompt site's `merge_available` computation | `docs/invariants/conflicts.md` |
 | `cli.py:_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` | `docs/invariants/init-devices.md` |
 | `devices.py` / `storage/local.py:put_exclusive` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
@@ -159,7 +160,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `host_skill_discovery.py:probe_grok_skill_discovery` | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
 | `cli.py:recapture` / `events_tail.py:_run_events_recapture` / `_prepare_recapture` / `events.py:resolve_push_cursor` / `capture_advances_cursor` / `make_git_capture` | `docs/invariants/events-retro.md` |
-| `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |
+| `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_is_live_conflict` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
 | `host_usage.py` (incl. `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry`) | `docs/invariants/events-retro.md` |
 | `host_usage.py:_grok_turns_from_record` / `_validate_grok_counters` / `_GROK_TERMINAL_KEYS` / `_validated_grok_entry` / `_grok_file_entry` / `_validated_grok_partial_days` / `_grok_partial_days` / `HostUsageResult.partial_days` | `tests/fixtures/host_sessions/grok/CONTRACT.md` and `docs/invariants/events-retro.md` (coverage states) |

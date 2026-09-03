@@ -51,6 +51,70 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Context:** filed by /ship pre-landing review + red-team pass on the roadmap-regen branch, 2026-09-03. Comment/docstring-only edits, zero runtime effect; grouped so they ride along instead of minting a docs-only code PR.
 
+### [plan-eng-review:severity=critical] `_ensure_inversion_marker` makes every new Mac mis-migrate 100% of its conflict sidecars
+- **Description:** `resolveflow._ensure_inversion_marker` mints `time.time()` on FIRST call. Its docstring assumes "every NEW conflict file produced from here on (mtime > now) is correctly skipped" — but `cli._apply_conflict` ends with `_restore_mtime_best_effort(conflict_path, remote_mtime_iso)`, stamping the sidecar with the PEER's mtime, which is essentially always in the past. `conflictmtime._restore_mtime_best_effort` clamps only the FUTURE (`now + 60s`); there is no past floor. So on a freshly-initialized device the marker is "today" and **every** sidecar it writes falls below its own safety gate and is renamed `v0-` by the migration sweep at `cli.py:4006`, which runs at the top of every pull including autopull. `_resolve_interactive_loop` then dispatches `v0-` under pre-inversion semantics where `(l)ocal` renames the sidecar OVER the canonical — so the user picks "keep my version" and mm overwrites their local file with the peer's bytes.
+- **Repro:** verified end-to-end on 2026-09-03 at `23b2cc8` / mm 0.13.0. Back-date a post-inversion sidecar to a peer mtime before the marker, run `resolveflow._find_conflict_files(cfg, migrate_pre_inversion=True)` (the exact call `_pull_core` makes): the file is renamed to `...sync-conflict-v0-...`. `mm conflicts` then renders it `Mode: pre-v0.9.2` with the local and remote columns SWAPPED.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Confirmed by all three review voices independently. The fix is NOT to stop back-dating the sidecar: its `st_mtime` is the only surviving carrier of the peer clock, read by `resolveflow.py:809` for the v0.12.5 resolve bump AND by `conflictmtime._stat_mtime_btime` for v0.12.10's `newer_side` / `render_verdict` / `(n)ewer`. Fix is to stop the CONSUMERS misreading the peer clock as the sidecar's own age. `cli.conflict_filename` already stamps `datetime.now(timezone.utc)` into the filename. **Era marker must go at `<stem>.sync-conflict-<ts>-v1-<dev8>`, NOT as a `v0-`-style prefix** — probed 2026-09-03: the prefix form makes `is_conflict_filename` return False, hence `manifest._is_excluded` False, hence conflict copies get UPLOADED to the fleet. See the full analysis at `~/.gstack/projects/kbitz-mind-meld/kbitz-fix-vanishing-conflict-sidecars-track45a-plan.md`.
+
+### [plan-eng-review:severity=critical] README documents the pre-inversion conflict direction, and contradicts itself two paragraphs later
+- **Description:** `README.md:62` and `README.md:413` (the "Handling conflicts" section itself) both say "the remote wins the canonical path and your local version is preserved as `<stem>.sync-conflict-...`". That is the PRE-v0.9.2 direction. Since v0.9.2 local stays at canonical and the REMOTE bytes go to the sidecar. `README.md:418` documents `(l)ocal` as "keep your edits" and `(r)emote` as "overwrite with peer's bytes", which IS correct post-inversion — so the README contradicts itself on the one question where being wrong destroys data. A user who believes :413 thinks the sidecar holds their own work; promoting it over the canonical destroys their edits with the peer's bytes.
+- **Repro:** `grep -n -i "sync-conflict" README.md` at `23b2cc8`.
+- **Effort:** S
+- **Priority:** P1
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03; found by the Codex DX voice. Same defect class CLAUDE.md already records as a lesson ("`synclog.py` still describing the pre-inversion direction four months after the inversion"). That copy was fixed in v0.12.51 and **nobody grepped for the other instances**. Completeness criterion is the grep, not this list.
+
+### [plan-eng-review:severity=major] `_migrate_pre_inversion_conflict` uses `find()` where every sibling parser uses `rindex()` — unbounded `v0-` accretion
+- **Description:** `resolveflow.py:228` does `name.find(CONFLICT_INFIX)`; `manifest.parse_conflict_device_short` uses `rindex` and `resolveflow._canonical_for_conflict` uses `rfind`. mm always appends its infix LAST, so `find` is wrong. On a double-infix name the `v0-` lands before the inner segment instead of before the digits, so `is_pre_inversion_conflict_filename` never latches and the file is renamed once per pull, forever.
+- **Repro:** verified 2026-09-03. `notes.sync-conflict-log.md` is a documented NON-conflict canonical name (`tests/test_manifest.py:994`), so it syncs; when it conflicts mm mints `notes.sync-conflict-log.sync-conflict-<ts>-<dev>.md`. Replaying the rename math: `v0-` → `v0-v0-` → `v0-v0-v0-`, `is_v0` False every time.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Each rename bumps the parent dir mtime and leaves nothing at the old name — the exact fingerprint the 2026-09-01 sidecar disappearance was attributed to an unidentified external walker. Test this first in any sidecar-disappearance investigation.
+
+### [plan-eng-review:severity=major] `mm gc --conflicts` can reap a live conflict, prints no paths, and has no preview by default
+- **Description:** four gaps in the one reaper that deletes user content. (1) `_gc_old_conflict_files` is called inside `if prune_conflicts:` so a bare `mm gc --dry-run` never previews it. (2) Non-verbose output is `Conflicts: candidates=N deleted=N` with no paths. (3) `CONFLICT_AGE_DAYS = 30` is a module constant with no `--older-than` and no config key. (4) It will reap a sidecar whose canonical still exists and still differs — a live unresolved conflict — on a silent 30-day deadline with no countdown on any surface.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03; both DX voices independently. Every other consequential mm operation has an escape hatch (`--force` on disable-source, `--dry-run`/`--yes` on migrate-config). Minimum bar: refuse to reap a live conflict, and print paths on delete.
+
+### [plan-eng-review:severity=major] `mm status` and `mm diag` never surface unresolved conflicts
+- **Description:** with three conflict sidecars live on disk, `mm status` printed six advisory lines (stale autorun, disabled sources, Codex capture, Grok capture, per-source diffs) and mentioned none of them. `mm diag`'s JSON has no conflicts key. `.mind-meld-log.md` is written only for `type == "claude"` sources (`cli.py:3351` sets `claude_sync_base` on that branch alone), so 22 of the 25 conflicts recorded on 2026-09-01 produced no per-project breadcrumb at all. Conflicts are announced exactly once, in an unattended hook's stderr, then vanish from every surface a human checks later.
+- **Repro:** verified 2026-09-03 — planted three correctly-named sidecars, `mm conflicts` listed all three, `mm status` mentioned none.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03. This is why the 2026-09-01 disappearance was found by accident rather than by mm.
+
+### [plan-eng-review:severity=major] `pullhistory.append_entry` has a `sidecar=` parameter that no caller ever passes
+- **Description:** `pullhistory.py:17` documents `"sidecar": "<optional sidecar filename if action=conflicted>"`, `:95` accepts it, `:116-117` writes it when non-None. `grep -rn "sidecar=" src/ tests/` returns zero. So every `conflicted` row records THAT a sidecar was written and never WHICH file, which makes any later reconciliation guess. This is the standing "a write with no reader is a liability" constraint inverted: a parameter with no producer, in the log schema since v0.6.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03. NOT a 15-line plumb: `_apply_conflict` returns a bare `ApplyOutcome` Literal, `_download_and_apply` gates Track 12A's `_CANONICAL_WRITE_OUTCOMES` invalidation on that exact value, and the row is written two frames up in `_pull_core` from `outcomes[action]: list[str]` (rel_paths only). Also note `pull-history.jsonl` rotates DESTRUCTIVELY at 1 MB (`os.replace` onto `.1`, overwriting the prior `.1`, no gc reaper) and swallows all write failures by design — so it cannot host a conflict lifecycle state machine. If durable conflict state is ever needed, route it through `lockedjson.py` per CLAUDE.md, and name the field `conflict_copy=` (`sidecar.py` already means the manifest cache in this call graph).
+
+### [plan-eng-review:severity=minor] Pull side does not reject conflict-shaped rel_paths from a peer manifest
+- **Description:** `manifest._is_excluded` drops conflict-shaped filenames on the PUSH walk. The pull side (`manifest._validate_rel_path`) rejects only NUL / absolute / `..` / drive letters, so a passphrase-holding peer can ship `foo.sync-conflict-19700101-000000-deadbeef.md` and mm will materialize it, after which every conflict-subsystem consumer treats it as mm-minted. Low impact today; becomes load-bearing the moment the gc bar reads the filename timestamp, because the attacker then chooses the reap age directly.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Fix is one `is_conflict_filename(basename)` call in the pull-side filter, mirroring the push-side gate. Related: `is_conflict_filename` validates digit SHAPE not date validity — `a.sync-conflict-20261345-999999-abcd1234.md` passes, so any new timestamp parser must catch `ValueError` and parse as UTC (`conflict_filename` uses `datetime.now(timezone.utc)`).
+
+### [plan-eng-review:severity=minor] Conflict discovery walks trees that `exclude_patterns` removed from sync
+- **Description:** `resolveflow._find_conflict_files` walks `_synced_scan_dirs` with `rglob` and filters only on `is_conflict_filename`; it never consults `exclude_patterns`, which live in `manifest.walk_generic_source`. So `mm conflicts`, `mm resolve`, `mm gc --conflicts` and the pull-top migration sweep all still operate on excluded trees. Verified 2026-09-03: a sidecar planted under `~/.codex/skills/.system/` is listed by `mm conflicts` despite `skills/.system/*` being in that source's `exclude_patterns`. Second-order consequence: a sidecar stranded in an excluded tree can never converge, so `mm resolve`'s `(l)`/`(r)` operate on a file that will never sync again.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Document the surface asymmetry in `docs/invariants/conflicts.md`; it is surprising and currently unwritten.
+
+### [plan-eng-review:severity=minor] Conflict GC retention age should be configurable
+- **Description:** `retention.CONFLICT_AGE_DAYS = 30` is a module constant. A user who wants conflict copies kept for 90 days has to fork. Add `[retention] conflict_age_days` to `config.toml`, or at minimum a `--older-than` flag on `mm gc --conflicts`.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03, deferred out of the safety work as a config-schema change.
+
+### [plan-eng-review:severity=minor] `synclog.write_sync_log` writes `.mind-meld-log.md` for claude sources only
+- **Description:** `cli.py:3351` sets `per_source.claude_sync_base` only when `src_cfg["type"] == "claude"`, and `synclog.write_sync_log` hardcodes a `projects/<name>/` layout. gstack, codex and grok conflicts therefore leave no per-project breadcrumb. On 2026-09-01 that was 22 of 25 conflicts.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Separate subsystem from the conflict-clock work; generalizing the layout is its own change.
+
 _Otherwise empty. Drained 2026-09-02 by Track 37A implementation: 5 discharged (release.yml guard, width-coupled tests, xdist, CI isolation, bin/check — the six-Track split was killed), 4 placed (36B amendments, unowned OpenCode files, 44A CLI verbs, 44A retirement notice), 4 deferred (see docs/roadmap-future.md)._
 
 ## Drain records

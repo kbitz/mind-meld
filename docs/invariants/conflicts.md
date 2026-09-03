@@ -2,12 +2,13 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse`
+- `src/mind_meld/cli.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename` / `_filter_excluded_paths`
 - `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_canonical_for_conflict` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
 - `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge`
-- `src/mind_meld/manifest.py` — `parse_conflict_device_short` / `is_conflict_filename` / `is_pre_inversion_conflict_filename`
+- `src/mind_meld/manifest.py` — `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
+- `src/mind_meld/retention.py` — `_gc_old_conflict_files` / `_is_live_conflict`
 - `src/mind_meld/devices.py` — `lookup_device_by_short_id` / `generate_unique_short_device_id`
 
 Tests: `tests/test_conflict_copy.py`, `tests/test_conflictdiff.py`, `tests/test_merge.py`, `tests/test_safe_str.py::TestConflictBannerSanitization`.
@@ -17,7 +18,31 @@ Tests: `tests/test_conflict_copy.py`, `tests/test_conflictdiff.py`, `tests/test_
 ## Conflict-direction inversion + fleet-version refusal (load-bearing, v0.9.2 BREAKING)
 `_apply_conflict` keeps LOCAL bytes at canonical; REMOTE bytes go to `.sync-conflict-*` sidecar. No rename + rollback dance — local is never overwritten in the conflict path. Pre-v0.9.2 produced the opposite mapping; pre-existing files migrate to a `v0-` prefix on first lock-protected discovery in `mm pull` / `mm resolve` (NEVER from `mm conflicts` — lockless, would race autopull, codex-2 #5).
 
-`_resolve_interactive_loop` is dual-mode dispatched BY FILENAME PREFIX (not timestamp — sound, since post-v0.9.2 code never produces a `v0-` file directly). `v0-` files: `(l)ocal` renames sidecar over canonical, `(r)emote` unlinks sidecar. No-prefix files: `(l)ocal` unlinks sidecar, `(r)emote` renames sidecar over canonical. Diff fromfile/tofile labels flip per row to match.
+`_resolve_interactive_loop` is dual-mode dispatched BY FILENAME PREFIX (not timestamp — sound, since post-v0.9.2 code never produces a `v0-` file directly). `v0-` files: `(l)ocal` renames sidecar over canonical, `(r)emote` unlinks sidecar. No-prefix (and `v1`) files: `(l)ocal` unlinks sidecar, `(r)emote` renames sidecar over canonical. Diff fromfile/tofile labels flip per row to match.
+
+## Clock separation (load-bearing, v0.14.0)
+
+A sidecar carries THREE distinct facts on THREE carriers. Conflating them is how `(l)ocal` overwrote local with peer bytes on every freshly-initialized Mac:
+
+| Fact | Carrier | Consumers |
+|---|---|---|
+| Sidecar birth (when mm wrote this copy) | filename timestamp, minted UTC by `conflict_filename` | migration gate, gc 30-day bar, `mm conflicts` **Conflict age** |
+| Inversion era | `v1` token after the timestamp (post-v0.14.0 mint); `v0-` prefix (pre-inversion, migrated) | `_migrate_pre_inversion_conflict`, `_resolve_interactive_loop` dispatch |
+| Peer file's modified time | sidecar `st_mtime`, restored by `_apply_conflict` → `_restore_mtime_best_effort` | v0.12.5 `_bump_canonical_mtime_post_resolve` (peer_mtime from the sidecar on post-inversion `(l)ocal`); v0.12.10 `newer_side` / `render_verdict` / `(n)ewer` / `render_time_line` via `_stat_mtime_btime` |
+
+**Do not drop `_restore_mtime_best_effort` from `_apply_conflict`.** That mtime is the only surviving carrier of the peer clock after the pull ends. Dropping it makes `newer_side` answer `"remote"` on essentially every post-inversion conflict — a silently wrong answer on a keystroke that destroys one side. This is the fourth attempt to reason about dropping the restore; the consumer set above is the reason it stays.
+
+**`v1` goes AFTER the timestamp:** `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<dev8>[-<rand4>]<ext>`. Never as a `v0-`-style prefix. The prefix form makes `is_conflict_filename` return False, hence `_is_excluded` False, hence conflict copies upload to the fleet as ordinary user data.
+
+**`parse_conflict_created_at` is UTC.** `conflict_filename` uses `datetime.now(timezone.utc)`. A naive `strptime().timestamp()` reads local and back-dates by up to 13 hours. `is_conflict_filename` validates digit SHAPE, not date validity, so the parser catches `ValueError` and returns `None`.
+
+**None-policy differs per consumer.** Unparseable filename: migration gate → refuse to migrate; gc bar → do not reap; display → render `?`. A uniform "fall back to `st_mtime`" re-opens the bug in the first two.
+
+**`_migrate_pre_inversion_conflict` uses `rindex`, not `find`.** mm appends its infix last. `notes.sync-conflict-log.md` is a documented NON-conflict canonical name that syncs; when it conflicts mm mints a double-infix name. `find` inserts `v0-` before the inner segment, `is_pre_inversion_conflict_filename` never latches, and `v0-` accretes forever (`v0-` → `v0-v0-` → `v0-v0-v0-`), one rename per pull.
+
+**Surface asymmetry.** `_find_conflict_files` does NOT consult `exclude_patterns`. Discovery, gc, resolve, and the pull-top migration sweep all reach trees that sync does not. A sidecar stranded in an excluded tree can never converge.
+
+**Live-conflict gc refuse.** `_gc_old_conflict_files` will not reap a sidecar whose canonical still exists and still differs, regardless of age. A 30-day destruction deadline on unresolved user data with no countdown is not shippable. Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`.
 
 ## Conflict-prompt UX (load-bearing, v0.11.1 BREAKING — interactive prompt)
 

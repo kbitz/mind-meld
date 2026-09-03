@@ -20,7 +20,7 @@ import hashlib
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -420,11 +420,11 @@ class TestApplyIncomingFile:
 
 class TestConflictFilename:
     def test_syncthing_format(self) -> None:
-        """Format: <stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device_short>.<ext>"""
+        """Format: <stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device_short>.<ext>"""
         canonical = Path("/tmp/fake/user_role.md")
         now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
         path = conflict_filename(canonical, "a1b2c3d4-e5f6-7890", now=now)
-        assert path.name == "user_role.sync-conflict-20260421-143055-a1b2c3d4.md"
+        assert path.name == "user_role.sync-conflict-20260421-143055-v1-a1b2c3d4.md"
 
     def test_short_device_id_padded(self, tmp_path: Path) -> None:
         """Device id shorter than 8 chars is used as-is (no padding)."""
@@ -555,14 +555,13 @@ class TestGcOldConflictFiles:
         src = tmp_path / "src"
         (src / "memory").mkdir(parents=True)
 
-        old_conflict = src / "memory" / "a.sync-conflict-20000101-000000-devA1234.md"
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        old_ts = (pinned_now - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
+        fresh_ts = pinned_now.strftime("%Y%m%d-%H%M%S")
+        old_conflict = src / "memory" / f"a.sync-conflict-{old_ts}-devA1234.md"
         old_conflict.write_bytes(b"old")
-        ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
-        os.utime(old_conflict, (ancient, ancient))
-
-        new_conflict = src / "memory" / "b.sync-conflict-20260421-000000-devA1234.md"
+        new_conflict = src / "memory" / f"b.sync-conflict-{fresh_ts}-devA1234.md"
         new_conflict.write_bytes(b"new")
-        # Fresh mtime (now) so it falls inside the retention window
 
         config = {
             "sync": {
@@ -578,7 +577,7 @@ class TestGcOldConflictFiles:
             },
         }
 
-        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False)
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
         assert reaped.deleted == 1
         assert not old_conflict.exists(), "old conflict should be reaped"
         assert new_conflict.exists(), "fresh conflict should survive"
@@ -851,7 +850,7 @@ class TestFindConflictFilesIncludeFiles:
         src.mkdir()
         (src / "config.yaml").write_bytes(b"canonical")
         old = src / "config.sync-conflict-20000101-000000-devA1234.yaml"
-        old.write_bytes(b"old")
+        old.write_bytes(b"canonical")
         ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
         os.utime(old, (ancient, ancient))
 
@@ -947,7 +946,7 @@ class TestFindConflictFilesNestedDedup:
         (src / "projects").mkdir(parents=True)
         (src / "projects" / "notes.md").write_bytes(b"canonical")
         old = src / "projects" / "notes.sync-conflict-20000101-000000-devA1234.md"
-        old.write_bytes(b"old")
+        old.write_bytes(b"canonical")
         ancient = datetime(2000, 1, 1, tzinfo=timezone.utc).timestamp()
         os.utime(old, (ancient, ancient))
 
@@ -2721,6 +2720,22 @@ class TestParseConflictDeviceShort:
             == "devA1234"
         )
 
+    def test_v1_era_extracts_device(self) -> None:
+        from mind_meld.manifest import parse_conflict_device_short
+
+        assert (
+            parse_conflict_device_short("user.sync-conflict-20260903-151747-v1-deadbeef.md")
+            == "deadbeef"
+        )
+
+    def test_v1_era_with_rand4_extracts_device(self) -> None:
+        from mind_meld.manifest import parse_conflict_device_short
+
+        assert (
+            parse_conflict_device_short("user.sync-conflict-20260903-151747-v1-deadbeef-ab12.md")
+            == "deadbeef"
+        )
+
 
 # ── Component 1: never default Enter to (m)erge ──────────────────────
 
@@ -3446,3 +3461,211 @@ class TestMigrationWarningIsSanitized:
         captured = capsys.readouterr()
         assert "\x1b" not in (captured.out + captured.err), "raw ESC reached the terminal"
         assert "failed to migrate" in (captured.out + captured.err)
+
+
+class TestGcFilenameClock:
+    """C2–C5: gc bar reads the filename, not st_mtime."""
+
+    def _config(self, src: Path) -> dict:
+        return {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                    }
+                ]
+            }
+        }
+
+    def test_day0_sidecar_with_old_peer_mtime_survives(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        fresh_ts = pinned_now.strftime("%Y%m%d-%H%M%S")
+        sidecar = memory / f"notes.sync-conflict-{fresh_ts}-devA1234.md"
+        sidecar.write_bytes(b"peer bytes")
+        ancient = (pinned_now - timedelta(days=90)).timestamp()
+        os.utime(sidecar, (ancient, ancient))
+        outcome = _gc_old_conflict_files(
+            self._config(src), dry_run=False, verbose=False, now=pinned_now
+        )
+        assert sidecar.exists()
+        assert outcome.deleted == 0
+
+    def test_unparseable_filename_not_reaped(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        # Digit-shaped but not a real date — is_conflict_filename True,
+        # parse_conflict_created_at None.
+        sidecar = memory / "notes.sync-conflict-20261345-999999-devA1234.md"
+        sidecar.write_bytes(b"x")
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        outcome = _gc_old_conflict_files(
+            self._config(src), dry_run=False, verbose=False, now=pinned_now
+        )
+        assert sidecar.exists()
+        assert outcome.deleted == 0
+        assert outcome.skipped >= 1
+
+    def test_live_conflict_not_reaped_at_day_30(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        old_ts = (pinned_now - timedelta(days=40)).strftime("%Y%m%d-%H%M%S")
+        canonical = memory / "notes.md"
+        canonical.write_bytes(b"local")
+        sidecar = memory / f"notes.sync-conflict-{old_ts}-devA1234.md"
+        sidecar.write_bytes(b"remote")
+        outcome = _gc_old_conflict_files(
+            self._config(src), dry_run=False, verbose=False, now=pinned_now
+        )
+        assert sidecar.exists()
+        assert canonical.read_bytes() == b"local"
+        assert outcome.deleted == 0
+
+    def test_ancient_filename_on_live_conflict_does_not_reap(self, tmp_path: Path) -> None:
+        """C5: a peer-chosen 1970 timestamp cannot drive the bar below the
+        live-conflict floor."""
+        src = tmp_path / "src"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        canonical = memory / "notes.md"
+        canonical.write_bytes(b"local")
+        sidecar = memory / "notes.sync-conflict-19700101-000000-deadbeef.md"
+        sidecar.write_bytes(b"remote")
+        outcome = _gc_old_conflict_files(self._config(src), dry_run=False, verbose=False)
+        assert sidecar.exists()
+        assert outcome.deleted == 0
+
+
+class TestConflictsAgeColumns:
+    def test_conflict_age_from_filename_peer_age_from_mtime(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from mind_meld.config import save_config
+
+        src = tmp_path / "src"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        (memory / "notes.md").write_bytes(b"local")
+        sidecar = memory / "notes.sync-conflict-20260901-000000-devA1234.md"
+        sidecar.write_bytes(b"remote")
+        ancient = datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(sidecar, (ancient, ancient))
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev", "name": "Dev"},
+                "storage": {"path": str(tmp_path / "storage")},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "s1",
+                            "path": str(src),
+                            "type": "generic",
+                            "include_dirs": ["memory"],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": 1024},
+            },
+            config_path,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        runner = CliRunner()
+        result = runner.invoke(app, ["conflicts"])
+        assert result.exit_code == 0, result.output
+        # Rich wraps headers around box-drawing glyphs at pytest's width.
+        words = "".join(ch if ch.isalnum() else " " for ch in result.output)
+        flat = " ".join(words.split())
+        assert "Conflict age" in flat
+        assert "Peer edit" in flat
+        from mind_meld.conflictdiff import format_age_delta
+
+        now = datetime.now(timezone.utc)
+        created = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        peer = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        assert format_age_delta((now - created).total_seconds()) in result.output
+        assert format_age_delta((now - peer).total_seconds()) in result.output
+
+    def test_unreadable_clocks_render_question_mark(self, tmp_path: Path, monkeypatch) -> None:
+        from mind_meld.config import save_config
+
+        src = tmp_path / "src"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        sidecar = memory / "notes.sync-conflict-20261345-999999-devA1234.md"
+        sidecar.write_bytes(b"x")
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev", "name": "Dev"},
+                "storage": {"path": str(tmp_path / "storage")},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "s1",
+                            "path": str(src),
+                            "type": "generic",
+                            "include_dirs": ["memory"],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": 1024},
+            },
+            config_path,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        result = CliRunner().invoke(app, ["conflicts"])
+        assert result.exit_code == 0, result.output
+        assert "?" in result.output
+
+
+class TestPostInversionLocalLeavesCanonical:
+    def test_resolve_local_on_v1_sidecar_leaves_canonical(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        canonical = tmp_path / "user.md"
+        canonical.write_bytes(b"local content")
+        conflict = tmp_path / "user.sync-conflict-20260903-151747-v1-devA1234.md"
+        conflict.write_bytes(b"remote content")
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        _resolve_interactive_loop([("s1", conflict, canonical)])
+        assert canonical.read_bytes() == b"local content"
+        assert not conflict.exists()
+
+    def test_mtime_restore_still_feeds_newer_side(self, tmp_path: Path) -> None:
+        from mind_meld.conflictdiff import newer_side
+        from mind_meld.conflictmtime import _stat_mtime_btime
+
+        rel = "memory/user_role.md"
+        local = tmp_path / rel
+        local.parent.mkdir(parents=True)
+        local.write_bytes(b"local content")
+        _set_mtime(local, datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc))
+        remote_mtime = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+        info = _remote_info("remotehash", remote_mtime)
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote content",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+        assert outcome == "conflicted"
+        sidecars = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
+        assert len(sidecars) == 1
+        assert "v1" in sidecars[0].name
+        remote_stat, _btime = _stat_mtime_btime(sidecars[0])
+        local_stat, _ = _stat_mtime_btime(local)
+        assert newer_side(local_stat, remote_stat) == "remote"
+        assert remote_stat is not None
+        assert abs(remote_stat - remote_mtime.timestamp()) < 2.0

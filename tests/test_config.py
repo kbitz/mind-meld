@@ -211,6 +211,7 @@ class TestDefaultSources:
         patterns = gstack.get("exclude_patterns") or []
         assert "projects/*/decisions.active.json" in patterns
         assert "projects/*/brain-cache/*" in patterns
+        assert "projects/*/pair-review/session.yaml" in patterns
 
     def test_gstack_derived_cache_globs_match_observed_paths(self):
         """Pin fnmatch behavior against the real observed rel_paths so a glob
@@ -227,8 +228,22 @@ class TestDefaultSources:
         # The append-only log that feeds the snapshot must NOT be excluded.
         assert not fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.jsonl", snapshot)
         assert not fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.jsonl", brain)
-        # Neither may the archive of superseded decisions.
         assert not fnmatch.fnmatch("projects/kbitz-mind-meld/decisions.archive.jsonl", snapshot)
+
+    def test_gstack_excludes_pair_review_session_yaml_only(self):
+        """Track 47A: session.yaml is a live per-machine state machine.
+        Prose artifacts stay in scope for cross-machine resume."""
+        import fnmatch
+
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        patterns = gstack.get("exclude_patterns") or []
+        glob = "projects/*/pair-review/session.yaml"
+        assert glob in patterns
+        assert fnmatch.fnmatch("projects/kbitz-bolt/pair-review/session.yaml", glob)
+        assert not fnmatch.fnmatch("projects/kbitz-bolt/pair-review/deploy.md", glob)
+        assert not fnmatch.fnmatch("projects/kbitz-bolt/pair-review/report.md", glob)
+        assert not fnmatch.fnmatch("projects/kbitz-bolt/pair-review/parked-bugs.md", glob)
+        assert not fnmatch.fnmatch("projects/kbitz-bolt/full-review/session.yaml", glob)
 
     def test_codex_excludes_host_managed_system_skills(self):
         """v0.12.51: `skills/.system/*` is Codex's OWN bundled skill payload,

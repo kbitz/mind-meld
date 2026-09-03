@@ -1,6 +1,7 @@
 """Tests for mind_meld.manifest — walking, hashing, diffing."""
 
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from mind_meld.errors import ManifestError
 from mind_meld.manifest import (
     CONFLICT_PATTERN,
+    MARKER_SKIP_NAME,
     TOMBSTONE_TTL_DAYS,
     _is_active_tombstone,
     _is_excluded,
@@ -19,8 +21,13 @@ from mind_meld.manifest import (
     generate_tombstones,
     hash_file,
     is_conflict_filename,
+    is_pre_inversion_conflict_filename,
+    is_v1_conflict_filename,
     load_manifest,
+    marker_skip_globs,
     normalize_manifest,
+    parse_conflict_created_at,
+    parse_conflict_device_short,
     read_and_hash,
     serialize_manifest,
     walk_claude_source,
@@ -36,6 +43,9 @@ class TestIsExcluded:
 
     def test_excludes_git(self):
         assert _is_excluded("projects/-foo/.git/HEAD")
+
+    def test_excludes_extend_root_marker(self):
+        assert _is_excluded("skills/roadmap/.extend-root")
 
     def test_excludes_ds_store(self):
         assert _is_excluded("projects/-foo/.DS_Store")
@@ -1020,6 +1030,157 @@ class TestIsConflictFilename:
             "*.sync-conflict-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-"
             "[0-9][0-9][0-9][0-9][0-9][0-9]-*"
         )
+
+
+class TestParseConflictCreatedAt:
+    """A1–A12: filename birth-time parser and v1 era marker."""
+
+    EXPECTED = datetime(2026, 9, 3, 15, 17, 47, tzinfo=timezone.utc)
+
+    def test_unprefixed_post_inversion(self):
+        got = parse_conflict_created_at("a.sync-conflict-20260903-151747-deadbeef.md")
+        assert got == self.EXPECTED
+
+    def test_v0_prefix_tolerated(self):
+        got = parse_conflict_created_at("a.sync-conflict-v0-20260903-151747-deadbeef.md")
+        assert got == self.EXPECTED
+
+    def test_v1_after_timestamp(self):
+        name = "a.sync-conflict-20260903-151747-v1-deadbeef.md"
+        assert parse_conflict_created_at(name) == self.EXPECTED
+        assert is_v1_conflict_filename(name)
+
+    def test_v1_with_rand4_suffix(self):
+        name = "a.sync-conflict-20260903-151747-v1-deadbeef-ab12.md"
+        assert parse_conflict_created_at(name) == self.EXPECTED
+        assert is_v1_conflict_filename(name)
+
+    def test_extensionless(self):
+        assert (
+            parse_conflict_created_at("README.sync-conflict-20260903-151747-deadbeef")
+            == self.EXPECTED
+        )
+
+    def test_digit_shaped_invalid_date_returns_none(self):
+        assert parse_conflict_created_at("a.sync-conflict-20261345-999999-deadbeef.md") is None
+
+    def test_garbage_digits_return_none(self):
+        assert parse_conflict_created_at("a.sync-conflict-99999999-999999-x.md") is None
+
+    def test_non_conflict_returns_none(self):
+        assert parse_conflict_created_at("notes.md") is None
+
+    def test_double_infix_parses_last(self):
+        name = "notes.sync-conflict-log.sync-conflict-20260101-000000-abcd1234.md"
+        assert parse_conflict_created_at(name) == datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    def test_parsed_as_utc_not_local(self):
+        got = parse_conflict_created_at("a.sync-conflict-20260903-151747-deadbeef.md")
+        assert got is not None
+        assert got.tzinfo is timezone.utc
+        assert got == datetime(2026, 9, 3, 15, 17, 47, tzinfo=timezone.utc)
+
+    def test_v1_shape_stays_excluded_and_device_parsable(self):
+        name = "a.sync-conflict-20260903-151747-v1-deadbeef.md"
+        assert is_conflict_filename(name)
+        assert not is_pre_inversion_conflict_filename(name)
+        assert _is_excluded("memory/" + name)
+        assert parse_conflict_device_short(name) == "deadbeef"
+
+    def test_v1_as_prefix_is_not_a_conflict_filename(self):
+        """Regression: a v0-style prefix would un-exclude the copy."""
+        prefix = "a.sync-conflict-v1-20260903-151747-deadbeef.md"
+        assert not is_conflict_filename(prefix)
+        assert not _is_excluded("memory/" + prefix)
+        assert not is_v1_conflict_filename(prefix)
+
+
+class TestMarkerSkipGlobs:
+    """Track 47A: directories containing `.extend-root` drop out of sync."""
+
+    def test_discovers_globs_for_marked_dirs(self, tmp_path: Path):
+        base = tmp_path / "codex"
+        marked = base / "skills" / "new-skill"
+        marked.mkdir(parents=True)
+        (marked / MARKER_SKIP_NAME).write_text("gstack-extend")
+        (marked / "SKILL.md").write_text("generated")
+        unmarked = base / "skills" / "my-own"
+        unmarked.mkdir(parents=True)
+        (unmarked / "SKILL.md").write_text("hand-authored")
+        cfg = {
+            "name": "codex",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["skills"],
+        }
+        assert marker_skip_globs(cfg) == ["skills/new-skill"]
+
+    def test_walker_skips_marked_dir_keeps_unmarked(self, tmp_path: Path):
+        base = tmp_path / "codex"
+        marked = base / "skills" / "new-skill"
+        marked.mkdir(parents=True)
+        (marked / MARKER_SKIP_NAME).write_text("gstack-extend")
+        (marked / "SKILL.md").write_text("generated")
+        unmarked = base / "skills" / "my-own"
+        unmarked.mkdir(parents=True)
+        (unmarked / "SKILL.md").write_text("hand-authored")
+        files = walk_generic_source(
+            {
+                "name": "codex",
+                "path": str(base),
+                "type": "generic",
+                "include_dirs": ["skills"],
+            }
+        )
+        paths = set(files.keys())
+        assert "skills/my-own/SKILL.md" in paths
+        assert "skills/new-skill/SKILL.md" not in paths
+        assert "skills/new-skill/.extend-root" not in paths
+
+    def test_no_include_dirs_returns_empty(self):
+        assert marker_skip_globs({"name": "claude", "path": "~/.claude", "type": "claude"}) == []
+
+    def test_marker_on_include_dir_root_does_not_skip_the_whole_tree(self, tmp_path: Path):
+        base = tmp_path / "codex"
+        skills = base / "skills"
+        skills.mkdir(parents=True)
+        (skills / MARKER_SKIP_NAME).write_text("misplaced")
+        keep = skills / "my-own"
+        keep.mkdir()
+        (keep / "SKILL.md").write_text("hand-authored")
+        cfg = {
+            "name": "codex",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["skills"],
+        }
+        assert marker_skip_globs(cfg) == []
+        files = walk_generic_source(cfg)
+        assert "skills/my-own/SKILL.md" in files
+
+    def test_literal_star_directory_is_a_prefix_not_a_glob(self, tmp_path: Path):
+        """A marker under a directory named ``*`` must not exclude siblings."""
+        from mind_meld.manifest import _under_skip_prefix
+
+        base = tmp_path / "gstack"
+        starred = base / "projects" / "*"
+        starred.mkdir(parents=True)
+        (starred / MARKER_SKIP_NAME).write_text("planted")
+        (base / "projects" / "myapp").mkdir(parents=True)
+        (base / "projects" / "myapp" / "role.md").write_text("keep")
+        cfg = {
+            "name": "gstack",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["projects"],
+        }
+        prefixes = marker_skip_globs(cfg)
+        assert prefixes == ["projects/*"]
+        assert _under_skip_prefix("projects/*/SKILL.md", prefixes)
+        assert not _under_skip_prefix("projects/myapp/role.md", prefixes)
+        files = walk_generic_source(cfg)
+        assert "projects/myapp/role.md" in files
+        assert "projects/*/SKILL.md" not in files
 
 
 class TestWalkerExcludesConflictFiles:

@@ -303,10 +303,10 @@ def format_ts(ts: float | None) -> str:
 def format_age_delta(seconds: float) -> str:
     """Render an absolute duration as ``Nd`` / ``Nh`` / ``Nm`` / ``<1m``.
 
-    Extends the ``mm conflicts`` Age convention (``cli.py`` ``{days}d`` /
-    ``{hours}h``) with a minutes bucket so a sub-hour gap doesn't collapse
-    to a confusing ``0h``. Sign is ignored -- the caller already knows which
-    side is newer; this is just the magnitude.
+    Used by ``mm conflicts`` (Conflict age / Peer edit age columns) and by
+    the conflict-prompt recency verdict. A minutes bucket so a sub-hour
+    gap doesn't collapse to a confusing ``0h``. Sign is ignored -- the
+    caller already knows which side is newer; this is just the magnitude.
     """
     seconds = abs(seconds)
     days = int(seconds // 86400)
