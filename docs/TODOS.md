@@ -44,7 +44,14 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-_Empty. Drained 2026-09-02 by Track 37A implementation: 5 discharged (release.yml guard, width-coupled tests, xdist, CI isolation, bin/check — the six-Track split was killed), 4 placed (36B amendments, unowned OpenCode files, 44A CLI verbs, 44A retirement notice), 4 deferred (see docs/roadmap-future.md)._
+### [ship:severity=minor] Three stale Track/version literals in code comments
+- **Description:** the 2026-09-03 renumber (Groups 45-50) fixed every stale cross-reference in docs/, but three live in code files a docs-only PR does not touch. Fix all three in the next code-touching Track, whichever it is.
+- **Items:** `src/mind_meld/token_usage.py:342` says the `offset == size` wedge is "(Track 37A)" — its number at `727f9cd`; the live card is **46A** and 37A now resolves to the shipped verification-command Track. `src/mind_meld/config.py:53` says "retired in Track 37B" — the live ledger entry is **44A** (alias recorded in `docs/roadmap-shipped.md`). `src/mind_meld/cli.py:5716` tells users the opencode source "was retired in v0.12.54" — the retirement shipped in **v0.12.55** (v0.12.54 was `bin/check`).
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by /ship pre-landing review on the roadmap-regen branch, 2026-09-03. Comment-only edits, zero runtime effect; grouped so they ride along instead of minting a docs-only code PR.
+
+_Otherwise empty. Drained 2026-09-02 by Track 37A implementation: 5 discharged (release.yml guard, width-coupled tests, xdist, CI isolation, bin/check — the six-Track split was killed), 4 placed (36B amendments, unowned OpenCode files, 44A CLI verbs, 44A retirement notice), 4 deferred (see docs/roadmap-future.md)._
 
 ## Drain records
 
