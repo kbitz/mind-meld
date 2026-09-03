@@ -16,7 +16,7 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 - **When a Track touches a reader, check the cache shape, not just the behaviour.** Track 34A verified all six of its card premises as TRUE-or-known-false and was still under-priced 2.5x, because premises describe behaviour while the cost sat in `host_usage._validated_grok_entry`, which normalizes every cached turn to `{key, day, model, usage}` and drops the rest. The existing "check the premise at drain time" constraint worked exactly as written and was insufficient.
 - **A Track that prices, sums, or trends a counter must first prove the counter schema of every reader it consumes.** Added 2026-09-01. Track 35A's card was measured against HEAD, its premises were re-verified at drain time, and it was still going to ship a 7.40x error, because every existing constraint checks *behaviour* and *premises* while the defect sat in an undocumented property of the source formats. Codex CLI and Grok CLI report **inclusive** `input` (cache-read already inside it); Claude is **disjoint**. `grok-4.6` appeared under both schemas, so the semantics belong to the READER, not the model id. This is the "check the cache shape" constraint one layer further out: check the SOURCE shape.
 - **A feature nobody uses is deleted, not repaired.** Added 2026-09-01. The OpenCode reader had been discarding its entire store since v0.12.30 and a Track was drafted to fix it; probing first showed `opencode.db` 19 days cold, `~/.config/opencode/` three weeks stale and composed entirely of symlinks into a git repo already under version control. The fix was real and the feature was not. Probe the artifact's liveness before pricing its repair.
-- **A host usage reader may not ship against a synthetic fixture.** Added 2026-09-01. Its `CONTRACT.md` must record a live census against a real corpus and the host version it was taken from. `tests/fixtures/host_sessions/opencode/CONTRACT.md` said outright "the local machine did not have an OpenCode data directory" and "the SQLite schema is a minimal synthetic contract table." It was the only reader built that way and the only one that returned zero — the root cause Track 36A exists to delete.
+- **A host usage reader may not ship against a synthetic fixture.** Added 2026-09-01. Its `CONTRACT.md` must record a live census against a real corpus and the host version it was taken from. `tests/fixtures/host_sessions/opencode/CONTRACT.md` said outright "the local machine did not have an OpenCode data directory" and "the SQLite schema is a minimal synthetic contract table." It was the only reader built that way and the only one that returned zero — the root cause Track 36A existed to delete (shipped v0.12.53).
 
 ---
 
@@ -37,7 +37,7 @@ _Depends on: none_
 ##### Track 45A: Find and fix what deletes conflict sidecars
 _3 tasks . ~220 LOC . high risk . 5 files_
 _touches: src/mind_meld/cli.py, src/mind_meld/resolveflow.py, tests/test_conflict_copy.py, docs/invariants/conflicts.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_read-first: docs/invariants/conflicts.md (the inversion and sidecar-dedup sections in full)_
+_read-first: docs/invariants/conflicts.md (the inversion and `_find_conflict_files` tuple-key dedup sections in full)_
 _out: 47A_
 _produces: the deleter is named, and fixed if it is mm_
 _session: fresh · effort: high · verify: ./bin/check tests/test_conflict_copy.py tests/test_docs_routing.py_
@@ -158,11 +158,15 @@ _**One instruction discharged 2026-09-03.** The card used to require widening th
 ### Execution Map
 
 A Group may launch when every Group in its ← set has landed, regardless
-of document order; document order is priority, not gating. One standing
-exception: all six Tracks are release-bearing (every `_touches:` claims
-`pyproject.toml`), so same-wave Groups still serialize their VERSION
-claim per the "Release-bearing Tracks serialize" constraint — waves count
-semantic gating only, not release order.
+of document order; document order is priority, not gating. The ← sets
+below are the union of TWO edge kinds: semantic dependencies (only
+49 ← {46} and 50 ← {46} — the cache-encoding rewrite feeds both) and
+release-slot serialization (every other edge — all six Tracks claim
+`pyproject.toml`, and "Release-bearing Tracks serialize"). This map is
+the launch gate; card-level `_blocked-by:` records only the edges a
+future regen must not re-derive differently. Same-wave Groups (46∥47,
+48∥49) still serialize their VERSION claim even though neither gates
+the other's work.
 
 Adjacency list (from the packer):
 ```
