@@ -347,7 +347,7 @@ arrives both ways. Inclusive extractors emit disjoint buckets via
 ``uncached = input - cache_read - cache_create``. Do **not** call
 ``_normalize_inclusive_usage`` in ``_add_usage``: that is where readers
 converge, and subtracting ``cache_read`` from an already-disjoint bucket
-would clamp real billable tokens to zero. Track 42A merges extractors
+would clamp real billable tokens to zero. Track 49A merges extractors
 into this path; a bare "every current reader is inclusive" assertion
 would not survive that merge. Malformed inclusive counters
 (``cache_read + cache_create > input``) degrade that reader (Track 31A
@@ -538,7 +538,7 @@ older than `MAX_BY_DAY_DAYS` mark every future snapshot partial forever.
 **Cache.** `_validated_grok_entry` persists `partial_days` (possibly empty)
 on the Grok cache entry. Pre-34A entries are detected by **key absence** and
 re-walked once. Not a `CACHE_VERSION` bump: that constant is shared with the
-Codex namespace. Track 40A rewrites this encoding and must carry the marker
+Codex namespace. Track 46A rewrites this encoding and must carry the marker
 through.
 
 **Acceptor.** Three-way on key presence, never a falsy check, reusing
