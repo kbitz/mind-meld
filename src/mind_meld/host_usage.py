@@ -77,7 +77,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, get_args
 
 from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.token_usage import (
@@ -106,7 +106,15 @@ _MAX_PROMPT_ID_BYTES = 256
 _MAX_COUNTER = 2**53
 _GROK_STOPS = frozenset({"end_turn", "cancelled"})
 _GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
-_GROK_TERMINAL_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
+_GROK_REQUIRED_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
+_GROK_IGNORABLE_KEYS = frozenset({"elapsed_ms"})
+GROK_USAGE_CENSUS_HOST_VERSION = "1.0.13"
+"""Host version of the last Grok usage-reader wire census.
+
+Bound to ``tests/fixtures/host_sessions/grok/CONTRACT.md`` by
+``test_contract_census_pin_matches_src_constant``. Not the skill-discovery
+pin in README.md (that is a different census, ``grok inspect --json``)."""
+GrokUpdateClass = Literal["terminal", "usage_less", "ignore", "drift"]
 _CANONICAL_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _YEAR_PART = re.compile(r"^\d{4}$")
 _MONTH_OR_DAY_PART = re.compile(r"^\d{2}$")
@@ -236,8 +244,10 @@ class _CacheEntry(TypedDict, total=False):
     of the 250 ms autopush host budget. Interning ``turn_ids`` / ``days`` /
     ``models`` and keeping ``last`` only on a file's FIRST state (the only place
     ``_aggregate`` reads it) brings that to 13.5 MB and 56 ms. Still 34x the
-    v0.12.47 cache, and it grows with the corpus — see the scaling note in
-    ``docs/TODOS.md`` for the trigger to revisit the encoding.
+    v0.12.47 cache, and it grows with the corpus. Encoding work is deferred
+    until the trigger in ``docs/TODOS.md`` (host cache encoding, Group 46
+    deferral) fires: 25 MB or 100 ms json round-trip. Measured 2026-09-04
+    at 4.11 MB / 23.3 ms / 20,047 states / 716 rollouts, about 6x headroom.
     """
 
     dev: int
@@ -455,7 +465,8 @@ def grok_completed_once() -> bool:
 
     Missing, corrupt, or lock-contended cache is pre-success (fail safe).
     Diagnostic only: the host-sweep no longer keys publication policy on this
-    latch (Track 31A). ``mm status`` / ``mm diag`` still do.
+    latch (Track 31A). ``mm status`` / ``mm diag`` prefer ``last_reason``
+    when it is a permanent failure, then this latch.
     """
     return grok_usage_diag()["complete_once"] is True
 
@@ -555,6 +566,7 @@ def grok_usage_diag() -> dict[str, Any]:
         return {
             "complete_once": False,
             "usage_less_skipped": 0,
+            "last_reason": None,
             "cache_state": "unreadable",
             "model_count": 0,
             "models": [],
@@ -564,6 +576,7 @@ def grok_usage_diag() -> dict[str, Any]:
         return {
             "complete_once": False,
             "usage_less_skipped": 0,
+            "last_reason": None,
             "cache_state": cache_state,
             "model_count": 0,
             "models": [],
@@ -575,6 +588,7 @@ def grok_usage_diag() -> dict[str, Any]:
     return {
         "complete_once": data.get("complete_once") is True,
         "usage_less_skipped": skipped,
+        "last_reason": _cached_last_reason(data),
         "cache_state": "ok",
         "model_count": models["model_count"],
         "models": models["models"],
@@ -668,10 +682,29 @@ def read_grok_usage(
 
             cached_files = _cached_files(locked.data)
             prior_complete = locked.data.get("complete_once") is True
+            prior_reason = _cached_last_reason(locked.data)
             result, staged_files, learned, saw_files = _scan_grok_root(
                 source_root, cached_files, read_deadline
             )
-            if not learned and not result.complete:
+            new_reason = None if result.complete else result.reason
+            # A later deadline/locked/io_error must not erase a standing
+            # unsupported. mm status only special-cases permanent reasons;
+            # clobbering them would reprint "prior scan completed successfully"
+            # while Grok is still dropped. Keep in sync with
+            # events_tail._HOST_PERMANENT_REASONS.
+            if (
+                not result.complete
+                and prior_reason == "unsupported"
+                and new_reason != "unsupported"
+            ):
+                new_reason = prior_reason
+            # Persist the last failure reason even when every file was a cache
+            # hit. The previous gate (`not learned and not complete`) left a
+            # permanently-drifted store unable to write anything, so mm status
+            # and mm diag never saw the reason class and prescribed `mm push`
+            # forever. Absence of `last_reason` is the pre-46A discriminator
+            # — not a CACHE_VERSION bump, which shares a constant with Codex.
+            if not learned and not result.complete and prior_reason == new_reason:
                 raise _NoCacheCommit(result)
             complete_once = prior_complete or (result.complete and saw_files)
             files = staged_files if result.complete else {**cached_files, **staged_files}
@@ -689,6 +722,7 @@ def read_grok_usage(
                 "version": CACHE_VERSION,
                 "complete_once": complete_once,
                 "usage_less_skipped": skip_total,
+                "last_reason": new_reason,
                 "files": files,
             }
             if not result.complete:
@@ -707,8 +741,21 @@ def _empty_grok_cache() -> dict[str, Any]:
         "version": CACHE_VERSION,
         "complete_once": False,
         "usage_less_skipped": 0,
+        "last_reason": None,
         "files": {},
     }
+
+
+def _cached_last_reason(data: dict[str, Any]) -> Reason | None:
+    """Read a closed ``Reason`` off the Grok cache root, or None.
+
+    Key-absence is the pre-46A discriminator. Garbage is treated as absent
+    so a hand-edited cache cannot smuggle peer text onto ``mm diag``.
+    """
+    raw = data.get("last_reason")
+    if raw in get_args(Reason):
+        return raw  # type: ignore[return-value]
+    return None
 
 
 def _scan_grok_root(
@@ -984,19 +1031,14 @@ def _grok_turns_from_record(
         return None
     if update.get("sessionUpdate") != "turn_completed":
         return None
-    # Content-bearing turns short-circuit BEFORE the key-set check. A
-    # content field on a terminal is "not this projection", not "unknown
-    # wire" — load-bearing: the carve-out below would otherwise never
-    # fire for a usage-less record that also carried content.
-    if _GROK_CONTENT_FIELDS & update.keys():
+    kind = _classify_grok_update(update)
+    if kind == "ignore":
         return None
-    # Usage-less `turn_completed` is a zero-token skip, not unsupported.
-    # MUST precede the exact-match key check: a record without `usage`
-    # fails `set(update) != _GROK_TERMINAL_KEYS` first, so a carve-out at
-    # the `usage = update.get("usage")` site is dead code.
-    if set(update) == _GROK_TERMINAL_KEYS - {"usage"}:
+    if kind == "usage_less":
         return [], frozenset()
-    if set(update) != _GROK_TERMINAL_KEYS:
+    if kind == "drift":
+        raise _ReadFailure("unsupported")
+    if kind != "terminal":
         raise _ReadFailure("unsupported")
     day = _grok_outer_day(record.get("timestamp"))
     prompt_id = update.get("prompt_id")
@@ -1045,6 +1087,27 @@ def _grok_turns_from_record(
         )
     days = frozenset({day} if (incomplete or cache_create_nonzero) and accepted else ())
     return accepted, days
+
+
+def _classify_grok_update(update: dict[str, Any]) -> GrokUpdateClass:
+    """Classify a ``turn_completed`` update object's key set.
+
+    Three tiers, matching ``_GROK_CONTENT_FIELDS`` / ``_GROK_IGNORABLE_KEYS``
+    / ``_GROK_REQUIRED_KEYS``. An ignorable key is dropped before the
+    required-set comparison so a usage-less terminal that also carries
+    ``elapsed_ms`` stays a skip, not a drift. Unknown extra keys are
+    ``drift``; this Track still refuses them (Track 46B owns quarantine).
+    One caller; hoistable for Track 49A, not generalized here.
+    """
+    keys = set(update)
+    if _GROK_CONTENT_FIELDS & keys:
+        return "ignore"
+    projected = keys - _GROK_IGNORABLE_KEYS
+    if projected == _GROK_REQUIRED_KEYS:
+        return "terminal"
+    if projected == _GROK_REQUIRED_KEYS - {"usage"}:
+        return "usage_less"
+    return "drift"
 
 
 def _normalize_inclusive_usage(usage: Usage) -> Usage:
@@ -2366,6 +2429,7 @@ __all__ = [
     "DEFAULT_READ_BUDGET_S",
     "GROK_CACHE_PATH",
     "GROK_SESSIONS_PATH",
+    "GROK_USAGE_CENSUS_HOST_VERSION",
     "grok_sessions_root",
     "HostFamily",
     "HostTokens",

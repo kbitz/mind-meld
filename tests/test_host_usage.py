@@ -959,19 +959,21 @@ def _grok_turn_usage_less(
     ts: int = 1786731043,
     prompt_id: str = "33333333-3333-3333-3333-333333333333",
     stop: str = "cancelled",
+    extra_update: dict | None = None,
 ) -> str:
+    update = {
+        "prompt_id": prompt_id,
+        "sessionUpdate": "turn_completed",
+        "stop_reason": stop,
+    }
+    if extra_update:
+        update.update(extra_update)
     return (
         json.dumps(
             {
                 "method": "session/update",
                 "timestamp": ts,
-                "params": {
-                    "update": {
-                        "prompt_id": prompt_id,
-                        "sessionUpdate": "turn_completed",
-                        "stop_reason": stop,
-                    }
-                },
+                "params": {"update": update},
             }
         )
         + "\n"
@@ -1057,12 +1059,15 @@ class TestGrokUsage:
     def test_census_fixtures_parse_as_the_contract_describes(
         self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
-        """T4: the extra Grok 1.0.5 census fixtures stay loadable."""
+        """T4: the extra census fixtures stay loadable, including the 1.0.13
+        elapsed_ms shapes."""
         cases = {
             "usage-less": (True, {}),
             "cancelled-with-usage": (True, 6),
             "incomplete-usage": (True, 8),
             "no-ledger": (True, {}),
+            "elapsed-ms": (True, 10),
+            "usage-less-elapsed-ms": (True, {}),
         }
         for name, (complete, expected) in cases.items():
             root = tmp_path / name
@@ -1217,15 +1222,224 @@ class TestGrokUsage:
         assert result.complete is True
         assert result.hosts["grok"]["2026-08-14"]["input"] == 17
 
+    def test_elapsed_ms_on_terminal_is_counted(
+        self, isolated_adapter_caches: Path, tmp_path: Path
+    ) -> None:
+        """A known ignorable key counts identically to a record without it.
+
+        Edges 0 and 3,101,044 are the live min-floor (below observed 7,441)
+        and the live max from the 2026-09-04 census.
+        """
+        baseline_root = tmp_path / "baseline"
+        _write_grok_session(baseline_root, lines=[_grok_turn()])
+        baseline = hu.read_grok_usage(baseline_root, consented=True)
+        assert baseline.complete is True
+        expected = baseline.hosts["grok"]["2026-08-14"]
+
+        for elapsed in (0, 12, 3_101_044):
+            root = tmp_path / f"elapsed-{elapsed}"
+            _write_grok_session(root, lines=[_grok_turn(extra_update={"elapsed_ms": elapsed})])
+            result = hu.read_grok_usage(root, consented=True)
+            assert result.complete is True, elapsed
+            assert result.hosts["grok"]["2026-08-14"] == expected, elapsed
+            cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
+            for entry in cache["files"].values():
+                for turn in entry["turns"]:
+                    assert set(turn) == {"key", "day", "model", "usage"}
+                    assert "elapsed_ms" not in turn
+
+    def test_elapsed_ms_on_usage_less_stays_skipped(
+        self, isolated_adapter_caches: Path, tmp_path: Path
+    ) -> None:
+        """The 1-in-229 live record: usage-less + elapsed_ms stays a skip."""
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn_usage_less(extra_update={"elapsed_ms": 10362})])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        assert result.hosts == {}
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
+        assert cache["usage_less_skipped"] == 1
+        assert cache["last_reason"] is None
+
     def test_extra_non_content_key_on_terminal_is_unsupported(
         self, isolated_adapter_caches: Path, tmp_path: Path
     ) -> None:
+        """Unknown extra key still refuses. durationMs is not ignorable."""
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn(extra_update={"durationMs": 12})])
 
         result = hu.read_grok_usage(root, consented=True)
 
         assert result.reason == "unsupported"
+        assert result.complete is False
+        assert hu.grok_usage_diag()["last_reason"] == "unsupported"
+
+    def test_classify_grok_update_matches_census_table(self) -> None:
+        required = {"prompt_id": "p", "sessionUpdate": "turn_completed", "stop_reason": "end_turn"}
+        with_usage = {**required, "usage": {}}
+        assert hu._classify_grok_update(with_usage) == "terminal"
+        assert hu._classify_grok_update({**with_usage, "elapsed_ms": 1}) == "terminal"
+        assert hu._classify_grok_update(required) == "usage_less"
+        assert hu._classify_grok_update({**required, "elapsed_ms": 1}) == "usage_less"
+        assert hu._classify_grok_update({**with_usage, "durationMs": 12}) == "drift"
+        assert hu._classify_grok_update({**with_usage, "content": "x"}) == "ignore"
+        with_content_and_elapsed = {**with_usage, "content": "x", "elapsed_ms": 1}
+        assert hu._classify_grok_update(with_content_and_elapsed) == "ignore"
+        drifted = {**with_usage, "elapsed_ms": 1, "durationMs": 12}
+        assert hu._classify_grok_update(drifted) == "drift"
+
+    def test_failed_scan_persists_last_reason_while_incomplete(
+        self, isolated_adapter_caches: Path, tmp_path: Path
+    ) -> None:
+        """First contact with an unreadable ledger still commits last_reason.
+
+        A cold durationMs file raises inside the read, so learned is True
+        on this path. The learned=False + incomplete write is
+        test_deadline_does_not_clobber_permanent_last_reason.
+        """
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(extra_update={"durationMs": 12})])
+
+        first = hu.read_grok_usage(root, consented=True)
+        assert first.complete is False
+        assert first.reason == "unsupported"
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
+        assert cache["last_reason"] == "unsupported"
+        assert cache["complete_once"] is False
+        assert cache["version"] == hu.CACHE_VERSION == 1
+
+        second = hu.read_grok_usage(root, consented=True)
+        assert second.reason == "unsupported"
+        assert hu.grok_usage_diag()["last_reason"] == "unsupported"
+        assert hu.grok_completed_once() is False
+
+    def test_successful_scan_clears_prior_last_reason(
+        self, isolated_adapter_caches: Path, tmp_path: Path
+    ) -> None:
+        isolated_adapter_caches.parent.mkdir(parents=True, exist_ok=True)
+        isolated_adapter_caches.write_text(
+            json.dumps(
+                {
+                    "version": hu.CACHE_VERSION,
+                    "complete_once": False,
+                    "usage_less_skipped": 0,
+                    "last_reason": "unsupported",
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(extra_update={"elapsed_ms": 12})])
+
+        result = hu.read_grok_usage(root, consented=True)
+
+        assert result.complete is True
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
+        assert cache["last_reason"] is None
+        assert cache["complete_once"] is True
+        assert hu.grok_usage_diag()["last_reason"] is None
+
+    def test_deadline_does_not_clobber_permanent_last_reason(
+        self, isolated_adapter_caches: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        isolated_adapter_caches.parent.mkdir(parents=True, exist_ok=True)
+        isolated_adapter_caches.write_text(
+            json.dumps(
+                {
+                    "version": hu.CACHE_VERSION,
+                    "complete_once": True,
+                    "usage_less_skipped": 0,
+                    "last_reason": "unsupported",
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            hu,
+            "_scan_grok_root",
+            lambda *args, **kwargs: (hu._incomplete("deadline"), {}, False, True),
+        )
+        root = tmp_path / "sessions"
+        result = hu.read_grok_usage(root, consented=True)
+        assert result.reason == "deadline"
+        assert hu.grok_usage_diag()["last_reason"] == "unsupported"
+        assert hu.grok_completed_once() is True
+
+    def test_cached_last_reason_is_closed_vocabulary(self, isolated_adapter_caches: Path) -> None:
+        isolated_adapter_caches.parent.mkdir(parents=True, exist_ok=True)
+        isolated_adapter_caches.write_text(
+            json.dumps({"version": hu.CACHE_VERSION, "complete_once": False, "files": {}}),
+            encoding="utf-8",
+        )
+        assert hu.grok_usage_diag()["last_reason"] is None
+        isolated_adapter_caches.write_text(
+            json.dumps(
+                {
+                    "version": hu.CACHE_VERSION,
+                    "complete_once": False,
+                    "last_reason": None,
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert hu.grok_usage_diag()["last_reason"] is None
+        isolated_adapter_caches.write_text(
+            json.dumps(
+                {
+                    "version": hu.CACHE_VERSION,
+                    "complete_once": False,
+                    "last_reason": "unsupported",
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert hu.grok_usage_diag()["last_reason"] == "unsupported"
+        isolated_adapter_caches.write_text(
+            json.dumps(
+                {
+                    "version": hu.CACHE_VERSION,
+                    "complete_once": False,
+                    "last_reason": "x\n  grok prior successful scan: yes",
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert hu.grok_usage_diag()["last_reason"] is None
+
+    def test_reason_persistence_does_not_bump_shared_cache_version(
+        self, isolated_adapter_caches: Path, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        isolated_cache.parent.mkdir(parents=True, exist_ok=True)
+        isolated_cache.write_text(
+            json.dumps({"version": hu.CACHE_VERSION, "files": {"keep": True}}),
+            encoding="utf-8",
+        )
+        root = tmp_path / "sessions"
+        _write_grok_session(root, lines=[_grok_turn(extra_update={"durationMs": 1})])
+
+        hu.read_grok_usage(root, consented=True)
+
+        grok = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
+        assert grok["version"] == 1
+        assert grok["last_reason"] == "unsupported"
+        assert json.loads(isolated_cache.read_text(encoding="utf-8")) == {
+            "version": 1,
+            "files": {"keep": True},
+        }
+
+    def test_contract_census_pin_matches_src_constant(self) -> None:
+        contract = (FIXTURES / "grok" / "CONTRACT.md").read_text(encoding="utf-8")
+        pin = hu.GROK_USAGE_CENSUS_HOST_VERSION
+        assert pin == "1.0.13"
+        assert f"Host version: Grok {pin}" in contract
+        assert "_GROK_TERMINAL_KEYS" not in contract
 
     def test_content_bearing_turn_is_ignored(
         self, isolated_adapter_caches: Path, tmp_path: Path
@@ -1615,10 +1829,10 @@ class TestGrokUsage:
         """X-1: Grok bounded-scan convergence. Mirror of the Codex pin.
 
         Measured floor on the live corpus (T1+T2 applied): 250 ms converges
-        in 3 passes; 100 ms in 8; 60 ms wedges permanently (no mid-file
-        checkpoint — ``_validated_grok_entry`` requires offset == size).
-        This test pins convergence when the budget can cover at least one
-        file per pass; a budget below per-file cost cannot progress.
+        in 3 passes; 100 ms in 8. There is no intra-file partial stage —
+        a deadline mid-file discards ``last_offset``. This test pins
+        convergence when the budget can cover at least one file per pass;
+        a budget below per-file cost cannot progress.
         """
 
         class _FakeTime:

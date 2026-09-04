@@ -558,8 +558,8 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
     if reason in _HOST_PERMANENT_REASONS:
         return (
             f"{phrase}. {reader}'s log format changed in a way this version "
-            f"cannot read. Upgrade mm, or run `mm disable-source {reader}` "
-            "to stop retrying."
+            f"cannot read. Run `pipx upgrade mind-meld`, or run "
+            f"`mm disable-source {reader}` to stop retrying."
         )
     if reason in {"deadline", "partial"}:
         # The generic promise below is false here on a quiet Mac: the events

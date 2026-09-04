@@ -872,8 +872,9 @@ class TestResolvePrices:
         assert tu.resolve_prices(model) == pytest.approx(expected)
 
     def test_grok_is_held_unpriced(self) -> None:
-        """Gate D1: Grok rates are held until ingestion is proven.
-        Two blockers: Track 37A offset==size wedge, OpenCode $.id defect."""
+        """Gate D1: Grok rates stay unpriced. Track 46A discharged the two
+        named blockers (offset==size never fired; OpenCode reader is gone)
+        but does not add the xAI tier — that is its own TODO."""
         assert tu.resolve_prices("grok-4.6-build") is None
         assert "grok-4.6-build" not in tu.PRICING_FAMILY_BY_MODEL
         assert "grok" not in tu.VENDOR_FAMILY_TIERS

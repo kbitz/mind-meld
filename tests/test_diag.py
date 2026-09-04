@@ -109,6 +109,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "consented",
         "complete_once",
         "usage_less_skipped",
+        "last_reason",
         "cache_state",
         "model_count",
         "models",
@@ -158,6 +159,33 @@ def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_usage"]["grok"]["usage_less_skipped"] == 3
+    assert payload["host_usage"]["grok"]["last_reason"] is None
+    assert "grok last failure" not in result.output
+
+
+def test_diag_renders_persisted_last_reason(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    host_usage.GROK_CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": host_usage.CACHE_VERSION,
+                "complete_once": False,
+                "usage_less_skipped": 0,
+                "last_reason": "unsupported",
+                "files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    json_result = runner.invoke(app, ["diag", "--json"])
+    assert json_result.exit_code == 0, json_result.output
+    payload = json.loads(json_result.stdout)
+    assert payload["host_usage"]["grok"]["last_reason"] == "unsupported"
+    plain = runner.invoke(app, ["diag"])
+    assert plain.exit_code == 0, plain.output
+    assert "grok last failure" in plain.output
+    assert "pipx upgrade mind-meld" in plain.output
 
 
 def test_diag_grok_consent_matches_an_auto_detected_resolved_source(tmp_path, monkeypatch):

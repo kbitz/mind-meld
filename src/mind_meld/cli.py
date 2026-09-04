@@ -4623,7 +4623,17 @@ def status(
         grok_present = False
     if grok_on or grok_present:
         if grok_on:
-            if _host_usage.grok_completed_once():
+            grok_diag = _host_usage.grok_usage_diag()
+            last_reason = grok_diag.get("last_reason")
+            if last_reason in events_tail._HOST_PERMANENT_REASONS:
+                # Reuse the skip phrase so status, diag, and push stderr
+                # cannot drift apart. A permanent reason is not fixed by
+                # `mm push`.
+                console.print(
+                    "  Grok usage capture: enabled — "
+                    + events_tail._host_skip_phrase("grok", str(last_reason))
+                )
+            elif grok_diag.get("complete_once") is True:
                 console.print("  Grok usage capture: enabled; a prior scan completed successfully")
             else:
                 console.print(
@@ -4937,8 +4947,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         (claude_skills_compat, retro_fleet_resolved, retro_fleet_path,
         grok_version) plus host/status
       * host_usage values other than the cache-only diag keys: grok's
-        consented / complete_once / usage_less_skipped / cache_state /
-        model_count / models, and Codex's cache_state / state /
+        consented / complete_once / usage_less_skipped / last_reason /
+        cache_state / model_count / models, and Codex's cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
         pending / model_count / models (never a path, never a host store,
         never a token magnitude)
@@ -5069,6 +5079,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "consented": grok_consented,
             "complete_once": grok_diag["complete_once"],
             "usage_less_skipped": grok_diag["usage_less_skipped"],
+            "last_reason": grok_diag.get("last_reason"),
             "cache_state": grok_diag["cache_state"],
             "model_count": grok_diag.get("model_count", 0),
             "models": grok_diag.get("models", []),
@@ -5248,6 +5259,11 @@ def diag(
         scan_shown = "no"
     console.print(f"  grok consented:          {consented_shown}")
     console.print(f"  grok prior successful scan: {scan_shown}")
+    last_reason = hu_state.get("last_reason")
+    if last_reason in events_tail._HOST_PERMANENT_REASONS:
+        console.print(
+            "  grok last failure:        " + events_tail._host_skip_phrase("grok", str(last_reason))
+        )
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
     console.print(f"  grok cache:              {safe_str(str(hu_state.get('cache_state', '')))}")
     console.print(f"  grok models cached:      {_diag_models_line(hu_state)}")
@@ -5269,13 +5285,6 @@ def diag(
             f"  codex awaiting re-walk:  {cx_state['files_pre_track']}"
             " — run [bold]mm push[/bold] (interactive) to finish the rebuild"
         )
-
-    # Track 35A: a Mac still showing — on the retro reported inclusive
-    # counters. This machine writes disjoint-v1; the remedy is the other
-    # Mac. Routed through the aggregator's phrasebook, not a third copy.
-    from mind_meld.skills.retro_fleet.aggregator import _host_detail_phrase
-
-    console.print("  host counter format:    " + _host_detail_phrase("absent", "legacy_counters"))
 
     disc = state.get("discovery") or {}
     console.print("\n[bold]Git-root discovery[/bold] (autopush budget)")

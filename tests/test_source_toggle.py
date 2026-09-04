@@ -663,6 +663,59 @@ class TestStatusBreadcrumbs:
         assert "last scan complete" not in historical.output
         assert "Grok usage capture: enabled, publishing" not in historical.output
 
+        _host_usage.GROK_CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": _host_usage.CACHE_VERSION,
+                    "complete_once": False,
+                    "usage_less_skipped": 0,
+                    "last_reason": "unsupported",
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        drifted = runner.invoke(app, ["status"])
+        assert drifted.exit_code == 0, drifted.output
+        assert "pipx upgrade mind-meld" in drifted.output
+        assert "disable-source" in drifted.output
+        assert "no successful scan yet — run" not in drifted.output
+
+        _host_usage.GROK_CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": _host_usage.CACHE_VERSION,
+                    "complete_once": True,
+                    "usage_less_skipped": 0,
+                    "last_reason": "unsupported",
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        latched = runner.invoke(app, ["status"])
+        assert latched.exit_code == 0, latched.output
+        assert "pipx upgrade mind-meld" in latched.output
+        assert "prior scan completed successfully" not in latched.output
+
+        _host_usage.GROK_CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": _host_usage.CACHE_VERSION,
+                    "complete_once": False,
+                    "usage_less_skipped": 0,
+                    "last_reason": "deadline",
+                    "files": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        warming = runner.invoke(app, ["status"])
+        assert warming.exit_code == 0, warming.output
+        assert "no successful scan yet" in warming.output
+        assert "run" in warming.output
+        assert "mm push" in warming.output
+
         runner.invoke(app, ["disable-source", "grok"])
         _host_usage.GROK_SESSIONS_PATH.mkdir(parents=True)
         present = runner.invoke(app, ["status"])

@@ -216,12 +216,16 @@ Claude is `docs/designs/host-parity.md`: 22A/23A put totals on the MODELS
 card; Grok does not get an `AgentRow` (it discovers `~/.claude/skills`; `mm diag` measures that under `host_skill_discovery`); session-transcript sync and a
 Codex/Grok `sessions-snapshot` are not planned.
 
-**Grok v1 terminal ledger (Track 18D).** When consented, `read_grok_usage`
+**Grok v1 terminal ledger (Track 18D, ignorable keys Track 46A).** When consented, `read_grok_usage`
 walks `GROK_HOME/sessions` (else `~/.grok/sessions`) and reads only regular
 non-symlink `updates.jsonl` files directly under a session directory. It
-accepts a line only when `params.update` is exactly the `turn_completed`
-projection (`prompt_id`, `sessionUpdate`, `stop_reason`, `usage`) with no
-content-bearing fields. Each accepted record is a per-prompt total attributed
+accepts a line when `params.update` is a `turn_completed` whose key set,
+minus `_GROK_IGNORABLE_KEYS` (`elapsed_ms`), equals `_GROK_REQUIRED_KEYS`
+(`prompt_id`, `sessionUpdate`, `stop_reason`, `usage`) with no
+content-bearing fields. Ignorable keys are dropped before the projection
+and are never stamped onto the stored turn dict (`{key, day, model, usage}`;
+resume compares live == cached). An unknown extra key is still `unsupported`
+and still refuses the whole reader (Track 46B owns per-record quarantine). Each accepted record is a per-prompt total attributed
 to the UTC day of the outer timestamp. `reasoningTokens` must be a bounded
 subset of `outputTokens` and is never added twice. The private
 `grok-host-tokens.json` cache stores opaque file keys, fingerprints, offsets,
@@ -236,9 +240,10 @@ The latch's premise was already false (`complete_once` arms on an empty
 `updates.jsonl`, i.e. file existence, not content), and making Grok succeed
 once would have armed a permanent fleet-wide veto on the next Grok wire
 drift. Reader-scoped isolation replaces it. `host_usage.grok_completed_once()`
-is kept as a **diagnostic** for `mm status` / `mm diag` (and so the three
-CI-enforced doc citations to it still resolve). Do not reintroduce it as a
-sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
+is kept as a **diagnostic** latch (and so the three
+CI-enforced doc citations to it still resolve). `mm status` / `mm diag`
+prefer `last_reason` when it is in `_HOST_PERMANENT_REASONS`, then this
+latch. Do not reintroduce it as a sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
 sweep-level `reader`/`reason` for a pre-any-reader expiry); autopush never
 warms. After a successful warm, retry only deadline-dropped readers and merge
 their fresh outcomes with the first pass's completed readers — a flaky
@@ -247,11 +252,12 @@ already captured. If
 the retry expires before invoking a reader, it has no replacement outcome, so
 retain the initial deadline declaration.
 
-**Grok terminal skip (Track 31A, partial discharged Track 34A).** A `turn_completed` whose `params.update`
-key set is exactly `_GROK_TERMINAL_KEYS - {usage}` is a zero-token skip,
-counted on the Grok cache as `usage_less_skipped`. The carve-out MUST
-precede the exact-match key check — placing it at `usage = update.get("usage")`
-is dead code. `usage` present-but-not-a-dict stays fatal. `usageIsIncomplete`
+**Grok terminal skip (Track 31A, partial discharged Track 34A, ignorable keys Track 46A).** A `turn_completed` whose `params.update`
+key set, minus `_GROK_IGNORABLE_KEYS`, is exactly `_GROK_REQUIRED_KEYS - {usage}` is a zero-token skip,
+counted on the Grok cache as `usage_less_skipped`. `_classify_grok_update` is the
+single decision; placing a carve-out at `usage = update.get("usage")`
+is dead code. The usage-less path MUST keep working with an ignorable key
+present (1 of 229 live records at the 2026-09-04 census). `usage` present-but-not-a-dict stays fatal. `usageIsIncomplete`
 is an `is True` identity check (never truthiness) and marks that UTC day
 partial; see Coverage states below. An absent `updates.jsonl`
 is not an I/O error (`FileNotFoundError` / `NotADirectoryError` → skip;
@@ -538,8 +544,11 @@ older than `MAX_BY_DAY_DAYS` mark every future snapshot partial forever.
 **Cache.** `_validated_grok_entry` persists `partial_days` (possibly empty)
 on the Grok cache entry. Pre-34A entries are detected by **key absence** and
 re-walked once. Not a `CACHE_VERSION` bump: that constant is shared with the
-Codex namespace. Track 46A rewrites this encoding and must carry the marker
-through.
+Codex namespace. Track 46A was retargeted away from an encoding rewrite
+(the 25 MB / 100 ms trigger does not fire; measured 4.11 MB / 23.3 ms);
+`last_reason` on the Grok cache *root* uses the same absence discriminator
+and does not re-walk per-file entries. Encoding work stays deferred until
+the TODOS trigger fires.
 
 **Acceptor.** Three-way on key presence, never a falsy check, reusing
 `_token_sources_subsequence`. Absent = no signal, not a broken peer — do not
@@ -766,8 +775,11 @@ store would cost the retro its real content AND rewind the cursor into a
 reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` NEVER promises a retry (it is a standing property
-of the host's storage) and carries a fix clause (upgrade mm, or
-`mm disable-source <reader>`). Every other reason may retry. The phrase
+of the host's storage) and carries a fix clause (`pipx upgrade mind-meld`, or
+`mm disable-source <reader>`). Every other reason may retry. `mm status` and `mm diag` reuse `_host_skip_phrase` when the Grok cache root
+carries `last_reason` in `_HOST_PERMANENT_REASONS`, so a permanently-drifted
+Grok is not told to `mm push`. Absence of `last_reason` is the pre-46A
+discriminator. The phrase
 deliberately contains no `; `, which is the separator `autopush` joins
 breadcrumb reasons with. One degradation is appended per dropped reader.
 

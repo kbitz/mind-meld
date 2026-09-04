@@ -868,7 +868,7 @@ class TestTailWiring:
             "host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
             "grok's log format changed in a way this version cannot read. "
-            "Upgrade mm, or run `mm disable-source grok` to stop retrying."
+            "Run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
         ]
         assert f"mm: notice: {degradations[0]}" in capsys.readouterr().err
 
@@ -921,7 +921,7 @@ class TestTailWiring:
             "host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
             "grok's log format changed in a way this version cannot read. "
-            "Upgrade mm, or run `mm disable-source grok` to stop retrying."
+            "Run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
         ]
 
         empty_sources = _sources(events_root, hosts=())
@@ -1020,7 +1020,7 @@ class TestTailWiring:
         promises_retry = "A later substantive push will retry" in degradations[0]
         if reason in events_tail._HOST_PERMANENT_REASONS:
             assert not promises_retry
-            assert "Upgrade mm" in degradations[0]
+            assert "pipx upgrade mind-meld" in degradations[0]
         else:
             # A transient reason must tell the user what happens next, and
             # exactly one of the two ways. The generic promise is the default.
@@ -1218,7 +1218,8 @@ class TestTailWiring:
     def test_permanent_skip_phrase_carries_a_fix_clause(self):
         """T3-9: permanent branch used to append nothing."""
         phrase = events_tail._host_skip_phrase("grok", "unsupported")
-        assert "Upgrade mm" in phrase
+        assert "pipx upgrade mind-meld" in phrase
+        assert "Upgrade mm" not in phrase
         assert "mm disable-source grok" in phrase
         assert "A later substantive push will retry" not in phrase
         assert "; " not in phrase

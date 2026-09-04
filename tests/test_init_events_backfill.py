@@ -354,7 +354,8 @@ class TestBackfillHostSnapshot:
             "mm: notice: host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
             "grok's log format changed in a way this version cannot read. "
-            "Upgrade mm, or run `mm disable-source grok` to stop retrying.\n" in err
+            "Run `pipx upgrade mind-meld`, or run "
+            "`mm disable-source grok` to stop retrying.\n" in err
         )
         assert "A later substantive push will retry" not in err, (
             "unsupported storage is permanent — never promise a retry"
