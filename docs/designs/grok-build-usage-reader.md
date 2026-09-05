@@ -74,13 +74,27 @@ credentials, session state, and whole-file configuration remain local.
    immediately. Never log, cache, return, or synchronize a raw line, session
    path, prompt, response, tool call, or error text.
 4. Accept a line only when its outer timestamp is timezone-aware and
-   `params.update` is exactly the terminal metadata projection:
+   `params.update`, once the `_GROK_IGNORABLE_KEYS` allowlist is subtracted,
+   is exactly the terminal metadata projection `_GROK_REQUIRED_KEYS`:
    `prompt_id`, `sessionUpdate`, `stop_reason`, and `usage`; its
-   `sessionUpdate` must equal `turn_completed`. The exact same terminal shape
-   without `usage` is a zero-token skip, tallied as `usage_less_skipped`
-   before the exact-match check. A line whose update object carries a
-   content-bearing field is not a terminal ledger record and is ignored, not
-   inspected further.
+   `sessionUpdate` must equal `turn_completed`. The same terminal shape
+   without `usage` is a zero-token skip, tallied as `usage_less_skipped`.
+   A line whose update object carries a content-bearing field is not a
+   terminal ledger record and is ignored, not inspected further.
+   `_classify_grok_update` is the single decision point for all three
+   dispositions plus drift, so no carve-out may be added downstream of it.
+
+   **Ignorable keys (v0.14.1, Track 46A).** Grok Build 1.0.13 added
+   `elapsed_ms` to `turn_completed`. Under the original exact-match rule one
+   additive field made the record unsupported, and that refusal aborted the
+   whole Grok store — every Grok Mac reported zero tokens from 2026-09-01.
+   `_GROK_IGNORABLE_KEYS` is a one-name allowlist, not a permissive mode: an
+   *unknown* extra key is still `unsupported` and still refuses the reader.
+   An ignorable key is dropped before the projection and never stored on the
+   cached turn (`{key, day, model, usage}`), so resume comparison and every
+   existing fleet cache entry are unaffected. Per-record quarantine of
+   unknown drift is deferred to Track 46B. Live census and the cutover dates
+   are in `tests/fixtures/host_sessions/grok/CONTRACT.md`.
 5. Require a non-empty bounded `prompt_id`, a valid terminal stop reason, and
    a bounded model ID for every `modelUsage` entry. A malformed terminal
    record, duplicate terminal key with different counters, incomplete final

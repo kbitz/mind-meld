@@ -337,13 +337,16 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # the write bucket has a published rate, but its relationship to inclusive
 # input has not been censused. Literal four-field cards, one row per family.
 #
-# Grok / xAI is HELD (gate D1, 2026-09-01). No ``grok-4.6-build`` alias,
-# no xAI tier. Two blockers before a follow-up can add it: (1) the
-# ``_validated_grok_entry`` ``offset == size`` wedge (Track 37A) so Grok
-# has never completed a scan on this fleet; (2) the OpenCode ``$.id``
-# defect, which discards the only other path a ``grok-*`` model could
-# take. ``resolve_prices("grok-4.6-build")`` returning None is a
-# decision, not an omission.
+# Grok / xAI is HELD (gate D1, 2026-09-01; discharged-as-blocker Track 46A
+# 2026-09-04). No ``grok-4.6-build`` alias, no xAI tier. The two named
+# blockers are both false: (1) the ``offset == size`` wedge never fired
+# (0 of 42 live Grok cache entries; the actual outage was additive
+# ``elapsed_ms`` on ``turn_completed``, which 46A allowlists); (2) the
+# OpenCode ``$.id`` defect died with that reader in v0.12.53. Track 46A
+# restores Grok ingestion; adding the rate is Track 35A's gate, filed
+# as a TODO. ``resolve_prices("grok-4.6-build")`` returning None is still
+# a decision — tokens without cost until that TODO lands — not an
+# omission and not a reader defect.
 PRICING_FAMILY_BY_MODEL: dict[str, str] = {
     "gpt-5.6-terra": "gpt-5.6-terra",
     "gpt-5.6-sol": "gpt-5.6-sol",

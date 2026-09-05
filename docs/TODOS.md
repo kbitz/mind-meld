@@ -44,9 +44,51 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review] Intra-file resume for a Grok ledger that exceeds one read budget
+- **Why:** `_read_grok_file` has no intra-file partial stage. A `deadline` mid-file raises and discards `last_offset`, so a single ledger larger than the remaining budget can never be read. Track 46A's card named this as `_validated_grok_entry` `offset == size`; that validator never rejected (0 of 42 live entries). The real hazard is the missing mid-file checkpoint.
+- **Repro:** largest live ledger 18.1 MB of 261 MB total / 983 ms full scan → ~265 MB/s. Wall is ~1.3 GB in one file against `DEFAULT_READ_BUDGET_S = 5.0`.
+- **Trigger:** any single `updates.jsonl` > 1 GB, or a `deadline` that recurs across 3+ interactive warms.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** filed by Track 46A /autoplan, 2026-09-04. Claude eng voice #3.
+
+### [plan-eng-review] Host cache encoding trigger (deferred from original Track 46A)
+- **Why:** `locked_json_rmw` parses and re-serialises the whole host cache every push, so cost scales with corpus size. The original 46A card's own gate does not fire.
+- **Trigger:** json round-trip above 100 ms, or cache above 25 MB.
+- **Repro:** measured 2026-09-04 on device 889e42c0 after a converged push: Codex `host-tokens.json` 4.11 MB / 23.3 ms / 20,047 states / 716 rollouts. Linear in states, so 25 MB ≈ 122k states ≈ 4,350 rollouts at the current mean (~6x headroom). Codex prunes its own sessions, so the corpus is not monotonic.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by Track 46A /autoplan, 2026-09-04. Original card premises falsified by live probe. `host_usage._CacheEntry` docstring points here.
+
+### [plan-eng-review] Per-entry `states` cap on the Codex host cache
+- **Why:** a per-entry cap needs a degradation that keeps the file's tokens counted while dropping only its cross-file dedup. Refusing the file would re-create the fail-closed whole-store pathology Track 31A removed. `iter_bounded_lines` bounds line SIZE, not line COUNT. Max observed 2026-09-04 is 441 states/entry (card said 1,234, which was the 2026-08-28 corpus).
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by Track 46A /autoplan, 2026-09-04. This is its own item. Do NOT fold into Track 49A: that card bounds `_add_usage`'s `by_model` materialization and says capping in the READER is not the fix. Different symbol, opposite conclusion.
+
+### [plan-eng-review] Add the xAI / `grok-4.6-build` price tier
+- **Why:** Track 35A's gate (D1, 2026-09-01) still owns pricing. Track 46A discharged the two false blockers named at `token_usage.py` (`offset == size` wedge never fired; OpenCode `$.id` defect died with the reader in v0.12.53) and restored Grok ingestion. Until this lands the retro renders Grok tokens with no cost. `resolve_prices("grok-4.6-build")` returning None is now a decision, not a reader defect.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** filed by Track 46A /autoplan, 2026-09-04. Claude CEO voice #10.
+
+### [plan-eng-review] Ask whether Grok/Codex expose a supported usage surface
+- **Why:** mm exact-match-parses undocumented, weekly-shipping private formats of tools it does not control, fail-closed, with no version negotiation. Both 46A review voices flagged that no approach questioned private-file parsing. Strategic, out of scope for a 3-day outage fix.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** filed by Track 46A /autoplan, 2026-09-04.
+
+### [plan-eng-review] Reader-agnostic quarantine and drift classification (Track 46B)
+- **Why:** 46A tolerated exactly one additive key (`elapsed_ms`) so a 3-day outage could end. The shape that caused it is unchanged: ~13 exact-match detectors, any of which turns one additive upstream field into a total silent store abort. `_GROK_STOPS` is a closed 2-value enum and is the likely next one. The durable fix is per-record quarantine plus a `drift_skipped` counter, so a drifted record costs one record instead of the whole agent.
+- **Scope:** per-record quarantine; `drift_skipped`; truthful coverage on day-disjoint drift (the C1 snapshot keep-set fix); a parser epoch so a later allowlist recovers tokens from a byte-identical ledger without a cache bump; widen `partial_sources` (drift is not "the host declared"). Reader-agnostic — Codex has the same detector shape.
+- **Trigger:** the next additive-key drift on either host, or any `unsupported` that survives one `pipx upgrade`.
+- **Effort:** L
+- **Priority:** P2
+- **Context:** filed by Track 46A /ship, 2026-09-04 (plan item N5, missed by the 46A TODO sweep). Until this is carded, 46B exists only as prose in `_classify_grok_update`'s docstring, `tests/fixtures/host_sessions/grok/CONTRACT.md`, and `docs/invariants/events-retro.md:229`.
+
 ### [ship:severity=minor] Stale Track/version literals in code and test comments (15 across 10 files)
 - **Description:** the 2026-09-03 renumber (Groups 45-50) fixed the stale cross-references found in docs/, but the same epoch-rot lives in code and test comments a docs-only PR does not touch. Route per file, not as one batch: fix each literal inside the Track that already declares the file (`host_usage.py`/`token_usage.py` + their tests → 46A or 49A; `config.py` → 47A; `cli.py` → 45A); the four retirement docstrings live in test files no upcoming card declares — fold them into whichever of those Tracks widens cheapest at drain time, per the documented drift process. **Completeness criterion is the grep, not this list:** `grep -rn "Track 37A\|Track 37B\|Track 39A\|Track 42A" src tests` — every hit must either name a live card or carry dated lineage. (`Track 37A` hits in `tests/test_bin_check.py:1` and `tests/test_docs_routing.py:16`/`:666` are the CORRECT shipped verification-command Track — leave those.)
-- **Items:** wedge card, now **46A** (was 37A pre-#154): `src/mind_meld/token_usage.py:342`, `tests/test_token_usage.py:876`. Walker substrate, now **49A** (was 42A): `src/mind_meld/host_usage.py:25`/`:279`/`:1062`/`:1785`, `tests/test_host_usage.py:2598`. Source retirement, now **44A** (was 37B): `src/mind_meld/config.py:53`, `src/mind_meld/cli.py:6058`, `tests/test_pull_helpers.py:1813`, `tests/test_source_toggle.py:217`, `tests/test_integration.py:1026`, `tests/test_docs_routing.py:48` — that last docstring is also stale in SUBSTANCE: it says 44A "leaves the mm-owned OpenCode skill link on disk / this loop is the only cleanup", but v0.13.0 ships a reaper that removes the mm-owned link on interactive push/init/install-skills, so the README loop now covers user-made links and never-interactive machines only. Sync surface, now **47A** (was 39A): `src/mind_meld/config.py:56`, which also still says "(blocked-by: 37B)" — an edge discharged 2026-09-03. Version string: `src/mind_meld/cli.py:5716` says the opencode source "was retired in v0.12.54"; the retirement shipped in **v0.12.55** (v0.12.54 was bin/check).
+- **Items:** wedge-card literals at `token_usage.py` / `test_token_usage.py` **discharged in Track 46A** (2026-09-04): the comment now records that both named blockers are false. Walker substrate, now **49A** (was 42A): `src/mind_meld/host_usage.py:25`/`:279`/`:1062`/`:1785`, `tests/test_host_usage.py:2598`. Source retirement, now **44A** (was 37B): `src/mind_meld/config.py:53`, `src/mind_meld/cli.py:6058`, `tests/test_pull_helpers.py:1813`, `tests/test_source_toggle.py:217`, `tests/test_integration.py:1026`, `tests/test_docs_routing.py:48` — that last docstring is also stale in SUBSTANCE: it says 44A "leaves the mm-owned OpenCode skill link on disk / this loop is the only cleanup", but v0.13.0 ships a reaper that removes the mm-owned link on interactive push/init/install-skills, so the README loop now covers user-made links and never-interactive machines only. Sync surface, now **47A** (was 39A): `src/mind_meld/config.py:56`, which also still says "(blocked-by: 37B)" — an edge discharged 2026-09-03. Version string: `src/mind_meld/cli.py:5716` says the opencode source "was retired in v0.12.54"; the retirement shipped in **v0.12.55** (v0.12.54 was bin/check).
 - **Effort:** S
 - **Priority:** P3
 - **Context:** filed by /ship pre-landing review + red-team pass on the roadmap-regen branch, 2026-09-03. Comment/docstring-only edits, zero runtime effect; grouped so they ride along instead of minting a docs-only code PR.

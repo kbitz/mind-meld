@@ -359,6 +359,20 @@ class TestReaderOrchestration:
         assert events_tail._HOST_PERMANENT_REASONS
         assert events_tail._HOST_PERMANENT_REASONS <= events_tail._HOST_READ_REASONS
 
+    def test_permanent_reasons_match_the_grok_sticky_literal(self):
+        """`host_usage.read_grok_usage` hardcodes `"unsupported"` in its sticky
+        block (`host_usage.py:697`) because `host_usage` cannot import
+        `events_tail` (cycle). Nothing but this pin holds the two sides
+        together. Add a reason here and the sticky rule silently stops
+        stickying it, while `mm status` starts printing the permanent phrase
+        for a reason the reader already clobbered with the next transient
+        `deadline` / `locked` / `io_error`."""
+        assert events_tail._HOST_PERMANENT_REASONS == frozenset({"unsupported"}), (
+            "widening _HOST_PERMANENT_REASONS also requires widening the sticky "
+            "comparison in host_usage.read_grok_usage — they are two literals, "
+            "not one constant"
+        )
+
     def test_built_in_constant_matches_the_full_reader_set(self):
         """`events.ACTIVE_HOST_READERS` documents the live reader universe
         and their order. `events` cannot import `events_tail` (cycle), so
@@ -868,7 +882,7 @@ class TestTailWiring:
             "host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
             "grok's log format changed in a way this version cannot read. "
-            "Upgrade mm, or run `mm disable-source grok` to stop retrying."
+            "Run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
         ]
         assert f"mm: notice: {degradations[0]}" in capsys.readouterr().err
 
@@ -921,7 +935,7 @@ class TestTailWiring:
             "host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
             "grok's log format changed in a way this version cannot read. "
-            "Upgrade mm, or run `mm disable-source grok` to stop retrying."
+            "Run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
         ]
 
         empty_sources = _sources(events_root, hosts=())
@@ -1020,7 +1034,7 @@ class TestTailWiring:
         promises_retry = "A later substantive push will retry" in degradations[0]
         if reason in events_tail._HOST_PERMANENT_REASONS:
             assert not promises_retry
-            assert "Upgrade mm" in degradations[0]
+            assert "pipx upgrade mind-meld" in degradations[0]
         else:
             # A transient reason must tell the user what happens next, and
             # exactly one of the two ways. The generic promise is the default.
@@ -1218,7 +1232,8 @@ class TestTailWiring:
     def test_permanent_skip_phrase_carries_a_fix_clause(self):
         """T3-9: permanent branch used to append nothing."""
         phrase = events_tail._host_skip_phrase("grok", "unsupported")
-        assert "Upgrade mm" in phrase
+        assert "pipx upgrade mind-meld" in phrase
+        assert "Upgrade mm" not in phrase
         assert "mm disable-source grok" in phrase
         assert "A later substantive push will retry" not in phrase
         assert "; " not in phrase

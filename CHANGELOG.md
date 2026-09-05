@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.1] - 2026-09-04
+
+**Grok usage is counted again.** Grok Build 1.0.13 started adding one extra field, `elapsed_ms`, to the record it writes when a turn finishes. mm matched that record's fields exactly, so a single unrecognized key made it refuse the file — and that refusal aborted the entire Grok store, not just the one record. Every Grok Mac silently reported zero tokens from 2026-09-01 onward, and `mm status` kept telling you to run `mm push`, which could never fix it. mm now tolerates that field, counts all 7 days of held-back history on the next push, and when a read does fail for good it says so and names a command that actually helps.
+
+### Fixed
+
+- `host_usage` accepts `elapsed_ms` on a `turn_completed` record instead of rejecting the file. The key is tolerated, never stored: a cached turn stays `{key, day, model, usage}`, so no existing fleet cache entry is invalidated. An **unknown** extra key is still refused — the allowlist is one name, not a permissive mode.
+- A usage-less turn carrying `elapsed_ms` remains a skip rather than becoming a hard failure.
+- `mm status` and `mm diag` no longer prescribe `mm push` for a break a push cannot repair. A permanent failure now reads as a permanent failure and names `pipx upgrade mind-meld`.
+- The Grok cache records why the last read failed even when nothing new was learned. Previously a fully cache-hit store could not write anything, so the one machine that needed the diagnosis was the one machine unable to save it.
+- A later `deadline`, `locked`, or `io_error` can no longer erase a standing `unsupported`, which used to make `mm status` reprint "a prior scan completed successfully" while Grok was still being dropped.
+- `mm diag` no longer prints a permanent "legacy counters" line that was lit continuously while nothing was wrong.
+
+### Changed
+
+- `_GROK_TERMINAL_KEYS` splits into `_GROK_REQUIRED_KEYS` plus `_GROK_IGNORABLE_KEYS`, with the four-way decision extracted into `_classify_grok_update`.
+- `tests/fixtures/host_sessions/grok/CONTRACT.md` is re-censused at Grok 1.0.13 (111 ledgers, 229 terminal records, the 2026-08-19 → 2026-09-01 cutover) with two sanitized real fixtures. The four README `Grok 1.0.5` pins are deliberately untouched — those track skill discovery, not the usage reader.
+- The cache format is unchanged. `CACHE_VERSION` is shared with Codex and was not bumped; absence of the new field is the backward-compatibility discriminator, so no peer re-walk is triggered.
+
 ## [0.14.0] - 2026-09-03
 
 **A conflict sidecar's `st_mtime` is the peer's clock, not the sidecar's age.** Two consumers read it as age and destroyed data. The pre-inversion migration sweep renamed a fresh sidecar `v0-`, after which `mm resolve` `(l)ocal` promoted **peer bytes over your own file** — and because `_ensure_inversion_marker` mints "now" on first call, that was 100% of sidecars on a newly initialized Mac. `mm gc --conflicts` could reap a copy on the day it was written. Age and era now live in the filename, which mm already stamped and never read.
