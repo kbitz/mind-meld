@@ -181,7 +181,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
 | `mm gc` | Delete orphaned blobs and run local retention cleanup |
 | `mm gc --dry-run` | Preview orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
-| `mm gc --conflicts` | Also delete `.sync-conflict-*` files older than 30 days |
+| `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
 | `mm log` | Query the per-file pull/push history. Filter with `--source`, `--since`, `--action {written\|merged\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push}`, `--limit`; `--format {jsonl\|table}` |
 | `mm migrate-config` | Append any missing recommended `exclude_patterns` to your existing `[[sync.sources]]` entries. Idempotent and preserves your customizations; `--dry-run` to preview, `--yes` to skip the prompt |
