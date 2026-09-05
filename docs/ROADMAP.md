@@ -129,7 +129,7 @@ _Source: former Track 48A (2026-09-03 numbering), plus approved full-review H1/H
 
 ### Phase 3: Retro fidelity
 
-**End-state:** Every supported agent has a truthful model-family usage view, with API-equivalent estimates kept per machine and non-model activity aggregated once.
+**End-state:** The retro presents model usage consistently, states each value's collection scope and coverage, and adds only verified Grok estimates without changing accounting semantics.
 **Groups:** 54, 55
 
 #### Group 54: Grok pricing
@@ -141,33 +141,35 @@ _2 tasks . ~100 LOC . medium risk . 4 files_
 _touches: src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_token_usage.py, tests/test_retro_fleet_aggregator.py, README.md, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _blocked-by: Track 53A_
 _read-first: docs/invariants/events-retro.md, tests/fixtures/host_sessions/grok/CONTRACT.md_
-_produces: observed Grok model ids have a sourced, explicitly bounded API-equivalent estimate through resolve_prices_
+_produces: verified Grok model ids have sourced, bounded API-equivalent estimates through resolve_prices; unverifiable aliases remain unpriced_
 _session: fresh · effort: high · verify: ./bin/check tests/test_token_usage.py tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
 
 _Source: Track 46A pricing deferral (2026-09-04) and the matching Future item. v0.14.1 restored ingestion without the proposed cache rewrite; neither the retired OpenCode bug nor `offset == size` is an active pricing prerequisite. Pricing is still absent by decision. Re-census actual model ids and counter semantics when implementing, and verify current xAI primary-source rates and context thresholds; do not copy stale numbers into the table. Dependency is release serialization._
 
-- **Verify the rate contract and add exact model mappings** -- establish the current observed Grok model ids and disjoint counters, then add only supported aliases/rates through `resolve_prices`, with a vendor-specific verification date. Do not infer rates from arbitrary peer model prefixes or decode the unverified `costUsdTicks` unit. _token_usage.py + tests, ~60 lines._ (M)
+- **Verify the rate contract and add exact model mappings** -- establish the current observed Grok model ids and disjoint counters, then add only supported aliases/rates through `resolve_prices`, with a vendor-specific verification date. An unverifiable model alias stays unpriced. Do not infer rates from arbitrary peer model prefixes or decode the unverified `costUsdTicks` unit. _token_usage.py + tests, ~60 lines._ (M)
 - **Keep estimate limits visible** -- test the existing per-machine consumer with Grok data, including unknown models and any context-length surcharge that aggregate counters cannot reconstruct. Such uncertainty must remain a floor or unavailable estimate, never an exact bill or a fleet sum. Carry the disclosure into the reference and invariant docs. _aggregator.py + tests, ~40 lines._ (S)
 
-#### Group 55: Unified reporting
+#### Group 55: Usage presentation
 
 _Depends on: Group 54_
 
-##### Track 55A: Report every agent the same way
+##### Track 55A: Make model usage easier to read without changing what totals mean
 _1 task . ~220 LOC . medium risk . 3 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _blocked-by: Track 54A_
 _read-first: docs/invariants/events-retro.md_
-_produces: one consistent model-family reporting surface for Claude Code, Codex and Grok Build with honest coverage_
+_produces: consistent usage presentation with explicit source logs, machine scope, observation time, window and coverage_
 _session: fresh · effort: high · verify: ./bin/check tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
 
-_Source: former Track 50A (2026-09-03 numbering), plus approved full-review H4. `_render_agent_inventory` and `AGENT_FAMILY_ROWS` remain; `aggregate` now materializes event rows directly and `_read_events` is unused. The old dependencies on cache encoding, marker skips and a shared walker are removed: the first was deferred, the second shipped, and the third does not supply a renderer requirement. The pricing dependency supplies Grok's rate contract._
+_Source: former Track 50A (2026-09-03 numbering), approved full-review H4, and the user-approved pre-existing-roadmap assessment on 2026-09-05. `_render_agent_inventory` and `AGENT_FAMILY_ROWS` remain; `aggregate` materializes event rows directly and `_read_events` is unused. The cache-encoding and shared-walker prerequisites stay removed. Track 54A supplies verified rates or an explicit unpriced result, not permission to change aggregation._
 
-- **Unify the view while preserving aggregation semantics** -- replace the separate inventory/model presentations with a consistent per-model-family usage view for all three hosts; retain per-machine API-equivalent estimates and coverage/unknown/partial/degraded disclosures. Commits, LOC, streaks, peaks, PRs and trends remain cross-model aggregates with no new summary-card row. Keep retired inbound reader names tolerated but invisible as active agents, preserve the two-pass skill decoder, and delete the unused `_read_events` iterator while correcting its documentation. Pin populated, absent and degraded host cases and the one-materialization prior-period path. _aggregator.py + SKILL.md + tests, ~220 lines._ (L)
+_Boundary verified at f10bf34: `SessionsAggregate` holds Claude fleet-window totals; `HostUsageInventory` retains accepted snapshots per machine, whose day buckets are sliced by `_windowed_host_by_model` and clamped by `_snapshot_day_ceiling`. Contributing readers are recorded per machine, but the wire has no reader-to-model-family attribution. Presentation must preserve those distinctions. New accounting schemas, cross-machine deduplication or reader-to-model wire attribution need a separately justified proposal._
+
+- **Clarify usage without changing accounting** -- first show a compact before/after rendered example with Claude session data, two machines of host inventory, an unpriced Grok model and a degraded reader. Use it to settle consistent naming and layout while showing each value's collection scope, observation time, window and coverage. Reuse existing aggregations: host counters never enter the Claude fleet sum; retained inventory stays distinguishable from in-window activity; per-machine host estimates retain the do-not-sum rule. Do not imply per-host model attribution the wire lacks. Preserve the existing global git metrics, unavailable/partial/degraded disclosures, retired-reader tolerance, two-pass skill decoder and no-new-summary-row constraint. Delete the unused `_read_events` iterator and correct its documentation. Pin populated, absent and degraded views plus the one-materialization prior-period path. _aggregator.py + SKILL.md + tests, ~220 lines._ (L)
 
 ### Execution Map
 
-A Group may launch when every Group in its dependency set has landed. The open hotfix blocks other work; release-bearing Tracks then serialize on `pyproject.toml`. The 54A → 55A edge also supplies the verified Grok pricing contract.
+A Group may launch when every Group in its dependency set has landed. The open hotfix blocks other work; release-bearing Tracks then serialize on `pyproject.toml`. The 54A → 55A edge also records which Grok models have verified prices and which remain unpriced.
 
 Adjacency from the roadmap audit's GROUP_DEPS output:
 
@@ -188,7 +190,7 @@ Adjacency from the roadmap audit's GROUP_DEPS output:
 
 ## Future
 
-Deferred: docs/roadmap-future.md (82 items)
+Deferred: docs/roadmap-future.md (76 items)
 
 ## Shipped
 
