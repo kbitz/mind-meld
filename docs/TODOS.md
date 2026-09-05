@@ -44,199 +44,83 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review] Intra-file resume for a Grok ledger that exceeds one read budget
-- **Why:** `_read_grok_file` has no intra-file partial stage. A `deadline` mid-file raises and discards `last_offset`, so a single ledger larger than the remaining budget can never be read. Track 46A's card named this as `_validated_grok_entry` `offset == size`; that validator never rejected (0 of 42 live entries). The real hazard is the missing mid-file checkpoint.
-- **Repro:** largest live ledger 18.1 MB of 261 MB total / 983 ms full scan → ~265 MB/s. Wall is ~1.3 GB in one file against `DEFAULT_READ_BUDGET_S = 5.0`.
-- **Trigger:** any single `updates.jsonl` > 1 GB, or a `deadline` that recurs across 3+ interactive warms.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** filed by Track 46A /autoplan, 2026-09-04. Claude eng voice #3.
 
-### [plan-eng-review] Host cache encoding trigger (deferred from original Track 46A)
-- **Why:** `locked_json_rmw` parses and re-serialises the whole host cache every push, so cost scales with corpus size. The original 46A card's own gate does not fire.
-- **Trigger:** json round-trip above 100 ms, or cache above 25 MB.
-- **Repro:** measured 2026-09-04 on device 889e42c0 after a converged push: Codex `host-tokens.json` 4.11 MB / 23.3 ms / 20,047 states / 716 rollouts. Linear in states, so 25 MB ≈ 122k states ≈ 4,350 rollouts at the current mean (~6x headroom). Codex prunes its own sessions, so the corpus is not monotonic.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by Track 46A /autoplan, 2026-09-04. Original card premises falsified by live probe. `host_usage._CacheEntry` docstring points here.
-
-### [plan-eng-review] Per-entry `states` cap on the Codex host cache
-- **Why:** a per-entry cap needs a degradation that keeps the file's tokens counted while dropping only its cross-file dedup. Refusing the file would re-create the fail-closed whole-store pathology Track 31A removed. `iter_bounded_lines` bounds line SIZE, not line COUNT. Max observed 2026-09-04 is 441 states/entry (card said 1,234, which was the 2026-08-28 corpus).
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by Track 46A /autoplan, 2026-09-04. This is its own item. Do NOT fold into Track 49A: that card bounds `_add_usage`'s `by_model` materialization and says capping in the READER is not the fix. Different symbol, opposite conclusion.
-
-### [plan-eng-review] Add the xAI / `grok-4.6-build` price tier
-- **Why:** Track 35A's gate (D1, 2026-09-01) still owns pricing. Track 46A discharged the two false blockers named at `token_usage.py` (`offset == size` wedge never fired; OpenCode `$.id` defect died with the reader in v0.12.53) and restored Grok ingestion. Until this lands the retro renders Grok tokens with no cost. `resolve_prices("grok-4.6-build")` returning None is now a decision, not a reader defect.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** filed by Track 46A /autoplan, 2026-09-04. Claude CEO voice #10.
-
-### [plan-eng-review] Ask whether Grok/Codex expose a supported usage surface
-- **Why:** mm exact-match-parses undocumented, weekly-shipping private formats of tools it does not control, fail-closed, with no version negotiation. Both 46A review voices flagged that no approach questioned private-file parsing. Strategic, out of scope for a 3-day outage fix.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** filed by Track 46A /autoplan, 2026-09-04.
-
-### [plan-eng-review] Reader-agnostic quarantine and drift classification (Track 46B)
-- **Why:** 46A tolerated exactly one additive key (`elapsed_ms`) so a 3-day outage could end. The shape that caused it is unchanged: ~13 exact-match detectors, any of which turns one additive upstream field into a total silent store abort. `_GROK_STOPS` is a closed 2-value enum and is the likely next one. The durable fix is per-record quarantine plus a `drift_skipped` counter, so a drifted record costs one record instead of the whole agent.
-- **Scope:** per-record quarantine; `drift_skipped`; truthful coverage on day-disjoint drift (the C1 snapshot keep-set fix); a parser epoch so a later allowlist recovers tokens from a byte-identical ledger without a cache bump; widen `partial_sources` (drift is not "the host declared"). Reader-agnostic — Codex has the same detector shape.
-- **Trigger:** the next additive-key drift on either host, or any `unsupported` that survives one `pipx upgrade`.
-- **Effort:** L
-- **Priority:** P2
-- **Context:** filed by Track 46A /ship, 2026-09-04 (plan item N5, missed by the 46A TODO sweep). Until this is carded, 46B exists only as prose in `_classify_grok_update`'s docstring, `tests/fixtures/host_sessions/grok/CONTRACT.md`, and `docs/invariants/events-retro.md:229`.
-
-### [ship:severity=minor] Stale Track/version literals in code and test comments (15 across 10 files)
-- **Description:** the 2026-09-03 renumber (Groups 45-50) fixed the stale cross-references found in docs/, but the same epoch-rot lives in code and test comments a docs-only PR does not touch. Route per file, not as one batch: fix each literal inside the Track that already declares the file (`host_usage.py`/`token_usage.py` + their tests → 46A or 49A; `config.py` → 47A; `cli.py` → 45A); the four retirement docstrings live in test files no upcoming card declares — fold them into whichever of those Tracks widens cheapest at drain time, per the documented drift process. **Completeness criterion is the grep, not this list:** `grep -rn "Track 37A\|Track 37B\|Track 39A\|Track 42A" src tests` — every hit must either name a live card or carry dated lineage. (`Track 37A` hits in `tests/test_bin_check.py:1` and `tests/test_docs_routing.py:16`/`:666` are the CORRECT shipped verification-command Track — leave those.)
-- **Items:** wedge-card literals at `token_usage.py` / `test_token_usage.py` **discharged in Track 46A** (2026-09-04): the comment now records that both named blockers are false. Walker substrate, now **49A** (was 42A): `src/mind_meld/host_usage.py:25`/`:279`/`:1062`/`:1785`, `tests/test_host_usage.py:2598`. Source retirement, now **44A** (was 37B): `src/mind_meld/config.py:53`, `src/mind_meld/cli.py:6058`, `tests/test_pull_helpers.py:1813`, `tests/test_source_toggle.py:217`, `tests/test_integration.py:1026`, `tests/test_docs_routing.py:48` — that last docstring is also stale in SUBSTANCE: it says 44A "leaves the mm-owned OpenCode skill link on disk / this loop is the only cleanup", but v0.13.0 ships a reaper that removes the mm-owned link on interactive push/init/install-skills, so the README loop now covers user-made links and never-interactive machines only. Sync surface, now **47A** (was 39A): `src/mind_meld/config.py:56`, which also still says "(blocked-by: 37B)" — an edge discharged 2026-09-03. Version string: `src/mind_meld/cli.py:5716` says the opencode source "was retired in v0.12.54"; the retirement shipped in **v0.12.55** (v0.12.54 was bin/check).
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by /ship pre-landing review + red-team pass on the roadmap-regen branch, 2026-09-03. Comment/docstring-only edits, zero runtime effect; grouped so they ride along instead of minting a docs-only code PR.
-
-### [plan-eng-review:severity=critical] `_ensure_inversion_marker` makes every new Mac mis-migrate 100% of its conflict sidecars
-- **Description:** `resolveflow._ensure_inversion_marker` mints `time.time()` on FIRST call. Its docstring assumes "every NEW conflict file produced from here on (mtime > now) is correctly skipped" — but `cli._apply_conflict` ends with `_restore_mtime_best_effort(conflict_path, remote_mtime_iso)`, stamping the sidecar with the PEER's mtime, which is essentially always in the past. `conflictmtime._restore_mtime_best_effort` clamps only the FUTURE (`now + 60s`); there is no past floor. So on a freshly-initialized device the marker is "today" and **every** sidecar it writes falls below its own safety gate and is renamed `v0-` by the migration sweep at `cli.py:4006`, which runs at the top of every pull including autopull. `_resolve_interactive_loop` then dispatches `v0-` under pre-inversion semantics where `(l)ocal` renames the sidecar OVER the canonical — so the user picks "keep my version" and mm overwrites their local file with the peer's bytes.
-- **Repro:** verified end-to-end on 2026-09-03 at `23b2cc8` / mm 0.13.0. Back-date a post-inversion sidecar to a peer mtime before the marker, run `resolveflow._find_conflict_files(cfg, migrate_pre_inversion=True)` (the exact call `_pull_core` makes): the file is renamed to `...sync-conflict-v0-...`. `mm conflicts` then renders it `Mode: pre-v0.9.2` with the local and remote columns SWAPPED.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Confirmed by all three review voices independently. The fix is NOT to stop back-dating the sidecar: its `st_mtime` is the only surviving carrier of the peer clock, read by `resolveflow.py:809` for the v0.12.5 resolve bump AND by `conflictmtime._stat_mtime_btime` for v0.12.10's `newer_side` / `render_verdict` / `(n)ewer`. Fix is to stop the CONSUMERS misreading the peer clock as the sidecar's own age. `cli.conflict_filename` already stamps `datetime.now(timezone.utc)` into the filename. **Era marker must go at `<stem>.sync-conflict-<ts>-v1-<dev8>`, NOT as a `v0-`-style prefix** — probed 2026-09-03: the prefix form makes `is_conflict_filename` return False, hence `manifest._is_excluded` False, hence conflict copies get UPLOADED to the fleet. See the full analysis at `~/.gstack/projects/kbitz-mind-meld/kbitz-fix-vanishing-conflict-sidecars-track45a-plan.md`.
-
-### [plan-eng-review:severity=critical] README documents the pre-inversion conflict direction, and contradicts itself two paragraphs later
-- **Description:** `README.md:62` and `README.md:413` (the "Handling conflicts" section itself) both say "the remote wins the canonical path and your local version is preserved as `<stem>.sync-conflict-...`". That is the PRE-v0.9.2 direction. Since v0.9.2 local stays at canonical and the REMOTE bytes go to the sidecar. `README.md:418` documents `(l)ocal` as "keep your edits" and `(r)emote` as "overwrite with peer's bytes", which IS correct post-inversion — so the README contradicts itself on the one question where being wrong destroys data. A user who believes :413 thinks the sidecar holds their own work; promoting it over the canonical destroys their edits with the peer's bytes.
-- **Repro:** `grep -n -i "sync-conflict" README.md` at `23b2cc8`.
-- **Effort:** S
-- **Priority:** P1
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03; found by the Codex DX voice. Same defect class CLAUDE.md already records as a lesson ("`synclog.py` still describing the pre-inversion direction four months after the inversion"). That copy was fixed in v0.12.51 and **nobody grepped for the other instances**. Completeness criterion is the grep, not this list.
-
-### [plan-eng-review:severity=major] `_migrate_pre_inversion_conflict` uses `find()` where every sibling parser uses `rindex()` — unbounded `v0-` accretion
-- **Description:** `resolveflow.py:228` does `name.find(CONFLICT_INFIX)`; `manifest.parse_conflict_device_short` uses `rindex` and `resolveflow._canonical_for_conflict` uses `rfind`. mm always appends its infix LAST, so `find` is wrong. On a double-infix name the `v0-` lands before the inner segment instead of before the digits, so `is_pre_inversion_conflict_filename` never latches and the file is renamed once per pull, forever.
-- **Repro:** verified 2026-09-03. `notes.sync-conflict-log.md` is a documented NON-conflict canonical name (`tests/test_manifest.py:994`), so it syncs; when it conflicts mm mints `notes.sync-conflict-log.sync-conflict-<ts>-<dev>.md`. Replaying the rename math: `v0-` → `v0-v0-` → `v0-v0-v0-`, `is_v0` False every time.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Each rename bumps the parent dir mtime and leaves nothing at the old name — the exact fingerprint the 2026-09-01 sidecar disappearance was attributed to an unidentified external walker. Test this first in any sidecar-disappearance investigation.
-
-### [plan-eng-review:severity=major] `mm gc --conflicts` can reap a live conflict, prints no paths, and has no preview by default
-- **Description:** four gaps in the one reaper that deletes user content. (1) `_gc_old_conflict_files` is called inside `if prune_conflicts:` so a bare `mm gc --dry-run` never previews it. (2) Non-verbose output is `Conflicts: candidates=N deleted=N` with no paths. (3) `CONFLICT_AGE_DAYS = 30` is a module constant with no `--older-than` and no config key. (4) It will reap a sidecar whose canonical still exists and still differs — a live unresolved conflict — on a silent 30-day deadline with no countdown on any surface.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03; both DX voices independently. Every other consequential mm operation has an escape hatch (`--force` on disable-source, `--dry-run`/`--yes` on migrate-config). Minimum bar: refuse to reap a live conflict, and print paths on delete.
-
-### [plan-eng-review:severity=major] `mm status` and `mm diag` never surface unresolved conflicts
-- **Description:** with three conflict sidecars live on disk, `mm status` printed six advisory lines (stale autorun, disabled sources, Codex capture, Grok capture, per-source diffs) and mentioned none of them. `mm diag`'s JSON has no conflicts key. `.mind-meld-log.md` is written only for `type == "claude"` sources (`cli.py:3351` sets `claude_sync_base` on that branch alone), so 22 of the 25 conflicts recorded on 2026-09-01 produced no per-project breadcrumb at all. Conflicts are announced exactly once, in an unattended hook's stderr, then vanish from every surface a human checks later.
-- **Repro:** verified 2026-09-03 — planted three correctly-named sidecars, `mm conflicts` listed all three, `mm status` mentioned none.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03. This is why the 2026-09-01 disappearance was found by accident rather than by mm.
-
-### [plan-eng-review:severity=major] `pullhistory.append_entry` has a `sidecar=` parameter that no caller ever passes
-- **Description:** `pullhistory.py:17` documents `"sidecar": "<optional sidecar filename if action=conflicted>"`, `:95` accepts it, `:116-117` writes it when non-None. `grep -rn "sidecar=" src/ tests/` returns zero. So every `conflicted` row records THAT a sidecar was written and never WHICH file, which makes any later reconciliation guess. This is the standing "a write with no reader is a liability" constraint inverted: a parameter with no producer, in the log schema since v0.6.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03. NOT a 15-line plumb: `_apply_conflict` returns a bare `ApplyOutcome` Literal, `_download_and_apply` gates Track 12A's `_CANONICAL_WRITE_OUTCOMES` invalidation on that exact value, and the row is written two frames up in `_pull_core` from `outcomes[action]: list[str]` (rel_paths only). Also note `pull-history.jsonl` rotates DESTRUCTIVELY at 1 MB (`os.replace` onto `.1`, overwriting the prior `.1`, no gc reaper) and swallows all write failures by design — so it cannot host a conflict lifecycle state machine. If durable conflict state is ever needed, route it through `lockedjson.py` per CLAUDE.md, and name the field `conflict_copy=` (`sidecar.py` already means the manifest cache in this call graph).
-
-### [plan-eng-review:severity=minor] Pull side does not reject conflict-shaped rel_paths from a peer manifest
-- **Description:** `manifest._is_excluded` drops conflict-shaped filenames on the PUSH walk. The pull side (`manifest._validate_rel_path`) rejects only NUL / absolute / `..` / drive letters, so a passphrase-holding peer can ship `foo.sync-conflict-19700101-000000-deadbeef.md` and mm will materialize it, after which every conflict-subsystem consumer treats it as mm-minted. Low impact today; becomes load-bearing the moment the gc bar reads the filename timestamp, because the attacker then chooses the reap age directly.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Fix is one `is_conflict_filename(basename)` call in the pull-side filter, mirroring the push-side gate. Related: `is_conflict_filename` validates digit SHAPE not date validity — `a.sync-conflict-20261345-999999-abcd1234.md` passes, so any new timestamp parser must catch `ValueError` and parse as UTC (`conflict_filename` uses `datetime.now(timezone.utc)`).
-
-### [plan-eng-review:severity=minor] Conflict discovery walks trees that `exclude_patterns` removed from sync
-- **Description:** `resolveflow._find_conflict_files` walks `_synced_scan_dirs` with `rglob` and filters only on `is_conflict_filename`; it never consults `exclude_patterns`, which live in `manifest.walk_generic_source`. So `mm conflicts`, `mm resolve`, `mm gc --conflicts` and the pull-top migration sweep all still operate on excluded trees. Verified 2026-09-03: a sidecar planted under `~/.codex/skills/.system/` is listed by `mm conflicts` despite `skills/.system/*` being in that source's `exclude_patterns`. Second-order consequence: a sidecar stranded in an excluded tree can never converge, so `mm resolve`'s `(l)`/`(r)` operate on a file that will never sync again.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Document the surface asymmetry in `docs/invariants/conflicts.md`; it is surprising and currently unwritten.
-
-### [plan-eng-review:severity=minor] Conflict GC retention age should be configurable
-- **Description:** `retention.CONFLICT_AGE_DAYS = 30` is a module constant. A user who wants conflict copies kept for 90 days has to fork. Add `[retention] conflict_age_days` to `config.toml`, or at minimum a `--older-than` flag on `mm gc --conflicts`.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03, deferred out of the safety work as a config-schema change.
-
-### [plan-eng-review:severity=minor] `synclog.write_sync_log` writes `.mind-meld-log.md` for claude sources only
-- **Description:** `cli.py:3351` sets `per_source.claude_sync_base` only when `src_cfg["type"] == "claude"`, and `synclog.write_sync_log` hardcodes a `projects/<name>/` layout. gstack, codex and grok conflicts therefore leave no per-project breadcrumb. On 2026-09-01 that was 22 of 25 conflicts.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** filed by /autoplan on Track 45A, 2026-09-03. Separate subsystem from the conflict-clock work; generalizing the layout is its own change.
-
-_Otherwise empty. Drained 2026-09-02 by Track 37A implementation: 5 discharged (release.yml guard, width-coupled tests, xdist, CI isolation, bin/check — the six-Track split was killed), 4 placed (36B amendments, unowned OpenCode files, 44A CLI verbs, 44A retirement notice), 4 deferred (see docs/roadmap-future.md)._
-
-### [full-review:severity=critical,files=src/mind_meld/cli.py] Sidecar deduplication deletes another canonical file’s conflict
-- **Description:** Per-peer sidecar discovery treats a stem-prefix glob as exact canonical ownership. The supported canonical notes.sync-conflict-log.md creates notes.sync-conflict-log.sync-conflict-<ts>-v1-aaaaaaaa.md, which the helper incorrectly returns as a sidecar of notes.md; a subsequent conflict for notes.md deletes that unrelated sidecar at line 1749. The temporary-directory reproduction confirms the sibling's remote data disappears. This overlaps Track 45A's forensic topic and directly falsifies its explicit assertion that this helper cannot reap a sibling's sidecar; the mechanism remains in HEAD after v0.14.0.
-- **Hypothesis (untested):** Investigate replacing glob-based ownership inference with an exact comparison against the canonical name parsed from the final conflict suffix before deduplication or removal. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:1662-1677
-- **Context:** From /full-review cluster "Conflict deduplication deletes recoverable copies" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=critical,files=src/mind_meld/cli.py] Failed sidecar replacement removes the previous recoverable copy
-- **Description:** Replacing a stale sidecar unlinks every previous copy before constructing and writing the replacement. With an existing R1 conflict and a newer peer R2, an ordinary write failure such as ENOSPC returns failed after deleting R1, leaving zero sidecars and losing the only local recoverable peer copy. An isolated injected-write-failure reproduction confirms this; the successful-replacement test intentionally reaps stale snapshots but does not cover preservation on failure. Related to Track 45A's loss investigation, with no specific backlog item for the ordering defect.
-- **Hypothesis (untested):** Investigate making replacement success precede stale-copy removal so a failed write leaves the previously recoverable conflict intact. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:1743-1777
-- **Context:** From /full-review cluster "Conflict deduplication deletes recoverable copies" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=critical,files=src/mind_meld/cli.py] Upload can replace an untouched file with another file’s bytes
-- **Description:** Upload ignores the digest returned by read_and_hash and encrypts current bytes under the earlier manifest scan's sha256. A normal edit between scan and upload therefore corrupts content addressing; when two files were scanned with identical bytes, editing the second before upload overwrites their shared blob and a peer receives the edited file's unrelated bytes for the untouched file, reporting both as written. The real encrypted LocalBackend reproduction confirms this cross-file corruption; no existing backlog entry covers it.
-- **Hypothesis (untested):** Investigate removing the inconsistent second snapshot so the published manifest metadata and blob key describe the exact uploaded bytes, or refuse publication when a scanned input changed. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:1238-1241
-- **Context:** From /full-review cluster "Upload bytes disagree with their content hash" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=critical,files=src/mind_meld/storage/local.py] Rejected manifest filenames bypass terminal sanitization
-- **Description:** Rejected shared-storage manifest filenames bypass the established terminal-sanitization boundary: find_conflict_copies writes raw candidate paths (and exception tails) to stderr, unlike safety.strip_terminal_escapes/safe_str callers elsewhere; a Dropbox-shaped conflict filename containing OSC 52 passes the candidate regex and the false-validator warning emits its complete control sequence, reachable through every _fetch_remote_manifest call at cli.py:541 even though the ciphertext is rejected; an isolated StringIO repro confirmed the raw sequence and the shared sanitizer's removal, with no existing backlog overlap found.
-- **Hypothesis (untested):** Keep the useful validation warning and remove the raw interpolation path by applying the existing plain-terminal sanitizer to filenames and exception text, then verify both rejection branches through the real manifest-fetch caller. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/storage/local.py:213-223
-- **Context:** From /full-review cluster "Rejected storage filenames reach the terminal unsanitized" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=necessary,files=src/mind_meld/cli.py] Unreadable existing files become deletion tombstones
-- **Description:** Push converts an unreadable existing file into a deletion tombstone: _record_file catches a hash/read OSError and omits that path, but the push consumes the incomplete manifest without filtering failed paths from its deletion comparison; this violates the existing exclusion/symlink tombstone-suppression pattern and cli.py:1044's explicit rule that walker omission is not causal deletion evidence; a temp-only repro leaves notes.md on disk, records its read-error skip, passes the exact push filters, then emits custom:notes.md and makes is_tombstoned suppress peer restoration; on_skip is only displayed interactively and is not an autopush degradation; no existing backlog overlap found.
-- **Hypothesis (untested):** First remove the unsafe assumption that a failed walk is a complete deletion snapshot by refusing or narrowing that push's deletion comparison, then pin unreadable-existing-file versus truly-deleted-file behavior before adding recovery machinery. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/cli.py:3107-3114
-- **Context:** From /full-review cluster "Read errors become deletion tombstones" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=necessary,files=src/mind_meld/merge.py] Mixed JSONL timestamp types abort the remaining pull batch
-- **Description:** _extract_ts returns arbitrary JSON ts values despite its str-or-None contract, and merge_jsonl sorts those raw values together at line 99. A valid JSONL containing a numeric epoch timestamp merged with a peer line using an ISO timestamp raises TypeError; _apply_merge and _download_and_apply do not catch it, so one file aborts the pull batch and later ordinary files are never downloaded. An encrypted temporary-backend reproduction confirms that following.md is skipped by the aborted batch; no existing backlog item or mixed-type timestamp test covers it.
-- **Hypothesis (untested):** Investigate restricting timestamp ordering to the supported comparable type and letting other valid JSON lines use the existing deterministic lexical fallback. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/merge.py:141-146
-- **Context:** From /full-review cluster "Mixed JSONL timestamp types abort a pull" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=necessary,files=src/mind_meld/host_usage.py] Codex diagnostics report ready after an unsupported read
-- **Description:** Codex diagnosis reports state=ready after a permanent unsupported read because it derives readiness solely from cached and on-disk file counts and never persists the latest failure; Grok's parallel path now preserves last_reason and surfaces permanent failures instead of success/retry claims; warming one valid rollout and then appending unsupported counters reproduces read_codex_usage.complete=False/reason=unsupported alongside codex_usage_diag.state=ready/pending=0, and cli.py:4606-4615 emits no dedicated Codex warning for this state; Track 46B's TODO covers reader-agnostic quarantine but does not cover this diagnostic contradiction.
-- **Hypothesis (untested):** Treat Codex capture as still-needed functionality and replace the cache-count-only success inference with the same persistent failure-state contract used by Grok, verifying that successful recovery clears it and transient failures do not erase a standing permanent failure. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/host_usage.py:536-553
-- **Context:** From /full-review cluster "Codex reports ready after capture fails" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Delete the unused pre-refactor push-cursor wrapper
-- **Description:** `_last_mm_push_ts` is an unreachable pre-cursor-refactor implementation. `last_push_ts` delegates directly to `resolve_push_cursor`, which reads `_iter_mm_push_objs`; no production or test caller invokes `_last_mm_push_ts`. Its docstring and events-retro invariant falsely claim the existing last-match tests exercise it, leaving a second cursor algorithm that can be edited without affecting actual behavior. No matching current backlog item found.
-- **Hypothesis (untested):** Delete the unused private wrapper and update the invariant references to the actual `_iter_mm_push_objs`/`resolve_push_cursor` path while preserving their behavioral tests. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/events.py:1599-1613
-- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Delete the unreachable second recapture writer
-- **Description:** `_run_events_recapture` is a second recapture writer with no caller in production or tests. The CLI instead calls `_prepare_recapture` and writes `prepared.git_rows` itself at cli.py:6691; this 35-line implementation and its `__all__` export remain after that split. The sole test reference merely asserts autopush does not mention its name. No matching current backlog item found.
-- **Hypothesis (untested):** Delete the unreachable writer and its export, retaining `_prepare_recapture` and the exercised CLI orchestration as the sole recapture path. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/events_tail.py:1156-1190
-- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Remove the orphan host model-id validator
-- **Description:** `_model_id` has no reference anywhere in the repository outside its definition, including tests, exports, and documentation; the live readers use their own current record-specific extraction paths. It is a leftover private validator with no consumer. Track 49A already owns neighboring reader/leaf-helper cleanup, but does not name this dead helper.
-- **Hypothesis (untested):** Remove `_model_id` during the already-planned Track 49A cleanup after reconfirming its zero-call-site status. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/host_usage.py:1283-1288
-- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
-
-### [full-review:severity=nice-to-have] Delete the unused retro event iterator
-- **Description:** `_read_events` is unused after `aggregate` began listing event files once, deriving the coverage floor, and materializing rows directly at lines 2636-2640. No caller or test imports this private function, while the events-retro invariant still attributes single-glob behavior to it; the duplicate entry point obscures which path the read-once test actually covers. No matching current backlog item found.
-- **Hypothesis (untested):** Delete the orphan iterator and correct invariant references to the live single-glob/materialization path without changing the one-read behavior. — re-investigate before implementing; the reviewer did not verify this direction.
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:799-813
-- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
-- **Effort:** ? (user triages in /roadmap)
+_Empty. All 28 items drained on 2026-09-05; dispositions and evidence are below._
 
 ## Drain records
+
+### Roadmap drain — 2026-09-05
+
+28 inbox items: **12 placed, 10 deferred, 6 discharged, 0 killed**. The 11 approved full-review findings are all placed. Authored-false rate for the inbox: 6 / (12 + 6) = **33.3%**; this measures already-shipped observations, not rejected ideas. Verification baseline: `2024ff6` (runtime code unchanged from `8be81ce`).
+
+| Inbox item | Title | Disposition / destination | Evidence or reason |
+|---|---|---|---|
+| 1 | Intra-file resume for a Grok ledger that exceeds one read budget | defer → docs/roadmap-future.md | The reader still lacks an intra-file checkpoint; the filed >1 GB / three repeated interactive deadline trigger has not been demonstrated. |
+| 2 | Host cache encoding trigger (deferred from original Track 46A) | defer → docs/roadmap-future.md | Keep the measured >100 ms or >25 MB gate. The dated filing measured 23.3 ms and 4.11 MB, below both gates. |
+| 3 | Per-entry `states` cap on the Codex host cache | defer → docs/roadmap-future.md | No demonstrated pathological entry; preserve totals and cross-file dedup semantics before deciding a cap. |
+| 4 | Add the xAI / `grok-4.6-build` price tier | place → Track 54A | Pricing remains absent in resolve_prices; ingestion recovery shipped at 8be81ce. |
+| 5 | Ask whether Grok/Codex expose a supported usage surface | defer → docs/roadmap-future.md | Strategic vendor-surface research has no dependency on the immediate correctness repairs. |
+| 6 | Reader-agnostic quarantine and drift classification (Track 46B) | defer → docs/roadmap-future.md | Retain the explicit next-drift / unsupported-after-upgrade trigger. The Codex diagnostic defect is placed separately and does not require quarantine. |
+| 7 | Stale Track/version literals in code and test comments (15 across 10 files) | defer → docs/roadmap-future.md | Correct remaining historical comments alongside the files being changed; do not create a standalone code PR or carry the old count forward. |
+| 8 | `_ensure_inversion_marker` makes every new Mac mis-migrate 100% of its conflict sidecars | discharged@f2624fb → v0.14.0 | Filename birth/era now drives migration; peer mtime remains the peer clock. |
+| 9 | README documents the pre-inversion conflict direction, and contradicts itself two paragraphs later | discharged@f2624fb → v0.14.0 | README now says local remains canonical and remote bytes go to the conflict copy. |
+| 10 | `_migrate_pre_inversion_conflict` uses `find()` where every sibling parser uses `rindex()` — unbounded `v0-` accretion | discharged@f2624fb → v0.14.0 | _migrate_pre_inversion_conflict now parses the final infix with rindex. |
+| 11 | `mm gc --conflicts` can reap a live conflict, prints no paths, and has no preview by default | discharged@f2624fb → v0.14.0 | GC preserves live/recoverable copies, prints deletion paths, and bare --dry-run previews conflicts. Configurable age remains a separate deferred item. |
+| 12 | `mm status` and `mm diag` never surface unresolved conflicts | defer → docs/roadmap-future.md | Status coverage shipped; defer the residual machine-readable diag conflict inventory until a consumer needs it. |
+| 13 | `pullhistory.append_entry` has a `sidecar=` parameter that no caller ever passes | defer → docs/roadmap-future.md | Forensic filename plumbing remains useful but spans the apply outcome and pull accumulator; it is not needed to prevent the reproduced deletions. |
+| 14 | Pull side does not reject conflict-shaped rel_paths from a peer manifest | discharged@f2624fb → v0.14.0 | _filter_excluded_paths rejects conflict-shaped names and .extend-root even with no configured excludes. |
+| 15 | Conflict discovery walks trees that `exclude_patterns` removed from sync | discharged@f2624fb → v0.14.0 | The requested surface-asymmetry documentation exists in docs/invariants/conflicts.md; discovery intentionally still finds excluded copies. |
+| 16 | Conflict GC retention age should be configurable | defer → docs/roadmap-future.md | Live and recoverable copies are now preserved regardless of age; configurable retention of redundant copies is lower priority. |
+| 17 | `synclog.write_sync_log` writes `.mind-meld-log.md` for claude sources only | defer → docs/roadmap-future.md | Generalizing project-log layout is separate from the preservation fixes; status already exposes unresolved conflicts. |
+| 18 | Sidecar deduplication deletes another canonical file’s conflict | place → Track 48A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 19 | Failed sidecar replacement removes the previous recoverable copy | place → Track 48A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 20 | Upload can replace an untouched file with another file’s bytes | place → Track 49A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 21 | Rejected manifest filenames bypass terminal sanitization | place → Track 50A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 22 | Unreadable existing files become deletion tombstones | place → Track 49A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 23 | Mixed JSONL timestamp types abort the remaining pull batch | place → Track 51A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 24 | Codex diagnostics report ready after an unsupported read | place → Track 52A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 25 | Delete the unused pre-refactor push-cursor wrapper | place → Track 53A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 26 | Delete the unreachable second recapture writer | place → Track 53A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 27 | Remove the orphan host model-id validator | place → Track 52A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+| 28 | Delete the unused retro event iterator | place → Track 55A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
+
+**Former active plan:** IDs below refer to the 2026-09-03 plan; they are historical, not current routing keys.
+
+| Old task | Title | Disposition | Evidence or reason |
+|---|---|---|---|
+| 45A.1 | Reproduce under filesystem instrumentation | discharge | Re-scoped cause analysis shipped at f2624fb: filename clock/era consumers were fixed; no claim of a fleet-wide unlink-process proof. |
+| 45A.2 | Fix it if it is mm | discharge | f2624fb fixed the demonstrated migration/GC defects; independent new review failures are placed in 48A. |
+| 45A.3 | Immediate post-write existence warning | kill | A stat immediately after writing neither prevents the reproduced replacement loss nor proves a future deletion; fix the actual mechanisms in 48A. |
+| 46A.1 | Per-state increment encoding and Grok resume | defer | Split into existing inbox cache-encoding and intra-file-resume Future entries; the dated trigger measurement does not justify active work. |
+| 46A.2 | Bound a single entry | defer | Existing inbox states-cap entry preserves the totals-versus-dedup contract. |
+| 47A.1 | Marker-aware directory skip | discharge | f2624fb shipped normalized marker prefixes, include-root preservation and tombstone suppression. |
+| 47A.2 | Exclude pair-review state only | discharge | f2624fb excludes session.yaml while preserving prose artifacts. |
+| 48A.1 | Scrub git subprocess environments | place | 53A; both history and remote subprocesses still inherit repository-redirection variables. |
+| 49A.1 | Hoist the resume protocol | defer | New Future entry requires a measured shared filesystem seam; no renderer depends on it. |
+| 49A.2 | Collapse readers into one per-turn adapter | kill | The common tuple discards cumulative Codex state required for cross-file accounting; Grok and Claude have different identities. |
+| 49A.3a | Remove proven obsolete local reader helpers | place | 52A removes the test-only Terminal path alongside full-review H3; preserve production TurnState accounting. |
+| 49A.3b | Share leaf coercions and add a boundary guard | defer | Retained with the measured resume seam; avoid policing an abstraction that has not earned its place. |
+| 49A.3c | Bound interned model detail | defer | New Future entry preserves day totals and measures cardinality first; distinct from the states cap. |
+| 50A.1 | One block, every agent | place | 55A; retains coverage, legacy-name tolerance and the verified pricing dependency on 54A. |
+| 50A.2 | Everything else aggregates across models | place | 55A; part of the same renderer outcome, with no new summary-card row. |
+
+**Future membership:** 70 existing deferred bullets retained verbatim; pricing promoted to 54A; the three entries below removed from the queue. Twelve deferred entries added (10 from the inbox, two scoped remnants of the old walker card), leaving 82. Refusals remain policy; removing their queue entries does not authorize them.
+
+- **No tooling migration hidden inside a workspace fix:** keep the existing bin/check interface; do not infer a uv/Hatch/tox migration from hatchling being the build backend. Original refusal: [manual], 2026-09-01.
+- **No collector-dependent similarity classifier/silent merge:** the v0.12.51 analysis cancelled this auto-resolver, and AGENTS.md forbids resurrecting the collector. It is not waiting for a dataset.
+- **No Codex/Grok sessions-snapshot:** local discovery is not permission to publish encoded cwd or transcripts. Claude's sessions snapshot stays Claude-only; reconsider only if a host supplies a metadata-only index. Original refusal: host-parity [manual], 2026-08-17. The roadmap's standing wire-privacy constraint remains in force.
+
+**ID lineage:**
+
+| Previous ID (2026-09-03 plan) | Disposition / new ID (2026-09-05 plan) |
+|---|---|
+| 45A: sidecar forensics | Shipped work recorded as 45A; new confirmed replacement defects → 48A; immediate-stat mitigation killed |
+| 46A: cache encoding | Re-scoped shipped Grok repair recorded as 46A; original encoding/resume/cap work → Future |
+| 47A: sync surface | Shipped as 47A |
+| 48A: git environment | 53A |
+| 49A: one walker, two adapters | Blanket adapter recipe killed; measured filesystem sharing/model bounds → Future; obsolete helpers → 52A |
+| 50A: unified reporting | 55A |
+
 
 `/roadmap` drain, 38 items on 2026-09-01 (first drain since 2026-08-25; the
 2026-08-30 Track 34A batch and the 2026-09-01 Track 35A batch had both gone
@@ -362,4 +246,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-01 by Track 37A `/autoplan` (8 items appended, inbox now 13; 5 appended earlier the same day by the Track 36B review; `/roadmap` last drained 2026-09-01)._
+_Last updated 2026-09-05 by /roadmap; inbox empty. Prior drain records are historical._
