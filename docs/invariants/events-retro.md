@@ -353,9 +353,12 @@ arrives both ways. Inclusive extractors emit disjoint buckets via
 ``uncached = input - cache_read - cache_create``. Do **not** call
 ``_normalize_inclusive_usage`` in ``_add_usage``: that is where readers
 converge, and subtracting ``cache_read`` from an already-disjoint bucket
-would clamp real billable tokens to zero. Track 49A merges extractors
-into this path; a bare "every current reader is inclusive" assertion
-would not survive that merge. Malformed inclusive counters
+would clamp real billable tokens to zero. The extractor-merge recipe that
+once threatened this path (Track 49A under the 2026-09-03 numbering) was
+killed on 2026-09-05; what survives is the deferred "Share host-reader
+filesystem resume primitives only after measuring duplication cost". A bare
+"every current reader is inclusive" assertion still would not survive any
+such merge, so keep the qualifier. Malformed inclusive counters
 (``cache_read + cache_create > input``) degrade that reader (Track 31A
 isolation), not a fabricated zero bucket.
 
@@ -733,7 +736,7 @@ host family).
 ``mm retro-fleet --dump-host-usage`` is the forensic hatch. It prints
 the inventory JSON and skips the markdown retro. As of v0.12.49 the dump
 emits per-model ``tokens_by_day`` and a detail status per device. The card
-stays family-only until Group 50 (unified reporting, Track 50A — numbered Group 36 when this was written, Group 43 until 2026-09-03; today's Group 36 is the shipped Three-hosts group). Model ids are sanitized at DUMP time only
+stays family-only until the **unified-reporting** work lands (cite it by title, not by ID: it was numbered Group 36 when this was written, Group 43 until 2026-09-03, Group 50 until 2026-09-05, and Group 55 / Track 55A today; today's Group 36 is the shipped Three-hosts group and today's Group 50 is unrelated terminal-safe recovery warnings). Model ids are sanitized at DUMP time only
 (``_safe_short``), never at accept — and because that truncates at 128 chars
 while the acceptor admits 256 bytes, two distinct accepted ids can sanitize
 to one key. `_sanitize_tokens_by_day` disambiguates with a `~N` suffix rather
