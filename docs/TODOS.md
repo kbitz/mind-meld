@@ -159,6 +159,83 @@ here by hand, use the H3 form.
 
 _Otherwise empty. Drained 2026-09-02 by Track 37A implementation: 5 discharged (release.yml guard, width-coupled tests, xdist, CI isolation, bin/check — the six-Track split was killed), 4 placed (36B amendments, unowned OpenCode files, 44A CLI verbs, 44A retirement notice), 4 deferred (see docs/roadmap-future.md)._
 
+### [full-review:severity=critical,files=src/mind_meld/cli.py] Sidecar deduplication deletes another canonical file’s conflict
+- **Description:** Per-peer sidecar discovery treats a stem-prefix glob as exact canonical ownership. The supported canonical notes.sync-conflict-log.md creates notes.sync-conflict-log.sync-conflict-<ts>-v1-aaaaaaaa.md, which the helper incorrectly returns as a sidecar of notes.md; a subsequent conflict for notes.md deletes that unrelated sidecar at line 1749. The temporary-directory reproduction confirms the sibling's remote data disappears. This overlaps Track 45A's forensic topic and directly falsifies its explicit assertion that this helper cannot reap a sibling's sidecar; the mechanism remains in HEAD after v0.14.0.
+- **Hypothesis (untested):** Investigate replacing glob-based ownership inference with an exact comparison against the canonical name parsed from the final conflict suffix before deduplication or removal. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/cli.py:1662-1677
+- **Context:** From /full-review cluster "Conflict deduplication deletes recoverable copies" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=critical,files=src/mind_meld/cli.py] Failed sidecar replacement removes the previous recoverable copy
+- **Description:** Replacing a stale sidecar unlinks every previous copy before constructing and writing the replacement. With an existing R1 conflict and a newer peer R2, an ordinary write failure such as ENOSPC returns failed after deleting R1, leaving zero sidecars and losing the only local recoverable peer copy. An isolated injected-write-failure reproduction confirms this; the successful-replacement test intentionally reaps stale snapshots but does not cover preservation on failure. Related to Track 45A's loss investigation, with no specific backlog item for the ordering defect.
+- **Hypothesis (untested):** Investigate making replacement success precede stale-copy removal so a failed write leaves the previously recoverable conflict intact. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/cli.py:1743-1777
+- **Context:** From /full-review cluster "Conflict deduplication deletes recoverable copies" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=critical,files=src/mind_meld/cli.py] Upload can replace an untouched file with another file’s bytes
+- **Description:** Upload ignores the digest returned by read_and_hash and encrypts current bytes under the earlier manifest scan's sha256. A normal edit between scan and upload therefore corrupts content addressing; when two files were scanned with identical bytes, editing the second before upload overwrites their shared blob and a peer receives the edited file's unrelated bytes for the untouched file, reporting both as written. The real encrypted LocalBackend reproduction confirms this cross-file corruption; no existing backlog entry covers it.
+- **Hypothesis (untested):** Investigate removing the inconsistent second snapshot so the published manifest metadata and blob key describe the exact uploaded bytes, or refuse publication when a scanned input changed. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/cli.py:1238-1241
+- **Context:** From /full-review cluster "Upload bytes disagree with their content hash" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=critical,files=src/mind_meld/storage/local.py] Rejected manifest filenames bypass terminal sanitization
+- **Description:** Rejected shared-storage manifest filenames bypass the established terminal-sanitization boundary: find_conflict_copies writes raw candidate paths (and exception tails) to stderr, unlike safety.strip_terminal_escapes/safe_str callers elsewhere; a Dropbox-shaped conflict filename containing OSC 52 passes the candidate regex and the false-validator warning emits its complete control sequence, reachable through every _fetch_remote_manifest call at cli.py:541 even though the ciphertext is rejected; an isolated StringIO repro confirmed the raw sequence and the shared sanitizer's removal, with no existing backlog overlap found.
+- **Hypothesis (untested):** Keep the useful validation warning and remove the raw interpolation path by applying the existing plain-terminal sanitizer to filenames and exception text, then verify both rejection branches through the real manifest-fetch caller. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/storage/local.py:213-223
+- **Context:** From /full-review cluster "Rejected storage filenames reach the terminal unsanitized" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=necessary,files=src/mind_meld/cli.py] Unreadable existing files become deletion tombstones
+- **Description:** Push converts an unreadable existing file into a deletion tombstone: _record_file catches a hash/read OSError and omits that path, but the push consumes the incomplete manifest without filtering failed paths from its deletion comparison; this violates the existing exclusion/symlink tombstone-suppression pattern and cli.py:1044's explicit rule that walker omission is not causal deletion evidence; a temp-only repro leaves notes.md on disk, records its read-error skip, passes the exact push filters, then emits custom:notes.md and makes is_tombstoned suppress peer restoration; on_skip is only displayed interactively and is not an autopush degradation; no existing backlog overlap found.
+- **Hypothesis (untested):** First remove the unsafe assumption that a failed walk is a complete deletion snapshot by refusing or narrowing that push's deletion comparison, then pin unreadable-existing-file versus truly-deleted-file behavior before adding recovery machinery. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/cli.py:3107-3114
+- **Context:** From /full-review cluster "Read errors become deletion tombstones" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=necessary,files=src/mind_meld/merge.py] Mixed JSONL timestamp types abort the remaining pull batch
+- **Description:** _extract_ts returns arbitrary JSON ts values despite its str-or-None contract, and merge_jsonl sorts those raw values together at line 99. A valid JSONL containing a numeric epoch timestamp merged with a peer line using an ISO timestamp raises TypeError; _apply_merge and _download_and_apply do not catch it, so one file aborts the pull batch and later ordinary files are never downloaded. An encrypted temporary-backend reproduction confirms that following.md is skipped by the aborted batch; no existing backlog item or mixed-type timestamp test covers it.
+- **Hypothesis (untested):** Investigate restricting timestamp ordering to the supported comparable type and letting other valid JSON lines use the existing deterministic lexical fallback. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/merge.py:141-146
+- **Context:** From /full-review cluster "Mixed JSONL timestamp types abort a pull" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=necessary,files=src/mind_meld/host_usage.py] Codex diagnostics report ready after an unsupported read
+- **Description:** Codex diagnosis reports state=ready after a permanent unsupported read because it derives readiness solely from cached and on-disk file counts and never persists the latest failure; Grok's parallel path now preserves last_reason and surfaces permanent failures instead of success/retry claims; warming one valid rollout and then appending unsupported counters reproduces read_codex_usage.complete=False/reason=unsupported alongside codex_usage_diag.state=ready/pending=0, and cli.py:4606-4615 emits no dedicated Codex warning for this state; Track 46B's TODO covers reader-agnostic quarantine but does not cover this diagnostic contradiction.
+- **Hypothesis (untested):** Treat Codex capture as still-needed functionality and replace the cache-count-only success inference with the same persistent failure-state contract used by Grok, verifying that successful recovery clears it and transient failures do not erase a standing permanent failure. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/host_usage.py:536-553
+- **Context:** From /full-review cluster "Codex reports ready after capture fails" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=nice-to-have] Delete the unused pre-refactor push-cursor wrapper
+- **Description:** `_last_mm_push_ts` is an unreachable pre-cursor-refactor implementation. `last_push_ts` delegates directly to `resolve_push_cursor`, which reads `_iter_mm_push_objs`; no production or test caller invokes `_last_mm_push_ts`. Its docstring and events-retro invariant falsely claim the existing last-match tests exercise it, leaving a second cursor algorithm that can be edited without affecting actual behavior. No matching current backlog item found.
+- **Hypothesis (untested):** Delete the unused private wrapper and update the invariant references to the actual `_iter_mm_push_objs`/`resolve_push_cursor` path while preserving their behavioral tests. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/events.py:1599-1613
+- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=nice-to-have] Delete the unreachable second recapture writer
+- **Description:** `_run_events_recapture` is a second recapture writer with no caller in production or tests. The CLI instead calls `_prepare_recapture` and writes `prepared.git_rows` itself at cli.py:6691; this 35-line implementation and its `__all__` export remain after that split. The sole test reference merely asserts autopush does not mention its name. No matching current backlog item found.
+- **Hypothesis (untested):** Delete the unreachable writer and its export, retaining `_prepare_recapture` and the exercised CLI orchestration as the sole recapture path. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/events_tail.py:1156-1190
+- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=nice-to-have] Remove the orphan host model-id validator
+- **Description:** `_model_id` has no reference anywhere in the repository outside its definition, including tests, exports, and documentation; the live readers use their own current record-specific extraction paths. It is a leftover private validator with no consumer. Track 49A already owns neighboring reader/leaf-helper cleanup, but does not name this dead helper.
+- **Hypothesis (untested):** Remove `_model_id` during the already-planned Track 49A cleanup after reconfirming its zero-call-site status. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/host_usage.py:1283-1288
+- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
+### [full-review:severity=nice-to-have] Delete the unused retro event iterator
+- **Description:** `_read_events` is unused after `aggregate` began listing event files once, deriving the coverage floor, and materializing rows directly at lines 2636-2640. No caller or test imports this private function, while the events-retro invariant still attributes single-glob behavior to it; the duplicate entry point obscures which path the read-once test actually covers. No matching current backlog item found.
+- **Hypothesis (untested):** Delete the orphan iterator and correct invariant references to the live single-glob/materialization path without changing the one-read behavior. — re-investigate before implementing; the reviewer did not verify this direction.
+- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:799-813
+- **Context:** From /full-review cluster "Unused helpers survived completed refactors" on branch kbitz/full-review-v2 (2026-09-05 UTC), reviewed commit 8be81ce.
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 `/roadmap` drain, 38 items on 2026-09-01 (first drain since 2026-08-25; the
