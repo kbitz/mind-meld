@@ -359,6 +359,20 @@ class TestReaderOrchestration:
         assert events_tail._HOST_PERMANENT_REASONS
         assert events_tail._HOST_PERMANENT_REASONS <= events_tail._HOST_READ_REASONS
 
+    def test_permanent_reasons_match_the_grok_sticky_literal(self):
+        """`host_usage.read_grok_usage` hardcodes `"unsupported"` in its sticky
+        block (`host_usage.py:697`) because `host_usage` cannot import
+        `events_tail` (cycle). Nothing but this pin holds the two sides
+        together. Add a reason here and the sticky rule silently stops
+        stickying it, while `mm status` starts printing the permanent phrase
+        for a reason the reader already clobbered with the next transient
+        `deadline` / `locked` / `io_error`."""
+        assert events_tail._HOST_PERMANENT_REASONS == frozenset({"unsupported"}), (
+            "widening _HOST_PERMANENT_REASONS also requires widening the sticky "
+            "comparison in host_usage.read_grok_usage — they are two literals, "
+            "not one constant"
+        )
+
     def test_built_in_constant_matches_the_full_reader_set(self):
         """`events.ACTIVE_HOST_READERS` documents the live reader universe
         and their order. `events` cannot import `events_tail` (cycle), so

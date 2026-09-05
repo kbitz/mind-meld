@@ -1295,9 +1295,12 @@ class TestGrokUsage:
     ) -> None:
         """First contact with an unreadable ledger still commits last_reason.
 
-        A cold durationMs file raises inside the read, so learned is True
-        on this path. The learned=False + incomplete write is
-        test_deadline_does_not_clobber_permanent_last_reason.
+        This IS the learned=False + incomplete write: the cold durationMs file
+        raises inside ``_read_full_grok_file``, which is the statement BEFORE
+        ``learned = True``, so ``learned`` stays False. The write happens
+        because ``prior_reason`` (None, cold cache) differs from
+        ``new_reason`` ("unsupported"), which is what keeps the
+        ``_NoCacheCommit`` gate shut.
         """
         root = tmp_path / "sessions"
         _write_grok_session(root, lines=[_grok_turn(extra_update={"durationMs": 12})])
@@ -1345,6 +1348,15 @@ class TestGrokUsage:
     def test_deadline_does_not_clobber_permanent_last_reason(
         self, isolated_adapter_caches: Path, tmp_path: Path, monkeypatch
     ) -> None:
+        """A later deadline must not erase a standing unsupported.
+
+        No cache write happens on this path, by design: the sticky block
+        rewrites new_reason back to "unsupported", which makes
+        ``prior_reason == new_reason`` and fires ``_NoCacheCommit``. The
+        assertion below therefore reads the seeded cache back unchanged.
+        That is still the guard that matters — delete the sticky block and
+        the gate reopens, landing "deadline" on disk.
+        """
         isolated_adapter_caches.parent.mkdir(parents=True, exist_ok=True)
         isolated_adapter_caches.write_text(
             json.dumps(
@@ -1595,9 +1607,19 @@ class TestGrokUsage:
 
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
 
-    def test_filesystem_error_is_incomplete_without_creating_a_cache(
+    def test_filesystem_error_is_incomplete_and_persists_its_reason(
         self, isolated_adapter_caches: Path
     ) -> None:
+        """An unreadable root is incomplete AND records why.
+
+        Renamed from ``..._without_creating_a_cache``: before the gate was
+        widened to ``prior_reason == new_reason``, this path hit
+        ``_NoCacheCommit`` and wrote nothing. It now commits, which is the
+        point of the Track — a machine that cannot read its store can still
+        say so to ``mm diag``. ``complete_once`` stays False and ``files``
+        stays empty, so nothing is lost by the write.
+        """
+
         class UnreadableRoot:
             def exists(self) -> bool:
                 raise OSError("unreadable source")
@@ -1605,6 +1627,11 @@ class TestGrokUsage:
         result = hu.read_grok_usage(UnreadableRoot(), consented=True)  # type: ignore[arg-type]
 
         assert result == hu.HostUsageResult({}, complete=False, reason="io_error")
+        cache = json.loads(isolated_adapter_caches.read_text(encoding="utf-8"))
+        assert cache["last_reason"] == "io_error"
+        assert cache["complete_once"] is False
+        assert cache["files"] == {}
+        assert hu.grok_usage_diag()["last_reason"] == "io_error"
 
     def test_absent_updates_jsonl_beside_a_healthy_session_completes(
         self, isolated_adapter_caches: Path, tmp_path: Path
