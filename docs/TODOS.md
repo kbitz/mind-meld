@@ -106,11 +106,13 @@ The closed unhide items do not authorize a cosmetic flag rename or alias. The cl
 | 27 | Remove the orphan host model-id validator | place → Track 52A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
 | 28 | Delete the unused retro event iterator | place → Track 55A | Approved review reproduction at 8be81ce / rechecked at 2024ff6. |
 
+**Full-review code provenance:** ROADMAP.md's `_Source:` lines cite the review's own R/C/H codes, which exist only in the review transcript — and Conductor workspaces are ephemeral. The code groups resolve against rows 18-28 above by destination Track: **R2/R3** → 48A (rows 18-19), **R1/C2** → 49A (rows 20, 22), **C1** → 50A (row 21), **R4** → 51A (row 23), **C3/H3** → 52A (rows 24, 27), **H1/H2** → 53A (rows 25-26), **H4** → 55A (row 28). Letter-to-row assignment *within* a pair was not recorded; the Track cards carry the reproduction detail, so nothing depends on it.
+
 **Former active plan:** IDs below refer to the 2026-09-03 plan; they are historical, not current routing keys.
 
 | Old task | Title | Disposition | Evidence or reason |
 |---|---|---|---|
-| 45A.1 | Reproduce under filesystem instrumentation | discharge | Re-scoped cause analysis shipped at f2624fb: filename clock/era consumers were fixed; no claim of a fleet-wide unlink-process proof. |
+| 45A.1 | Reproduce under filesystem instrumentation | kill | Not discharged: no cause was named and `docs/invariants/conflicts.md` records none. Dropped by explicit decision on 2026-09-03 on three supports, only one of which is unconditional. (a) `mm pull` re-materializes a vanished sidecar because the pull diff hashes the live local file — **but only while the mtime-skip gate stays shut**: `cli.py:1871` returns `"skipped"` once the local file is newer than remote, so after the user edits their canonical the conflict path never runs again and nothing is re-materialized. Do not read this as self-healing. (b) 47A plus existing config excludes remove 22 of the 25 affected paths from sync — scope reduction, not repair; 3 remain. (c) The `mm status` conflicts line (`cli.py:4523`) makes any recurrence visible — this one holds unconditionally and is what the kill actually rests on. Honest residual: f2624fb's clock fix does NOT explain the 2026-09-01 event (those peer files were ~12 days old and never crossed the 30-day GC bar); cause unknown, may not be mm. Re-open only on a fresh recurrence observed through `mm status`. |
 | 45A.2 | Fix it if it is mm | discharge | f2624fb fixed the demonstrated migration/GC defects; independent new review failures are placed in 48A. |
 | 45A.3 | Immediate post-write existence warning | kill | A stat immediately after writing neither prevents the reproduced replacement loss nor proves a future deletion; fix the actual mechanisms in 48A. |
 | 46A.1 | Per-state increment encoding and Grok resume | defer | Split into existing inbox cache-encoding and intra-file-resume Future entries; the dated trigger measurement does not justify active work. |
@@ -142,6 +144,12 @@ The closed unhide items do not authorize a cosmetic flag rename or alias. The cl
 | 48A: git environment | 53A |
 | 49A: one walker, two adapters | Blanket adapter recipe killed; measured filesystem sharing/model bounds → Future; obsolete helpers → 52A |
 | 50A: unified reporting | 55A |
+
+
+Drained 2026-09-02 by Track 37A implementation: 5 discharged (release.yml guard,
+width-coupled tests, xdist, CI isolation, bin/check — the six-Track split was
+killed), 4 placed (36B amendments, unowned OpenCode files, 44A CLI verbs, 44A
+retirement notice), 4 deferred (see docs/roadmap-future.md).
 
 
 `/roadmap` drain, 38 items on 2026-09-01 (first drain since 2026-08-25; the
