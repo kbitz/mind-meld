@@ -7,7 +7,9 @@ landed as "Track 2A" (v0.8.7) when cli.py was decomposed.
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,20 +26,25 @@ from mind_meld.cli import (
     _CorruptPeer,
     _fsync_touched_parents,
     _FsyncWarning,
+    _include_prior_grok_if_needed,
     _load_prior_device_metadata,
     _PerSourceResult,
     _prefetch_manifests,
     _preflight_conflicts,
     _prompt_passphrase,
     _prompt_sources,
+    _prove_omitted_paths_absent,
     _pull_one_source,
     _register_and_save,
     _restore_mtime_best_effort,
+    _retain_prior_default_sources,
     _select_devices,
     _UnknownSourceWarning,
+    _upload_changed_blobs,
 )
-from mind_meld.config import DEFAULT_SOURCES
-from mind_meld.errors import StorageError
+from mind_meld.config import DEFAULT_SOURCES, SourceResolution
+from mind_meld.errors import SnapshotError, StorageError
+from mind_meld.manifest import read_file_revision
 
 # ── fixtures ─────────────────────────────────────────────────────────
 
@@ -2003,6 +2010,10 @@ class TestPromptSources:
             def is_symlink(self) -> bool:
                 return False
 
+            def lstat(self):
+                probes.append(self.value)
+                return os.stat_result((0o040755, 1, 0, 1, 0, 0, 0, 0, 0, 0))
+
         prompts: list[tuple[str, bool]] = []
 
         def confirm(prompt: str, *, default: bool) -> bool:
@@ -2432,20 +2443,23 @@ class TestDownloadAndApplyPathTraversalGuard:
         # <tmp_path>, then write `should_not_exist` — outside `base`.
         bad_rel = "../../should_not_exist"
 
+        apply_spy = MagicMock()
+        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
         bt, outcomes = _download_and_apply(
             backend,
             base,
-            {bad_rel: _info("h")},
+            {bad_rel: _info(_sha(b"attacker-bytes"))},
             "peerA",
             "pp",
             1024,
-            quiet=True,
+            quiet=False,
         )
         # File must NOT have been written outside the source root.
         assert not sentinel_outside.exists()
         # Outcome must be `failed` (per-file isolation, not raise).
         assert outcomes["failed"] == [bad_rel]
         assert outcomes["written"] == []
+        apply_spy.assert_not_called()
 
     def test_rejects_absolute_path_override(self, tmp_path, monkeypatch) -> None:
         from mind_meld.cli import _download_and_apply
@@ -2458,18 +2472,21 @@ class TestDownloadAndApplyPathTraversalGuard:
         abs_target = tmp_path / "absolute_escape_target"
         bad_rel = str(abs_target)
 
+        apply_spy = MagicMock()
+        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
         bt, outcomes = _download_and_apply(
             backend,
             base,
-            {bad_rel: _info("h")},
+            {bad_rel: _info(_sha(b"attacker-bytes"))},
             "peerA",
             "pp",
             1024,
-            quiet=True,
+            quiet=False,
         )
         assert not abs_target.exists()
         assert outcomes["failed"] == [bad_rel]
         assert outcomes["written"] == []
+        apply_spy.assert_not_called()
 
     def test_accepts_legitimate_nested_path(self, tmp_path, monkeypatch) -> None:
         """Sanity: the guard does NOT false-positive on legitimate
@@ -2615,3 +2632,364 @@ class TestDownloadAndApplyPathTraversalGuard:
 
         output = capsys.readouterr().out
         assert output.count("skipped (local symlink preserved)") == 1
+
+
+class TestIncomingDigestCheck:
+    """Receiving plaintext must match the advertised digest before apply."""
+
+    def test_mismatch_fails_before_apply_and_preserves_bytes(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = MagicMock()
+        backend.get = MagicMock(return_value=b"opaque-ciphertext")
+        monkeypatch.setattr("mind_meld.cli.decrypt", lambda *a, **kw: b"wrong-bytes")
+        apply_spy = MagicMock()
+        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
+
+        base = tmp_path / "src"
+        base.mkdir()
+        canonical = base / "notes.md"
+        canonical.write_text("local notes")
+        sidecar = base / "notes.sync-conflict-20260101-000000-v1-abcd1234.md"
+        sidecar.write_text("peer copy")
+
+        _, outcomes = _download_and_apply(
+            backend,
+            base,
+            {"notes.md": _info(_sha(b"expected-bytes"))},
+            "peerA",
+            "pp",
+            1024,
+            quiet=False,
+        )
+        assert outcomes["failed"] == ["notes.md"]
+        assert outcomes["written"] == []
+        assert canonical.read_text() == "local notes"
+        assert sidecar.read_text() == "peer copy"
+        apply_spy.assert_not_called()
+        assert "content check failed" in capsys.readouterr().out
+
+    def test_mismatch_then_later_valid_file_applies(self, tmp_path, monkeypatch) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        payloads = {"bad.md": b"wrong", "good.md": b"good-bytes"}
+
+        def decrypt_payload(data, *a, **kw):
+            return payloads[data.decode()]
+
+        backend = MagicMock()
+        backend.get = MagicMock(side_effect=[b"bad.md", b"good.md"])
+        monkeypatch.setattr("mind_meld.cli.decrypt", decrypt_payload)
+
+        base = tmp_path / "src"
+        base.mkdir()
+        to_download = {
+            "bad.md": _info(_sha(b"expected")),
+            "good.md": _info(_sha(b"good-bytes")),
+        }
+        _, outcomes = _download_and_apply(
+            backend, base, to_download, "peerA", "pp", 1024, quiet=True
+        )
+        assert outcomes["failed"] == ["bad.md"]
+        assert outcomes["written"] == ["good.md"]
+        assert (base / "good.md").read_bytes() == b"good-bytes"
+        assert not (base / "bad.md").exists()
+
+    def test_quiet_mismatch_has_no_per_file_stdout(self, tmp_path, monkeypatch, capsys) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = MagicMock()
+        backend.get = MagicMock(return_value=b"opaque")
+        monkeypatch.setattr("mind_meld.cli.decrypt", lambda *a, **kw: b"wrong")
+        base = tmp_path / "src"
+        base.mkdir()
+        _, outcomes = _download_and_apply(
+            backend,
+            base,
+            {"a.md": _info(_sha(b"expected"))},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert outcomes["failed"] == ["a.md"]
+
+    def test_mismatch_does_not_enter_conflict_replacement(self, tmp_path, monkeypatch) -> None:
+        from mind_meld.cli import _download_and_apply
+
+        backend = MagicMock()
+        backend.get = MagicMock(return_value=b"opaque")
+        monkeypatch.setattr("mind_meld.cli.decrypt", lambda *a, **kw: b"remote-wrong")
+        apply_spy = MagicMock()
+        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "notes.md").write_text("local divergent")
+        _, outcomes = _download_and_apply(
+            backend,
+            base,
+            {"notes.md": _info(_sha(b"remote-right"))},
+            "peerA",
+            "pp",
+            1024,
+            quiet=True,
+        )
+        assert outcomes["failed"] == ["notes.md"]
+        assert outcomes["conflicted"] == []
+        apply_spy.assert_not_called()
+        assert (base / "notes.md").read_text() == "local divergent"
+
+
+class TestSnapshotPublicationHelpers:
+    def test_omission_proof_does_not_open_recovered_base_or_traversal(self, tmp_path, monkeypatch):
+        trusted = tmp_path / "src"
+        trusted.mkdir()
+        recovered = tmp_path / "peer-base"
+        recovered.mkdir()
+        secret = tmp_path / "secret"
+        secret.write_text("do-not-open")
+        probed: list[Path] = []
+        real_lstat = Path.lstat
+
+        def tracking(self):
+            probed.append(self)
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", tracking)
+        prior = {
+            "sources": {
+                "claude": {
+                    "base_path": str(recovered),
+                    "files": {"../secret": {"sha256": "a" * 64}},
+                }
+            }
+        }
+        _prove_omitted_paths_absent(
+            {"sources": {"claude": {"files": {}}}},
+            prior,
+            [{"name": "claude", "path": str(trusted)}],
+            max_file_size=1024,
+        )
+        assert secret not in probed
+        assert recovered not in probed
+        assert not any(p == secret or p == recovered for p in probed)
+
+    def test_still_present_omitted_alias_refuses(self, tmp_path):
+        root = tmp_path / "src"
+        root.mkdir()
+        (root / "a.md").write_text("same")
+        os.link(root / "a.md", root / "alias.md")
+        local = {"sources": {"gstack": {"files": {"a.md": {"sha256": "x"}}}}}
+        prior = {
+            "sources": {
+                "gstack": {
+                    "files": {
+                        "a.md": {"sha256": "x"},
+                        "alias.md": {"sha256": "x"},
+                    }
+                }
+            }
+        }
+        with pytest.raises(SnapshotError, match="still present"):
+            _prove_omitted_paths_absent(
+                local,
+                prior,
+                [{"name": "gstack", "path": str(root)}],
+                max_file_size=1024,
+            )
+
+    def test_proof_unreadable_root_refuses(self, tmp_path, monkeypatch):
+        root = tmp_path / "src"
+        root.mkdir()
+        real_stat = Path.stat
+
+        def boom(self, *a, **kw):
+            if self == root:
+                raise PermissionError("denied")
+            return real_stat(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "stat", boom)
+        prior = {"sources": {"gstack": {"files": {"a.md": {"sha256": "a" * 64}}}}}
+        with pytest.raises(SnapshotError, match="could not be read"):
+            _prove_omitted_paths_absent(
+                {"sources": {"gstack": {"files": {}}}},
+                prior,
+                [{"name": "gstack", "path": str(root)}],
+                max_file_size=1024,
+            )
+
+    def test_upload_rejects_matching_digest_wrong_size(self, tmp_path):
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "a.md").write_text("ok")
+        digest = hashlib.sha256(b"ok").hexdigest()
+        info = {"sha256": digest, "size": 99, "mtime": "2026-01-01T00:00:00+00:00"}
+        backend = MagicMock()
+        with pytest.raises(SnapshotError, match="changed while being read"):
+            _upload_changed_blobs(backend, base, {"a.md": info}, "dev", "pw", 1024)
+        backend.put.assert_not_called()
+
+    def test_upload_accepts_z_mtime_alias(self, tmp_path, monkeypatch):
+        base = tmp_path / "src"
+        base.mkdir()
+        path = base / "a.md"
+        path.write_text("ok")
+        rev = read_file_revision(path, max_file_size=1024, retain_bytes=True, base=base)
+        advertised = rev.mtime_iso.replace("+00:00", "Z")
+        info = {"sha256": rev.digest, "size": rev.size, "mtime": advertised}
+        backend = MagicMock()
+        monkeypatch.setattr("mind_meld.cli.encrypt", lambda *a, **kw: b"enc")
+        transferred = _upload_changed_blobs(backend, base, {"a.md": info}, "dev", "pw", 1024)
+        backend.put.assert_called_once()
+        assert transferred == len(b"enc")
+
+    def test_upload_refuses_grok_hardlink_replacement(self, tmp_path):
+        base = tmp_path / ".grok"
+        skills = base / "skills"
+        skills.mkdir(parents=True)
+        path = skills / "SKILL.md"
+        path.write_text("ok")
+        rev = read_file_revision(
+            path,
+            max_file_size=1024,
+            retain_bytes=True,
+            source_type="grok",
+            base=base,
+        )
+        os.link(path, skills / "alias.md")
+        info = {"sha256": rev.digest, "size": rev.size, "mtime": rev.mtime_iso}
+        backend = MagicMock()
+        with pytest.raises(SnapshotError, match="no longer a confined regular file"):
+            _upload_changed_blobs(
+                backend,
+                base,
+                {"skills/SKILL.md": info},
+                "dev",
+                "pw",
+                1024,
+                source_type="grok",
+            )
+        backend.put.assert_not_called()
+
+    def test_prior_grok_missing_root_refuses(self, tmp_path):
+        missing = tmp_path / "gone-grok"
+        grok_cfg = {"name": "grok", "path": str(missing), "type": "grok"}
+        resolution = SourceResolution(selected=[grok_cfg], available=[])
+        remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
+        with pytest.raises(SnapshotError, match="source grok"):
+            _include_prior_grok_if_needed(
+                {"sync": {}},
+                resolution,
+                remote,
+                [],
+                {"sources": {}},
+                "dev",
+                "A",
+                1024,
+                None,
+            )
+
+    def test_prior_grok_empty_customization_dirs_scans(self, tmp_path):
+        root = tmp_path / ".grok"
+        root.mkdir()
+        grok_cfg = {"name": "grok", "path": str(root), "type": "grok"}
+        resolution = SourceResolution(selected=[grok_cfg], available=[])
+        remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
+        sources, local = _include_prior_grok_if_needed(
+            {"sync": {}},
+            resolution,
+            remote,
+            [],
+            {"sources": {}},
+            "dev",
+            "A",
+            1024,
+            None,
+        )
+        assert any(src["name"] == "grok" for src in sources)
+        assert "grok" in local["sources"]
+        assert local["sources"]["grok"]["files"] == {}
+
+    def test_explicit_config_does_not_reinject_retired_grok(self, tmp_path):
+        root = tmp_path / ".grok"
+        root.mkdir()
+        (root / "skills").mkdir()
+        (root / "skills" / "a.md").write_text("x")
+        resolution = SourceResolution(selected=[], available=[], explicit=True)
+        remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
+        sources, local = _include_prior_grok_if_needed(
+            {"sync": {"sources": []}},
+            resolution,
+            remote,
+            [],
+            {"sources": {}},
+            "dev",
+            "A",
+            1024,
+            None,
+        )
+        assert sources == []
+        assert "grok" not in local["sources"]
+
+    def test_legacy_prior_default_source_stays_selected(self):
+        resolution = SourceResolution(
+            selected=[{"name": "claude", "path": "/tmp/claude", "type": "claude"}],
+            available=[{"name": "claude", "path": "/tmp/claude", "type": "claude"}],
+            explicit=False,
+        )
+        remote = {"sources": {"claude": {"files": {}}, "gstack": {"files": {"a.md": {}}}}}
+        out = _retain_prior_default_sources(resolution, remote, {"sync": {}})
+        assert any(src["name"] == "gstack" for src in out.selected)
+        explicit = SourceResolution(
+            selected=[{"name": "claude", "path": "/tmp/claude", "type": "claude"}],
+            available=[{"name": "claude", "path": "/tmp/claude", "type": "claude"}],
+            explicit=True,
+        )
+        kept = _retain_prior_default_sources(explicit, remote, {"sync": {}})
+        assert not any(src["name"] == "gstack" for src in kept.selected)
+
+    def test_omission_proof_skips_walker_excluded_grok_path(self, tmp_path):
+        root = tmp_path / ".grok"
+        generated = root / "skills" / "gstack-foo"
+        generated.mkdir(parents=True)
+        (generated / "SKILL.md").write_text("generated")
+        prior = {
+            "sources": {
+                "grok": {
+                    "files": {"skills/gstack-foo/SKILL.md": {"sha256": "a" * 64}},
+                }
+            }
+        }
+        _prove_omitted_paths_absent(
+            {"sources": {"grok": {"files": {}}}},
+            prior,
+            [{"name": "grok", "path": str(root), "type": "grok"}],
+            max_file_size=1024,
+        )
+
+    def test_omission_proof_eloop_refuses(self, tmp_path, monkeypatch):
+        root = tmp_path / "src"
+        root.mkdir()
+        (root / "a.md").write_text("x")
+        real_lstat = Path.lstat
+
+        def boom(self):
+            if self == root / "a.md":
+                err = OSError("loop")
+                err.errno = errno.ELOOP
+                raise err
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", boom)
+        prior = {"sources": {"gstack": {"files": {"a.md": {"sha256": "a" * 64}}}}}
+        with pytest.raises(SnapshotError, match="could not be read"):
+            _prove_omitted_paths_absent(
+                {"sources": {"gstack": {"files": {}}}},
+                prior,
+                [{"name": "gstack", "path": str(root)}],
+                max_file_size=1024,
+            )

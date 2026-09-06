@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import errno
 import fcntl
 import fnmatch
 import hashlib
@@ -16,6 +17,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -61,11 +63,13 @@ from mind_meld.config import (
     DEFAULT_SOURCES,
     DEFAULT_STORAGE_PATH,
     MM_INTERNAL_SOURCE_NAMES,
+    SourceResolution,
     get_default_source,
     get_sources,
     grok_host_usage_enabled,
     load_config,
     patch_config_on_disk,
+    resolve_sources,
     save_config,
 )
 from mind_meld.conflictdiff import (
@@ -106,21 +110,27 @@ from mind_meld.devices import (
     update_last_seen,
 )
 from mind_meld.errors import (
+    SNAPSHOT_FAILURES_URL,
     ConfigError,
     CryptoError,
     LockError,
     ManifestError,
     MindMeldError,
+    SnapshotError,
     StorageError,
+    os_error_cause,
+    snapshot_refusal,
 )
 from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
     CONFLICT_V1_MARKER,
+    GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
     DiffResult,
     _under_skip_prefix,
+    _validate_rel_path,
     build_manifest_v2,
     collect_tombstones,
     deserialize_manifest,
@@ -136,9 +146,13 @@ from mind_meld.manifest import (
     mtime_from_path,
     parse_conflict_created_at,
     parse_conflict_device_short,
-    read_and_hash,
+    path_has_descendant_symlink,
+    read_file_revision,
     serialize_manifest,
     walk_source,
+)
+from mind_meld.manifest import (
+    _FileTooLarge as _ManifestFileTooLarge,
 )
 from mind_meld.manifest import (
     _is_excluded as _manifest_is_excluded,
@@ -577,10 +591,10 @@ def _fetch_remote_manifest(
     # INVARIANT (load-bearing): files are merged as a UNION across conflict
     # copies (see _merge_manifests). Tombstones are newest-timestamp-wins.
     # The asymmetry is correct because the manifest walker is LOSSY — it
-    # drops files on permission errors, size-exceeded, and read failures
-    # (manifest.py:walk_claude_source, walk_generic_source). A file missing
-    # from the newer conflict copy is NOT causal evidence of deletion; only
-    # an explicit tombstone is. Swapping files to newest-wins would silently
+    # Diagnostic walkers drop files on permission errors, size-exceeded, and
+    # read failures; publishing scans refuse those paths instead. A file
+    # missing from the newer conflict copy is NOT causal evidence of deletion;
+    # only an explicit tombstone is. Swapping files to newest-wins would silently
     # resurrect-via-erase any file that happened to be locked/unreadable
     # during one scan but not another. The correctness guarantee is:
     # union-for-files + newest-wins-for-tombstones + is_tombstoned() gate
@@ -590,6 +604,9 @@ def _fetch_remote_manifest(
 
 def _build_exclude_map(
     config: dict,
+    sources: list[dict[str, Any]] | None = None,
+    *,
+    strict: bool = False,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """Map source name -> exclude_patterns and marker-skip prefixes.
 
@@ -598,12 +615,18 @@ def _build_exclude_map(
     boundary filter can prefix-match rather than fnmatch. Without that
     merge, a walker-only skip would emit deletion tombstones for
     previously-synced generated files.
+
+    Publishing supplies the already-resolved source list and strict mode
+    so this helper does not re-enter a permissive ``get_sources``.
     """
     out: dict[str, list[str]] = {}
     prefixes: dict[str, list[str]] = {}
-    for src in get_sources(config):
+    resolved = sources if sources is not None else get_sources(config)
+    for src in resolved:
         patterns = list(src.get("exclude_patterns") or [])
-        prefs = marker_skip_globs(src)
+        if src.get("type") == "grok":
+            patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
+        prefs = marker_skip_globs(src, strict=strict)
         if patterns:
             out[src["name"]] = patterns
         if prefs:
@@ -702,45 +725,58 @@ def _filter_excluded_paths(
     return out
 
 
-def _has_symlinked_component(path: Path, base_path: Path) -> bool:
+def _has_symlinked_component(
+    path: Path,
+    base_path: Path,
+    *,
+    strict: bool = False,
+    source_name: str | None = None,
+) -> bool:
     """Whether ``path`` traverses a symlink below its source root.
 
     A symlinked source root is legitimate: it is the user's chosen location
     for the whole source. Any link below that root is local routing and must
     neither be published nor followed while applying a peer's bytes.
     """
-    try:
-        relative = path.relative_to(base_path)
-    except ValueError:
-        return True
-
-    component = base_path
-    for part in relative.parts:
-        component /= part
-        if component.is_symlink():
-            return True
-    return False
+    return path_has_descendant_symlink(path, base_path, strict=strict, source_name=source_name)
 
 
-def _filter_symlinked_paths(manifest: dict, sources: list[dict[str, Any]]) -> dict:
+def _filter_symlinked_paths(
+    manifest: dict,
+    sources: list[dict[str, Any]],
+    *,
+    strict: bool = False,
+) -> dict:
     """Remove locally-symlinked paths from a prior manifest before tombstones.
 
-    ``walk_generic_source`` deliberately omits symlinks. Filtering the prior
+    Walkers deliberately omit descendant symlinks. Filtering the prior
     manifest at this consumer boundary prevents that omission from minting a
     fleet-wide deletion tombstone, including for pre-migration explicit source
     configurations that do not yet carry the new default exclude globs.
+    Applies to Claude, generic, and Grok sources.
     """
     source_roots = {
         source["name"]: Path(source["path"]).expanduser()
         for source in sources
-        if source.get("type") == "generic" and source.get("name") and source.get("path")
+        if source.get("name") and source.get("path")
     }
     if not source_roots:
         return manifest
 
     def _symlinked(source_name: str, rel_path: str) -> bool:
         base_path = source_roots.get(source_name)
-        return base_path is not None and _has_symlinked_component(base_path / rel_path, base_path)
+        if base_path is None:
+            return False
+        try:
+            _validate_rel_path(rel_path, where=f"{source_name}:{rel_path}")
+        except ManifestError:
+            return False
+        return _has_symlinked_component(
+            base_path / rel_path,
+            base_path,
+            strict=strict,
+            source_name=source_name,
+        )
 
     out = dict(manifest)
     out["sources"] = {
@@ -763,13 +799,31 @@ def _filter_symlinked_paths(manifest: dict, sources: list[dict[str, Any]]) -> di
     return out
 
 
+def _filter_unselected_sources(manifest: dict, selected: set[str] | list[str]) -> dict:
+    """Drop unselected source file entries; preserve existing tombstones.
+
+    Asymmetric, matching ``_filter_disabled_sources``: retired or unselected
+    source files must not generate deletion tombstones, and established
+    unexpired tombstones stay.
+    """
+    selected_set = set(selected)
+    current = manifest.get("sources", {})
+    if not current or all(name in selected_set for name in current):
+        return manifest
+    out = dict(manifest)
+    out["sources"] = {name: data for name, data in current.items() if name in selected_set}
+    return out
+
+
 def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     """Return a shallow copy of `manifest` with disabled-source entries stripped.
 
     Drops `sources.<name>` entries whose source name is in `disabled`.
     Empty `disabled` returns `manifest` unchanged (load-bearing for hot paths).
 
-    Apply at the CONSUMER boundary (`_pull_core`, `_push_core`), NOT inside
+    Apply at the CONSUMER boundary (`_pull_core`). Push uses
+    `_filter_unselected_sources` for the same asymmetric contract (drop
+    unselected source files, keep tombstones). Do not apply inside
     `_fetch_remote_manifest`. Same hazard as `_filter_excluded_paths`:
     `mm gc` reads raw manifests via that path to compute referenced blobs,
     and a filtered manifest there would mark live peer blobs as orphans.
@@ -811,6 +865,238 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     # the asymmetric-filter rationale in the docstring above.
 
     return out
+
+
+def _prove_omitted_paths_absent(
+    local_manifest: dict,
+    prior_manifest: dict | None,
+    sources: list[dict[str, Any]],
+    *,
+    max_file_size: int,
+) -> None:
+    """Refuse if an omitted prior path is still present or its root is unreadable.
+
+    ``generate_tombstones`` stays a pure comparison. This bounded probe uses
+    the trusted local source map only — never a recovered ``base_path``.
+    ENOENT/ENOTDIR below an accessible root is genuine absence. A still-
+    present regular file omitted by cap/dedup is a snapshot refusal.
+    """
+    if prior_manifest is None:
+        return
+    source_map = {source["name"]: source for source in sources if source.get("name")}
+    local_sources = local_manifest.get("sources", {})
+    for src_name, remote_src in prior_manifest.get("sources", {}).items():
+        src_cfg = source_map.get(src_name)
+        if src_cfg is None or not src_cfg.get("path"):
+            continue
+        base = Path(src_cfg["path"]).expanduser()
+        try:
+            base.stat()
+        except FileNotFoundError as e:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=src_name,
+                    problem="is missing after it was previously published",
+                    cause=os_error_cause(e),
+                    next_action=(
+                        "Restore the source folder, or run "
+                        f"'mm disable-source {src_name}' if it should stop syncing."
+                    ),
+                )
+            ) from e
+        except OSError as e:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=src_name,
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action=(
+                        "Restore read access, or run "
+                        f"'mm disable-source {src_name}' if it should stop syncing."
+                    ),
+                )
+            ) from e
+        local_files = local_sources.get(src_name, {}).get("files", {})
+        for rel_path in remote_src.get("files", {}):
+            if rel_path in local_files:
+                continue
+            try:
+                _validate_rel_path(rel_path, where=f"{src_name}:{rel_path}")
+            except ManifestError:
+                continue
+            extra = list(src_cfg.get("exclude_patterns") or [])
+            if src_cfg.get("type") == "grok":
+                extra = [*GROK_EXCLUDE_PATTERNS, *extra]
+            if _manifest_is_excluded(rel_path, extra):
+                continue
+            path = base / rel_path
+            try:
+                st = path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                if e.errno == errno.ENOTDIR:
+                    continue
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=src_name,
+                        rel_path=rel_path,
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if st.st_size > max_file_size:
+                size_mb = st.st_size / (1024 * 1024)
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=src_name,
+                        rel_path=rel_path,
+                        problem=(f"is still present but exceeds max_file_size ({size_mb:.1f}MB)"),
+                        next_action=(
+                            "Raise sync.max_file_size in config.toml or add a "
+                            "precise exclude_patterns glob under this source, then run mm push."
+                        ),
+                    )
+                )
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=src_name,
+                    rel_path=rel_path,
+                    problem="is still present but was omitted from the snapshot",
+                    next_action=(
+                        "Remove the extra hard-link alias or restore a unique "
+                        "path, then run mm push."
+                    ),
+                )
+            )
+
+
+def _retain_prior_default_sources(
+    resolution: SourceResolution,
+    remote_manifest: dict | None,
+    config: dict,
+) -> SourceResolution:
+    """Keep previously published default sources selected on legacy configs.
+
+    Auto-detect only appends gstack/codex/gstack-extend when the root is
+    present. If a prior snapshot advertised one of those names and the
+    root is now missing, selection would otherwise look like retirement.
+    Explicit ``sync.sources`` stays user-curated.
+    """
+    if resolution.explicit or remote_manifest is None:
+        return resolution
+    disabled = set(config.get("sync", {}).get("disabled_sources") or [])
+    selected = list(resolution.selected)
+    selected_names = {src["name"] for src in selected}
+    extra = False
+    for name in remote_manifest.get("sources", {}):
+        if name in selected_names or name in disabled:
+            continue
+        default = get_default_source(name)
+        if default is None:
+            continue
+        selected.append({**default, "path": str(Path(default["path"]).expanduser())})
+        selected_names.add(name)
+        extra = True
+    if not extra:
+        return resolution
+    return SourceResolution(
+        selected=selected,
+        available=list(resolution.available),
+        explicit=False,
+    )
+
+
+def _include_prior_grok_if_needed(
+    config: dict,
+    resolution: SourceResolution,
+    remote_manifest: dict | None,
+    sources: list[dict[str, Any]],
+    local_manifest: dict,
+    device_id: str,
+    device_name: str,
+    max_file_size: int,
+    on_skip: Any,
+) -> tuple[list[dict[str, Any]], dict]:
+    """Scan a previously published Grok source whose customization dirs are gone."""
+    if remote_manifest is None or "grok" not in remote_manifest.get("sources", {}):
+        return sources, local_manifest
+    disabled = set(config.get("sync", {}).get("disabled_sources") or [])
+    if "grok" in disabled or any(src["name"] == "grok" for src in sources):
+        return sources, local_manifest
+    grok_cfg = next((src for src in resolution.selected if src["name"] == "grok"), None)
+    if grok_cfg is None:
+        if resolution.explicit:
+            return sources, local_manifest
+        grok_cfg = get_default_source("grok")
+        if grok_cfg is None:
+            return sources, local_manifest
+        grok_cfg = {**grok_cfg, "path": str(Path(grok_cfg["path"]).expanduser())}
+    root = Path(grok_cfg["path"]).expanduser()
+    try:
+        root.stat()
+    except FileNotFoundError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source="grok",
+                problem="is missing after it was previously published",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore the source folder, or run "
+                    "'mm disable-source grok' if it should stop syncing."
+                ),
+            )
+        ) from e
+    except OSError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source="grok",
+                problem="could not be read",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore read access, or run "
+                    "'mm disable-source grok' if it should stop syncing."
+                ),
+            )
+        ) from e
+    sources = [*sources, grok_cfg]
+    grok_manifest = build_manifest_v2(
+        device_id, device_name, [grok_cfg], max_file_size, on_skip, strict=True
+    )
+    local_manifest["sources"].update(grok_manifest["sources"])
+    return sources, local_manifest
+
+
+def _refuse_unavailable_selected_sources(
+    resolution: SourceResolution,
+    remote_manifest: dict | None,
+    available: list[dict[str, Any]],
+) -> None:
+    """Refuse a still-selected previously populated root that is unavailable."""
+    available_names = {src["name"] for src in available}
+    prior_sources = (remote_manifest or {}).get("sources", {})
+    for src in resolution.selected:
+        name = src["name"]
+        if name in available_names:
+            continue
+        prior_files = prior_sources.get(name, {}).get("files") or {}
+        if not prior_files:
+            continue
+        raise SnapshotError(
+            snapshot_refusal(
+                source=name,
+                problem="is missing after it was previously published",
+                next_action=(
+                    "Restore the source folder, or run "
+                    f"'mm disable-source {name}' if it should stop syncing."
+                ),
+            )
+        )
 
 
 def _detect_case_insensitive_fs(path: Path) -> bool:
@@ -1217,27 +1503,69 @@ def _upload_changed_blobs(
     memory_kb: int,
     verbose: bool = False,
     src_name: str | None = None,
+    *,
+    source_type: str = "claude",
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE,
 ) -> int:
     """Upload changed blobs to storage.
 
-    Reads and hashes each file atomically with read_and_hash to avoid
-    TOCTOU races. Returns total encrypted bytes transferred.
+    Verifies the upload revision against the scanned digest, size, and
+    mtime before any encryption or ``backend.put``. Missing or changed
+    input aborts the whole publication. Returns total encrypted bytes
+    transferred.
 
     `src_name` (when provided) drives `pullhistory.append` so the history
     log records one "uploaded" entry per file. Optional so legacy/test
     callers without source context still work; production push paths
-    always pass it.
+    always pass it. Source type and cap come from trusted local config,
+    never from a source name string.
     """
     bytes_transferred = 0
     for rel_path, info in to_upload.items():
         file_path = base_path / rel_path
-        if not file_path.exists():
-            if verbose:
-                console.print(f"  [dim]skipped (missing): {safe_str(rel_path)}[/dim]")
-            continue
+        try:
+            revision = read_file_revision(
+                file_path,
+                max_file_size=max_file_size,
+                retain_bytes=True,
+                source_name=src_name,
+                source_type=source_type,
+                base=base_path,
+            )
+        except _ManifestFileTooLarge as e:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=src_name,
+                    rel_path=rel_path,
+                    problem="changed while being read",
+                    next_action="Wait for the writer to finish, then run mm push.",
+                )
+            ) from e
+        assert revision.data is not None
+        advertised_sha = info.get("sha256")
+        advertised_size = info.get("size")
+        advertised_mtime = info.get("mtime")
+        mtime_ok = isinstance(advertised_mtime, str) and (
+            revision.mtime_iso == advertised_mtime
+            or _upload_mtime_matches(revision.mtime_iso, advertised_mtime)
+        )
+        if (
+            revision.digest != advertised_sha
+            or revision.size != advertised_size
+            or len(revision.data) != advertised_size
+            or hashlib.sha256(revision.data).hexdigest() != advertised_sha
+            or not mtime_ok
+        ):
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=src_name,
+                    rel_path=rel_path,
+                    problem="changed while being read",
+                    next_action="Wait for the writer to finish, then run mm push.",
+                )
+            )
 
-        data, _sha = read_and_hash(file_path)
-        enc_data = encrypt(data, passphrase, memory_kb)
+        enc_data = encrypt(revision.data, passphrase, memory_kb)
         bkey = blob_key(device_id, info["sha256"])
         backend.put(bkey, enc_data)
         bytes_transferred += len(enc_data)
@@ -1256,6 +1584,13 @@ def _upload_changed_blobs(
             console.print(f"  [green]\u2191[/green] {safe_str(rel_path)}")
 
     return bytes_transferred
+
+
+def _upload_mtime_matches(accepted_iso: str, advertised: str) -> bool:
+    try:
+        return mtime_from_manifest(accepted_iso) == mtime_from_manifest(advertised)
+    except (TypeError, ValueError):
+        return False
 
 
 _CONFLICT_NAME_RANDOM_ATTEMPTS = 5
@@ -2197,6 +2532,19 @@ def _download_and_apply(
                 _advance()
                 continue
 
+            advertised = info.get("sha256")
+            actual = hashlib.sha256(plain_data).hexdigest()
+            if not isinstance(advertised, str) or actual != advertised:
+                if not quiet:
+                    console.print(
+                        f"  [red]content check failed:[/red] {safe_str(rel_path)} "
+                        "does not match the sending snapshot. Local file kept. "
+                        f"see {SNAPSHOT_FAILURES_URL}."
+                    )
+                outcomes["failed"].append(rel_path)
+                _advance()
+                continue
+
             outcome = _apply_incoming_file(
                 local_path=local_path,
                 rel_path=rel_path,
@@ -2865,9 +3213,23 @@ def init() -> None:
 @app.command()
 def push(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would change"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Preview the strict scan and deletion proof without publishing "
+            "blobs or a manifest. Setup may still prompt migration, persist a "
+            "missing crypto fingerprint, or bootstrap mm-events."
+        ),
+    ),
 ) -> None:
-    """Push local session data to storage."""
+    """Push selected agent context to storage.
+
+    Publishes only after a complete scan of configured sources. Each
+    advertised digest, size, and mtime describes one accepted file
+    revision. An unreadable selected file refuses the whole push and
+    keeps the previous snapshot.
+    """
     config = _get_config()
     _maybe_prompt_migration(config)
     # Re-load in case the migration prompt mutated config on disk so the
@@ -2886,7 +3248,10 @@ def push(
             memory_kb = _init_crypto_session(backend, passphrase, config)
         except MindMeldError as e:
             _error(str(e))
-        result = _push_core(config, passphrase, memory_kb, verbose, dry_run)
+        try:
+            result = _push_core(config, passphrase, memory_kb, verbose, dry_run)
+        except SnapshotError as e:
+            _error(str(e))
 
         # Auto GC on interactive push only (not autopush).
         # Catch only unexpected failures — let typer.Exit (from _do_gc's
@@ -3053,10 +3418,13 @@ def _push_core(
     dry_run: bool = False,
     quiet: bool = False,
 ) -> PushResult | None:
-    """Core push logic shared by push and autopush.
+    """Core push logic shared by push, autopush, and recapture.
 
     When quiet=True, suppresses all rich console output (for autopush).
     Returns PushResult on success, None if nothing to push or dry_run.
+    Incomplete scans raise ``SnapshotError``; callers must catch it
+    (interactive push and recapture via ``_error``, autopush via
+    ``_auto_command_scope``).
     """
     start = time.time()
     device_id = config["device"]["id"]
@@ -3070,7 +3438,8 @@ def _push_core(
     # so consent is known before the gate runs (Track 25C). The hook itself
     # stays AFTER _ensure_device_registered and BEFORE _run_events_tail.
     # The mm-events bootstrap mkdir moves a few lines earlier.
-    sources = get_sources(config)
+    resolution = resolve_sources(config, strict=True)
+    sources = list(resolution.available)
     may_create = skill_link.consented_agent_keys(config, sources)
 
     # Group 8 / Track 8A retro-fleet skill self-heal. Position locked in
@@ -3103,7 +3472,7 @@ def _push_core(
                 f"mm: notice: retro-fleet skill installation failed: "
                 f"{type(e).__name__}: {safe_str(e)}"
             )
-    if not sources:
+    if not resolution.selected:
         msg = "no sync sources found. Run 'mm init' to configure."
         if quiet:
             # Load-bearing: a misconfigured sources list silently no-ops every
@@ -3132,7 +3501,9 @@ def _push_core(
     # because no-op pushes don't advance it (see events.py).
     if not quiet:
         console.print("[bold]Building manifest...[/bold]")
-    local_manifest = build_manifest_v2(device_id, device_name, sources, max_file_size, on_skip)
+    local_manifest = build_manifest_v2(
+        device_id, device_name, sources, max_file_size, on_skip, strict=True
+    )
 
     total_file_count = sum(
         len(src_data["files"]) for src_data in local_manifest["sources"].values()
@@ -3151,10 +3522,33 @@ def _push_core(
     remote_manifest = _recover_prior_manifest(
         fetch, backend, device_id, passphrase, memory_kb, quiet=quiet
     )
+    advertised_prior_sources = set((remote_manifest or {}).get("sources", {}))
+    resolution = _retain_prior_default_sources(resolution, remote_manifest, config)
+    sources, local_manifest = _include_prior_grok_if_needed(
+        config,
+        resolution,
+        remote_manifest,
+        sources,
+        local_manifest,
+        device_id,
+        device_name,
+        max_file_size,
+        on_skip,
+    )
+    intended_names = {src["name"] for src in resolution.selected}
+    intended_names.update(src["name"] for src in sources)
+    _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
+    if not sources:
+        msg = "no sync sources found. Run 'mm init' to configure."
+        if quiet:
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        return None
 
     # Consumer-boundary filters. Strip from prior_manifest BOTH (1) paths
     # the local config now excludes via per-source `exclude_patterns` and
-    # (2) entire sources the user has marked in [sync].disabled_sources.
+    # (2) entire sources no longer selected (disabled or retired).
     # Both filters apply to the ok-fetch path AND the recovery branches
     # (sidecar prior state, peer-tombstone aggregation).
     #
@@ -3167,15 +3561,17 @@ def _push_core(
     # propagating fleet-wide data loss. v0.10.0 source-toggle invariant;
     # mirror of (1)'s pattern. See docs/designs/source-toggle.md.
     #
-    # Order matters: disable first, then exclude. Disabling drops the
-    # whole source; excluding-then-filtering would walk a soon-to-be-
-    # dropped source's exclude_patterns for nothing.
-    exclude_map, skip_prefixes = _build_exclude_map(config)
-    disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
+    # Order matters: unselected first, then exclude. Dropping the
+    # whole source first avoids walking a soon-to-be-dropped source's
+    # exclude_patterns for nothing. Tombstones stay (asymmetric filter).
+    exclude_map, skip_prefixes = _build_exclude_map(config, sources, strict=True)
     if remote_manifest is not None:
-        remote_manifest = _filter_disabled_sources(remote_manifest, disabled_sources)
+        remote_manifest = _filter_unselected_sources(remote_manifest, intended_names)
         remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
-        remote_manifest = _filter_symlinked_paths(remote_manifest, sources)
+        remote_manifest = _filter_symlinked_paths(remote_manifest, sources, strict=True)
+        _prove_omitted_paths_absent(
+            local_manifest, remote_manifest, sources, max_file_size=max_file_size
+        )
 
     # Generate tombstones for files that disappeared since last push
     tombstones = generate_tombstones(local_manifest, remote_manifest, device_id)
@@ -3204,7 +3600,13 @@ def _push_core(
     has_mtime_only = (not has_substantive) and _has_mtime_only_changes_vs_remote(
         local_manifest, remote_sources
     )
-    if not has_substantive and not has_mtime_only and not recovering_from_corrupt:
+    has_selection_change = set(local_manifest["sources"]) != advertised_prior_sources
+    if (
+        not has_substantive
+        and not has_mtime_only
+        and not recovering_from_corrupt
+        and not has_selection_change
+    ):
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
         return None
@@ -3220,13 +3622,24 @@ def _push_core(
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
             events_manifest = build_manifest_v2(
-                device_id, device_name, mm_internal_cfgs, max_file_size
+                device_id,
+                device_name,
+                mm_internal_cfgs,
+                max_file_size,
+                on_skip,
+                strict=True,
             )
             local_manifest["sources"].update(events_manifest["sources"])
+            if remote_manifest is not None:
+                _prove_omitted_paths_absent(
+                    local_manifest, remote_manifest, sources, max_file_size=max_file_size
+                )
             # mm-events file count may have rolled (new daily file); regenerate.
             local_manifest["tombstones"] = generate_tombstones(
                 local_manifest, remote_manifest, device_id
             )
+
+    source_by_name = {src["name"]: src for src in sources}
 
     # Diff and upload per-source.
     total_bytes = 0
@@ -3245,6 +3658,7 @@ def _push_core(
 
         to_upload = {**diff.new, **diff.modified}
         base_path = Path(src_data["base_path"])
+        src_cfg = source_by_name.get(src_name, {})
 
         if verbose and not quiet:
             console.print(f"\n[bold]Uploading {len(to_upload)} files from '{src_name}'...[/bold]")
@@ -3258,6 +3672,8 @@ def _push_core(
             memory_kb,
             verbose=(verbose and not quiet),
             src_name=src_name,
+            source_type=src_cfg.get("type", "claude"),
+            max_file_size=max_file_size,
         )
         total_new += len(diff.new)
         total_modified += len(diff.modified)
@@ -3266,7 +3682,9 @@ def _push_core(
     if dry_run:
         if not quiet:
             elapsed = time.time() - start
-            if has_mtime_only and not (total_new or total_modified or total_deleted):
+            if has_selection_change and not (total_new or total_modified or total_deleted):
+                console.print("\n[bold]Would refresh manifest[/bold] (source selection changed).")
+            elif has_mtime_only and not (total_new or total_modified or total_deleted):
                 # Symmetric with the status command's metadata-only branch (v0.12.6).
                 # Without this, dry-run would print "Dry run complete" with zero
                 # per-source output and the user would miss that `mm push` would
@@ -3285,6 +3703,8 @@ def _push_core(
     if not quiet:
         if recovering_from_corrupt and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Rewriting manifest to heal remote corruption...[/bold]")
+        elif has_selection_change and not (total_new or total_modified or total_deleted):
+            console.print("\n[bold]Refreshing manifest (source selection changed)...[/bold]")
         elif has_mtime_only and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Refreshing manifest (metadata-only changes)...[/bold]")
         else:
@@ -6760,6 +7180,12 @@ def recapture(
 
         try:
             result = _push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)
+        except SnapshotError as e:
+            console.print(
+                "Recapture was written locally but not synced. "
+                "Fix the snapshot refusal below, then run 'mm push'."
+            )
+            _error(str(e))
         except typer.Exit:
             console.print(
                 "Recapture was written locally but not synced. "

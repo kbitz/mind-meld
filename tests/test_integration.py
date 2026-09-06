@@ -1,5 +1,6 @@
 """Integration tests for Mind Meld — full push/pull round-trips."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -153,12 +154,14 @@ class TestPushPullRoundTrip:
         save_config(config, config_path)
         self._activate(monkeypatch, config_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: home)
+        monkeypatch.setenv("HOME", str(home))
 
         assert runner.invoke(app, ["push"]).exit_code == 0
 
-        home = tmp_path / "home"
         (home / ".grok").mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(home))
         enabled = runner.invoke(app, ["enable-source", "grok"])
         assert enabled.exit_code == 0, enabled.output
         (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
@@ -4891,3 +4894,305 @@ class TestConflictOwnershipEncryptedPull:
         assert captured.out == ""
         assert "sidecar write failed" in captured.err
         assert "mm:" in captured.err
+
+
+class TestCompleteSnapshots:
+    """Track 49A: complete-or-refused publication and verified uploads."""
+
+    def _prepare(self, tmp_path, monkeypatch, *, extra_sources=None):
+        from mind_meld.storage.keys import device_key, manifest_key
+        from tests.conftest import MEMORY_KB, PASSPHRASE, _redirect_lock
+
+        storage_dir = tmp_path / "storage"
+        claude = tmp_path / ".claude"
+        memory = claude / "projects" / "-app" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "a.md").write_text("old bytes")
+        (memory / "b.md").write_text("old bytes")
+        config = {
+            "device": {"id": "dev-a", "name": "A"},
+            "storage": {"path": str(storage_dir)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude), "type": "claude"},
+                    *(extra_sources or []),
+                ],
+            },
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        _redirect_lock(monkeypatch, tmp_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        return {
+            "config": config,
+            "config_path": config_path,
+            "backend": backend,
+            "claude": claude,
+            "memory": memory,
+            "storage_dir": storage_dir,
+            "manifest_key": manifest_key("dev-a"),
+            "device_key": device_key("dev-a"),
+        }
+
+    def _push(self, extra_args=None):
+        result = runner.invoke(app, ["push", *(extra_args or [])])
+        return result
+
+    def _prior(self, env):
+        from mind_meld import sidecar as sidecar_mod
+
+        return (
+            env["backend"].get(env["manifest_key"]),
+            sidecar_mod.sidecar_path().read_bytes(),
+            env["backend"].get(env["device_key"]),
+        )
+
+    def _assert_prior_kept(self, env, prior, result):
+        assert result.exit_code != 0 or "Error" in (result.output + (result.stderr or ""))
+        assert env["backend"].get(env["manifest_key"]) == prior[0]
+        from mind_meld import sidecar as sidecar_mod
+
+        assert sidecar_mod.sidecar_path().read_bytes() == prior[1]
+        assert env["backend"].get(env["device_key"]) == prior[2]
+        assert "Push complete" not in result.output
+
+    def test_shared_hash_poison_is_refused_and_old_blob_kept(self, tmp_path, monkeypatch):
+        from mind_meld.crypto import decrypt
+        from mind_meld.storage.keys import blob_key
+
+        env = self._prepare(tmp_path, monkeypatch)
+        first = self._push()
+        assert first.exit_code == 0, first.output
+        prior = self._prior(env)
+        old_digest = hashlib.sha256(b"old bytes").hexdigest()
+        old_blob = env["backend"].get(blob_key("dev-a", old_digest))
+        real_upload = cli_module._upload_changed_blobs
+
+        def mutate_after_scan(*a, **kw):
+            (env["memory"] / "a.md").write_text("changed bytes")
+            return real_upload(*a, **kw)
+
+        monkeypatch.setattr(cli_module, "_upload_changed_blobs", mutate_after_scan)
+        (env["memory"] / "a.md").write_text("shared v2")
+        (env["memory"] / "b.md").write_text("shared v2")
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+        plain = decrypt(old_blob, "shared-cli-test-passphrase", 1024)
+        assert plain == b"old bytes"
+
+    def test_missing_upload_input_refuses(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        (env["memory"] / "c.md").write_text("new")
+
+        real_upload = cli_module._upload_changed_blobs
+
+        def drop_then_upload(*a, **kw):
+            (env["memory"] / "c.md").unlink()
+            return real_upload(*a, **kw)
+
+        monkeypatch.setattr(cli_module, "_upload_changed_blobs", drop_then_upload)
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+
+    def test_unreadable_existing_file_does_not_tombstone(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        target = env["memory"] / "a.md"
+        real_open = cli_module.manifest._open_nofollow_nonblock
+
+        def boom(path):
+            if Path(path) == target:
+                raise PermissionError("denied")
+            return real_open(path)
+
+        monkeypatch.setattr(cli_module.manifest, "_open_nofollow_nonblock", boom)
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+        from mind_meld.crypto import decrypt
+        from mind_meld.manifest import load_manifest
+
+        remote = load_manifest(decrypt(prior[0], "shared-cli-test-passphrase", 1024))
+        assert "claude:projects/-app/memory/a.md" not in remote.get("tombstones", {})
+
+    def test_source_selection_removal_publishes_without_removal_tombstones(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld.crypto import decrypt
+        from mind_meld.manifest import load_manifest
+        from tests.conftest import MEMORY_KB
+
+        extra = tmp_path / "notes"
+        extra.mkdir()
+        (extra / "keep.md").write_text("notes")
+        extra_src = {
+            "name": "notes",
+            "path": str(extra),
+            "type": "generic",
+            "include_files": ["keep.md"],
+        }
+        env = self._prepare(tmp_path, monkeypatch, extra_sources=[extra_src])
+        (env["memory"] / "gone.md").write_text("will delete")
+        assert self._push().exit_code == 0
+        (env["memory"] / "gone.md").unlink()
+        assert self._push().exit_code == 0
+        remote = load_manifest(
+            decrypt(env["backend"].get(env["manifest_key"]), "shared-cli-test-passphrase", 1024)
+        )
+        assert any(k.startswith("claude:") and k.endswith("gone.md") for k in remote["tombstones"])
+
+        env["config"]["sync"]["sources"] = [
+            {"name": "claude", "path": str(env["claude"]), "type": "claude"},
+        ]
+        save_config(env["config"], env["config_path"])
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        published = load_manifest(
+            decrypt(env["backend"].get(env["manifest_key"]), "shared-cli-test-passphrase", 1024)
+        )
+        assert "notes" not in published["sources"]
+        assert any(k.endswith("gone.md") for k in published["tombstones"])
+        assert not any(k.startswith("notes:") for k in published["tombstones"] if "keep.md" in k)
+        second = self._push()
+        assert second.exit_code == 0
+        assert "Nothing to push" in second.output or "up to date" in second.output
+        _ = MEMORY_KB
+
+    def test_dry_run_scan_failure_does_not_publish(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        target = env["memory"] / "a.md"
+        real_open = cli_module.manifest._open_nofollow_nonblock
+
+        def boom(path):
+            if Path(path) == target:
+                raise PermissionError("denied")
+            return real_open(path)
+
+        monkeypatch.setattr(cli_module.manifest, "_open_nofollow_nonblock", boom)
+        result = self._push(["--dry-run"])
+        self._assert_prior_kept(env, prior, result)
+
+    def test_retry_after_writer_settles(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        (env["memory"] / "a.md").write_text("new bytes")
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        from mind_meld.crypto import decrypt
+        from mind_meld.storage.keys import blob_key
+
+        digest = hashlib.sha256(b"new bytes").hexdigest()
+        plain = decrypt(
+            env["backend"].get(blob_key("dev-a", digest)),
+            "shared-cli-test-passphrase",
+            1024,
+        )
+        assert plain == b"new bytes"
+
+    def test_second_events_scan_failure_keeps_prior(self, tmp_path, monkeypatch):
+        events_root = tmp_path / "mm-events"
+        events_root.mkdir()
+        extra = {
+            "name": "mm-events",
+            "path": str(events_root),
+            "type": "generic",
+            "include_dirs": ["events"],
+        }
+        env = self._prepare(tmp_path, monkeypatch, extra_sources=[extra])
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        (env["memory"] / "a.md").write_text("changed")
+        calls = {"n": 0}
+        real_build = cli_module.build_manifest_v2
+
+        def flaky(*a, **kw):
+            calls["n"] += 1
+            cfgs = a[2] if len(a) > 2 else kw.get("sources_configs")
+            names = [s.get("name") for s in (cfgs or [])]
+            if "mm-events" in names and "claude" not in names:
+                raise cli_module.SnapshotError("second scan failed")
+            return real_build(*a, **kw)
+
+        monkeypatch.setattr(cli_module, "build_manifest_v2", flaky)
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+
+    def test_second_absence_proof_after_events_tail_keeps_prior(self, tmp_path, monkeypatch):
+        events_root = tmp_path / "mm-events"
+        events_root.mkdir()
+        extra = {
+            "name": "mm-events",
+            "path": str(events_root),
+            "type": "generic",
+            "include_dirs": ["events"],
+        }
+        env = self._prepare(tmp_path, monkeypatch, extra_sources=[extra])
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        (env["memory"] / "a.md").write_text("changed")
+        calls = {"n": 0}
+        real_prove = cli_module._prove_omitted_paths_absent
+
+        def flaky(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise cli_module.SnapshotError("second proof failed")
+            return real_prove(*a, **kw)
+
+        monkeypatch.setattr(cli_module, "_prove_omitted_paths_absent", flaky)
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+        assert calls["n"] >= 2
+
+    def test_missing_previously_populated_source_refuses_sibling(self, tmp_path, monkeypatch):
+        extra = tmp_path / "notes"
+        extra.mkdir()
+        (extra / "keep.md").write_text("notes")
+        extra_src = {
+            "name": "notes",
+            "path": str(extra),
+            "type": "generic",
+            "include_files": ["keep.md"],
+        }
+        env = self._prepare(tmp_path, monkeypatch, extra_sources=[extra_src])
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        shutil.rmtree(extra)
+        (env["memory"] / "a.md").write_text("sibling change")
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+        assert "notes" in (result.output + (result.stderr or ""))
+
+    def test_oversized_prior_file_refuses_instead_of_tombstone(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        (env["memory"] / "a.md").write_bytes(b"x" * 200)
+        env["config"]["sync"]["max_file_size"] = 50
+        save_config(env["config"], env["config_path"])
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+        assert "max_file_size" in (result.output + (result.stderr or ""))
+
+    def test_all_previously_populated_roots_missing_refuses_not_no_sources(
+        self, tmp_path, monkeypatch
+    ):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        prior = self._prior(env)
+        shutil.rmtree(env["claude"])
+        result = self._push()
+        self._assert_prior_kept(env, prior, result)
+        combined = (result.output + (result.stderr or "")).replace("\n", " ")
+        assert "missing after" in combined
+        assert "no sync sources found" not in combined

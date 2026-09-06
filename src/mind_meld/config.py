@@ -6,13 +6,15 @@ Reads and writes ~/.config/mind-meld/config.toml.
 from __future__ import annotations
 
 import copy
+import stat
 import sys
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from mind_meld import fsutil
-from mind_meld.errors import ConfigError
+from mind_meld.errors import ConfigError, SnapshotError, os_error_cause, snapshot_refusal
 from mind_meld.safety import strip_terminal_escapes
 
 CONFIG_DIR = Path.home() / ".config" / "mind-meld"
@@ -435,21 +437,41 @@ def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
             )
 
 
-def grok_customization_dirs_exist(root: Path) -> bool:
+def grok_customization_dirs_exist(
+    root: Path,
+    *,
+    strict: bool = False,
+    source_name: str = "grok",
+) -> bool:
     """True if any hardcoded Grok customization dir exists under ``root``.
 
     ``~/.grok`` itself exists on every Grok install (sessions + auth).
-    That is not a signal that there is anything to roam.
+    That is not a signal that there is anything to roam. Strict publishing
+    probes raise on permission/I/O errors instead of treating them as
+    absence.
     """
     from mind_meld.manifest import GROK_SYNCED_SUBDIRS
 
     for name in GROK_SYNCED_SUBDIRS:
         candidate = root / name
         try:
-            if candidate.is_dir() and not candidate.is_symlink():
-                return True
-        except OSError:
+            st = candidate.lstat()
+        except FileNotFoundError:
             continue
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=name,
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            continue
+        if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+            return True
     return False
 
 
@@ -483,25 +505,62 @@ def _resolve_source_path(value: str, *, label: str) -> str:
     return str(resolved)
 
 
-def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Resolve the list of sync sources from config.
+@dataclass(frozen=True)
+class SourceResolution:
+    """Configured selection versus currently walkable sources.
 
-    Priority:
-    1. config["sync"]["sources"] if present (explicit list)
-    2. config["sync"]["claude_dir"] wrapped as a single claude source
-    3. DEFAULT_SOURCES
-
-    Auto-detection: if a known agent directory exists on disk but its source
-    is absent from a legacy (non-explicit) config, append that default source.
-
-    Finally, filter to sources whose path actually exists on disk.
-
-    Raises ``ConfigError`` when an explicitly configured source path cannot
-    be resolved. Callers can then honor the normal typed-config-error path.
+    ``selected`` is the intended set after disabled-source filtering and
+    before availability. ``available`` is the subset whose root currently
+    exists. Publishing uses both; diagnostics only need ``available``.
     """
-    sync = config.get("sync", {})
 
+    selected: list[dict[str, Any]]
+    available: list[dict[str, Any]]
+    explicit: bool = False
+
+
+def _optional_host_present(path: Path) -> bool:
+    """Best-effort optional auto-detect probe. Never raises."""
+    try:
+        path.stat()
+        return True
+    except OSError:
+        return False
+
+
+def _source_path_available(path_str: str, *, strict: bool, source_name: str) -> bool:
+    """Probe a selected source root. Strict mode refuses permission/I/O errors."""
+    path = Path(path_str)
+    try:
+        path.stat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action=(
+                        "Restore the source folder, or run "
+                        f"'mm disable-source {source_name}' if it should stop syncing."
+                    ),
+                )
+            ) from e
+        return False
+
+
+def _configured_sources(
+    config: dict[str, Any], *, strict: bool
+) -> tuple[list[dict[str, Any]], bool]:
+    """Build configured/default/legacy candidates before bootstrap and exists."""
+    sync = config.get("sync", {})
+    disabled = set(sync.get("disabled_sources", []) or [])
     explicit_sources = "sources" in sync
+    grok_strict = strict and "grok" not in disabled
+
     if explicit_sources:
         sources = [
             {
@@ -509,6 +568,7 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
                 "path": _resolve_source_path(src["path"], label=f"source {src['name']!r}"),
             }
             for src in sync["sources"]
+            if src.get("name") not in disabled
         ]
     elif "claude_dir" in sync:
         sources = [
@@ -526,18 +586,28 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
         sources = [{**src, "path": str(Path(src["path"]).expanduser())} for src in DEFAULT_SOURCES]
         # ~/.grok exists on every Grok install. Only activate the default
         # grok source when a hardcoded customization dir is present.
+        # Skip the probe entirely when grok is disabled (S07).
         sources = [
             s
             for s in sources
-            if s.get("type") != "grok" or grok_customization_dirs_exist(Path(s["path"]))
+            if s.get("type") != "grok"
+            or s["name"] in disabled
+            or grok_customization_dirs_exist(Path(s["path"]), strict=grok_strict)
         ]
 
     # Auto-detect: append default gstack source if ~/.gstack exists but
     # no gstack source is already in the list.
     # Only auto-detect when NOT using explicit sync.sources config.
+    # Optional host detection stays best-effort and never inspects a
+    # disabled name just to establish strict health.
     gstack_path = Path.home() / ".gstack"
     has_gstack = any(s["name"] == "gstack" for s in sources)
-    if not explicit_sources and gstack_path.exists() and not has_gstack:
+    if (
+        not explicit_sources
+        and "gstack" not in disabled
+        and not has_gstack
+        and _optional_host_present(gstack_path)
+    ):
         default_gstack = next((s for s in DEFAULT_SOURCES if s["name"] == "gstack"), None)
         if default_gstack:
             # Same rationale as the DEFAULT_SOURCES branch above: walker resolves
@@ -553,7 +623,12 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     # Same auto-detect pattern for gstack-extend's per-project state slot.
     gstack_extend_path = Path.home() / ".gstack-extend"
     has_gstack_extend = any(s["name"] == "gstack-extend" for s in sources)
-    if not explicit_sources and gstack_extend_path.exists() and not has_gstack_extend:
+    if (
+        not explicit_sources
+        and "gstack-extend" not in disabled
+        and not has_gstack_extend
+        and _optional_host_present(gstack_extend_path)
+    ):
         default_gstack_extend = next(
             (s for s in DEFAULT_SOURCES if s["name"] == "gstack-extend"), None
         )
@@ -573,17 +648,30 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
             ("codex", Path.home() / ".codex"),
             ("grok", Path.home() / ".grok"),
         ):
+            if source_name in disabled or any(s["name"] == source_name for s in sources):
+                continue
             present = (
-                grok_customization_dirs_exist(source_path)
+                grok_customization_dirs_exist(source_path, strict=False)
                 if source_name == "grok"
-                else source_path.exists()
+                else _optional_host_present(source_path)
             )
-            if present and not any(s["name"] == source_name for s in sources):
+            if present:
                 default_source = get_default_source(source_name)
                 if default_source:
                     default_source["path"] = str(Path(default_source["path"]).expanduser())
                     sources.append(default_source)
 
+    return sources, explicit_sources
+
+
+def resolve_sources(config: dict[str, Any], *, strict: bool = False) -> SourceResolution:
+    """Resolve intended selection and currently available sources.
+
+    Diagnostic ``get_sources`` returns ``available``. Publishing uses the
+    full resolution so a missing previously populated root can refuse
+    before the no-sources shortcut.
+    """
+    sources, explicit = _configured_sources(config, strict=strict)
     _validate_sources(sources)
 
     # Per-machine disabled toggle (v0.10.0): drop sources whose name is
@@ -596,7 +684,7 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     # entries from prior_manifest / peer manifests respectively, before
     # tombstone computation, to prevent fleet-wide data loss on first
     # post-disable push. See cli.py and TestDisabledSourcesTombstoneSuppression.
-    disabled = sync.get("disabled_sources", []) or []
+    disabled = config.get("sync", {}).get("disabled_sources", []) or []
     if disabled:
         sources = [s for s in sources if s["name"] not in disabled]
 
@@ -617,13 +705,38 @@ def get_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     for src in sources:
         name = src.get("name")
         if name in MM_INTERNAL_SOURCE_NAMES and name in bootstrap_dispatch:
-            bootstrap_dispatch[name](src["path"])
+            bootstrap_dispatch[name](src["path"], strict=strict)
 
-    # Filter to sources whose path exists on disk
-    return [s for s in sources if Path(s["path"]).exists()]
+    available = [
+        s
+        for s in sources
+        if _source_path_available(s["path"], strict=strict, source_name=s["name"])
+    ]
+    return SourceResolution(selected=sources, available=available, explicit=explicit)
 
 
-def _bootstrap_mm_events_path(path: str) -> None:
+def get_sources(config: dict[str, Any], *, strict: bool = False) -> list[dict[str, Any]]:
+    """Resolve the list of sync sources from config.
+
+    Priority:
+    1. config["sync"]["sources"] if present (explicit list)
+    2. config["sync"]["claude_dir"] wrapped as a single claude source
+    3. DEFAULT_SOURCES
+
+    Auto-detection: if a known agent directory exists on disk but its source
+    is absent from a legacy (non-explicit) config, append that default source.
+
+    Finally, filter to sources whose path actually exists on disk.
+
+    Raises ``ConfigError`` when an explicitly configured source path cannot
+    be resolved. Callers can then honor the normal typed-config-error path.
+    Strict publishing raises ``SnapshotError`` on selected-source probe
+    failures instead of silently dropping them.
+    """
+    return resolve_sources(config, strict=strict).available
+
+
+def _bootstrap_mm_events_path(path: str, *, strict: bool = False) -> None:
     """Best-effort mkdir for the mm-events source base path.
 
     Idempotent — `exist_ok=True` makes re-call a no-op. Failure (permission
@@ -636,16 +749,45 @@ def _bootstrap_mm_events_path(path: str) -> None:
     breadcrumb on the first read-only command in a process, then silence
     for the ~10 subsequent `get_sources()` call sites. Visible-failure
     contract is preserved (monitoring catches the first occurrence).
+    Strict publishing ignores the warn-once cache and raises SnapshotError.
     """
     p = Path(path).expanduser()
-    if p.exists():
+    try:
+        p.stat()
         return
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source="mm-events",
+                    problem="could not be created",
+                    cause=os_error_cause(e),
+                    next_action=(
+                        "Restore write access to the mm-events directory, then run mm push."
+                    ),
+                )
+            ) from e
+        # Fall through to mkdir; a permission error on stat may still be a
+        # missing directory we can create, or mkdir will fail the same way.
     path_key = str(p)
-    if path_key in _BOOTSTRAP_WARNED_PATHS:
+    if not strict and path_key in _BOOTSTRAP_WARNED_PATHS:
         return
     try:
         p.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source="mm-events",
+                    problem="could not be created",
+                    cause=os_error_cause(e),
+                    next_action=(
+                        "Restore write access to the mm-events directory, then run mm push."
+                    ),
+                )
+            ) from e
         _BOOTSTRAP_WARNED_PATHS.add(path_key)
         sys.stderr.write(
             "mm: warning: could not create mm-events source dir "

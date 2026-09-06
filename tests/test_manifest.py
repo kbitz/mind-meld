@@ -1,13 +1,15 @@
 """Tests for mind_meld.manifest — walking, hashing, diffing."""
 
+import errno
 import hashlib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from mind_meld.errors import ManifestError
+from mind_meld.errors import ManifestError, SnapshotError
 from mind_meld.manifest import (
     CONFLICT_PATTERN,
     MARKER_SKIP_NAME,
@@ -30,6 +32,7 @@ from mind_meld.manifest import (
     parse_conflict_created_at,
     parse_conflict_device_short,
     read_and_hash,
+    read_file_revision,
     serialize_manifest,
     walk_claude_source,
     walk_generic_source,
@@ -1159,6 +1162,56 @@ class TestMarkerSkipGlobs:
         }
         assert marker_skip_globs(cfg) == ["skills/new-skill"]
 
+    def test_permissive_marker_scan_skips_unreadable_sibling(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        base = tmp_path / "codex"
+        marked = base / "skills" / "new-skill"
+        marked.mkdir(parents=True)
+        (marked / MARKER_SKIP_NAME).write_text("gstack-extend")
+        bad = base / "skills" / "blocked"
+        bad.mkdir()
+        real_scandir = os.scandir
+
+        def boom(path):
+            if Path(path) == bad:
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", boom)
+        cfg = {
+            "name": "codex",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["skills"],
+        }
+        assert marker_skip_globs(cfg) == ["skills/new-skill"]
+
+    def test_marked_dir_children_are_not_enumerated(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        base = tmp_path / "codex"
+        marked = base / "skills" / "new-skill"
+        private = marked / "private"
+        private.mkdir(parents=True)
+        (marked / MARKER_SKIP_NAME).write_text("gstack-extend")
+        scanned = []
+        real_scandir = os.scandir
+
+        def tracking(path):
+            scanned.append(Path(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", tracking)
+        cfg = {
+            "name": "codex",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["skills"],
+        }
+        assert marker_skip_globs(cfg, strict=True) == ["skills/new-skill"]
+        assert private not in scanned
+
     def test_walker_skips_marked_dir_keeps_unmarked(self, tmp_path: Path):
         base = tmp_path / "codex"
         marked = base / "skills" / "new-skill"
@@ -1857,3 +1910,496 @@ class TestGenerateTombstonesContract:
         }
         result = generate_tombstones(local_manifest, prior, "this-device")
         assert not any(key.startswith("grok:") for key in result)
+
+
+class TestFileRevision:
+    def test_stable_descriptor_empty_and_binary(self, tmp_path):
+        empty = tmp_path / "empty.bin"
+        empty.write_bytes(b"")
+        binary = tmp_path / "bin.dat"
+        binary.write_bytes(b"\x00\xff\xfe hello")
+        for path in (empty, binary):
+            rev = read_file_revision(
+                path, max_file_size=1_000_000, retain_bytes=True, base=tmp_path
+            )
+            data = path.read_bytes()
+            assert rev.data == data
+            assert rev.digest == hashlib.sha256(data).hexdigest()
+            assert rev.size == len(data)
+            assert "T" in rev.mtime_iso
+
+    def test_same_size_content_mutation_refuses(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "a.md"
+        path.write_text("aaaa")
+        real_fstat = os.fstat
+        calls = {"n": 0}
+
+        def mutating_fstat(fd):
+            st = real_fstat(fd)
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                return os.stat_result(
+                    (
+                        st.st_mode,
+                        st.st_ino,
+                        st.st_dev,
+                        st.st_nlink,
+                        st.st_uid,
+                        st.st_gid,
+                        st.st_size,
+                        st.st_atime,
+                        st.st_mtime,
+                        st.st_ctime,
+                        st.st_atime_ns,
+                        st.st_mtime_ns + 1,
+                        st.st_ctime_ns,
+                    )
+                )
+            return st
+
+        monkeypatch.setattr(m.os, "fstat", mutating_fstat)
+        with pytest.raises(SnapshotError, match="changed while being read"):
+            read_file_revision(path, max_file_size=1_000_000, retain_bytes=True, base=tmp_path)
+
+    def test_short_read_refuses_when_size_unchanged(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "a.md"
+        path.write_text("hello")
+        real_read = os.read
+        state = {"n": 0}
+
+        def short_read(fd, n):
+            state["n"] += 1
+            if state["n"] == 1:
+                return b"hel"
+            if state["n"] == 2:
+                return b""
+            return real_read(fd, n)
+
+        monkeypatch.setattr(m.os, "read", short_read)
+        with pytest.raises(SnapshotError, match="changed while being read"):
+            read_file_revision(path, max_file_size=1_000_000, retain_bytes=True, base=tmp_path)
+
+    def test_fifo_replacement_does_not_hang(self, tmp_path):
+        path = tmp_path / "fifo"
+        os.mkfifo(path)
+        with pytest.raises(SnapshotError, match="no longer a confined regular file"):
+            read_file_revision(path, max_file_size=1_000_000, retain_bytes=True, base=tmp_path)
+
+    def test_directory_open_refuses(self, tmp_path):
+        path = tmp_path / "dir"
+        path.mkdir()
+        with pytest.raises(SnapshotError, match="no longer a confined regular file"):
+            read_file_revision(path, max_file_size=1_000_000, retain_bytes=True, base=tmp_path)
+
+    def test_leaf_symlink_refuses(self, tmp_path):
+        target = tmp_path / "target.md"
+        target.write_text("secret")
+        link = tmp_path / "link.md"
+        link.symlink_to(target)
+        with pytest.raises(SnapshotError, match="no longer a confined regular file"):
+            read_file_revision(link, max_file_size=1_000_000, retain_bytes=True, base=tmp_path)
+
+    def test_growth_beyond_cap_refuses_without_keeping_whole_file(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "grow.bin"
+        path.write_bytes(b"ab")
+        real_read = os.read
+        chunks = {0: b"a", 1: b"b", 2: b"c"}
+        state = {"n": 0}
+
+        def bounded_read(fd, n):
+            idx = state["n"]
+            state["n"] += 1
+            if idx in chunks:
+                return chunks[idx]
+            return real_read(fd, n)
+
+        monkeypatch.setattr(m.os, "read", bounded_read)
+        with pytest.raises(SnapshotError, match="grew beyond max_file_size"):
+            read_file_revision(path, max_file_size=2, retain_bytes=True, base=tmp_path)
+
+    @pytest.mark.parametrize("field", ["st_size", "st_mtime_ns", "st_ctime_ns", "st_ino"])
+    def test_descriptor_mismatch_refuses(self, tmp_path, monkeypatch, field):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "a.md"
+        path.write_text("hello")
+        real_fstat = os.fstat
+        calls = {"n": 0}
+
+        def mutating_fstat(fd):
+            st = real_fstat(fd)
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                kwargs = {
+                    "st_mode": st.st_mode,
+                    "st_ino": st.st_ino + (1 if field == "st_ino" else 0),
+                    "st_dev": st.st_dev,
+                    "st_nlink": st.st_nlink,
+                    "st_uid": st.st_uid,
+                    "st_gid": st.st_gid,
+                    "st_size": st.st_size + (1 if field == "st_size" else 0),
+                    "st_atime": st.st_atime,
+                    "st_mtime": st.st_mtime,
+                    "st_ctime": st.st_ctime,
+                    "st_atime_ns": st.st_atime_ns,
+                    "st_mtime_ns": st.st_mtime_ns + (1 if field == "st_mtime_ns" else 0),
+                    "st_ctime_ns": st.st_ctime_ns + (1 if field == "st_ctime_ns" else 0),
+                }
+                return os.stat_result(
+                    (
+                        kwargs["st_mode"],
+                        kwargs["st_ino"],
+                        kwargs["st_dev"],
+                        kwargs["st_nlink"],
+                        kwargs["st_uid"],
+                        kwargs["st_gid"],
+                        kwargs["st_size"],
+                        kwargs["st_atime"],
+                        kwargs["st_mtime"],
+                        kwargs["st_ctime"],
+                        kwargs["st_atime_ns"],
+                        kwargs["st_mtime_ns"],
+                        kwargs["st_ctime_ns"],
+                    )
+                )
+            return st
+
+        monkeypatch.setattr(m.os, "fstat", mutating_fstat)
+        with pytest.raises(SnapshotError, match="changed while being read"):
+            read_file_revision(path, max_file_size=1_000_000, retain_bytes=False, base=tmp_path)
+
+    def test_open_identity_mismatch_refuses(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "a.md"
+        path.write_text("hello")
+        real_fstat = os.fstat
+        calls = {"n": 0}
+
+        def first_fd_wrong(fd):
+            st = real_fstat(fd)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return os.stat_result(
+                    (
+                        st.st_mode,
+                        st.st_ino + 1,
+                        st.st_dev,
+                        st.st_nlink,
+                        st.st_uid,
+                        st.st_gid,
+                        st.st_size,
+                        st.st_atime,
+                        st.st_mtime,
+                        st.st_ctime,
+                        st.st_atime_ns,
+                        st.st_mtime_ns,
+                        st.st_ctime_ns,
+                    )
+                )
+            return st
+
+        monkeypatch.setattr(m.os, "fstat", first_fd_wrong)
+        with pytest.raises(SnapshotError, match="changed while being read"):
+            read_file_revision(path, max_file_size=1000, retain_bytes=True, base=tmp_path)
+
+    def test_unreadable_component_refuses_in_strict_symlink_probe(self, tmp_path, monkeypatch):
+        from mind_meld.manifest import path_has_descendant_symlink
+
+        base = tmp_path / "src"
+        nested = base / "docs" / "a.md"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("x")
+        real_lstat = Path.lstat
+
+        def boom(self):
+            if self == nested.parent:
+                raise PermissionError("denied")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", boom)
+        with pytest.raises(SnapshotError, match="could not be read"):
+            path_has_descendant_symlink(nested, base, strict=True, source_name="gstack")
+        assert path_has_descendant_symlink(nested, base, strict=False) is True
+
+    def test_enotdir_on_descendant_is_absence_not_refusal(self, tmp_path, monkeypatch):
+        from mind_meld.manifest import path_has_descendant_symlink
+
+        base = tmp_path / "src"
+        nested = base / "docs" / "old.md"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("x")
+        real_lstat = Path.lstat
+
+        def boom(self):
+            if self == nested:
+                err = OSError("not a directory")
+                err.errno = errno.ENOTDIR
+                raise err
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", boom)
+        assert path_has_descendant_symlink(nested, base, strict=True) is False
+
+
+class TestStrictWalkers:
+    def test_claude_scandir_failure_refuses(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        claude = tmp_path / ".claude"
+        projects = claude / "projects"
+        memory = projects / "p" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "a.md").write_text("ok")
+        real_scandir = os.scandir
+
+        def boom(path):
+            if Path(path) == projects:
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", boom)
+        with pytest.raises(SnapshotError, match="could not be enumerated"):
+            walk_claude_source(claude, strict=True, source_name="claude")
+
+    def test_generic_rglob_suppressed_error_is_visible_when_strict(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        root = tmp_path / "src"
+        inc = root / "docs"
+        inc.mkdir(parents=True)
+        (inc / "a.md").write_text("ok")
+        real_scandir = os.scandir
+        state = {"n": 0}
+
+        def flaky(path):
+            state["n"] += 1
+            if Path(path) == inc and state["n"] == 1:
+                raise OSError("io")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", flaky)
+        cfg = {
+            "name": "gstack",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": ["docs"],
+        }
+        with pytest.raises(SnapshotError, match="could not be enumerated"):
+            walk_generic_source(cfg, strict=True)
+
+    def test_grok_selected_path_failure_refuses(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        root = tmp_path / ".grok"
+        skills = root / "skills"
+        skills.mkdir(parents=True)
+        (skills / "a.md").write_text("ok")
+        real_scandir = os.scandir
+
+        def boom(path):
+            if Path(path) == skills:
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", boom)
+        cfg = {"name": "grok", "path": str(root), "type": "grok"}
+        with pytest.raises(SnapshotError, match="could not be enumerated"):
+            walk_grok_source(cfg, strict=True)
+
+    def test_generic_dedup_stat_failure_refuses_before_record(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        root = tmp_path / "src"
+        docs = root / "docs"
+        docs.mkdir(parents=True)
+        target = docs / "a.md"
+        target.write_text("hello")
+        recorded = []
+        real_record = m._record_file
+        real_lstat = Path.lstat
+
+        def scoped_lstat(self):
+            if self == target:
+                raise OSError("stat failed")
+            return real_lstat(self)
+
+        def tracking_record(*a, **kw):
+            recorded.append(a[0])
+            return real_record(*a, **kw)
+
+        monkeypatch.setattr(Path, "lstat", scoped_lstat)
+        monkeypatch.setattr(m, "_record_file", tracking_record)
+        cfg = {
+            "name": "gstack",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": ["docs"],
+        }
+        with pytest.raises(SnapshotError, match="could not be read"):
+            walk_generic_source(cfg, strict=True)
+        assert recorded == []
+
+    def test_include_file_probe_failure_refuses(self, tmp_path, monkeypatch):
+        root = tmp_path / "src"
+        root.mkdir()
+        target = root / "notes.md"
+        target.write_text("x")
+        real_lstat = Path.lstat
+
+        def scoped(self):
+            if self == target:
+                raise PermissionError("denied")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", scoped)
+        cfg = {
+            "name": "gstack",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": [],
+            "include_files": ["notes.md"],
+        }
+        with pytest.raises(SnapshotError, match="could not be read"):
+            walk_generic_source(cfg, strict=True)
+
+    def test_missing_optional_include_file_still_succeeds(self, tmp_path):
+        root = tmp_path / "src"
+        root.mkdir()
+        cfg = {
+            "name": "gstack",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": [],
+            "include_files": ["absent.md"],
+        }
+        assert walk_generic_source(cfg, strict=True) == {}
+
+    def test_marker_discovery_failure_refuses(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        root = tmp_path / "src"
+        skills = root / "skills"
+        child = skills / "roadmap"
+        child.mkdir(parents=True)
+        (child / ".extend-root").write_text("")
+        (child / "SKILL.md").write_text("x")
+        real_scandir = os.scandir
+
+        def boom(path):
+            if Path(path) == skills:
+                raise OSError("scan failed")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", boom)
+        cfg = {
+            "name": "codex",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": ["skills"],
+        }
+        with pytest.raises(SnapshotError, match="could not be enumerated"):
+            marker_skip_globs(cfg, strict=True)
+
+    def test_unreadable_excluded_subtree_is_not_traversed(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        root = tmp_path / "src"
+        docs = root / "docs"
+        git = docs / ".git"
+        git.mkdir(parents=True)
+        (docs / "ok.md").write_text("ok")
+        (git / "objects").mkdir()
+        scanned = []
+        real_scandir = os.scandir
+
+        def tracking(path):
+            scanned.append(Path(path))
+            if Path(path) == git:
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", tracking)
+        cfg = {
+            "name": "gstack",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": ["docs"],
+        }
+        files = walk_generic_source(cfg, strict=True)
+        assert "docs/ok.md" in files
+        assert git not in scanned
+
+    def test_strict_failure_independent_of_on_skip(self, tmp_path, monkeypatch):
+        path = tmp_path / "a.md"
+        path.write_text("x")
+        real_stat = Path.stat
+
+        def boom(self, *a, **kw):
+            if self == path:
+                raise PermissionError("denied")
+            return real_stat(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "stat", boom)
+        with pytest.raises(SnapshotError):
+            _record_file(path, tmp_path, 1_000_000, on_skip=None, strict=True, source_name="claude")
+
+    def test_claude_leaf_symlink_skipped_without_tombstone_or_target_bytes(self, tmp_path):
+        claude = tmp_path / ".claude"
+        memory = claude / "projects" / "p" / "memory"
+        memory.mkdir(parents=True)
+        secret = tmp_path / "secret.md"
+        secret.write_text("do-not-publish")
+        (memory / "note.md").write_text("local")
+        (memory / "link.md").symlink_to(secret)
+        files = walk_claude_source(claude, strict=True, source_name="claude")
+        assert "projects/p/memory/note.md" in files
+        assert "projects/p/memory/link.md" not in files
+        secret_digest = hashlib.sha256(b"do-not-publish").hexdigest()
+        assert all(info["sha256"] != secret_digest for info in files.values())
+
+    def test_strict_oversized_new_file_still_skips(self, tmp_path):
+        skipped = []
+        path = tmp_path / "big.bin"
+        path.write_bytes(b"x" * 200)
+        result = _record_file(
+            path,
+            tmp_path,
+            50,
+            on_skip=lambda p, r: skipped.append((p, r)),
+            strict=True,
+            source_name="claude",
+        )
+        assert result is None
+        assert skipped and "exceeds max_file_size" in skipped[0][1]
+
+    def test_discovered_child_vanishing_refuses(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        root = tmp_path / "src"
+        docs = root / "docs"
+        nested = docs / "nested"
+        nested.mkdir(parents=True)
+        (nested / "b.md").write_text("x")
+        real_scandir = os.scandir
+
+        def vanish(path):
+            if Path(path) == nested:
+                raise FileNotFoundError("gone")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", vanish)
+        cfg = {
+            "name": "gstack",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": ["docs"],
+        }
+        with pytest.raises(SnapshotError, match="disappeared while being read"):
+            walk_generic_source(cfg, strict=True)

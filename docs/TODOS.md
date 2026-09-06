@@ -58,6 +58,32 @@ here by hand, use the H3 form.
 - **Effort:** S
 - **Priority:** P3
 
+### [plan-eng-review:severity=major] Audit historical blob integrity and design verified targeted re-upload
+
+- **What:** Design a bounded, read-only integrity inventory for referenced encrypted blobs, then a separate targeted re-upload path that restores a mismatched key only from verified authoritative local bytes.
+- **Why:** Track 49A prevents new stale-digest uploads and rejects mismatched incoming plaintext. It does not inspect unchanged stored blobs, and an unchanged push or metadata-only touch does not upload them again. Updated receivers can therefore repeatedly reject a historically poisoned key with no supported targeted repair command.
+- **Evidence:** The 49A isolated reproduction at 09d98ab stores changed plaintext under a prior shared digest key, so an untouched sibling resolves to the wrong bytes. This proves the mechanism, not that any particular live fleet blob is corrupt. `cli.py:_upload_changed_blobs` and the hash-based diff determine which keys are rewritten.
+- **Context:** Track 49A /autoplan, 2026-09-06, branch kbitz/49a-complete-snapshots. Durable plan: `~/.gstack/projects/kbitz-mind-meld/kbitz-49a-complete-snapshots-plan.md`; evidence: `49a-reproductions.json`. This is distinct from the Future snapshot-completeness data-model item.
+- **Pros:** Establishes actual historical damage and gives users a precise recovery path without changing meaningful file contents to force a new hash.
+- **Cons:** Reading cloud blobs can materialize data and cost time; replacement authority and multi-reference keys need explicit handling. Inventory must be bounded and distinguish unavailable from mismatched; repair must preserve recoverable bytes.
+- **Next step:** Specify a report keyed by device/source/path/digest, with valid, unavailable and mismatched states. Require the candidate repair bytes to hash to the advertised key, encrypt before storage, and verify the result. Do not auto-select a peer copy or run fleet-wide mutation as part of discovery.
+- **Depends on:** Track 49A's prospective producer/receiver checks; an inventory and explicit authority decision before any repair is implemented or run.
+- **Effort:** M
+- **Priority:** P2
+
+### [plan-eng-review:severity=moderate] Make push dry-run setup honor the existing no-mutation contract
+
+- **What:** Audit and gate setup mutations before `mm push --dry-run` reaches its already-gated publication core.
+- **Why:** `docs/invariants/events-retro.md` requires a non-mutating preview, but the current command can offer/apply migration, persist a missing crypto fingerprint and bootstrap the mm-events source directory before the dry-run gates. Track 49A adds strict scan/deletion diagnostics; it must not describe the whole current command as read-only or weaken the existing invariant to match this defect.
+- **Evidence:** Code trace at 09d98ab: `cli.py:push` calls `_maybe_prompt_migration` and `_init_crypto_session` before `_push_core(..., dry_run=True)`; `get_sources` invokes `_bootstrap_mm_events_path` unconditionally. This is a source audit, not a claimed live mutation reproduction.
+- **Context:** Track 49A /autoplan DX/Eng review, 2026-09-06. Its tests protect blob/manifest/last_seen/event publication and add no new preview writes; the broader setup repair is separate. Do not route a dry-run through destructive recover/reset commands.
+- **Pros:** Makes the documented preview safe and predictable for troubleshooting and automation.
+- **Cons:** Requires a deliberate read-only crypto/source setup contract and migration-prompt behavior; simply skipping initialization can produce a misleading preview.
+- **Next step:** Add isolated CLI tests for missing fingerprint, missing mm-events root and pending config migration, snapshot all config/source/storage paths, then implement read-only setup or an explicit actionable refusal where a truthful preview needs initialization.
+- **Depends on:** Coordinate with Track 49A's shared source-resolution helper; preserve its strictness and publication guarantees.
+- **Effort:** M
+- **Priority:** P2
+
 ## Drain records
 
 ### Approved roadmap refinements — 2026-09-05
@@ -287,4 +313,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-06 by /document-release; one conflict-cleanup policy item remains open. Prior drain records are historical._
+_Last updated 2026-09-06 by Track 49A /autoplan; three items remain open: conflict-cleanup policy, historical blob integrity/repair, and push dry-run setup. Prior drain records are historical._

@@ -292,6 +292,9 @@ class TestFinalOutputSinks:
             def exists(self):
                 return False
 
+            def stat(self):
+                raise FileNotFoundError("missing")
+
             def mkdir(self, **_kwargs):
                 raise OSError(evil)
 

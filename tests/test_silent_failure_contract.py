@@ -540,6 +540,65 @@ def test_autopull_mindmelderror_stderr_no_log(tmp_path, monkeypatch):
     assert not (iso / "autopull.log").exists()
 
 
+def test_interactive_snapshoterror_exits_1_no_traceback(tmp_path, monkeypatch):
+    _setup_real_config(tmp_path, monkeypatch)
+    from mind_meld.errors import SnapshotError
+
+    def boom(*a, **kw):
+        raise SnapshotError(
+            "Cannot publish: source claude, a.md could not be read (EACCES 13). "
+            "Previous snapshot kept. Restore read access, then run mm push."
+        )
+
+    monkeypatch.setattr("mind_meld.cli._push_core", boom)
+    r = runner.invoke(app, ["push"])
+    assert r.exit_code == 1
+    combined = r.output + (r.stderr or "")
+    assert "Cannot publish" in combined
+    assert "Traceback" not in combined
+    assert "Push complete" not in combined
+
+
+def test_autopush_snapshoterror_exit_0_failed_breadcrumb(tmp_path, monkeypatch):
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    from mind_meld.errors import SnapshotError
+
+    def boom(*a, **kw):
+        raise SnapshotError(
+            "Cannot publish: source claude, a.md changed while being read."
+        ) from None
+
+    monkeypatch.setattr("mind_meld.cli._push_core", boom)
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0
+    assert "push failed" in (r.stderr or "")
+    assert "Cannot publish" in (r.stderr or "")
+    assert "unexpected error" not in (r.stderr or "")
+    crumb_path = iso / "last-autorun.json"
+    assert crumb_path.exists()
+    entry = _verb_crumb(json.loads(crumb_path.read_text()), "push")
+    assert entry.get("outcome") == "failed"
+    assert not (iso / "autopush.log").exists()
+
+
+def test_autopush_snapshoterror_with_os_cause_logs_traceback(tmp_path, monkeypatch):
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    from mind_meld.errors import SnapshotError
+
+    def boom(*a, **kw):
+        raise SnapshotError(
+            "Cannot publish: source claude, a.md could not be read."
+        ) from PermissionError("denied")
+
+    monkeypatch.setattr("mind_meld.cli._push_core", boom)
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0
+    assert "push failed" in (r.stderr or "")
+    assert (iso / "autopush.log").exists()
+
+
 def test_autopush_mindmelderror_stderr_no_log(tmp_path, monkeypatch):
     """Mirror: MindMeldError from _push_core -> typed stderr, no log."""
     _setup_real_config(tmp_path, monkeypatch)

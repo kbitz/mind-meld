@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 from mind_meld import seen_sources
 from mind_meld.cli import (
     _filter_disabled_sources,
+    _filter_unselected_sources,
     _known_source_names,
     _prompt_source_toggle,
     _validate_source_name,
@@ -794,3 +795,20 @@ class TestFilterDisabledSources:
         # BOTH tombstones flow through — disable does not undo prior consensus.
         assert "claude:a.md" in out["tombstones"]
         assert "gstack:b.md" in out["tombstones"]
+
+    def test_unselected_source_drops_files_preserves_tombstones(self):
+        manifest = {
+            "sources": {
+                "claude": {"files": {"a.md": {"sha256": "x"}}},
+                "retired": {"files": {"old.md": {"sha256": "y"}}},
+            },
+            "tombstones": {
+                "claude:gone.md": {"deleted_at": "2026-01-01T00:00:00+00:00"},
+                "retired:old.md": {"deleted_at": "2026-01-01T00:00:00+00:00"},
+            },
+        }
+        out = _filter_unselected_sources(manifest, {"claude"})
+        assert "retired" not in out["sources"]
+        assert "claude" in out["sources"]
+        assert "retired:old.md" in out["tombstones"]
+        assert "claude:gone.md" in out["tombstones"]

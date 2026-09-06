@@ -9,7 +9,19 @@ Read BEFORE editing any of these:
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`
 
-Tests pinning the invariants below: `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_seen_sources.py`, `tests/test_manifest_fuzz.py`.
+Tests pinning the invariants below: `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_seen_sources.py`, `tests/test_manifest_fuzz.py`.
+
+---
+
+## Complete snapshots (load-bearing, v0.14.3)
+
+Publishing scans (`_push_core`, including the mm-events rescan) use strict mode: directory enumeration, classification, descriptor identity, and hash errors raise `SnapshotError` instead of omitting the path. Diagnostic walkers stay permissive. A published entry's digest and size describe the accepted file bytes and mtime describes that same observed revision. This is not a filesystem-wide atomic snapshot.
+
+`generate_tombstones` stays a pure comparison. Before each call, `_prove_omitted_paths_absent` checks omitted prior paths against the trusted local source map. ENOENT/ENOTDIR below an accessible root is genuine absence. A still-present regular file omitted by size cap or inode dedup refuses. A missing previously populated selected root refuses the whole push; removing a source from selection drops its file entries, preserves existing tombstones, and is itself a manifest change.
+
+`_upload_changed_blobs` verifies the upload revision against the scanned digest, size, and mtime **before** `backend.put`. Missing or changed input aborts; it does not `continue`. Earlier correctly keyed encrypted blobs may remain as orphans. The encrypted manifest is the commit boundary; last_seen, sidecar, and conflict cleanup run only after that put.
+
+`_download_and_apply` hashes plaintext after the non-mutating symlink/containment guards and before `_apply_incoming_file`. A mismatch is a per-file `failed` outcome; later valid files continue. Unchanged historical blobs are not rewritten by a no-op push; incoming verification rejects them if encountered.
 
 ---
 
@@ -149,7 +161,7 @@ Defense-in-depth: `_download_and_apply` ALSO checks `local_path.resolve(strict=F
 
 ## Symlink policy at the manifest and apply boundaries (load-bearing, v0.12.17)
 
-Symlinks **below** a source root are local routing, not synced content. A generic-source walk omits every symlinked file. The source root itself may be a symlink: users can locate an entire source through a link, and resolving that root remains valid. Do not weaken the rel-path traversal defense to admit child links.
+Symlinks **below** a source root are local routing, not synced content. Strict publishing scans omit descendant symlinks for Claude, generic, and Grok; a symlinked source root remains allowed. Prior-state filtering suppresses those omissions for all three types before deletion proof so a converted link is not tombstoned. The source root itself may be a symlink: users can locate an entire source through a link, and resolving that root remains valid. Do not weaken the rel-path traversal defense to admit child links. An unavailable symlink/privacy probe refuses rather than becoming an intentional omission.
 
 The Grok walker is stricter still: it rejects a candidate whose inode has more
 than one link. A hard link to `auth.json` or a session transcript inside an

@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.3] - 2026-09-06
+
+**Pushes publish complete snapshots, or they refuse.** An unreadable selected file no longer looks like a deletion, and a file that changes after it is hashed can no longer store the wrong bytes under another file's digest. Incoming pulls reject plaintext that does not match the advertised hash and leave the local copy alone.
+
+### Fixed
+
+- Publishing scans enumerate selected sources strictly. A permission, I/O, vanished-entry, descriptor-identity, or marker-discovery failure refuses the whole push and keeps the previous encrypted manifest, recovery sidecar, and last_seen.
+- A still-present previously published file omitted only because it exceeds `max_file_size` or shares an inode alias refuses instead of minting a tombstone. Newly oversized files still skip.
+- `_upload_changed_blobs` verifies digest, size, and mtime against the scanned revision before encrypting or writing a blob key. Missing input raises instead of counting as a successful skip.
+- Pull hashes decrypted content after path/symlink guards and before apply. A mismatch is a per-file failure; later valid files continue.
+
+### Changed
+
+- Interactive `mm push` reports `SnapshotError` with source/path, cause, "Previous snapshot kept", and a next action (exit 1). Autopush keeps exit 0, typed stderr, and a failed breadcrumb.
+- Removing a source from selection publishes a refreshed manifest without inventing removal tombstones, and preserves existing ones.
+- `mm push --dry-run` is a strict scan and deletion-proof preview. It does not publish blobs or a manifest, and it does not claim the whole command is mutation-free setup.
+
 ## [0.14.2] - 2026-09-06
 
 **Conflicts keep the right copies, even when replacement fails.** A pull no longer mistakes another file’s conflict copy for its own or deletes the previous peer copy before a replacement is saved. Unreadable copies remain available, occupied replacement names are preserved, and sidecars with no recoverable original filename stay safe during discovery, resolution, and garbage collection.
