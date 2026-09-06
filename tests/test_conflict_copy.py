@@ -4117,6 +4117,61 @@ class TestConflictOwnershipDiscovery:
         assert [h[1] for h in hits] == [own]
         assert poison.is_dir()
 
+    def test_ownerless_sidecar_is_discovered_without_self_canonical(self, tmp_path: Path) -> None:
+        src = tmp_path / "gstack"
+        (src / "memory").mkdir(parents=True)
+        sidecar = src / "memory" / ".sync-conflict-20260421-143055-v1-devA1234"
+        sidecar.write_bytes(b"only copy")
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            }
+        }
+        hits = _find_conflict_files(config)
+        assert len(hits) == 1
+        assert hits[0][1] == sidecar
+        assert hits[0][2] is None
+
+    def test_ownerless_sidecar_resolve_skip_and_gc_preserve_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = tmp_path / "gstack"
+        (src / "memory").mkdir(parents=True)
+        sidecar = src / "memory" / ".sync-conflict-20200101-000000-v1-devA1234"
+        sidecar.write_bytes(b"only copy")
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            }
+        }
+        hits = _find_conflict_files(config)
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        resolved, failed = _resolve_interactive_loop(hits)
+        assert (resolved, failed) == (0, 0)
+        assert sidecar.exists()
+        assert sidecar.read_bytes() == b"only copy"
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
+        assert reaped.deleted == 0
+        assert sidecar.exists()
+        assert sidecar.read_bytes() == b"only copy"
+
     def test_resolve_remote_only_touches_owned_canonical(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

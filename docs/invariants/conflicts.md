@@ -62,7 +62,7 @@ The pre-v0.9.0 letters `c` / `f` remain LOUD-rejected in the **`mm resolve` path
 
 **Exact ownership, then publish, then cleanup (Track 48A).** A sidecar belongs to the canonical reconstructed by `manifest._canonical_for_conflict` (final infix, lexical Path equality under the shared parent). Prefix globs are not ownership. Apply and include_files depth-zero discovery reject shape/owner mismatches before `stat`/read/migration. Cleanup unlinks only same-owner/same-peer post-inversion copies whose bytes were successfully read and differ, and only after the replacement write succeeds. Unreadable copies stay. Occupied replacement names are probed with `lstat` (FileNotFoundError means free).
 
-**`_canonical_for_conflict` never raises.** An infix-at-index-0 name (``.sync-conflict-<ts>-<dev>``) reconstructs to the empty string; `Path.with_name("")` would raise. Return the input path unchanged so a wide sibling scan cannot abort pull/conflicts/resolve.
+**`_canonical_for_conflict` never raises, and empty reconstruction is ownerless.** An infix-at-index-0 name (``.sync-conflict-<ts>-<dev>``) reconstructs to the empty string; `Path.with_name("")` would raise. Return `None` so discovery records no canonical. Returning the sidecar itself would make resolve/GC treat the only copy as both sides and delete it.
 
 **Three-number divergence summary.** `count_divergent_lines` counts `-` / `+` lines in the unified diff (excluding the `---` / `+++` headers) and returns `(M, N, K)` where M = removed-or-replaced, N = added-or-replaced, K = M + N. Wording is honest about replacement semantics: a 1-line replacement is M=1, N=1, K=2 (counting both old and new). Codex T1 caught the original "unique to local/remote" wording as pseudo-precision.
 

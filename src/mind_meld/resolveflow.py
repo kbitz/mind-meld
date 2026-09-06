@@ -370,7 +370,7 @@ def _find_conflict_files(
                 _try_add(
                     src_cfg["name"],
                     conflict_path,
-                    canonical if canonical.exists() else None,
+                    canonical if canonical is not None and canonical.exists() else None,
                 )
 
         # (2) Depth-0 sibling-glob for include_files entries. Gate on data
@@ -563,16 +563,23 @@ def _resolve_interactive_loop(
             # must not silently promote/delete. (codex /review v0.9.0)
             if choice in ("p", "promote"):
                 target_canonical = manifest._canonical_for_conflict(cpath)
-                try:
-                    cpath.rename(target_canonical)
+                if target_canonical is None:
                     console.print(
-                        f"  [green]promoted[/green] "
-                        f"{safe_str(cpath.name)} -> {safe_str(target_canonical.name)}"
+                        "  [red]promote failed:[/red] cannot reconstruct a "
+                        "canonical name for this sidecar"
                     )
-                    resolved += 1
-                except OSError as e:
-                    console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
                     failed += 1
+                else:
+                    try:
+                        cpath.rename(target_canonical)
+                        console.print(
+                            f"  [green]promoted[/green] "
+                            f"{safe_str(cpath.name)} -> {safe_str(target_canonical.name)}"
+                        )
+                        resolved += 1
+                    except OSError as e:
+                        console.print(f"  [red]promote failed:[/red] {safe_str(e)}")
+                        failed += 1
             elif choice in ("d", "delete"):
                 try:
                     cpath.unlink()

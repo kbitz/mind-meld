@@ -1007,10 +1007,6 @@ class TestCanonicalForConflict:
                 "notes.sync-conflict-log.md",
             ),
             ("notes[1].sync-conflict-20260421-143055-v1-devA1234.md", "notes[1].md"),
-            (
-                ".sync-conflict-20260421-143055-v1-devA1234",
-                ".sync-conflict-20260421-143055-v1-devA1234",
-            ),
             ("plain.md", "plain.md"),
         ],
     )
@@ -1019,6 +1015,10 @@ class TestCanonicalForConflict:
     ) -> None:
         parent = Path("/x")
         assert _canonical_for_conflict(parent / conflict_name) == parent / canonical_name
+
+    def test_empty_reconstruction_is_ownerless(self) -> None:
+        cpath = Path("/x/.sync-conflict-20260421-143055-v1-devA1234")
+        assert _canonical_for_conflict(cpath) is None
 
 
 class TestIsConflictFilename:
