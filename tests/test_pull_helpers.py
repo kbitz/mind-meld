@@ -235,6 +235,125 @@ class TestApplyConflict:
         # No sidecar was written.
         assert not any(p.name.startswith("doc.sync-conflict-") for p in tmp_path.iterdir())
 
+    def test_seeded_write_oserror_preserves_old_sidecar(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        from mind_meld import cli as cli_module
+
+        local = tmp_path / "doc.md"
+        local.write_bytes(b"local")
+        old = tmp_path / "doc.sync-conflict-20260421-120000-v1-devAAAA1.md"
+        old.write_bytes(b"peer R1")
+        local_mtime = local.stat().st_mtime_ns
+        old_mtime = old.stat().st_mtime_ns
+
+        def boom(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
+        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
+        assert outcome == "failed"
+        assert local.read_bytes() == b"local"
+        assert local.stat().st_mtime_ns == local_mtime
+        assert old.exists()
+        assert old.read_bytes() == b"peer R1"
+        assert old.stat().st_mtime_ns == old_mtime
+        err = capsys.readouterr().err
+        assert "sidecar write failed" in err
+        assert "prior conflict copies preserved" in err
+        assert str(local) in err or "doc.md" in err
+
+    def test_seeded_replace_storageerror_preserves_old_sidecar(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from mind_meld import fsutil as fsutil_mod
+
+        local = tmp_path / "doc.md"
+        local.write_bytes(b"local")
+        old = tmp_path / "doc.sync-conflict-20260421-120000-v1-devAAAA1.md"
+        old.write_bytes(b"peer R1")
+        local_mtime = local.stat().st_mtime_ns
+        old_mtime = old.stat().st_mtime_ns
+
+        def bad_replace(src, dst):
+            raise OSError("cross-device link")
+
+        monkeypatch.setattr(fsutil_mod.os, "replace", bad_replace)
+        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
+        assert outcome == "failed"
+        assert local.read_bytes() == b"local"
+        assert local.stat().st_mtime_ns == local_mtime
+        assert old.exists()
+        assert old.read_bytes() == b"peer R1"
+        assert old.stat().st_mtime_ns == old_mtime
+        assert not any(
+            p.name.startswith("doc.sync-conflict-") and p != old and p.is_file()
+            for p in tmp_path.iterdir()
+        )
+        assert list(tmp_path.glob("tmp*")) == []
+
+    def test_path_build_valueerror_after_selection_preserves_old(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        from mind_meld import cli as cli_module
+
+        local = tmp_path / "doc.md"
+        local.write_bytes(b"local")
+        old = tmp_path / "doc.sync-conflict-20260421-120000-v1-devAAAA1.md"
+        old.write_bytes(b"peer R1")
+        old_mtime = old.stat().st_mtime_ns
+
+        def boom(canonical, device_id, now=None):
+            raise ValueError("injected after selection")
+
+        monkeypatch.setattr(cli_module, "conflict_filename", boom)
+        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
+        assert outcome == "failed"
+        assert old.exists()
+        assert old.read_bytes() == b"peer R1"
+        assert old.stat().st_mtime_ns == old_mtime
+        err = capsys.readouterr().err
+        assert "conflict path build failed" in err
+        assert "injected after selection" in err
+        assert "\x1b" not in err
+
+    def test_occupancy_probe_oserror_fails_one_file_and_continues(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        first = tmp_path / "first.md"
+        second = tmp_path / "second.md"
+        first.write_bytes(b"local-1")
+        second.write_bytes(b"local-2")
+        old = tmp_path / "first.sync-conflict-20260421-120000-v1-devA1234.md"
+        old.write_bytes(b"peer R1")
+        old_mtime = old.stat().st_mtime_ns
+        orig_lstat = Path.lstat
+
+        def selective_lstat(self: Path):
+            if "first.sync-conflict-" in self.name:
+                raise PermissionError("probe denied")
+            return orig_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", selective_lstat)
+        first_outcome = _apply_conflict(first, "first.md", b"peer R2", "devA1234")
+        second_outcome = _apply_conflict(second, "second.md", b"peer R2", "devA1234")
+        assert first_outcome == "failed"
+        assert second_outcome == "conflicted"
+        assert old.exists()
+        assert old.read_bytes() == b"peer R1"
+        assert old.stat().st_mtime_ns == old_mtime
+        assert first.read_bytes() == b"local-1"
+        assert second.read_bytes() == b"local-2"
+        err = capsys.readouterr().err
+        assert "conflict path build failed" in err
+        owned_second = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file() and p.name.startswith("second.sync-conflict-")
+        ]
+        assert len(owned_second) == 1
+        assert owned_second[0].read_bytes() == b"peer R2"
+
     def test_sidecar_mtime_matches_remote(self, tmp_path: Path) -> None:
         """The sidecar holds the surprising remote bytes — and it should
         carry the remote's authorship time, not the time of pull. Lets

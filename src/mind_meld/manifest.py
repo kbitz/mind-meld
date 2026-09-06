@@ -209,6 +209,32 @@ def is_pre_inversion_conflict_filename(name: str) -> bool:
     return fnmatch.fnmatch(name, CONFLICT_PATTERN_V0)
 
 
+def _canonical_for_conflict(conflict_path: Path) -> Path:
+    """Given a .sync-conflict-<ts>-<device>.<ext> path, return the canonical sibling.
+
+    Strips the ".sync-conflict-<rest>" infix from the filename, re-assembling
+    the original stem and extension. Uses rfind so that files which already
+    had an infix before mm added its own (e.g., a Syncthing conflict file
+    that mm then conflicted again) unwind the most recent layer only.
+    """
+    name = conflict_path.name
+    idx = name.rfind(CONFLICT_INFIX)
+    if idx == -1:
+        return conflict_path
+    before = name[:idx]
+    # Everything after the infix up to the final suffix is conflict metadata.
+    after = name[idx + len(CONFLICT_INFIX) :]
+    suffix = ""
+    if "." in after:
+        suffix = "." + after.rsplit(".", 1)[-1]
+    reconstructed = before + suffix
+    if not reconstructed:
+        # Infix at index 0 with no extension (``.sync-conflict-<ts>-<dev>``)
+        # is a legal conflict filename; Path.with_name("") raises ValueError.
+        return conflict_path
+    return conflict_path.with_name(reconstructed)
+
+
 EXCLUDED = [
     "node_modules/",
     ".git/",

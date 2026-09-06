@@ -642,6 +642,89 @@ def test_log_unexpected_swallows_write_failure(tmp_path, monkeypatch):
 # ─── Breadcrumb (last-autorun.json) tests ────────────────────────────────
 
 
+def _seed_conflict_pair(tmp_path: Path) -> tuple[Path, Path]:
+    local = tmp_path / "doc.md"
+    local.write_bytes(b"local")
+    old = tmp_path / "doc.sync-conflict-20260421-120000-v1-devAAAA1.md"
+    old.write_bytes(b"peer R1")
+    return local, old
+
+
+def test_conflict_path_build_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
+    from mind_meld.cli import _apply_conflict
+
+    local, _old = _seed_conflict_pair(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "conflict_filename",
+        lambda *a, **kw: (_ for _ in ()).throw(ValueError("bad id \x1b[31mRED")),
+    )
+    assert _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "failed"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "conflict path build failed" in captured.err
+    assert "\x1b[31m" not in captured.err
+    assert "[31m" not in captured.err
+
+
+def test_conflict_write_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
+    from mind_meld.cli import _apply_conflict
+
+    local, _old = _seed_conflict_pair(tmp_path)
+    monkeypatch.setattr(
+        cli_module.fsutil,
+        "atomic_write_bytes",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full \x1b[31mRED")),
+    )
+    assert _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "failed"
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "sidecar write failed" in captured.err
+    assert "\x1b[31m" not in captured.err
+
+
+def test_conflict_cleanup_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
+    from mind_meld.cli import _apply_conflict
+
+    local, old = _seed_conflict_pair(tmp_path)
+    real_unlink = Path.unlink
+
+    def fail_old(self, missing_ok=False):
+        if self == old:
+            raise OSError("unlink \x1b[31mRED")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_old)
+    assert _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "conflicted"
+    captured = capsys.readouterr()
+    assert captured.out == "" or "conflict:" not in captured.out
+    assert "replacement saved" in captured.err
+    assert "mm resolve" in captured.err
+    assert "\x1b[31m" not in captured.err
+
+
+def test_autopull_cleanup_only_conflict_keeps_success_breadcrumb(tmp_path, monkeypatch):
+    """Cleanup leftovers are conflicted extras, not a failed/degraded pull."""
+    from mind_meld.cli import PullResult
+
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    fake_result = PullResult(
+        total_written=1,
+        total_conflicted=1,
+        total_failed=0,
+        device_names=["Mac B"],
+        elapsed=0.1,
+    )
+    monkeypatch.setattr("mind_meld.cli._pull_core", lambda *a, **kw: fake_result)
+    r = runner.invoke(app, ["autopull"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    assert "conflicts" in (r.stderr or "")
+    data = json.loads((iso / "last-autorun.json").read_text())
+    pull = _verb_crumb(data, "pull")
+    assert pull["outcome"] == "success"
+
+
 def test_autopull_writes_breadcrumb_on_success(tmp_path, monkeypatch):
     """Success path writes `{verb: 'pull', outcome: 'success'}`."""
     _setup_real_config(tmp_path, monkeypatch)

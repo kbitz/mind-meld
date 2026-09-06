@@ -39,7 +39,7 @@ from typing import Any, Literal
 
 import typer
 
-from mind_meld import fsutil, sidecar
+from mind_meld import fsutil, manifest, sidecar
 from mind_meld.config import get_sources
 from mind_meld.conflictdiff import (
     count_divergent_lines,
@@ -352,12 +352,21 @@ def _find_conflict_files(
             # rglob is loose (substring); filter strictly via is_conflict_filename
             # so user files like notes.sync-conflict-log.md are not listed/reaped.
             for conflict_path in scan_dir.rglob(f"*{CONFLICT_INFIX}*"):
-                if not conflict_path.is_file():
-                    continue
                 if not is_conflict_filename(conflict_path.name):
                     continue
+                try:
+                    is_regular = conflict_path.is_file()
+                except OSError as e:
+                    print(
+                        "mm: warning: conflict sidecar unreadable (left in place): "
+                        f"{safe_str(conflict_path)} \u2014 {safe_str(e)}",
+                        file=sys.stderr,
+                    )
+                    continue
+                if not is_regular:
+                    continue
                 conflict_path = _maybe_migrate(conflict_path)
-                canonical = _canonical_for_conflict(conflict_path)
+                canonical = manifest._canonical_for_conflict(conflict_path)
                 _try_add(
                     src_cfg["name"],
                     conflict_path,
@@ -378,11 +387,26 @@ def _find_conflict_files(
                 parent_dir = canonical.parent
                 if not parent_dir.exists():
                     continue
-                pattern = f"{canonical.stem}{CONFLICT_INFIX}*{canonical.suffix}"
-                for conflict_path in parent_dir.glob(pattern):
-                    if not conflict_path.is_file():
-                        continue
+                # Fixed glob: stem-prefix patterns treat literal metacharacters
+                # in the canonical name as glob syntax and also match a
+                # different file that shares a prefix (notes.md vs
+                # notes.sync-conflict-log.md). Ownership is exact Path equality
+                # via the shared parser, checked before stat/migration.
+                for conflict_path in parent_dir.glob(f"*{CONFLICT_INFIX}*"):
                     if not is_conflict_filename(conflict_path.name):
+                        continue
+                    if manifest._canonical_for_conflict(conflict_path) != canonical:
+                        continue
+                    try:
+                        is_regular = conflict_path.is_file()
+                    except OSError as e:
+                        print(
+                            "mm: warning: conflict sidecar unreadable (left in place): "
+                            f"{safe_str(conflict_path)} \u2014 {safe_str(e)}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    if not is_regular:
                         continue
                     conflict_path = _maybe_migrate(conflict_path)
                     _try_add(
@@ -391,27 +415,6 @@ def _find_conflict_files(
                         canonical if canonical.exists() else None,
                     )
     return hits
-
-
-def _canonical_for_conflict(conflict_path: Path) -> Path:
-    """Given a .sync-conflict-<ts>-<device>.<ext> path, return the canonical sibling.
-
-    Strips the ".sync-conflict-<rest>" infix from the filename, re-assembling
-    the original stem and extension. Uses rfind so that files which already
-    had an infix before mm added its own (e.g., a Syncthing conflict file
-    that mm then conflicted again) unwind the most recent layer only.
-    """
-    name = conflict_path.name
-    idx = name.rfind(CONFLICT_INFIX)
-    if idx == -1:
-        return conflict_path
-    before = name[:idx]
-    # Everything after the infix up to the final suffix is conflict metadata.
-    after = name[idx + len(CONFLICT_INFIX) :]
-    suffix = ""
-    if "." in after:
-        suffix = "." + after.rsplit(".", 1)[-1]
-    return conflict_path.with_name(before + suffix)
 
 
 def _promote_target_path(
@@ -559,7 +562,7 @@ def _resolve_interactive_loop(
             # Exact-match dispatch (not startswith): "post"/"plan"/"description"
             # must not silently promote/delete. (codex /review v0.9.0)
             if choice in ("p", "promote"):
-                target_canonical = _canonical_for_conflict(cpath)
+                target_canonical = manifest._canonical_for_conflict(cpath)
                 try:
                     cpath.rename(target_canonical)
                     console.print(
@@ -983,7 +986,6 @@ def _resolve_interactive_loop(
 
 
 __all__ = [
-    "_canonical_for_conflict",
     "_ensure_inversion_marker",
     "_find_conflict_files",
     "_inversion_marker_path",

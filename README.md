@@ -410,7 +410,9 @@ Discovery is local. Track 29A's live gap was one repo (8 commits, 15%), not "10 
 
 ## Handling conflicts
 
-If you edit the same file on two machines before syncing, `mm pull` never destroys your local edits. It follows the Syncthing convention: your local file stays at the canonical path, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it. If your local file is newer than the remote (by mtime), pull leaves it alone — convergence happens on the next push.
+If you edit the same file on two machines before syncing, `mm pull` never overwrites your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it. If your local file is newer than the remote (by mtime), pull leaves it alone — convergence happens on the next push.
+
+Managed sidecars are latest-per-peer, not an archive. Unchanged peer content reuses the existing sidecar. Changed content publishes a new sidecar first, then removes the older same-peer copy. If publication fails, local and prior copies remain. If only cleanup fails, the new copy is already saved and extras remain — `mm conflicts` / `mm resolve` can inspect them. Edits made inside a managed sidecar are subject to that replacement; promote or copy the sidecar out of managed naming to keep a durable document. Sidecars stay local-only. A canonical or promoted file syncs only when the source's include rules cover it. Deleting a sidecar on this Mac does not delete anything on other machines.
 
 Managing conflicts:
 

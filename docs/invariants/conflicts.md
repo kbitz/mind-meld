@@ -3,11 +3,11 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename` / `_filter_excluded_paths`
-- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_canonical_for_conflict` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
 - `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge`
-- `src/mind_meld/manifest.py` — `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
 - `src/mind_meld/retention.py` — `_gc_old_conflict_files` / `_is_live_conflict`
 - `src/mind_meld/devices.py` — `lookup_device_by_short_id` / `generate_unique_short_device_id`
 
@@ -58,7 +58,11 @@ The two interactive prompt sites (`resolveflow.py:_resolve_interactive_loop` for
 
 The pre-v0.9.0 letters `c` / `f` remain LOUD-rejected in the **`mm resolve` path only** (real silent-data-loss risk in mapping them through post-inversion). That rejection runs before resolver-only `(n)ewer` handling and before the shared b/both helper. Inline pull intentionally retains its existing unrecognized-input → keep-both fallback for `c` / `f`; Track 18B does not expand or unify that policy. The asymmetry is deliberate: `c`/`f` encoded directional ambiguity that the v0.9.2 inversion broke; `b` does not.
 
-**Honest skip-lifecycle copy.** The `(s)kip` line reads `leave both files on disk; run `mm resolve` later or delete manually` — explicit that the next pull does NOT re-prompt unless remote changes again, so the conflict file persists indefinitely. Codex outside-voice review (T2) caught the misleading prior wording ("decide on the next pull").
+**Honest skip-lifecycle copy.** The `(s)kip` line reads `leave both files on disk; run `mm resolve` later or delete manually` — explicit that the next pull does NOT re-prompt unless remote changes again. That is the current-action wording; it is not an indefinite-history promise. A later pull of *different* bytes from the same peer may replace the managed sidecar after the new copy is published (latest-per-peer). Unchanged peer content is a no-write no-cleanup retry. Promote or copy the sidecar out of managed naming to keep a durable editable document. Codex outside-voice review (T2) caught the misleading prior wording ("decide on the next pull").
+
+**Exact ownership, then publish, then cleanup (Track 48A).** A sidecar belongs to the canonical reconstructed by `manifest._canonical_for_conflict` (final infix, lexical Path equality under the shared parent). Prefix globs are not ownership. Apply and include_files depth-zero discovery reject shape/owner mismatches before `stat`/read/migration. Cleanup unlinks only same-owner/same-peer post-inversion copies whose bytes were successfully read and differ, and only after the replacement write succeeds. Unreadable copies stay. Occupied replacement names are probed with `lstat` (FileNotFoundError means free).
+
+**`_canonical_for_conflict` never raises.** An infix-at-index-0 name (``.sync-conflict-<ts>-<dev>``) reconstructs to the empty string; `Path.with_name("")` would raise. Return the input path unchanged so a wide sibling scan cannot abort pull/conflicts/resolve.
 
 **Three-number divergence summary.** `count_divergent_lines` counts `-` / `+` lines in the unified diff (excluding the `---` / `+++` headers) and returns `(M, N, K)` where M = removed-or-replaced, N = added-or-replaced, K = M + N. Wording is honest about replacement semantics: a 1-line replacement is M=1, N=1, K=2 (counting both old and new). Codex T1 caught the original "unique to local/remote" wording as pseudo-precision.
 
