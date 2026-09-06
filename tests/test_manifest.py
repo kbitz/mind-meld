@@ -12,6 +12,7 @@ from mind_meld.manifest import (
     CONFLICT_PATTERN,
     MARKER_SKIP_NAME,
     TOMBSTONE_TTL_DAYS,
+    _canonical_for_conflict,
     _is_active_tombstone,
     _is_excluded,
     _record_file,
@@ -988,6 +989,49 @@ class TestNormalizeManifest:
         m = {"device_id": "c", "files": {"a.md": {"sha256": "x"}}}
         result = normalize_manifest(m)
         assert result["sources"]["claude"]["base_path"] == ""
+
+
+class TestCanonicalForConflict:
+    @pytest.mark.parametrize(
+        ("conflict_name", "canonical_name"),
+        [
+            ("user_role.sync-conflict-20260421-143055-a1b2c3d4.md", "user_role.md"),
+            ("user_role.sync-conflict-20260421-143055-a1b2c3d4-7f9a.md", "user_role.md"),
+            ("user_role.sync-conflict-20260421-143055-v1-a1b2c3d4.md", "user_role.md"),
+            ("user_role.sync-conflict-v0-20260421-143055-a1b2c3d4.md", "user_role.md"),
+            ("README.sync-conflict-20260421-143055-a1b2c3d4", "README"),
+            (".config.sync-conflict-20260421-143055-a1b2c3d4", ".config"),
+            ("archive.tar.sync-conflict-20260421-143055-a1b2c3d4.gz", "archive.tar.gz"),
+            (
+                "notes.sync-conflict-log.sync-conflict-20260421-143055-v1-devA1234.md",
+                "notes.sync-conflict-log.md",
+            ),
+            ("notes[1].sync-conflict-20260421-143055-v1-devA1234.md", "notes[1].md"),
+            ("notes.sync-conflict-20260421-143055-v1-devA1234.", "notes."),
+            ("....sync-conflict-20260421-143055-v1-devA1234", "..."),
+            ("plain.md", "plain.md"),
+        ],
+    )
+    def test_reconstructs_owner_from_final_infix(
+        self, conflict_name: str, canonical_name: str
+    ) -> None:
+        parent = Path("/x")
+        assert _canonical_for_conflict(parent / conflict_name) == parent / canonical_name
+
+    @pytest.mark.parametrize(
+        "conflict_name",
+        [
+            ".sync-conflict-20260421-143055-v1-devA1234",
+            ".sync-conflict-20260421-143055-v1-devA1234.",
+            "..sync-conflict-20260421-143055-v1-devA1234",
+            "..sync-conflict-20260421-143055-v1-devA1234.",
+            "...sync-conflict-20260421-143055-v1-devA1234",
+        ],
+    )
+    def test_invalid_reconstruction_is_ownerless(self, conflict_name: str) -> None:
+        cpath = Path("/x") / conflict_name
+        assert is_conflict_filename(conflict_name)
+        assert _canonical_for_conflict(cpath) is None
 
 
 class TestIsConflictFilename:

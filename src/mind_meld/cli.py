@@ -45,6 +45,7 @@ from mind_meld import (
     fsutil,
     host_skill_discovery,
     identity,
+    manifest,
     pullhistory,
     resolveflow,
     retention,
@@ -893,11 +894,11 @@ def _drop_case_collisions_from_manifests(
     if not collisions:
         return manifest_cache
     new_cache: dict[str, dict | None] = {}
-    for did, manifest in manifest_cache.items():
-        if manifest is None:
+    for did, peer_manifest in manifest_cache.items():
+        if peer_manifest is None:
             new_cache[did] = None
             continue
-        new_manifest = copy.deepcopy(manifest)
+        new_manifest = copy.deepcopy(peer_manifest)
         for src_name, clusters in collisions.items():
             src_data = new_manifest.get("sources", {}).get(src_name)
             if not src_data:
@@ -1257,6 +1258,23 @@ def _upload_changed_blobs(
     return bytes_transferred
 
 
+_CONFLICT_NAME_RANDOM_ATTEMPTS = 5
+
+
+def _conflict_name_is_free(path: Path) -> bool:
+    """True only when ``lstat`` raises FileNotFoundError.
+
+    Files, directories, and dangling symlinks are occupied. Other OSError
+    (permission, I/O) propagates so the caller fails this file rather than
+    treating a denied probe as either free or occupied.
+    """
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
 def conflict_filename(
     canonical: Path,
     device_id: str,
@@ -1274,13 +1292,19 @@ def conflict_filename(
     the sidecar's own birth time; ``st_mtime`` is restored to the peer
     file's clock separately.
 
-    If the computed path already exists (same-second double-conflict on the
-    same device), append a 4-char random suffix. Filenames are never overwritten.
+    If the computed path is already occupied (same-second double-conflict
+    on the same device, or a leftover directory/symlink at that name),
+    append a 4-char random suffix and retry up to
+    ``_CONFLICT_NAME_RANDOM_ATTEMPTS`` times. Occupancy is ``lstat``:
+    only FileNotFoundError means free. This protects preexisting occupied
+    names under the mm lock; it is not atomic no-clobber against an
+    external writer creating the same name between probe and publish.
 
-    Raises ValueError on empty/None `device_id`. The caller (peer manifest or
-    local config) is responsible for supplying a non-empty id; the previous
-    `"unknown"` fallback silently minted cross-device-colliding filenames when
-    a corrupted peer manifest fed an empty id, which is a data-loss footgun.
+    Raises ValueError on empty/None `device_id`, or if every candidate
+    name is occupied. The caller (peer manifest or local config) is
+    responsible for supplying a non-empty id; the previous `"unknown"`
+    fallback silently minted cross-device-colliding filenames when a
+    corrupted peer manifest fed an empty id, which is a data-loss footgun.
     """
     if not device_id:
         raise ValueError("conflict_filename: device_id must be non-empty")
@@ -1293,11 +1317,17 @@ def conflict_filename(
     base_name = f"{stem}{CONFLICT_INFIX}{ts}-{CONFLICT_V1_MARKER}-{device_short}"
     path = canonical.with_name(f"{base_name}{suffix}")
 
-    if path.exists():
+    if _conflict_name_is_free(path):
+        return path
+    for _ in range(_CONFLICT_NAME_RANDOM_ATTEMPTS):
         rand = secrets.token_hex(2)
-        path = canonical.with_name(f"{base_name}-{rand}{suffix}")
-
-    return path
+        candidate = canonical.with_name(f"{base_name}-{rand}{suffix}")
+        if _conflict_name_is_free(candidate):
+            return candidate
+    raise ValueError(
+        "conflict_filename: no unused name for "
+        f"{canonical.name} after {_CONFLICT_NAME_RANDOM_ATTEMPTS} random suffixes"
+    )
 
 
 def _prompt_conflict_choice(
@@ -1648,6 +1678,10 @@ def _existing_post_inversion_sidecars_from_peer(canonical: Path, device_short: s
     ``datetime.now()``), so users were accumulating N near-identical
     sidecars per peer over N pulls.
 
+    Ownership is exact Path equality via ``manifest._canonical_for_conflict``,
+    checked before ``is_file``/read. A stem-prefix glob is not ownership:
+    ``notes.md`` must not select ``notes.sync-conflict-log.md``'s sidecar.
+
     Skips ``v0-``-prefixed pre-inversion sidecars. Those hold LOCAL
     bytes from a pre-v0.9.2 conflict and must NEVER be reaped by the
     apply path -- they encode user data that may not exist anywhere
@@ -1656,23 +1690,35 @@ def _existing_post_inversion_sidecars_from_peer(canonical: Path, device_short: s
 
     Returns sidecars whose parsed device_short matches ``device_short``.
     Listing failures (permission, transient FS errors) return empty so
-    the caller falls through to the existing write path.
+    the caller falls through to the existing write path. An individual
+    eligible candidate that cannot be statted is skipped (left untouched)
+    with a sanitized stderr warning.
     """
     parent = canonical.parent
-    pattern = f"{canonical.stem}{CONFLICT_INFIX}*{canonical.suffix}"
     out: list[Path] = []
     try:
-        candidates = list(parent.glob(pattern))
+        candidates = list(parent.glob(f"*{CONFLICT_INFIX}*"))
     except OSError:
         return []
     for sibling in candidates:
-        if not sibling.is_file():
-            continue
         if not is_conflict_filename(sibling.name):
+            continue
+        if manifest._canonical_for_conflict(sibling) != canonical:
             continue
         if is_pre_inversion_conflict_filename(sibling.name):
             continue
         if parse_conflict_device_short(sibling.name) != device_short:
+            continue
+        try:
+            is_regular = sibling.is_file()
+        except OSError as e:
+            print(
+                "mm: warning: conflict sidecar unreadable (left in place): "
+                f"{safe_str(sibling)} \u2014 {safe_str(e)}",
+                file=sys.stderr,
+            )
+            continue
+        if not is_regular:
             continue
         out.append(sibling)
     return out
@@ -1699,23 +1745,33 @@ def _apply_conflict(
     is newer or mtimes are equal \u2014 but "remote newer" never meant "remote
     correct for this machine."
 
-    Per-peer dedup (post-v0.11.4): before writing, scan for existing
-    post-inversion sidecars from this peer for the same canonical. If
-    one already holds the same bytes, skip the write -- the prior
-    sidecar already represents this conflict, and stamping a fresh
-    timestamp would just accumulate near-identical files. If existing
-    sidecars hold STALE bytes (peer pushed something newer), reap them
-    before writing the new one so the user sees one current sidecar
-    per peer rather than a timeline of every pull.
+    Per-peer dedup (post-v0.11.4, publish-then-cleanup as of Track 48A):
+    scan existing post-inversion sidecars from this peer for the same
+    canonical. If one already holds the same bytes, skip the write --
+    the prior sidecar already represents this conflict. If existing
+    sidecars hold STALE bytes (peer pushed something newer), publish
+    the replacement first, then best-effort unlink only the copies
+    whose bytes were successfully read and differ. Unreadable copies
+    stay; a failed publish leaves every old copy in place.
 
     Failure modes (per-file isolation; never destroys local without a
     recoverable trail):
-      * sidecar path-build (empty/None remote_device_id from corrupt peer
-        manifest): warn, fail this file, keep walking.
-      * sidecar write fail: warn, fail this file. Local is untouched at
-        canonical because we never wrote it out \u2014 the inversion makes
-        rollback unnecessary.
+      * sidecar path-build (empty/None remote_device_id, occupied-name
+        exhaustion, occupancy-probe OSError): warn on stderr, fail this
+        file, keep walking. Local and prior conflict copies remain.
+      * sidecar write fail: warn on stderr, fail this file. Local is
+        untouched at canonical because we never wrote it out \u2014 the
+        inversion makes rollback unnecessary. Prior conflict copies
+        remain because cleanup has not run.
+      * stale unlink fail after a successful write: warn on stderr;
+        outcome stays conflicted. The new copy is saved and the old
+        copy remains recoverable via ``mm resolve``.
     """
+    # Candidate and verified-different lists are initialized outside the
+    # optional peer scan so a path-build/write failure never depends on
+    # an unbound local, and so cleanup cannot run before publication.
+    existing: list[Path] = []
+    stale: list[Path] = []
     # Per-peer dedup. Empty/None remote_device_id falls through to the
     # ValueError branch below where conflict_filename refuses to mint a
     # path -- skip the dedup scan for that case (we couldn't attribute
@@ -1725,48 +1781,44 @@ def _apply_conflict(
         existing = _existing_post_inversion_sidecars_from_peer(local_path, device_short)
         for sidecar in existing:
             try:
-                if sidecar.read_bytes() == plain_data:
-                    # Idempotent: peer bytes unchanged from a prior pull;
-                    # the existing sidecar already represents this conflict.
-                    # Skip the write so we don't accumulate duplicates.
-                    if verbose:
-                        console.print(
-                            f"  [yellow]conflict (unchanged):[/yellow] "
-                            f"{safe_str(rel_path)} "
-                            f"(existing sidecar {safe_str(sidecar.name)})"
-                        )
-                    return "conflicted"
-            except OSError:
-                # Stat/read failure on one candidate -- treat as non-match
-                # and let the reap-and-write path handle it.
-                continue
-        # No content match. Reap stale snapshots from this peer (peer
-        # pushed something different since the last sidecar) before
-        # writing the new one. Best-effort: unlink failures degrade to
-        # accumulation, never block the write.
-        for sidecar in existing:
-            try:
-                sidecar.unlink()
+                sidecar_bytes = sidecar.read_bytes()
             except OSError as e:
                 print(
-                    f"mm: warning: stale sidecar unlink failed: "
-                    f"{safe_str(sidecar.name)} \u2014 {safe_str(e)}",
+                    "mm: warning: conflict sidecar unreadable (left in place): "
+                    f"{safe_str(sidecar)} \u2014 {safe_str(e)}",
                     file=sys.stderr,
                 )
+                continue
+            if sidecar_bytes == plain_data:
+                # Idempotent: peer bytes unchanged from a prior pull;
+                # the existing sidecar already represents this conflict.
+                # Skip the write so we don't accumulate duplicates.
+                # Unchanged-content retries do not clean extras.
+                if verbose:
+                    console.print(
+                        f"  [yellow]conflict (unchanged):[/yellow] "
+                        f"{safe_str(rel_path)} "
+                        f"(existing sidecar {safe_str(sidecar.name)})"
+                    )
+                return "conflicted"
+            stale.append(sidecar)
 
     try:
         conflict_path = conflict_filename(local_path, remote_device_id)
-    except ValueError as e:
-        # Empty/None remote_device_id (corrupted peer manifest). Preserve
-        # per-file isolation: warn and fail this file only, keep walking.
-        # The pull summary's `failed` count surfaces the issue without
-        # losing progress on N other peer files.
-        console.print(
-            f"  [red]conflict path build failed (local preserved):[/red] "
-            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
+    except (ValueError, OSError) as e:
+        # Empty/None remote_device_id (corrupted peer manifest), name
+        # exhaustion, or occupancy-probe OSError. Preserve per-file
+        # isolation: warn and fail this file only, keep walking.
+        print(
+            "mm: warning: conflict path build failed "
+            "(local and prior conflict copies preserved): "
+            f"{safe_str(local_path)} \u2014 {safe_str(e)}",
+            file=sys.stderr,
         )
         return "failed"
 
+    # Publish while every old copy still exists. Cleanup runs only after
+    # this write succeeds, and only for verified-different candidates.
     # Inverted semantics: write remote bytes to the .sync-conflict-* sidecar.
     # Canonical (local) is untouched \u2014 no rename + rollback dance needed
     # because we never overwrite local in the conflict path. The sidecar
@@ -1776,12 +1828,28 @@ def _apply_conflict(
     try:
         fsutil.atomic_write_bytes(conflict_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
-        console.print(
-            f"  [red]sidecar write failed (local preserved):[/red] "
-            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
+        print(
+            "mm: warning: sidecar write failed "
+            "(local and prior conflict copies preserved): "
+            f"{safe_str(local_path)} \u2014 {safe_str(e)}",
+            file=sys.stderr,
         )
         return "failed"
     _restore_mtime_best_effort(conflict_path, remote_mtime_iso)
+
+    for sidecar in stale:
+        if sidecar == conflict_path:
+            continue
+        try:
+            sidecar.unlink()
+        except OSError as e:
+            print(
+                "mm: warning: replacement saved as "
+                f"{safe_str(conflict_path)}; old copy remains at "
+                f"{safe_str(sidecar)} \u2014 {safe_str(e)}. "
+                "Inspect with mm resolve.",
+                file=sys.stderr,
+            )
 
     if verbose:
         console.print(
@@ -7214,18 +7282,25 @@ def resolve(
     (m)erge accepts the LCS-merged result over canonical (offered only
     when the content is text; never the default key -- you must type it).
     (p)romote keeps BOTH: renames the .sync-conflict-* sidecar to its own
-    first-class filename so both versions survive as separate synced
-    files. Use this when the two files turned out to be different
-    documents that merely collided on a name.
-    (s)kip leaves both files on disk; you can run `mm resolve` again
-    later or delete the .sync-conflict-* file manually. Note: the next
-    `mm pull` does NOT re-prompt unless remote changes again -- the
-    .sync-conflict-* file persists until you act on it.
+    first-class filename. Use this when the two files turned out to be
+    different documents that merely collided on a name. The promoted
+    file syncs only when the source's include rules cover that new
+    name (include_files sources match exact configured names, so a
+    from-/local- name will not sync until you add it).
+    (s)kip leaves both files on disk for now; you can run `mm resolve`
+    again later or delete the .sync-conflict-* file manually. The next
+    `mm pull` does NOT re-prompt unless remote changes again. A later
+    pull of different bytes from the same peer may replace that managed
+    sidecar after the new copy is published; promote or copy it out of
+    managed naming to keep a durable editable document. Sidecars stay
+    local-only. Deleting a sidecar here does not delete anything on
+    other machines.
     (a)bort exits the resolve walk; previously-resolved conflicts stay
     resolved.
 
-    Both deletions and renames propagate on the next `mm push` via the
-    existing tombstone / additive-sync machinery.
+    Canonical deletions and renames propagate on the next `mm push` via
+    the existing tombstone / additive-sync machinery when the path is
+    in source scope. Sidecar deletion is local.
 
     Acquires the mm lockfile so an autopull running in parallel can't
     race with our rename/unlink operations on the synced files.

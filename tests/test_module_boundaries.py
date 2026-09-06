@@ -328,6 +328,27 @@ def test_future_clamp_constant_has_one_owner() -> None:
     assert others == [], f"constant redefined in {others}"
 
 
+def test_canonical_for_conflict_has_one_owner() -> None:
+    """Track 48A: the final-infix owner lives in manifest, not a third copy.
+
+    Prefix globbing is not ownership. A second reconstruction in cli or
+    resolveflow is how notes.md would again delete notes.sync-conflict-log.md.
+    """
+    from mind_meld import cli, manifest, resolveflow
+
+    assert hasattr(manifest, "_canonical_for_conflict")
+    assert cli.manifest._canonical_for_conflict is manifest._canonical_for_conflict
+    assert resolveflow.manifest._canonical_for_conflict is manifest._canonical_for_conflict
+    assert "def _canonical_for_conflict" not in (SRC / "resolveflow.py").read_text(encoding="utf-8")
+    assert "def _canonical_for_conflict" not in (SRC / "cli.py").read_text(encoding="utf-8")
+    assert "_canonical_for_conflict" not in resolveflow.__all__
+    cli_src = (SRC / "cli.py").read_text(encoding="utf-8")
+    resolveflow_src = (SRC / "resolveflow.py").read_text(encoding="utf-8")
+    assert "manifest._canonical_for_conflict" in cli_src
+    assert "manifest._canonical_for_conflict" in resolveflow_src
+    assert "from mind_meld.resolveflow import _canonical_for_conflict" not in cli_src
+
+
 # ---------------------------------------------------------------------------
 # T8 — the test suite must never reach the real skill installer.
 # ---------------------------------------------------------------------------

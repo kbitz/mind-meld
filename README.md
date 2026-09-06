@@ -56,10 +56,10 @@ Config lives at `~/.config/mind-meld/config.toml` — not tied to your current d
 3. `mm pull` — downloads everything the other machine(s) have pushed.
 4. `mm push` — uploads anything this machine has that the others don't.
 
-Push and pull on each Mac over time and the state converges toward the union of all three. Nothing is destroyed:
+Push and pull on each Mac to exchange changes according to each file's sync rules:
 
 - **`.jsonl` files and `MEMORY.md`** deep-merge by line-union (deduped, sorted by `ts`). Entries from all machines accumulate — this is why telemetry, learnings, and timeline files stay coherent across devices.
-- **Other divergent files** use mtime-skip: if your local file is newer than the remote, pull leaves it alone. Otherwise your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). See [Handling conflicts](#handling-conflicts) below.
+- **Other divergent files** use mtime-skip: if your local file is newer than the remote, pull leaves it alone. Otherwise, with the default `keep-both` mode, your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). See [Handling conflicts](#handling-conflicts) below.
 - **Deletions** propagate via tombstones in the manifest — delete a file on one machine, and `mm pull` on the others removes it cleanly.
 
 First-run-from-divergent-state is explicitly supported: if each Mac already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
@@ -410,7 +410,11 @@ Discovery is local. Track 29A's live gap was one repo (8 commits, 15%), not "10 
 
 ## Handling conflicts
 
-If you edit the same file on two machines before syncing, `mm pull` never destroys your local edits. It follows the Syncthing convention: your local file stays at the canonical path, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it. If your local file is newer than the remote (by mtime), pull leaves it alone — convergence happens on the next push.
+For a divergent file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it. If your local file is newer than the remote (by mtime), pull leaves it alone — convergence happens on the next push.
+
+Managed sidecars are latest-per-peer, not an archive. Unchanged peer content reuses the existing sidecar without cleaning up extras. Changed content publishes a new sidecar first, then removes prior same-peer copies for that file whose contents it could read and verify as different. Unreadable copies remain. If publication fails, local and prior copies remain. If only cleanup fails, the new copy is already saved and extras remain — `mm conflicts` / `mm resolve` can inspect them. Edits made inside a managed sidecar are subject to that replacement; promote or copy the sidecar out of managed naming to keep a durable document.
+
+Sidecars stay local-only. A canonical or promoted file syncs only when the source's include rules cover it. Deleting a sidecar on this Mac does not delete anything on other machines. If a sidecar has no recoverable original filename, `mm resolve` cannot promote it automatically; copy or rename it manually to a name you choose.
 
 Managing conflicts:
 

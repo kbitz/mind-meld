@@ -30,6 +30,7 @@ from typer.testing import CliRunner
 from mind_meld import resolveflow
 from mind_meld.cli import (
     CONFLICT_INFIX,
+    _apply_conflict,
     _apply_incoming_file,
     _predict_pull_outcome,
     _prompt_conflict_choice,
@@ -38,13 +39,15 @@ from mind_meld.cli import (
 )
 from mind_meld.config import save_config
 from mind_meld.manifest import (
+    _canonical_for_conflict,
     hash_file,
+    is_v1_conflict_filename,
     mtime_from_manifest,
     mtime_from_path,
+    parse_conflict_device_short,
     walk_claude_source,
 )
 from mind_meld.resolveflow import (
-    _canonical_for_conflict,
     _find_conflict_files,
     _promote_conflict_file,
     _promote_target_path,
@@ -66,6 +69,26 @@ def _remote_info(sha: str, mtime: datetime) -> dict:
         "size": 0,
         "mtime": mtime.isoformat(),
     }
+
+
+def _v1_sidecar(
+    canonical: Path,
+    device_id: str,
+    payload: bytes,
+    ts: str = "20260421-120000",
+) -> Path:
+    """Seed a post-inversion sidecar whose reconstructed owner is `canonical`."""
+    path = canonical.with_name(
+        f"{canonical.stem}{CONFLICT_INFIX}{ts}-v1-{device_id[:8]}{canonical.suffix}"
+    )
+    path.write_bytes(payload)
+    return path
+
+
+def _older_local(path: Path, payload: bytes = b"local content") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    _set_mtime(path, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
 
 
 # ── _apply_incoming_file branches ────────────────────────────────────
@@ -467,6 +490,64 @@ class TestConflictFilename:
         canonical = tmp_path / "f.md"
         with pytest.raises(ValueError, match="device_id must be non-empty"):
             conflict_filename(canonical, None)  # type: ignore[arg-type]
+
+    def test_occupied_random_fallback_picks_a_free_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Base plus the first random candidate occupied -> return the free one."""
+        canonical = tmp_path / "x.md"
+        now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
+        base = conflict_filename(canonical, "devA1234", now=now)
+        base.write_bytes(b"occupied-base")
+        tokens = iter(["aaaa", "bbbb"])
+        monkeypatch.setattr("mind_meld.cli.secrets.token_hex", lambda n: next(tokens))
+        occupied = canonical.with_name(f"{base.stem}-aaaa{base.suffix}")
+        occupied.write_bytes(b"occupied-random")
+        chosen = conflict_filename(canonical, "devA1234", now=now)
+        assert chosen.name.endswith("-bbbb.md")
+        assert not chosen.exists()
+        assert occupied.read_bytes() == b"occupied-random"
+        assert is_v1_conflict_filename(chosen.name)
+        assert parse_conflict_device_short(chosen.name) == "devA1234"
+
+    def test_five_occupied_random_candidates_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        canonical = tmp_path / "x.md"
+        now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
+        base = conflict_filename(canonical, "devA1234", now=now)
+        base.write_bytes(b"base")
+        tokens = ["aa11", "bb22", "cc33", "dd44", "ee55"]
+        for tok in tokens:
+            canonical.with_name(f"{base.stem}-{tok}{base.suffix}").write_bytes(b"taken")
+        calls: list[str] = []
+
+        def take(n: int) -> str:
+            tok = tokens[len(calls)]
+            calls.append(tok)
+            return tok
+
+        monkeypatch.setattr("mind_meld.cli.secrets.token_hex", take)
+        with pytest.raises(ValueError, match="no unused name"):
+            conflict_filename(canonical, "devA1234", now=now)
+        assert calls == tokens
+        assert base.read_bytes() == b"base"
+
+    def test_dangling_symlink_and_directory_are_occupied(self, tmp_path: Path) -> None:
+        canonical = tmp_path / "x.md"
+        now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
+        base = conflict_filename(canonical, "devA1234", now=now)
+        outside = tmp_path / "outside-target"
+        outside.write_bytes(b"do-not-touch")
+        base.symlink_to(tmp_path / "missing-target")
+        chosen = conflict_filename(canonical, "devA1234", now=now)
+        assert chosen != base
+        assert base.is_symlink()
+        assert outside.read_bytes() == b"do-not-touch"
+        chosen.mkdir()
+        third = conflict_filename(canonical, "devA1234", now=now)
+        assert third != chosen
+        assert chosen.is_dir()
 
 
 # ── manifest mtime helpers ───────────────────────────────────────────
@@ -3743,3 +3824,766 @@ class TestPostInversionLocalLeavesCanonical:
         assert newer_side(local_stat, remote_stat) == "remote"
         assert remote_stat is not None
         assert abs(remote_stat - remote_mtime.timestamp()) < 2.0
+
+
+# ── Track 48A: exact ownership, publish-then-cleanup, occupancy ─────────
+
+
+class TestConflictOwnershipApply:
+    """Wrong-owner sidecars must not be deleted or used as a dedup hit."""
+
+    def _apply(
+        self,
+        local: Path,
+        remote: bytes,
+        device_id: str = "devA1234",
+    ) -> str:
+        info = _remote_info(
+            hashlib.sha256(remote).hexdigest(),
+            datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
+        )
+        return _apply_incoming_file(
+            local_path=local,
+            rel_path=local.name,
+            plain_data=remote,
+            remote_info=info,
+            remote_device_id=device_id,
+        )
+
+    def test_wrong_owner_different_bytes_are_not_deleted(self, tmp_path: Path) -> None:
+        notes = tmp_path / "notes.md"
+        other = tmp_path / "notes.sync-conflict-log.md"
+        _older_local(notes)
+        other.write_bytes(b"canonical B")
+        other_mtime = other.stat().st_mtime_ns
+        other_sidecar = _v1_sidecar(other, "devA1234", b"peer bytes for B")
+        other_sidecar_mtime = other_sidecar.stat().st_mtime_ns
+
+        outcome = self._apply(notes, b"peer bytes for A")
+        assert outcome == "conflicted"
+        assert notes.read_bytes() == b"local content"
+        assert other.read_bytes() == b"canonical B"
+        assert other.stat().st_mtime_ns == other_mtime
+        assert other_sidecar.exists()
+        assert other_sidecar.read_bytes() == b"peer bytes for B"
+        assert other_sidecar.stat().st_mtime_ns == other_sidecar_mtime
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == notes
+        ]
+        assert len(owned) == 1
+        assert owned[0].read_bytes() == b"peer bytes for A"
+
+    def test_wrong_owner_identical_bytes_do_not_suppress_conflict(self, tmp_path: Path) -> None:
+        notes = tmp_path / "notes.md"
+        other = tmp_path / "notes.sync-conflict-log.md"
+        _older_local(notes)
+        other.write_bytes(b"canonical B")
+        incoming = b"shared remote bytes"
+        other_sidecar = _v1_sidecar(other, "devA1234", incoming)
+
+        outcome = self._apply(notes, incoming)
+        assert outcome == "conflicted"
+        assert other_sidecar.exists()
+        assert other_sidecar.read_bytes() == incoming
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == notes
+        ]
+        assert len(owned) == 1
+        assert owned[0].read_bytes() == incoming
+        assert owned[0] != other_sidecar
+
+    @pytest.mark.parametrize("name", ["notes[1].md", "notes*.md", "notes?.md"])
+    def test_literal_metacharacters_own_their_sidecar(self, tmp_path: Path, name: str) -> None:
+        canonical = tmp_path / name
+        neighbor = tmp_path / "notes1.md"
+        _older_local(canonical)
+        _older_local(neighbor, b"neighbor local")
+        own = _v1_sidecar(canonical, "devA1234", b"stale own")
+        neighbor_sidecar = _v1_sidecar(neighbor, "devA1234", b"neighbor remote")
+        neighbor_bytes = neighbor_sidecar.read_bytes()
+
+        outcome = self._apply(canonical, b"fresh own")
+        assert outcome == "conflicted"
+        assert canonical.read_bytes() == b"local content"
+        assert neighbor_sidecar.exists()
+        assert neighbor_sidecar.read_bytes() == neighbor_bytes
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == canonical
+        ]
+        assert len(owned) == 1
+        assert owned[0].read_bytes() == b"fresh own"
+        assert not own.exists() or owned[0] == own
+
+    def test_empty_suffix_does_not_overmatch_extension(self, tmp_path: Path) -> None:
+        todo = tmp_path / "TODO"
+        todo_md = tmp_path / "TODO.md"
+        _older_local(todo)
+        _older_local(todo_md, b"todo md local")
+        other_sidecar = _v1_sidecar(todo_md, "devA1234", b"todo md remote")
+
+        outcome = self._apply(todo, b"todo remote")
+        assert outcome == "conflicted"
+        assert other_sidecar.exists()
+        assert other_sidecar.read_bytes() == b"todo md remote"
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == todo
+        ]
+        assert len(owned) == 1
+        assert owned[0].read_bytes() == b"todo remote"
+
+    def test_unprefixed_post_inversion_is_cleanup_eligible(self, tmp_path: Path) -> None:
+        local = tmp_path / "doc.md"
+        _older_local(local)
+        unprefixed = local.parent / "doc.sync-conflict-20260421-120000-devA1234.md"
+        unprefixed.write_bytes(b"peer R1")
+        outcome = self._apply(local, b"peer R2")
+        assert outcome == "conflicted"
+        assert not unprefixed.exists()
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == local
+        ]
+        assert len(owned) == 1
+        assert owned[0].read_bytes() == b"peer R2"
+
+    def test_empty_stem_conflict_sibling_does_not_abort_apply(self, tmp_path: Path) -> None:
+        notes = tmp_path / "notes.md"
+        _older_local(notes)
+        empty_stem = tmp_path / ".sync-conflict-20260421-143055-v1-devA1234"
+        empty_stem.write_bytes(b"not ours")
+        outcome = self._apply(notes, b"peer A")
+        assert outcome == "conflicted"
+        assert empty_stem.exists()
+        assert empty_stem.read_bytes() == b"not ours"
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == notes
+        ]
+        assert len(owned) == 1
+        assert owned[0].read_bytes() == b"peer A"
+
+
+class TestConflictOwnershipDiscovery:
+    def _config(self, src: Path, include_files: list[str]) -> dict:
+        return {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": [],
+                        "include_files": include_files,
+                    }
+                ]
+            }
+        }
+
+    def test_include_files_attributes_only_exact_owner(self, tmp_path: Path) -> None:
+        src = tmp_path / "gstack"
+        src.mkdir()
+        notes = src / "notes.md"
+        other = src / "notes.sync-conflict-log.md"
+        notes.write_bytes(b"A")
+        other.write_bytes(b"B")
+        a_sidecar = _v1_sidecar(notes, "devA1234", b"A remote")
+        b_sidecar = _v1_sidecar(other, "devA1234", b"B remote")
+
+        only_a = _find_conflict_files(self._config(src, ["notes.md"]))
+        assert [h[1] for h in only_a] == [a_sidecar]
+        assert only_a[0][2] == notes
+
+        both = _find_conflict_files(self._config(src, ["notes.md", "notes.sync-conflict-log.md"]))
+        paths = {h[1] for h in both}
+        assert paths == {a_sidecar, b_sidecar}
+        by_path = {h[1]: h[2] for h in both}
+        assert by_path[a_sidecar] == notes
+        assert by_path[b_sidecar] == other
+
+    def test_wrong_owner_is_not_migrated_by_other_include_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mind_meld.resolveflow import _ensure_inversion_marker
+
+        sidecar_dir = tmp_path / "sidecar"
+        monkeypatch.setattr("mind_meld.sidecar.SIDECAR_DIR", sidecar_dir)
+        src = tmp_path / "gstack"
+        src.mkdir()
+        notes = src / "notes.md"
+        other = src / "notes.sync-conflict-log.md"
+        notes.write_bytes(b"A")
+        other.write_bytes(b"B")
+        a_sidecar = src / "notes.sync-conflict-20260301-100000-devA1234.md"
+        a_sidecar.write_bytes(b"A remote unprefixed")
+        b_sidecar = src / "notes.sync-conflict-log.sync-conflict-20260301-100000-devA1234.md"
+        b_sidecar.write_bytes(b"B remote unprefixed")
+        marker_ts = _ensure_inversion_marker()
+        assert marker_ts is not None
+        migrated = []
+        real_migrate = resolveflow._migrate_pre_inversion_conflict
+
+        def spy_migrate(path: Path) -> Path:
+            migrated.append(path)
+            return real_migrate(path)
+
+        monkeypatch.setattr(resolveflow, "_migrate_pre_inversion_conflict", spy_migrate)
+        hits = _find_conflict_files(
+            self._config(src, ["notes.md"]),
+            migrate_pre_inversion=True,
+        )
+        assert b_sidecar.exists()
+        assert "v0-" not in b_sidecar.name
+        assert all(p != b_sidecar for p in migrated)
+        a_migrated = src / "notes.sync-conflict-v0-20260301-100000-devA1234.md"
+        assert a_migrated.exists()
+        assert [h[1] for h in hits] == [a_migrated]
+        assert not a_sidecar.exists()
+
+    def test_include_files_owned_stat_error_skips_without_abort(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        src = tmp_path / "gstack"
+        src.mkdir()
+        notes = src / "notes.md"
+        other = src / "other.md"
+        notes.write_bytes(b"A")
+        other.write_bytes(b"B")
+        owned = _v1_sidecar(notes, "devA1234", b"A remote")
+        other_sidecar = _v1_sidecar(other, "devA1234", b"B remote")
+        orig_is_file = Path.is_file
+
+        def boom_owned(self: Path) -> bool:
+            if self == owned:
+                raise PermissionError("stat denied")
+            return orig_is_file(self)
+
+        monkeypatch.setattr(Path, "is_file", boom_owned)
+        hits = _find_conflict_files(self._config(src, ["notes.md", "other.md"]))
+        assert owned.exists()
+        assert owned.read_bytes() == b"A remote"
+        assert [h[1] for h in hits] == [other_sidecar]
+        err = capsys.readouterr().err
+        assert "unreadable" in err
+        assert "\x1b" not in err
+
+    @pytest.mark.parametrize("name", ["notes[1].md", "notes*.md", "notes?.md"])
+    def test_include_files_literal_metacharacters_own_their_sidecar(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        src = tmp_path / "gstack"
+        src.mkdir()
+        canonical = src / name
+        neighbor = src / "notes1.md"
+        canonical.write_bytes(b"own")
+        neighbor.write_bytes(b"neighbor")
+        own = _v1_sidecar(canonical, "devA1234", b"own remote")
+        neighbor_sidecar = _v1_sidecar(neighbor, "devA1234", b"neighbor remote")
+        hits = _find_conflict_files(self._config(src, [name]))
+        assert [h[1] for h in hits] == [own]
+        assert hits[0][2] == canonical
+        assert neighbor_sidecar.exists()
+
+    def test_empty_stem_directory_does_not_abort_discovery(self, tmp_path: Path) -> None:
+        src = tmp_path / "gstack"
+        src.mkdir()
+        notes = src / "notes.md"
+        notes.write_bytes(b"A")
+        poison = src / ".sync-conflict-20260421-143055-v1-devA1234"
+        poison.mkdir()
+        own = _v1_sidecar(notes, "devA1234", b"A remote")
+        hits = _find_conflict_files(self._config(src, ["notes.md"]))
+        assert [h[1] for h in hits] == [own]
+        assert poison.is_dir()
+
+    def test_recursive_stat_error_preserves_copy_and_continues_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        src = tmp_path / "gstack"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        notes = memory / "notes.md"
+        other = memory / "other.md"
+        notes.write_bytes(b"A local")
+        other.write_bytes(b"B local")
+        unreadable = _v1_sidecar(notes, "devA1234", b"A remote")
+        readable = _v1_sidecar(other, "devA1234", b"B remote")
+        prior_mtime = unreadable.stat().st_mtime_ns
+        config = self._config(src, [])
+        config["sync"]["sources"][0]["include_dirs"] = ["memory"]
+        real_is_file = Path.is_file
+
+        def fail_one_stat(path: Path) -> bool:
+            if path == unreadable:
+                raise PermissionError("stat denied \x1b[31mRED")
+            return real_is_file(path)
+
+        monkeypatch.setattr(Path, "is_file", fail_one_stat)
+        hits = _find_conflict_files(config)
+
+        assert hits == [("gstack", readable, other)]
+        assert unreadable.read_bytes() == b"A remote"
+        assert unreadable.stat().st_mtime_ns == prior_mtime
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "mm: warning: conflict sidecar unreadable (left in place)" in captured.err
+        assert str(unreadable) in captured.err
+        assert "\x1b" not in captured.err
+        assert "[31m" not in captured.err
+
+    def test_ownerless_promote_refuses_without_mutation_and_continues_walk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ownerless = tmp_path / ".sync-conflict-20260421-143055-v1-devA1234"
+        ownerless.write_bytes(b"only ownerless copy")
+        prior_mtime = ownerless.stat().st_mtime_ns
+        canonical = tmp_path / "notes.md"
+        recoverable = _v1_sidecar(canonical, "devA1234", b"recoverable remote")
+        hits = [("gstack", ownerless, None), ("gstack", recoverable, None)]
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+
+        resolved, failed = _resolve_interactive_loop(hits)
+
+        assert (resolved, failed) == (1, 1)
+        assert ownerless.read_bytes() == b"only ownerless copy"
+        assert ownerless.stat().st_mtime_ns == prior_mtime
+        assert canonical.read_bytes() == b"recoverable remote"
+        assert not recoverable.exists()
+        captured = capsys.readouterr()
+        assert "promote failed:" in captured.out
+        assert "cannot reconstruct a canonical name" in captured.out
+
+    def test_ownerless_sidecar_is_discovered_without_self_canonical(self, tmp_path: Path) -> None:
+        src = tmp_path / "gstack"
+        (src / "memory").mkdir(parents=True)
+        sidecar = src / "memory" / ".sync-conflict-20260421-143055-v1-devA1234"
+        sidecar.write_bytes(b"only copy")
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            }
+        }
+        hits = _find_conflict_files(config)
+        assert len(hits) == 1
+        assert hits[0][1] == sidecar
+        assert hits[0][2] is None
+
+    @pytest.mark.parametrize(
+        "conflict_name",
+        [
+            ".sync-conflict-20200101-000000-v1-devA1234",
+            ".sync-conflict-20200101-000000-v1-devA1234.",
+            "..sync-conflict-20200101-000000-v1-devA1234",
+            "..sync-conflict-20200101-000000-v1-devA1234.",
+            "...sync-conflict-20200101-000000-v1-devA1234",
+        ],
+    )
+    def test_ownerless_sidecar_resolve_skip_and_gc_preserve_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conflict_name: str
+    ) -> None:
+        src = tmp_path / "gstack"
+        (src / "memory").mkdir(parents=True)
+        sidecar = src / "memory" / conflict_name
+        sidecar.write_bytes(b"only copy")
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "s1",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": ["memory"],
+                        "include_files": [],
+                    }
+                ]
+            }
+        }
+        hits = _find_conflict_files(config)
+        assert hits == [("s1", sidecar, None)]
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        resolved, failed = _resolve_interactive_loop(hits)
+        assert (resolved, failed) == (0, 0)
+        assert sidecar.exists()
+        assert sidecar.read_bytes() == b"only copy"
+        pinned_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+        reaped = _gc_old_conflict_files(config, dry_run=False, verbose=False, now=pinned_now)
+        assert reaped.deleted == 0
+        assert sidecar.exists()
+        assert sidecar.read_bytes() == b"only copy"
+
+    def test_resolve_remote_only_touches_owned_canonical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = tmp_path / "gstack"
+        src.mkdir()
+        notes = src / "notes.md"
+        other = src / "notes.sync-conflict-log.md"
+        notes.write_bytes(b"A local")
+        other.write_bytes(b"B local")
+        a_sidecar = _v1_sidecar(notes, "devA1234", b"A remote")
+        b_sidecar = _v1_sidecar(other, "devA1234", b"B remote")
+        hits = _find_conflict_files(self._config(src, ["notes.md"]))
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "r")
+        resolved, failed = _resolve_interactive_loop(hits)
+        assert (resolved, failed) == (1, 0)
+        assert notes.read_bytes() == b"A remote"
+        assert not a_sidecar.exists()
+        assert other.read_bytes() == b"B local"
+        assert b_sidecar.exists()
+        assert b_sidecar.read_bytes() == b"B remote"
+
+
+class TestConflictPublishThenCleanup:
+    def test_cleanup_unlinks_only_after_new_bytes_exist(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mind_meld import cli as cli_module
+        from mind_meld import fsutil as fsutil_mod
+
+        local = tmp_path / "doc.md"
+        _older_local(local)
+        old = _v1_sidecar(local, "devA1234", b"peer R1")
+        occupied_base = local.with_name("doc.sync-conflict-20260421-143055-v1-devA1234.md")
+        occupied_base.mkdir()
+        frozen = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
+        real_cf = cli_module.conflict_filename
+
+        def frozen_cf(canonical: Path, device_id: str, now: datetime | None = None) -> Path:
+            return real_cf(canonical, device_id, now=frozen)
+
+        monkeypatch.setattr(cli_module, "conflict_filename", frozen_cf)
+        events: list[str] = []
+        real_write = fsutil_mod.atomic_write_bytes
+
+        def spy_write(path: Path, data: bytes, **kw: object) -> None:
+            events.append(f"write:{path.name}")
+            assert old.exists()
+            real_write(path, data, **kw)
+
+        real_unlink = Path.unlink
+
+        def spy_unlink(self: Path, missing_ok: bool = False) -> None:
+            events.append(f"unlink:{self.name}")
+            if self == old:
+                owned = [
+                    p
+                    for p in tmp_path.iterdir()
+                    if p.is_file()
+                    and is_v1_conflict_filename(p.name)
+                    and _canonical_for_conflict(p) == local
+                    and p != old
+                ]
+                assert owned and owned[0].read_bytes() == b"peer R2"
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(fsutil_mod, "atomic_write_bytes", spy_write)
+        monkeypatch.setattr(Path, "unlink", spy_unlink)
+        info = _remote_info(
+            hashlib.sha256(b"peer R2").hexdigest(),
+            datetime(2026, 4, 21, 13, 0, tzinfo=timezone.utc),
+        )
+        outcome = _apply_incoming_file(
+            local_path=local,
+            rel_path="doc.md",
+            plain_data=b"peer R2",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+        assert outcome == "conflicted"
+        assert events[0].startswith("write:")
+        assert any(e == f"unlink:{old.name}" for e in events)
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == local
+        ]
+        assert len(owned) == 1
+        assert owned[0].read_bytes() == b"peer R2"
+        assert occupied_base.is_dir()
+
+    def test_cleanup_unlink_failure_keeps_both(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        local = tmp_path / "doc.md"
+        _older_local(local)
+        old = _v1_sidecar(local, "devA1234", b"peer R1")
+        local_mtime = local.stat().st_mtime_ns
+        real_unlink = Path.unlink
+
+        def fail_old(self: Path, missing_ok: bool = False) -> None:
+            if self == old:
+                raise OSError("read-only")
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", fail_old)
+        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        assert outcome == "conflicted"
+        assert local.read_bytes() == b"local content"
+        assert local.stat().st_mtime_ns == local_mtime
+        assert old.exists()
+        assert old.read_bytes() == b"peer R1"
+        owned = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == local
+        ]
+        assert any(p.read_bytes() == b"peer R2" for p in owned)
+        err = capsys.readouterr().err
+        assert "replacement saved" in err
+        assert "mm resolve" in err
+        assert old.name in err
+
+    def test_cleanup_failure_then_unchanged_retry_leaves_extras(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        local = tmp_path / "doc.md"
+        _older_local(local)
+        old = _v1_sidecar(local, "devA1234", b"peer R1")
+        real_unlink = Path.unlink
+
+        def fail_old(self: Path, missing_ok: bool = False) -> None:
+            if self == old:
+                raise OSError("read-only")
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", fail_old)
+        first = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        assert first == "conflicted"
+        writes: list[Path] = []
+        unlinks: list[Path] = []
+        from mind_meld import fsutil as fsutil_mod
+
+        real_write = fsutil_mod.atomic_write_bytes
+
+        def spy_write(path: Path, data: bytes, **kw: object) -> None:
+            writes.append(path)
+            real_write(path, data, **kw)
+
+        def spy_unlink(self: Path, missing_ok: bool = False) -> None:
+            unlinks.append(self)
+            real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(fsutil_mod, "atomic_write_bytes", spy_write)
+        monkeypatch.setattr(Path, "unlink", spy_unlink)
+        second = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        assert second == "conflicted"
+        assert writes == []
+        assert unlinks == []
+        assert old.exists()
+        current = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == local
+            and p.read_bytes() == b"peer R2"
+        ]
+        assert len(current) == 1
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
+        hits = [("s1", p, local) for p in (old, current[0])]
+        resolved, failed = _resolve_interactive_loop(hits)
+        assert (resolved, failed) == (0, 0)
+        assert old.exists() and current[0].exists()
+        assert old.read_bytes() != current[0].read_bytes()
+
+
+class TestConflictOwnerBeforeStat:
+    def test_unrelated_owner_is_not_statted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        notes = tmp_path / "notes.md"
+        other = tmp_path / "notes.sync-conflict-log.md"
+        _older_local(notes)
+        other.write_bytes(b"B")
+        other_sidecar = _v1_sidecar(other, "devA1234", b"B remote")
+        probed: list[Path] = []
+        orig_is_file = Path.is_file
+        orig_read = Path.read_bytes
+
+        def spy_is_file(self: Path) -> bool:
+            if self == other_sidecar:
+                probed.append(self)
+            return orig_is_file(self)
+
+        def spy_read(self: Path) -> bytes:
+            if self == other_sidecar:
+                probed.append(self)
+            return orig_read(self)
+
+        monkeypatch.setattr(Path, "is_file", spy_is_file)
+        monkeypatch.setattr(Path, "read_bytes", spy_read)
+        info = _remote_info(
+            hashlib.sha256(b"A remote").hexdigest(),
+            datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
+        )
+        outcome = _apply_incoming_file(
+            local_path=notes,
+            rel_path="notes.md",
+            plain_data=b"A remote",
+            remote_info=info,
+            remote_device_id="devA1234",
+        )
+        assert outcome == "conflicted"
+        assert probed == []
+        assert other_sidecar.exists()
+
+    def test_owned_stat_error_is_skipped_and_preserved_on_failed_publish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mind_meld import cli as cli_module
+
+        local = tmp_path / "doc.md"
+        _older_local(local)
+        old = _v1_sidecar(local, "devA1234", b"peer R1")
+        orig_is_file = Path.is_file
+
+        def boom_owned(self: Path) -> bool:
+            if self == old:
+                raise PermissionError("stat denied")
+            return orig_is_file(self)
+
+        monkeypatch.setattr(Path, "is_file", boom_owned)
+        monkeypatch.setattr(
+            cli_module.fsutil,
+            "atomic_write_bytes",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        assert outcome == "failed"
+        assert old.exists()
+        assert old.read_bytes() == b"peer R1"
+
+    def test_discovery_does_not_stat_unrelated_owner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        src = tmp_path / "gstack"
+        src.mkdir()
+        notes = src / "notes.md"
+        other = src / "notes.sync-conflict-log.md"
+        notes.write_bytes(b"A")
+        other.write_bytes(b"B")
+        other_sidecar = _v1_sidecar(other, "devA1234", b"B remote")
+        _v1_sidecar(notes, "devA1234", b"A remote")
+        probed: list[Path] = []
+        orig_is_file = Path.is_file
+
+        def spy_is_file(self: Path) -> bool:
+            if self == other_sidecar:
+                probed.append(self)
+            return orig_is_file(self)
+
+        monkeypatch.setattr(Path, "is_file", spy_is_file)
+        config = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": str(src),
+                        "type": "generic",
+                        "include_dirs": [],
+                        "include_files": ["notes.md"],
+                    }
+                ]
+            }
+        }
+        hits = _find_conflict_files(config)
+        assert probed == []
+        assert [h[1] for h in hits][0].name.startswith("notes.sync-conflict-")
+        assert all(_canonical_for_conflict(h[1]) == notes for h in hits)
+
+
+class TestUnreadableCandidateNotCleaned:
+    def test_successful_publish_retains_unreadable_old(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        local = tmp_path / "doc.md"
+        _older_local(local)
+        unreadable = _v1_sidecar(local, "devA1234", b"peer R1", ts="20260421-110000")
+        readable = _v1_sidecar(local, "devA1234", b"peer R1b", ts="20260421-120000")
+        orig_read = Path.read_bytes
+
+        def selective_read(self: Path) -> bytes:
+            if self == unreadable:
+                raise PermissionError("read denied")
+            return orig_read(self)
+
+        monkeypatch.setattr(Path, "read_bytes", selective_read)
+        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        assert outcome == "conflicted"
+        assert unreadable.exists()
+        monkeypatch.setattr(Path, "read_bytes", orig_read)
+        assert unreadable.read_bytes() == b"peer R1"
+        assert not readable.exists()
+        current = [
+            p
+            for p in tmp_path.iterdir()
+            if p.is_file()
+            and is_v1_conflict_filename(p.name)
+            and _canonical_for_conflict(p) == local
+            and p != unreadable
+        ]
+        assert len(current) == 1
+        assert current[0].read_bytes() == b"peer R2"
+        err = capsys.readouterr().err
+        assert "unreadable" in err
+        assert "\x1b" not in err
+
+    def test_failed_publish_retains_unreadable_old(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mind_meld import cli as cli_module
+
+        local = tmp_path / "doc.md"
+        _older_local(local)
+        old = _v1_sidecar(local, "devA1234", b"peer R1")
+        orig_read = Path.read_bytes
+
+        def boom_read(self: Path) -> bytes:
+            if self == old:
+                raise PermissionError("read denied")
+            return orig_read(self)
+
+        monkeypatch.setattr(Path, "read_bytes", boom_read)
+        monkeypatch.setattr(
+            cli_module.fsutil,
+            "atomic_write_bytes",
+            lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        assert outcome == "failed"
+        monkeypatch.setattr(Path, "read_bytes", orig_read)
+        assert old.exists()
+        assert old.read_bytes() == b"peer R1"

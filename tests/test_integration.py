@@ -4814,3 +4814,80 @@ class TestPushMtimeOnlyPropagation:
         assert "Would refresh manifest" in result.output, (
             f"dry-run did not surface the metadata-only republish hint:\n{result.output}"
         )
+
+
+class TestConflictOwnershipEncryptedPull:
+    """Track 48A: failed replacement on one file must not stop the next."""
+
+    def test_encrypted_replacement_failure_continues_to_next_file(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        import hashlib
+
+        from mind_meld.cli import _download_and_apply
+        from mind_meld.storage.keys import blob_key
+
+        storage_dir = tmp_path / "storage"
+        base = tmp_path / "src"
+        base.mkdir()
+        backend = LocalBackend(storage_dir)
+        peer = "devA1234"
+        first = base / "notes.md"
+        second = base / "other.md"
+        first.write_bytes(b"local-a")
+        second.write_bytes(b"local-b")
+        old = datetime.now(timezone.utc).timestamp() - 3600
+        os.utime(first, (old, old))
+        os.utime(second, (old, old))
+        old_sidecar = base / "notes.sync-conflict-20260421-120000-v1-devA1234.md"
+        old_sidecar.write_bytes(b"peer R1")
+        old_mtime = old_sidecar.stat().st_mtime_ns
+        first_mtime = first.stat().st_mtime_ns
+
+        remote_a = b"peer R2 for notes"
+        remote_b = b"peer R2 for other"
+        sha_a = hashlib.sha256(remote_a).hexdigest()
+        sha_b = hashlib.sha256(remote_b).hexdigest()
+        backend.put(blob_key(peer, sha_a), encrypt(remote_a, PASSPHRASE, memory_kb=MEMORY_KB))
+        backend.put(blob_key(peer, sha_b), encrypt(remote_b, PASSPHRASE, memory_kb=MEMORY_KB))
+        newer = datetime.now(timezone.utc).isoformat()
+        to_download = {
+            "notes.md": {"sha256": sha_a, "size": len(remote_a), "mtime": newer},
+            "other.md": {"sha256": sha_b, "size": len(remote_b), "mtime": newer},
+        }
+
+        real_write = fsutil.atomic_write_bytes
+
+        def selective_write(path: Path, data: bytes, **kw):
+            if path.name.startswith("notes.sync-conflict-") and path != old_sidecar:
+                raise OSError("disk full")
+            return real_write(path, data, **kw)
+
+        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", selective_write)
+        pending = {first.resolve(): 1.0}
+        _bt, outcomes = _download_and_apply(
+            backend,
+            base,
+            to_download,
+            peer,
+            PASSPHRASE,
+            MEMORY_KB,
+            quiet=True,
+            pending_inline_bumps=pending,
+        )
+        captured = capsys.readouterr()
+        assert outcomes["failed"] == ["notes.md"]
+        assert outcomes["conflicted"] == ["other.md"]
+        assert first.read_bytes() == b"local-a"
+        assert first.stat().st_mtime_ns == first_mtime
+        assert old_sidecar.exists()
+        assert old_sidecar.read_bytes() == b"peer R1"
+        assert old_sidecar.stat().st_mtime_ns == old_mtime
+        assert second.read_bytes() == b"local-b"
+        other_sidecars = list(base.glob("other.sync-conflict-*"))
+        assert len(other_sidecars) == 1
+        assert other_sidecars[0].read_bytes() == remote_b
+        assert pending == {first.resolve(): 1.0}
+        assert captured.out == ""
+        assert "sidecar write failed" in captured.err
+        assert "mm:" in captured.err
