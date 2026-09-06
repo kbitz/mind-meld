@@ -51,6 +51,7 @@ from mind_meld import (
     pullhistory,
     resolveflow,
     retention,
+    safety,
     seen_sources,
     sidecar,
     skill_link,
@@ -6139,13 +6140,18 @@ def _do_gc(
             # at the start of _do_gc, so they're not seen here.
             malformed_count += 1
             if verbose or dry_run:
-                console.print(f"  [yellow]malformed (skipped):[/yellow] {bkey}")
+                # Printable-escape first, then Rich markup: the field helper
+                # keeps literal brackets, so markup escaping is still required.
+                console.print(
+                    f"  [yellow]malformed (skipped):[/yellow] "
+                    f"{safe_str(safety.safe_terminal_str(bkey))}"
+                )
             continue
         _did, sha = parsed
         if sha not in referenced_hashes:
             orphan_count += 1
             if verbose:
-                console.print(f"  [red]orphan:[/red] {bkey}")
+                console.print(f"  [red]orphan:[/red] {safe_str(safety.safe_terminal_str(bkey))}")
             if not dry_run:
                 backend.delete(bkey)
 
