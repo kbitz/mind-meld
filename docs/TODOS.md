@@ -44,6 +44,19 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:severity=major] Contain apply exceptions without losing completed-file bookkeeping
+
+- **What:** Define per-file exception containment and partial-pull durability together, so one failed apply does not discard completed outcomes or prevent unrelated downloads.
+- **Why:** `_download_and_apply` calls `_apply_incoming_file` without an exception boundary. An exception prevents its outcomes from reaching `_pull_one_source` and `_pull_core`; remaining files/sources/peers stop, the in-flight source's history and sync-log updates are skipped, and the normal deferred directory-fsync phase is bypassed. Autopull does report an unexpected-error line and a failed breadcrumb, so this is not a claim of completely silent failure.
+- **Repro:** At `cc22b6c`, use an isolated encrypted LocalBackend batch ordered `earlier.txt`, `blocked/inside.txt`, `later.txt`, with a regular local file occupying `blocked`. The first file is written; `_apply_incoming_file`'s parent `mkdir` raises `FileExistsError`; the last file is absent and the blocking local file is preserved. The loss of the returned outcome map is reproduced; skipped source bookkeeping and deferred fsync are traced in `_pull_one_source` and `_pull_core`. No data loss after a power failure was simulated.
+- **Context:** Track 51A `/autoplan`, 2026-09-06, branch `kbitz/51a-mixed-timestamp-pull`. The track fixes heterogeneous JSONL sort keys and narrowly handles decoder `RecursionError`; it does not claim general apply isolation. Evidence: `~/.gstack/projects/kbitz-mind-meld/51a-deferred-isolation-reproduction.json`. The same review's mixed-ts encrypted batch reproduction is in `51a-integration-reproduction.json`.
+- **Pros:** Later files can still arrive, completed writes keep honest history, and deferred durability no longer depends on every apply returning normally.
+- **Cons:** A blanket catch can misreport an exception after a successful write, lose touched-parent information, hide programming defects, or swallow intentional abort semantics. Failure classification, outcome ownership and finalization must be designed together.
+- **Next step:** Inventory exceptions before and after publication; specify which become per-file failures and which still abort. Add isolated multi-file tests for a normal write followed by the parent-file collision, an injected post-publication exception, and explicit user abort. Require useful sanitized file context, accurate failed/degraded reporting, preservation of already-completed outcomes, and directory durability without draining abandoned keep-local decisions.
+- **Depends on:** Coordinate with Track 51A's classifier fix; no live fleet scan or mutation is needed. Preserve the existing deferred-inline-bump abort contract in `docs/invariants/conflicts.md`.
+- **Effort:** M
+- **Priority:** P2
+
 ### [plan-eng-review:severity=major] Harden existing Rich and multiline sanitizer consumers against nested escapes
 
 - **What:** Define and enforce a terminal-control postcondition for the existing `strip_terminal_escapes`, `safe_str` and `safe_text` consumers, preserving the intended formatting of multiline content.
@@ -326,4 +339,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-06 by Track 50A /autoplan; four items remain open: shared terminal sanitizer hardening, conflict-cleanup policy, historical blob integrity/repair, and push dry-run setup. Prior drain records are historical._
+_Last updated 2026-09-06 by Track 51A /autoplan; five items remain open: apply exception containment/durability, shared terminal sanitizer hardening, conflict-cleanup policy, historical blob integrity/repair, and push dry-run setup. Prior drain records are historical._

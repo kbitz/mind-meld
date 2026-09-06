@@ -82,10 +82,10 @@ Old `sync.claude_dir` auto-converts to single claude source on load.
 
 On pull, `.jsonl` files use merge instead of overwrite:
 1. Union of lines (byte-exact dedup after whitespace strip)
-2. Sort by `ts` field if present
-3. Lexicographic tiebreaker for non-JSON lines
+2. Records whose JSON object carries a string `ts` sort first, by `(ts, original line)`; since v0.14.5 a non-string `ts` (number, bool, null, array, object) is not a sort key
+3. Every other line (missing or non-string `ts`, non-object JSON, malformed text) follows, sorted lexicographically by the whole line
 
-Merged result becomes new truth on next push.
+Merged result becomes new truth on next push. SPEC.md "JSONL Merge on Pull" and `docs/invariants/conflicts.md` "JSONL line-union ordering" hold the full contract, including the numeric-only reorder and the mixed-version rollout note.
 
 ## Key Architecture Notes
 
