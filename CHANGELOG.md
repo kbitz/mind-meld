@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.2] - 2026-09-06
+
+**Conflicts keep the right copies, even when replacement fails.** A pull no longer mistakes another file’s conflict copy for its own or deletes the previous peer copy before a replacement is saved. Unreadable copies remain available, occupied replacement names are preserved, and sidecars with no recoverable original filename stay safe during discovery, resolution, and garbage collection.
+
+### Fixed
+
+- Conflict reuse, replacement, and explicit-file discovery match the exact original filename, including names with repeated conflict markers, literal glob characters, or different extensions. A conflict for one file cannot hide or delete another file’s copy or send its contents to the wrong resolver target.
+- Failed replacement writes leave the local file and previous peer copies intact. Older same-peer copies are removed only after the new copy is saved and their contents were successfully read; unreadable copies stay available for recovery.
+- Replacement names are checked for existing files, directories, and dangling links, including each of five random fallback attempts. Naming and write failures report on stderr and allow the remaining files to continue.
+- Conflict copies whose names reconstruct to an empty original filename are treated as ownerless. Listing, resolver skip or failed promotion, and garbage collection preserve those copies instead of treating them as their own original file.
+- An unreadable conflict candidate no longer aborts discovery.
+
+### Changed
+
+- Conflict errors distinguish a failed replacement from successful saving with incomplete cleanup, and identify the copies that remain.
+- Conflict documentation and help explain that managed copies retain the latest peer revision after successful replacement. Unchanged pulls do not retry cleanup, and deleting a local conflict copy does not delete files on another Mac.
+
 ## [0.14.1] - 2026-09-04
 
 **Grok usage is counted again.** Grok Build 1.0.13 started adding one extra field, `elapsed_ms`, to the record it writes when a turn finishes. mm matched that record's fields exactly, so a single unrecognized key made it refuse the file — and that refusal aborted the entire Grok store, not just the one record. Every Grok Mac silently reported zero tokens from 2026-09-01 onward, and `mm status` kept telling you to run `mm push`, which could never fix it. mm now tolerates that field, counts all 7 days of held-back history on the next push, and when a read does fail for good it says so and names a command that actually helps.
