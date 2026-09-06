@@ -1,10 +1,15 @@
-"""safe_str() regression pins (Group 7 preflight #1 + D2 + D7).
+"""Sanitizer regression pins (Group 7 preflight #1 + D2 + D7 + Track 50A).
 
 Peer-controlled strings (filenames, file contents) flow through Rich
 console.print at many sites in cli.py. Without sanitization, a peer can
 plant Rich markup or ANSI escape sequences in synced filenames or file
 bodies and have them rendered as control output during pull/conflict/
 merge feedback. safe_str strips ANSI escapes AND escapes Rich markup.
+
+safe_terminal_str is the plain-stderr field helper: strip known grammars,
+then render residual nonprintable characters as ascii() notation so the
+output is a single printable line. The malformed-blob GC composition test
+pins safe_str(safe_terminal_str(...)) on a Rich sink.
 
 Diff content lines additionally use console.print(Text(line)) so Rich
 never interprets markup in remote-byte file contents.
@@ -18,10 +23,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from rich.console import Console
 from rich.text import Text
 
-from mind_meld.safety import safe_str, safe_text, strip_terminal_escapes
+from mind_meld.safety import safe_str, safe_terminal_str, safe_text, strip_terminal_escapes
+
+# Nested CSI that one strip pass turns into OSC 52 (BEL-terminated).
+_NESTED_OSC_BEL = "\x1b\x1b[31m]52;c;ZXZpbA==\x07"
+# Nested CSI that one strip pass turns into OSC 52 (ST-terminated).
+_NESTED_OSC_ST = "\x1b\x1b[31m]52;c;VEVTVA==\x1b\x1b[31m\\"
 
 
 class TestStripsAnsi:
@@ -372,3 +384,194 @@ class TestConflictBannerSanitization:
         out = self._render(render_banner("local", evil_path, None))
         assert "\x1bP" not in out
         assert "notes" in out
+
+
+def _assert_printable_field(value: str) -> None:
+    assert all(ch.isprintable() for ch in value)
+    assert "\n" not in value
+    assert "\r" not in value
+    assert "\x1b" not in value
+    assert "\x07" not in value
+
+
+class TestSafeTerminalStr:
+    """Plain-stderr field helper: strip known grammars, then escape residuals."""
+
+    def test_preserves_ordinary_text_brackets_and_unicode(self):
+        assert safe_terminal_str("plain") == "plain"
+        assert safe_terminal_str("[red]inject[/red]") == "[red]inject[/red]"
+        assert "\\" not in safe_terminal_str("[red]inject[/red]")
+        assert safe_terminal_str("café naïve") == "café naïve"
+        assert safe_terminal_str("日本語") == "日本語"
+        assert safe_terminal_str("") == ""
+
+    def test_stringifies_path_and_exception(self):
+        result = safe_terminal_str(Path("/tmp/[red]name"))
+        assert "[red]name" in result
+        assert "\\" not in result
+        assert safe_terminal_str(RuntimeError("boom")) == "boom"
+
+    @pytest.mark.parametrize(
+        "raw,sentinel",
+        [
+            ("pre\x1b[31mred\x1b[0mpost", "preredpost"),
+            ("pre\x1b]52;c;ZXZpbA==\x07post", "prepost"),
+            ("pre\x1b]0;title\x1b\\post", "prepost"),
+            ("pre\x1bP1$rm\x1b\\post", "prepost"),
+            ("pre\x9b31mredpost", "preredpost"),
+        ],
+    )
+    def test_known_sequences_stripped_sentinels_kept(self, raw, sentinel):
+        out = safe_terminal_str(raw)
+        _assert_printable_field(out)
+        assert out == sentinel
+
+    def test_nested_escape_construction_has_no_raw_controls(self):
+        out = safe_terminal_str(f"head{_NESTED_OSC_BEL}tail")
+        _assert_printable_field(out)
+        assert "head" in out
+        assert "tail" in out
+        assert "\x1b]52" not in out
+        assert "\x07" not in out
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "\r",
+            "\n",
+            "\t",
+            "\x08",
+            "\x07",
+            "\x7f",
+            "\x84",
+            "\x1bc",
+            "\u2028",
+            "\u2029",
+            "\u200d",
+            "\u2066",
+            "\ud800",
+        ],
+    )
+    def test_residual_controls_become_visible_notation(self, raw):
+        out = safe_terminal_str(f"L{raw}R")
+        _assert_printable_field(out)
+        assert out.startswith("L")
+        assert out.endswith("R")
+        assert raw not in out
+        for ch in raw:
+            if not ch.isprintable():
+                assert ascii(ch)[1:-1] in out
+
+    @given(st.text(max_size=64))
+    @settings(max_examples=80, deadline=None)
+    def test_generated_unicode_is_printable_single_line(self, value: str):
+        out = safe_terminal_str(value)
+        _assert_printable_field(out)
+
+
+class TestGcMalformedKeyWarning:
+    """G1: malformed blob-key warning is a Rich sink; compose both helpers."""
+
+    def test_dry_run_warning_inert_and_key_preserved(self, tmp_path, monkeypatch):
+        from mind_meld import cli
+        from mind_meld.cli import _do_gc
+        from mind_meld.crypto import encrypt
+        from mind_meld.devices import register_device
+        from mind_meld.manifest import serialize_manifest
+        from mind_meld.storage.local import LocalBackend
+
+        storage = LocalBackend(tmp_path / "storage")
+        config = {
+            "device": {"id": "dev1", "name": "Test"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "crypto": {"argon2_memory_kb": 1024},
+            "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
+        }
+        register_device(storage, "dev1", "Test")
+        manifest = {
+            "device_id": "dev1",
+            "device_name": "Test",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "files": {},
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+        enc = encrypt(serialize_manifest(manifest), "test-passphrase", memory_kb=1024)
+        storage.put("manifests/dev1/manifest.json.enc", enc)
+
+        hostile_leaf = f"[/red]inject[red]{_NESTED_OSC_ST}.enc"
+        bkey = f"data/{hostile_leaf}"
+        payload = b"malformed-bytes"
+        storage.put(bkey, payload)
+
+        buf = io.StringIO()
+        monkeypatch.setattr(
+            cli,
+            "console",
+            Console(file=buf, force_terminal=True, width=200, color_system=None),
+        )
+        count = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=False)
+        out = buf.getvalue()
+
+        assert count == 0
+        assert "\x1b]52" not in out
+        assert "\x1b\\" not in out
+        assert "\x07" not in out
+        assert "[/red]" in out
+        assert "[red]" in out
+        assert "inject" in out
+        assert "malformed" in out
+        assert storage.get(bkey) == payload
+
+    def test_verbose_orphan_key_warning_is_inert(self, tmp_path, monkeypatch):
+        from mind_meld import cli
+        from mind_meld.cli import _do_gc
+        from mind_meld.crypto import encrypt
+        from mind_meld.devices import register_device
+        from mind_meld.manifest import serialize_manifest
+        from mind_meld.storage.local import LocalBackend
+
+        storage = LocalBackend(tmp_path / "storage")
+        config = {
+            "device": {"id": "dev1", "name": "Test"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "crypto": {"argon2_memory_kb": 1024},
+            "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
+        }
+        register_device(storage, "dev1", "Test")
+        manifest = {
+            "device_id": "dev1",
+            "device_name": "Test",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "files": {},
+            "sources": {"claude": {"base_path": "", "files": {}}},
+            "tombstones": {},
+        }
+        enc = encrypt(serialize_manifest(manifest), "test-passphrase", memory_kb=1024)
+        storage.put("manifests/dev1/manifest.json.enc", enc)
+
+        sha = "a" * 64
+        # parse_blob_key splits on /, so the device_id must not contain a slash
+        # (`[/red]` would become extra path depth and miss the orphan branch).
+        hostile_dev = f"evil[red]{_NESTED_OSC_ST}"
+        bkey = f"data/{hostile_dev}/{sha}.enc"
+        payload = b"orphan-bytes"
+        storage.put(bkey, payload)
+
+        buf = io.StringIO()
+        monkeypatch.setattr(
+            cli,
+            "console",
+            Console(file=buf, force_terminal=True, width=200, color_system=None),
+        )
+        count = _do_gc(config, "test-passphrase", 1024, dry_run=True, verbose=True)
+        out = buf.getvalue()
+
+        assert count == 1
+        assert "\x1b]52" not in out
+        assert "\x1b\\" not in out
+        assert "\x07" not in out
+        assert "[red]" in out
+        assert "evil" in out
+        assert "orphan" in out
+        assert storage.get(bkey) == payload

@@ -29,7 +29,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from mind_meld import fsutil
+from mind_meld import fsutil, safety
 from mind_meld.errors import StorageError
 
 # iCloud conflict pattern: "filename 2.ext", "filename 3.ext", or
@@ -210,17 +210,19 @@ class LocalBackend:
             try:
                 ok = is_valid(c)
             except Exception as e:
-                sys.stderr.write(f"warning: ignoring suspicious file {c} (validator raised: {e})\n")
+                reason = safety.safe_terminal_str(f"{type(e).__name__}: {e}")
+                sys.stderr.write(
+                    f"mm: warning: ignoring suspicious file {safety.safe_terminal_str(c)} "
+                    f"(validator raised: {reason}). "
+                    f"File left in place; inspect it in your storage folder.\n"
+                )
                 continue
             if ok:
                 confirmed.append(c)
             else:
                 sys.stderr.write(
-                    f"warning: ignoring suspicious file {c} "
-                    f"(failed validation). If you re-ran `mm init` with "
-                    f"a new passphrase, old conflict copies stay "
-                    f"unreadable until you remove them manually or run "
-                    f"`mm gc --conflicts`.\n"
+                    f"mm: warning: ignoring suspicious file {safety.safe_terminal_str(c)} "
+                    f"(failed validation). File left in place; inspect it in your storage folder.\n"
                 )
         return sorted(confirmed)
 

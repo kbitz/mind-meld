@@ -414,6 +414,54 @@ class TestGCRefusesOnCorruptPeer:
         )
 
 
+class TestRejectedHostileSiblingFetch:
+    """Real _fetch_remote_manifest must not treat rejected siblings as state."""
+
+    def test_invalid_hostile_sibling_keeps_missing(self, tmp_path, capsys):
+        backend = LocalBackend(tmp_path / "storage")
+        parent = backend.root / "manifests" / "fresh"
+        parent.mkdir(parents=True)
+        hostile_name = "manifest.json (conflicted copy 2026-03-18\x1b]52;c;ZXZpbA==\x07).enc"
+        hostile = parent / hostile_name
+        payload = b"not-a-manifest"
+        hostile.write_bytes(payload)
+
+        fetch = _fetch_remote_manifest(backend, "fresh", PASSPHRASE, MEMORY_KB)
+        captured = capsys.readouterr()
+        assert fetch.status == "missing"
+        assert fetch.manifest is None
+        assert captured.err.startswith("mm: warning:")
+        assert "failed validation" in captured.err
+        assert "File left in place" in captured.err
+        assert "\x1b" not in captured.err
+        assert "\x07" not in captured.err
+        assert captured.err.count("\n") == 1
+        assert hostile.read_bytes() == payload
+
+    def test_valid_encrypted_sibling_recovers_despite_hostile_reject(self, tmp_path, capsys):
+        backend = LocalBackend(tmp_path / "storage")
+        parent = backend.root / "manifests" / "mac-a"
+        parent.mkdir(parents=True)
+        manifest = _make_manifest("mac-a", {"keep.md": {"sha256": "aaa"}})
+        enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
+        (parent / "manifest.json 2.enc").write_bytes(enc)
+        hostile_name = "manifest.json (conflicted copy 2026-03-18\x1b]52;c;ZXZpbA==\x07).enc"
+        hostile = parent / hostile_name
+        hostile.write_bytes(b"garbage")
+
+        fetch = _fetch_remote_manifest(backend, "mac-a", PASSPHRASE, MEMORY_KB)
+        captured = capsys.readouterr()
+        assert fetch.is_ok
+        assert fetch.manifest is not None
+        assert "keep.md" in fetch.manifest["sources"]["claude"]["files"]
+        assert hostile.exists()
+        assert hostile.read_bytes() == b"garbage"
+        assert "failed validation" in captured.err
+        assert "\x1b" not in captured.err
+        assert "\x07" not in captured.err
+        assert (parent / "manifest.json 2.enc").read_bytes() == enc
+
+
 class TestPushRecoveryIntegration:
     """Two device_ids sharing one LocalBackend. Simulates the user-facing
     guarantee: 'delete on Mac A, Mac A's manifest corrupts, next push

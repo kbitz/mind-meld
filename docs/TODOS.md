@@ -44,6 +44,19 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:severity=major] Harden existing Rich and multiline sanitizer consumers against nested escapes
+
+- **What:** Define and enforce a terminal-control postcondition for the existing `strip_terminal_escapes`, `safe_str` and `safe_text` consumers, preserving the intended formatting of multiline content.
+- **Why:** The current sanitizer performs one regex substitution. Removing an embedded CSI can assemble a fresh OSC 52 sequence after the regex has passed that position. A captured Rich console probe confirms that a deliberately nested ST-terminated payload survives both `safe_str` and `safe_text` as a complete terminal sequence.
+- **Repro:** At `0c1a969`, pass the escaped Python string `"\x1b\x1b[31m]52;c;VEVTVA==\x1b\x1b[31m\\"` through either helper and render into `Console(file=StringIO(), force_terminal=True, color_system=None)`. Inspect only `repr`/JSON of the capture: it contains `"\x1b]52;c;VEVTVA==\x1b\\"`. Never replay the capture in a live terminal.
+- **Context:** Track 50A `/autoplan`, 2026-09-06, branch `kbitz/sanitize-storage-filenames`. The recommended plan adds a stricter plain-field helper for the two storage rejection warnings and one malformed-blob GC warning. It does not change existing Rich/diff renderer semantics or repair their other callers. Evidence is saved at `~/.gstack/projects/kbitz-mind-meld/50a-reproductions.json`, under `corrected_shared_rich_sink_probe`; the preceding attempt with an extra literal `]` did not reproduce the complete ST sequence and is retained as a negative control.
+- **Pros:** Closes the same confirmed escape-composition mechanism across the remaining terminal sinks instead of fixing one payload spelling at a time.
+- **Cons:** A blanket printable-only conversion would escape meaningful newlines and formatting characters in diff bodies; a fixed number of regex passes is not a proof against arbitrary nesting. The shared contract and affected callers need explicit review.
+- **Next step:** Inventory Rich versus plain versus multiline sinks, choose a postcondition that prevents executable ESC/C1 output while retaining application-owned layout, and add captured final-render regressions for nested BEL/ST sequences. Include existing plain-stderr users of `safe_str` such as `retention.py` and `token_usage.py` when deciding routing; do not infer that Rich markup escaping makes terminal controls inert.
+- **Depends on:** No release dependency; coordinate helper naming with the Track 50A plan. No live fleet mutation is needed to reproduce or test this.
+- **Effort:** M
+- **Priority:** P1
+
 
 ### [plan-eng-review:severity=minor] Decide whether unchanged pulls should retry stale conflict-copy cleanup
 
@@ -313,4 +326,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-06 by Track 49A /autoplan; three items remain open: conflict-cleanup policy, historical blob integrity/repair, and push dry-run setup. Prior drain records are historical._
+_Last updated 2026-09-06 by Track 50A /autoplan; four items remain open: shared terminal sanitizer hardening, conflict-cleanup policy, historical blob integrity/repair, and push dry-run setup. Prior drain records are historical._

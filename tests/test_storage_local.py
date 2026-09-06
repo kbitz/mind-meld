@@ -409,3 +409,167 @@ class TestPredicateBehavior:
             _always_valid,
         )
         assert conflicts == []
+
+
+_OSC_BEL = "\x1b]52;c;ZXZpbA==\x07"
+# Nested CSI that one strip pass turns into OSC 52 (BEL-terminated).
+_NESTED_OSC_BEL = "\x1b\x1b[31m]52;c;ZXZpbA==\x07"
+_DROPBOX_OSC = f"manifest.json (conflicted copy 2026-03-18{_OSC_BEL}).enc"
+_DROPBOX_NESTED = f"manifest.json (conflicted copy 2026-03-18{_NESTED_OSC_BEL}).enc"
+_DROPBOX_CONTROLS = "manifest.json (conflicted copy 2026-03-18\x07\x08\x7f).enc"
+_ICLOUD_LF = "manifest.json\n2.enc"
+
+
+def _assert_single_plain_warning(err: str, *sentinels: str) -> None:
+    assert err, "expected a rejection warning on stderr"
+    assert err.startswith("mm: warning:"), err
+    assert err.endswith("\n")
+    assert err.count("\n") == 1, repr(err)
+    body = err[:-1]
+    assert all(ch.isprintable() for ch in body), repr(body)
+    assert "File left in place" in err
+    assert "storage folder" in err
+    assert "mm gc --conflicts" not in err
+    for sentinel in sentinels:
+        assert sentinel in err
+
+
+class TestRejectedFilenameWarnings:
+    """Rejected storage siblings warn with safe fields and keep original files."""
+
+    @pytest.fixture
+    def backend(self, tmp_path):
+        return LocalBackend(tmp_path / "storage")
+
+    def _matching_sibling(self, backend: LocalBackend, name: str, payload: bytes) -> Path:
+        backend.put("manifests/abc/manifest.json.enc", b"original")
+        path = backend.root / "manifests" / "abc" / name
+        path.write_bytes(payload)
+        return path
+
+    @pytest.mark.parametrize(
+        "name",
+        [_DROPBOX_OSC, _DROPBOX_NESTED, _DROPBOX_CONTROLS, _ICLOUD_LF],
+    )
+    def test_false_validator_warns_safely_and_preserves_file(self, backend, capsys, name):
+        payload = b"rejected-bytes"
+        sibling = self._matching_sibling(backend, name, payload)
+        seen: list[Path] = []
+
+        def reject(path: Path) -> bool:
+            seen.append(path)
+            return False
+
+        conflicts = backend.find_conflict_copies(
+            "manifests/abc/manifest.json.enc",
+            reject,
+        )
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        _assert_single_plain_warning(captured.err, "failed validation", "manifest.json")
+        assert "\x1b" not in captured.err
+        assert "\x07" not in captured.err
+        assert conflicts == []
+        assert seen == [sibling]
+        assert sibling.exists()
+        assert sibling.read_bytes() == payload
+        assert sibling.name == name
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError(f"validator {_OSC_BEL} boom"),
+            RuntimeError(_NESTED_OSC_BEL),
+            RuntimeError("bad\nreason\r\t"),
+            RuntimeError(""),
+            RuntimeError("\x07\x08\x1b"),
+            RuntimeError("\ud800"),
+        ],
+        ids=[
+            "osc",
+            "nested",
+            "record-controls",
+            "empty",
+            "all-control",
+            "surrogate",
+        ],
+    )
+    def test_raised_validator_sanitizes_path_and_reason(self, backend, capsys, exc):
+        payload = b"suspect"
+        sibling = self._matching_sibling(backend, _DROPBOX_NESTED, payload)
+        seen: list[Path] = []
+
+        def exploding(path: Path) -> bool:
+            seen.append(path)
+            raise exc
+
+        conflicts = backend.find_conflict_copies(
+            "manifests/abc/manifest.json.enc",
+            exploding,
+        )
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        _assert_single_plain_warning(
+            captured.err,
+            "validator raised",
+            "RuntimeError",
+            "manifest.json",
+        )
+        assert "\x1b" not in captured.err
+        assert "\x07" not in captured.err
+        assert "\n" not in captured.err[:-1]
+        assert conflicts == []
+        assert seen == [sibling]
+        assert sibling.read_bytes() == payload
+
+    def test_mixed_candidates_continue_and_keep_original_paths(self, backend, capsys):
+        backend.put("manifests/abc/manifest.json.enc", b"original")
+        parent = backend.root / "manifests" / "abc"
+        legit = parent / "manifest.json 2.enc"
+        rejected = parent / "manifest.json 3.enc"
+        raising = parent / "manifest.json (conflicted copy 2026-03-18).enc"
+        legit.write_bytes(b"legit conflict")
+        rejected.write_bytes(b"bogus file")
+        raising.write_bytes(b"raises")
+        seen: list[Path] = []
+
+        def selective(path: Path) -> bool:
+            seen.append(path)
+            if path.name == raising.name:
+                raise RuntimeError("validator bug")
+            return path.read_bytes() == b"legit conflict"
+
+        conflicts = backend.find_conflict_copies(
+            "manifests/abc/manifest.json.enc",
+            selective,
+        )
+        captured = capsys.readouterr()
+        assert len(seen) == 3
+        assert {p.name for p in seen} == {legit.name, rejected.name, raising.name}
+        assert [p.name for p in conflicts] == ["manifest.json 2.enc"]
+        assert any(p is conflicts[0] for p in seen)
+        assert conflicts[0] == legit
+        assert legit.read_bytes() == b"legit conflict"
+        assert rejected.read_bytes() == b"bogus file"
+        assert raising.read_bytes() == b"raises"
+        assert "failed validation" in captured.err
+        assert "validator raised" in captured.err
+        assert "RuntimeError" in captured.err
+        assert "\x1b" not in captured.err
+
+    def test_full_path_including_parent_is_sanitized(self, tmp_path, capsys):
+        root = tmp_path / f"store{_OSC_BEL}dir" / "storage"
+        backend = LocalBackend(root)
+        sibling = self._matching_sibling(backend, _DROPBOX_OSC, b"x")
+        conflicts = backend.find_conflict_copies(
+            "manifests/abc/manifest.json.enc",
+            _always_invalid,
+        )
+        captured = capsys.readouterr()
+        _assert_single_plain_warning(captured.err, "failed validation")
+        assert "\x1b" not in captured.err
+        assert "\x07" not in captured.err
+        assert "store" in captured.err
+        assert "dir" in captured.err
+        assert conflicts == []
+        assert sibling.exists()
