@@ -484,6 +484,48 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch):
     assert snapshot_rows[0]["origin"] == events.GIT_SNAPSHOT_ORIGIN_RECAPTURE
 
 
+def test_recapture_snapshoterror_exits_1_no_traceback(tmp_path, monkeypatch):
+    from mind_meld.errors import SnapshotError
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    events_dir = tmp_path / "mm-events" / "events"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    row = {
+        "v": events.EVENTS_SCHEMA_VERSION,
+        "type": "git-snapshot",
+        "ts": now.isoformat(),
+        "device": "dev-deg",
+        "origin": events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+        "projects": [],
+        "skipped": [],
+    }
+    prepared = events_tail.RecaptureCapture(
+        git_rows=[row],
+        root_discovery=events.GitRootDiscovery((repo,), (), False),
+        walk_budget_aborts=0,
+        walk_errors=0,
+        events_dir=events_dir,
+        since=now - timedelta(days=1),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *_a, **_k: prepared)
+    monkeypatch.setattr(events, "write_push_event", lambda *_a, **_k: None)
+
+    def boom(*_a, **_k):
+        raise SnapshotError("Cannot publish: source claude disappeared. Previous snapshot kept.")
+
+    monkeypatch.setattr(cli, "_push_core", boom)
+    r = runner.invoke(app, ["recapture", "1d"])
+    text = (r.stdout or "") + (r.stderr or "")
+    assert r.exit_code == 1
+    assert "written locally but not synced" in text.replace("\n", " ")
+    assert "Previous snapshot kept" in text
+    assert "Traceback" not in text
+
+
 def test_recapture_unresolved_mm_events_exits_nonzero(tmp_path, monkeypatch):
     from mind_meld.config import load_config, save_config
     from tests.test_silent_failure_contract import _setup_events_tail_config

@@ -16,9 +16,10 @@ from mind_meld.config import (
     grok_host_usage_enabled,
     load_config,
     patch_config_on_disk,
+    resolve_sources,
     save_config,
 )
-from mind_meld.errors import ConfigError
+from mind_meld.errors import ConfigError, SnapshotError
 
 
 class TestValidation:
@@ -1834,3 +1835,119 @@ class TestRepoRootsValidation:
         save_config(config, config_path)
         loaded = load_config(config_path)
         assert loaded["retro"]["repo_roots"] == [str(tmp_path / "repo"), "~/src"]
+
+
+class TestGetSourcesStrict:
+    def _base_config(self, tmp_path):
+        return {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+        }
+
+    def test_explicit_default_legacy_shape_matches_permissive(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "max_file_size": 52_428_800,
+            "sources": [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+        }
+        permissive = get_sources(config)
+        strict = get_sources(config, strict=True)
+        assert [s["name"] for s in permissive] == [s["name"] for s in strict] == ["claude"]
+
+        legacy = self._base_config(tmp_path)
+        legacy["sync"] = {"claude_dir": str(claude_dir), "max_file_size": 52_428_800}
+        assert [s["name"] for s in get_sources(legacy, strict=True)] == [
+            s["name"] for s in get_sources(legacy)
+        ]
+
+    def test_selected_probe_error_retains_source_and_cause(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config = self._base_config(tmp_path)
+        config["sync"] = {"max_file_size": 52_428_800}
+        real_stat = Path.stat
+
+        def boom(self, *a, **kw):
+            if self == claude_dir or self == Path(str(claude_dir)):
+                raise PermissionError("denied")
+            return real_stat(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "stat", boom)
+        with pytest.raises(SnapshotError, match="source claude") as exc:
+            get_sources(config, strict=True)
+        assert "denied" in str(exc.value) or "Permission" in str(exc.value)
+        names = [s["name"] for s in get_sources(config)]
+        assert "claude" not in names
+
+    def test_never_used_optional_absence_succeeds(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config = self._base_config(tmp_path)
+        config["sync"] = {"max_file_size": 52_428_800}
+        (tmp_path / ".claude").mkdir()
+        resolution = resolve_sources(config, strict=True)
+        names = [s["name"] for s in resolution.available]
+        assert "claude" in names
+        assert "gstack" not in names
+
+    def test_disabled_root_is_not_probed(self, tmp_path, monkeypatch):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        gstack_dir = tmp_path / ".gstack"
+        gstack_dir.mkdir()
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "max_file_size": 52_428_800,
+            "disabled_sources": ["gstack"],
+            "sources": [
+                {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                {"name": "gstack", "path": str(gstack_dir), "type": "generic"},
+            ],
+        }
+        probed = []
+        real_stat = Path.stat
+
+        def tracking(self, *a, **kw):
+            probed.append(self)
+            return real_stat(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "stat", tracking)
+        sources = get_sources(config, strict=True)
+        assert [s["name"] for s in sources] == ["claude"]
+        assert gstack_dir not in probed
+
+    def test_strict_bootstrap_fails_after_warn_once(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_mod
+
+        monkeypatch.setattr(config_mod, "_BOOTSTRAP_WARNED_PATHS", set())
+        events_root = tmp_path / "mm-events-root"
+        config = self._base_config(tmp_path)
+        config["sync"] = {
+            "max_file_size": 52_428_800,
+            "sources": [
+                {
+                    "name": "mm-events",
+                    "path": str(events_root),
+                    "type": "generic",
+                    "include_dirs": ["events"],
+                }
+            ],
+        }
+        real_mkdir = Path.mkdir
+
+        def boom(self, *a, **kw):
+            if self == events_root:
+                raise PermissionError("denied")
+            return real_mkdir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "mkdir", boom)
+        get_sources(config)
+        assert str(events_root) in config_mod._BOOTSTRAP_WARNED_PATHS
+        with pytest.raises(SnapshotError, match="mm-events"):
+            get_sources(config, strict=True)

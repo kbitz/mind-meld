@@ -922,7 +922,11 @@ class TestPushSkillLinkWiring:
             "_ensure_retro_skill_links",
             lambda *, dry_run, allow_mutate=True, explicit=False, may_create: calls.append(dry_run),
         )
-        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+        monkeypatch.setattr(
+            cli_module,
+            "resolve_sources",
+            lambda *_a, **_k: cli_module.SourceResolution(selected=[], available=[]),
+        )
 
         assert cli_module._push_core(config, "pw", 1024) is None
         assert calls == [False]
@@ -940,7 +944,11 @@ class TestPushSkillLinkWiring:
             raise RuntimeError("unexpected installer regression")
 
         monkeypatch.setattr(skill_link, "_ensure_retro_skill_links", boom)
-        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+        monkeypatch.setattr(
+            cli_module,
+            "resolve_sources",
+            lambda *_a, **_k: cli_module.SourceResolution(selected=[], available=[]),
+        )
 
         assert cli_module._push_core(config, "pw", 1024) is None
         assert "retro-fleet skill installation failed" in capsys.readouterr().err
@@ -950,9 +958,9 @@ class TestPushSkillLinkWiring:
         install_args: list = []
         gs_calls: list = []
 
-        def gs(_config):
+        def gs(_config=None, *, strict=False):
             gs_calls.append(1)
-            return []
+            return cli_module.SourceResolution(selected=[], available=[])
 
         def gate(*, may_create):
             gate_args.append(may_create)
@@ -971,7 +979,7 @@ class TestPushSkillLinkWiring:
         monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
         monkeypatch.setattr(skill_link, "_skill_links_check_due", gate)
         monkeypatch.setattr(skill_link, "_ensure_retro_skill_links", installer)
-        monkeypatch.setattr(cli_module, "get_sources", gs)
+        monkeypatch.setattr(cli_module, "resolve_sources", gs)
 
         assert cli_module._push_core(config, "pw", 1024) is None
         assert gs_calls == [1]
@@ -2195,7 +2203,11 @@ class TestRetiredOpencodeSkillLink:
         monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create: False)
         monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
         monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
-        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+        monkeypatch.setattr(
+            cli_module,
+            "resolve_sources",
+            lambda *_a, **_k: cli_module.SourceResolution(selected=[], available=[]),
+        )
         config = {
             "device": {"id": "dev-a", "name": "Mac A"},
             "sync": {"max_file_size": 1024},
@@ -2214,7 +2226,11 @@ class TestRetiredOpencodeSkillLink:
         monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create: False)
         monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
         monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
-        monkeypatch.setattr(cli_module, "get_sources", lambda _config: [])
+        monkeypatch.setattr(
+            cli_module,
+            "resolve_sources",
+            lambda *_a, **_k: cli_module.SourceResolution(selected=[], available=[]),
+        )
         config = {
             "device": {"id": "dev-a", "name": "Mac A"},
             "sync": {"max_file_size": 1024},

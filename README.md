@@ -60,7 +60,9 @@ Push and pull on each Mac to exchange changes according to each file's sync rule
 
 - **`.jsonl` files and `MEMORY.md`** deep-merge by line-union (deduped, sorted by `ts`). Entries from all machines accumulate — this is why telemetry, learnings, and timeline files stay coherent across devices.
 - **Other divergent files** use mtime-skip: if your local file is newer than the remote, pull leaves it alone. Otherwise, with the default `keep-both` mode, your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). See [Handling conflicts](#handling-conflicts) below.
-- **Deletions** propagate via tombstones in the manifest — delete a file on one machine, and `mm pull` on the others removes it cleanly.
+- **Deletions** propagate via tombstones in the manifest. A tombstone stops a missing file from being restored from an older peer snapshot; it does not itself delete a file that is already on the receiving Mac.
+
+After the first successful `mm push` on Mac A, open Mac B and `mm pull`, then confirm one selected file you edited on A is present on B.
 
 First-run-from-divergent-state is explicitly supported: if each Mac already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
 
@@ -457,9 +459,32 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm push` prints `events tail budget exceeded`.** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 
-**A file came back after you deleted it.** Deletions propagate via tombstones on the *next* push from the machine that deleted it. Push there, then pull elsewhere.
+**A file came back after you deleted it.** Deletions are recorded as tombstones on the *next* successful push from the machine that deleted it. A tombstone suppresses restoration from peers that still advertise the file; it does not actively delete a copy that is already present. Push on the deleting Mac, then pull elsewhere.
 
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm diff` predicts them before a pull, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
+
+### Snapshot failures
+
+A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file, a file that changes while it is being read, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, or a missing source that was previously published, **refuses the whole push** and keeps the previous snapshot. There is no hidden retry; run `mm push` again after the cause is fixed. `mm push --dry-run` previews this scan and deletion proof; it does not prove a later upload read or the post-event mm-events rescan, and existing command setup may still prompt config migration, persist a missing crypto fingerprint, or bootstrap the mm-events directory.
+
+`mm autopush` still exits 0 so an agent hook can continue. Inspect `mm status` (the `last_autorun.detail` field) or run interactive `mm push` if you need an exit status.
+
+| What happened | What to do |
+|---|---|
+| File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
+| File changed while being read | Wait for the editor/writer to finish, then `mm push`. |
+| Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
+| Source folder is missing after it was previously published | Restore the folder, or `mm disable-source <name>` if it should stop syncing. |
+| Pull says a file does not match the sending snapshot | Local bytes are kept. Run `mm pull --verbose` for peer/source/path, then `mm log --verb pull --action failed --limit 10`. A metadata-only `touch` or unchanged re-push does not rewrite a blob the diff considers unchanged. |
+
+Do not edit meaningful file contents just to force a new hash. Mixed-version fleets stay compatible, but older writers can still publish inconsistent blobs and older receivers lack this content check.
+
+```bash
+mm status
+mm log --verb pull --action failed --limit 10
+mm pull --verbose
+mm push
+```
 
 ### Shell completion
 

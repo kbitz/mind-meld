@@ -503,7 +503,7 @@ When `_merge_manifests` combines multiple conflict copies of the same device's m
 - **Files: UNION across all copies** (older entries survive when absent from newer copies).
 - **Tombstones: newest-timestamp-wins** on `deleted_at`.
 
-The asymmetry is correct because the manifest walker is **lossy** — it drops files on permission errors, read failures, and `max_file_size` overruns (see `manifest.walk_claude_source` / `walk_generic_source`). A file missing from the newer conflict copy is **not causal evidence** of deletion; only an explicit tombstone is. Swapping files to newest-wins would silently drop any file that happened to be transiently locked/unreadable during one scan but not another.
+The asymmetry is correct because **diagnostic** walkers are **lossy** — they drop files on permission errors, read failures, and `max_file_size` overruns (see `manifest.walk_claude_source` / `walk_generic_source` with the default permissive mode). Publishing scans (`_push_core`) use strict mode and refuse instead of omitting those paths, so an incomplete observation cannot become a tombstone. Conflict-copy union still cannot treat a missing entry as deletion: a file missing from the newer conflict copy is **not causal evidence** of deletion; only an explicit tombstone is. Swapping files to newest-wins would silently drop any file that happened to be transiently locked/unreadable during one **permissive** scan but not another.
 
 **Correctness invariant:** union-for-files + newest-wins-for-tombstones + `is_tombstoned()` gate at every downstream consumer. The tombstone gate is load-bearing. **Every new consumer of a merged manifest MUST check `is_tombstoned(source, rel_path, aggregated_tombstones)` before acting on a file entry.** Adding a consumer that reads `manifest["sources"][x]["files"]` without the gate will silently resurrect deletions.
 
@@ -794,7 +794,10 @@ class StorageError(MindMeldError): ...        # backend I/O failures
 class ConfigError(MindMeldError): ...         # config parsing/validation
 class ManifestError(MindMeldError): ...       # manifest corruption/incompatibility
 class LockError(MindMeldError): ...           # concurrent operation conflict
+class SnapshotError(MindMeldError): ...       # incomplete selected scan or unverified upload revision
 ```
+
+Snapshot refusals use a four-part message: location (source/path), problem, preservation (`Previous snapshot kept`), and the next action, plus a README `#snapshot-failures` link. Interactive `mm push` exits 1 with no traceback. `mm autopush` keeps exit 0, typed stderr, and a failed breadcrumb.
 
 ### Error Message Format
 

@@ -26,15 +26,18 @@ lost: v1 promotion copies it into `sources.claude.files` first.
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import hashlib
 import json
+import os
+import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
-from mind_meld.errors import ManifestError
+from mind_meld.errors import ManifestError, SnapshotError, os_error_cause, snapshot_refusal
 
 # Syncthing-style local conflict copies: <stem>.sync-conflict-<YYYYmmdd-HHMMSS>-<device>[.<ext>]
 # Pattern pinned to the exact timestamp shape `conflict_filename()` emits
@@ -299,7 +302,11 @@ def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
     return False
 
 
-def marker_skip_globs(source_config: dict[str, Any]) -> list[str]:
+def marker_skip_globs(
+    source_config: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> list[str]:
     """Return relative-dir prefixes for directories that contain ``.extend-root``.
 
     gstack-extend drops ``.extend-root`` in every directory it renders.
@@ -310,37 +317,109 @@ def marker_skip_globs(source_config: dict[str, Any]) -> list[str]:
     path exclude unrelated files. A marker skip must not generate deletion
     tombstones, exactly as adding a glob must not.
 
-    Best-effort: any OSError on a scan dir is skipped. Symlinked scan
-    dirs and symlink markers are ignored (same as the walker). Generic
-    sources only — callers with no ``include_dirs`` get ``[]``.
+    Permissive mode is best-effort: any OSError on a scan dir is skipped.
+    Strict publishing raises SnapshotError instead. Symlinked scan dirs
+    and symlink markers are ignored (same as the walker). Generic sources
+    only — callers with no ``include_dirs`` get ``[]``.
     """
     include_dirs: list[str] = source_config.get("include_dirs") or []
     if not include_dirs:
         return []
+    source_name = source_config.get("name")
     try:
         base = Path(source_config["path"]).expanduser().resolve()
-    except (OSError, KeyError, TypeError):
+    except (KeyError, TypeError):
         return []
-    if not base.exists():
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    problem="could not resolve the source path",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return []
+    try:
+        base.stat()
+    except FileNotFoundError:
+        return []
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
         return []
     globs: list[str] = []
     seen: set[str] = set()
     for dir_name in include_dirs:
         scan_dir = base / dir_name
-        if scan_dir.is_symlink():
+        try:
+            st = scan_dir.lstat()
+        except FileNotFoundError:
             continue
-        if not scan_dir.is_dir():
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=dir_name,
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            continue
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
             continue
         try:
-            markers = list(scan_dir.rglob(MARKER_SKIP_NAME))
-        except OSError:
+            markers = _collect_marker_files(scan_dir, base, source_name=source_name, strict=strict)
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=dir_name,
+                        problem="could not be enumerated",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
             continue
         for marker in markers:
             try:
-                if marker.is_symlink() or not marker.is_file():
+                marker_st = marker.lstat()
+                if stat.S_ISLNK(marker_st.st_mode) or not stat.S_ISREG(marker_st.st_mode):
                     continue
                 rel_dir = marker.parent.relative_to(base).as_posix()
-            except (OSError, ValueError):
+            except FileNotFoundError:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=dir_name,
+                            problem="disappeared while being read",
+                            next_action="Wait for the writer to finish, then run mm push.",
+                        )
+                    ) from None
+                continue
+            except (OSError, ValueError) as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=dir_name,
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
                 continue
             # A marker sitting ON the include-dir root would prefix the
             # entire source tree (`skills/.extend-root` → skip `skills/`).
@@ -359,6 +438,97 @@ def marker_skip_globs(source_config: dict[str, Any]) -> list[str]:
                 seen.add(rel_dir)
                 globs.append(rel_dir)
     return globs
+
+
+def _collect_marker_files(
+    scan_dir: Path,
+    base: Path,
+    *,
+    source_name: str | None,
+    strict: bool,
+) -> list[Path]:
+    """Find ``.extend-root`` markers under ``scan_dir`` without following links."""
+    found: list[Path] = []
+
+    def walk(directory: Path, *, discovered: bool) -> None:
+        try:
+            rel_dir = directory.relative_to(base).as_posix() if directory != base else ""
+        except ValueError:
+            rel_dir = directory.name
+        if rel_dir and _dir_is_policy_skipped(rel_dir, None):
+            return
+        try:
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+        except FileNotFoundError:
+            if discovered and strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(directory, base),
+                        problem="disappeared while being read",
+                        next_action="Wait for the writer to finish, then run mm push.",
+                    )
+                ) from None
+            return
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=rel_dir or _rel_or_name(directory, base),
+                        problem="could not be enumerated",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return
+        entries.sort(key=lambda entry: entry.name)
+        child_dirs: list[Path] = []
+        marked = False
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(Path(entry.path), base),
+                            problem="disappeared while being read",
+                            next_action="Wait for the writer to finish, then run mm push.",
+                        )
+                    ) from None
+                continue
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(Path(entry.path), base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                continue
+            child = Path(entry.path)
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if stat.S_ISREG(st.st_mode) and entry.name == MARKER_SKIP_NAME:
+                found.append(child)
+                marked = True
+            elif stat.S_ISDIR(st.st_mode):
+                child_dirs.append(child)
+        # Include-root exemption: a marker on scan_dir itself must not
+        # skip walking children. Nested marked dirs are fully pruned.
+        if marked and discovered:
+            return
+        for child_dir in child_dirs:
+            walk(child_dir, discovered=True)
+
+    walk(scan_dir, discovered=False)
+    return found
 
 
 def mtime_from_manifest(iso_str: str) -> datetime:
@@ -422,12 +592,293 @@ def _is_excluded(
     return False
 
 
+_HASH_CHUNK = 65_536
+
+
+class _FileTooLarge(Exception):
+    """A newly encountered file is already over the configured size cap."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__(size)
+        self.size = size
+
+
+@dataclass(frozen=True)
+class FileRevision:
+    """One accepted open-file revision: digest, size, and mtime agree."""
+
+    digest: str
+    size: int
+    mtime_iso: str
+    st_dev: int
+    st_ino: int
+    st_mtime_ns: int
+    st_ctime_ns: int
+    data: bytes | None = None
+
+
+def _rel_or_name(path: Path, base: Path) -> str:
+    try:
+        return path.relative_to(base).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _mtime_iso_from_stat(st: os.stat_result) -> str:
+    return datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+
+
+def _revision_signature(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _open_nofollow_nonblock(path: Path) -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    return os.open(path, flags)
+
+
+def path_has_descendant_symlink(
+    path: Path,
+    base: Path,
+    *,
+    strict: bool = False,
+    source_name: str | None = None,
+) -> bool:
+    """True if any component strictly below ``base`` is a symlink.
+
+    A symlinked source root is allowed. An unavailable probe refuses in
+    strict mode instead of becoming an intentional omission.
+    """
+    try:
+        relative = path.relative_to(base)
+    except ValueError:
+        # Not a descendant of this source root. Confinement/escape checks
+        # belong to the caller; this helper only names descendant links.
+        return False
+    component = base
+    for part in relative.parts:
+        component /= part
+        try:
+            st = component.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            if e.errno == errno.ENOTDIR:
+                return False
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(path, base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return True
+        if stat.S_ISLNK(st.st_mode):
+            return True
+    return False
+
+
+def _assert_revision_privacy(
+    path: Path,
+    base: Path | None,
+    st: os.stat_result,
+    *,
+    source_name: str | None,
+    source_type: str | None,
+) -> None:
+    if base is not None and path_has_descendant_symlink(
+        path, base, strict=True, source_name=source_name
+    ):
+        raise SnapshotError(
+            snapshot_refusal(
+                source=source_name,
+                rel_path=_rel_or_name(path, base),
+                problem="is no longer a confined regular file",
+                next_action=("Remove the descendant symlink or hard link, then run mm push."),
+            )
+        )
+    if source_type == "grok" and st.st_nlink > 1:
+        raise SnapshotError(
+            snapshot_refusal(
+                source=source_name,
+                rel_path=_rel_or_name(path, base) if base is not None else path.name,
+                problem="is no longer a confined regular file",
+                next_action="Remove the extra hard link, then run mm push.",
+            )
+        )
+
+
+def read_file_revision(
+    path: Path,
+    *,
+    max_file_size: int,
+    retain_bytes: bool,
+    source_name: str | None = None,
+    source_type: str | None = None,
+    base: Path | None = None,
+) -> FileRevision:
+    """Read one regular-file revision from a single no-follow descriptor.
+
+    Open with ``O_NOFOLLOW`` / ``O_NONBLOCK`` where the platform supports
+    them, require a regular file, and refuse if device/inode/size/mtime_ns/
+    ctime_ns or the pathname identity change during the read. Bytes read
+    are bounded by ``max_file_size``. An already-oversized file raises
+    ``_FileTooLarge`` so callers can keep the established skip policy.
+    """
+    rel = _rel_or_name(path, base) if base is not None else path.name
+
+    def _refuse(problem: str, next_action: str, exc: BaseException | None = None) -> NoReturn:
+        cause = os_error_cause(exc) if exc is not None else None
+        err = SnapshotError(
+            snapshot_refusal(
+                source=source_name,
+                rel_path=rel,
+                problem=problem,
+                cause=cause,
+                next_action=next_action,
+            )
+        )
+        if exc is not None:
+            raise err from exc
+        raise err
+
+    try:
+        pre_path_st = path.lstat()
+    except FileNotFoundError as e:
+        _refuse(
+            "disappeared while being read",
+            "Wait for the writer to finish, then run mm push.",
+            e,
+        )
+    except OSError as e:
+        _refuse("could not be read", "Restore read access, then run mm push.", e)
+
+    if stat.S_ISLNK(pre_path_st.st_mode):
+        _refuse(
+            "is no longer a confined regular file",
+            "Remove the descendant symlink, then run mm push.",
+        )
+    if not stat.S_ISREG(pre_path_st.st_mode):
+        _refuse(
+            "is no longer a confined regular file",
+            "Restore the regular file, then run mm push.",
+        )
+
+    try:
+        fd = _open_nofollow_nonblock(path)
+    except FileNotFoundError as e:
+        _refuse(
+            "disappeared while being read",
+            "Wait for the writer to finish, then run mm push.",
+            e,
+        )
+    except OSError as e:
+        _refuse("could not be read", "Restore read access, then run mm push.", e)
+
+    try:
+        try:
+            pre_fd_st = os.fstat(fd)
+        except OSError as e:
+            _refuse("could not be read", "Restore read access, then run mm push.", e)
+        if not stat.S_ISREG(pre_fd_st.st_mode):
+            _refuse(
+                "is no longer a confined regular file",
+                "Restore the regular file, then run mm push.",
+            )
+        if (pre_fd_st.st_dev, pre_fd_st.st_ino) != (pre_path_st.st_dev, pre_path_st.st_ino):
+            _refuse(
+                "changed while being read",
+                "Wait for the writer to finish, then run mm push.",
+            )
+        if pre_fd_st.st_size > max_file_size:
+            raise _FileTooLarge(pre_fd_st.st_size)
+        _assert_revision_privacy(
+            path, base, pre_fd_st, source_name=source_name, source_type=source_type
+        )
+
+        hasher = hashlib.sha256()
+        chunks: list[bytes] = []
+        remaining = max_file_size + 1
+        while remaining > 0:
+            try:
+                chunk = os.read(fd, min(_HASH_CHUNK, remaining))
+            except OSError as e:
+                _refuse("could not be read", "Restore read access, then run mm push.", e)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            if retain_bytes:
+                chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining <= 0:
+            _refuse(
+                "grew beyond max_file_size while being read",
+                "Wait for the writer to finish, or raise sync.max_file_size, then run mm push.",
+            )
+        hashed = (max_file_size + 1) - remaining
+        if hashed != pre_fd_st.st_size:
+            _refuse(
+                "changed while being read",
+                "Wait for the writer to finish, then run mm push.",
+            )
+
+        try:
+            post_fd_st = os.fstat(fd)
+            post_path_st = path.lstat()
+        except FileNotFoundError as e:
+            _refuse(
+                "disappeared while being read",
+                "Wait for the writer to finish, then run mm push.",
+                e,
+            )
+        except OSError as e:
+            _refuse("could not be read", "Restore read access, then run mm push.", e)
+        if _revision_signature(pre_fd_st) != _revision_signature(post_fd_st):
+            _refuse(
+                "changed while being read",
+                "Wait for the writer to finish, then run mm push.",
+            )
+        if (post_path_st.st_dev, post_path_st.st_ino) != (pre_fd_st.st_dev, pre_fd_st.st_ino):
+            _refuse(
+                "changed while being read",
+                "Wait for the writer to finish, then run mm push.",
+            )
+        if not stat.S_ISREG(post_path_st.st_mode):
+            _refuse(
+                "is no longer a confined regular file",
+                "Restore the regular file, then run mm push.",
+            )
+        _assert_revision_privacy(
+            path, base, post_fd_st, source_name=source_name, source_type=source_type
+        )
+        data = b"".join(chunks) if retain_bytes else None
+        return FileRevision(
+            digest=hasher.hexdigest(),
+            size=pre_fd_st.st_size,
+            mtime_iso=_mtime_iso_from_stat(pre_fd_st),
+            st_dev=pre_fd_st.st_dev,
+            st_ino=pre_fd_st.st_ino,
+            st_mtime_ns=pre_fd_st.st_mtime_ns,
+            st_ctime_ns=pre_fd_st.st_ctime_ns,
+            data=data,
+        )
+    finally:
+        os.close(fd)
+
+
 def hash_file(path: Path) -> str:
     """SHA-256 hash a file. Reads in chunks to handle large files."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while True:
-            chunk = f.read(65_536)
+            chunk = f.read(_HASH_CHUNK)
             if not chunk:
                 break
             h.update(chunk)
@@ -446,23 +897,145 @@ def read_and_hash(path: Path) -> tuple[bytes, str]:
     return data, digest
 
 
-# Per-file walker pipeline (single source of truth, called by both
-# walk_claude_source and walk_generic_source):
+def _dir_is_policy_skipped(rel_dir: str, skip_prefixes: list[str] | None) -> bool:
+    """True only for proven directory-level selection exclusions, never file globs."""
+    if not rel_dir:
+        return False
+    if _under_skip_prefix(rel_dir, skip_prefixes):
+        return True
+    parts = rel_dir.split("/")
+    for pattern in EXCLUDED:
+        if pattern.endswith("/"):
+            dir_name = pattern.rstrip("/")
+            if dir_name in parts:
+                return True
+    return False
+
+
+def _collect_regular_files_scandir(
+    start: Path,
+    base: Path,
+    *,
+    strict: bool,
+    source_name: str | None,
+    skip_prefixes: list[str] | None = None,
+) -> list[Path]:
+    """Explicit ``os.scandir`` walk that never follows descendant symlinks."""
+    collected: list[Path] = []
+
+    def walk(directory: Path, *, discovered: bool) -> None:
+        try:
+            rel_dir = directory.relative_to(base).as_posix() if directory != base else ""
+        except ValueError:
+            rel_dir = directory.name
+        if rel_dir and _dir_is_policy_skipped(rel_dir, skip_prefixes):
+            return
+        try:
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+        except FileNotFoundError as e:
+            if discovered and strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=rel_dir or _rel_or_name(directory, base),
+                        problem="disappeared while being read",
+                        next_action="Wait for the writer to finish, then run mm push.",
+                    )
+                ) from e
+            return
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=rel_dir or _rel_or_name(directory, base),
+                        problem="could not be enumerated",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return
+        entries.sort(key=lambda entry: entry.name)
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except FileNotFoundError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(Path(entry.path), base),
+                            problem="disappeared while being read",
+                            next_action="Wait for the writer to finish, then run mm push.",
+                        )
+                    ) from e
+                continue
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(Path(entry.path), base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                continue
+            child = Path(entry.path)
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                walk(child, discovered=True)
+            elif stat.S_ISREG(st.st_mode):
+                collected.append(child)
+
+    walk(start, discovered=False)
+    collected.sort(key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p))
+    return collected
+
+
+def _lstat_or_none(
+    path: Path,
+    *,
+    strict: bool,
+    source_name: str | None,
+    rel_path: str,
+) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=rel_path,
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return None
+
+
+# Per-file walker pipeline (single source of truth, called by
+# walk_claude_source, walk_generic_source, and walk_grok_source):
 #
 #   path ──► relative_to(base) ──► rel
 #                                   │
 #                          _is_excluded(rel)? ──► None
 #                                   │
-#                               stat() ─── PermissionError ──► on_skip("permission denied") ──► None
-#                                   │
-#                              size > cap? ──► on_skip("exceeds max_file_size (...MB)") ──► None
-#                                   │
-#                             hash_file() ─── Permission/OSError ──► on_skip("read error") ──► None
+#                 strict: one descriptor revision ─── OSError/change ──► SnapshotError
+#                 diagnostic: stat()/hash_file() skip on permission/read/size
 #                                   │
 #                          (rel, {sha256, size, mtime})
 #
-# "None" returns are NOT causal evidence of deletion — the walker is
-# intentionally lossy. Only explicit tombstones are. See SPEC.md
+# Diagnostic "None" returns are NOT causal evidence of deletion — the
+# permissive walker is intentionally lossy. Publishing scans use strict
+# mode so an incomplete observation cannot become a tombstone. See SPEC.md
 # "Merge invariants."
 def _record_file(
     path: Path,
@@ -471,6 +1044,10 @@ def _record_file(
     on_skip: Any = None,
     exclude_patterns: list[str] | None = None,
     skip_prefixes: list[str] | None = None,
+    *,
+    strict: bool = False,
+    source_name: str | None = None,
+    source_type: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Apply the per-file walker pipeline to `path` under `base`.
 
@@ -484,23 +1061,45 @@ def _record_file(
     `exclude_patterns` extends the global EXCLUDED list with per-source
     fnmatch globs evaluated against the relative path. Excluded paths
     return None silently (no on_skip) — exclusion is intentional, not
-    a degradation signal.
+    a degradation signal. Strict mode raises SnapshotError on read,
+    identity, and privacy failures; a newly oversized file still skips.
     """
     rel = str(path.relative_to(base))
 
     if _is_excluded(rel, exclude_patterns, skip_prefixes):
         return None
 
+    if strict:
+        try:
+            revision = read_file_revision(
+                path,
+                max_file_size=max_file_size,
+                retain_bytes=False,
+                source_name=source_name,
+                source_type=source_type,
+                base=base,
+            )
+        except _FileTooLarge as e:
+            if on_skip:
+                size_mb = e.size / (1024 * 1024)
+                on_skip(rel, f"exceeds max_file_size ({size_mb:.1f}MB)")
+            return None
+        return rel, {
+            "sha256": revision.digest,
+            "size": revision.size,
+            "mtime": revision.mtime_iso,
+        }
+
     try:
-        stat = path.stat()
+        file_stat = path.stat()
     except PermissionError:
         if on_skip:
             on_skip(rel, "permission denied")
         return None
 
-    if stat.st_size > max_file_size:
+    if file_stat.st_size > max_file_size:
         if on_skip:
-            size_mb = stat.st_size / (1024 * 1024)
+            size_mb = file_stat.st_size / (1024 * 1024)
             on_skip(rel, f"exceeds max_file_size ({size_mb:.1f}MB)")
         return None
 
@@ -513,8 +1112,8 @@ def _record_file(
 
     return rel, {
         "sha256": sha,
-        "size": stat.st_size,
-        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "size": file_stat.st_size,
+        "mtime": datetime.fromtimestamp(file_stat.st_mtime, tz=timezone.utc).isoformat(),
     }
 
 
@@ -523,6 +1122,9 @@ def walk_claude_source(
     max_file_size: int = 52_428_800,
     on_skip: Any = None,
     exclude_patterns: list[str] | None = None,
+    *,
+    strict: bool = False,
+    source_name: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Claude ~/.claude directory and build the files dict.
 
@@ -534,20 +1136,110 @@ def walk_claude_source(
         on_skip: Optional callback(path, reason) for skipped files.
         exclude_patterns: Optional per-source fnmatch globs that extend the
             hardcoded EXCLUDED list. Matched against the relative path.
+        strict: Publishing scans refuse incomplete observations.
+        source_name: Source name for strict SnapshotError location.
 
     Returns:
         Dict mapping relative paths to {sha256, size, mtime}.
     """
     base = Path(base_dir).expanduser().resolve()
     projects_dir = base / "projects"
-    if not projects_dir.exists():
+    try:
+        projects_st = projects_dir.lstat()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path="projects",
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return {}
+    if stat.S_ISLNK(projects_st.st_mode):
+        return {}
+    if not stat.S_ISDIR(projects_st.st_mode):
         return {}
 
     files: dict[str, dict[str, Any]] = {}
-
-    # Only walk synced subdirs (memory/, todos/) within each project.
-    # Structure: projects/{project-name}/{subdir}/...
     scan_dirs: list[Path] = []
+    if strict:
+        try:
+            with os.scandir(projects_dir) as iterator:
+                project_entries = list(iterator)
+        except OSError as e:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path="projects",
+                    problem="could not be enumerated",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        project_entries.sort(key=lambda entry: entry.name)
+        for entry in project_entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except FileNotFoundError as e:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(Path(entry.path), base),
+                        problem="disappeared while being read",
+                        next_action="Wait for the writer to finish, then run mm push.",
+                    )
+                ) from e
+            except OSError as e:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(Path(entry.path), base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                continue
+            project_dir = Path(entry.path)
+            for subdir_name in SYNCED_SUBDIRS:
+                subdir = project_dir / subdir_name
+                sub_st = _lstat_or_none(
+                    subdir,
+                    strict=True,
+                    source_name=source_name,
+                    rel_path=_rel_or_name(subdir, base),
+                )
+                if (
+                    sub_st is None
+                    or stat.S_ISLNK(sub_st.st_mode)
+                    or not stat.S_ISDIR(sub_st.st_mode)
+                ):
+                    continue
+                scan_dirs.append(subdir)
+        for scan_dir in scan_dirs:
+            for path in _collect_regular_files_scandir(
+                scan_dir, base, strict=True, source_name=source_name
+            ):
+                if result := _record_file(
+                    path,
+                    base,
+                    max_file_size,
+                    on_skip,
+                    exclude_patterns,
+                    strict=True,
+                    source_name=source_name,
+                    source_type="claude",
+                ):
+                    rel, info = result
+                    files[rel] = info
+        return files
+
     for project_dir in projects_dir.iterdir():
         if not project_dir.is_dir():
             continue
@@ -567,28 +1259,12 @@ def walk_claude_source(
     return files
 
 
-def _has_symlink_below_root(path: Path, base: Path) -> bool:
-    """True if any path component strictly below ``base`` is a symlink.
-
-    Stops a nested ``skills/<name> -> ../sessions`` dir-link from publishing
-    session files under an allowlisted prefix. The top-level include dir is
-    checked separately by the grok walker.
-    """
-    try:
-        current = path
-        while current != base and current != current.parent:
-            if current.is_symlink():
-                return True
-            current = current.parent
-    except OSError:
-        return True
-    return False
-
-
 def walk_grok_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
     on_skip: Any = None,
+    *,
+    strict: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Grok home and build the files dict.
 
@@ -596,8 +1272,22 @@ def walk_grok_source(
     (``GROK_SYNCED_SUBDIRS``). Sessions, credentials, vendor trees, and
     ``config.toml`` are never entered. Missing dirs are a no-op.
     """
+    source_name = source_config.get("name")
     base = Path(source_config["path"]).expanduser().resolve()
-    if not base.exists():
+    try:
+        base.stat()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
         return {}
 
     extra = source_config.get("exclude_patterns") or []
@@ -608,28 +1298,50 @@ def walk_grok_source(
 
     for dir_name in GROK_SYNCED_SUBDIRS:
         scan_dir = base / dir_name
-        if scan_dir.is_symlink():
+        st = _lstat_or_none(scan_dir, strict=strict, source_name=source_name, rel_path=dir_name)
+        if st is None:
+            continue
+        if stat.S_ISLNK(st.st_mode):
             if on_skip:
                 on_skip(str(scan_dir), "symlink")
             continue
-        if not scan_dir.exists() or not scan_dir.is_dir():
+        if not stat.S_ISDIR(st.st_mode):
             continue
-        for path in scan_dir.rglob("*"):
-            if path.is_file():
-                collected_paths.append(path)
+        if strict:
+            collected_paths.extend(
+                _collect_regular_files_scandir(scan_dir, base, strict=True, source_name=source_name)
+            )
+        else:
+            for path in scan_dir.rglob("*"):
+                if path.is_file():
+                    collected_paths.append(path)
 
     collected_paths.sort(
         key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
     )
     seen: set[tuple[int, int]] = set()
     for path in collected_paths:
-        if path.is_symlink() or _has_symlink_below_root(path, base):
+        if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
             if on_skip:
                 on_skip(str(path), "symlink")
             continue
         try:
-            st = path.stat()
-        except OSError:
+            st = path.lstat() if strict else path.stat()
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(path, base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            if on_skip:
+                on_skip(str(path), "symlink")
             continue
         # A hard link can make a credential or session file reachable from an
         # allowlisted directory without introducing a symlink component.  The
@@ -643,7 +1355,16 @@ def walk_grok_source(
         if identity in seen:
             continue
         seen.add(identity)
-        if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
+        if result := _record_file(
+            path,
+            base,
+            max_file_size,
+            on_skip,
+            exclude_patterns,
+            strict=strict,
+            source_name=source_name,
+            source_type="grok",
+        ):
             rel, info = result
             files[rel] = info
 
@@ -654,6 +1375,8 @@ def walk_generic_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
     on_skip: Any = None,
+    *,
+    strict: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """Walk a generic source directory with configurable include_dirs/include_files.
 
@@ -669,12 +1392,27 @@ def walk_generic_source(
                 it does not generate deletion tombstones.
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files.
+        strict: Publishing scans refuse incomplete observations.
 
     Returns:
         Dict mapping relative paths (from base) to {sha256, size, mtime}.
     """
+    source_name = source_config.get("name")
     base = Path(source_config["path"]).expanduser().resolve()
-    if not base.exists():
+    try:
+        base.stat()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    problem="could not be read",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
         return {}
 
     include_dirs: list[str] = source_config.get("include_dirs", [])
@@ -685,28 +1423,47 @@ def walk_generic_source(
     # not fnmatch globs. `_build_exclude_map` threads the same prefixes
     # for tombstone suppression. Do NOT skip this — a walker-only skip
     # would tombstone previously-synced files on the next push.
-    skip_prefixes = marker_skip_globs(source_config)
+    skip_prefixes = marker_skip_globs(source_config, strict=strict)
 
     files: dict[str, dict[str, Any]] = {}
     collected_paths: list[Path] = []
 
-    # Walk each include_dir recursively
     for dir_name in include_dirs:
         scan_dir = base / dir_name
-        if scan_dir.is_symlink():
+        st = _lstat_or_none(scan_dir, strict=strict, source_name=source_name, rel_path=dir_name)
+        if st is None:
+            continue
+        if stat.S_ISLNK(st.st_mode):
             if on_skip:
                 on_skip(str(scan_dir), "symlink")
             continue
-        if not scan_dir.exists() or not scan_dir.is_dir():
+        if not stat.S_ISDIR(st.st_mode):
             continue
-        for path in scan_dir.rglob("*"):
-            if path.is_file():
-                collected_paths.append(path)
+        if strict:
+            collected_paths.extend(
+                _collect_regular_files_scandir(
+                    scan_dir,
+                    base,
+                    strict=True,
+                    source_name=source_name,
+                    skip_prefixes=skip_prefixes,
+                )
+            )
+        else:
+            for path in scan_dir.rglob("*"):
+                if path.is_file():
+                    collected_paths.append(path)
 
-    # Check each include_files entry at root level
     for filename in include_files:
         path = base / filename
-        if path.exists() and path.is_file():
+        st = _lstat_or_none(path, strict=strict, source_name=source_name, rel_path=filename)
+        if st is None:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            if on_skip:
+                on_skip(str(path), "symlink")
+            continue
+        if stat.S_ISREG(st.st_mode):
             collected_paths.append(path)
 
     # Dedup by filesystem identity (Group 7 preflight #2 + D6). When an
@@ -736,20 +1493,42 @@ def walk_generic_source(
         # target would produce a manifest entry the pull path cannot safely
         # apply without either traversing outside the source root or replacing
         # the link with a regular file.
-        if path.is_symlink():
+        if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
             if on_skip:
                 on_skip(str(path), "symlink")
             continue
         try:
-            st = path.stat()
-        except OSError:
+            st = path.lstat() if strict else path.stat()
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(path, base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
             continue  # consistent with _record_file's tolerance for races
+        if stat.S_ISLNK(st.st_mode):
+            if on_skip:
+                on_skip(str(path), "symlink")
+            continue
         identity = (st.st_dev, st.st_ino)
         if identity in seen:
             continue
         seen.add(identity)
         if result := _record_file(
-            path, base, max_file_size, on_skip, exclude_patterns, skip_prefixes
+            path,
+            base,
+            max_file_size,
+            on_skip,
+            exclude_patterns,
+            skip_prefixes,
+            strict=strict,
+            source_name=source_name,
+            source_type="generic",
         ):
             rel, info = result
             files[rel] = info
@@ -761,6 +1540,8 @@ def walk_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
     on_skip: Any = None,
+    *,
+    strict: bool = False,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     """Dispatch to the appropriate walker based on source type.
 
@@ -771,6 +1552,7 @@ def walk_source(
             type="generic" -> walk_generic_source
         max_file_size: Skip files larger than this (bytes).
         on_skip: Optional callback(path, reason) for skipped files.
+        strict: Publishing scans refuse incomplete observations.
 
     Returns:
         Tuple of (resolved_base_path_str, files_dict).
@@ -784,11 +1566,13 @@ def walk_source(
             max_file_size,
             on_skip,
             exclude_patterns=source_config.get("exclude_patterns"),
+            strict=strict,
+            source_name=source_config.get("name"),
         )
     elif source_type == "grok":
-        files = walk_grok_source(source_config, max_file_size, on_skip)
+        files = walk_grok_source(source_config, max_file_size, on_skip, strict=strict)
     elif source_type == "generic":
-        files = walk_generic_source(source_config, max_file_size, on_skip)
+        files = walk_generic_source(source_config, max_file_size, on_skip, strict=strict)
     else:
         raise ManifestError(f"manifest: unknown source type '{source_type}'")
 
@@ -801,6 +1585,8 @@ def build_manifest_v2(
     sources_configs: list[dict[str, Any]],
     max_file_size: int = 52_428_800,
     on_skip: Any = None,
+    *,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Build a v2 manifest with multiple sources.
 
@@ -811,6 +1597,7 @@ def build_manifest_v2(
             "name", "type", and "path" keys.
         max_file_size: Skip files larger than this (bytes).
         on_skip: Optional callback(path, reason) for skipped files.
+        strict: Publishing scans refuse incomplete observations.
 
     Returns:
         v2 manifest dict with a "sources" dict keyed by source name.
@@ -819,7 +1606,7 @@ def build_manifest_v2(
 
     for src_cfg in sources_configs:
         name = src_cfg["name"]
-        base_path, files = walk_source(src_cfg, max_file_size, on_skip)
+        base_path, files = walk_source(src_cfg, max_file_size, on_skip, strict=strict)
         sources[name] = {
             "base_path": base_path,
             "files": files,
