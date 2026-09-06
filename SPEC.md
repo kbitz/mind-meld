@@ -722,11 +722,14 @@ Default generic sources (see `config.py:DEFAULT_SOURCES`):
 
 ### JSONL Merge on Pull
 
-`.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull:
+`.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull. `MEMORY.md` is a separate plain lexical line-union and does not consult `ts`.
 
-1. Union of lines from local and remote (byte-exact dedup after whitespace strip).
-2. Sort by `ts` field if present in JSON lines.
-3. Lexicographic tiebreaker for non-JSON or timestamp-less lines.
+1. Union of unique normalized lines from local and remote (UTF-8 replacement, trailing-whitespace strip, blank lines dropped, byte-exact dedup). Original line text is kept; lines are not reserialized.
+2. Records whose decoded JSON is an object with a **string** `ts` (including empty) sort first, by `(ts, original line)`. Comparison is lexical — not chronological, and not numeric-epoch.
+3. Every other original normalized line follows, sorted lexicographically by the whole line: missing `ts`, null, numbers, bools, arrays, objects, non-object JSON, malformed text, and decoder `ValueError` / `RecursionError`.
+4. Full-line tiebreak applies inside the string bucket as well, so identical inputs produce identical bytes across `PYTHONHASHSEED` values.
+
+Numeric-only `ts` values used to sort as numbers; they now sort as original-line text (`10` before `2`). Mixed string and non-string `ts` values used to raise `TypeError` and abort the rest of the pull. Old clients retain both defects, so a mixed-version fleet can rewrite numeric-only JSONL until every active Mac is upgraded.
 
 The merged result becomes the new local truth and propagates on the next push.
 

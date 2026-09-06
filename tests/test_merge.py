@@ -1,12 +1,20 @@
 """Tests for merge logic — JSONL, MEMORY.md, and LCS-based 3-way merge."""
 
+import json
 import os
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from mind_meld.merge import lcs_merge, merge_file, merge_jsonl, merge_lines, should_merge
+
+
+def _jsonl(*lines: str) -> bytes:
+    """Join already-normalized JSONL lines into trailing-newline bytes."""
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 class TestShouldMerge:
@@ -188,6 +196,350 @@ class TestMergeJsonl:
             f"  seed=42:     {out2!r}\n"
             f"  seed=999999: {out3!r}"
         )
+
+
+# Unique normalized lines used by the Track 51A type-matrix / combined
+# fixture. Expected order is a literal, not derived from _extract_ts.
+_TS_EMPTY = '{"ts":"","k":"empty"}'
+_TS_NUMLOOK = '{"ts":"10","k":"numeric-looking"}'
+_TS_OFFSET = '{"ts":"2026-01-01T00:00:00+00:00","k":"offset"}'
+_TS_ISO_A = '{"ts":"2026-01-01T00:00:00Z","k":"a"}'
+_TS_ISO_Z = '{"ts":"2026-01-01T00:00:00Z","k":"z"}'
+_TS_ISO_B = '{"ts":"2026-01-02T00:00:00Z","k":"b"}'
+_TS_ESCAPED = '{"ts":"caf\\u00e9","k":"escaped"}'
+_TS_UNICODE = '{"ts":"café","k":"unicode"}'
+_TS_TEXT = '{"ts":"hello","k":"text"}'
+_FB_TOP_STR = '"just a string"'
+_FB_TOP_NUM = "42"
+_FB_TOP_ARR = "[1,2]"
+_FB_MALFORMED = "not json at all"
+_FB_TOP_NULL = "null"
+_FB_TOP_BOOL = "true"
+_FB_MISSING = '{"k":"missing-ts"}'
+_FB_NEG = '{"ts":-1,"k":"neg"}'
+_FB_NINF = '{"ts":-Infinity,"k":"ninf"}'
+_FB_ZERO = '{"ts":0,"k":"zero"}'
+_FB_FLOAT = '{"ts":1.5,"k":"float"}'
+_FB_TEN = '{"ts":10,"k":"ten"}'
+_FB_OVERFLOW = '{"ts":1e999,"k":"overflow"}'
+_FB_TWO = '{"ts":2,"k":"two"}'
+_FB_INF = '{"ts":Infinity,"k":"inf"}'
+_FB_NAN = '{"ts":NaN,"k":"nan"}'
+_FB_ARR_NESTED = '{"ts":[1,"x",true],"k":"arr-nested"}'
+_FB_ARR_EMPTY = '{"ts":[],"k":"arr-empty"}'
+_FB_FALSE = '{"ts":false,"k":"false"}'
+_FB_NULL = '{"ts":null,"k":"null"}'
+_FB_TRUE = '{"ts":true,"k":"true"}'
+_FB_OBJ_A = '{"ts":{"a":1},"k":"obj-pop"}'
+_FB_OBJ_B = '{"ts":{"b":2},"k":"obj-pop2"}'
+_FB_OBJ_EMPTY = '{"ts":{},"k":"obj-empty"}'
+
+# String-ts bucket, then full-line fallback. Hand-written order:
+# empty / numeric-looking / offset-before-Z / tied ISO by whole line /
+# later ISO / escaped-Unicode original before UTF-8 café / arbitrary text;
+# then top-level JSON, malformed, missing ts, signed/nonfinite/finite
+# numbers (10 before 2), heterogeneous arrays, bools, null, objects.
+_COMBINED_EXPECTED = _jsonl(
+    _TS_EMPTY,
+    _TS_NUMLOOK,
+    _TS_OFFSET,
+    _TS_ISO_A,
+    _TS_ISO_Z,
+    _TS_ISO_B,
+    _TS_ESCAPED,
+    _TS_UNICODE,
+    _TS_TEXT,
+    _FB_TOP_STR,
+    _FB_TOP_NUM,
+    _FB_TOP_ARR,
+    _FB_MALFORMED,
+    _FB_TOP_NULL,
+    _FB_TOP_BOOL,
+    _FB_MISSING,
+    _FB_NEG,
+    _FB_NINF,
+    _FB_ZERO,
+    _FB_FLOAT,
+    _FB_TEN,
+    _FB_OVERFLOW,
+    _FB_TWO,
+    _FB_INF,
+    _FB_NAN,
+    _FB_ARR_NESTED,
+    _FB_ARR_EMPTY,
+    _FB_FALSE,
+    _FB_NULL,
+    _FB_TRUE,
+    _FB_OBJ_A,
+    _FB_OBJ_B,
+    _FB_OBJ_EMPTY,
+)
+
+_COMBINED_LOCAL = _jsonl(
+    _TS_ISO_B,
+    _FB_TWO,
+    _FB_NULL,
+    _FB_MALFORMED,
+    _TS_EMPTY,
+    _FB_OBJ_A,
+    _FB_NAN,
+    _FB_TOP_STR,
+    _TS_UNICODE,
+)
+_COMBINED_REMOTE = _jsonl(
+    _TS_ISO_A,
+    _TS_ISO_Z,
+    _TS_NUMLOOK,
+    _TS_OFFSET,
+    _TS_ESCAPED,
+    _TS_TEXT,
+    _FB_TOP_NUM,
+    _FB_TOP_ARR,
+    _FB_TOP_NULL,
+    _FB_TOP_BOOL,
+    _FB_MISSING,
+    _FB_NEG,
+    _FB_NINF,
+    _FB_ZERO,
+    _FB_FLOAT,
+    _FB_TEN,
+    _FB_OVERFLOW,
+    _FB_INF,
+    _FB_ARR_NESTED,
+    _FB_ARR_EMPTY,
+    _FB_FALSE,
+    _FB_TRUE,
+    _FB_OBJ_B,
+    _FB_OBJ_EMPTY,
+    _FB_TWO,
+)
+
+
+class TestMergeJsonlMixedTimestamps:
+    """Track 51A: non-string ts values must not abort or reorder non-deterministically."""
+
+    def test_combined_fixture_exact_bytes(self):
+        result = merge_jsonl(_COMBINED_LOCAL, _COMBINED_REMOTE)
+        assert result == _COMBINED_EXPECTED
+        decoded = result.decode("utf-8")
+        str_bucket_end = decoded.index(_FB_TOP_STR)
+        assert decoded.index(_TS_TEXT) < str_bucket_end
+        assert decoded.index(_TS_ISO_A) < decoded.index(_TS_ISO_Z)
+        assert decoded.index(_TS_ISO_Z) < decoded.index(_TS_ISO_B)
+
+    def test_numeric_only_two_and_ten_are_lexical(self):
+        """Identical surrounding shape; 10 before 2 as whole-line text, not numeric."""
+        ten = '{"ts":10,"k":"same"}'
+        two = '{"ts":2,"k":"same"}'
+        expected = _jsonl(ten, two)
+        assert merge_jsonl(_jsonl(two), _jsonl(ten)) == expected
+        assert merge_jsonl(_jsonl(ten), _jsonl(two)) == expected
+
+    @pytest.mark.parametrize(
+        "fallback_line",
+        [
+            '{"ts":0,"k":"zero"}',
+            '{"ts":-1,"k":"neg"}',
+            '{"ts":2,"k":"two"}',
+            '{"ts":10,"k":"ten"}',
+            '{"ts":1.5,"k":"float"}',
+            '{"ts":true,"k":"true"}',
+            '{"ts":false,"k":"false"}',
+            '{"ts":null,"k":"null"}',
+            '{"ts":[],"k":"arr-empty"}',
+            '{"ts":[1,"x",true],"k":"arr-nested"}',
+            '{"ts":{},"k":"obj-empty"}',
+            '{"ts":{"a":1},"k":"obj-pop"}',
+            '{"ts":{"b":2},"k":"obj-pop2"}',
+            '{"k":"missing-ts"}',
+            "[1,2]",
+            '"just a string"',
+            "42",
+            "true",
+            "null",
+            "not json at all",
+            '{"ts":NaN,"k":"nan"}',
+            '{"ts":Infinity,"k":"inf"}',
+            '{"ts":-Infinity,"k":"ninf"}',
+            '{"ts":1e999,"k":"overflow"}',
+        ],
+    )
+    def test_each_non_string_ts_is_preserved_after_string_bucket(self, fallback_line):
+        string_line = '{"ts":"2026-01-01T00:00:00Z","k":"s"}'
+        result = merge_jsonl(_jsonl(fallback_line), _jsonl(string_line))
+        assert result == _jsonl(string_line, fallback_line)
+
+    @pytest.mark.parametrize(
+        "string_line",
+        [
+            '{"ts":"","k":"empty"}',
+            '{"ts":"10","k":"numeric-looking"}',
+            '{"ts":"hello","k":"text"}',
+            '{"ts":"2026-01-01T00:00:00Z","k":"iso"}',
+            '{"ts":"2026-01-01T00:00:00+00:00","k":"offset"}',
+            '{"ts":"caf\\u00e9","k":"escaped"}',
+        ],
+    )
+    def test_string_ts_variants_stay_in_string_bucket(self, string_line):
+        fallback = '{"ts":2,"k":"two"}'
+        result = merge_jsonl(_jsonl(fallback), _jsonl(string_line))
+        assert result == _jsonl(string_line, fallback)
+
+    def test_blank_lines_are_dropped_and_originals_kept(self):
+        local = b'{"ts":"2026-01-01T00:00:00Z","k":"a"}\n\n  \n'
+        remote = b'{"ts":2,"k":"two"}\n'
+        assert merge_jsonl(local, remote) == _jsonl(
+            '{"ts":"2026-01-01T00:00:00Z","k":"a"}',
+            '{"ts":2,"k":"two"}',
+        )
+
+    def test_finite_plus_nan_lexical_fallback(self):
+        """NaN is not a total order; original lines sort as whole-line text."""
+        zero = '{"ts":0,"id":"zero"}'
+        one = '{"ts":1,"id":"one"}'
+        two = '{"ts":2,"id":"two"}'
+        nan = '{"ts":NaN,"id":"nan"}'
+        expected = _jsonl(zero, one, two, nan)
+        shuffled = _jsonl(two, nan, zero, one)
+        assert merge_jsonl(shuffled, b"") == expected
+        assert merge_jsonl(_jsonl(zero, one), _jsonl(two, nan)) == expected
+
+    def test_deeply_nested_ts_keeps_original_line(self):
+        nested = '{"ts":' + ("[" * 1500) + ("]" * 1500) + "}"
+        string_line = '{"ts":"2026-01-01T00:00:00Z","k":"a"}'
+        result = merge_jsonl(_jsonl(nested), _jsonl(string_line))
+        assert result == _jsonl(string_line, nested)
+
+    def test_injected_recursionerror_falls_back(self, monkeypatch):
+        """Portable pin: decoder depth need not match across Python versions."""
+        real_loads = json.loads
+
+        def boom(s, *a, **kw):
+            if "AAA" in s:
+                raise RecursionError("decoder depth")
+            return real_loads(s, *a, **kw)
+
+        monkeypatch.setattr("mind_meld.merge.json.loads", boom)
+        aaa = '{"ts":"AAA","k":"aaa"}'
+        zzz = '{"ts":"ZZZ","k":"zzz"}'
+        # If both parsed as strings, AAA would precede ZZZ. RecursionError
+        # on AAA puts it in fallback, so the string-ts ZZZ comes first.
+        assert merge_jsonl(_jsonl(aaa), _jsonl(zzz)) == _jsonl(zzz, aaa)
+
+    def test_injected_valueerror_falls_back(self, monkeypatch):
+        real_loads = json.loads
+
+        def boom(s, *a, **kw):
+            if "BIGINT" in s:
+                raise ValueError("int too large")
+            return real_loads(s, *a, **kw)
+
+        monkeypatch.setattr("mind_meld.merge.json.loads", boom)
+        big = '{"ts":"BIGINT","k":"big"}'
+        ok = '{"ts":"2026-01-01T00:00:00Z","k":"ok"}'
+        assert merge_jsonl(_jsonl(big), _jsonl(ok)) == _jsonl(ok, big)
+
+    def test_union_idempotent_commutative_associative(self):
+        a = _jsonl(_TS_ISO_A, _FB_TWO)
+        b = _jsonl(_TS_ISO_B, _FB_TRUE, _TS_ISO_A)
+        c = _jsonl(_FB_MALFORMED, _FB_NULL)
+        expected_ab = _jsonl(_TS_ISO_A, _TS_ISO_B, _FB_TWO, _FB_TRUE)
+        expected_abc = _jsonl(
+            _TS_ISO_A,
+            _TS_ISO_B,
+            _FB_MALFORMED,
+            _FB_TWO,
+            _FB_NULL,
+            _FB_TRUE,
+        )
+        merged_ab = merge_jsonl(a, b)
+        assert merged_ab == expected_ab
+        assert merge_jsonl(merged_ab, b) == expected_ab
+        assert merge_jsonl(b, a) == expected_ab
+        assert merge_jsonl(merge_jsonl(a, b), c) == expected_abc
+        assert merge_jsonl(a, merge_jsonl(b, c)) == expected_abc
+        assert set(merged_ab.decode().splitlines()) == {
+            _TS_ISO_A,
+            _TS_ISO_B,
+            _FB_TWO,
+            _FB_TRUE,
+        }
+
+    def _run_merge_subprocess(self, tmp_path: Path, seed: str, source: str) -> bytes:
+        runner = tmp_path / f"runner_{seed}.py"
+        runner.write_text(source)
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        return subprocess.run(
+            [sys.executable, str(runner)],
+            env=env,
+            capture_output=True,
+            check=True,
+        ).stdout
+
+    def test_mixed_types_deterministic_across_hash_seeds(self, tmp_path: Path):
+        source = textwrap.dedent(
+            """
+            import sys
+            from mind_meld.merge import merge_jsonl
+            local = (
+                b'{"ts":"2026-01-02T00:00:00Z","k":"b"}\\n'
+                b'{"ts":2,"k":"two"}\\n'
+                b'{"ts":NaN,"k":"nan"}\\n'
+                b'not json at all\\n'
+            )
+            remote = (
+                b'{"ts":"2026-01-01T00:00:00Z","k":"a"}\\n'
+                b'{"ts":10,"k":"ten"}\\n'
+                b'{"ts":true,"k":"true"}\\n'
+            )
+            sys.stdout.buffer.write(merge_jsonl(local, remote))
+            """
+        ).strip()
+        expected = _jsonl(
+            '{"ts":"2026-01-01T00:00:00Z","k":"a"}',
+            '{"ts":"2026-01-02T00:00:00Z","k":"b"}',
+            "not json at all",
+            '{"ts":10,"k":"ten"}',
+            '{"ts":2,"k":"two"}',
+            '{"ts":NaN,"k":"nan"}',
+            '{"ts":true,"k":"true"}',
+        )
+        outputs = [
+            self._run_merge_subprocess(tmp_path, seed, source)
+            for seed in ("1", "2", "42", "999999")
+        ]
+        for out in outputs:
+            assert out == expected
+        assert len(set(outputs)) == 1
+
+    def test_finite_plus_nan_deterministic_across_hash_seeds(self, tmp_path: Path):
+        source = textwrap.dedent(
+            """
+            import sys
+            from mind_meld.merge import merge_jsonl
+            payload = (
+                b'{"ts":2,"id":"two"}\\n'
+                b'{"ts":NaN,"id":"nan"}\\n'
+                b'{"ts":0,"id":"zero"}\\n'
+                b'{"ts":1,"id":"one"}\\n'
+            )
+            sys.stdout.buffer.write(merge_jsonl(payload, b""))
+            """
+        ).strip()
+        expected = _jsonl(
+            '{"ts":0,"id":"zero"}',
+            '{"ts":1,"id":"one"}',
+            '{"ts":2,"id":"two"}',
+            '{"ts":NaN,"id":"nan"}',
+        )
+        outputs = [
+            self._run_merge_subprocess(tmp_path, seed, source)
+            for seed in ("1", "2", "42", "999999")
+        ]
+        for out in outputs:
+            assert out == expected
+        assert len(set(outputs)) == 1
 
 
 class TestMergeLines:

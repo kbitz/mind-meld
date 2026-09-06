@@ -43,6 +43,26 @@ PASSPHRASE = "integration-test-passphrase"
 MEMORY_KB = 1024  # Low for fast tests
 runner = CliRunner()
 
+# Track 51A mixed-ts fixtures. Expected merge is a literal, not derived
+# from merge._extract_ts. Local keeps a unique string-ts line so retry
+# hashes still differ and `_apply_merge`'s no-op branch runs.
+_MIXED_REMOTE_JSONL = (
+    b'{"ts":"2026-01-02T00:00:00Z","k":"remote-str"}\n'
+    b'{"ts":2,"k":"remote-int"}\n'
+    b'{"ts":"2026-01-01T00:00:00Z","k":"remote-early"}\n'
+)
+_LOCAL_ONLY_JSONL = (
+    b'{"ts":"2026-01-03T00:00:00Z","k":"local-only"}\n'
+    b'{"ts":"2026-01-02T00:00:00Z","k":"remote-str"}\n'
+)
+_MERGED_MIXED_JSONL = (
+    b'{"ts":"2026-01-01T00:00:00Z","k":"remote-early"}\n'
+    b'{"ts":"2026-01-02T00:00:00Z","k":"remote-str"}\n'
+    b'{"ts":"2026-01-03T00:00:00Z","k":"local-only"}\n'
+    b'{"ts":2,"k":"remote-int"}\n'
+)
+_ORDINARY_PEER_BYTES = b"ordinary-from-peer\n"
+
 
 @pytest.fixture
 def storage(tmp_path):
@@ -3150,6 +3170,115 @@ class TestMultiSourceSync:
         assert keys == {"line1", "line2", "line3", "line4"}
         assert len(merged_lines) == 4
 
+    def _prepare_mixed_timestamp_fleet(self, tmp_path, monkeypatch):
+        """Push mixed-ts JSONL + ordinary file from A; B has a local-only line."""
+        from mind_meld import sidecar as sidecar_mod
+
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        jsonl_dir = claude_dir / "projects" / "-app" / "memory"
+        notes_dir = claude_dir / "projects" / "-other" / "memory"
+        jsonl_dir.mkdir(parents=True)
+        notes_dir.mkdir(parents=True)
+        jsonl_path = jsonl_dir / "learnings.jsonl"
+        notes_path = notes_dir / "notes.md"
+        jsonl_path.write_bytes(_MIXED_REMOTE_JSONL)
+        notes_path.write_bytes(_ORDINARY_PEER_BYTES)
+
+        config_a_path, _ = self._make_config(tmp_path, storage_dir, claude_dir, "dev-a", "Mac A")
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "Mac A")
+        register_device(backend, "dev-b", "Mac B")
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        pushed = runner.invoke(app, ["autopush"])
+        assert pushed.exit_code == 0, pushed.output
+
+        shutil.rmtree(str(claude_dir))
+        jsonl_dir.mkdir(parents=True)
+        jsonl_path.write_bytes(_LOCAL_ONLY_JSONL)
+
+        config_b_path, _ = self._make_config(tmp_path, storage_dir, claude_dir, "dev-b", "Mac B")
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b_path)
+        return {
+            "jsonl_path": jsonl_path,
+            "notes_path": notes_path,
+            "jsonl_parent": jsonl_dir,
+            "notes_parent": notes_dir,
+            "sidecar_dir": sidecar_mod.SIDECAR_DIR,
+        }
+
+    @pytest.mark.parametrize("command", ["pull", "autopull"])
+    def test_mixed_timestamp_pull_bookkeeping_and_retry(self, tmp_path, monkeypatch, command):
+        """Full CLI: mixed JSONL merges, ordinary file arrives, retry is quiet."""
+        from mind_meld import pullhistory
+
+        env = self._prepare_mixed_timestamp_fleet(tmp_path, monkeypatch)
+        jsonl_path = env["jsonl_path"]
+        notes_path = env["notes_path"]
+
+        calls: list[Path] = []
+        real_fsync_dir = fsutil.fsync_dir
+
+        def spy_fsync_dir(path):
+            calls.append(Path(path))
+            real_fsync_dir(path)
+
+        monkeypatch.setattr(cli_module.fsutil, "fsync_dir", spy_fsync_dir)
+
+        first = runner.invoke(app, [command])
+        assert first.exit_code == 0, first.output
+        combined = (first.output or "") + (first.stderr or "")
+        assert jsonl_path.read_bytes() == _MERGED_MIXED_JSONL
+        assert notes_path.read_bytes() == _ORDINARY_PEER_BYTES
+        assert "failed" not in combined.lower()
+        assert "unexpected error" not in combined
+
+        unique_parents = set(calls)
+        expected_parents = {env["jsonl_parent"], env["notes_parent"]}
+        missing = expected_parents - unique_parents
+        assert not missing, f"missing fsync parents {missing}; actual {unique_parents}"
+
+        records = list(pullhistory.read_records())
+        pull_records = [r for r in records if r.get("verb") == "pull"]
+        actions = {(r["rel_path"], r["action"]) for r in pull_records}
+        assert ("projects/-app/memory/learnings.jsonl", "merged") in actions
+        assert ("projects/-other/memory/notes.md", "written") in actions
+        assert not any(r.get("action") == "failed" for r in pull_records)
+
+        if command == "autopull":
+            breadcrumb = json.loads((env["sidecar_dir"] / "last-autorun.json").read_text())
+            assert breadcrumb["pull"]["outcome"] == "success"
+
+        merged_mtime = jsonl_path.stat().st_mtime_ns
+        first_merged_count = sum(
+            1
+            for r in pull_records
+            if r.get("rel_path") == "projects/-app/memory/learnings.jsonl"
+            and r.get("action") == "merged"
+        )
+
+        second = runner.invoke(app, [command])
+        assert second.exit_code == 0, second.output
+        second_out = (second.output or "") + (second.stderr or "")
+        assert jsonl_path.read_bytes() == _MERGED_MIXED_JSONL
+        assert jsonl_path.stat().st_mtime_ns == merged_mtime
+        assert notes_path.read_bytes() == _ORDINARY_PEER_BYTES
+        assert "merged" not in second_out.lower()
+        if command == "autopull":
+            breadcrumb = json.loads((env["sidecar_dir"] / "last-autorun.json").read_text())
+            assert breadcrumb["pull"]["outcome"] == "success"
+
+        retry_records = [
+            r
+            for r in pullhistory.read_records()
+            if r.get("verb") == "pull"
+            and r.get("rel_path") == "projects/-app/memory/learnings.jsonl"
+            and r.get("action") == "merged"
+        ]
+        assert len(retry_records) == first_merged_count
+
     def test_source_filter_on_pull(self, tmp_path, monkeypatch):
         """Pull with --source gstack only downloads gstack files."""
         storage_dir = tmp_path / "storage"
@@ -4894,6 +5023,118 @@ class TestConflictOwnershipEncryptedPull:
         assert captured.out == ""
         assert "sidecar write failed" in captured.err
         assert "mm:" in captured.err
+
+
+class TestMixedTimestampEncryptedPull:
+    """Track 51A: mixed JSONL merge must complete and continue to the next file."""
+
+    @pytest.mark.parametrize("quiet", [True, False])
+    def test_jsonl_then_ordinary_file_both_succeed(self, tmp_path: Path, quiet: bool):
+        import hashlib
+
+        from mind_meld.cli import _download_and_apply
+        from mind_meld.storage.keys import blob_key
+
+        storage_dir = tmp_path / "storage"
+        base = tmp_path / "src"
+        base.mkdir()
+        backend = LocalBackend(storage_dir)
+        peer = "devA1234"
+        jsonl_path = base / "events.jsonl"
+        ordinary_path = base / "later.txt"
+        jsonl_path.write_bytes(_LOCAL_ONLY_JSONL)
+        old = datetime.now(timezone.utc).timestamp() - 3600
+        os.utime(jsonl_path, (old, old))
+
+        sha_j = hashlib.sha256(_MIXED_REMOTE_JSONL).hexdigest()
+        sha_t = hashlib.sha256(_ORDINARY_PEER_BYTES).hexdigest()
+        enc_j = encrypt(_MIXED_REMOTE_JSONL, PASSPHRASE, memory_kb=MEMORY_KB)
+        enc_t = encrypt(_ORDINARY_PEER_BYTES, PASSPHRASE, memory_kb=MEMORY_KB)
+        backend.put(blob_key(peer, sha_j), enc_j)
+        backend.put(blob_key(peer, sha_t), enc_t)
+        newer = datetime.now(timezone.utc).isoformat()
+        to_download = {}
+        to_download["events.jsonl"] = {
+            "sha256": sha_j,
+            "size": len(_MIXED_REMOTE_JSONL),
+            "mtime": newer,
+        }
+        to_download["later.txt"] = {
+            "sha256": sha_t,
+            "size": len(_ORDINARY_PEER_BYTES),
+            "mtime": newer,
+        }
+        assert list(to_download) == ["events.jsonl", "later.txt"]
+        assert not ordinary_path.exists()
+
+        bt, outcomes = _download_and_apply(
+            backend,
+            base,
+            to_download,
+            peer,
+            PASSPHRASE,
+            MEMORY_KB,
+            quiet=quiet,
+        )
+        assert jsonl_path.read_bytes() == _MERGED_MIXED_JSONL
+        assert ordinary_path.read_bytes() == _ORDINARY_PEER_BYTES
+        assert outcomes["merged"] == ["events.jsonl"]
+        assert outcomes["written"] == ["later.txt"]
+        assert outcomes["failed"] == []
+        assert outcomes["conflicted"] == []
+        assert bt == len(enc_j) + len(enc_t)
+
+    def test_merge_noop_retry_keeps_bytes_and_mtime(self, tmp_path: Path, monkeypatch):
+        import hashlib
+
+        from mind_meld.cli import _download_and_apply
+        from mind_meld.storage.keys import blob_key
+
+        storage_dir = tmp_path / "storage"
+        base = tmp_path / "src"
+        base.mkdir()
+        backend = LocalBackend(storage_dir)
+        peer = "devA1234"
+        jsonl_path = base / "events.jsonl"
+        jsonl_path.write_bytes(_MERGED_MIXED_JSONL)
+        sha_j = hashlib.sha256(_MIXED_REMOTE_JSONL).hexdigest()
+        local_sha = hashlib.sha256(_MERGED_MIXED_JSONL).hexdigest()
+        assert local_sha != sha_j
+        enc_j = encrypt(_MIXED_REMOTE_JSONL, PASSPHRASE, memory_kb=MEMORY_KB)
+        backend.put(blob_key(peer, sha_j), enc_j)
+        newer = datetime.now(timezone.utc).isoformat()
+        to_download = {
+            "events.jsonl": {
+                "sha256": sha_j,
+                "size": len(_MIXED_REMOTE_JSONL),
+                "mtime": newer,
+            }
+        }
+        writes: list[Path] = []
+        real_write = fsutil.atomic_write_bytes
+
+        def spy_write(path: Path, data: bytes, **kw):
+            writes.append(Path(path))
+            return real_write(path, data, **kw)
+
+        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", spy_write)
+        before = jsonl_path.stat().st_mtime_ns
+        _bt, outcomes = _download_and_apply(
+            backend,
+            base,
+            to_download,
+            peer,
+            PASSPHRASE,
+            MEMORY_KB,
+            quiet=True,
+        )
+        assert outcomes["unchanged"] == ["events.jsonl"]
+        assert outcomes["merged"] == []
+        assert outcomes["written"] == []
+        assert outcomes["failed"] == []
+        assert jsonl_path.read_bytes() == _MERGED_MIXED_JSONL
+        assert jsonl_path.stat().st_mtime_ns == before
+        assert jsonl_path.resolve() not in {p.resolve() for p in writes}
 
 
 class TestCompleteSnapshots:

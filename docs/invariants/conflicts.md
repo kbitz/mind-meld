@@ -7,7 +7,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
-- `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge`
+- `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge` / `merge_jsonl` / `_extract_ts`
 - `src/mind_meld/retention.py` — `_gc_old_conflict_files` / `_is_live_conflict`
 - `src/mind_meld/devices.py` — `lookup_device_by_short_id` / `generate_unique_short_device_id`
 
@@ -96,6 +96,22 @@ The pre-v0.9.0 letters `c` / `f` remain LOUD-rejected in the **`mm resolve` path
 **Trailing-newline preservation.** `lcs_merge` splits without `keepends` (so trailing-newline variations don't trip the LCS into a spurious `replace` on the only line of a file) and re-attaches a `\n` terminator on output if either input had one. Memory entry files routinely end with `\n`; the merged result matches.
 
 **Future graduation path.** The user-confirmed (m) prompt is the conservative ship for the dogfood window. If clean-merge accepts dominate during dogfood, the dispatch in `_apply_incoming_file` can flip to "silently apply lcs_merge result at pull time when conflict_count == 0" (Approach A in the /plan-ceo-review). Same `lcs_merge` primitive, no new module.
+
+## JSONL line-union ordering (load-bearing, Track 51A)
+
+`merge.py:merge_jsonl` / `_extract_ts` implement the silent `.jsonl` merge on pull. This is **not** filesystem or manifest mtime, and it is **not** `MEMORY.md` (that file is a plain lexical line-union with no `ts` key).
+
+**Normalized unique-line preservation.** `_split_lines` decodes with UTF-8 replacement, strips trailing whitespace, and drops blank lines. The union is a `set` of those normalized lines. Duplicates, trailing spaces, and invalid UTF-8 byte sequences are not preserved. Original line *text* is never reserialized.
+
+**String-only timestamp bucket.** `_extract_ts` returns the decoded `ts` value only when the outer JSON is an object and `ts` is a Python `str` (including empty and numeric-looking strings). Those records sort first by `(ts, original line)`. String comparison is lexical: ISO-looking values are not parsed as dates, offsets are not normalized, and there is no chronology promise.
+
+**Full-line fallback.** Missing `ts`, null, numbers, bools, arrays, objects, non-object JSON, malformed text, decoder `ValueError` (includes `JSONDecodeError`), and decoder `RecursionError` keep the original normalized line and sort after the string bucket, lexicographically by the whole line. Ties inside the string bucket also break on the full original line (hash-seed invariant; without it every `mm pull` rewrites the file).
+
+**Numeric-only files change order.** Pre-51A, homogeneous numeric `ts` values sorted as numbers (`2` before `10`). They now sort as original-line text (`{"ts":10...}` before `{"ts":2...}`). Mixed string+number `ts` values used to raise `TypeError` out of `_download_and_apply` and abort later files in the batch.
+
+**Rollout.** An old client still crashes on mixed types and still sorts numeric-only files numerically. A mixed-version fleet can therefore rewrite numeric-only JSONL on every pull until every active Mac is upgraded. Check each Mac with local `mm --version`, then `pipx upgrade mind-meld` and `mm pull`. `mm devices` reports the version at last push, not a live install probe. `mm log --action merged` can show repeated merges; a merged outcome alone does not prove timestamp oscillation.
+
+**Do not add numeric ordering later without a total order.** Python `json` accepts `NaN` / `Infinity` / `-Infinity` by default. `float('nan')` is not comparable (`nan < 0` and `0 < nan` are both False), so a numeric bucket that admitted nonfinite values would not be a total order and would re-open hash-seed rewrites. Any future numeric policy must exclude nonfinite values explicitly.
 
 `_check_fleet_version_or_refuse(backend, my_device_id)` runs at the top of `_pull_core` BEFORE any I/O. Per-peer classification via `packaging.version.Version` against `INVERSION_MIN_VERSION = "0.9.2"`: safe (>= 0.9.2 → ALLOW), inactive (last_seen missing → ALLOW), pre-v0.9.2 (last_seen present, version missing or < threshold → REFUSE), dropped (corrupt device.json → REFUSE by storage key). Refusal message names every offending peer; recovery is `pip install --upgrade mind-meld` + `mm push` on each peer. Implementation uses `list_devices_with_drops` (silent variant) so the `_select_devices`-side `_list_devices_warn` only logs once if the fleet check passes.
 

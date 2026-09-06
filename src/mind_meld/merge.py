@@ -3,8 +3,13 @@
 On pull, certain files are merged instead of overwritten to preserve
 entries appended on different machines:
 
-  .jsonl files — set-union of lines, sorted by 'ts' field if present.
-  MEMORY.md    — line-union of the index file (preserves entries from all machines).
+  .jsonl files — set-union of unique normalized lines. Records with a
+    string ``ts`` sort first by that string then the full original line;
+    every other original line follows in lexical order. No date parsing
+    or numeric-epoch interpretation.
+  MEMORY.md    — line-union of the index file (preserves entries from
+    all machines), sorted lexicographically. MEMORY.md does not consult
+    ``ts``.
 
 For the residual conflict path (files that should_merge() rejects -- prose
 memory entry files, etc.) ``lcs_merge`` offers a 3-way merge using
@@ -66,8 +71,18 @@ def merge_file(rel_path: str, local_bytes: bytes, remote_bytes: bytes) -> bytes:
 def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
     """Merge two JSONL files by taking the union of their lines.
 
-    Dedup: byte-exact after whitespace strip.
-    Sort: by 'ts' field if present, then lexicographic for non-JSON lines.
+    Dedup: byte-exact after whitespace strip (unique normalized lines).
+    Sort:
+      1. Records whose decoded JSON is an object with a string ``ts``
+         (including the empty string), ordered by ``(ts, original line)``.
+      2. Every other original normalized line after them, ordered
+         lexically by the whole line.
+
+    Non-string ``ts`` values (numbers, bools, null, arrays, objects),
+    missing ``ts``, non-object JSON, malformed text, and decoder
+    ``ValueError`` / ``RecursionError`` all keep the original normalized
+    line in the fallback bucket. Lines are never reserialized. There is
+    no chronology or numeric-epoch promise.
 
     INVARIANT (load-bearing): the sort key MUST break ties on full line
     content, not on `ts` alone. The line collection is built by iterating
@@ -85,21 +100,21 @@ def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
     # Union by content (set dedup)
     merged = set(local_lines) | set(remote_lines)
 
-    # Sort: timestamped lines first (by ts, then full line content),
-    # then non-timestamped lexicographically.
-    timestamped = []
-    non_timestamped = []
+    # String-ts records first (by ts, then full line content); every
+    # other original normalized line follows lexicographically.
+    string_timestamped = []
+    fallback_lines = []
     for line in merged:
         ts = _extract_ts(line)
         if ts is not None:
-            timestamped.append((ts, line))
+            string_timestamped.append((ts, line))
         else:
-            non_timestamped.append(line)
+            fallback_lines.append(line)
 
-    timestamped.sort(key=lambda x: (x[0], x[1]))
-    non_timestamped.sort()
+    string_timestamped.sort(key=lambda x: (x[0], x[1]))
+    fallback_lines.sort()
 
-    result_lines = [line for _, line in timestamped] + non_timestamped
+    result_lines = [line for _, line in string_timestamped] + fallback_lines
     return _join_lines(result_lines)
 
 
@@ -139,13 +154,29 @@ def _join_lines(lines: list[str]) -> bytes:
 
 
 def _extract_ts(line: str) -> str | None:
-    """Extract 'ts' field from a JSON line. Returns None if not parseable."""
+    """Return a decoded string ``ts`` from a JSON object line, else None.
+
+    Only a JSON object whose ``ts`` value is a Python ``str`` (including
+    empty) contributes a timestamp sort key. All other decoded values —
+    missing key, null, number, bool, array, object, non-object JSON —
+    return None so ``merge_jsonl`` keeps the original normalized line in
+    the lexical fallback.
+
+    Decoder failures return None. ``ValueError`` includes
+    ``JSONDecodeError`` by inheritance. ``RecursionError`` is a named
+    rescue for parser-depth limits on deeply nested payloads; it is not
+    a catch-all. Recursion limits are not changed.
+    """
     try:
         obj = json.loads(line)
-        if isinstance(obj, dict) and "ts" in obj:
-            return obj["ts"]
-    except (json.JSONDecodeError, ValueError):
-        pass
+    except (ValueError, RecursionError):
+        # JSONDecodeError subclasses ValueError. RecursionError is the
+        # CPython decoder-depth failure; keep the original line.
+        return None
+    if isinstance(obj, dict) and "ts" in obj:
+        ts = obj["ts"]
+        if isinstance(ts, str):
+            return ts
     return None
 
 
