@@ -22,175 +22,177 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 
 ## In Progress
 
-_No partially shipped Groups remain after reconciling v0.14.0 and v0.14.1._
+_No partially shipped Groups remain after reconciling v0.14.2 through v0.14.5._
 
 ## Current Plan
 
 _tombstone: 27_
 
-#### Group 48: Hotfix: Preserve conflict copies
+#### Group 52: Terminal-control postcondition
 
 _Depends on: none_
 
-##### Track 48A: Preserve conflict ownership and failed replacements
-_2 tasks . ~140 LOC . high risk . 7 files_
-_touches: src/mind_meld/cli.py, src/mind_meld/manifest.py, src/mind_meld/resolveflow.py, tests/test_conflict_copy.py, tests/test_manifest.py, tests/test_pull_helpers.py, tests/test_integration.py, docs/invariants/conflicts.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_read-first: docs/invariants/conflicts.md, docs/invariants/sync.md, src/mind_meld/resolveflow.py_
-_produces: deduplication touches only the matching canonical file and a failed replacement preserves the prior conflict copy_
-_session: fresh · effort: high · verify: ./bin/check tests/test_conflict_copy.py tests/test_manifest.py tests/test_pull_helpers.py tests/test_integration.py tests/test_docs_routing.py_
+##### Track 52A: Enforce a no-control postcondition in the shared sanitizers
+_2 tasks . ~80 LOC . medium risk . 6 files_
+_touches: src/mind_meld/safety.py, src/mind_meld/retention.py, src/mind_meld/token_usage.py, tests/test_safe_str.py, tests/test_retention.py, tests/test_token_usage.py, docs/invariants/init-devices.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_read-first: docs/invariants/init-devices.md, src/mind_meld/safety.py_
+_produces: no string returned by `strip_terminal_escapes`, `safe_str`, `safe_text` or `safe_terminal_str` contains ESC or a C1 control; newlines and tabs in diff bodies survive_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_safe_str.py tests/test_conflictdiff.py tests/test_retention.py tests/test_token_usage.py tests/test_docs_routing.py_
 
-_Source: approved full-review findings R2/R3, 2026-09-05 UTC. The deletion behavior was introduced by `f4bf6dd` (v0.11.5), so this is a regression on shipped preservation behavior. Reproduced at `8be81ce`: a conflict for `notes.md` deletes the sidecar of `notes.sync-conflict-log.md`; separately, an injected ENOSPC during replacement leaves no sidecars. These mechanisms remain after v0.14.0. The former 45A claim that the prefix glob cannot match another canonical is false; this does not establish that either mechanism caused every historical disappearance._
+_Source: [plan-eng-review:severity=major] filed by Track 50A /autoplan, 2026-09-06, priority P1. Verified at 38222ac: `strip_terminal_escapes` is a single `_ANSI_ESCAPE_RE.sub` pass, and its own docstring plus the v0.14.4 CHANGELOG record nested-escape hardening as the follow-up. A nested ST-terminated payload survives `safe_str` and `safe_text` as a complete OSC 52 sequence (review evidence `~/.gstack/projects/kbitz-mind-meld/50a-reproductions.json`, key `corrected_shared_rich_sink_probe`). Sink census at HEAD (`grep -c "safe_str(\|safe_text(" src/mind_meld/*.py`): cli.py 128, resolveflow.py 30, retention.py 26, skill_link.py 9, events_tail.py 8, conflictdiff.py 5, and only three of all of those are plain `sys.stderr.write` lines still routed through `safe_str`. Fix the helper, not the two hundred callers._
 
-- **Match exact canonical ownership** -- replace the stem-prefix inference with ownership parsed from the final conflict suffix; retain peer and era checks. **Do NOT write a new parser:** `resolveflow._canonical_for_conflict` already computes exactly this via `rfind(CONFLICT_INFIX)`. `manifest` cannot import `resolveflow` (resolveflow imports `CONFLICT_INFIX` from manifest — a cycle `tests/test_module_boundaries.py` rejects), so MOVE `_canonical_for_conflict` down into `manifest.py` and re-point its two resolveflow callers (`:360`, `:562`), its `resolveflow.__all__` entry, and the `tests/test_conflict_copy.py` import. A third divergent copy of this computation is how full-review finding #10 happened (`find()` vs `rindex()`, discharged in v0.14.0). Cover double-infix canonical names, literal glob characters, extensions, and a same-content sidecar belonging to a different file so false dedup is caught as well as false deletion. _cli.py + manifest.py + resolveflow.py + regression tests, ~80 lines._ (M)
-- **Preserve the old copy until replacement succeeds** -- remove stale copies only after a replacement has been written successfully; failure must preserve the previous peer bytes and surface the existing failure outcome. Pin injected write failure, successful replacement, unchanged dedup, and unlink failure. Preserve the peer-mtime and v1 filename contracts. **Note `tests/test_pull_helpers.py:235` currently asserts that a failed write leaves NO sidecar** — that is the semantics this task inverts, so update it deliberately rather than discovering it red. _cli.py + regression tests, ~60 lines._ (M)
+- **Define the postcondition once in safety.py** -- after the grammar strip, delete every remaining ESC (`\x1b`) and C1 control (`\x80`-`\x9f`) code point so no deletion can assemble a fresh introducer; a fixed number of regex passes is not the proof. Keep `\n` and `\t` for `safe_text` diff bodies; keep `safe_terminal_str`'s printable-only rule. Pin the review's nested probe (`"\x1b\x1b[31m]52;c;VEVTVA==\x1b\x1b[31m\\"`), a BEL-terminated nesting, and a bare 8-bit `\x9d` OSC against all four helpers through a captured `Console(file=StringIO(), force_terminal=True)`; assert on `repr` only and never replay a capture in a live terminal. Rewrite the three "recorded follow-up" docstrings and the invariant's sanitizer paragraph to state the postcondition. _safety.py + tests + init-devices.md, ~50 lines._ (M)
+- **Route the three plain-stderr `safe_str` sites** -- `retention.py`'s `token cache gc failed` notice and `token_usage.py`'s oversize-line and unknown-model notices write to `sys.stderr` with no Rich markup, so markup escaping there only adds backslashes; switch them to `safe_terminal_str` and leave every `console.print` sink on `safe_str`. `conflictdiff` rendering is unchanged. _retention.py + token_usage.py + tests, ~30 lines._ (S)
 
-#### Group 49: Snapshot integrity
+#### Group 53: Pull isolation
 
-_Depends on: Group 48_
+_Depends on: Group 52_
 
-##### Track 49A: Publish complete, content-consistent snapshots
-_2 tasks . ~200 LOC . high risk . 5 files_
-_touches: src/mind_meld/cli.py, src/mind_meld/manifest.py, tests/test_integration.py, tests/test_manifest.py, tests/test_pull_helpers.py, docs/invariants/sync.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 48A_
-_read-first: docs/invariants/sync.md_
-_produces: every advertised hash identifies the uploaded bytes and a failed read never becomes evidence of deletion_
-_session: fresh · effort: high · verify: ./bin/check tests/test_integration.py tests/test_manifest.py tests/test_pull_helpers.py tests/test_docs_routing.py_
+##### Track 53A: Contain apply exceptions without losing completed-file bookkeeping
+_2 tasks . ~150 LOC . high risk . 4 files_
+_touches: src/mind_meld/cli.py, tests/test_pull_helpers.py, tests/test_integration.py, tests/test_silent_failure_contract.py, docs/invariants/sync.md, docs/invariants/conflicts.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_blocked-by: Track 52A_
+_read-first: docs/invariants/sync.md, docs/invariants/conflicts.md_
+_produces: one file's apply failure is a per-file `failed` outcome with sanitized context and the rest of the batch continues; files already applied keep their history, sync-log and directory fsync even when the pull still aborts; user abort still aborts_
+_session: fresh · effort: high · verify: ./bin/check tests/test_pull_helpers.py tests/test_integration.py tests/test_silent_failure_contract.py tests/test_docs_routing.py_
 
-_Source: approved full-review R1/C2, 2026-09-05 UTC. Reproduced at `8be81ce`: two files scanned with identical content share a blob key; editing one before `_upload_changed_blobs` makes a peer receive its new bytes for the untouched file too. A separate hash/read error omits an existing path and `_push_core` publishes a tombstone that suppresses restoration. Existing exclude and symlink filters do not cover failed reads. The dependency puts the preservation regression first and serializes the shared release claim; it is not a new data dependency._
+_Source: [plan-eng-review:severity=major] filed by Track 51A /autoplan, 2026-09-06. Verified at 38222ac: `_download_and_apply` calls `_apply_incoming_file` with no exception boundary (the only `finally` stops the progress bar), so a raise discards the `outcomes` map, `_pull_one_source` never reaches its pull-history, sync-log or `fsutil.fsync_dir`-per-touched-parent step, and the remaining files, sources and peers stop. Reproduced at cc22b6c: batch `earlier.txt`, `blocked/inside.txt`, `later.txt` with a regular local file at `blocked`; the parent `mkdir` raises `FileExistsError` and `later.txt` never arrives (evidence `~/.gstack/projects/kbitz-mind-meld/51a-deferred-isolation-reproduction.json`). Autopull already prints an unexpected-error line and a failed breadcrumb: this is not a silent failure, it is a lost batch. v0.14.5 fixed one named exception (`TypeError` from mixed timestamps); this is the general boundary. Dependency is release serialization._
 
-- **Make content addressing describe one snapshot** -- investigate refusing a changed input or using one consistent snapshot for bytes, digest, size and mtime. Do not discard the freshly computed digest or advertise a skipped/missing upload. Pin the two-path shared-hash reproduction and failure before manifest publication; retain the encrypted-storage invariant. _cli.py + integration tests, ~100 lines._ (M)
-- **Separate incomplete scans from deletions** -- choose the smallest safe failure policy before adding recovery machinery: a read error must not enter deletion comparison as a missing file. Pin unreadable-existing versus genuinely deleted files, source scoping, existing exclusion behavior, recovery manifests, and a visible autopush failure/degradation. Any failure signal produced by the walker must be consumed by `_push_core` in this change. _manifest.py + cli.py + tests, ~100 lines._ (M)
+- **Classify apply exceptions at the boundary** -- inventory what `_apply_incoming_file` can raise before and after the canonical write is published (the `OSError` family from mkdir, write, rename and mtime restore; `MindMeldError`; decoder errors; `typer.Abort` / `KeyboardInterrupt`). Wrap the call so OS and mm errors become a per-file `failed` outcome with `safe_str` file context and the batch continues; user abort and programming errors still propagate. A failure raised after a successful write must not be reported as a failed write. Preserve the `_CANONICAL_WRITE_OUTCOMES` inline-bump invalidation on the success path. _cli.py + tests, ~80 lines._ (M)
+- **Keep completed bookkeeping when the pull still aborts** -- when an exception does propagate out of `_download_and_apply`, `_pull_one_source` and `_pull_core` must still record the outcomes accumulated so far: pull history, sync-log, and the deferred `fsync_dir` of every touched parent, without draining abandoned keep-local decisions (the `_drain_inline_bumps` abort contract in conflicts.md). Pin three isolated multi-file cases: a normal write followed by the parent-file collision; an injected post-publication exception; an explicit user abort. Autopull's `mm: warning:` line and failed breadcrumb stay. _cli.py + integration tests, ~70 lines._ (M)
 
-#### Group 50: Terminal-safe recovery warnings
+#### Group 54: Honest Codex diagnostics
 
-_Depends on: Group 49_
+_Depends on: Group 53_
 
-##### Track 50A: Sanitize rejected storage filenames
-_1 task . ~40 LOC . low risk . 3 files_
-_touches: src/mind_meld/storage/local.py, tests/test_storage_local.py, tests/test_recovery.py, docs/invariants/init-devices.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 49A_
-_read-first: docs/invariants/init-devices.md_
-_produces: a rejected manifest filename or validator exception cannot inject terminal controls through a warning_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_storage_local.py tests/test_recovery.py tests/test_safe_str.py tests/test_docs_routing.py_
-
-_Source: approved full-review C1, 2026-09-05 UTC. Captured stderr at `8be81ce` contains an OSC 52 sequence from a Dropbox-shaped conflict filename even when validation returns false. The existing sanitizer removes it. The dependency serializes the release after snapshot integrity; the sanitizer itself has no dependency on that implementation._
-
-- **Reuse the terminal sanitizer at both warning sites** -- sanitize candidate paths and exception text in `LocalBackend.find_conflict_copies`, retaining the useful warning. Exercise validator-false and validator-raised branches and the manifest-fetch caller using captured output; never execute the control sequence in a terminal. _storage/local.py + tests, ~40 lines._ (S)
-
-#### Group 51: Deterministic JSONL merge
-
-_Depends on: Group 50_
-
-##### Track 51A: Keep mixed timestamp types from aborting pull
-_1 task . ~60 LOC . medium risk . 3 files_
-_touches: src/mind_meld/merge.py, tests/test_merge.py, tests/test_integration.py, docs/invariants/conflicts.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 50A_
-_read-first: docs/invariants/conflicts.md_
-_produces: valid JSONL with heterogeneous timestamp values merges deterministically and does not abort later downloads_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_merge.py tests/test_integration.py tests/test_docs_routing.py_
-
-_Source: approved full-review R4, 2026-09-05 UTC. `_extract_ts` returns arbitrary JSON values into `merge_jsonl`'s sort. Numeric and string timestamps reproduce a TypeError out of `_download_and_apply`, preventing the next ordinary file from downloading. The existing UTF-8 replacement behavior is explicitly accepted by `test_non_utf8_graceful` and is outside this fix. Dependency is release serialization._
-
-- **Use supported comparable sort keys** -- investigate retaining timestamp ordering for the documented string form and using the existing deterministic lexical fallback for other values. Preserve every input line, full-line tie breaking, idempotence and ordering across hash seeds. Pin heterogeneous values through the real download/apply path and verify the following file is downloaded. _merge.py + tests, ~60 lines._ (M)
-
-#### Group 52: Honest Codex diagnostics
-
-_Depends on: Group 51_
-
-##### Track 52A: Report failed Codex capture and remove obsolete reader helpers
+##### Track 54A: Report failed Codex capture and remove obsolete reader helpers
 _2 tasks . ~120 LOC + ~60 lines (del) . medium risk . 5 files_
 _touches: src/mind_meld/host_usage.py, src/mind_meld/cli.py, tests/test_host_usage.py, tests/test_diag.py, tests/test_silent_failure_contract.py, README.md, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 51A_
+_blocked-by: Track 53A_
 _read-first: docs/invariants/events-retro.md_
 _produces: status and diag distinguish a complete Codex capture from a cached inventory whose latest read failed_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_host_usage.py tests/test_diag.py tests/test_silent_failure_contract.py tests/test_docs_routing.py_
 
-_Source: approved full-review C3/H3, 2026-09-05 UTC, plus the unused `_Terminal` branch from the former walker card. A warm rollout followed by unsupported counters reproduces reader failure alongside `state=ready, pending=0`. Grok's v0.14.1 `last_reason` contract supplies the existing pattern. `_model_id` has no callers; `_terminal_from_record` and the `_Terminal` aggregation branch are test-only. This fixes diagnosis without committing to the deferred per-record quarantine policy. Dependency is release serialization._
+_Source: approved full-review C3/H3, 2026-09-05 UTC, plus the unused `_Terminal` branch from the former walker card; carded as Track 52A in the 2026-09-05 plan. A warm rollout followed by unsupported counters reproduces reader failure alongside `state=ready, pending=0`. Grok's v0.14.1 `last_reason` contract supplies the existing pattern. Re-verified at 38222ac: `codex_usage_diag` returns `state` / `pending` / `files_*` and no failure field; `_model_id` in host_usage.py has zero callers; `_terminal_from_record` is called only from `tests/test_host_usage.py`, so the `_Terminal` branch in `_aggregate` is unreachable in production. This fixes diagnosis without committing to the deferred per-record quarantine policy. Dependency is release serialization._
 
 - **Carry failure state through diagnosis** -- apply the persistent outcome contract to the Codex reader and its status/diag consumers in one change. Preserve a permanent failure across transient failures; successful recovery clears it. Keep diagnostic reads cache-only and passphrase-free, and retain independent Grok success. _host_usage.py + cli.py + tests and user-facing reference, ~120 lines._ (M)
 - **Delete obsolete reader paths** -- reconfirm and remove `_model_id`, the test-only `_terminal_from_record`/`_Terminal` path, and tests that exercise only that obsolete representation. Keep the production `_TurnState` cumulative union and inclusive-counter normalization unchanged. Replace live comments that still promise a universal adapter with the actual deferred-work reference. _host_usage.py + test_host_usage.py, ~60 lines (del)._ (S)
 
-#### Group 53: Git capture integrity and cleanup
+#### Group 55: Git capture integrity and cleanup
 
-_Depends on: Group 52_
+_Depends on: Group 54_
 
-##### Track 53A: Scrub the git environment for mm's git subprocesses
+##### Track 55A: Scrub the git environment for mm's git subprocesses
 _2 tasks . ~40 LOC + ~50 lines (del) . low risk . 7 files_
 _touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/token_usage.py, tests/test_events.py, tests/test_init_events_backfill.py, tests/test_module_boundaries.py, tests/test_track_30a.py, AGENTS.md, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 52A_
+_blocked-by: Track 54A_
 _read-first: docs/invariants/events-retro.md_
 _produces: each git candidate reports its own history and event-capture documentation points at the code that runs_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_events.py tests/test_init_events_backfill.py tests/test_module_boundaries.py tests/test_track_30a.py tests/test_docs_routing.py_
 
-_Source: former Track 48A (2026-09-03 numbering), plus approved full-review H1/H2. `_walk_one_repo` and `_origin_remote_url` still inherit git repository-redirection variables; filesystem discovery ignores them. `_last_mm_push_ts` and `_run_events_recapture` have no runtime callers: the active paths are `resolve_push_cursor` and the CLI's `_prepare_recapture` orchestration. Dependency is release serialization._
+_Source: former Track 48A (2026-09-03 numbering), carded as Track 53A in the 2026-09-05 plan, plus approved full-review H1/H2. Re-verified at 38222ac: both `subprocess.run` calls in `events.py` (`_walk_one_repo` and `_origin_remote_url`) pass no `env=`, so they inherit git repository-redirection variables while filesystem discovery ignores them. `_last_mm_push_ts` and `_run_events_recapture` have no runtime callers: the active paths are `resolve_push_cursor` and the CLI's `_prepare_recapture` orchestration. Dependency is release serialization._
 
 - **Scrub repository-redirection variables** -- pass an environment that cannot redirect either git subprocess to another repository. Use an isolated decoy-repo test with `GIT_DIR` and the related repository-selection variables to verify both history and remote attribution. _events.py + tests, ~40 lines._ (S)
-- **Remove the unused event helpers** -- delete `_last_mm_push_ts`, `_run_events_recapture` and its export; **re-point** (do NOT delete) the references in invariants, AGENTS.md, token_usage's reader documentation and adjacent tests. Both `_last_mm_push_ts` facts in `docs/invariants/events-retro.md` survive the deletion and move to successors: the bounded-read table row at `:86` belongs to `_iter_mm_push_objs`, and the "returning `None` is NOT a benign fallback" cursor-rewind hazard at `:93` belongs to `resolve_push_cursor` / `CursorResolution.used_floor`. Drop the now-vacuous `assert "_run_events_recapture" not in src` at `tests/test_track_30a.py:636`; keep its live `_prepare_recapture` and `recapture(` siblings. Preserve the exercised cursor and recapture behavior; no new generic walker. _events.py + events_tail.py and documentation, ~50 lines (del)._ (S)
+- **Remove the unused event helpers** -- delete `_last_mm_push_ts`, `_run_events_recapture` and its export; **re-point** (do NOT delete) the references in invariants, AGENTS.md, token_usage's reader documentation and adjacent tests. Both `_last_mm_push_ts` facts in `docs/invariants/events-retro.md` survive the deletion and move to successors: the bounded-read table row at `:86` belongs to `_iter_mm_push_objs`, and the "returning `None` is NOT a benign fallback" cursor-rewind hazard at `:93` belongs to `resolve_push_cursor` / `CursorResolution.used_floor`. Drop the now-vacuous `assert "_run_events_recapture" not in src` at `tests/test_track_30a.py:678` (it sat at `:636` before v0.14.3 grew that file); keep its live `_prepare_recapture` and `recapture(` siblings. Preserve the exercised cursor and recapture behavior; no new generic walker. _events.py + events_tail.py and documentation, ~50 lines (del)._ (S)
+
+#### Group 56: Dry-run honesty
+
+_Depends on: Group 55_
+
+##### Track 56A: Make push dry-run setup honor the no-mutation contract
+_1 task . ~90 LOC . medium risk . 5 files_
+_touches: src/mind_meld/cli.py, src/mind_meld/config.py, tests/test_config.py, tests/test_integration.py, tests/test_silent_failure_contract.py, README.md, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_blocked-by: Track 55A_
+_read-first: docs/invariants/events-retro.md, docs/invariants/init-devices.md_
+_produces: `mm push --dry-run` writes nothing: no config patch, no fingerprint persist, no mm-events directory; where a truthful preview needs setup it refuses and names the command that performs it_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_config.py tests/test_integration.py tests/test_silent_failure_contract.py tests/test_docs_routing.py_
+
+_Source: [plan-eng-review:severity=moderate] filed by Track 49A /autoplan DX and Eng review, 2026-09-06. Verified at 38222ac: `push` calls `_maybe_prompt_migration` and then `_init_crypto_session` (which persists a missing `root_salt_fp` through `patch_config_on_disk`) before `_push_core(..., dry_run=True)`; `config.resolve_sources` runs `_bootstrap_mm_events_path` (a `mkdir`) unconditionally; the `--dry-run` help text admits all three. The `dry_run` no-op invariant in events-retro.md names this setup repair as the separate follow-up and forbids weakening the publication half to match it. This is a source audit, not a claimed live mutation. Dependency is release serialization._
+
+- **Make setup read-only under --dry-run** -- thread a read-only flag through the three setup sites: report a pending config migration and name `mm migrate-config` instead of prompting; keep the fingerprint backfill in memory only; report "would create" for a missing mm-events directory instead of creating it. Where the preview cannot be truthful without setup, refuse with the exact command. Snapshot config, source directories and storage before and after in isolated CLI tests for a missing fingerprint, a missing mm-events root and a pending migration. Update the help text and the invariant's setup caveat. Do not route a dry-run through recover or reset. _cli.py + config.py + tests, ~90 lines._ (M)
 
 ### Phase 3: Retro fidelity
 
 **End-state:** The retro presents model usage consistently, states each value's collection scope and coverage, and adds only verified Grok estimates without changing accounting semantics.
-**Groups:** 54, 55
+**Groups:** 57, 58
 
-#### Group 54: Grok pricing
+#### Group 57: Grok pricing
 
-_Depends on: Group 53_
+_Depends on: Group 56_
 
-##### Track 54A: Price verified Grok usage
+##### Track 57A: Price verified Grok usage
 _2 tasks . ~100 LOC . medium risk . 4 files_
 _touches: src/mind_meld/token_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_token_usage.py, tests/test_retro_fleet_aggregator.py, README.md, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 53A_
+_blocked-by: Track 56A_
 _read-first: docs/invariants/events-retro.md, tests/fixtures/host_sessions/grok/CONTRACT.md_
 _produces: verified Grok model ids have sourced, bounded API-equivalent estimates through resolve_prices; unverifiable aliases remain unpriced_
 _session: fresh · effort: high · verify: ./bin/check tests/test_token_usage.py tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
 
-_Source: Track 46A pricing deferral (2026-09-04) and the matching Future item. v0.14.1 restored ingestion without the proposed cache rewrite; neither the retired OpenCode bug nor `offset == size` is an active pricing prerequisite. Pricing is still absent by decision. Re-census actual model ids and counter semantics when implementing, and verify current xAI primary-source rates and context thresholds; do not copy stale numbers into the table. Dependency is release serialization._
+_Source: Track 46A pricing deferral (2026-09-04) and the matching Future item; carded as Track 54A in the 2026-09-05 plan. v0.14.1 restored ingestion without the proposed cache rewrite; neither the retired OpenCode bug nor `offset == size` is an active pricing prerequisite. Re-verified at 38222ac: token_usage.py still records xAI as HELD with no `grok-4.6-build` alias and no xAI tier. Pricing is still absent by decision. Re-census actual model ids and counter semantics when implementing, and verify current xAI primary-source rates and context thresholds; do not copy stale numbers into the table. Dependency is release serialization._
 
 - **Verify the rate contract and add exact model mappings** -- establish the current observed Grok model ids and disjoint counters, then add only supported aliases/rates through `resolve_prices`, with a vendor-specific verification date. An unverifiable model alias stays unpriced. Do not infer rates from arbitrary peer model prefixes or decode the unverified `costUsdTicks` unit. _token_usage.py + tests, ~60 lines._ (M)
 - **Keep estimate limits visible** -- test the existing per-machine consumer with Grok data, including unknown models and any context-length surcharge that aggregate counters cannot reconstruct. Such uncertainty must remain a floor or unavailable estimate, never an exact bill or a fleet sum. Carry the disclosure into the reference and invariant docs. _aggregator.py + tests, ~40 lines._ (S)
 
-#### Group 55: Usage presentation
+#### Group 58: Usage presentation
 
-_Depends on: Group 54_
+_Depends on: Group 57_
 
-##### Track 55A: Make model usage easier to read without changing what totals mean
+##### Track 58A: Make model usage easier to read without changing what totals mean
 _1 task . ~220 LOC . medium risk . 3 files_
 _touches: src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_retro_fleet_aggregator.py, docs/invariants/events-retro.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 54A_
+_blocked-by: Track 57A_
 _read-first: docs/invariants/events-retro.md_
 _produces: consistent usage presentation with explicit source logs, machine scope, observation time, window and coverage_
 _session: fresh · effort: high · verify: ./bin/check tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
 
-_Source: former Track 50A (2026-09-03 numbering), approved full-review H4, and the user-approved pre-existing-roadmap assessment on 2026-09-05. `_render_agent_inventory` and `AGENT_FAMILY_ROWS` remain; `aggregate` materializes event rows directly and `_read_events` is unused. The cache-encoding and shared-walker prerequisites stay removed. Track 54A supplies verified rates or an explicit unpriced result, not permission to change aggregation._
+_Source: former Track 50A (2026-09-03 numbering), carded as Track 55A in the 2026-09-05 plan, approved full-review H4, and the user-approved pre-existing-roadmap assessment on 2026-09-05. Re-verified at 38222ac: `_render_agent_inventory` and `AGENT_FAMILY_ROWS` remain; `aggregate` materializes event rows directly and `_read_events` has zero callers. The cache-encoding and shared-walker prerequisites stay removed. Track 57A supplies verified rates or an explicit unpriced result, not permission to change aggregation._
 
-_Boundary verified at f10bf34: `SessionsAggregate` holds Claude fleet-window totals; `HostUsageInventory` retains accepted snapshots per machine. Day-bucket slicing is NOT one function: `_windowed_host_by_model` (one caller, `_device_economics_cell`) slices `tokens_by_day` only, while `lifetime_by_family` is sliced inline in `_render_agent_inventory` and in the rhythm view, clamped by `_snapshot_day_ceiling` alone. A renderer rewrite must account for all three sites. Contributing readers are recorded per machine, but the wire has no reader-to-model-family attribution. Presentation must preserve those distinctions. New accounting schemas, cross-machine deduplication or reader-to-model wire attribution need a separately justified proposal._
+_Boundary verified at f10bf34 and unchanged at 38222ac: `SessionsAggregate` holds Claude fleet-window totals; `HostUsageInventory` retains accepted snapshots per machine. Day-bucket slicing is NOT one function: `_windowed_host_by_model` (one caller, `_device_economics_cell`) slices `tokens_by_day` only, while `lifetime_by_family` is sliced inline in `_render_agent_inventory` and in the rhythm view, clamped by `_snapshot_day_ceiling` alone. A renderer rewrite must account for all three sites. Contributing readers are recorded per machine, but the wire has no reader-to-model-family attribution. Presentation must preserve those distinctions. New accounting schemas, cross-machine deduplication or reader-to-model wire attribution need a separately justified proposal._
 
 - **Clarify usage without changing accounting** -- first show a compact before/after rendered example with Claude session data, two machines of host inventory, an unpriced Grok model and a degraded reader. Use it to settle consistent naming and layout while showing each value's collection scope, observation time, window and coverage. Reuse existing aggregations: host counters never enter the Claude fleet sum; retained inventory stays distinguishable from in-window activity; per-machine host estimates retain the do-not-sum rule. Do not imply per-host model attribution the wire lacks. Preserve the existing global git metrics, unavailable/partial/degraded disclosures, retired-reader tolerance, two-pass skill decoder and no-new-summary-row constraint. Delete the unused `_read_events` iterator and correct its documentation. Pin populated, absent and degraded views plus the one-materialization prior-period path. _aggregator.py + SKILL.md + tests, ~220 lines._ (L)
 
 ### Execution Map
 
-**This adjacency is RELEASE order, not launch order.** Most edges below are release serialization on `pyproject.toml`, not semantic dependencies — four cards say "Dependency is release serialization" outright, and Track 50A states the sanitizer "has no dependency on that implementation". Those Tracks may be worked in parallel Conductor workspaces; only their version slots serialize. Treat an edge as launch-gating only where the card names a semantic reason: the open hotfix blocks other work, and the 54A → 55A edge also records which Grok models have verified prices and which remain unpriced. (Open question for the next regen: 50A is a 40-LOC sanitizer and 51A fixes a `TypeError` that aborts the remaining pull batch, yet both sit behind ~340 LOC of data-integrity work in the release queue.)
+**This adjacency is RELEASE order, not launch order.** Every edge below is release serialization on `pyproject.toml`: seven cards claim seven consecutive versions, and only one tag can exist per version. None of the edges is a data dependency except 57A → 58A, which records which Grok models have verified prices and which remain unpriced. Tracks may be worked in parallel Conductor workspaces; only their version slots serialize, and document order is priority. The 2026-09-05 map's open question (two small pull fixes queued behind ~340 LOC of integrity work) resolved itself: all four shipped within one day as v0.14.2–v0.14.5.
 
-Adjacency from the roadmap audit's GROUP_DEPS output:
+Adjacency from `bin/roadmap-pack` on the drafted Tracks (identical to the audit's GROUP_DEPS after apply):
 
 ```
-- Group 48 ← {}
-- Group 49 ← {48}
-- Group 50 ← {49}
-- Group 51 ← {50}
-- Group 52 ← {51}
+- Group 52 ← {}
 - Group 53 ← {52}
 - Group 54 ← {53}
 - Group 55 ← {54}
+- Group 56 ← {55}
+- Group 57 ← {56}
+- Group 58 ← {57}
 ```
 
-**Total: 8 groups . 8 tracks remaining.**
+Track detail per group:
+
+```
+Group 52: Terminal-control postcondition
+  +-- Track 52A ........... ~M . 2 tasks
+Group 53: Pull isolation
+  +-- Track 53A ........... ~L . 2 tasks
+Group 54: Honest Codex diagnostics
+  +-- Track 54A ........... ~M . 2 tasks
+Group 55: Git capture integrity and cleanup
+  +-- Track 55A ........... ~S . 2 tasks
+Group 56: Dry-run honesty
+  +-- Track 56A ........... ~M . 1 task
+Group 57: Grok pricing                        (Retro fidelity)
+  +-- Track 57A ........... ~M . 2 tasks
+Group 58: Usage presentation                  (Retro fidelity)
+  +-- Track 58A ........... ~L . 1 task
+```
+
+**Total: 7 groups . 7 tracks remaining.**
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (76 items)
+Deferred: docs/roadmap-future.md (78 items)
 
 ## Shipped
 
