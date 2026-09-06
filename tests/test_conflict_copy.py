@@ -4197,12 +4197,22 @@ class TestConflictOwnershipDiscovery:
         assert hits[0][1] == sidecar
         assert hits[0][2] is None
 
+    @pytest.mark.parametrize(
+        "conflict_name",
+        [
+            ".sync-conflict-20200101-000000-v1-devA1234",
+            ".sync-conflict-20200101-000000-v1-devA1234.",
+            "..sync-conflict-20200101-000000-v1-devA1234",
+            "..sync-conflict-20200101-000000-v1-devA1234.",
+            "...sync-conflict-20200101-000000-v1-devA1234",
+        ],
+    )
     def test_ownerless_sidecar_resolve_skip_and_gc_preserve_bytes(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conflict_name: str
     ) -> None:
         src = tmp_path / "gstack"
         (src / "memory").mkdir(parents=True)
-        sidecar = src / "memory" / ".sync-conflict-20200101-000000-v1-devA1234"
+        sidecar = src / "memory" / conflict_name
         sidecar.write_bytes(b"only copy")
         config = {
             "sync": {
@@ -4218,6 +4228,7 @@ class TestConflictOwnershipDiscovery:
             }
         }
         hits = _find_conflict_files(config)
+        assert hits == [("s1", sidecar, None)]
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
         resolved, failed = _resolve_interactive_loop(hits)
         assert (resolved, failed) == (0, 0)

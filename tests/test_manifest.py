@@ -1007,6 +1007,8 @@ class TestCanonicalForConflict:
                 "notes.sync-conflict-log.md",
             ),
             ("notes[1].sync-conflict-20260421-143055-v1-devA1234.md", "notes[1].md"),
+            ("notes.sync-conflict-20260421-143055-v1-devA1234.", "notes."),
+            ("....sync-conflict-20260421-143055-v1-devA1234", "..."),
             ("plain.md", "plain.md"),
         ],
     )
@@ -1016,8 +1018,19 @@ class TestCanonicalForConflict:
         parent = Path("/x")
         assert _canonical_for_conflict(parent / conflict_name) == parent / canonical_name
 
-    def test_empty_reconstruction_is_ownerless(self) -> None:
-        cpath = Path("/x/.sync-conflict-20260421-143055-v1-devA1234")
+    @pytest.mark.parametrize(
+        "conflict_name",
+        [
+            ".sync-conflict-20260421-143055-v1-devA1234",
+            ".sync-conflict-20260421-143055-v1-devA1234.",
+            "..sync-conflict-20260421-143055-v1-devA1234",
+            "..sync-conflict-20260421-143055-v1-devA1234.",
+            "...sync-conflict-20260421-143055-v1-devA1234",
+        ],
+    )
+    def test_invalid_reconstruction_is_ownerless(self, conflict_name: str) -> None:
+        cpath = Path("/x") / conflict_name
+        assert is_conflict_filename(conflict_name)
         assert _canonical_for_conflict(cpath) is None
 
 

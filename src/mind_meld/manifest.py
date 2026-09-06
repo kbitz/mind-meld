@@ -217,12 +217,11 @@ def _canonical_for_conflict(conflict_path: Path) -> Path | None:
     had an infix before mm added its own (e.g., a Syncthing conflict file
     that mm then conflicted again) unwind the most recent layer only.
 
-    Returns None when reconstruction is empty (infix at index 0 with no
-    extension: ``.sync-conflict-<ts>-<dev>``). That shape is a legal
-    conflict filename, but it has no owner; treating the sidecar as its
-    own canonical lets resolve/GC delete the only copy. Path.with_name("")
-    would also raise. Non-conflict names (no infix) still return the input
-    path unchanged.
+    Returns None when reconstruction is empty or a directory component
+    ("." or ".."). Those shapes can pass the conflict-name check but have
+    no file owner. Never alias the sidecar or a parent directory as its
+    canonical, or pass an invalid name to Path.with_name. Non-conflict
+    names (no infix) still return the input path unchanged.
     """
     name = conflict_path.name
     idx = name.rfind(CONFLICT_INFIX)
@@ -235,7 +234,7 @@ def _canonical_for_conflict(conflict_path: Path) -> Path | None:
     if "." in after:
         suffix = "." + after.rsplit(".", 1)[-1]
     reconstructed = before + suffix
-    if not reconstructed:
+    if reconstructed in ("", ".", ".."):
         return None
     return conflict_path.with_name(reconstructed)
 

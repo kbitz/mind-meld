@@ -11,7 +11,7 @@ All notable changes to Mind Meld will be documented in this file.
 - Conflict reuse, replacement, and explicit-file discovery match the exact original filename, including names with repeated conflict markers, literal glob characters, or different extensions. A conflict for one file cannot hide or delete another file’s copy or send its contents to the wrong resolver target.
 - Failed replacement writes leave the local file and previous peer copies intact. Older same-peer copies are removed only after the new copy is saved and their contents were successfully read; unreadable copies stay available for recovery.
 - Replacement names are checked for existing files, directories, and dangling links, including each of five random fallback attempts. Naming and write failures report on stderr and allow the remaining files to continue.
-- Conflict copies whose names reconstruct to an empty original filename are treated as ownerless. Listing, resolver skip or failed promotion, and garbage collection preserve those copies instead of treating them as their own original file.
+- Conflict copies whose names reconstruct to an empty original filename or a directory component (`.` or `..`) are treated as ownerless. Listing, resolver skip or failed promotion, and garbage collection preserve those copies without aborting discovery or treating them as their own original file.
 - An unreadable conflict candidate no longer aborts discovery.
 
 ### Changed
