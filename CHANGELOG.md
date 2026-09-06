@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.5] - 2026-09-06
+
+**A `.jsonl` file that mixes string and numeric timestamps no longer aborts your pull.** The merge sorted on the decoded `ts` value whatever its JSON type, so one record with `"ts": 2` beside records carrying ISO strings raised `TypeError` out of the apply loop, and every later file in that pull never arrived. Unattended `mm autopull` reported an unexpected error and a failed breadcrumb. Only string `ts` values are sort keys now; every other line keeps its original text and follows in lexical order, and the rest of the pull continues.
+
+### Fixed
+
+- `merge_jsonl` sorts only records whose decoded JSON is an object with a string `ts` (including the empty string), by `(ts, original line)`. Numbers, bools, null, arrays, objects, missing keys, non-object JSON, malformed text, and decoder `ValueError` / `RecursionError` all keep the original normalized line in a whole-line lexical fallback after the string bucket. Lines are never reserialized.
+- A decoder `RecursionError` on a deeply nested payload is a named per-line fallback, not a crash. Recursion limits are unchanged.
+- An identical retry takes the merge no-op path: the file's bytes and mtime are untouched and no second `merged` row is logged.
+
+### Changed
+
+- Numeric-only `ts` values sort as original-line text (`{"ts":10,...}` before `{"ts":2,...}`) instead of as numbers. An old client still crashes on mixed types and still sorts numeric-only files numerically, so a mixed-version fleet can rewrite such a file on each pull until every active Mac is upgraded. Check each Mac with `mm --version`, then `pipx upgrade mind-meld` and `mm pull`; the README troubleshooting section walks through it.
+- README, SPEC, and `docs/invariants/conflicts.md` state the ordering contract: string `ts` first, then whole-line lexical fallback, with no chronology or numeric-epoch promise. `MEMORY.md` is documented as a plain lexical line-union that does not consult `ts`; its behavior is unchanged.
+
 ## [0.14.4] - 2026-09-06
 
 **A hostile filename in your storage folder can no longer drive your terminal through an mm warning.** Rejected iCloud/Dropbox-shaped storage siblings and malformed blob keys used to be echoed raw into warnings, so a name carrying terminal control sequences could clear the screen, retitle the window, or write to the clipboard the moment a pull or `mm gc` mentioned it. Those warnings now render every nonprintable character as visible notation, and the file is left exactly where it was.
