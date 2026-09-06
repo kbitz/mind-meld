@@ -3247,6 +3247,15 @@ class TestMultiSourceSync:
         assert ("projects/-other/memory/notes.md", "written") in actions
         assert not any(r.get("action") == "failed" for r in pull_records)
 
+        # Sync log: the merged JSONL is listed as updated in its project and
+        # the ordinary file as new in its own project.
+        app_log = (env["jsonl_parent"].parent / ".mind-meld-log.md").read_text()
+        assert "## Updated from other machine" in app_log
+        assert "- memory/learnings.jsonl" in app_log
+        other_log = (env["notes_parent"].parent / ".mind-meld-log.md").read_text()
+        assert "## New from other machine" in other_log
+        assert "- memory/notes.md" in other_log
+
         if command == "autopull":
             breadcrumb = json.loads((env["sidecar_dir"] / "last-autorun.json").read_text())
             assert breadcrumb["pull"]["outcome"] == "success"
@@ -5133,6 +5142,87 @@ class TestMixedTimestampEncryptedPull:
         assert outcomes["written"] == []
         assert outcomes["failed"] == []
         assert jsonl_path.read_bytes() == _MERGED_MIXED_JSONL
+        assert jsonl_path.stat().st_mtime_ns == before
+        assert jsonl_path.resolve() not in {p.resolve() for p in writes}
+
+    def test_numeric_only_file_reorders_once_then_stays_quiet(self, tmp_path: Path, monkeypatch):
+        """A pre-51A numeric-only file in numeric order is rewritten lexically once.
+
+        Pins the README troubleshooting claim: after upgrade, the first pull
+        that merges such a file reports ``merged`` and reorders it as
+        whole-line text (``10`` before ``2``); a retry against the same peer
+        snapshot is ``unchanged`` and touches neither bytes nor mtime.
+        """
+        import hashlib
+
+        from mind_meld.cli import _download_and_apply
+        from mind_meld.storage.keys import blob_key
+
+        two = b'{"ts":2,"k":"same"}\n'
+        ten = b'{"ts":10,"k":"same"}\n'
+        three = b'{"ts":3,"k":"same"}\n'
+        old_numeric_order = two + ten
+        peer_bytes = two + ten + three
+        lexical = ten + two + three
+
+        storage_dir = tmp_path / "storage"
+        base = tmp_path / "src"
+        base.mkdir()
+        backend = LocalBackend(storage_dir)
+        peer = "devA1234"
+        jsonl_path = base / "events.jsonl"
+        jsonl_path.write_bytes(old_numeric_order)
+        old = datetime.now(timezone.utc).timestamp() - 3600
+        os.utime(jsonl_path, (old, old))
+
+        sha = hashlib.sha256(peer_bytes).hexdigest()
+        backend.put(
+            blob_key(peer, sha),
+            encrypt(peer_bytes, PASSPHRASE, memory_kb=MEMORY_KB),
+        )
+        to_download = {
+            "events.jsonl": {
+                "sha256": sha,
+                "size": len(peer_bytes),
+                "mtime": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+
+        _bt, first = _download_and_apply(
+            backend,
+            base,
+            to_download,
+            peer,
+            PASSPHRASE,
+            MEMORY_KB,
+            quiet=True,
+        )
+        assert first["merged"] == ["events.jsonl"]
+        assert first["failed"] == []
+        assert jsonl_path.read_bytes() == lexical
+
+        writes: list[Path] = []
+        real_write = fsutil.atomic_write_bytes
+
+        def spy_write(path: Path, data: bytes, **kw):
+            writes.append(Path(path))
+            return real_write(path, data, **kw)
+
+        monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", spy_write)
+        before = jsonl_path.stat().st_mtime_ns
+        _bt, second = _download_and_apply(
+            backend,
+            base,
+            to_download,
+            peer,
+            PASSPHRASE,
+            MEMORY_KB,
+            quiet=True,
+        )
+        assert second["unchanged"] == ["events.jsonl"]
+        assert second["merged"] == []
+        assert second["failed"] == []
+        assert jsonl_path.read_bytes() == lexical
         assert jsonl_path.stat().st_mtime_ns == before
         assert jsonl_path.resolve() not in {p.resolve() for p in writes}
 

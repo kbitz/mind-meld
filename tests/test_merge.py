@@ -404,6 +404,18 @@ class TestMergeJsonlMixedTimestamps:
         assert merge_jsonl(shuffled, b"") == expected
         assert merge_jsonl(_jsonl(zero, one), _jsonl(two, nan)) == expected
 
+    def test_invalid_utf8_bytes_are_replaced_not_raised(self):
+        """Invalid UTF-8 decodes to U+FFFD; the record still keys on its string ts."""
+        local = b'{"ts":"2026-01-01T00:00:00Z","k":"\xff\xfe"}\n'
+        remote = b'{"ts":2,"k":"two"}\n'
+        result = merge_jsonl(local, remote)
+        assert result == _jsonl(
+            '{"ts":"2026-01-01T00:00:00Z","k":"��"}',
+            '{"ts":2,"k":"two"}',
+        )
+        assert b"\xff" not in result
+        assert b"\xfe" not in result
+
     def test_deeply_nested_ts_keeps_original_line(self):
         nested = '{"ts":' + ("[" * 1500) + ("]" * 1500) + "}"
         string_line = '{"ts":"2026-01-01T00:00:00Z","k":"a"}'
@@ -565,6 +577,20 @@ class TestMergeLines:
         result = merge_lines(local, remote)
         assert b"good.md" in result
         # Should not raise, replacement chars used
+
+    def test_memory_md_does_not_consult_ts(self):
+        """MEMORY.md is a plain lexical line-union; a ts field is not a sort key."""
+        later_ts = '{"k":"a","ts":"2026-01-02T00:00:00Z"}'
+        earlier_ts = '{"k":"z","ts":"2026-01-01T00:00:00Z"}'
+        local = (earlier_ts + "\n").encode()
+        remote = (later_ts + "\n").encode()
+        # Whole-line order puts "k":"a" first even though its ts is later.
+        lexical = (later_ts + "\n" + earlier_ts + "\n").encode()
+        assert merge_lines(local, remote) == lexical
+        assert merge_file("memory/MEMORY.md", local, remote) == lexical
+        # The same lines through the JSONL strategy sort by ts instead.
+        by_ts = (earlier_ts + "\n" + later_ts + "\n").encode()
+        assert merge_file("memory/log.jsonl", local, remote) == by_ts
 
     def test_idempotent(self):
         a = b"- [Foo](foo.md) -- hook\n"
