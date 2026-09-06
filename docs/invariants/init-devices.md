@@ -2,13 +2,13 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard`
+- `src/mind_meld/cli.py` — `_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` / `_do_gc`
 - `src/mind_meld/devices.py` — `register_device` / `update_last_seen` / `list_devices` / `_devices_write_lock`
-- `src/mind_meld/storage/local.py` — `LocalBackend.put_exclusive`
-- `src/mind_meld/safety.py` — `safe_str` / `safe_text` / `strip_terminal_escapes`
-- Anywhere a peer-controlled string is rendered (filename, path, source name, device name, `str(e)` exception tail) — use `safe_str` / `safe_text`
+- `src/mind_meld/storage/local.py` — `LocalBackend.put_exclusive` / `find_conflict_copies`
+- `src/mind_meld/safety.py` — `safe_str` / `safe_text` / `strip_terminal_escapes` / `safe_terminal_str`
+- Anywhere a peer-controlled string is rendered (filename, path, source name, device name, `str(e)` exception tail) — use `safe_str` in Rich markup, `safe_text` for diff content, and `safe_terminal_str` for single-line plain stderr
 
-Tests: `tests/test_devices.py`, `tests/test_safe_str.py`, `tests/test_silent_failure_contract.py`, `tests/test_storage_local.py`, `tests/test_recover.py`.
+Tests: `tests/test_devices.py`, `tests/test_safe_str.py`, `tests/test_silent_failure_contract.py`, `tests/test_storage_local.py`, `tests/test_recover.py`, `tests/test_recovery.py`.
 
 ---
 
@@ -36,11 +36,13 @@ The lock is LOCAL (per-machine config dir) — `fcntl.flock` is a local-process 
 ## Peer-controlled string sanitization (load-bearing, v0.10.1, security)
 Every synced filename AND file body crosses an untrusted trust boundary. Without sanitization, a peer can plant Rich markup (`[/red]…[red]`) or terminal escape sequences in any synced filename or file body and have them rendered as control output during `mm pull` / `mm conflicts` / `mm resolve` / `mm devices` / `mm status`. The OSC 52 vector is particularly nasty — many terminals (xterm, iTerm2, kitty, alacritty) honor base64-encoded clipboard writes from remote-controlled escape sequences, silently changing the user's clipboard. CSI `\x1b[2J` clears the screen; OSC 0/2 spoofs the title; DCS / C1 8-bit are also covered.
 
-`strip_terminal_escapes(s)` removes the full common-grammar set: CSI `\x1b[…[\x40-\x7e]`, OSC `\x1b]…(BEL|ST)`, DCS, single-byte `\x1b[\x40-\x5f]`, and the rarely-used 0x9b 8-bit C1 CSI variant. Apply BEFORE rendering any peer-controlled string to a real terminal — Rich's `Text()` does NOT strip these.
+`strip_terminal_escapes(s)` removes the full common-grammar set: CSI `\x1b[…[\x40-\x7e]`, OSC `\x1b]…(BEL|ST)`, DCS, single-byte `\x1b[\x40-\x5f]`, and the rarely-used 0x9b 8-bit C1 CSI variant. Apply BEFORE rendering any peer-controlled string to a real terminal — Rich's `Text()` does NOT strip these. One pass is not a no-control guarantee: deleting an inner CSI can assemble a fresh OSC that the same pass no longer sees. Other `safe_str` / `safe_text` consumers remain a recorded follow-up.
 
-`safe_str(s)` composes `strip_terminal_escapes` with `rich.markup.escape` and returns a plain `str`, so f-string composition with Rich markup tags continues to work: `f"[red]write failed:[/red] {safe_str(rel_path)}"`. Use at every print site interpolating a peer-controlled string (filenames, paths, source names, device names, error message tails — including exceptions whose `str(e)` echoes peer-supplied bytes).
+`safe_str(s)` composes `strip_terminal_escapes` with `rich.markup.escape` and returns a plain `str`, so f-string composition with Rich markup tags continues to work: `f"[red]write failed:[/red] {safe_str(rel_path)}"`. Use at Rich markup print sites interpolating a peer-controlled string (filenames, paths, source names, device names, error message tails — including exceptions whose `str(e)` echoes peer-supplied bytes).
 
-`safe_text(s, **kwargs) -> rich.text.Text` is the diff-content variant. Use for diff CONTENT lines (peer-controlled file bytes printed via `console.print`). `Text()` alone defangs Rich markup but passes raw ANSI/OSC/DCS through to the terminal — same trust-boundary leak `safe_str` closes for filenames. Strip escapes first.
+`safe_terminal_str(value)` is the helper for single-line plain stderr (Track 50A). It stringifies, runs `strip_terminal_escapes`, then keeps each remaining character only if `str.isprintable()` is true; otherwise it renders `ascii(ch)[1:-1]`. That visibly escapes residual C0/DEL/C1, Unicode line separators, format controls (including ZWJ, so some joined emoji spellings appear split), and surrogate codepoints, while preserving printable Unicode and literal brackets. Display text is not a filesystem identity or a shell argument — callers keep the original Path / storage key for validation, recovery, and deletion. Rejected storage-filename warnings in `LocalBackend.find_conflict_copies` use this helper directly; the malformed-blob and verbose-orphan GC warnings compose `safe_str(safe_terminal_str(bkey))` because those sinks are Rich markup. Original storage keys are still used for parse, lookup, and deletion.
+
+`safe_text(s, **kwargs) -> rich.text.Text` is the diff-content variant. Use for diff CONTENT lines (peer-controlled file bytes printed via `console.print`). `Text()` alone defangs Rich markup but passes raw ANSI/OSC/DCS through to the terminal. Strip escapes first. `safe_text` still uses one strip pass; nested-escape hardening of Rich/diff sinks is the follow-up already filed in `docs/TODOS.md`.
 
 Sweep covers ~30 print sites: pull-prediction widget, upload progress, conflict prompts, write/merge/conflict apply paths, all `_apply_*` / `_pull_*` error tails, `mm devices` table cells, `mm diff` per-source headers, fleet-version refusal listing, `_print_pull_summary` warnings, `_resolve_interactive_loop` headers + prompts + diff labels + diff content + outcome lines. `mm devices` Rich Table cells are sanitized too — Table cells interpret markup AND pass raw escapes through (verified). All sites pinned in `tests/test_safe_str.py`.
 
