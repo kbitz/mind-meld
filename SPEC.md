@@ -345,7 +345,7 @@ mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
                                              # annotates modified files as write / merge / skip / conflict
 mm gc [--dry-run] [--conflicts]
                             # delete orphaned blobs and local retention data; --dry-run previews candidates without mutation
-                            # with --conflicts, also reap .sync-conflict-* files >30d
+                            # with --conflicts, also reap converged .sync-conflict-* files >30d; live copies remain
 mm sources                  # list configured sync sources with status
 mm conflicts                # list unresolved .sync-conflict-* files across sources
 mm resolve [PATH]           # interactively resolve conflict files (unified diff + pick winner)
@@ -416,7 +416,7 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 8. Download + decrypt changed blobs. Decompress (gzip).
 9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
 10. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`; `.tmp` siblings are cleaned up on failure).
-11. For conflict-copy decisions, rename the local file to `<stem>.sync-conflict-<ts>-<device>.<ext>` before writing remote to the canonical path. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight all files and exit **3** with the predicted-conflict list if any file would conflict — no writes happen. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
+11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight all files and exit **3** with the predicted-conflict list if any file would conflict — no writes happen. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
 12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
@@ -432,8 +432,8 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 6. Delete blobs not in the referenced set.
 7. Reap `mm-events` files older than `EVENTS_RETENTION_DAYS` (90). Always-on fleet policy, not opt-in.
 8. Reap `session-tokens.json` cache entries whose underlying jsonl is gone, or whose most recent `by_day` key is more than 90 days old.
-9. With `--conflicts`, also reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30).
-10. Supports `--dry-run`: each executed retention reaper selects the same candidates as apply mode, prints a stable summary (including zero counts), and makes no deletion or cache write. Token-cache preview holds a shared read-only lock, so inspecting a missing or malformed cache never creates, rewrites, re-permissions, or normalizes it. Apply mode counts a deletion only after it succeeds and reports failed or skipped work separately; use `mm gc -v` for safe per-path detail. `--conflicts` opts into the conflict-sidecar reaper in both modes.
+9. With `--conflicts`, also reap post-inversion `.sync-conflict-*` files whose filename birth is older than `CONFLICT_AGE_DAYS` (30), only when canonical exists with identical bytes. Live, ownerless, missing-canonical, pre-inversion, and unhashable copies remain at any age.
+10. Supports `--dry-run`: each executed retention reaper selects the same candidates as apply mode, prints a stable summary (including zero counts), and makes no deletion or cache write. Token-cache preview holds a shared read-only lock, so inspecting a missing or malformed cache never creates, rewrites, re-permissions, or normalizes it. Apply mode counts a deletion only after it succeeds and reports failed or skipped work separately; use `mm gc -v` for safe per-path detail. Bare `--dry-run` also previews conflict cleanup; deleting those copies requires `--conflicts`.
 11. Release lockfile.
 12. Print summary (blobs deleted, bytes freed).
 
@@ -521,17 +521,23 @@ DO NOT add a new manifest-load path that bypasses `load_manifest` (or sidecar's 
 
 ### Source-file conflicts (Syncthing-style conflict-copy preservation)
 
-If the local file has been edited independently of the remote version (local hash ≠ last-synced hash AND local hash ≠ remote hash), pull never destroys local edits. Behavior is decided per-file at apply time by a documented decision tree in `_apply_incoming_file`:
+If the local file has been edited independently of the remote version (local hash ≠ last-synced hash AND local hash ≠ remote hash), behavior is decided per-file at apply time by a documented decision tree in `_apply_incoming_file`. The default `keep-both` conflict-copy path preserves local bytes at canonical:
 
 1. **Skip (S):** local mtime is newer than remote mtime — leave local as-is. Convergence happens on the next push.
 2. **Merge (M):** file has a mergeable type (`.jsonl` union-merge, `MEMORY.md` line-merge).
 3. **Write (W):** no local divergence — write the remote version to the canonical path.
-4. **Conflict-copy (C, INVERTED in v0.9.2):** local has diverged AND isn't mergeable AND isn't newer — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside.
+4. **Conflict-copy (C, INVERTED in v0.9.2):** local has diverged AND isn't mergeable AND isn't newer — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside.
 5. **Update-base (U):** remote hash matches local hash — no I/O, just refresh the last-synced state.
 
 Pull re-reads local hash and mtime at apply time so the decision reflects the actual state when writing, race-safe against editors running during a long pull.
 
 **Inversion (v0.9.2 BREAKING).** Pre-v0.9.2 did the opposite for [C]: local was renamed out to the sidecar and remote bytes were written to canonical. The inversion makes the visible `.sync-conflict-*` file hold the *surprising* version (remote, from elsewhere) rather than the working version (local, on this machine). Sidecar-write failure is per-file isolated and does NOT need a rollback dance — local is never overwritten in the conflict path.
+
+**Ownership and replacement (v0.14.2).** `manifest._canonical_for_conflict` reconstructs the owner from the final conflict infix. Apply and exact-`include_files` discovery compare that owner before touching a candidate, so shared prefixes and literal glob characters cannot select another file's copy. Managed sidecars retain the latest content per peer: matching bytes reuse an existing sidecar without writing or cleaning up extras; different bytes are published before prior readable, verified-different copies for the same owner and peer are removed. Unreadable candidates and pre-inversion copies stay. If publication fails, local and prior copies stay; if cleanup fails, the replacement is saved and both revisions remain inspectable with `mm resolve`.
+
+Replacement names use `lstat` occupancy checks, including directories and dangling symlinks, followed by at most five random-suffix attempts. Exhaustion or a probe/write error fails only that file and warns on stderr. These checks protect preexisting occupied names under the mm lock; they do not promise atomic no-clobber against external writers or power-loss durability. A sidecar with no recoverable original filename has no canonical owner: discovery reports it without a canonical, GC preserves it, and automatic promotion fails without changing it.
+
+Sidecars remain local-only. Promote or copy a managed sidecar to a regular filename to retain it as an editable document; the new name syncs only if its source's include rules cover it. Deleting a sidecar affects only this Mac.
 
 **Pre-inversion file migration.** Files produced by pre-v0.9.2 code carry no marker. The first lock-protected discovery in `mm pull` or `mm resolve` migrates them by renaming to `<stem>.sync-conflict-v0-<ts>-<dev>.<ext>` — the `v0-` prefix is reserved for migrated files; post-v0.9.2 code never produces it directly. The dual-mode resolve dispatch is keyed by the prefix, NOT by timestamp (sound — post-inversion code is the only producer of un-prefixed files). `mm conflicts` is intentionally read-only and does NOT migrate (it's lockless and would race autopull, codex-2 #5).
 
@@ -557,7 +563,7 @@ The shared leaf renderers (`render_prompt`, `render_banner`, `render_capped_diff
 
 - `mm conflicts` — list every `.sync-conflict-*` file across synced sources with age, canonical sibling, and per-row Mode column (`pre-v0.9.2` for `v0-`-prefixed files, `v0.9.2+` otherwise). Read-only; does NOT migrate pre-inversion files.
 - `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows banners + timestamps + divergence summary + unified diff, then prompts `(m)erge` / `(l)ocal` / `(r)emote` / `(n)ewer` / `(p)romote` / `(s)kip` / `(a)bort`. `(p)romote` keeps BOTH by giving the conflict file its own first-class filename; `(n)ewer` (v0.12.10) remaps onto the existing `(l)` / `(r)` dispatch rather than adding an apply branch, is offered only when both sides' mtimes are readable, and re-prompts on an exact tie instead of guessing. Dual-mode dispatch by filename prefix: `v0-` → pre-inversion ops ((l) renames sidecar over canonical, (r) unlinks sidecar); no prefix → post-inversion ops ((l) unlinks sidecar, (r) renames sidecar over canonical). Acquires the mm lockfile so autopull can't race the rename/unlink. Migrates pre-inversion files to `v0-` prefix on first discovery. Exits 1 if any per-conflict rename/unlink/read fails, so scripts can detect partial failure; the walk still continues through every conflict. Lives in `resolveflow.py` (the `@app.command()` shell stays in `cli.py`).
-- `mm gc --conflicts` — reap `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days). Matches both prefixed and un-prefixed forms via `is_conflict_filename`.
+- `mm gc --conflicts` — reap post-inversion `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days) by filename birth, only after their bytes match an existing canonical. Pre-inversion, live, ownerless, missing-canonical, and unhashable copies remain. Bare `mm gc --dry-run` previews the candidates.
 
 **Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.mind-meld-log.md`, and `mm diff` annotations all reflect the split so cross-machine work is visible.
 

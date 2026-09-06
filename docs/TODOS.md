@@ -49,12 +49,12 @@ here by hand, use the H3 form.
 
 - **What:** Evaluate a bounded retry of same-owner/same-peer post-inversion cleanup when the current remote bytes already have a sidecar.
 - **Why:** After a replacement publishes successfully but unlinking the older sidecar fails, an identical later pull returns early. The older differing revision can remain indefinitely; GC correctly preserves it while it diverges from canonical.
-- **Repro:** In an isolated fixture, save peer R1, publish peer R2 while injecting an unlink error for R1, then restore permissions and pull R2 again. Both copies remain because the identical-content branch performs no cleanup. Confirm with the regression planned by “Preserve conflict ownership and failed replacements” before designing a change.
+- **Repro:** In an isolated fixture, save peer R1, publish peer R2 while injecting an unlink error for R1, then restore permissions and pull R2 again. Both copies remain because the identical-content branch performs no cleanup. Pinned by `tests/test_conflict_copy.py::TestConflictPublishThenCleanup::test_cleanup_failure_then_unchanged_retry_leaves_extras`, which also verifies both revisions remain available to the resolver.
 - **Context:** Track 48A /autoplan, 2026-09-05, branch kbitz/48a-conflict-ownership at 64c301d. The hotfix intentionally keeps this no-mutation branch. This is a policy choice, not another failed-publication bug: R2 is saved and mm resolve can inspect both revisions. Do not call differing revisions duplicates or infer safe deletion from sidecar mtime (the peer clock).
 - **Pros:** A transient cleanup failure would not leave old revisions forever under a latest-per-peer policy.
 - **Cons:** Adds deletion to a formerly unchanged path and could discard edits made directly in a managed sidecar; scope and user expectation need an explicit decision.
 - **Hypothesis (untested):** Reuse the shared exact-owner/era/peer predicate only after verifying a matching current sidecar exists; preserve it and every unverifiable candidate. Compare this with retaining the existing manual resolve path before implementing.
-- **Depends on:** The preservation/ownership hotfix and its cleanup-failure → unchanged-retry → resolve regression.
+- **Depends on:** The preservation/ownership hotfix and its cleanup-failure → unchanged-retry → resolve regression, implemented in v0.14.2. The cleanup policy decision remains open.
 - **Effort:** S
 - **Priority:** P3
 
@@ -287,4 +287,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-05 by /roadmap; inbox empty. Prior drain records are historical._
+_Last updated 2026-09-06 by /document-release; one conflict-cleanup policy item remains open. Prior drain records are historical._
