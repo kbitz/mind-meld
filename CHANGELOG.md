@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.4] - 2026-09-06
+
+**A hostile filename in your storage folder can no longer drive your terminal through an mm warning.** Rejected iCloud/Dropbox-shaped storage siblings and malformed blob keys used to be echoed raw into warnings, so a name carrying terminal control sequences could clear the screen, retitle the window, or write to the clipboard the moment a pull or `mm gc` mentioned it. Those warnings now render every nonprintable character as visible notation, and the file is left exactly where it was.
+
+### Fixed
+
+- Both rejection warnings in `LocalBackend.find_conflict_copies` (validator returned false, validator raised) sanitize the full candidate path and the `ClassName: message` exception text before writing to stderr. The original `Path` still goes to the validator, the returned list, and recovery, so display never changes what is checked or deleted.
+- `mm gc` malformed-blob-key and verbose-orphan warnings escape nonprintables first and Rich markup second, so an OSC 52 sequence smuggled into a blob key is inert in dry-run and verbose output. Original keys still drive parse, lookup, and deletion.
+
+### Added
+
+- `safety.safe_terminal_str`, the single-line plain-stderr sanitizer. It stringifies, strips the known escape grammars, then keeps a character only if `str.isprintable()` is true; everything else becomes `ascii(ch)[1:-1]`. Printable Unicode and literal brackets are preserved; format controls such as ZWJ are escaped, so some joined emoji spellings appear split. Display text is not a filesystem identity or a shell argument.
+
+### Changed
+
+- Rejected-file warnings use the standard `mm: warning:` prefix, say the file was left in place, and point you at your storage folder instead of `mm gc --conflicts`, which never reaped rejected manifest siblings. The README troubleshooting section explains that a rejection is not proof of malice: an older passphrase or a leftover conflict copy produces the same warning.
+- Existing `safe_str`, `safe_text`, and `strip_terminal_escapes` behavior is unchanged. Their docstrings now state that one strip pass is not a no-control guarantee, because deleting an inner CSI can assemble a fresh OSC. Hardening the remaining Rich and multiline sinks is a recorded follow-up.
+
 ## [0.14.3] - 2026-09-06
 
 **Pushes publish complete snapshots, or they refuse.** An unreadable selected file no longer looks like a deletion, and a file that changes after it is hashed can no longer store the wrong bytes under another file's digest. Incoming pulls reject plaintext that does not match the advertised hash and leave the local copy alone.
