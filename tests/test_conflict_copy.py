@@ -4117,6 +4117,63 @@ class TestConflictOwnershipDiscovery:
         assert [h[1] for h in hits] == [own]
         assert poison.is_dir()
 
+    def test_recursive_stat_error_preserves_copy_and_continues_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        src = tmp_path / "gstack"
+        memory = src / "memory"
+        memory.mkdir(parents=True)
+        notes = memory / "notes.md"
+        other = memory / "other.md"
+        notes.write_bytes(b"A local")
+        other.write_bytes(b"B local")
+        unreadable = _v1_sidecar(notes, "devA1234", b"A remote")
+        readable = _v1_sidecar(other, "devA1234", b"B remote")
+        prior_mtime = unreadable.stat().st_mtime_ns
+        config = self._config(src, [])
+        config["sync"]["sources"][0]["include_dirs"] = ["memory"]
+        real_is_file = Path.is_file
+
+        def fail_one_stat(path: Path) -> bool:
+            if path == unreadable:
+                raise PermissionError("stat denied \x1b[31mRED")
+            return real_is_file(path)
+
+        monkeypatch.setattr(Path, "is_file", fail_one_stat)
+        hits = _find_conflict_files(config)
+
+        assert hits == [("gstack", readable, other)]
+        assert unreadable.read_bytes() == b"A remote"
+        assert unreadable.stat().st_mtime_ns == prior_mtime
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "mm: warning: conflict sidecar unreadable (left in place)" in captured.err
+        assert str(unreadable) in captured.err
+        assert "\x1b" not in captured.err
+        assert "[31m" not in captured.err
+
+    def test_ownerless_promote_refuses_without_mutation_and_continues_walk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        ownerless = tmp_path / ".sync-conflict-20260421-143055-v1-devA1234"
+        ownerless.write_bytes(b"only ownerless copy")
+        prior_mtime = ownerless.stat().st_mtime_ns
+        canonical = tmp_path / "notes.md"
+        recoverable = _v1_sidecar(canonical, "devA1234", b"recoverable remote")
+        hits = [("gstack", ownerless, None), ("gstack", recoverable, None)]
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+
+        resolved, failed = _resolve_interactive_loop(hits)
+
+        assert (resolved, failed) == (1, 1)
+        assert ownerless.read_bytes() == b"only ownerless copy"
+        assert ownerless.stat().st_mtime_ns == prior_mtime
+        assert canonical.read_bytes() == b"recoverable remote"
+        assert not recoverable.exists()
+        captured = capsys.readouterr()
+        assert "promote failed:" in captured.out
+        assert "cannot reconstruct a canonical name" in captured.out
+
     def test_ownerless_sidecar_is_discovered_without_self_canonical(self, tmp_path: Path) -> None:
         src = tmp_path / "gstack"
         (src / "memory").mkdir(parents=True)
