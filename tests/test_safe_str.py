@@ -20,6 +20,7 @@ never interprets markup in remote-byte file contents.
 from __future__ import annotations
 
 import io
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -232,6 +233,19 @@ class TestStripTerminalEscapesBroadCoverage:
     def test_dcs_sequence(self):
         assert strip_terminal_escapes("a\x1bP1$rm\x1b\\b") == "ab"
 
+    @pytest.mark.parametrize("introducer", ["X", "^", "_"])
+    def test_sos_pm_apc_sequences(self, introducer):
+        # SOS / PM / APC share the DCS alternation (ESC X / ESC ^ / ESC _,
+        # ST-terminated): the whole grammar is removed. Unterminated, the
+        # introducer (0x58 / 0x5E / 0x5F) falls inside the single-byte
+        # ESC+0x40-0x5F alternation, so ESC+introducer is consumed together
+        # and the body is literal with no residual ESC for either helper.
+        terminated = f"a\x1b{introducer}payload\x1b\\b"
+        assert strip_terminal_escapes(terminated) == "ab"
+        unterminated = f"a\x1b{introducer}payload"
+        assert strip_terminal_escapes(unterminated) == "apayload"
+        assert safe_terminal_str(unterminated) == "apayload"
+
     def test_c1_8bit_csi(self):
         # 0x9b is the 8-bit C1 form of CSI.
         assert strip_terminal_escapes("a\x9b31mred") == "ared"
@@ -360,6 +374,29 @@ class TestFinalOutputSinks:
         _assert_no_esc_or_c1(out)
         assert "[red]configuration[/red]" in out
         assert "bad" in out
+
+    def test_auto_typed_error_nested_st_probe_has_no_esc_or_c1(self, monkeypatch):
+        # cli.py's autopull/autopush typed-error line is a plain-stderr sink
+        # routed through strip_terminal_escapes (not a Rich console). The
+        # nested probe leaves a bare ESC after one grammar pass; the
+        # residual pass must delete it before the line reaches stderr.
+        # StringIO, not capsys: a failing capsys test replays the captured
+        # bytes raw into the developer terminal.
+        from mind_meld import cli
+
+        buf = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", buf)
+        cli._print_auto_typed_error(
+            "autopull", "skipped", RuntimeError(f"bad {_NESTED_OSC_ST}config")
+        )
+
+        err = buf.getvalue()
+        if err.count("\n") != 1:
+            raise AssertionError(f"expected one line, got {ascii(err)}")
+        if not err.startswith("mm: autopull skipped - bad "):
+            raise AssertionError(f"bad prefix in {ascii(err)}")
+        _assert_no_esc_or_c1(err)
+        assert "config" in err
 
     def test_events_whole_walk_notice_strips_terminal_escapes(self, monkeypatch, capsys):
         from mind_meld import events
@@ -674,6 +711,19 @@ class TestEscC1Postcondition:
         assert safe_text("").plain == ""
         assert safe_terminal_str("") == ""
         assert strip_terminal_escapes("café naïve 日本語") == "café naïve 日本語"
+
+    @pytest.mark.parametrize("survivor", ["\x7f", "\xa0", "Ā"])
+    def test_residual_deletion_bounds_are_exactly_esc_and_c1(self, survivor):
+        # The residual regex is [\x1b\x80-\x9f]. Pin both fences: U+009F is
+        # the last deleted codepoint; DEL (U+007F), NBSP (U+00A0) and the
+        # first Latin Extended codepoint survive the raw / Rich helpers. The
+        # policy is ESC/C1-only, not all-control, so a widened range would
+        # start eating bytes out of peer filenames.
+        raw = f"{_SNOWMAN}{survivor}{_SNOWMAN}"
+        assert strip_terminal_escapes(raw) == raw
+        assert safe_text(raw).plain == raw
+        assert safe_str(raw) == raw
+        assert strip_terminal_escapes(f"{_SNOWMAN}\x9f{_SNOWMAN}") == f"{_SNOWMAN}{_SNOWMAN}"
 
     @given(
         st.one_of(
