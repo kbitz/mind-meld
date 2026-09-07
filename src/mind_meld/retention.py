@@ -44,7 +44,7 @@ from mind_meld.manifest import (
     is_pre_inversion_conflict_filename,
     parse_conflict_created_at,
 )
-from mind_meld.safety import safe_str
+from mind_meld.safety import safe_str, safe_terminal_str
 from mind_meld.storage.local import LocalBackend
 
 CONFLICT_AGE_DAYS = 30
@@ -140,7 +140,9 @@ def _gc_token_cache(dry_run: bool, verbose: bool) -> ReapOutcome:
                     f"  [yellow]token cache write failed: {safe_str(result.write_error)}[/yellow]"
                 )
     except Exception as e:
-        sys.stderr.write(f"mm: notice: token cache gc failed: {type(e).__name__}: {safe_str(e)}\n")
+        sys.stderr.write(
+            f"mm: notice: token cache gc failed: {type(e).__name__}: {safe_terminal_str(e)}\n"
+        )
         outcome = ReapOutcome(skipped=1)
     _render_reap_outcome("Token cache", outcome, dry_run=dry_run)
     return outcome

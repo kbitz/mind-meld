@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import io
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
+from rich.console import Console
 
 from mind_meld.cli import _do_gc
 from mind_meld.retention import (
     _SNAPSHOT_FILENAME_RE,
     _gc_old_event_files,
     _gc_orphan_retros_dir,
+    _gc_token_cache,
     _sweep_local_tmp_files,
 )
 from mind_meld.storage.local import LocalBackend
@@ -195,3 +201,51 @@ class TestOrphanRetrosDir:
         outcome = _gc_orphan_retros_dir(dry_run=False, verbose=False, retros_dir=tmp_path / "nope")
         assert outcome.candidates == 0
         assert "Orphan retros:" in capsys.readouterr().out
+
+
+class TestTokenCacheGcFailureNotice:
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_hostile_exception_is_printable_and_skips(self, monkeypatch, dry_run):
+        from mind_meld import retention
+        from tests.test_safe_str import (
+            _NESTED_OSC_ST,
+            _assert_no_esc_or_c1,
+            _assert_plain_notice_field,
+        )
+
+        def boom(*_args, **_kwargs):
+            raise OSError(f"denied[red]{_NESTED_OSC_ST}")
+
+        target = "plan_cache_entries" if dry_run else "reap_cache_entries"
+        monkeypatch.setattr(retention.token_usage, target, boom)
+        buf = io.StringIO()
+        err_buf = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", err_buf)
+        monkeypatch.setattr(
+            retention,
+            "console",
+            Console(
+                file=buf,
+                force_terminal=True,
+                color_system=None,
+                highlight=False,
+                width=200,
+            ),
+        )
+
+        outcome = _gc_token_cache(dry_run=dry_run, verbose=False)
+
+        assert outcome.skipped == 1
+        err = err_buf.getvalue()
+        if not err.startswith("mm: notice: token cache gc failed: OSError: "):
+            raise AssertionError(f"bad GC prefix in {ascii(err)}")
+        if err.count("\n") != 1:
+            raise AssertionError(f"expected one notice line, got {ascii(err)}")
+        _assert_no_esc_or_c1(err)
+        field = err.split("OSError: ", 1)[1].rstrip("\n")
+        _assert_plain_notice_field(field, starts_with="denied[red]")
+        summary = buf.getvalue()
+        assert "Token cache" in summary
+        assert "skipped=1" in summary
+        if dry_run:
+            assert "dry-run" in summary

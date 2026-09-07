@@ -87,7 +87,7 @@ from mind_meld.lockedjson import (
     locked_json_rmw,
     locked_json_snapshot,
 )
-from mind_meld.safety import safe_str
+from mind_meld.safety import safe_terminal_str
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1069,14 +1069,15 @@ def iter_bounded_lines(
             # Resumable reader: partial write. Stop without advancing past it.
             return
         if path_str not in _WARNED_OVERSIZE_PATHS:
-            # `safe_str` because the path is a FILENAME from an agent-writable
-            # tree (`~/.codex/sessions/**/rollout-*.jsonl` matches `.*`, and
-            # macOS permits control bytes in filenames), so it can smuggle an
-            # OSC/CSI escape into the terminal. Track 19A's relaxed Codex
-            # refusal made this reachable on far more files than before —
-            # the scan used to die on the first ledger-less rollout.
+            # `safe_terminal_str` because the path is a FILENAME from an
+            # agent-writable tree (`~/.codex/sessions/**/rollout-*.jsonl`
+            # matches `.*`, and macOS permits control bytes in filenames),
+            # so it can smuggle an OSC/CSI escape into the terminal. Track
+            # 19A's relaxed Codex refusal made this reachable on far more
+            # files than before — the scan used to die on the first
+            # ledger-less rollout. Dedup still keys on the raw path.
             sys.stderr.write(
-                f"mm: notice: {label} skipping oversize line in {safe_str(path_str)}\n"
+                f"mm: notice: {label} skipping oversize line in {safe_terminal_str(path_str)}\n"
             )
             _WARNED_OVERSIZE_PATHS.add(path_str)
         drained = _drain_to_newline(fp)
@@ -1486,10 +1487,11 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
             if model not in _WARNED_UNKNOWN_MODELS:
                 # Sanitize the model name before logging — strings come from
                 # peer-controlled jsonls. A planted model like "x\x1b[2J" would
-                # otherwise clear the user's terminal on stderr emit.
-                from mind_meld.safety import safe_str
-
-                sys.stderr.write(f"mm: notice: unknown model in pricing: {safe_str(model)}\n")
+                # otherwise clear the user's terminal on stderr emit. Dedup
+                # and resolve_prices still use the original model id.
+                sys.stderr.write(
+                    f"mm: notice: unknown model in pricing: {safe_terminal_str(model)}\n"
+                )
                 _WARNED_UNKNOWN_MODELS.add(model)
             continue
         cost = sum(usage.get(k, 0) * prices[k] for k in TOKEN_FIELDS) / 1_000_000.0

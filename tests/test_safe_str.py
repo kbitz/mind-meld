@@ -1,4 +1,4 @@
-"""Sanitizer regression pins (Group 7 preflight #1 + D2 + D7 + Track 50A).
+"""Sanitizer regression pins (Group 7 preflight #1 + D2 + D7 + Track 50A + 52A).
 
 Peer-controlled strings (filenames, file contents) flow through Rich
 console.print at many sites in cli.py. Without sanitization, a peer can
@@ -6,10 +6,12 @@ plant Rich markup or ANSI escape sequences in synced filenames or file
 bodies and have them rendered as control output during pull/conflict/
 merge feedback. safe_str strips ANSI escapes AND escapes Rich markup.
 
-safe_terminal_str is the plain-stderr field helper: strip known grammars,
-then render residual nonprintable characters as ascii() notation so the
-output is a single printable line. The malformed-blob GC composition test
-pins safe_str(safe_terminal_str(...)) on a Rich sink.
+Public strip_terminal_escapes / safe_str / safe_text are ESC/C1-free after
+grammar stripping. safe_terminal_str is the plain-stderr field helper:
+strip known grammars, then render residual nonprintable characters as
+ascii() notation so the output is a single printable line. The
+malformed-blob GC composition test pins safe_str(safe_terminal_str(...))
+on a Rich sink.
 
 Diff content lines additionally use console.print(Text(line)) so Rich
 never interprets markup in remote-byte file contents.
@@ -23,7 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 from rich.console import Console
 from rich.text import Text
@@ -34,6 +36,71 @@ from mind_meld.safety import safe_str, safe_terminal_str, safe_text, strip_termi
 _NESTED_OSC_BEL = "\x1b\x1b[31m]52;c;ZXZpbA==\x07"
 # Nested CSI that one strip pass turns into OSC 52 (ST-terminated).
 _NESTED_OSC_ST = "\x1b\x1b[31m]52;c;VEVTVA==\x1b\x1b[31m\\"
+
+_ESC = "\x1b"
+_C1_CODEPOINTS = tuple(chr(n) for n in range(0x80, 0xA0))
+_FORBIDDEN_ESC_C1 = frozenset((_ESC, *_C1_CODEPOINTS))
+# Grammar-inert sentinel: not an ANSI final byte, so ESC/C1 + this cannot
+# be consumed as a complete CSI/single-byte sequence.
+_SNOWMAN = "\u2603"
+
+_MALFORMED_SEQUENCES = (
+    _ESC,
+    f"{_ESC}[",
+    f"{_ESC}]",
+    f"{_ESC}]52;c;partial",
+    f"{_ESC}P",
+    f"{_ESC}c",
+    "\x9b",
+    "\x9d",
+    "\x9d52;c;x",
+    f"{_ESC}[31",
+    f"{_ESC}P1$rm",
+)
+
+
+def _assert_no_esc_or_c1(value: str) -> None:
+    hits = [f"U+{ord(ch):04X}" for ch in value if ch in _FORBIDDEN_ESC_C1]
+    assert not hits, f"forbidden codepoints survived: {hits} in {ascii(value)}"
+
+
+def _assert_plain_notice_field(field: str, *, starts_with: str) -> None:
+    """Pin a migrated stderr field as safe_terminal_str, with ascii failures."""
+    _assert_no_esc_or_c1(field)
+    _assert_printable_field(field)
+    if not field.startswith(starts_with):
+        raise AssertionError(f"expected prefix {ascii(starts_with)}, got {ascii(field)}")
+    if r"\[" in field:
+        raise AssertionError(f"Rich markup backslash in {ascii(field)}")
+    notation = ascii("\x1b")[1:-1]
+    if notation not in field:
+        raise AssertionError(f"missing residual ESC notation in {ascii(field)}")
+
+
+def _helper_outputs(raw: str) -> dict[str, str]:
+    return {
+        "strip_terminal_escapes": strip_terminal_escapes(raw),
+        "safe_str": safe_str(raw),
+        "safe_text.plain": safe_text(raw).plain,
+        "safe_terminal_str": safe_terminal_str(raw),
+    }
+
+
+def _forced_console(buf: io.StringIO, *, markup: bool) -> Console:
+    return Console(
+        file=buf,
+        force_terminal=True,
+        color_system=None,
+        highlight=False,
+        markup=markup,
+        width=200,
+    )
+
+
+def _capture_printed(value, *, markup: bool) -> str:
+    buf = io.StringIO()
+    _forced_console(buf, markup=markup).print(value)
+    return buf.getvalue()
 
 
 class TestStripsAnsi:
@@ -269,6 +336,31 @@ class TestFinalOutputSinks:
         assert "[red]name[/red]" in out
         assert "peerid" in out
 
+    def test_error_nested_st_probe_has_no_esc_or_c1(self, monkeypatch):
+        import typer
+
+        from mind_meld import cli
+
+        buf = io.StringIO()
+        monkeypatch.setattr(
+            cli,
+            "stderr_console",
+            Console(
+                file=buf,
+                force_terminal=True,
+                color_system=None,
+                highlight=False,
+                width=200,
+            ),
+        )
+        with pytest.raises(typer.Exit):
+            cli._error(f"bad {_NESTED_OSC_ST}[red]configuration[/red]")
+
+        out = buf.getvalue()
+        _assert_no_esc_or_c1(out)
+        assert "[red]configuration[/red]" in out
+        assert "bad" in out
+
     def test_events_whole_walk_notice_strips_terminal_escapes(self, monkeypatch, capsys):
         from mind_meld import events
 
@@ -334,9 +426,16 @@ class TestConflictBannerSanitization:
 
     @staticmethod
     def _render(text):
-        c = Console(record=True, width=120, force_terminal=True, color_system="truecolor")
+        buf = io.StringIO()
+        c = Console(
+            file=buf,
+            force_terminal=True,
+            color_system=None,
+            highlight=False,
+            width=120,
+        )
         c.print(text)
-        return c.export_text()
+        return buf.getvalue()
 
     def test_banner_strips_osc52_from_filename(self):
         from mind_meld.conflictdiff import render_banner
@@ -384,6 +483,18 @@ class TestConflictBannerSanitization:
         out = self._render(render_banner("local", evil_path, None))
         assert "\x1bP" not in out
         assert "notes" in out
+
+    def test_banner_nested_st_probe_has_no_esc_or_c1(self):
+        from mind_meld.conflictdiff import render_banner
+
+        evil_path = f"notes{_NESTED_OSC_ST}.md"
+        evil_name = f"kb-mbp{_NESTED_OSC_BEL}"
+        path_out = self._render(render_banner("local", evil_path, None))
+        name_out = self._render(render_banner("remote", "notes.sync-conflict-X.md", evil_name))
+        _assert_no_esc_or_c1(path_out)
+        _assert_no_esc_or_c1(name_out)
+        assert "notes" in path_out
+        assert "kb-mbp" in name_out
 
 
 def _assert_printable_field(value: str) -> None:
@@ -467,6 +578,131 @@ class TestSafeTerminalStr:
     def test_generated_unicode_is_printable_single_line(self, value: str):
         out = safe_terminal_str(value)
         _assert_printable_field(out)
+
+
+class TestEscC1Postcondition:
+    """Track 52A: public raw/Rich helpers are ESC/C1-free; plain helper
+    keeps visible notation and still satisfies the forbidden-set property.
+    """
+
+    def test_nested_st_and_bel_have_no_esc_or_c1(self):
+        for probe, label in ((_NESTED_OSC_ST, "st"), (_NESTED_OSC_BEL, "bel")):
+            raw = f"head{probe}tail"
+            outputs = _helper_outputs(raw)
+            for name, out in outputs.items():
+                _assert_no_esc_or_c1(out)
+                assert "head" in out, f"{label}/{name}: {ascii(out)}"
+                assert "tail" in out, f"{label}/{name}: {ascii(out)}"
+            captured_raw = _capture_printed(outputs["strip_terminal_escapes"], markup=False)
+            captured_plain = _capture_printed(outputs["safe_terminal_str"], markup=False)
+            captured_markup = _capture_printed(outputs["safe_str"], markup=True)
+            captured_text = _capture_printed(safe_text(raw), markup=True)
+            for captured in (captured_raw, captured_plain, captured_markup, captured_text):
+                _assert_no_esc_or_c1(captured)
+                assert "head" in captured
+                assert "tail" in captured
+
+    def test_ris_esc_c_has_no_esc_or_c1(self):
+        raw = f"{_SNOWMAN}{_ESC}c{_SNOWMAN}"
+        outputs = _helper_outputs(raw)
+        for name, out in outputs.items():
+            _assert_no_esc_or_c1(out)
+            assert _SNOWMAN in out, f"{name}: {ascii(out)}"
+        assert outputs["strip_terminal_escapes"] == f"{_SNOWMAN}c{_SNOWMAN}"
+        assert outputs["safe_text.plain"] == f"{_SNOWMAN}c{_SNOWMAN}"
+        assert ascii(_ESC)[1:-1] in outputs["safe_terminal_str"]
+        assert outputs["safe_terminal_str"].endswith(f"c{_SNOWMAN}")
+
+    @pytest.mark.parametrize("ch", _C1_CODEPOINTS)
+    def test_each_c1_codepoint_has_no_esc_or_c1(self, ch: str):
+        raw = f"{_SNOWMAN}{ch}{_SNOWMAN}"
+        outputs = _helper_outputs(raw)
+        for name, out in outputs.items():
+            _assert_no_esc_or_c1(out)
+            assert out.startswith(_SNOWMAN), f"{name}: {ascii(out)}"
+            assert out.endswith(_SNOWMAN), f"{name}: {ascii(out)}"
+        assert outputs["strip_terminal_escapes"] == f"{_SNOWMAN}{_SNOWMAN}"
+        assert outputs["safe_text.plain"] == f"{_SNOWMAN}{_SNOWMAN}"
+        assert ascii(ch)[1:-1] in outputs["safe_terminal_str"]
+
+    def test_bare_esc_and_bare_c1_osc_have_no_esc_or_c1(self):
+        for raw in (
+            f"{_SNOWMAN}{_ESC}{_SNOWMAN}",
+            f"{_SNOWMAN}\x9d{_SNOWMAN}",
+            f"{_SNOWMAN}\x9d52;c;x{_SNOWMAN}",
+        ):
+            for name, out in _helper_outputs(raw).items():
+                _assert_no_esc_or_c1(out)
+                assert _SNOWMAN in out, f"{name}: {ascii(out)}"
+
+    @pytest.mark.parametrize("raw", _MALFORMED_SEQUENCES)
+    def test_malformed_sequences_have_no_esc_or_c1(self, raw: str):
+        wrapped = f"{_SNOWMAN}{raw}{_SNOWMAN}"
+        for name, out in _helper_outputs(wrapped).items():
+            _assert_no_esc_or_c1(out)
+            assert _SNOWMAN in out, f"{name}: {ascii(out)}"
+
+    def test_esc_r_is_consumed_by_existing_grammar(self):
+        # ESC+R and C1-CSI+R are complete grammars; finite-set tests must
+        # not treat the following ASCII letter as a surviving sentinel.
+        assert strip_terminal_escapes(f"{_SNOWMAN}{_ESC}R{_SNOWMAN}") == f"{_SNOWMAN}{_SNOWMAN}"
+        assert strip_terminal_escapes(f"{_SNOWMAN}\x9bR{_SNOWMAN}") == f"{_SNOWMAN}{_SNOWMAN}"
+
+    def test_lf_and_ht_remain_exact_in_raw_and_text_plain(self):
+        raw = "a\nb\tc"
+        assert strip_terminal_escapes(raw) == raw
+        assert safe_text(raw).plain == raw
+
+    def test_safe_text_forwards_kwargs(self):
+        text = safe_text("hi", style="red")
+        assert text.plain == "hi"
+        assert str(text.style) == "red"
+
+    def test_literal_tag_fragments_joined_by_deletion_stay_literal(self):
+        raw = f"[re{_ESC}[31md]inject[/re{_ESC}[0md]"
+        escaped = safe_str(raw)
+        assert escaped == r"\[red]inject\[/red]"
+        out = _capture_printed(escaped, markup=True)
+        _assert_no_esc_or_c1(out)
+        assert "[red]" in out
+        assert "[/red]" in out
+        assert "inject" in out
+
+    def test_empty_and_ordinary_unicode_unchanged(self):
+        assert strip_terminal_escapes("") == ""
+        assert safe_str("") == ""
+        assert safe_text("").plain == ""
+        assert safe_terminal_str("") == ""
+        assert strip_terminal_escapes("café naïve 日本語") == "café naïve 日本語"
+
+    @given(
+        st.one_of(
+            st.text(max_size=64),
+            st.lists(
+                st.one_of(
+                    st.text(max_size=8),
+                    st.sampled_from(
+                        (
+                            _ESC,
+                            f"{_ESC}c",
+                            _NESTED_OSC_ST,
+                            _NESTED_OSC_BEL,
+                            *_C1_CODEPOINTS,
+                        )
+                    ),
+                ),
+                max_size=8,
+            ).map("".join),
+        )
+    )
+    @settings(max_examples=80, deadline=None)
+    @example(_NESTED_OSC_ST)
+    @example(_NESTED_OSC_BEL)
+    @example(f"{_ESC}c")
+    @example("\x9d52;c;x\x9c")
+    def test_generated_unicode_has_no_esc_or_c1(self, value: str):
+        for name, out in _helper_outputs(value).items():
+            _assert_no_esc_or_c1(out)
 
 
 class TestGcMalformedKeyWarning:
