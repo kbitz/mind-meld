@@ -13,6 +13,8 @@ Coverage targets, per the eng-review test plan:
 
 from __future__ import annotations
 
+import io
+
 from rich.console import Console
 
 from mind_meld.conflictdiff import (
@@ -225,11 +227,18 @@ class TestRenderPrompt:
 
 class TestRenderBanner:
     def _render_to_str(self, text) -> str:
-        # Render through a Console with terminal=True so ANSI codes show
-        # up if they leak; capture as string for assertions.
-        c = Console(record=True, width=120, force_terminal=True, color_system="truecolor")
+        # Capture through a StringIO file before printing. record=True /
+        # export_text alone still writes the live console first.
+        buf = io.StringIO()
+        c = Console(
+            file=buf,
+            force_terminal=True,
+            color_system=None,
+            highlight=False,
+            width=120,
+        )
         c.print(text)
-        return c.export_text()
+        return buf.getvalue()
 
     def test_local_side_label_and_path(self) -> None:
         rendered = self._render_to_str(render_banner("local", "notes.md", None))
@@ -281,6 +290,22 @@ class TestRenderBanner:
         # peer_name is irrelevant on the LOCAL side; banner ignores it.
         assert "from kb-mbp" not in rendered
         assert "unknown peer" not in rendered
+
+    def test_nested_st_probe_has_no_esc_or_c1(self) -> None:
+        from tests.test_safe_str import (
+            _NESTED_OSC_BEL,
+            _NESTED_OSC_ST,
+            _assert_no_esc_or_c1,
+        )
+
+        path_out = self._render_to_str(render_banner("local", f"notes{_NESTED_OSC_ST}.md", None))
+        name_out = self._render_to_str(
+            render_banner("remote", "notes.sync-conflict-X.md", f"kb-mbp{_NESTED_OSC_BEL}")
+        )
+        _assert_no_esc_or_c1(path_out)
+        _assert_no_esc_or_c1(name_out)
+        assert "notes" in path_out
+        assert "kb-mbp" in name_out
 
 
 class TestRenderCappedDiff:
@@ -334,6 +359,37 @@ class TestRenderCappedDiff:
         assert "\x1b" not in rendered[1].plain
         assert str(rendered[0].style) == "green"
         assert str(rendered[1].style) == "red"
+
+    def test_nested_st_probe_has_no_esc_or_c1_in_plain_or_capture(self) -> None:
+        from tests.test_safe_str import (
+            _NESTED_OSC_BEL,
+            _NESTED_OSC_ST,
+            _assert_no_esc_or_c1,
+        )
+
+        rendered = render_capped_diff(
+            [f"+head{_NESTED_OSC_ST}tail", f"-head{_NESTED_OSC_BEL}tail"],
+            cap=2,
+        )
+        assert str(rendered[0].style) == "green"
+        assert str(rendered[1].style) == "red"
+        buf = io.StringIO()
+        console = Console(
+            file=buf,
+            force_terminal=True,
+            color_system=None,
+            highlight=False,
+            width=200,
+        )
+        for line in rendered:
+            _assert_no_esc_or_c1(line.plain)
+            assert "head" in line.plain
+            assert "tail" in line.plain
+            console.print(line)
+        out = buf.getvalue()
+        _assert_no_esc_or_c1(out)
+        assert "head" in out
+        assert "tail" in out
 
 
 class TestCountDivergentLines:

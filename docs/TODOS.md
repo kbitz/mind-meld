@@ -45,7 +45,17 @@ here by hand, use the H3 form.
 ## Unprocessed
 
 
-_Empty. All 5 items drained on 2026-09-06; dispositions and evidence are below._
+### [plan-eng-review:severity=minor] Complete the deferred plain-stderr display audit beyond direct safe_str calls
+
+- **What:** Extend the existing plain-stderr follow-up's inventory to direct strip_terminal_escapes consumers, indirect skill_link._reason consumers, and messages Rich-escaped during construction.
+- **Why:** The twelve-site census counts direct safe_str calls, not all plain-output paths. The shared ESC/C1 fix protects these other paths too, but a later single-line/display migration would remain incomplete if it only revisits the recorded nine sites. A downstream helper swap also cannot remove Rich backslashes already added upstream.
+- **Context:** Verified against ba53612 during the Track 52A /autoplan review, 2026-09-07. Additional direct-strip paths are config.py:_bootstrap_mm_events_path (stderr at 792), events.py:walk_git_projects (whole-walk failure at 1002), and cli.py:_print_auto_typed_error (8085). skill_link.py:_reason constructs a safe_str message at 420–422 that several plain stderr callers reuse. errors.py:os_error_cause and snapshot_refusal escape fields at construction; the latter reaches plain typed-error output. Trace all consumers before changing these builders, since Rich sinks also consume them.
+- **Repro:** snapshot_refusal(problem="failed", next_action="Retry.", rel_path="[red]file[/red]") currently contains literal backslashes before the brackets; _print_auto_typed_error prints the constructed message to plain stderr. Capture through StringIO and assert on escaped representations. Separately trace direct strip and _reason consumers rather than relying on a same-line safe_str grep.
+- **Scope:** Fold this inventory into the existing nine-site follow-up in docs/roadmap-future.md when it is taken up. Decide the legitimate multiline contract for typed errors before migrating them. Preserve raw path/model identities and apply Rich escaping at the actual Rich sink. This is a display audit, not a new blanket control policy or an AST enforcement project.
+- **Tradeoff:** Complete sink-specific migration avoids misleading names and duplicate escaping; tracing mixed Rich/plain consumers is required to avoid breaking existing formatting.
+- **Effort:** S (human ~2h / agent ~20min)
+- **Priority:** P3
+- **Depends on:** Shared sanitizer hardening; retain the existing follow-up's scheduling trigger rather than adding these runtime files to Track 52A.
 
 ## Drain records
 

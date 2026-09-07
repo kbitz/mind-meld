@@ -15,7 +15,9 @@ Pinned behaviors per the eng-review test diagram:
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -703,6 +705,70 @@ class TestEstimateCost:
         assert per_model["claude-sonnet-5"] == pytest.approx(3.0)
         assert per_model["claude-fable-5"] == pytest.approx(10.0)
         assert total == pytest.approx(23.0)
+
+    def test_hostile_unknown_model_uses_raw_id_and_printable_notice(self, monkeypatch) -> None:
+        from tests.test_safe_str import (
+            _NESTED_OSC_ST,
+            _assert_no_esc_or_c1,
+            _assert_plain_notice_field,
+            _assert_printable_field,
+        )
+
+        seen: list[str] = []
+        original = tu.resolve_prices
+
+        def spy(model: str):
+            seen.append(model)
+            return original(model)
+
+        monkeypatch.setattr(tu, "resolve_prices", spy)
+        known = "claude-opus-4-7"
+        hostile = f"claude-[red]{_NESTED_OSC_ST}future-9-9"
+        display_priced = "claude-\x1b[31msonnet-4-6"
+        zero = {"input": 1_000_000, "cache_create": 0, "cache_read": 0, "output": 0}
+        err_buf = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", err_buf)
+        total, per_model = tu.estimate_cost(
+            {
+                known: zero,
+                hostile: zero,
+                display_priced: zero,
+            }
+        )
+        assert total == pytest.approx(5.0)
+        assert per_model[known] == pytest.approx(5.0)
+        assert hostile not in per_model
+        assert display_priced not in per_model
+        assert "claude-sonnet-4-6" not in per_model
+        assert seen == [known, hostile, display_priced]
+        err = err_buf.getvalue()
+        lines = err.splitlines()
+        assert len(lines) == 2
+        for line in lines:
+            if not line.startswith("mm: notice: unknown model in pricing: "):
+                raise AssertionError(f"bad notice prefix in {ascii(line)}")
+            _assert_no_esc_or_c1(line)
+            _assert_printable_field(line)
+        hostile_line = next(ln for ln in lines if "future-9-9" in ln)
+        field = hostile_line.split("unknown model in pricing: ", 1)[1]
+        _assert_plain_notice_field(field, starts_with="claude-[red]")
+        priced_line = next(ln for ln in lines if "sonnet-4-6" in ln)
+        if "claude-sonnet-4-6" not in priced_line:
+            raise AssertionError(f"missing priced display in {ascii(priced_line)}")
+
+    def test_unknown_model_dedup_keys_on_raw_id(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from tests.test_safe_str import _assert_no_esc_or_c1
+
+        zero = {"input": 1, "cache_create": 0, "cache_read": 0, "output": 0}
+        plain = "claude-future-9-9"
+        colored = "claude-\x1b[31mfuture-9-9"
+        tu.estimate_cost({plain: zero})
+        tu.estimate_cost({colored: zero})
+        first = capsys.readouterr().err
+        assert first.count("unknown model in pricing:") == 2
+        _assert_no_esc_or_c1(first)
+        tu.estimate_cost({plain: zero, colored: zero})
+        assert "unknown model in pricing:" not in capsys.readouterr().err
 
     def test_cache_write_priced_at_1h_ttl(self) -> None:
         """Cache writes bill at 2x input (1h TTL), not 1.25x (5m). Claude
@@ -1889,6 +1955,51 @@ class TestIncrementalResume:
         path.write_bytes(b'{"junk":"' + (b"x" * 4000) + b'"}\n')
         list(tu.walk_jsonl_buckets(path))
         assert "token walker skipping oversize line" in capsys.readouterr().err
+
+    def test_oversize_hostile_path_notice_is_printable_and_later_record_survives(
+        self, monkeypatch
+    ) -> None:
+        from tests.test_safe_str import (
+            _NESTED_OSC_ST,
+            _assert_no_esc_or_c1,
+            _assert_plain_notice_field,
+        )
+
+        monkeypatch.setattr(tu, "MAX_JSONL_LINE_BYTES", 16)
+        later = b'{"ok": true}\n'
+        fp = io.BytesIO(b"x" * 64 + b"\n" + later)
+        path_str = f"/tmp/[red]sess{_NESTED_OSC_ST}ion.jsonl"
+        err_buf = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", err_buf)
+        rows = list(tu.iter_bounded_lines(fp, path_str, 0, label="cwd reader"))
+        assert rows[0][0] == b""
+        assert rows[1][0] == later
+        assert rows[1][1] == len(b"x" * 64 + b"\n" + later)
+        err = err_buf.getvalue()
+        if err.count("\n") != 1:
+            raise AssertionError(f"expected one notice line, got {ascii(err)}")
+        prefix = "mm: notice: cwd reader skipping oversize line in "
+        if not err.startswith(prefix):
+            raise AssertionError(f"bad oversize prefix in {ascii(err)}")
+        _assert_no_esc_or_c1(err)
+        field = err.split(" in ", 1)[1].rstrip("\n")
+        _assert_plain_notice_field(field, starts_with="/tmp/[red]")
+
+    def test_oversize_path_dedup_keys_on_raw_id(self, monkeypatch, capsys) -> None:
+        from tests.test_safe_str import _assert_no_esc_or_c1
+
+        monkeypatch.setattr(tu, "MAX_JSONL_LINE_BYTES", 16)
+        payload = b"x" * 64 + b"\n"
+        plain = "/tmp/session.jsonl"
+        colored = "/tmp/session\x1b[31m.jsonl"
+        list(tu.iter_bounded_lines(io.BytesIO(payload), plain, 0))
+        list(tu.iter_bounded_lines(io.BytesIO(payload), colored, 0))
+        first = capsys.readouterr().err
+        assert first.count("skipping oversize line") == 2
+        _assert_no_esc_or_c1(first)
+        list(tu.iter_bounded_lines(io.BytesIO(payload), plain, 0))
+        list(tu.iter_bounded_lines(io.BytesIO(payload), colored, 0))
+        assert "skipping oversize line" not in capsys.readouterr().err
 
     def test_eof_inside_oversize_line_does_not_advance(self, tmp_path: Path, monkeypatch) -> None:
         """Claude Code mid-write of a huge line: `_drain_to_newline` hits
