@@ -736,7 +736,7 @@ host family).
 ``mm retro-fleet --dump-host-usage`` is the forensic hatch. It prints
 the inventory JSON and skips the markdown retro. As of v0.12.49 the dump
 emits per-model ``tokens_by_day`` and a detail status per device. The card
-stays family-only until the **unified-reporting** work lands (cite it by title, not by ID: it was numbered Group 36 when this was written, Group 43 until 2026-09-03, Group 50 until 2026-09-05, and Group 55 / Track 55A today; today's Group 36 is the shipped Three-hosts group and today's Group 50 is unrelated terminal-safe recovery warnings). Model ids are sanitized at DUMP time only
+stays family-only until the **unified-reporting** work lands (cite it by title, not by ID: it was numbered Group 36 when this was written, Group 43 until 2026-09-03, Group 50 until 2026-09-05, Group 55 / Track 55A until 2026-09-06, and Group 58 / Track 58A today; today's Group 36 is the shipped Three-hosts group, today's Group 50 is the shipped terminal-safe recovery warnings group, and today's Group 55 is the unrelated git-environment cleanup). Model ids are sanitized at DUMP time only
 (``_safe_short``), never at accept — and because that truncates at 128 chars
 while the acceptor admits 256 bytes, two distinct accepted ids can sanitize
 to one key. `_sanitize_tokens_by_day` disambiguates with a `~N` suffix rather

@@ -44,73 +44,37 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review:severity=major] Contain apply exceptions without losing completed-file bookkeeping
 
-- **What:** Define per-file exception containment and partial-pull durability together, so one failed apply does not discard completed outcomes or prevent unrelated downloads.
-- **Why:** `_download_and_apply` calls `_apply_incoming_file` without an exception boundary. An exception prevents its outcomes from reaching `_pull_one_source` and `_pull_core`; remaining files/sources/peers stop, the in-flight source's history and sync-log updates are skipped, and the normal deferred directory-fsync phase is bypassed. Autopull does report an unexpected-error line and a failed breadcrumb, so this is not a claim of completely silent failure.
-- **Repro:** At `cc22b6c`, use an isolated encrypted LocalBackend batch ordered `earlier.txt`, `blocked/inside.txt`, `later.txt`, with a regular local file occupying `blocked`. The first file is written; `_apply_incoming_file`'s parent `mkdir` raises `FileExistsError`; the last file is absent and the blocking local file is preserved. The loss of the returned outcome map is reproduced; skipped source bookkeeping and deferred fsync are traced in `_pull_one_source` and `_pull_core`. No data loss after a power failure was simulated.
-- **Context:** Track 51A `/autoplan`, 2026-09-06, branch `kbitz/51a-mixed-timestamp-pull`. The track fixes heterogeneous JSONL sort keys and narrowly handles decoder `RecursionError`; it does not claim general apply isolation. Evidence: `~/.gstack/projects/kbitz-mind-meld/51a-deferred-isolation-reproduction.json`. The same review's mixed-ts encrypted batch reproduction is in `51a-integration-reproduction.json`.
-- **Pros:** Later files can still arrive, completed writes keep honest history, and deferred durability no longer depends on every apply returning normally.
-- **Cons:** A blanket catch can misreport an exception after a successful write, lose touched-parent information, hide programming defects, or swallow intentional abort semantics. Failure classification, outcome ownership and finalization must be designed together.
-- **Next step:** Inventory exceptions before and after publication; specify which become per-file failures and which still abort. Add isolated multi-file tests for a normal write followed by the parent-file collision, an injected post-publication exception, and explicit user abort. Require useful sanitized file context, accurate failed/degraded reporting, preservation of already-completed outcomes, and directory durability without draining abandoned keep-local decisions.
-- **Depends on:** Coordinate with Track 51A's classifier fix; no live fleet scan or mutation is needed. Preserve the existing deferred-inline-bump abort contract in `docs/invariants/conflicts.md`.
-- **Effort:** M
-- **Priority:** P2
-
-### [plan-eng-review:severity=major] Harden existing Rich and multiline sanitizer consumers against nested escapes
-
-- **What:** Define and enforce a terminal-control postcondition for the existing `strip_terminal_escapes`, `safe_str` and `safe_text` consumers, preserving the intended formatting of multiline content.
-- **Why:** The current sanitizer performs one regex substitution. Removing an embedded CSI can assemble a fresh OSC 52 sequence after the regex has passed that position. A captured Rich console probe confirms that a deliberately nested ST-terminated payload survives both `safe_str` and `safe_text` as a complete terminal sequence.
-- **Repro:** At `0c1a969`, pass the escaped Python string `"\x1b\x1b[31m]52;c;VEVTVA==\x1b\x1b[31m\\"` through either helper and render into `Console(file=StringIO(), force_terminal=True, color_system=None)`. Inspect only `repr`/JSON of the capture: it contains `"\x1b]52;c;VEVTVA==\x1b\\"`. Never replay the capture in a live terminal.
-- **Context:** Track 50A `/autoplan`, 2026-09-06, branch `kbitz/sanitize-storage-filenames`. The recommended plan adds a stricter plain-field helper for the two storage rejection warnings and one malformed-blob GC warning. It does not change existing Rich/diff renderer semantics or repair their other callers. Evidence is saved at `~/.gstack/projects/kbitz-mind-meld/50a-reproductions.json`, under `corrected_shared_rich_sink_probe`; the preceding attempt with an extra literal `]` did not reproduce the complete ST sequence and is retained as a negative control.
-- **Pros:** Closes the same confirmed escape-composition mechanism across the remaining terminal sinks instead of fixing one payload spelling at a time.
-- **Cons:** A blanket printable-only conversion would escape meaningful newlines and formatting characters in diff bodies; a fixed number of regex passes is not a proof against arbitrary nesting. The shared contract and affected callers need explicit review.
-- **Next step:** Inventory Rich versus plain versus multiline sinks, choose a postcondition that prevents executable ESC/C1 output while retaining application-owned layout, and add captured final-render regressions for nested BEL/ST sequences. Include existing plain-stderr users of `safe_str` such as `retention.py` and `token_usage.py` when deciding routing; do not infer that Rich markup escaping makes terminal controls inert.
-- **Depends on:** No release dependency; coordinate helper naming with the Track 50A plan. No live fleet mutation is needed to reproduce or test this.
-- **Effort:** M
-- **Priority:** P1
-
-
-### [plan-eng-review:severity=minor] Decide whether unchanged pulls should retry stale conflict-copy cleanup
-
-- **What:** Evaluate a bounded retry of same-owner/same-peer post-inversion cleanup when the current remote bytes already have a sidecar.
-- **Why:** After a replacement publishes successfully but unlinking the older sidecar fails, an identical later pull returns early. The older differing revision can remain indefinitely; GC correctly preserves it while it diverges from canonical.
-- **Repro:** In an isolated fixture, save peer R1, publish peer R2 while injecting an unlink error for R1, then restore permissions and pull R2 again. Both copies remain because the identical-content branch performs no cleanup. Pinned by `tests/test_conflict_copy.py::TestConflictPublishThenCleanup::test_cleanup_failure_then_unchanged_retry_leaves_extras`, which also verifies both revisions remain available to the resolver.
-- **Context:** Track 48A /autoplan, 2026-09-05, branch kbitz/48a-conflict-ownership at 64c301d. The hotfix intentionally keeps this no-mutation branch. This is a policy choice, not another failed-publication bug: R2 is saved and mm resolve can inspect both revisions. Do not call differing revisions duplicates or infer safe deletion from sidecar mtime (the peer clock).
-- **Pros:** A transient cleanup failure would not leave old revisions forever under a latest-per-peer policy.
-- **Cons:** Adds deletion to a formerly unchanged path and could discard edits made directly in a managed sidecar; scope and user expectation need an explicit decision.
-- **Hypothesis (untested):** Reuse the shared exact-owner/era/peer predicate only after verifying a matching current sidecar exists; preserve it and every unverifiable candidate. Compare this with retaining the existing manual resolve path before implementing.
-- **Depends on:** The preservation/ownership hotfix and its cleanup-failure → unchanged-retry → resolve regression, implemented in v0.14.2. The cleanup policy decision remains open.
-- **Effort:** S
-- **Priority:** P3
-
-### [plan-eng-review:severity=major] Audit historical blob integrity and design verified targeted re-upload
-
-- **What:** Design a bounded, read-only integrity inventory for referenced encrypted blobs, then a separate targeted re-upload path that restores a mismatched key only from verified authoritative local bytes.
-- **Why:** Track 49A prevents new stale-digest uploads and rejects mismatched incoming plaintext. It does not inspect unchanged stored blobs, and an unchanged push or metadata-only touch does not upload them again. Updated receivers can therefore repeatedly reject a historically poisoned key with no supported targeted repair command.
-- **Evidence:** The 49A isolated reproduction at 09d98ab stores changed plaintext under a prior shared digest key, so an untouched sibling resolves to the wrong bytes. This proves the mechanism, not that any particular live fleet blob is corrupt. `cli.py:_upload_changed_blobs` and the hash-based diff determine which keys are rewritten.
-- **Context:** Track 49A /autoplan, 2026-09-06, branch kbitz/49a-complete-snapshots. Durable plan: `~/.gstack/projects/kbitz-mind-meld/kbitz-49a-complete-snapshots-plan.md`; evidence: `49a-reproductions.json`. This is distinct from the Future snapshot-completeness data-model item.
-- **Pros:** Establishes actual historical damage and gives users a precise recovery path without changing meaningful file contents to force a new hash.
-- **Cons:** Reading cloud blobs can materialize data and cost time; replacement authority and multi-reference keys need explicit handling. Inventory must be bounded and distinguish unavailable from mismatched; repair must preserve recoverable bytes.
-- **Next step:** Specify a report keyed by device/source/path/digest, with valid, unavailable and mismatched states. Require the candidate repair bytes to hash to the advertised key, encrypt before storage, and verify the result. Do not auto-select a peer copy or run fleet-wide mutation as part of discovery.
-- **Depends on:** Track 49A's prospective producer/receiver checks; an inventory and explicit authority decision before any repair is implemented or run.
-- **Effort:** M
-- **Priority:** P2
-
-### [plan-eng-review:severity=moderate] Make push dry-run setup honor the existing no-mutation contract
-
-- **What:** Audit and gate setup mutations before `mm push --dry-run` reaches its already-gated publication core.
-- **Why:** `docs/invariants/events-retro.md` requires a non-mutating preview, but the current command can offer/apply migration, persist a missing crypto fingerprint and bootstrap the mm-events source directory before the dry-run gates. Track 49A adds strict scan/deletion diagnostics; it must not describe the whole current command as read-only or weaken the existing invariant to match this defect.
-- **Evidence:** Code trace at 09d98ab: `cli.py:push` calls `_maybe_prompt_migration` and `_init_crypto_session` before `_push_core(..., dry_run=True)`; `get_sources` invokes `_bootstrap_mm_events_path` unconditionally. This is a source audit, not a claimed live mutation reproduction.
-- **Context:** Track 49A /autoplan DX/Eng review, 2026-09-06. Its tests protect blob/manifest/last_seen/event publication and add no new preview writes; the broader setup repair is separate. Do not route a dry-run through destructive recover/reset commands.
-- **Pros:** Makes the documented preview safe and predictable for troubleshooting and automation.
-- **Cons:** Requires a deliberate read-only crypto/source setup contract and migration-prompt behavior; simply skipping initialization can produce a misleading preview.
-- **Next step:** Add isolated CLI tests for missing fingerprint, missing mm-events root and pending config migration, snapshot all config/source/storage paths, then implement read-only setup or an explicit actionable refusal where a truthful preview needs initialization.
-- **Depends on:** Coordinate with Track 49A's shared source-resolution helper; preserve its strictness and publication guarantees.
-- **Effort:** M
-- **Priority:** P2
+_Empty. All 5 items drained on 2026-09-06; dispositions and evidence are below._
 
 ## Drain records
+
+### Roadmap drain — 2026-09-06
+
+5 inbox items, all `[plan-eng-review]` from the Track 48A–51A /autoplan reviews: **3 placed, 2 deferred, 0 discharged, 0 killed**. Authored-false rate: 0 / (3 + 0) = 0%. Verification baseline: `38222ac` (v0.14.5). Ground truth closed four Tracks first: 48A (v0.14.2 `09d98ab`), 49A (v0.14.3 `0c1a969`), 50A (v0.14.4 `cc22b6c`), 51A (v0.14.5 `38222ac`); Groups 48–51 are appended to `docs/roadmap-shipped.md`.
+
+| Inbox item | Title | Disposition / destination | Evidence or reason |
+|---|---|---|---|
+| 1 | Contain apply exceptions without losing completed-file bookkeeping | place → Track 53A | `_download_and_apply` still calls `_apply_incoming_file` with no exception boundary at 38222ac; the only `finally` stops the progress bar. |
+| 2 | Harden existing Rich and multiline sanitizer consumers against nested escapes | place → Track 52A | `strip_terminal_escapes` is one `re.sub` pass; its docstring and the v0.14.4 CHANGELOG record the follow-up. 12 plain-stderr `safe_str` sites exist (not 3 — corrected 2026-09-06 /ship review); the card names 3 in scope and defers the other 9 to roadmap-future.md. |
+| 3 | Decide whether unchanged pulls should retry stale conflict-copy cleanup | defer → docs/roadmap-future.md | Policy choice with a pinned test (`test_conflict_copy.py::TestConflictPublishThenCleanup::test_cleanup_failure_then_unchanged_retry_leaves_extras`), not a defect. |
+| 4 | Audit historical blob integrity and design verified targeted re-upload | defer → docs/roadmap-future.md | v0.14.3's per-file pull check is the detector and has not fired; the trigger is a `content check failed:` line on any Mac. Inventory and repair designs are recorded on the bullet. |
+| 5 | Make push dry-run setup honor the existing no-mutation contract | place → Track 56A | `push` runs `_maybe_prompt_migration` and the fingerprint persist before `_push_core(dry_run=True)`; `resolve_sources` mkdirs mm-events unconditionally. |
+
+**Former active plan:** IDs below refer to the 2026-09-05 plan. Priority order changed: the two new defects outrank the queued Codex-diagnostics and git-environment cards, so those four recycled. Old IDs are dated lineage in each card's `_Source:` line; nothing was blind-remapped, and the 2026-09-05 records below keep their own numbering.
+
+| 2026-09-05 ID | Title | 2026-09-06 disposition / ID |
+|---|---|---|
+| 48A | Preserve conflict ownership and failed replacements | shipped as 48A (v0.14.2) |
+| 49A | Publish complete, content-consistent snapshots | shipped as 49A (v0.14.3) |
+| 50A | Sanitize rejected storage filenames | shipped as 50A (v0.14.4) |
+| 51A | Keep mixed timestamp types from aborting pull | shipped as 51A (v0.14.5) |
+| 52A | Report failed Codex capture and remove obsolete reader helpers | 54A (premises re-verified) |
+| 53A | Scrub the git environment for mm's git subprocesses | 55A (premises re-verified; the `test_track_30a.py` assert moved from `:636` to `:678`) |
+| 54A | Price verified Grok usage | 57A |
+| 55A | Make model usage easier to read without changing what totals mean | 58A |
+
+New Tracks: 52A (sanitizer postcondition), 53A (pull isolation), 56A (dry-run honesty). Future: 76 → 78; one existing bullet's citation moved from "Track 52A" to the title with dated lineage. `docs/invariants/events-retro.md` gained the 2026-09-06 hop on the unified-reporting ID trail. Shipped history is append-only. Not acted on: the audit's archive advisory for `docs/designs/sync-gstack-context.md` (a live design doc cited from AGENTS.md; v0.14.5 merely edited it).
 
 ### Approved roadmap refinements — 2026-09-05
 
@@ -339,4 +303,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-06 by Track 51A /autoplan; five items remain open: apply exception containment/durability, shared terminal sanitizer hardening, conflict-cleanup policy, historical blob integrity/repair, and push dry-run setup. Prior drain records are historical._
+_Last updated 2026-09-06 by /roadmap; the inbox is empty. Prior drain records are historical._
