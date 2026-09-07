@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.6] - 2026-09-07
+
+**A control sequence hidden inside another one can no longer reassemble into a clipboard write after mm sanitizes it.** The shared sanitizer made one pass over peer-controlled text, so a CSI nested inside an OSC survived that pass and came out the other side as a complete OSC 52 clipboard-write sequence. Every `safe_str` and `safe_text` sink inherited the hole: conflict banners, diff bodies, `mm devices` cells, and error tails. Sanitized text now contains no ESC or C1 control byte at all, and three plain-stderr notices that still echoed raw escapes render them as visible notation instead.
+
+### Fixed
+
+- `strip_terminal_escapes`, `safe_str`, and `safe_text` strip the known CSI / OSC / DCS / C1 grammars and then delete every leftover ESC (`U+001B`) and C1 (`U+0080`–`U+009F`) byte, so a nested sequence cannot reassemble into a fresh one. Line feeds and tabs still pass through for diff bodies. This is an ESC/C1 guarantee, not an all-control guarantee.
+- The token-cache GC failure notice, the oversize-jsonl-line notice, and the unknown-model pricing notice go through `safe_terminal_str`. A hostile Codex rollout filename or a planted model id in a session jsonl now shows as printable ASCII notation on stderr instead of driving the terminal. The raw path and model id still drive dedup, resume offsets, the pricing lookup, and the GC skip count.
+- The escape regex comment claimed RIS (`ESC c`) was covered by the single-byte range. It is not. The leftover ESC is now deleted by the public helpers and rendered as notation by `safe_terminal_str`.
+
+### Changed
+
+- Grammar removal lives in a private `_strip_terminal_grammar` helper that both policies share. Public helpers delete residual ESC/C1; `safe_terminal_str` keeps its visible notation so a diagnostic never silently loses a byte.
+- `docs/invariants/init-devices.md` and the module map state the ESC/C1 postcondition and the deletion policy. The remaining nine plain-stderr `safe_str` sites and any broader C0 control policy stay recorded follow-ups.
+
 ## [0.14.5] - 2026-09-06
 
 **A `.jsonl` file that mixes string and numeric timestamps no longer aborts your pull.** The merge sorted on the decoded `ts` value whatever its JSON type, so one record with `"ts": 2` beside records carrying ISO strings raised `TypeError` out of the apply loop, and every later file in that pull never arrived. Unattended `mm autopull` reported an unexpected error and a failed breadcrumb. Only string `ts` values are sort keys now; every other line keeps its original text and follows in lexical order, and the rest of the pull continues.
