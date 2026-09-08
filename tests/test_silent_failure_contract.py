@@ -923,6 +923,41 @@ def test_mm_status_surfaces_breadcrumb(tmp_path, monkeypatch):
     assert "2026-04-23" in r.stdout
 
 
+@pytest.mark.parametrize(
+    "outcome,detail,expect_nag",
+    [
+        ("degraded", "1 file(s) failed", True),
+        ("degraded", "fsync failed on 1 parent dir(s)", False),
+        ("failed", "1 file(s) failed", False),
+    ],
+)
+def test_status_file_failure_nag_is_detail_gated(
+    tmp_path, monkeypatch, outcome, detail, expect_nag
+):
+    """The Track 53A nag is keyed on pull + degraded + 'file(s) failed'."""
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    (iso / "last-autorun.json").write_text(
+        json.dumps(
+            {
+                "pull": {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "outcome": outcome,
+                    "detail": detail,
+                }
+            }
+        )
+    )
+
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    nag = "Files failed to apply on the last auto-pull"
+    if expect_nag:
+        assert nag in r.stdout
+    else:
+        assert nag not in r.stdout
+
+
 # ─── Cross-peer preflight test ───────────────────────────────────────────
 
 
@@ -1126,7 +1161,10 @@ def test_autopull_surfaces_total_failed_count_on_stderr(tmp_path, monkeypatch):
     r = runner.invoke(app, ["autopull"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
     assert "3 file(s) failed" in (r.stderr or "")
-    assert "mm pull --verbose" in (r.stderr or "")
+    assert (
+        "mm: 3 file(s) failed to apply - see the warnings above; they retry on the next pull"
+        in r.stderr
+    )
 
 
 def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(tmp_path, monkeypatch, capsys):

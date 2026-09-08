@@ -535,9 +535,14 @@ def mtime_from_manifest(iso_str: str) -> datetime:
     """Parse a manifest mtime ISO-8601 string to a timezone-aware UTC datetime.
 
     Manifests always emit UTC with either `+00:00` or `Z` suffix. We accept
-    both; `datetime.fromisoformat` on 3.11+ handles `Z` natively.
+    both; `datetime.fromisoformat` on 3.11+ handles `Z` natively. A timezone-
+    less string parses but cannot be compared with local UTC mtimes — raise
+    so apply/predict gates treat it as uninterpretable instead of aborting.
     """
-    return datetime.fromisoformat(iso_str)
+    parsed = datetime.fromisoformat(iso_str)
+    if parsed.tzinfo is None:
+        raise ValueError("manifest mtime must be timezone-aware")
+    return parsed
 
 
 def mtime_from_path(path: Path) -> datetime:
@@ -1751,7 +1756,9 @@ def load_manifest(data: bytes) -> dict[str, Any]:
     Single load boundary for every manifest path (remote fetch, sidecar
     recovery, test fixtures). Guarantees the returned dict has dict-typed
     `sources` and `tombstones`, each source entry has a dict-typed `files`,
-    and each tombstone value is a dict. Every key in `sources[*].files` is
+    each file value is a dict with a string `sha256`, and each tombstone
+    value is a dict. Non-string file `mtime` values are coerced to `None`
+    only after that shape check. Every key in `sources[*].files` is
     confined to a relative path inside its source — no '..' segments, no
     absolute paths, no null bytes (see `_validate_rel_path`). Callers may
     rely on these invariants.
@@ -1780,8 +1787,15 @@ def load_manifest(data: bytes) -> dict[str, Any]:
         files = src_data.get("files", {})
         if not isinstance(files, dict):
             raise ManifestError(f"manifest: sources[{src_name!r}]['files'] must be an object")
-        for rel in files.keys():
+        for rel, info in files.items():
             _validate_rel_path(rel, where=f"sources[{src_name!r}]['files'] key")
+            if not isinstance(info, dict) or not isinstance(info.get("sha256"), str):
+                raise ManifestError(
+                    f"manifest: sources[{src_name!r}]['files'][{rel!r}] "
+                    "must be an object with a string sha256"
+                )
+            if not isinstance(info.get("mtime"), str):
+                info["mtime"] = None
     for key, info in tombstones.items():
         if not isinstance(info, dict):
             raise ManifestError(f"manifest: tombstones[{key!r}] must be an object")

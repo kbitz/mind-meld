@@ -574,6 +574,10 @@ class TestMtimeHelpers:
         dt = mtime_from_manifest("2026-04-21T14:30:00+00:00")
         assert dt.year == 2026 and dt.hour == 14
 
+    def test_manifest_rejects_timezone_less_string(self) -> None:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            mtime_from_manifest("2026-09-08T12:00:00")
+
 
 # ── _find_conflict_files / _canonical_for_conflict ────────────────────
 
