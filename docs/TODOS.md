@@ -57,6 +57,16 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Depends on:** Shared sanitizer hardening; retain the existing follow-up's scheduling trigger rather than adding these runtime files to Track 52A.
 
+### [plan-eng-review:severity=minor] Carry a sanitized failure reason on pull-history `failed` rows
+
+- **What:** Add an optional `detail` field to `pullhistory.append` for `failed` rows and render it in `mm log --format table`, so `mm log --verb pull --action failed` explains a failure without a verbose re-run.
+- **Why:** After Track 53A every per-file apply failure prints one actionable `mm: warning:` line to stderr at the moment it happens, but the forensic log still records only `failed`. A hook's stderr scrolls away; the history row is what survives.
+- **Context:** Filed 2026-09-08 by the Track 53A /autoplan review (CEO Codex voice, Medium; DX Claude voice). The boundary has the sanitized cause in hand (`_warn_apply_failure` builds it), so the plumbing is one keyword on `append` plus the table renderer. The 2026-09-05 drain deferred the sibling `sidecar=` parameter on the same row shape; take both together. Use `safe_terminal_str` for the stored text; treat the row as display text, never as a path.
+- **Repro:** cause a parent-file collision (regular file where a peer publishes a folder), run `mm autopull`, then `mm log --verb pull --action failed --limit 5`: the row names the file but not the cause.
+- **Effort:** S (human ~2h / agent ~15min)
+- **Priority:** P3
+- **Depends on:** Track 53A (the formatter that produces the reason).
+
 ## Drain records
 
 ### Roadmap drain — 2026-09-06
