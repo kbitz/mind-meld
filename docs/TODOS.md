@@ -67,6 +67,16 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Depends on:** Track 53A (the formatter that produces the reason).
 
+### [plan-eng-review:severity=minor] Decide whether interactive `mm pull` should exit non-zero when files failed to apply
+
+- **What:** Give interactive `mm pull` a dedicated non-zero exit (a new code 4, distinct from 3 for the conflict-mode preflight) when `total_failed > 0`; `mm autopull` stays 0 for hook continuity. Update the `pull` docstring exit table, README, and the exit-code tests.
+- **Why:** After Track 53A a per-file apply failure inside a batch is contained, so the reproduced parent-file collision moves from a crash with exit 1 to a green exit 0. Every other per-file failure class (decrypt, blob, write) has always exited 0, so today a script cannot tell a partial pull from a complete one; `--conflict-mode fail` gives CI a signal for conflicts but none for apply failures.
+- **Context:** Raised independently by both DX outside voices of the Track 53A /autoplan on 2026-09-08 (Claude proposed code 4; Codex preferred reusing 1). Presented as a User Challenge at the final gate; the user kept the documented exit-0 contract, so this is filed rather than built. `pull()` at `cli.py:3835` discards `_pull_core`'s result, so the change is one branch on `result.total_failed` plus the docstring at `cli.py:3811` and a README row in the Snapshot-failures / pull-failures table.
+- **Repro:** cause a parent-file collision, run `mm pull`, `echo $?` prints 0 while the summary says `Pull incomplete:`.
+- **Effort:** S (human ~1h / agent ~10min)
+- **Priority:** P3
+- **Depends on:** Track 53A (the `Pull incomplete:` summary and per-file warnings it introduces).
+
 ## Drain records
 
 ### Roadmap drain — 2026-09-06
