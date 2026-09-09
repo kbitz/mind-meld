@@ -111,6 +111,7 @@ from mind_meld.devices import (
     update_last_seen,
 )
 from mind_meld.errors import (
+    PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
     ConfigError,
     CryptoError,
@@ -1460,10 +1461,10 @@ def _predict_pull_outcome(
         local_mtime = mtime_from_path(local_path)
         remote_mtime_str = remote_info.get("mtime")
         remote_mtime = mtime_from_manifest(remote_mtime_str) if remote_mtime_str else None
-    except (ValueError, OSError):
+        if remote_mtime is not None and local_mtime > remote_mtime:
+            return "skip"
+    except (TypeError, ValueError, OverflowError, OSError):
         return "conflict"
-    if remote_mtime is not None and local_mtime > remote_mtime:
-        return "skip"
     return "conflict"
 
 
@@ -1543,6 +1544,8 @@ def _upload_changed_blobs(
                 )
             ) from e
         assert revision.data is not None
+        # Only freshly scanned local revisions enter this upload path;
+        # loaded manifests (whose mtime may normalize to None) must never.
         advertised_sha = info.get("sha256")
         advertised_size = info.get("size")
         advertised_mtime = info.get("mtime")
@@ -1853,8 +1856,10 @@ def _prompt_conflict_choice(
 #   carry a `v0-` prefix in the metadata position so resolve's dual-mode
 #   dispatch can pick the right semantics per file.
 #
-#   Failures (sidecar write) are isolated per-file: local is untouched at
-#   canonical because we never overwrite it. Returns "failed" on error.
+#   Publication -> _ApplyReporter before restore, cleanup, or output.
+#   OS/mm exceptions -> failed (or keep a recorded publication); other
+#   exceptions propagate with completed bookkeeping. Invalid mtimes fall
+#   through to conflict at the parse site, never at the general boundary.
 
 
 # ── deferred inline keep-canonical mtime bump (Track 12A) ─────────────
@@ -1863,7 +1868,7 @@ def _prompt_conflict_choice(
 #     keep-canonical → _record_inline_bump (canonical untouched)
 #     all other branches → return their outcome
 #                          │
-#   _download_and_apply: after every _apply_incoming_file call
+#   _ApplyReporter: at publication, or non-publishing return at the boundary
 #     outcome in _CANONICAL_WRITE_OUTCOMES → _invalidate_inline_bump
 #       (success-only by construction: write/merge/sidecar outcomes are only
 #       returned on successful canonical mutation; "failed" / "skipped" /
@@ -1880,15 +1885,16 @@ def _prompt_conflict_choice(
 # baseline; the bump value (max over every keep-canonical peer for that
 # path) then beats all of them at once.
 #
-# Why invalidation lives at the _download_and_apply seam, not in
+# Why invalidation lives in _ApplyReporter.record, not in
 # _apply_incoming_file's per-branch returns: ONE site keyed on the outcome
 # enum covers every canonical-mutating path uniformly — keep-remote, inline
 # merge, keep-both (the _apply_conflict sidecar), AND the _apply_write
 # branch that fires when canonical vanished mid-walk (user `rm`'d the file
-# while the blocking prompt waited). The per-branch approach missed
-# _apply_write entirely (would silently bump REMOTE bytes as locally-
-# authored) and was not success-only for keep-both (would pop on a sidecar
-# write failure even though canonical was still local). See
+# while the blocking prompt waited). Publication-time recording also voids
+# the bump before a fallible restore/cleanup/print can raise. The per-branch
+# approach missed _apply_write entirely (would silently bump REMOTE bytes as
+# locally-authored) and was not success-only for keep-both (would pop on a
+# sidecar write failure even though canonical was still local). See
 # docs/invariants/conflicts.md.
 
 
@@ -1917,13 +1923,14 @@ def _invalidate_inline_bump(
 ) -> None:
     """Drop a pending inline bump because a later peer changed/left this file.
 
-    Called once at the ``_download_and_apply`` seam when ``_apply_incoming_file``
-    returns an outcome in ``_CANONICAL_WRITE_OUTCOMES`` (write / merge / merge-
-    via-lcs / conflicted). Success-only by construction: those outcomes are
-    only returned on successful canonical mutation; "failed" leaves canonical
-    pure local, so the prior keep-canonical decision still stands and the
-    bump is NOT popped. Same property for "skipped" (canonical untouched —
-    mtime-skip branch) and "unchanged" (sha match).
+    Called from ``_ApplyReporter.record`` when the outcome is in
+    ``_CANONICAL_WRITE_OUTCOMES`` (write / merge / merge-via-lcs / conflicted):
+    at publication, or at a non-publishing return such as sidecar dedup.
+    Success-only by construction: those outcomes are only recorded on
+    successful canonical mutation; "failed" leaves canonical pure local, so
+    the prior keep-canonical decision still stands and the bump is NOT popped.
+    Same property for "skipped" (canonical untouched — mtime-skip branch) and
+    "unchanged" (sha match).
 
     An earlier peer's keep-canonical bump is void once a later peer's decision
     for the same file either overwrites canonical (bumping would broadcast the
@@ -1951,22 +1958,156 @@ def _drain_inline_bumps(pending: dict[Path, float] | None) -> None:
         _bump_canonical_mtime_post_resolve(canonical, peer_mtime)
 
 
+def _first_existing_ancestor(path: Path) -> Path:
+    """Find the actual collider, even beneath several missing components."""
+    while True:
+        try:
+            path.stat()
+            return path
+        except (FileNotFoundError, NotADirectoryError):
+            if path.parent == path:
+                raise
+            path = path.parent
+
+
+def _print_apply_warning(message: str) -> None:
+    """A dead stderr must not turn a contained failure into a batch failure."""
+    try:
+        print(message, file=sys.stderr)
+    except OSError:
+        pass
+
+
+def _warn_apply_failure(
+    device_name: str | None,
+    src_name: str | None,
+    rel_path: str,
+    local_path: Path,
+    operation: str,
+    exc: BaseException,
+    *,
+    preserved: str,
+) -> None:
+    """One plain-stderr line: attribution, cause, preservation, and remedy."""
+    safe = safety.safe_terminal_str
+    location = "/".join(safe(p) for p in (device_name, src_name, rel_path) if p is not None)
+    error_number = getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
+    remedy = ""
+    if error_number in (errno.EEXIST, errno.ENOTDIR, errno.EISDIR):
+        try:
+            collider = _first_existing_ancestor(local_path.parent)
+            if not collider.is_dir():
+                remedy = (
+                    f"{safe(device_name or 'The peer')} published a folder named "
+                    f"'{safe(collider.name)}' where this Mac has a file; "
+                    "keep yours or move it aside, then run mm pull. "
+                )
+        except OSError:
+            pass
+    elif error_number in (errno.EACCES, errno.EPERM, errno.EROFS):
+        remedy = f"check write permission on {safe(local_path.parent)}. "
+    elif error_number == errno.ENOSPC:
+        remedy = "free disk space. "
+    _print_apply_warning(
+        f"mm: warning: {safe(operation)} ({safe(preserved)}): {location} — "
+        f"{safe(exc)}. {remedy}See {safe(PULL_FAILURES_URL)}."
+    )
+
+
+@dataclass
+class _ApplyReporter:
+    """Per-source publication ledger; begin() binds each file before apply.
+
+    With outcomes=None this is the direct-call diagnostic default: it prints
+    failures but does not record publications or invalidate deferred bumps.
+    No disk inference: the recorded word is what this attempt actually did.
+    """
+
+    device_name: str | None = None
+    src_name: str | None = None
+    outcomes: dict[ApplyOutcome, list[str]] | None = None
+    pending_inline_bumps: dict[Path, float] | None = None
+    touched_parents: set[Path] = field(default_factory=set)
+    bytes_transferred: int = 0
+    rel_path: str = ""
+    local_path: Path = Path()
+    resolved_local: Path | None = None
+    recorded: ApplyOutcome | None = None
+    follow_up: str = "follow-up step"
+
+    def begin(self, rel_path: str, local_path: Path, resolved_local: Path | None) -> None:
+        self.rel_path, self.local_path, self.resolved_local = rel_path, local_path, resolved_local
+        self.recorded = None
+        self.follow_up = "follow-up step"
+
+    def record(self, outcome: ApplyOutcome) -> None:
+        if self.outcomes is None:
+            return
+        if self.recorded is not None:
+            if self.recorded != outcome:
+                raise RuntimeError(f"apply outcome changed: {self.recorded} -> {outcome}")
+            return
+        self.outcomes[outcome].append(self.rel_path)
+        if outcome in _CANONICAL_WRITE_OUTCOMES:
+            _invalidate_inline_bump(self.pending_inline_bumps, self.resolved_local)
+            self.touched_parents.add(self.local_path.parent)
+        self.recorded = outcome
+
+    def published(self, outcome: ApplyOutcome) -> None:
+        self.record(outcome)
+
+    def created_ancestor(self, path: Path) -> None:
+        if self.outcomes is not None:
+            self.touched_parents.add(path.parent)
+
+    def failed(self, operation: str, exc: BaseException, *, preserved: str) -> None:
+        self.record("failed")
+        _warn_apply_failure(
+            self.device_name,
+            self.src_name,
+            self.rel_path,
+            self.local_path,
+            operation,
+            exc,
+            preserved=preserved,
+        )
+
+    def follow_up_failed(self, exc: BaseException) -> None:
+        wording = {
+            "written": "file written",
+            "merged": "file merged",
+            "merged-via-lcs": "file merged",
+            "conflicted": "conflict copy saved",
+        }.get(self.recorded, self.recorded)
+        safe = safety.safe_terminal_str
+        _print_apply_warning(
+            f"mm: notice: {safe(self.local_path)}: {safe(wording)}; "
+            f"{safe(self.follow_up)} failed ({safe(exc)}). Completed changes are on disk."
+        )
+
+
 def _apply_write(
     local_path: Path,
     rel_path: str,
     plain_data: bytes,
     verbose: bool = False,
     remote_mtime_iso: str | None = None,
+    *,
+    reporter: _ApplyReporter | None = None,
 ) -> ApplyOutcome:
     """[W] local has no copy \u2014 atomic_write remote to canonical."""
+    reporter = reporter or _ApplyReporter(rel_path=rel_path, local_path=local_path)
     try:
         # Deferred durability: per-file fsync=False; end of pull calls
         # fsutil.fsync_dir once per touched parent.
         fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
-        console.print(f"  [red]write failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}")
+        reporter.failed("write failed", e, preserved="local preserved")
         return "failed"
+    reporter.published("written")
+    reporter.follow_up = "mtime restore"
     _restore_mtime_best_effort(local_path, remote_mtime_iso)
+    reporter.follow_up = "output"
     if verbose:
         console.print(f"  [green]\u2193[/green] {safe_str(rel_path)}")
     return "written"
@@ -1977,6 +2118,8 @@ def _apply_merge(
     rel_path: str,
     plain_data: bytes,
     verbose: bool = False,
+    *,
+    reporter: _ApplyReporter | None = None,
 ) -> ApplyOutcome:
     """[M] mergeable: jsonl / MEMORY.md are line-union safe.
 
@@ -1989,6 +2132,7 @@ def _apply_merge(
     files that actually changed, eliminating the "every pull says
     1+ merged" noise users were seeing.
     """
+    reporter = reporter or _ApplyReporter(rel_path=rel_path, local_path=local_path)
     try:
         local_bytes = local_path.read_bytes()
         merged = merge_file(rel_path, local_bytes, plain_data)
@@ -1998,8 +2142,10 @@ def _apply_merge(
             return "unchanged"
         fsutil.atomic_write_bytes(local_path, merged, fsync=False)
     except (OSError, StorageError) as e:
-        console.print(f"  [red]merge failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}")
+        reporter.failed("merge failed", e, preserved="local preserved")
         return "failed"
+    reporter.published("merged")
+    reporter.follow_up = "output"
     if verbose:
         console.print(f"  [cyan]merged[/cyan] {safe_str(rel_path)}")
     return "merged"
@@ -2048,10 +2194,9 @@ def _existing_post_inversion_sidecars_from_peer(canonical: Path, device_short: s
         try:
             is_regular = sibling.is_file()
         except OSError as e:
-            print(
+            _print_apply_warning(
                 "mm: warning: conflict sidecar unreadable (left in place): "
-                f"{safe_str(sibling)} \u2014 {safe_str(e)}",
-                file=sys.stderr,
+                f"{safety.safe_terminal_str(sibling)} — {safety.safe_terminal_str(e)}"
             )
             continue
         if not is_regular:
@@ -2067,6 +2212,8 @@ def _apply_conflict(
     remote_device_id: str,
     verbose: bool = False,
     remote_mtime_iso: str | None = None,
+    *,
+    reporter: _ApplyReporter | None = None,
 ) -> ApplyOutcome:
     """[C] conflict path (v0.9.2 INVERTED): keep local at canonical,
     route remote bytes to .sync-conflict-*.
@@ -2106,6 +2253,7 @@ def _apply_conflict(
     # Candidate and verified-different lists are initialized outside the
     # optional peer scan so a path-build/write failure never depends on
     # an unbound local, and so cleanup cannot run before publication.
+    reporter = reporter or _ApplyReporter(rel_path=rel_path, local_path=local_path)
     existing: list[Path] = []
     stale: list[Path] = []
     # Per-peer dedup. Empty/None remote_device_id falls through to the
@@ -2119,10 +2267,9 @@ def _apply_conflict(
             try:
                 sidecar_bytes = sidecar.read_bytes()
             except OSError as e:
-                print(
+                _print_apply_warning(
                     "mm: warning: conflict sidecar unreadable (left in place): "
-                    f"{safe_str(sidecar)} \u2014 {safe_str(e)}",
-                    file=sys.stderr,
+                    f"{safety.safe_terminal_str(sidecar)} — {safety.safe_terminal_str(e)}"
                 )
                 continue
             if sidecar_bytes == plain_data:
@@ -2145,11 +2292,8 @@ def _apply_conflict(
         # Empty/None remote_device_id (corrupted peer manifest), name
         # exhaustion, or occupancy-probe OSError. Preserve per-file
         # isolation: warn and fail this file only, keep walking.
-        print(
-            "mm: warning: conflict path build failed "
-            "(local and prior conflict copies preserved): "
-            f"{safe_str(local_path)} \u2014 {safe_str(e)}",
-            file=sys.stderr,
+        reporter.failed(
+            "conflict path build failed", e, preserved="local and prior conflict copies preserved"
         )
         return "failed"
 
@@ -2164,29 +2308,29 @@ def _apply_conflict(
     try:
         fsutil.atomic_write_bytes(conflict_path, plain_data, fsync=False)
     except (OSError, StorageError) as e:
-        print(
-            "mm: warning: sidecar write failed "
-            "(local and prior conflict copies preserved): "
-            f"{safe_str(local_path)} \u2014 {safe_str(e)}",
-            file=sys.stderr,
+        reporter.failed(
+            "sidecar write failed", e, preserved="local and prior conflict copies preserved"
         )
         return "failed"
+    reporter.published("conflicted")
+    reporter.follow_up = "conflict-copy mtime restore"
     _restore_mtime_best_effort(conflict_path, remote_mtime_iso)
 
+    reporter.follow_up = "stale-copy cleanup"
     for sidecar in stale:
         if sidecar == conflict_path:
             continue
         try:
             sidecar.unlink()
         except OSError as e:
-            print(
+            _print_apply_warning(
                 "mm: warning: replacement saved as "
-                f"{safe_str(conflict_path)}; old copy remains at "
-                f"{safe_str(sidecar)} \u2014 {safe_str(e)}. "
-                "Inspect with mm resolve.",
-                file=sys.stderr,
+                f"{safety.safe_terminal_str(conflict_path)}; old copy remains at "
+                f"{safety.safe_terminal_str(sidecar)} — {safety.safe_terminal_str(e)}. "
+                "Inspect with mm resolve."
             )
 
+    reporter.follow_up = "output"
     if verbose:
         console.print(
             f"  [yellow]conflict:[/yellow] {safe_str(rel_path)} "
@@ -2206,6 +2350,8 @@ def _apply_incoming_file(
     devices: list[dict[str, Any]] | None = None,
     pending_inline_bumps: dict[Path, float] | None = None,
     resolved_local: Path | None = None,
+    *,
+    reporter: _ApplyReporter | None = None,
 ) -> ApplyOutcome:
     """Dispatch one decrypted remote file to the appropriate _apply_* helper.
 
@@ -2215,11 +2361,13 @@ def _apply_incoming_file(
 
     ``pending_inline_bumps`` / ``resolved_local`` carry the Track 12A deferred
     keep-canonical bump. In interactive pull, the keep-canonical branch RECORDS
-    into the dict; INVALIDATION is owned by ``_download_and_apply`` keyed on
-    the returned outcome (see ``_CANONICAL_WRITE_OUTCOMES``). Both default
-    None for non-interactive callers and direct-call tests — when either is
-    None the bump machinery is a no-op (today's behavior).
+    into the dict; INVALIDATION is owned by ``_ApplyReporter.record`` keyed on
+    the outcome (see ``_CANONICAL_WRITE_OUTCOMES``), at publication or at a
+    non-publishing canonical-write return. Both default None for
+    non-interactive callers and direct-call tests — when either is None the
+    bump machinery is a no-op (today's behavior).
     """
+    reporter = reporter or _ApplyReporter(rel_path=rel_path, local_path=local_path)
     # Direct callers bypass _download_and_apply's component check, so protect
     # a leaf symlink here before mkdir or atomic_write can replace it.
     if local_path.is_symlink():
@@ -2229,7 +2377,25 @@ def _apply_incoming_file(
             )
         return "skipped"
 
-    local_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if not local_path.parent.is_dir():
+            ancestor = _first_existing_ancestor(local_path.parent)
+            if not ancestor.is_dir():
+                raise NotADirectoryError(errno.ENOTDIR, "Not a directory", str(ancestor))
+            # Create one component at a time so a later failure still
+            # registers every directory that landed (including the parent
+            # of the topmost new ancestor) for fsync.
+            missing: list[Path] = []
+            current = local_path.parent
+            while current != ancestor:
+                missing.append(current)
+                current = current.parent
+            for directory in reversed(missing):
+                directory.mkdir(exist_ok=True)
+                reporter.created_ancestor(directory)
+    except OSError as e:
+        reporter.failed("cannot create folder", e, preserved="local preserved")
+        return "failed"
     remote_mtime_iso = remote_info.get("mtime")
 
     if not local_path.exists():
@@ -2239,6 +2405,7 @@ def _apply_incoming_file(
             plain_data,
             verbose=verbose,
             remote_mtime_iso=remote_mtime_iso,
+            reporter=reporter,
         )
 
     # Re-read local state. Precomputed snapshot can be stale if the user
@@ -2246,35 +2413,41 @@ def _apply_incoming_file(
     try:
         local_hash = hash_file(local_path)
     except (PermissionError, OSError) as e:
-        console.print(f"  [yellow]read failed:[/yellow] {safe_str(rel_path)} \u2014 {safe_str(e)}")
+        reporter.failed("read failed", e, preserved="local preserved")
         return "failed"
 
     if local_hash == remote_info.get("sha256"):
         return "unchanged"
 
     if should_merge(rel_path):
-        return _apply_merge(local_path, rel_path, plain_data, verbose=verbose)
+        return _apply_merge(local_path, rel_path, plain_data, verbose=verbose, reporter=reporter)
 
     # [S] local is newer. Keep local at canonical path \u2014 next push propagates it.
     remote_mtime_str = remote_mtime_iso
     local_mtime: datetime | None = None
     remote_mtime: datetime | None = None
+    local_newer = False
     try:
         local_mtime = mtime_from_path(local_path)
         if remote_mtime_str:
             remote_mtime = mtime_from_manifest(remote_mtime_str)
-    except (ValueError, OSError) as e:
+        local_newer = (
+            local_mtime is not None and remote_mtime is not None and local_mtime > remote_mtime
+        )
+    except (TypeError, ValueError, OverflowError, OSError) as e:
         # Malformed mtime or filesystem error: fall through to conflict path.
         console.print(
-            f"  [yellow]mtime parse failed (forcing conflict):[/yellow] "
+            f"  [yellow]timestamp could not be interpreted; treating as a conflict:[/yellow] "
             f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
         )
         local_mtime = None
         remote_mtime = None
-
-    if local_mtime is not None and remote_mtime is not None and local_mtime > remote_mtime:
+    if local_newer:
         if verbose:
-            console.print(f"  [dim]= {safe_str(rel_path)} (local newer, kept)[/dim]")
+            try:
+                console.print(f"  [dim]= {safe_str(rel_path)} (local newer, kept)[/dim]")
+            except (OSError, SystemExit):
+                pass
         return "skipped"
 
     # [C] conflict path. Optionally prompt the user; default keep-both.
@@ -2330,11 +2503,12 @@ def _apply_incoming_file(
             try:
                 fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
             except (OSError, StorageError) as e:
-                console.print(
-                    f"  [red]write failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}"
-                )
+                reporter.failed("write failed", e, preserved="local preserved")
                 return "failed"
+            reporter.published("written")
+            reporter.follow_up = "mtime restore"
             _restore_mtime_best_effort(local_path, remote_mtime_iso)
+            reporter.follow_up = "output"
             if verbose:
                 console.print(
                     f"  [yellow]\u2193[/yellow] {safe_str(rel_path)} (remote kept by user)"
@@ -2350,17 +2524,17 @@ def _apply_incoming_file(
             try:
                 fsutil.atomic_write_bytes(local_path, merged_bytes, fsync=False)
             except (OSError, StorageError) as e:
-                console.print(
-                    f"  [red]merge write failed:[/red] {safe_str(rel_path)} — {safe_str(e)}"
-                )
+                reporter.failed("merge write failed", e, preserved="local preserved")
                 return "failed"
+            reporter.published("merged-via-lcs")
+            reporter.follow_up = "output"
             if verbose:
                 console.print(f"  [cyan]merged[/cyan] {safe_str(rel_path)} (LCS)")
             return "merged-via-lcs"
         if choice == "abort":
             raise typer.Abort()
         # choice == "keep-both" -> fall through to _apply_conflict, returns
-        # "conflicted" on success. _download_and_apply will invalidate any
+        # "conflicted" on success. _ApplyReporter.record invalidates any
         # prior keep-canonical bump for this path on that outcome.
 
     return _apply_conflict(
@@ -2370,6 +2544,7 @@ def _apply_incoming_file(
         remote_device_id,
         verbose=verbose,
         remote_mtime_iso=remote_mtime_iso,
+        reporter=reporter,
     )
 
 
@@ -2385,6 +2560,8 @@ def _download_and_apply(
     quiet: bool = False,
     devices: list[dict[str, Any]] | None = None,
     pending_inline_bumps: dict[Path, float] | None = None,
+    *,
+    reporter: _ApplyReporter | None = None,
 ) -> tuple[int, dict[ApplyOutcome, list[str]]]:
     """Download blobs and dispatch each to _apply_incoming_file.
 
@@ -2392,15 +2569,15 @@ def _download_and_apply(
     outcomes_by_path groups rel_paths by outcome so callers can report
     per-outcome totals and write accurate sync logs.
 
-    ``pending_inline_bumps`` is the shared Track 12A accumulator. This function
-    owns the INVALIDATION half of the bump lifecycle: after every
-    ``_apply_incoming_file`` call, if the returned outcome is in
-    ``_CANONICAL_WRITE_OUTCOMES``, the corresponding entry is popped. RECORD
-    stays inside ``_apply_incoming_file``'s keep-canonical branch. Both halves
-    no-op when ``pending_inline_bumps`` is None (non-interactive pulls).
+    ``pending_inline_bumps`` is the shared Track 12A accumulator.
+    ``_ApplyReporter.record`` owns INVALIDATION: it pops on publication, or
+    on a non-publishing return in ``_CANONICAL_WRITE_OUTCOMES`` such as
+    sidecar dedup. RECORD stays inside ``_apply_incoming_file``'s
+    keep-canonical branch. Both halves no-op when ``pending_inline_bumps``
+    is None (non-interactive pulls).
 
     Progress display (Track 5B Task 4):
-      - quiet=True: silent. Autopull contract — no stdout/stderr noise.
+      - quiet=True: no progress output; apply failures still warn on stderr.
       - TTY + not quiet: Rich Progress widget renders bar + count + elapsed.
         First-pull-on-new-Mac case (the 2026-04-24 first-pull session): per-file
         backend.get(bkey) blocks on iCloud placeholder materialization;
@@ -2414,16 +2591,11 @@ def _download_and_apply(
       - to_download empty: skip the widget entirely (Rich Progress with
         total=0 risks empty-bar / div-by-zero rendering).
     """
-    bytes_transferred = 0
-    outcomes: dict[ApplyOutcome, list[str]] = {
-        "written": [],
-        "merged": [],
-        "merged-via-lcs": [],
-        "skipped": [],
-        "conflicted": [],
-        "unchanged": [],
-        "failed": [],
-    }
+    reporter = reporter or _ApplyReporter(
+        outcomes=_empty_outcomes(), pending_inline_bumps=pending_inline_bumps
+    )
+    assert reporter.outcomes is not None
+    outcomes = reporter.outcomes
 
     total = len(to_download)
     show_progress = bool(to_download) and not quiet
@@ -2439,6 +2611,7 @@ def _download_and_apply(
             TimeElapsedColumn(),
             console=console,
             transient=True,
+            redirect_stderr=False,
         )
         progress.start()
         task_id = progress.add_task("download", total=total)
@@ -2492,7 +2665,7 @@ def _download_and_apply(
                 _advance()
                 continue
 
-            bytes_transferred += len(enc_data)
+            reporter.bytes_transferred += len(enc_data)
             local_path = base_path / rel_path
 
             # Reject a local link at the destination or in a child component
@@ -2546,26 +2719,30 @@ def _download_and_apply(
                 _advance()
                 continue
 
-            outcome = _apply_incoming_file(
-                local_path=local_path,
-                rel_path=rel_path,
-                plain_data=plain_data,
-                remote_info=info,
-                remote_device_id=source_device_id,
-                interactive_resolve=interactive_resolve,
-                verbose=verbose and not quiet,
-                devices=devices,
-                pending_inline_bumps=pending_inline_bumps,
-                resolved_local=resolved_local,
-            )
-            outcomes[outcome].append(rel_path)
-            # Track 12A: centralized eligibility gate for the deferred
-            # keep-canonical bump. Any successful canonical mutation
-            # (write / merge / merge-via-lcs / conflicted-sidecar) voids a
-            # prior peer's pending keep-canonical decision for this resolved
-            # path. Success-only by construction — see _CANONICAL_WRITE_OUTCOMES.
-            if outcome in _CANONICAL_WRITE_OUTCOMES:
-                _invalidate_inline_bump(pending_inline_bumps, resolved_local)
+            reporter.begin(rel_path, local_path, resolved_local)
+            try:
+                outcome = _apply_incoming_file(
+                    local_path=local_path,
+                    rel_path=rel_path,
+                    plain_data=plain_data,
+                    remote_info=info,
+                    remote_device_id=source_device_id,
+                    interactive_resolve=interactive_resolve,
+                    verbose=verbose and not quiet,
+                    devices=devices,
+                    pending_inline_bumps=pending_inline_bumps,
+                    resolved_local=resolved_local,
+                    reporter=reporter,
+                )
+            except (OSError, MindMeldError) as e:
+                if reporter.recorded is None:
+                    reporter.failed("apply failed", e, preserved="local preserved")
+                else:
+                    reporter.follow_up_failed(e)
+            else:
+                # Also checks publication/return agreement. A mismatch is a
+                # programming error, never a contained per-file failure.
+                reporter.record(outcome)
             _advance()
     finally:
         # progress.stop() in its own try/except so a Rich render failure
@@ -2574,10 +2751,10 @@ def _download_and_apply(
         if progress is not None:
             try:
                 progress.stop()
-            except Exception:
+            except (Exception, SystemExit):
                 pass
 
-    return bytes_transferred, outcomes
+    return reporter.bytes_transferred, outcomes
 
 
 # ── init ──────────────────────────────────────────────────────────────
@@ -3905,6 +4082,10 @@ class _PerSourceResult:
     # limitation; this flag just makes sure single-device rename doesn't
     # silently break the per-project sync log.
     claude_sync_base: str | None = None
+    # Recovery may resume this helper after its output raises. Each forensic
+    # write is attempted once; replaying the whole block would duplicate rows.
+    history_recorded: set[tuple[str, str]] = field(default_factory=set, repr=False)
+    sync_log_attempted: bool = field(default=False, repr=False)
 
     @property
     def had_changes(self) -> bool:
@@ -4145,6 +4326,7 @@ def _pull_one_source(
     quiet: bool = False,
     devices: list[dict[str, Any]] | None = None,
     pending_inline_bumps: dict[Path, float] | None = None,
+    reporter: _ApplyReporter | None = None,
 ) -> _PerSourceResult:
     """Pull one source from one peer. Returns _PerSourceResult.
 
@@ -4159,14 +4341,22 @@ def _pull_one_source(
     `quiet` is the autopull flag — gates the Track 5B Task 4 download
     progress widget (silent in autopull, visible otherwise).
     """
+    reporter = reporter or _ApplyReporter(
+        device_name=dname,
+        src_name=src_name,
+        outcomes=_empty_outcomes(),
+        pending_inline_bumps=pending_inline_bumps,
+    )
+    assert reporter.outcomes is not None
     remote_files = src_data.get("files", {})
     base_result = _PerSourceResult(
         src_name=src_name,
         device_name=dname,
         device_id=did,
-        outcomes=_empty_outcomes(),
+        outcomes=reporter.outcomes,
         bytes_transferred=0,
-        touched_parents=set(),
+        touched_parents=reporter.touched_parents,
+        claude_sync_base=str(base_path) if src_type == "claude" else None,
     )
     if not remote_files:
         return base_result
@@ -4176,12 +4366,12 @@ def _pull_one_source(
     local_files: dict[str, dict] = {}
     for rel_path in remote_files:
         local_path = base_path / rel_path
-        if local_path.exists():
-            try:
+        try:
+            if local_path.exists():
                 sha = hash_file(local_path)
                 local_files[rel_path] = {"sha256": sha}
-            except (PermissionError, OSError):
-                pass
+        except (PermissionError, OSError):
+            pass
 
     # Arg-swap: this is the additive pull path. See diff_files docstring
     # — `new`/`modified` are files to download; `deleted` is ignored.
@@ -4212,16 +4402,8 @@ def _pull_one_source(
         quiet=quiet,
         devices=devices,
         pending_inline_bumps=pending_inline_bumps,
+        reporter=reporter,
     )
-
-    touched_parents: set[Path] = set()
-    for rel in (
-        outcomes["written"]
-        + outcomes["merged"]
-        + outcomes["merged-via-lcs"]
-        + outcomes["conflicted"]
-    ):
-        touched_parents.add((base_path / rel).parent)
 
     return _PerSourceResult(
         src_name=src_name,
@@ -4229,9 +4411,73 @@ def _pull_one_source(
         device_id=did,
         outcomes=outcomes,
         bytes_transferred=bt,
-        touched_parents=touched_parents,
+        touched_parents=reporter.touched_parents,
         claude_sync_base=str(base_path) if src_type == "claude" else None,
     )
+
+
+def _record_source_bookkeeping(
+    per_source: _PerSourceResult, src_data: dict, *, quiet: bool, verbose: bool
+) -> None:
+    """Attempt history and sync-log writes once, including during recovery."""
+    # Log per-file outcomes for `mm log` audit trail. "unchanged"
+    # is intentionally omitted — it represents apply-time
+    # convergence (no I/O), and logging it would dwarf the
+    # forensic signal in the file. All other outcomes ARE
+    # I/O events worth recording.
+    for action_key in (
+        "written",
+        "merged",
+        "merged-via-lcs",
+        "skipped",
+        "conflicted",
+        "failed",
+    ):
+        for rel_path in per_source.outcomes.get(action_key, []):
+            key = (action_key, rel_path)
+            if key in per_source.history_recorded:
+                continue
+            per_source.history_recorded.add(key)
+            remote_info = src_data.get("files", {}).get(rel_path, {})
+            pullhistory.append(
+                verb="pull",
+                device=per_source.device_id,
+                source=per_source.src_name,
+                rel_path=rel_path,
+                action=action_key,
+                remote_sha=remote_info.get("sha256"),
+            )
+
+    # Claude sync log is best-effort: log file is cosmetic
+    # signal for Claude Code, losing it on error is harmless.
+    # Swallowing the exception here protects the accumulated
+    # corrupt-peer / unknown-source warnings from being lost
+    # if write_sync_log raises.
+    if per_source.claude_sync_base is not None and not per_source.sync_log_attempted:
+        per_source.sync_log_attempted = True
+        try:
+            logs = write_sync_log(
+                claude_base=per_source.claude_sync_base,
+                device_name=per_source.device_name,
+                device_id=per_source.device_id,
+                new_files=per_source.outcomes["written"],
+                modified_files=(
+                    per_source.outcomes["merged"] + per_source.outcomes["merged-via-lcs"]
+                ),
+                deleted_files=[],
+                conflicted_files=per_source.outcomes["conflicted"],
+                skipped_files=per_source.outcomes["skipped"],
+            )
+        except (OSError, StorageError) as e:
+            msg = f"sync log write failed: {e}"
+            if quiet:
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"  [yellow]warning:[/yellow] {msg}")
+        else:
+            if verbose and not quiet and logs:
+                for log in logs:
+                    console.print(f"  [dim]wrote sync log: {log}[/dim]")
 
 
 def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
@@ -4245,7 +4491,9 @@ def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
     for parent_dir in sorted(touched_parents):
         try:
             fsutil.fsync_dir(parent_dir)
-        except StorageError as e:
+        except (OSError, StorageError) as e:
+            # Directory close can raise outside fsync_dir's StorageError
+            # wrapper. Recovery must still record completed publications.
             warnings.append(_FsyncWarning(parent_dir=parent_dir, error=str(e)))
     return warnings
 
@@ -4289,10 +4537,11 @@ def _format_inline_paths(paths: list[str], *, verbose: bool, sep: str) -> str:
     Caps to _INLINE_PATH_CAP unless verbose. Cap overflow renders as
     "(and N more)" suffix so users know they're seeing a slice.
     """
-    if verbose or len(paths) <= _INLINE_PATH_CAP:
-        return sep.join(paths)
-    shown = sep.join(paths[:_INLINE_PATH_CAP])
-    return f"{shown} (and {len(paths) - _INLINE_PATH_CAP} more)"
+    safe_paths = [safety.safe_terminal_str(p) for p in paths]
+    if verbose or len(safe_paths) <= _INLINE_PATH_CAP:
+        return sep.join(safe_paths)
+    shown = sep.join(safe_paths[:_INLINE_PATH_CAP])
+    return f"{shown} (and {len(safe_paths) - _INLINE_PATH_CAP} more)"
 
 
 def _print_inline_paths(paths: list[str], *, verbose: bool, color: str) -> None:
@@ -4304,7 +4553,7 @@ def _print_inline_paths(paths: list[str], *, verbose: bool, color: str) -> None:
     """
     cap = len(paths) if verbose else min(_INLINE_PATH_CAP, len(paths))
     for p in paths[:cap]:
-        console.print(f"    [{color}]- {p}[/{color}]")
+        console.print(f"    [{color}]- {safe_str(p)}[/{color}]")
     if not verbose and len(paths) > cap:
         console.print(f"    [dim]... and {len(paths) - cap} more[/dim]")
 
@@ -4317,6 +4566,8 @@ def _print_pull_summary(
     per_source_results: list[_PerSourceResult],
     quiet: bool,
     verbose: bool,
+    *,
+    interruption: Literal["interrupted", "aborted"] | None = None,
 ) -> None:
     """Single I/O owner for pull output.
 
@@ -4375,14 +4626,16 @@ def _print_pull_summary(
             if src_conflicted:
                 paths = _format_inline_paths(r.outcomes["conflicted"], verbose=verbose, sep=", ")
                 print(
-                    f"mm: warning: {r.device_name}/{r.src_name} — "
+                    f"mm: warning: {safety.safe_terminal_str(r.device_name)}/"
+                    f"{safety.safe_terminal_str(r.src_name)} — "
                     f"{src_conflicted} conflicts: {paths}",
                     file=sys.stderr,
                 )
             if src_failed:
                 paths = _format_inline_paths(r.outcomes["failed"], verbose=verbose, sep=", ")
                 print(
-                    f"mm: warning: {r.device_name}/{r.src_name} — {src_failed} failed: {paths}",
+                    f"mm: warning: {safety.safe_terminal_str(r.device_name)}/"
+                    f"{safety.safe_terminal_str(r.src_name)} — {src_failed} failed: {paths}",
                     file=sys.stderr,
                 )
         return
@@ -4417,7 +4670,21 @@ def _print_pull_summary(
                 _print_inline_paths(r.outcomes["failed"], verbose=verbose, color="red")
 
     # Totals.
-    console.print("\n[bold green]Pull complete.[/bold green]")
+    if interruption == "aborted":
+        console.print("\n[bold yellow]Pull aborted; completed changes were kept.[/bold yellow]")
+    elif interruption == "interrupted":
+        console.print(
+            "\n[bold yellow]Pull interrupted; completed changes were kept. "
+            "Run 'mm pull' to continue.[/bold yellow]"
+        )
+    elif result.total_failed:
+        console.print(
+            f"\n[bold yellow]Pull incomplete: {result.total_written} written, "
+            f"{result.total_failed} failed.[/bold yellow] Fix the warning above, "
+            "then run 'mm pull'; failed files are retried automatically on the next pull."
+        )
+    else:
+        console.print("\n[bold green]Pull complete.[/bold green]")
     parts = []
     if result.total_written:
         parts.append(f"{result.total_written} written")
@@ -4485,9 +4752,10 @@ def iter_source_diffs(
 
 # ── _pull_core: decomposition pattern ──────────────────────────────────
 #
-# _pull_core follows a "helpers return data, _print_pull_summary owns
-# user-visible output" pattern. Each helper performs its own storage /
-# filesystem I/O but does NOT call console.print. Load-bearing warnings
+# _pull_core aggregates source results; _print_pull_summary owns totals.
+# _ApplyReporter records at publication and emits per-file diagnostics.
+# On interruption, fsync runs first, then guarded forensic bookkeeping;
+# summary/teardown cannot replace the original exception. Load-bearing warnings
 # (corrupt peers, unknown sources, fsync failures, per-source
 # conflicts/failures) are accumulated into lists and routed to stderr by
 # _print_pull_summary — they survive quiet-mode suppression.
@@ -4685,6 +4953,25 @@ def _pull_core(
     total_written = total_merged = total_skipped = total_conflicted = 0
     total_failed = total_skipped_unknown_source = bytes_transferred = 0
 
+    in_flight: _ApplyReporter | None = None
+    per_source: _PerSourceResult | None = None
+    accounted = False
+    interruption: Literal["interrupted", "aborted"] | None = None
+
+    def _account_source(per_source: _PerSourceResult) -> None:
+        nonlocal bytes_transferred, total_written, total_merged, total_skipped
+        nonlocal total_conflicted, total_failed, touched_parents
+        per_source_results.append(per_source)
+        bytes_transferred += per_source.bytes_transferred
+        touched_parents |= per_source.touched_parents
+        total_written += len(per_source.outcomes["written"])
+        total_merged += len(per_source.outcomes["merged"]) + len(
+            per_source.outcomes["merged-via-lcs"]
+        )
+        total_skipped += len(per_source.outcomes["skipped"])
+        total_conflicted += len(per_source.outcomes["conflicted"])
+        total_failed += len(per_source.outcomes["failed"])
+
     try:
         for device in pull_targets:
             did = device["device_id"]
@@ -4719,6 +5006,14 @@ def _pull_core(
                         f"  [bold]Source '{safe_str(src_name)}' ({safe_str(base_path)}):[/bold]"
                     )
 
+                in_flight = _ApplyReporter(
+                    device_name=dname,
+                    src_name=src_name,
+                    outcomes=_empty_outcomes(),
+                    pending_inline_bumps=pending_inline_bumps,
+                )
+                per_source = None
+                accounted = False
                 per_source = _pull_one_source(
                     backend,
                     src_name=src_name,
@@ -4736,15 +5031,18 @@ def _pull_core(
                     quiet=quiet,
                     devices=all_devices,
                     pending_inline_bumps=pending_inline_bumps,
+                    reporter=in_flight,
                 )
 
                 if dry_run and per_source.dry_run_diff is not None:
                     if not quiet:
                         console.print(f"  Dry run for {safe_str(dname)}/{safe_str(src_name)}:")
                         _print_pull_prediction(per_source.dry_run_diff, base_path, src_name)
+                    in_flight = None
                     continue
 
                 if not per_source.had_changes:
+                    in_flight = None
                     if verbose and not quiet:
                         console.print(
                             f"  [green]Up to date with "
@@ -4752,72 +5050,12 @@ def _pull_core(
                         )
                     continue
 
-                per_source_results.append(per_source)
-                bytes_transferred += per_source.bytes_transferred
-                touched_parents |= per_source.touched_parents
-                total_written += len(per_source.outcomes["written"])
-                total_merged += len(per_source.outcomes["merged"]) + len(
-                    per_source.outcomes["merged-via-lcs"]
-                )
-                total_skipped += len(per_source.outcomes["skipped"])
-                total_conflicted += len(per_source.outcomes["conflicted"])
-                total_failed += len(per_source.outcomes["failed"])
+                _account_source(per_source)
+                accounted = True
                 device_had_changes = True
 
-                # Log per-file outcomes for `mm log` audit trail. "unchanged"
-                # is intentionally omitted — it represents apply-time
-                # convergence (no I/O), and logging it would dwarf the
-                # forensic signal in the file. All other outcomes ARE
-                # I/O events worth recording.
-                for action_key in (
-                    "written",
-                    "merged",
-                    "merged-via-lcs",
-                    "skipped",
-                    "conflicted",
-                    "failed",
-                ):
-                    for rel_path in per_source.outcomes.get(action_key, []):
-                        remote_info = src_data.get("files", {}).get(rel_path, {})
-                        pullhistory.append(
-                            verb="pull",
-                            device=did,
-                            source=src_name,
-                            rel_path=rel_path,
-                            action=action_key,
-                            remote_sha=remote_info.get("sha256"),
-                        )
-
-                # Claude sync log is best-effort: log file is cosmetic
-                # signal for Claude Code, losing it on error is harmless.
-                # Swallowing the exception here protects the accumulated
-                # corrupt-peer / unknown-source warnings from being lost
-                # if write_sync_log raises.
-                if per_source.claude_sync_base is not None:
-                    try:
-                        logs = write_sync_log(
-                            claude_base=per_source.claude_sync_base,
-                            device_name=dname,
-                            device_id=did,
-                            new_files=per_source.outcomes["written"],
-                            modified_files=(
-                                per_source.outcomes["merged"]
-                                + per_source.outcomes["merged-via-lcs"]
-                            ),
-                            deleted_files=[],
-                            conflicted_files=per_source.outcomes["conflicted"],
-                            skipped_files=per_source.outcomes["skipped"],
-                        )
-                    except (OSError, StorageError) as e:
-                        msg = f"sync log write failed: {e}"
-                        if quiet:
-                            print(f"mm: warning: {msg}", file=sys.stderr)
-                        else:
-                            console.print(f"  [yellow]warning:[/yellow] {msg}")
-                    else:
-                        if verbose and not quiet and logs:
-                            for log in logs:
-                                console.print(f"  [dim]wrote sync log: {log}[/dim]")
+                _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
+                in_flight = None
 
             if device_had_changes:
                 device_names.append(dname)
@@ -4825,14 +5063,20 @@ def _pull_core(
                 # effort: a failure here just leaves dup conflict copies on
                 # disk for the next pull to retry. Swallowing protects
                 # accumulated warnings from the visible-failure contract.
-                try:
-                    _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
-                except (OSError, StorageError) as e:
-                    msg = f"manifest conflict-copy cleanup failed for {dname}: {e}"
-                    if quiet:
-                        print(f"mm: warning: {msg}", file=sys.stderr)
-                    else:
-                        console.print(f"  [yellow]warning:[/yellow] {msg}")
+                # Skip after a contained apply failure so an alternate
+                # conflict-copy of this device's manifest remains for retry.
+                device_failed = any(
+                    r.device_id == did and r.outcomes["failed"] for r in per_source_results
+                )
+                if not device_failed:
+                    try:
+                        _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
+                    except (OSError, StorageError) as e:
+                        msg = f"manifest conflict-copy cleanup failed for {dname}: {e}"
+                        if quiet:
+                            print(f"mm: warning: {msg}", file=sys.stderr)
+                        else:
+                            console.print(f"  [yellow]warning:[/yellow] {msg}")
 
         fsync_warnings = _fsync_touched_parents(touched_parents)
 
@@ -4843,6 +5087,33 @@ def _pull_core(
         # abort means the user does not trust this pull, so half-made
         # keep-canonical decisions are not broadcast to the fleet.
         _drain_inline_bumps(pending_inline_bumps)
+    except BaseException as exc:
+        # A finally-with-access-to-the-error: preserve completed publications
+        # for every exception class, then re-raise the ORIGINAL exception.
+        # Ctrl-C waits for bounded directory fsync. A second Ctrl-C during
+        # recovery can replace the first traceback (accepted residual window).
+        if in_flight is not None:
+            if per_source is None:
+                assert in_flight.outcomes is not None
+                per_source = _PerSourceResult(
+                    src_name=src_name,
+                    device_name=dname,
+                    device_id=did,
+                    outcomes=in_flight.outcomes,
+                    bytes_transferred=in_flight.bytes_transferred,
+                    touched_parents=in_flight.touched_parents,
+                    claude_sync_base=str(base_path) if src_type == "claude" else None,
+                )
+            if not accounted:
+                _account_source(per_source)
+        fsync_warnings = _fsync_touched_parents(touched_parents)
+        if in_flight is not None:
+            try:
+                _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
+            except (Exception, SystemExit):
+                pass
+        interruption = "aborted" if isinstance(exc, typer.Abort) else "interrupted"
+        raise
     finally:
         # Even if an unexpected exception propagates from the loop above,
         # emit accumulated load-bearing warnings to stderr. The v0.8.1
@@ -4861,15 +5132,21 @@ def _pull_core(
             durability_fsync_failures=len(fsync_warnings),
             corrupt_peer_count=len(corrupt_peers),
         )
-        _print_pull_summary(
-            _partial_result,
-            corrupt_peers=corrupt_peers,
-            unknown_sources=unknown_sources,
-            fsync_warnings=fsync_warnings,
-            per_source_results=per_source_results,
-            quiet=quiet,
-            verbose=verbose,
-        )
+        exception_in_flight = sys.exc_info()[0] is not None
+        try:
+            _print_pull_summary(
+                _partial_result,
+                corrupt_peers=corrupt_peers,
+                unknown_sources=unknown_sources,
+                fsync_warnings=fsync_warnings,
+                per_source_results=per_source_results,
+                quiet=quiet,
+                verbose=verbose,
+                interruption=interruption,
+            )
+        except (Exception, SystemExit):
+            if not exception_in_flight:
+                raise
 
     return _partial_result
 
@@ -4975,6 +5252,16 @@ def status(
             f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})"
             f"{_breadcrumb_staleness_suffix(ts)}"
         )
+        if (
+            verb == "pull"
+            and outcome == "degraded"
+            and isinstance(detail, str)
+            and "file(s) failed" in detail
+        ):
+            console.print(
+                "  [yellow]Files failed to apply on the last auto-pull:[/yellow] "
+                "run [bold]mm pull[/bold] to see the warnings and retry"
+            )
         if (
             verb == "push"
             and outcome == "degraded"
@@ -8303,8 +8590,8 @@ def autopull() -> None:
             # silent-failure pattern Track 1A's helper-level audit was meant
             # to close.
             print(
-                f"mm: {result.total_failed} file(s) failed - "
-                "run 'mm pull --verbose' to see details",
+                f"mm: {result.total_failed} file(s) failed to apply - "
+                "see the warnings above; they retry on the next pull",
                 file=sys.stderr,
             )
 

@@ -2993,3 +2993,560 @@ class TestSnapshotPublicationHelpers:
                 [{"name": "gstack", "path": str(root)}],
                 max_file_size=1024,
             )
+
+
+@pytest.fixture
+def ordered_apply(tmp_path, monkeypatch):
+    """Explicit apply order; full pull's new-before-modified scheduler is separate."""
+    from mind_meld import cli
+    from mind_meld.crypto import encrypt
+    from mind_meld.storage.keys import blob_key
+
+    base = tmp_path / "apply"
+    base.mkdir()
+
+    def prepare(files, *, interactive=False, verbose=False, reporter=True):
+        payloads = {
+            blob_key("peer-123", _sha(data)): encrypt(data, "pw", 1024) for _, data, _ in files
+        }
+        backend = MagicMock()
+        backend.get.side_effect = payloads.__getitem__
+        pending = {(base / rel).resolve(): 1.0 for rel, _, _ in files}
+        ledger = cli._ApplyReporter(
+            device_name="Mac A",
+            src_name="claude",
+            outcomes=cli._empty_outcomes(),
+            pending_inline_bumps=pending,
+        )
+        entries = {rel: {"sha256": _sha(data), "mtime": mtime} for rel, data, mtime in files}
+
+        def run():
+            return cli._download_and_apply(
+                backend,
+                base,
+                entries,
+                "peer-123",
+                "pw",
+                1024,
+                interactive_resolve=interactive,
+                verbose=verbose,
+                quiet=not verbose,
+                pending_inline_bumps=pending,
+                reporter=ledger if reporter else None,
+            )
+
+        return run, ledger, backend, pending
+
+    return base, prepare
+
+
+class TestApplyExceptionBoundary53A:
+    @pytest.mark.parametrize("blocked", ["blocked/inside.txt", "blocked/deeper/inside.txt"])
+    def test_collision_continues_in_explicit_order(self, ordered_apply, capsys, blocked):
+        base, prepare = ordered_apply
+        (base / "blocked").write_bytes(b"mine")
+        run, ledger, _, pending = prepare(
+            [
+                ("earlier.txt", b"earlier", None),
+                (blocked, b"peer", None),
+                ("later.txt", b"later", None),
+            ]
+        )
+        _, outcomes = run()
+        assert outcomes["written"] == ["earlier.txt", "later.txt"]
+        assert outcomes["failed"] == [blocked]
+        assert (base / "blocked").read_bytes() == b"mine"
+        assert (base / "later.txt").read_bytes() == b"later"
+        assert pending == {(base / blocked).resolve(): 1.0}
+        assert base in ledger.touched_parents
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert len(captured.err.splitlines()) == 1
+        assert "Mac A/claude/" + blocked in captured.err
+        assert "Mac A published a folder named 'blocked' where this Mac has a file" in captured.err
+
+    @pytest.mark.parametrize("error", [TypeError, ValueError, OverflowError, OSError])
+    def test_gate_and_prediction_degrade(self, ordered_apply, monkeypatch, capsys, error):
+        from mind_meld import cli
+
+        base, prepare = ordered_apply
+        (base / "notes.md").write_bytes(b"local")
+
+        def boom(*args):
+            raise error("bad clock")
+
+        monkeypatch.setattr(cli, "mtime_from_path", boom)
+        assert cli._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer")}, base) == "conflict"
+        run, _, _, _ = prepare([("notes.md", b"peer", 1234), ("later.txt", b"later", None)])
+        _, outcomes = run()
+        assert outcomes["conflicted"] == ["notes.md"]
+        assert (base / "later.txt").read_bytes() == b"later"
+        assert (
+            "timestamp could not be interpreted; treating as a conflict" in capsys.readouterr().out
+        )
+
+    def test_int_mtime_reaches_direct_gate(self, ordered_apply, capsys):
+        from mind_meld import cli
+
+        base, prepare = ordered_apply
+        (base / "notes.md").write_bytes(b"local")
+        assert (
+            cli._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer"), "mtime": 1234}, base)
+            == "conflict"
+        )
+        run, _, _, _ = prepare([("notes.md", b"peer", 1234), ("later.txt", b"later", None)])
+        assert run()[1]["conflicted"] == ["notes.md"]
+        assert "timestamp could not be interpreted" in capsys.readouterr().out
+
+    def test_naive_mtime_conflicts_and_later_file_arrives(self, ordered_apply, capsys):
+        from mind_meld import cli
+
+        base, prepare = ordered_apply
+        (base / "notes.md").write_bytes(b"local")
+        naive = "2026-09-08T12:00:00"
+        assert (
+            cli._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer"), "mtime": naive}, base)
+            == "conflict"
+        )
+        run, _, _, _ = prepare([("notes.md", b"peer", naive), ("later.txt", b"later", None)])
+        assert run()[1]["conflicted"] == ["notes.md"]
+        assert (base / "later.txt").read_bytes() == b"later"
+        assert "timestamp could not be interpreted" in capsys.readouterr().out
+
+    def test_verbose_skip_print_error_does_not_conflict(self, ordered_apply, monkeypatch):
+        from mind_meld import cli
+
+        base, prepare = ordered_apply
+        (base / "notes.md").write_bytes(b"local")
+        os.utime(base / "notes.md", (3_000_000_000, 3_000_000_000))
+        original = cli.console.print
+
+        def boom(*args, **kwargs):
+            if args and "local newer" in str(args[0]):
+                raise OSError("stdout dead")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(cli.console, "print", boom)
+        run, _, _, _ = prepare([("notes.md", b"peer", "2020-01-01T00:00:00+00:00")], verbose=True)
+        _, outcomes = run()
+        assert outcomes["skipped"] == ["notes.md"]
+        assert not outcomes["failed"]
+        assert not outcomes["conflicted"]
+        assert (base / "notes.md").read_bytes() == b"local"
+        assert not list(base.glob("*.sync-conflict-*"))
+
+    @pytest.mark.parametrize(
+        "number,remedy",
+        [
+            (errno.EACCES, "check write permission"),
+            (errno.EPERM, "check write permission"),
+            (errno.EROFS, "check write permission"),
+            (errno.ENOSPC, "free disk space"),
+        ],
+    )
+    def test_mkdir_remedy(self, ordered_apply, monkeypatch, capsys, number, remedy):
+        base, prepare = ordered_apply
+        original = Path.mkdir
+
+        def denied(path, *args, **kwargs):
+            if path == base / "folder":
+                raise OSError(number, "mkdir denied")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", denied)
+        run, _, _, _ = prepare([("folder/a.txt", b"a", None), ("later.txt", b"later", None)])
+        assert run()[1]["failed"] == ["folder/a.txt"]
+        assert (base / "later.txt").exists()
+        assert remedy in capsys.readouterr().err
+
+    def test_all_created_directory_entries_are_registered(self, ordered_apply):
+        base, prepare = ordered_apply
+        run, ledger, _, _ = prepare([("one/two/three/file.txt", b"a", None)])
+        run()
+        assert ledger.touched_parents == {
+            base,
+            base / "one",
+            base / "one/two",
+            base / "one/two/three",
+        }
+
+    def test_partial_mkdir_registers_created_prefix(self, ordered_apply, monkeypatch):
+        base, prepare = ordered_apply
+        original = Path.mkdir
+
+        def denied(path, *args, **kwargs):
+            if path == base / "one/two":
+                raise OSError(errno.EACCES, "mkdir denied")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", denied)
+        run, ledger, _, _ = prepare(
+            [("one/two/file.txt", b"a", None), ("one/good.txt", b"g", None)]
+        )
+        _, outcomes = run()
+        assert outcomes["failed"] == ["one/two/file.txt"]
+        assert (base / "one/good.txt").read_bytes() == b"g"
+        assert (base / "one").is_dir()
+        assert base in ledger.touched_parents
+
+    def test_progress_does_not_redirect_stderr(self, ordered_apply, monkeypatch):
+        from mind_meld import cli
+
+        kwargs_list = []
+
+        def capture(*args, **kwargs):
+            kwargs_list.append(kwargs)
+            progress = MagicMock()
+            progress.add_task.return_value = 1
+            return progress
+
+        monkeypatch.setattr(cli, "Progress", capture)
+        monkeypatch.setattr(cli.console, "_force_terminal", True)
+        _, prepare = ordered_apply
+        run, _, _, _ = prepare([("file.txt", b"a", None)], verbose=True)
+        run()
+        assert kwargs_list
+        assert kwargs_list[0].get("redirect_stderr") is False
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError,
+            StorageError,
+            SnapshotError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            SystemExit,
+            KeyboardInterrupt,
+        ],
+    )
+    def test_exact_boundary_set(self, ordered_apply, monkeypatch, capsys, error):
+        from mind_meld import cli
+
+        base, prepare = ordered_apply
+        original = cli._apply_incoming_file
+        exc = error("apply boom")
+
+        def apply(**kwargs):
+            if kwargs["rel_path"] == "broken.txt":
+                raise exc
+            return original(**kwargs)
+
+        monkeypatch.setattr(cli, "_apply_incoming_file", apply)
+        run, ledger, _, _ = prepare(
+            [("earlier.txt", b"a", None), ("broken.txt", b"b", None), ("later.txt", b"c", None)]
+        )
+        if issubclass(error, (OSError, cli.MindMeldError)):
+            assert run()[1]["failed"] == ["broken.txt"]
+            assert (base / "later.txt").exists()
+            assert capsys.readouterr().err.count("mm: warning:") == 1
+        else:
+            with pytest.raises(error) as raised:
+                run()
+            assert raised.value is exc
+            assert ledger.outcomes["written"] == ["earlier.txt"]
+            assert not ledger.outcomes["failed"]
+            assert not (base / "later.txt").exists()
+
+    def test_abort_and_progress_systemexit_preserve_original(self, ordered_apply, monkeypatch):
+        import typer
+
+        from mind_meld import cli
+
+        _, prepare = ordered_apply
+        exc = typer.Abort()
+
+        def abort(**kwargs):
+            raise exc
+
+        monkeypatch.setattr(cli, "_apply_incoming_file", abort)
+        monkeypatch.setattr(cli.console, "_force_terminal", True)
+        progress = MagicMock()
+        progress.stop.side_effect = SystemExit(17)
+        monkeypatch.setattr(cli, "Progress", lambda *a, **kw: progress)
+        run, _, _, _ = prepare([("file.txt", b"a", None)], verbose=True)
+        with pytest.raises(typer.Abort) as raised:
+            run()
+        assert raised.value is exc
+        progress.stop.assert_called_once()
+
+    def test_mismatched_publication_is_a_bug(self, ordered_apply, monkeypatch):
+        from mind_meld import cli
+
+        _, prepare = ordered_apply
+        original = cli._apply_write
+
+        def mismatch(*args, **kwargs):
+            assert original(*args, **kwargs) == "written"
+            return "merged"
+
+        monkeypatch.setattr(cli, "_apply_write", mismatch)
+        run, ledger, _, _ = prepare([("file.txt", b"a", None)])
+        with pytest.raises(RuntimeError, match="apply outcome changed"):
+            run()
+        assert ledger.outcomes["written"] == ["file.txt"]
+        assert not ledger.outcomes["merged"]
+
+    def test_dead_stderr_does_not_stop_batch(self, ordered_apply, monkeypatch):
+        import builtins
+        import sys
+
+        base, prepare = ordered_apply
+        (base / "blocked").write_bytes(b"mine")
+        original = builtins.print
+        attempts = []
+
+        def closed(*args, **kwargs):
+            if kwargs.get("file") is sys.stderr:
+                attempts.append(args)
+                raise BrokenPipeError("closed stderr")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(builtins, "print", closed)
+        run, _, _, _ = prepare([("blocked/file.txt", b"a", None), ("later.txt", b"b", None)])
+        assert run()[1]["written"] == ["later.txt"]
+        assert len(attempts) == 1
+
+    @pytest.mark.parametrize(
+        "number,remedy",
+        [(errno.ENOSPC, "free disk space"), (errno.EROFS, "check write permission")],
+    )
+    def test_wrapped_errno_and_hostile_fields_are_one_line(self, tmp_path, capsys, number, remedy):
+        from mind_meld import cli
+
+        try:
+            raise OSError(number, "cause\r\n\t\x1b[2J")
+        except OSError as cause:
+            try:
+                raise StorageError("wrapper\r\n\t\x1b[2J") from cause
+            except StorageError as exc:
+                cli._warn_apply_failure(
+                    "Mac\nA",
+                    "src\tname",
+                    "file\r\n\t\x1b[2J",
+                    tmp_path / "parent\nname/file",
+                    "write failed\n",
+                    exc,
+                    preserved="local\rpreserved",
+                )
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert len(out.err.splitlines()) == 1
+        assert all(ch.isprintable() for ch in out.err.rstrip("\n"))
+        assert remedy in out.err
+        assert cli.PULL_FAILURES_URL in out.err
+
+    def test_follow_up_notice_hostile_fields_are_one_line(self, tmp_path, capsys):
+        from mind_meld import cli
+
+        reporter = cli._ApplyReporter(
+            rel_path="x",
+            local_path=tmp_path / "file\r\n\t\x1b[2J",
+        )
+        reporter.recorded = "written"
+        reporter.follow_up = "mtime\rrestore\n\x1b[2J"
+        reporter.follow_up_failed(OSError("cause\r\n\t\x1b[2J"))
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert len(out.err.splitlines()) == 1
+        assert all(ch.isprintable() for ch in out.err.rstrip("\n"))
+        assert "mm: notice:" in out.err
+
+
+@pytest.mark.parametrize(
+    "site,word",
+    [
+        ("write", "written"),
+        ("merge", "merged"),
+        ("conflict", "conflicted"),
+        ("keep-remote", "written"),
+        ("lcs", "merged-via-lcs"),
+    ],
+)
+@pytest.mark.parametrize("tail_error", [None, OSError, RuntimeError, SystemExit, KeyboardInterrupt])
+def test_53a_all_publications_precede_fallible_tail(
+    ordered_apply, monkeypatch, capsys, site, word, tail_error
+):
+    from mind_meld import cli
+
+    base, prepare = ordered_apply
+    rel = "notes.jsonl" if site == "merge" else "notes.md"
+    data = b'{"remote":1}\n' if site == "merge" else b"remote\n"
+    if site != "write":
+        (base / rel).write_bytes(b'{"local":1}\n' if site == "merge" else b"local\n")
+        os.utime(base / rel, (1, 1))
+    if site in ("keep-remote", "lcs"):
+        monkeypatch.setattr(
+            cli,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("merge" if site == "lcs" else "keep-remote", b"local\nremote\n"),
+        )
+    run, ledger, _, pending = prepare(
+        [(rel, data, "2020-01-01T00:00:00+00:00")],
+        interactive=site in ("keep-remote", "lcs"),
+        verbose=True,
+    )
+    original_published = ledger.published
+    calls = []
+
+    def published(outcome):
+        calls.append(outcome)
+        original_published(outcome)
+
+    ledger.published = published
+    original_restore = cli._restore_mtime_best_effort
+    original_print = cli.console.print
+    tail_calls = []
+    exc = tail_error("tail boom") if tail_error else None
+
+    def tail():
+        tail_calls.append(True)
+        assert calls == [word]
+        assert ledger.outcomes[word] == [rel]
+        assert not pending
+        assert base in ledger.touched_parents
+        if exc is not None:
+            raise exc
+
+    def restore(*args, **kwargs):
+        tail()
+        return original_restore(*args, **kwargs)
+
+    def output(*args, **kwargs):
+        if calls:
+            tail()
+        return original_print(*args, **kwargs)
+
+    if site in ("write", "keep-remote", "conflict"):
+        monkeypatch.setattr(cli, "_restore_mtime_best_effort", restore)
+    else:
+        monkeypatch.setattr(cli.console, "print", output)
+    if tail_error and tail_error is not OSError:
+        with pytest.raises(tail_error) as raised:
+            run()
+        assert raised.value is exc
+    else:
+        assert run()[1][word] == [rel]
+    assert calls == [word]
+    assert tail_calls
+    assert ledger.outcomes[word] == [rel]
+    assert not ledger.outcomes["failed"]
+    if site == "conflict":
+        assert (base / rel).read_bytes() == b"local\n"
+        assert next(base.glob("*.sync-conflict-*")).read_bytes() == data
+    else:
+        assert b"remote" in (base / rel).read_bytes()
+    if tail_error is OSError:
+        err = capsys.readouterr().err
+        assert "mm: notice:" in err
+        assert ("conflict copy saved" if site == "conflict" else "file ") in err
+        assert ("output failed" if site in ("merge", "lcs") else "mtime restore failed") in err
+
+
+@pytest.mark.parametrize(
+    "site,operation",
+    [
+        ("write", "write failed"),
+        ("merge", "merge failed"),
+        ("read", "read failed"),
+        ("keep-remote", "write failed"),
+        ("lcs", "merge write failed"),
+        ("path", "conflict path build failed"),
+        ("sidecar", "sidecar write failed"),
+    ],
+)
+def test_53a_every_helper_failure_uses_attributed_stderr(
+    ordered_apply, monkeypatch, capsys, site, operation
+):
+    from mind_meld import cli
+
+    base, prepare = ordered_apply
+    rel = "notes.jsonl" if site == "merge" else "notes.md"
+    if site != "write":
+        (base / rel).write_bytes(b"local\n")
+        os.utime(base / rel, (1, 1))
+    if site in ("keep-remote", "lcs"):
+        monkeypatch.setattr(
+            cli,
+            "_prompt_conflict_choice",
+            lambda *a, **kw: ("merge" if site == "lcs" else "keep-remote", b"merged\n"),
+        )
+
+    def boom(*args, **kwargs):
+        raise StorageError("write refused") from OSError(errno.ENOSPC, "full")
+
+    if site == "read":
+
+        def read_boom(*args):
+            raise PermissionError(errno.EACCES, "read denied")
+
+        monkeypatch.setattr(cli, "hash_file", read_boom)
+    elif site == "path":
+
+        def path_boom(*args):
+            raise ValueError("bad device")
+
+        monkeypatch.setattr(cli, "conflict_filename", path_boom)
+    else:
+        monkeypatch.setattr(cli.fsutil, "atomic_write_bytes", boom)
+    run, _, _, pending = prepare(
+        [(rel, b"remote\n", "2020-01-01T00:00:00+00:00")],
+        interactive=site in ("keep-remote", "lcs"),
+    )
+    assert run()[1]["failed"] == [rel]
+    assert pending
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert operation in captured.err
+    assert "Mac A/claude/" + rel in captured.err
+
+
+def test_53a_default_download_reporter_preserves_direct_calls(ordered_apply):
+    base, prepare = ordered_apply
+    run, _, _, pending = prepare([("new.txt", b"remote", None)], reporter=False)
+    assert run()[1]["written"] == ["new.txt"]
+    assert (base / "new.txt").read_bytes() == b"remote"
+    assert not pending
+
+
+def test_53a_prescan_exists_permission_error_reaches_apply(tmp_path, monkeypatch, capsys):
+    from mind_meld import cli
+    from mind_meld.crypto import encrypt
+
+    base = tmp_path / "source"
+    base.mkdir()
+    path = base / "notes.md"
+    path.write_bytes(b"local")
+    original_exists = Path.exists
+    calls = []
+
+    def exists(candidate):
+        if candidate == path:
+            calls.append(candidate)
+            raise PermissionError(errno.EACCES, "denied")
+        return original_exists(candidate)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    backend = MagicMock()
+    backend.get.return_value = encrypt(b"peer", "pw", 1024)
+    result = cli._pull_one_source(
+        backend,
+        src_name="claude",
+        src_type="claude",
+        src_data={"files": {"notes.md": {"sha256": _sha(b"peer"), "mtime": None}}},
+        did="peer",
+        dname="Mac A",
+        base_path=base,
+        all_tombstones={},
+        passphrase="pw",
+        memory_kb=1024,
+        interactive_resolve=False,
+        dry_run=False,
+        verbose_console=False,
+        quiet=True,
+    )
+    assert len(calls) >= 2
+    assert result.outcomes["failed"] == ["notes.md"]
+    assert "check write permission" in capsys.readouterr().err

@@ -5527,3 +5527,532 @@ class TestCompleteSnapshots:
         combined = (result.output + (result.stderr or "")).replace("\n", " ")
         assert "missing after" in combined
         assert "no sync sources found" not in combined
+
+
+@pytest.fixture
+def apply_failure_fleet(tmp_path, monkeypatch):
+    """Real encrypted peers and CLI, all state isolated by conftest into tmp_path."""
+    from types import SimpleNamespace
+
+    from mind_meld import pullhistory
+    from mind_meld.storage.keys import blob_key, manifest_key
+
+    storage_dir = tmp_path / "storage53"
+    base = tmp_path / "claude53"
+    memory = base / "projects/-app/memory"
+    memory.mkdir(parents=True)
+    backend = LocalBackend(storage_dir)
+    init = bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    crypto_module.set_crypto_session(init.root_salt, MEMORY_KB)
+    register_device(backend, "dev-b", "Mac B")
+    config_path = TestPushPullRoundTrip()._make_config(
+        tmp_path, storage_dir, base, "dev-b", "Mac B"
+    )
+    monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    prefix = "projects/-app/memory/"
+
+    def publish(files, *, peer="dev-a", name="Mac A", metadata=None):
+        register_device(backend, peer, name)
+        entries = {}
+        for rel, data in files.items():
+            digest = hashlib.sha256(data).hexdigest()
+            backend.put(blob_key(peer, digest), encrypt(data, PASSPHRASE, MEMORY_KB))
+            entries[prefix + rel] = {
+                "sha256": digest,
+                "size": len(data),
+                "mtime": "2020-01-01T00:00:00+00:00",
+            }
+        if metadata:
+            for rel, value in metadata.items():
+                entries[prefix + rel] = value
+        document = {
+            "version": 2,
+            "device_id": peer,
+            "sources": {"claude": {"files": entries}},
+            "tombstones": {},
+        }
+        backend.put(
+            manifest_key(peer), encrypt(serialize_manifest(document), PASSPHRASE, MEMORY_KB)
+        )
+
+    calls = []
+    original_fsync = fsutil.fsync_dir
+
+    def fsync(path):
+        calls.append(Path(path))
+        original_fsync(path)
+
+    monkeypatch.setattr(fsutil, "fsync_dir", fsync)
+
+    def records():
+        return [r for r in pullhistory.read_records() if r.get("verb") == "pull"]
+
+    def ordered(names):
+        # Pin the apply sequence explicitly for interruption assertions. The
+        # real diff/filter/download stack runs; this only orders its batch.
+        original = cli_module._download_and_apply
+
+        def apply(backend, base_path, to_download, *args, **kwargs):
+            order = [prefix + name for name in names]
+            assert set(to_download) == set(order)
+            return original(backend, base_path, {p: to_download[p] for p in order}, *args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "_download_and_apply", apply)
+
+    return SimpleNamespace(
+        base=base,
+        memory=memory,
+        backend=backend,
+        publish=publish,
+        records=records,
+        fsync_calls=calls,
+        prefix=prefix,
+        ordered=ordered,
+        log=memory.parent / ".mind-meld-log.md",
+    )
+
+
+class TestApplyRecovery53A:
+    @pytest.mark.parametrize("command", ["pull", "autopull"])
+    @pytest.mark.parametrize("blocked", ["bbb/inside.txt", "bbb/deeper/inside.txt"])
+    def test_collision_records_all_files_and_retries(self, apply_failure_fleet, command, blocked):
+        fleet = apply_failure_fleet
+        fleet.publish({"aaa.txt": b"a", blocked: b"b", "ccc.txt": b"c"})
+        (fleet.memory / "bbb").write_bytes(b"mine")
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert (fleet.memory / "aaa.txt").read_bytes() == b"a"
+        assert (fleet.memory / "ccc.txt").read_bytes() == b"c"
+        assert (fleet.memory / "bbb").read_bytes() == b"mine"
+        assert "Mac A published a folder named 'bbb' where this Mac has a file" in result.stderr
+        assert result.stderr.count("cannot create folder") == 1
+        assert {(r["rel_path"], r["action"]) for r in fleet.records()} == {
+            (fleet.prefix + "aaa.txt", "written"),
+            (fleet.prefix + blocked, "failed"),
+            (fleet.prefix + "ccc.txt", "written"),
+        }
+        assert len(fleet.records()) == 3
+        assert "aaa.txt" in fleet.log.read_text()
+        assert "ccc.txt" in fleet.log.read_text()
+        assert fleet.memory in fleet.fsync_calls
+        if command == "autopull":
+            assert result.stdout == "mm: pulled 2 files from Mac A (2 written)\n"
+            crumb = cli_module._read_autorun_breadcrumbs()["pull"]
+            assert (crumb["outcome"], crumb["detail"]) == ("degraded", "1 file(s) failed")
+            assert (
+                "mm: 1 file(s) failed to apply - see the warnings above; "
+                "they retry on the next pull" in result.stderr
+            )
+            status_result = runner.invoke(app, ["status"])
+            assert status_result.exit_code == 0, status_result.output
+            assert "Files failed to apply on the last auto-pull" in status_result.stdout
+        else:
+            assert "Pull incomplete: 2 written, 1 failed." in result.stdout
+            assert "Pull complete." not in result.stdout
+        (fleet.memory / "bbb").rename(fleet.memory / "bbb.local")
+        retry = runner.invoke(app, ["autopull"])
+        assert retry.exit_code == 0, retry.output
+        assert (fleet.memory / blocked).read_bytes() == b"b"
+        assert (fleet.memory / "bbb.local").read_bytes() == b"mine"
+        assert fleet.memory / "bbb" in fleet.fsync_calls
+        if "/deeper/" in blocked:
+            assert fleet.memory / "bbb/deeper" in fleet.fsync_calls
+        assert not [r for r in fleet.records()[3:] if r["action"] == "failed"]
+        quiet = runner.invoke(app, ["autopull"])
+        assert quiet.exit_code == 0
+        assert quiet.stdout == quiet.stderr == ""
+
+    def test_failed_apply_skips_manifest_conflict_cleanup(self, apply_failure_fleet, monkeypatch):
+        fleet = apply_failure_fleet
+        calls = []
+        monkeypatch.setattr(
+            cli_module,
+            "_cleanup_conflict_copies",
+            lambda *a, **k: calls.append(1) or 0,
+        )
+        fleet.publish({"aaa.txt": b"a", "bbb/inside.txt": b"b"})
+        (fleet.memory / "bbb").write_bytes(b"mine")
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0, result.output
+        assert not calls
+        (fleet.memory / "bbb").rename(fleet.memory / "bbb.local")
+        retry = runner.invoke(app, ["autopull"])
+        assert retry.exit_code == 0, retry.output
+        assert calls == [1]
+
+    @pytest.mark.parametrize("command", ["pull", "autopull"])
+    @pytest.mark.parametrize("entry", [None, "scalar", [], {}, {"sha256": 4}])
+    def test_bad_peer_metadata_does_not_stop_another_peer(
+        self, apply_failure_fleet, command, entry
+    ):
+        fleet = apply_failure_fleet
+        fleet.publish({"bad.txt": b"bad"}, metadata={"bad.txt": entry})
+        fleet.publish({"good.txt": b"good"}, peer="dev-c", name="Mac C")
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert "is corrupt - skipping pull from this device" in " ".join(result.output.split())
+        assert (fleet.memory / "good.txt").read_bytes() == b"good"
+        assert not (fleet.memory / "bad.txt").exists()
+        assert [r["action"] for r in fleet.records()] == ["written"]
+
+    @pytest.mark.parametrize("command", ["pull", "autopull"])
+    def test_loaded_int_mtime_conflicts_and_later_file_arrives(self, apply_failure_fleet, command):
+        fleet = apply_failure_fleet
+        fleet.publish(
+            {"notes.md": b"remote", "later.txt": b"later"},
+            metadata={
+                "notes.md": {"sha256": hashlib.sha256(b"remote").hexdigest(), "mtime": 1234},
+            },
+        )
+        (fleet.memory / "notes.md").write_bytes(b"local")
+        fleet.ordered(["notes.md", "later.txt"])
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert (fleet.memory / "notes.md").read_bytes() == b"local"
+        assert next(fleet.memory.glob("notes.sync-conflict-*")).read_bytes() == b"remote"
+        assert (fleet.memory / "later.txt").read_bytes() == b"later"
+        assert {r["action"] for r in fleet.records()} == {"conflicted", "written"}
+
+    @pytest.mark.parametrize("command", ["pull", "autopull"])
+    @pytest.mark.parametrize(
+        "failure", ["runtime", "keyboard", "post-write", "post-sidecar", "post-lcs"]
+    )
+    def test_interruption_keeps_completed_bookkeeping(
+        self, apply_failure_fleet, monkeypatch, command, failure
+    ):
+        fleet = apply_failure_fleet
+        fleet.publish({"aaa.txt": b"a", "bbb.txt": b"b", "ccc.txt": b"c"})
+        fleet.ordered(["aaa.txt", "bbb.txt", "ccc.txt"])
+        exc = (
+            KeyboardInterrupt("original interrupt")
+            if failure == "keyboard"
+            else RuntimeError("original apply error")
+        )
+        if failure == "keyboard":
+            original_get = LocalBackend.get
+            digest = hashlib.sha256(b"b").hexdigest()
+
+            def get(backend, key):
+                if digest in key:
+                    raise exc
+                return original_get(backend, key)
+
+            monkeypatch.setattr(LocalBackend, "get", get)
+        else:
+            original_apply = cli_module._apply_incoming_file
+            if failure in ("post-sidecar", "post-lcs"):
+                (fleet.memory / "bbb.txt").write_bytes(b"local")
+                os.utime(fleet.memory / "bbb.txt", (1, 1))
+            if failure == "post-lcs":
+                monkeypatch.setattr(
+                    cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("merge", b"local\nb\n")
+                )
+
+            def apply(**kwargs):
+                if kwargs["rel_path"] == fleet.prefix + "bbb.txt":
+                    if failure.startswith("post-"):
+                        if failure == "post-lcs":
+                            kwargs["interactive_resolve"] = True
+                        original_apply(**kwargs)
+                    raise exc
+                return original_apply(**kwargs)
+
+            monkeypatch.setattr(cli_module, "_apply_incoming_file", apply)
+        original_core = cli_module._pull_core
+        propagated = []
+
+        def core(*args, **kwargs):
+            try:
+                return original_core(*args, **kwargs)
+            except BaseException as error:
+                propagated.append(error)
+                raise
+
+        monkeypatch.setattr(cli_module, "_pull_core", core)
+        result = runner.invoke(app, [command])
+        assert propagated == [exc]
+        if command == "autopull" and failure != "keyboard":
+            assert result.exit_code == 0
+            crumb = cli_module._read_autorun_breadcrumbs()["pull"]
+            assert (crumb["outcome"], crumb["detail"]) == ("failed", "RuntimeError")
+        else:
+            assert result.exit_code != 0
+            # Click converts Ctrl-C to Abort at its outer CLI boundary.
+            if failure != "keyboard":
+                assert result.exception is exc
+        assert (fleet.memory / "aaa.txt").read_bytes() == b"a"
+        assert not (fleet.memory / "ccc.txt").exists()
+        records = fleet.records()
+        assert (fleet.prefix + "aaa.txt", "written") in {
+            (r["rel_path"], r["action"]) for r in records
+        }
+        expected = 2 if failure.startswith("post-") else 1
+        assert len(records) == expected
+        if expected == 2:
+            word = {
+                "post-write": "written",
+                "post-sidecar": "conflicted",
+                "post-lcs": "merged-via-lcs",
+            }[failure]
+            assert (fleet.prefix + "bbb.txt", word) in {
+                (r["rel_path"], r["action"]) for r in records
+            }
+        assert "aaa.txt" in fleet.log.read_text()
+        assert fleet.memory in fleet.fsync_calls
+        assert "Pull complete." not in result.stdout
+        if command == "pull":
+            assert "Pull interrupted; completed changes were kept." in result.stdout
+
+    def test_abort_after_keep_local_records_without_draining(
+        self, apply_failure_fleet, monkeypatch
+    ):
+        fleet = apply_failure_fleet
+        fleet.publish({"new.txt": b"new", "aaa.txt": b"peer a", "bbb.txt": b"peer b"})
+        for name in ("aaa.txt", "bbb.txt"):
+            (fleet.memory / name).write_bytes(b"local")
+            os.utime(fleet.memory / name, (1, 1))
+        fleet.ordered(["new.txt", "aaa.txt", "bbb.txt"])
+        drain = []
+        monkeypatch.setattr(
+            cli_module, "_drain_inline_bumps", lambda pending: drain.append(dict(pending))
+        )
+        result = runner.invoke(app, ["pull", "--conflict-mode", "prompt"], input="l\na\n")
+        assert result.exit_code != 0
+        assert [(r["rel_path"], r["action"]) for r in fleet.records()] == [
+            (fleet.prefix + "new.txt", "written"),
+            (fleet.prefix + "aaa.txt", "skipped"),
+        ]
+        assert "aaa.txt" in fleet.log.read_text()
+        assert (fleet.memory / "aaa.txt").stat().st_mtime == 1
+        assert fleet.memory in fleet.fsync_calls
+        assert not drain
+        assert "Pull aborted; completed changes were kept." in result.stdout
+
+    @pytest.mark.parametrize("command", ["pull", "autopull"])
+    @pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+    def test_interrupted_history_resumes_remaining_rows_once(
+        self, apply_failure_fleet, monkeypatch, command, exception_type
+    ):
+        fleet = apply_failure_fleet
+        fleet.publish({"aaa.txt": b"a", "bbb.txt": b"b", "ccc.txt": b"c"})
+        fleet.ordered(["aaa.txt", "bbb.txt", "ccc.txt"])
+        exc = exception_type(47)
+        original_append = cli_module.pullhistory.append
+        attempted = []
+
+        def append(**kwargs):
+            if kwargs.get("verb") == "pull":
+                name = kwargs["rel_path"]
+                attempted.append(name)
+                if name == fleet.prefix + "ccc.txt":
+                    assert fleet.memory in fleet.fsync_calls
+                original_append(**kwargs)
+                if name == fleet.prefix + "bbb.txt":
+                    assert fleet.memory not in fleet.fsync_calls
+                    raise exc
+            else:
+                original_append(**kwargs)
+
+        monkeypatch.setattr(cli_module.pullhistory, "append", append)
+        original_core = cli_module._pull_core
+        propagated = []
+
+        def core(*args, **kwargs):
+            try:
+                return original_core(*args, **kwargs)
+            except BaseException as error:
+                propagated.append(error)
+                raise
+
+        monkeypatch.setattr(cli_module, "_pull_core", core)
+        original_summary = cli_module._print_pull_summary
+        summaries = []
+
+        def summary(result, **kwargs):
+            summaries.append((result.total_written, kwargs["interruption"]))
+            original_summary(result, **kwargs)
+
+        monkeypatch.setattr(cli_module, "_print_pull_summary", summary)
+        drains = []
+        monkeypatch.setattr(cli_module, "_drain_inline_bumps", lambda pending: drains.append(1))
+        result = runner.invoke(app, [command])
+        assert result.exit_code != 0
+        assert propagated == [exc]
+        expected_paths = [fleet.prefix + name for name in ("aaa.txt", "bbb.txt", "ccc.txt")]
+        assert attempted == expected_paths
+        assert [(r["rel_path"], r["action"]) for r in fleet.records()] == [
+            (path, "written") for path in expected_paths
+        ]
+        log = fleet.log.read_text()
+        for name, data in (("aaa.txt", b"a"), ("bbb.txt", b"b"), ("ccc.txt", b"c")):
+            assert name in log
+            assert (fleet.memory / name).read_bytes() == data
+        assert summaries == [(3, "interrupted")]
+        assert not drains
+        assert "Pull complete." not in result.stdout
+
+    @pytest.mark.parametrize("command", ["pull", "autopull"])
+    @pytest.mark.parametrize(
+        "recovery_failure",
+        ["sync-log", "fsync", "fsync-close", "summary", "cleanup", "bookkeeping", "before-source"],
+    )
+    def test_recovery_preserves_original_and_exactly_once(
+        self, apply_failure_fleet, monkeypatch, command, recovery_failure
+    ):
+        from mind_meld.errors import StorageError
+
+        fleet = apply_failure_fleet
+        fleet.publish({"aaa.txt": b"a", "bbb.txt": b"b"})
+        fleet.ordered(["aaa.txt", "bbb.txt"])
+        exc = RuntimeError("original recovery probe")
+        original_apply = cli_module._apply_incoming_file
+
+        def apply(**kwargs):
+            if kwargs["rel_path"] == fleet.prefix + "bbb.txt":
+                raise exc
+            return original_apply(**kwargs)
+
+        monkeypatch.setattr(cli_module, "_apply_incoming_file", apply)
+
+        def boom(*args, **kwargs):
+            raise exc
+
+        if recovery_failure == "sync-log":
+
+            def log(**kwargs):
+                assert fleet.memory in fleet.fsync_calls
+                raise SystemExit(44)
+
+            monkeypatch.setattr(cli_module, "write_sync_log", log)
+        elif recovery_failure == "fsync":
+            original_fsync = fsutil.fsync_dir
+
+            def fsync(path):
+                if Path(path) == fleet.memory:
+                    raise StorageError("durability probe")
+                return original_fsync(path)
+
+            monkeypatch.setattr(fsutil, "fsync_dir", fsync)
+        elif recovery_failure == "fsync-close":
+            import errno
+
+            original_fsync = fsutil.fsync_dir
+            original_close = os.close
+
+            def close(fd):
+                original_close(fd)
+                raise OSError(errno.EIO, "directory close probe")
+
+            def fsync(path):
+                if Path(path) == fleet.memory:
+                    # Exercise the real fsync_dir finally block, whose close
+                    # can raise a raw OSError instead of a StorageError.
+                    with monkeypatch.context() as patch:
+                        patch.setattr(fsutil.os, "close", close)
+                        return original_fsync(path)
+                return original_fsync(path)
+
+            monkeypatch.setattr(fsutil, "fsync_dir", fsync)
+        elif recovery_failure == "summary":
+
+            def summary(*args, **kwargs):
+                raise SystemExit(45)
+
+            monkeypatch.setattr(cli_module, "_print_pull_summary", summary)
+        elif recovery_failure == "cleanup":
+            monkeypatch.setattr(cli_module, "_apply_incoming_file", original_apply)
+            monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", boom)
+        elif recovery_failure == "bookkeeping":
+            monkeypatch.setattr(cli_module, "_apply_incoming_file", original_apply)
+            original_log = cli_module.write_sync_log
+
+            def log(**kwargs):
+                original_log(**kwargs)
+                raise exc
+
+            monkeypatch.setattr(cli_module, "write_sync_log", log)
+        elif recovery_failure == "before-source":
+            original_print = cli_module.console.print
+
+            def output(*args, **kwargs):
+                if args and "Pulling from" in str(args[0]):
+                    raise exc
+                return original_print(*args, **kwargs)
+
+            # For quiet mode, raise from the first device access inside try.
+            if command == "autopull":
+
+                class BadDevice(dict):
+                    def __getitem__(self, key):
+                        raise exc
+
+                original_select = cli_module._select_devices
+
+                def select(*args):
+                    all_devices, _ = original_select(*args)
+                    return all_devices, [BadDevice()]
+
+                monkeypatch.setattr(cli_module, "_select_devices", select)
+            else:
+                monkeypatch.setattr(cli_module.console, "print", output)
+        result = runner.invoke(app, [command])
+        if command == "pull":
+            assert result.exception is exc, result.output
+        else:
+            assert result.exit_code == 0, result.output
+            crumb = cli_module._read_autorun_breadcrumbs()["pull"]
+            assert (crumb["outcome"], crumb["detail"]) == ("failed", "RuntimeError")
+        records = fleet.records()
+        expected = (
+            0
+            if recovery_failure == "before-source"
+            else 2
+            if recovery_failure in ("cleanup", "bookkeeping")
+            else 1
+        )
+        assert len(records) == expected
+        assert len({(r["rel_path"], r["action"]) for r in records}) == expected
+        if recovery_failure not in ("before-source", "sync-log"):
+            assert "aaa.txt" in fleet.log.read_text()
+        if recovery_failure not in ("before-source", "fsync"):
+            assert fleet.memory in fleet.fsync_calls
+        if recovery_failure in ("fsync", "fsync-close"):
+            assert "durability fsync failed" in result.output
+        assert "Pull complete." not in result.stdout
+
+    @pytest.mark.parametrize("command", [["pull", "--dry-run"], ["diff"]])
+    def test_preview_with_loaded_int_mtime_never_applies(
+        self, apply_failure_fleet, monkeypatch, command
+    ):
+        fleet = apply_failure_fleet
+        fleet.publish(
+            {"notes.md": b"peer"},
+            metadata={"notes.md": {"sha256": hashlib.sha256(b"peer").hexdigest(), "mtime": 1234}},
+        )
+        (fleet.memory / "notes.md").write_bytes(b"local")
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("preview reached the apply boundary")
+
+        monkeypatch.setattr(cli_module, "_download_and_apply", forbidden)
+        result = runner.invoke(app, command)
+        assert result.exit_code == 0, result.output
+        assert (fleet.memory / "notes.md").read_bytes() == b"local"
+        assert fleet.records() == []
+
+
+@pytest.mark.parametrize("command", ["pull", "autopull"])
+def test_53a_normal_summary_systemexit_propagates(apply_failure_fleet, monkeypatch, command):
+    fleet = apply_failure_fleet
+    fleet.publish({"aaa.txt": b"a"})
+
+    def summary(*args, **kwargs):
+        raise SystemExit(45)
+
+    monkeypatch.setattr(cli_module, "_print_pull_summary", summary)
+    result = runner.invoke(app, [command])
+    assert result.exit_code == 45
+    assert isinstance(result.exception, SystemExit)
+    assert [r["action"] for r in fleet.records()] == ["written"]
+    assert fleet.memory in fleet.fsync_calls

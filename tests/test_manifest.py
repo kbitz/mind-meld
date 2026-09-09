@@ -2403,3 +2403,40 @@ class TestStrictWalkers:
         }
         with pytest.raises(SnapshotError, match="disappeared while being read"):
             walk_generic_source(cfg, strict=True)
+
+
+class TestLoadManifestApplyMetadata53A:
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            None,
+            "scalar",
+            1234,
+            True,
+            [],
+            {},
+            {"size": 1},
+            {"sha256": None},
+            {"sha256": 1234},
+            {"sha256": []},
+        ],
+    )
+    def test_invalid_file_metadata_is_manifest_error(self, entry):
+        data = {
+            "version": 2,
+            "sources": {"claude": {"files": {"notes.md": entry}}},
+            "tombstones": {},
+        }
+        with pytest.raises(ManifestError, match="object with a string sha256"):
+            load_manifest(serialize_manifest(data))
+
+    @pytest.mark.parametrize("mtime", [1234, True, False, [], {}, None])
+    def test_nonstring_mtime_normalizes_to_none(self, mtime):
+        data = {
+            "version": 2,
+            "sources": {"claude": {"files": {"notes.md": {"sha256": "a" * 64, "mtime": mtime}}}},
+            "tombstones": {},
+        }
+        info = load_manifest(serialize_manifest(data))["sources"]["claude"]["files"]["notes.md"]
+        assert info["mtime"] is None
+        assert info["sha256"] == "a" * 64

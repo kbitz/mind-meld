@@ -11,6 +11,7 @@ import errno
 from mind_meld.safety import safe_str
 
 SNAPSHOT_FAILURES_URL = "https://github.com/kbitz/mind-meld#snapshot-failures"
+PULL_FAILURES_URL = "https://github.com/kbitz/mind-meld#pull-incomplete--could-not-pull-a-file"
 
 
 class MindMeldError(Exception):

@@ -57,6 +57,26 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Depends on:** Shared sanitizer hardening; retain the existing follow-up's scheduling trigger rather than adding these runtime files to Track 52A.
 
+### [plan-eng-review:severity=minor] Carry a sanitized failure reason on pull-history `failed` rows
+
+- **What:** Add an optional `detail` field to `pullhistory.append` for `failed` rows and render it in `mm log --format table`, so `mm log --verb pull --action failed` explains a failure without a verbose re-run.
+- **Why:** After Track 53A every per-file apply failure prints one actionable `mm: warning:` line to stderr at the moment it happens, but the forensic log still records only `failed`. A hook's stderr scrolls away; the history row is what survives.
+- **Context:** Filed 2026-09-08 by the Track 53A /autoplan review (CEO Codex voice, Medium; DX Claude voice). The boundary has the sanitized cause in hand (`_warn_apply_failure` builds it), so the plumbing is one keyword on `append` plus the table renderer. The 2026-09-05 drain deferred the sibling `sidecar=` parameter on the same row shape; take both together. Use `safe_terminal_str` for the stored text; treat the row as display text, never as a path.
+- **Repro:** cause a parent-file collision (regular file where a peer publishes a folder), run `mm autopull`, then `mm log --verb pull --action failed --limit 5`: the row names the file but not the cause.
+- **Effort:** S (human ~2h / agent ~15min)
+- **Priority:** P3
+- **Depends on:** Track 53A (the formatter that produces the reason).
+
+### [plan-eng-review:severity=minor] Decide whether interactive `mm pull` should exit non-zero when files failed to apply
+
+- **What:** Give interactive `mm pull` a dedicated non-zero exit (a new code 4, distinct from 3 for the conflict-mode preflight) when `total_failed > 0`; `mm autopull` stays 0 for hook continuity. Update the `pull` docstring exit table, README, and the exit-code tests.
+- **Why:** After Track 53A a per-file apply failure inside a batch is contained, so the reproduced parent-file collision moves from a crash with exit 1 to a green exit 0. Every other per-file failure class (decrypt, blob, write) has always exited 0, so today a script cannot tell a partial pull from a complete one; `--conflict-mode fail` gives CI a signal for conflicts but none for apply failures.
+- **Context:** Raised independently by both DX outside voices of the Track 53A /autoplan on 2026-09-08 (Claude proposed code 4; Codex preferred reusing 1). Presented as a User Challenge at the final gate; the user kept the documented exit-0 contract, so this is filed rather than built. `pull()` at `cli.py:3835` discards `_pull_core`'s result, so the change is one branch on `result.total_failed` plus the docstring at `cli.py:3811` and a README row in the Snapshot-failures / pull-failures table.
+- **Repro:** cause a parent-file collision, run `mm pull`, `echo $?` prints 0 while the summary says `Pull incomplete:`.
+- **Effort:** S (human ~1h / agent ~10min)
+- **Priority:** P3
+- **Depends on:** Track 53A (the `Pull incomplete:` summary and per-file warnings it introduces).
+
 ## Drain records
 
 ### Roadmap drain — 2026-09-06

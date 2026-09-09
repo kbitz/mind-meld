@@ -2,6 +2,26 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.7] - 2026-09-08
+
+**One blocked file during `mm pull` no longer aborts the whole batch.** An unhandled `OSError` or `MindMeldError` from one file's write, merge, or conflict resolution used to propagate out of the apply loop, so every later file in that pull, every other configured source, and every other peer's changes stopped arriving — with no record of what had already landed. `mm pull` and `mm autopull` now record each successful publication the moment it happens, contain a failing file's exception, print one warning naming the peer, path, cause, and remedy, and keep applying the rest of the batch.
+
+### Fixed
+
+- `_download_and_apply` catches exactly `(OSError, MindMeldError)` per file; `Abort`, `SystemExit`, `KeyboardInterrupt`, and programming errors still propagate uncontained. A new `_ApplyReporter` records each file's outcome at the moment of successful atomic write — before any fallible follow-up (stale-copy cleanup, notices, mtime restore) — so a crash in a follow-up step can no longer erase a completed publication from history or the sync log.
+- Mkdir failures during apply name the actual blocking file/folder collider and the peer that owns it, and every directory created while clearing a path is registered for durability fsync — previously a partial mkdir chain could leave newly created ancestors unsynced.
+- An `OSError` raised by the final `os.close` inside directory fsync (outside `fsutil.fsync_dir`'s own `StorageError` wrapper) no longer replaces the original apply exception and erases completed-file history; recovery now treats it the same as a `StorageError` durability warning.
+- `--conflict-mode fail` preflight and the interactive apply mtime gate catch `TypeError`, `ValueError`, `OverflowError`, and `OSError` from malformed mtime data, so a bad peer mtime can no longer crash the preflight check or the newer-local-file skip gate.
+- `load_manifest` rejects a file entry whose `sha256` isn't a string and coerces a non-string `mtime` to `None`, and `mtime_from_manifest` rejects a timezone-naive ISO string instead of returning an unusable datetime — a malformed peer manifest is now caught at the load boundary instead of corrupting one file's metadata downstream.
+- Interactive `mm pull` now exits 0 for contained per-file failures, matching `mm autopull` (previously interactive `mm pull` exited 1, which broke callers expecting 0-or-crash semantics). Both print `Pull incomplete: N file(s) failed` (or `Pull interrupted; completed changes were kept.` on an unexpected mid-batch error) plus one `mm: warning:` line per failed file.
+- Per-file write/merge/read failure messages that used to print straight to the interactive console now route through the same single-line `mm: warning:` stderr formatter as `mm autopull`, so a script reading stdout never sees failure text mixed into normal pull output.
+
+### Changed
+
+- The `degraded` breadcrumb (`mm status`, `mm autopull`) now also covers per-file apply failures (`detail` includes `N file(s) failed`), alongside the existing fsync-durability, corrupt-manifest, and unknown-source triggers.
+- README documents the new failure mode: a "Pull incomplete / could not pull a file" troubleshooting section with a warning-cause table and remedies, and updated Claude Code integration guidance to surface warnings, not just "tell the user what was synced."
+- `docs/invariants/sync.md` and `docs/invariants/conflicts.md` record the publication-before-follow-up design, the exact `(OSError, MindMeldError)` apply boundary, and the two accepted residual interrupt windows (a second Ctrl-C during recovery, and untracked in-flight bytes at the moment of interruption).
+
 ## [0.14.6] - 2026-09-07
 
 **A control sequence hidden inside another one can no longer reassemble into a clipboard write after mm sanitizes it.** The shared sanitizer made one pass over peer-controlled text, so a CSI nested inside an OSC survived that pass and came out the other side as a complete OSC 52 clipboard-write sequence. Every `safe_str` and `safe_text` sink inherited the hole: conflict banners, diff bodies, `mm devices` cells, and error tails. Sanitized text now contains no ESC or C1 control byte at all, and three plain-stderr notices that still echoed raw escapes render them as visible notation instead.
