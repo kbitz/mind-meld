@@ -8,7 +8,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
+- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list`
@@ -225,7 +225,8 @@ minus `_GROK_IGNORABLE_KEYS` (`elapsed_ms`), equals `_GROK_REQUIRED_KEYS`
 content-bearing fields. Ignorable keys are dropped before the projection
 and are never stamped onto the stored turn dict (`{key, day, model, usage}`;
 resume compares live == cached). An unknown extra key is still `unsupported`
-and still refuses the whole reader (Track 46B owns per-record quarantine). Each accepted record is a per-prompt total attributed
+and still refuses the whole reader (see "Reader-agnostic quarantine and drift
+classification" in `docs/roadmap-future.md`). Each accepted record is a per-prompt total attributed
 to the UTC day of the outer timestamp. `reasoningTokens` must be a bounded
 subset of `outputTokens` and is never added twice. The private
 `grok-host-tokens.json` cache stores opaque file keys, fingerprints, offsets,
@@ -242,8 +243,7 @@ once would have armed a permanent fleet-wide veto on the next Grok wire
 drift. Reader-scoped isolation replaces it. `host_usage.grok_completed_once()`
 is kept as a **diagnostic** latch (and so the three
 CI-enforced doc citations to it still resolve). `mm status` / `mm diag`
-prefer `last_reason` when it is in `_HOST_PERMANENT_REASONS`, then this
-latch. Do not reintroduce it as a sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
+prefer any standing `last_reason`, then this diagnostic latch. Do not reintroduce it as a sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
 sweep-level `reader`/`reason` for a pre-any-reader expiry); autopush never
 warms. After a successful warm, retry only deadline-dropped readers and merge
 their fresh outcomes with the first pass's completed readers — a flaky
@@ -402,8 +402,8 @@ recorded on that UTC day*: Codex differences the host's own cumulative counter
 between consecutive readings (`host_usage._read_rollout` collects `_TurnState`
 readings, `_aggregate` keys transitions by `(lineage, previous, current)` and
 sums them), Grok has been per-turn since v0.12.47 (`_aggregate_grok` over
-`entry["turns"]`). `_aggregate` still accepts already-reduced `_Terminal`
-rows (disjoint; do not normalize them). Buckets are therefore additive and
+`entry["turns"]`). `_aggregate` passes those already-disjoint Grok turns
+through without normalizing again; the obsolete `_Terminal` representation is gone. Buckets are therefore additive and
 stable: a fixed day's value no longer moves when an old session is resumed.
 
 **This retired three derived prohibitions and kept one.** Retired: "a window
@@ -549,8 +549,9 @@ on the Grok cache entry. Pre-34A entries are detected by **key absence** and
 re-walked once. Not a `CACHE_VERSION` bump: that constant is shared with the
 Codex namespace. Track 46A was retargeted away from an encoding rewrite
 (the 25 MB / 100 ms trigger does not fire; measured 4.11 MB / 23.3 ms);
-`last_reason` on the Grok cache *root* uses the same absence discriminator
-and does not re-walk per-file entries. Encoding work stays deferred until
+`last_reason` on either cache *root* is independent of that per-file
+migration: its absence is documentary, not a discriminator, and never
+forces a re-walk of per-file entries. Encoding work stays deferred until
 the TODOS trigger fires.
 
 **Acceptor.** Three-way on key presence, never a falsy check, reusing
@@ -777,14 +778,86 @@ store would cost the retro its real content AND rewind the cursor into a
 **The notice text is a closed vocabulary.** `_host_skip_phrase` names only the
 reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
-`unavailable`. `unsupported` NEVER promises a retry (it is a standing property
-of the host's storage) and carries a fix clause (`pipx upgrade mind-meld`, or
-`mm disable-source <reader>`). Every other reason may retry. `mm status` and `mm diag` reuse `_host_skip_phrase` when the Grok cache root
-carries `last_reason` in `_HOST_PERMANENT_REASONS`, so a permanently-drifted
-Grok is not told to `mm push`. Absence of `last_reason` is the pre-46A
-discriminator. The phrase
-deliberately contains no `; `, which is the separator `autopush` joins
-breadcrumb reasons with. One degradation is appended per dropped reader.
+`unavailable`. `unsupported` says the reader wrote a record this mm cannot
+read; a newer mm **may** read it (`pipx upgrade mind-meld`), or the user can
+`mm disable-source <reader>`. A retry alone is not a remedy. `partial` takes
+the generic retry sentence: "The next push that uploads a change retries;
+`mm diag` shows the reader's state." Only `deadline` names an interactive
+warm (up to 5 s per substantive push). The phrase and the joined breadcrumb
+are prose, not a semicolon-delimited schema: the approved retry sentence
+contains `; ` too. Nothing parses the detail by that separator. One
+degradation is appended per dropped reader.
+
+### Standing read blockers (v0.14.8)
+
+`last_reason` is the **standing read blocker**: the reason of the most recent
+read that did not complete, retained until a read completes, with a permanent
+reason surviving later transient failures. It is neither the latest attempt
+nor the latest publication outcome. `host_usage.PERMANENT_REASONS` owns
+`{"unsupported"}`; `events_tail._HOST_PERMANENT_REASONS` derives from it.
+Do not widen the set to `malformed` without evidence and a policy decision.
+`PERSISTABLE_REASONS` is `Reason` minus `locked` and `no_metadata_ledger`:
+contention is not evidence about the store, and no ledger is source absence.
+
+Both roots carry `version`, `files`, `last_reason`, `last_reason_since`.
+Grok additionally carries `complete_once` and `usage_less_skipped`. The shared
+`_carry_reason(prior_reason, prior_since, result, now)` returns the new pair.
+A complete read clears both fields, even if it then overruns the publication
+budget and the caller receives `deadline`. An unchanged permanent blocker
+keeps its original valid date across transient failures; a changed reason
+gets a fresh date. The date is this version's **first observation of the
+current reason**, not the outage start. A migrated or corrupt date is unknown
+until the next failing read dates it once. Never infer an earlier onset.
+
+`_cached_last_reason` accepts only the persistable vocabulary.
+`_cached_reason_since` accepts a bounded, timezone-aware ISO timestamp and
+returns normalized UTC ISO text. Invalid dates never erase valid reasons;
+without a valid reason, the date is always None. A version mismatch makes
+root metadata absent, like `_cached_files`. **Absence is documentary**:
+pre-v0.14.8 Codex roots lack `last_reason`, and both older roots lack `since`,
+but absent and null mean the same thing to readers. No `CACHE_VERSION` bump
+and no per-file re-walk is warranted.
+
+Failed passes skip the unconditional locked-json write via `_NoCacheCommit`
+only when no file was learned AND the validated `(reason, since)` pair is
+unchanged. Comparing reason alone would leave migrated blockers undated
+forever. Newly learned files still commit despite an unchanged sticky reason.
+Prior metadata is read immediately after acquiring the lock, **before** the
+post-lock deadline check. Expiry there skips scanning and carries `deadline`
+through the same helper: one write on transition, no repeated rewrites.
+Pre-lock expiry creates no cache. A completed-but-overbudget scan keeps its
+file cache and clears the blocker, returning `deadline` only for publication.
+Serialization occurs after the final deadline check, so the read budget is
+not an end-to-end ceiling. Healthy passes still rewrite the cache (the
+pre-existing locked-json default); scaling work remains deferred.
+
+**Write failure is a separate observation.** `_write_json` returns an
+`OSError` in `locked.write_error`; it does not raise into the reader's
+handler. Both readers inspect it after the block, print one
+`mm: notice: host token cache write failed: <ErrnoName>` without a path, and
+return the scan result unchanged. Truncate-before-write can lose the prior
+root: the next diag says `missing` (empty) or `unreadable` (partial JSON),
+with no blocker line. This is existing forensic-cache behavior; the next
+failing read can record the blocker again. Only failures before writing,
+such as lock acquisition errors, preserve the old cache. The write failure
+itself is a notice, not a persisted reason or a changed scan result.
+
+Status reports any standing reason for both readers; the Codex block requires
+its source enabled. Blocker, rebuilding, and warming are a strict `elif`
+chain, so a blocker never shares the status line with a count-based retry.
+Healthy Codex stays silent. Diag labels inventory and blocker separately:
+`<reader> cache inventory:` and `<reader> usage read blocker:`; readable
+healthy caches say `none`, and a valid date renders
+`(first observed YYYY-MM-DD UTC)`. Inventory `ready` plus blocker `none`
+still does not prove totals were published. Diag reads cache metadata without
+opening host logs or requiring a passphrase; Codex also counts rollout paths.
+
+Orchestration failures (a reader exception normalized to `unavailable`, or a
+sweep deadline before invocation) remain per-push stderr/breadcrumb signals.
+A no-op autopush may overwrite that breadcrumb with `success` without
+reading either host; a persisted blocker remains visible in status and diag.
+No no-op push re-read was added. See README "Host usage capture (Codex and
+Grok)" for remedies and the three existing deferred-work TODOs.
 
 **`degraded_sources` is additive.** No `EVENTS_SCHEMA_VERSION` bump:
 `_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`
@@ -857,8 +930,8 @@ prefixes instead of converging, and pruning on a directory listing it never
 finished would delete entries for files that were never absent. Entries for
 files deleted during a run of partial passes linger until the next complete
 pass; they are inert, because aggregation walks the DISK, never the cache. A
-scan that staged nothing still escapes via `_NoCacheCommit` rather than
-rewriting the file. Measured after the fix: an autopush-only machine converges
+failed scan that learned no file and kept the same blocker/date pair escapes
+via `_NoCacheCommit` rather than rewriting the file (see standing read blockers above). Measured after the fix: an autopush-only machine converges
 in **3 pushes** (264 → 361 → 440 files cached) with no interactive command.
 
 **A day bucket IS a day's recorded work, since Track 32A.** It was not before:

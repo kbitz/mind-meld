@@ -49,6 +49,187 @@ def _verb_crumb(payload: dict, verb: str) -> dict:
     return payload
 
 
+def _enable_test_host_source(tmp_path, reader, *, disabled=False):
+    from mind_meld.config import CONFIG_PATH, load_config
+
+    source = tmp_path / f"{reader}-customizations"
+    (source / "skills").mkdir(parents=True)
+    (source / "skills" / "test.md").write_text("substantive customization\n")
+    cfg = load_config(CONFIG_PATH)
+    cfg["sync"]["sources"].append(
+        {
+            "name": reader,
+            "type": "grok" if reader == "grok" else "generic",
+            "path": str(source),
+            **({"include_dirs": ["skills"]} if reader == "codex" else {}),
+        }
+    )
+    if disabled:
+        cfg["sync"]["disabled_sources"] = [reader]
+    save_config(cfg, CONFIG_PATH)
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reason", sorted(_mm_host_usage.PERSISTABLE_REASONS))
+def test_status_prioritizes_every_standing_reader_blocker(tmp_path, monkeypatch, reader, reason):
+    _setup_real_config(tmp_path, monkeypatch)
+    _enable_test_host_source(tmp_path, reader)
+    cache = _mm_host_usage.CACHE_PATH if reader == "codex" else _mm_host_usage.GROK_CACHE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "complete_once": True,
+                "last_reason": reason,
+                "last_reason_since": "2026-09-04T00:00:00+00:00",
+                "files": {"pre-track": {"day": "2026-09-04"}},
+            }
+        )
+    )
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.split())
+    assert f"{reader.title()} usage capture:" in text
+    assert f"({reader} {reason})" in text
+    assert "(first observed 2026-09-04 UTC)" in text
+    assert "awaiting re-walk" not in text
+    assert "prior scan completed successfully" not in text
+    assert "no successful scan yet" not in text
+    if reason == "unsupported":
+        assert "pipx upgrade mind-meld" in text
+        assert "mm push" not in text
+
+
+def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monkeypatch):
+    _setup_real_config(tmp_path, monkeypatch)
+    _enable_test_host_source(tmp_path, "codex")
+    cache = _mm_host_usage.CACHE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "last_reason": "deadline",
+                "files": {"warm": {"states": []}},
+            }
+        )
+    )
+    assert _mm_host_usage.codex_usage_diag()["state"] == "ready"
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.split())
+    assert "(codex deadline)" in text
+    assert "warm it (up to 5 s per push)" in text
+    assert "not yet scanned" not in text
+
+
+@pytest.mark.parametrize("state", ["disabled", "unreadable", "healthy"])
+def test_status_codex_silence_for_disabled_unreadable_or_healthy_cache(
+    tmp_path, monkeypatch, state
+):
+    _setup_real_config(tmp_path, monkeypatch)
+    _enable_test_host_source(tmp_path, "codex", disabled=state == "disabled")
+    cache = _mm_host_usage.CACHE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    data = {"version": 1, "last_reason": "unsupported", "files": {"old": {}}}
+    if state == "healthy":
+        data = {"version": 1, "files": {"warm": {"states": []}}}
+    cache.write_text("{broken" if state == "unreadable" else json.dumps(data))
+    if state == "disabled":
+        monkeypatch.setattr(
+            _mm_host_usage, "codex_usage_diag", lambda: pytest.fail("disabled probe")
+        )
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Codex usage capture:" not in result.output
+
+
+def test_status_and_diag_inventory_nags_when_no_blocker(tmp_path, monkeypatch):
+    from tests.test_host_usage import _context, _token, _write_rollout
+
+    _setup_real_config(tmp_path, monkeypatch)
+    _enable_test_host_source(tmp_path, "codex")
+    cache = _mm_host_usage.CACHE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"version": 1, "files": {"old": {"day": "2026-09-04"}}}))
+    rebuilding = runner.invoke(app, ["status"])
+    assert rebuilding.exit_code == 0, rebuilding.output
+    assert "rebuilding" in rebuilding.output
+    assert "awaiting re-walk" in rebuilding.output
+    diag = runner.invoke(app, ["diag"])
+    assert diag.exit_code == 0, diag.output
+    assert "codex awaiting re-walk" in diag.output
+    cache.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "last_reason": "unsupported",
+                "files": {"old": {"day": "2026-09-04"}},
+            }
+        )
+    )
+    blocked = runner.invoke(app, ["diag"])
+    assert blocked.exit_code == 0, blocked.output
+    assert "codex awaiting re-walk" not in blocked.output
+    cache.write_text(json.dumps({"version": 1, "files": {"warm": {"states": []}}}))
+    _write_rollout(_mm_host_usage.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(1)])
+    _write_rollout(_mm_host_usage.CODEX_SESSIONS_PATH, "rollout-b.jsonl", [_context(), _token(2)])
+    assert _mm_host_usage.codex_usage_diag()["state"] == "migrating"
+    warming = runner.invoke(app, ["status"])
+    assert warming.exit_code == 0, warming.output
+    text = " ".join(warming.output.split())
+    assert "warming" in text
+    assert "not yet scanned" in text
+
+
+def test_autopush_failed_codex_read_reaches_status_after_noop_success(tmp_path, monkeypatch):
+    from tests.test_host_usage import (
+        _context,
+        _grok_turn,
+        _token,
+        _write_grok_session,
+        _write_rollout,
+    )
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    _mm_token_usage.warm_token_cache_inline([claude_root])
+    _enable_test_host_source(tmp_path, "codex")
+    _enable_test_host_source(tmp_path, "grok")
+    bad = _token(100)
+    bad["payload"]["info"]["total_token_usage"]["input_tokens"] = "unreadable"
+    _write_rollout(_mm_host_usage.CODEX_SESSIONS_PATH, "rollout-failing.jsonl", [_context(), bad])
+    _write_grok_session(_mm_host_usage.GROK_SESSIONS_PATH, lines=[_grok_turn()])
+
+    first = runner.invoke(app, ["autopush"])
+    assert first.exit_code == 0, first.output
+    crumb_path = iso / "last-autorun.json"
+    crumb = _verb_crumb(json.loads(crumb_path.read_text()), "push")
+    assert crumb["outcome"] == "degraded"
+    assert "(codex unsupported)" in crumb["detail"]
+    rows = [
+        json.loads(line)
+        for path in (tmp_path / "mm-events" / "events").glob("*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    snapshot = next(row for row in rows if row["type"] == "host-usage-snapshot")
+    assert snapshot["token_sources"] == ["grok"]
+    assert snapshot["degraded_sources"] == ["codex"]
+    for attempt in range(2):
+        status = runner.invoke(app, ["status"])
+        assert status.exit_code == 0, status.output
+        assert "Codex usage capture:" in status.output
+        assert "(codex unsupported)" in " ".join(status.output.split())
+        if attempt == 0:
+            monkeypatch.setattr(
+                _mm_host_usage, "read_codex_usage", lambda **k: pytest.fail("no-op read")
+            )
+            second = runner.invoke(app, ["autopush"])
+            assert second.exit_code == 0, second.output
+            crumb = _verb_crumb(json.loads(crumb_path.read_text()), "push")
+            assert crumb["outcome"] == "success"
+
+
 # ─── Config-surface regressions ──────────────────────────────────────────
 
 
@@ -1635,8 +1816,8 @@ def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, m
     assert payload["detail"] == (
         "host-usage snapshot skipped (grok unsupported) — "
         "content sync and git/session capture unaffected. "
-        "grok's log format changed in a way this version cannot read. "
-        "Run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
+        "grok wrote a record this version cannot read. A newer mm may read it: "
+        "run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
     )
     # Safe by construction: no path, transcript, query, or exception text.
     assert str(tmp_path) not in payload["detail"]

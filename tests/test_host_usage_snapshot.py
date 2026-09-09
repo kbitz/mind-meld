@@ -353,25 +353,13 @@ class TestReaderOrchestration:
         assert events_tail._HOST_UNKNOWN_REASON not in events_tail._HOST_READ_REASONS
 
     def test_permanent_reasons_are_real_reader_reasons(self):
-        """`_HOST_PERMANENT_REASONS` hardcodes a literal while its sibling is
-        derived. A rename on the host_usage side would empty it silently, and
-        every omission would start promising a retry that never comes."""
+        """The shared permanent policy remains a subset of reader failures."""
         assert events_tail._HOST_PERMANENT_REASONS
         assert events_tail._HOST_PERMANENT_REASONS <= events_tail._HOST_READ_REASONS
 
-    def test_permanent_reasons_match_the_grok_sticky_literal(self):
-        """`host_usage.read_grok_usage` hardcodes `"unsupported"` in its sticky
-        block (`host_usage.py:697`) because `host_usage` cannot import
-        `events_tail` (cycle). Nothing but this pin holds the two sides
-        together. Add a reason here and the sticky rule silently stops
-        stickying it, while `mm status` starts printing the permanent phrase
-        for a reason the reader already clobbered with the next transient
-        `deadline` / `locked` / `io_error`."""
-        assert events_tail._HOST_PERMANENT_REASONS == frozenset({"unsupported"}), (
-            "widening _HOST_PERMANENT_REASONS also requires widening the sticky "
-            "comparison in host_usage.read_grok_usage — they are two literals, "
-            "not one constant"
-        )
+    def test_permanent_reasons_are_derived_from_host_usage(self):
+        assert events_tail._HOST_PERMANENT_REASONS == _mm_host_usage.PERMANENT_REASONS
+        assert _mm_host_usage.PERMANENT_REASONS == frozenset({"unsupported"})
 
     def test_built_in_constant_matches_the_full_reader_set(self):
         """`events.ACTIVE_HOST_READERS` documents the live reader universe
@@ -881,8 +869,8 @@ class TestTailWiring:
         assert degradations == [
             "host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
-            "grok's log format changed in a way this version cannot read. "
-            "Run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
+            "grok wrote a record this version cannot read. A newer mm may read it: "
+            "run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
         ]
         assert f"mm: notice: {degradations[0]}" in capsys.readouterr().err
 
@@ -934,8 +922,8 @@ class TestTailWiring:
         assert omitted_degradations == [
             "host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
-            "grok's log format changed in a way this version cannot read. "
-            "Run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
+            "grok wrote a record this version cannot read. A newer mm may read it: "
+            "run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
         ]
 
         empty_sources = _sources(events_root, hosts=())
@@ -1031,19 +1019,18 @@ class TestTailWiring:
         assert degradations[0].startswith(f"host-usage snapshot skipped (grok {reason})")
         # Permanent vs transient: never promise a retry for a failure a later
         # push cannot fix, and never leave a transient one without a next step.
-        promises_retry = "A later substantive push will retry" in degradations[0]
+        promises_retry = "The next push that uploads a change retries" in degradations[0]
         if reason in events_tail._HOST_PERMANENT_REASONS:
             assert not promises_retry
             assert "pipx upgrade mind-meld" in degradations[0]
         else:
             # A transient reason must tell the user what happens next, and
             # exactly one of the two ways. The generic promise is the default.
-            # `deadline` / `partial` name `mm push` instead, because that is
-            # what a warming cache produces and the generic promise is false
-            # there on a quiet Mac (autopush passes warm_host_cache=None).
+            # Only deadline names the attended warm. A trailing partial record
+            # needs a later completed write, not cache warming.
             names_command = "Run `mm push`" in degradations[0]
             assert sum((promises_retry, names_command)) == 1
-            if reason in {"deadline", "partial"}:
+            if reason == "deadline":
                 assert names_command
             else:
                 assert promises_retry
@@ -1235,7 +1222,7 @@ class TestTailWiring:
         assert "pipx upgrade mind-meld" in phrase
         assert "Upgrade mm" not in phrase
         assert "mm disable-source grok" in phrase
-        assert "A later substantive push will retry" not in phrase
+        assert "The next push that uploads a change retries" not in phrase
         assert "; " not in phrase
 
     def test_disabled_host_source_is_never_read_and_never_claimed(self, tmp_path, monkeypatch):
@@ -1260,12 +1247,8 @@ class TestTailWiring:
         assert row["hosts"] == {}
 
     @pytest.mark.parametrize("reason", sorted(get_args(_mm_host_usage.Reason)))
-    def test_degradation_phrase_is_safe_and_splittable(self, reason):
+    def test_degradation_phrase_is_safe(self, reason):
         phrase = events_tail._host_skip_phrase("grok", reason)
-        assert "; " not in phrase, (
-            "`; ` is the breadcrumb join separator — a phrase containing it "
-            "makes the joined `mm status` detail ambiguous to split"
-        )
         assert "content sync and git/session capture unaffected" in phrase
         assert "\x1b" not in phrase
 
@@ -1942,3 +1925,19 @@ class TestPartialDayMerges:
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_partial_takes_the_retry_sentence_not_warming(reader):
+    phrase = events_tail._host_skip_phrase(reader, "partial")
+    assert phrase.endswith(
+        "The next push that uploads a change retries; `mm diag` shows the reader's state."
+    )
+    assert "warming" not in phrase
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_deadline_names_bounded_interactive_warm(reader):
+    phrase = events_tail._host_skip_phrase(reader, "deadline")
+    assert "interactively to warm it (up to 5 s per push)" in phrase
+    assert "one pass" not in phrase

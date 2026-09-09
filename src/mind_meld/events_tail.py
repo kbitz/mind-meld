@@ -103,10 +103,8 @@ Pinned as a SUBSET of ``_HOST_READ_REASONS`` by
 ``host_usage.Reason`` side would otherwise empty this set silently and treat
 an honest absence as a failed read."""
 
-_HOST_PERMANENT_REASONS = frozenset({"unsupported"})
-"""Failure reasons a later push cannot fix, so the notice must not promise a
-retry. Distinct from ``_HOST_ABSENT_REASONS``: these drop the reader (declared)
-rather than remaining silent, and they never claim a retry will help."""
+_HOST_PERMANENT_REASONS = frozenset(host_usage.PERMANENT_REASONS)
+"""Derived from the reader's standing-blocker policy."""
 
 HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     "codex": "codex",
@@ -548,8 +546,9 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
     It names the affected optional subsystem so a `degraded` breadcrumb can't
     be misread as content-sync loss, and it names only the reader and reason
     class — never a path, transcript, query, or exception string. Permanent
-    reasons carry a fix clause and never promise a retry. The phrase contains
-    no ``; ``, which is the breadcrumb join separator.
+    reasons carry a fix clause and never promise a retry. One closed-vocabulary
+    sentence per reader; the sentence may contain ``; ``. Callers join phrases
+    with ``; ``.
     """
     phrase = (
         f"host-usage snapshot skipped ({reader} {reason}) — "
@@ -557,21 +556,22 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
     )
     if reason in _HOST_PERMANENT_REASONS:
         return (
-            f"{phrase}. {reader}'s log format changed in a way this version "
-            f"cannot read. Run `pipx upgrade mind-meld`, or run "
+            f"{phrase}. {reader} wrote a record this version cannot read. "
+            f"A newer mm may read it: run `pipx upgrade mind-meld`, or run "
             f"`mm disable-source {reader}` to stop retrying."
         )
-    if reason in {"deadline", "partial"}:
-        # The generic promise below is false here on a quiet Mac: the events
-        # tail only runs on a SUBSTANTIVE push and `autopush` passes
-        # `warm_host_cache=None`, so an unattended machine never warms and
-        # "later" can be never. Name the command that actually finishes it.
+    if reason == "deadline":
+        # Only an attended substantive push warms, and its budget is bounded.
+        budget = f"{host_usage.DEFAULT_READ_BUDGET_S:.0f}"
         return (
             f"{phrase}. The {reader} cache is still warming. Run `mm push` "
-            "interactively to finish it in one pass, or `mm diag` to see how "
+            f"interactively to warm it (up to {budget} s per push), or `mm diag` to see how "
             "much is left."
         )
-    return f"{phrase}. A later substantive push will retry"
+    return (
+        f"{phrase}. The next push that uploads a change retries; "
+        "`mm diag` shows the reader's state."
+    )
 
 
 def _capture_event_snapshots(

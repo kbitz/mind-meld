@@ -7,6 +7,7 @@ to persist a partial discovery pass.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -14,10 +15,12 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
 from mind_meld import host_usage as hu
+from mind_meld import lockedjson
 from mind_meld import token_usage as tu
 
 FIXTURES = Path(__file__).parent / "fixtures" / "host_sessions"
@@ -109,6 +112,259 @@ def isolated_adapter_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     grok_cache = tmp_path / "config" / "grok-host-tokens.json"
     monkeypatch.setattr(hu, "GROK_CACHE_PATH", grok_cache)
     return grok_cache
+
+
+_OBSERVED = "2026-09-04T10:00:00+00:00"
+_NOW = datetime(2026, 9, 9, 12, tzinfo=timezone.utc)
+
+
+def _seed_blocker(cache, *, reason="unsupported", since=_OBSERVED, files=None):
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "version": hu.CACHE_VERSION,
+        "last_reason": reason,
+        "last_reason_since": since,
+        "complete_once": True,
+        "usage_less_skipped": 2,
+        "files": files or {},
+    }
+    cache.write_text(json.dumps(data))
+    return data
+
+
+@pytest.fixture(params=["codex", "grok"])
+def reader_case(request, tmp_path, monkeypatch):
+    name = request.param
+    cache = hu.CACHE_PATH if name == "codex" else hu.GROK_CACHE_PATH
+    root = tmp_path / "reader-sessions"
+    monkeypatch.setattr(hu, "CODEX_SESSIONS_PATH", root)
+
+    def read():
+        if name == "codex":
+            return hu.read_codex_usage(root)
+        return hu.read_grok_usage(root, consented=True)
+
+    diag = hu.codex_usage_diag if name == "codex" else hu.grok_usage_diag
+
+    def set_scan(result, staged=None, learned=False):
+        output = (result, staged or {}, learned)
+        if name == "grok":
+            output += (True,)
+        scan = Mock(return_value=output)
+        monkeypatch.setattr(hu, f"_scan_{name}_root", scan)
+        return scan
+
+    return read, cache, diag, set_scan
+
+
+@pytest.mark.parametrize(
+    "prior,since,result,expected",
+    [
+        ("unsupported", _OBSERVED, hu.HostUsageResult({}, True), (None, None)),
+        (None, None, hu._incomplete("malformed"), ("malformed", _NOW.isoformat())),
+        ("deadline", _OBSERVED, hu._incomplete("io_error"), ("io_error", _NOW.isoformat())),
+        ("unsupported", _OBSERVED, hu._incomplete("deadline"), ("unsupported", _OBSERVED)),
+        ("unsupported", _OBSERVED, hu._incomplete("io_error"), ("unsupported", _OBSERVED)),
+        ("partial", _OBSERVED, hu._incomplete("partial"), ("partial", _OBSERVED)),
+        ("unsupported", None, hu._incomplete("unsupported"), ("unsupported", _NOW.isoformat())),
+        ("unsupported", _OBSERVED, hu._incomplete("locked"), ("unsupported", _OBSERVED)),
+        (None, None, hu._incomplete("no_metadata_ledger"), (None, None)),
+    ],
+)
+def test_carry_standing_reason(prior, since, result, expected):
+    assert hu._carry_reason(prior, since, result, _NOW) == expected
+
+
+@pytest.mark.parametrize("new_file", [False, True], ids=["warm-append", "cold-sibling"])
+def test_codex_unsupported_is_visible_and_recovery_clears_it(
+    new_file, isolated_cache, tmp_path, monkeypatch
+):
+    root = tmp_path / "sessions"
+    monkeypatch.setattr(hu, "CODEX_SESSIONS_PATH", root)
+    records = [_context(), _token(100)]
+    _write_rollout(root, "rollout-a.jsonl", records)
+    assert hu.read_codex_usage(root).complete
+    cached = json.loads(isolated_cache.read_text())["files"]
+    bad = _token(200)
+    bad["payload"]["info"]["total_token_usage"]["input_tokens"] = "broken"
+    name = "rollout-b.jsonl" if new_file else "rollout-a.jsonl"
+    _write_rollout(root, name, [*records, bad])
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    assert hu.read_codex_usage(root).reason == "unsupported"
+    writer.assert_called_once()
+    data = json.loads(isolated_cache.read_text())
+    assert data["files"] == cached
+    assert data["version"] == hu.CACHE_VERSION == 1
+    assert data["last_reason"] == "unsupported"
+    assert hu._cached_reason_since(data) is not None
+    diag = hu.codex_usage_diag()
+    assert diag["state"] == ("migrating" if new_file else "ready")
+    assert diag["pending"] == int(new_file)
+    assert diag["last_reason"] == "unsupported"
+    writer.reset_mock()
+    assert hu.read_codex_usage(root).reason == "unsupported"
+    writer.assert_not_called()
+    _write_rollout(root, name, records)
+    assert hu.read_codex_usage(root).complete
+    assert hu.codex_usage_diag()["last_reason"] is None
+    assert hu.codex_usage_diag()["last_reason_since"] is None
+
+
+@pytest.mark.parametrize("since", [None, "garbage", "2026-09-04T10:00:00"])
+def test_migrated_reader_root_gains_first_observed_once(reader_case, since, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    _seed_blocker(cache, since=since)
+    set_scan(hu._incomplete("unsupported"))
+    carry = hu._carry_reason
+    monkeypatch.setattr(hu, "_carry_reason", lambda a, b, c, now: carry(a, b, c, _NOW))
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    assert read().reason == "unsupported"
+    writer.assert_called_once()
+    assert diag()["last_reason_since"] == _NOW.isoformat()
+    writer.reset_mock()
+    assert read().reason == "unsupported"
+    writer.assert_not_called()
+    assert diag()["last_reason_since"] == _NOW.isoformat()
+
+
+@pytest.mark.parametrize("learned", [False, True])
+def test_failed_reader_writes_only_when_pair_changes_or_file_learned(
+    reader_case, learned, monkeypatch
+):
+    read, cache, diag, set_scan = reader_case
+    _seed_blocker(cache)
+    staged = {"learned": {"no_ledger": True}} if learned else {}
+    set_scan(hu._incomplete("deadline"), staged, learned)
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    assert read().reason == "deadline"
+    assert writer.call_count == int(learned)
+    assert json.loads(cache.read_text())["files"] == staged
+    assert diag()["last_reason"] == "unsupported"
+    assert diag()["last_reason_since"] == _OBSERVED
+
+
+def test_pre_lock_expiry_never_creates_cache(reader_case, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    scan = set_scan(hu.HostUsageResult({}, True))
+    monkeypatch.setattr(hu, "_expired", lambda d: True)
+    assert read().reason == "deadline"
+    assert not cache.exists()
+    scan.assert_not_called()
+
+
+def test_post_lock_expiry_records_deadline_once_without_scanning(reader_case, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    files = {"kept": {"no_ledger": True, "usage_less_skipped": 2}}
+    _seed_blocker(cache, reason=None, since=None, files=files)
+    scan = set_scan(hu.HostUsageResult({}, True))
+    writer = Mock(wraps=lockedjson._write_json)
+    monkeypatch.setattr(lockedjson, "_write_json", writer)
+    for attempt in range(2):
+        ticks = iter([False, True])
+        monkeypatch.setattr(hu, "_expired", lambda d: next(ticks))
+        assert read().reason == "deadline"
+        scan.assert_not_called()
+        assert writer.call_count == 1
+        data = json.loads(cache.read_text())
+        assert data["files"] == files
+        assert diag()["last_reason"] == "deadline"
+        if "complete_once" in data:
+            assert data["complete_once"] is True
+            assert data["usage_less_skipped"] == 2
+
+
+def test_complete_then_expired_clears_blocker_and_keeps_cache(reader_case, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    _seed_blocker(cache)
+    set_scan(hu.HostUsageResult({}, True), {"learned": {"no_ledger": True}}, True)
+    ticks = iter([False, False, True])
+    monkeypatch.setattr(hu, "_expired", lambda d: next(ticks))
+    assert read().reason == "deadline"
+    assert "learned" in json.loads(cache.read_text())["files"]
+    assert diag()["last_reason"] is None
+    assert diag()["last_reason_since"] is None
+
+
+@pytest.mark.parametrize("write_state", ["intact", "empty", "partial"])
+@pytest.mark.parametrize("complete", [False, True])
+def test_cache_write_failure_notices_and_preserves_scan_result(
+    reader_case, write_state, complete, monkeypatch, capsys
+):
+    read, cache, diag, set_scan = reader_case
+    _seed_blocker(cache)
+    before = cache.read_bytes()
+    result = hu.HostUsageResult({}, True) if complete else hu._incomplete("partial")
+    set_scan(result, {"learned": {"no_ledger": True}}, True)
+    real_write = lockedjson._write_json
+
+    def fail_write(fd, data):
+        if write_state != "intact":
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            if write_state == "partial":
+                os.write(fd, b'{"files":')
+        return OSError(errno.ENOSPC, "sensitive path must never be printed")
+
+    monkeypatch.setattr(lockedjson, "_write_json", fail_write)
+    assert read() is result
+    assert capsys.readouterr().err == "mm: notice: host token cache write failed: ENOSPC\n"
+    if write_state != "intact":
+        assert diag()["cache_state"] == ("missing" if write_state == "empty" else "unreadable")
+        assert diag()["last_reason"] is None
+    else:
+        assert cache.read_bytes() == before
+    monkeypatch.setattr(lockedjson, "_write_json", real_write)
+    set_scan(hu._incomplete("unsupported"))
+    assert read().reason == "unsupported"
+    assert diag()["last_reason"] == "unsupported"
+
+
+def test_slow_commit_does_not_reclassify_completed_read(reader_case, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    _seed_blocker(cache)
+    result = hu.HostUsageResult({}, True)
+    set_scan(result)
+    expired = False
+    real_write = lockedjson._write_json
+
+    def commit_after_deadline(fd, data):
+        nonlocal expired
+        expired = True
+        return real_write(fd, data)
+
+    monkeypatch.setattr(hu, "_expired", lambda d: expired)
+    monkeypatch.setattr(lockedjson, "_write_json", commit_after_deadline)
+    assert read() is result
+    assert diag()["last_reason"] is None
+
+
+def test_contended_reader_keeps_prior_blocker(reader_case):
+    read, cache, diag, set_scan = reader_case
+    _seed_blocker(cache)
+    scan = set_scan(hu.HostUsageResult({}, True))
+    before = cache.read_bytes()
+    with cache.open("r+") as fp:
+        fcntl.flock(fp, fcntl.LOCK_EX)
+        assert read().reason == "locked"
+    scan.assert_not_called()
+    assert cache.read_bytes() == before
+    assert diag()["last_reason"] == "unsupported"
+
+
+def test_legacy_codex_root_does_not_force_file_rewalk(isolated_cache, tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    _write_rollout(root, "rollout-old.jsonl", [_context(), _token(100)])
+    before = hu.read_codex_usage(root)
+    data = json.loads(isolated_cache.read_text())
+    del data["last_reason"]
+    del data["last_reason_since"]
+    isolated_cache.write_text(json.dumps(data))
+    monkeypatch.setattr(hu, "_read_full_rollout", lambda *a: pytest.fail("re-walked"))
+    assert hu.read_codex_usage(root) == before
+    assert json.loads(isolated_cache.read_text())["version"] == 1
 
 
 class TestHostFamily:
@@ -395,7 +651,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
     def test_broken_ledger_before_any_turn_context_is_still_fatal(
         self, isolated_cache: Path, tmp_path: Path
     ) -> None:
-        """The model-attribution `continue` runs before `_terminal_from_record`,
+        """Model-attribution buffering runs before counter validation,
         so a non-dict `info` arriving first used to slip past the refusal the
         docstring promised. Refusal now happens in `_carries_usage`."""
         root = tmp_path / "sessions"
@@ -569,7 +825,10 @@ class TestCacheLifecycle:
         result = hu.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="stale")
-        assert isolated_cache.read_bytes() == cache_before
+        data = json.loads(isolated_cache.read_text())
+        assert data["files"] == json.loads(cache_before)["files"]
+        assert data["last_reason"] == result.reason
+        assert hu._cached_reason_since(data) is not None
 
     def test_mutation_after_append_proof_preserves_existing_cache(
         self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -596,7 +855,10 @@ class TestCacheLifecycle:
         result = hu.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="stale")
-        assert isolated_cache.read_bytes() == cache_before
+        data = json.loads(isolated_cache.read_text())
+        assert data["files"] == json.loads(cache_before)["files"]
+        assert data["last_reason"] == result.reason
+        assert hu._cached_reason_since(data) is not None
 
     def test_deadline_during_cache_fingerprinting_preserves_existing_cache(
         self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -613,7 +875,10 @@ class TestCacheLifecycle:
         result = hu.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
-        assert isolated_cache.read_bytes() == cache_before
+        data = json.loads(isolated_cache.read_text())
+        assert data["files"] == json.loads(cache_before)["files"]
+        assert data["last_reason"] == result.reason
+        assert hu._cached_reason_since(data) is not None
 
     def test_2am_regression_partial_scan_never_replaces_or_prunes_cache(
         self, isolated_cache: Path, tmp_path: Path
@@ -738,6 +1003,7 @@ class TestCacheLifecycle:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
 
+        _seed_blocker(isolated_cache)
         real_scan = hu._scan_codex_root
         blown = {"on": False}
         real_expired = hu._expired
@@ -754,6 +1020,8 @@ class TestCacheLifecycle:
 
         assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
         files = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
+        assert hu.codex_usage_diag()["last_reason"] is None
+        assert hu.codex_usage_diag()["last_reason_since"] is None
         assert len(files) == 1, "a complete-but-overbudget scan must still keep its work"
 
         # ...and the work counts: the next in-budget scan re-parses nothing.
@@ -868,7 +1136,10 @@ class TestCacheLifecycle:
         result = hu.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="partial")
-        assert isolated_cache.read_bytes() == cache_before
+        data = json.loads(isolated_cache.read_text())
+        assert data["files"] == json.loads(cache_before)["files"]
+        assert data["last_reason"] == result.reason
+        assert hu._cached_reason_since(data) is not None
 
     def test_lock_contention_returns_incomplete_without_mutating_cache(
         self, isolated_cache: Path, tmp_path: Path
@@ -1365,6 +1636,7 @@ class TestGrokUsage:
                     "complete_once": True,
                     "usage_less_skipped": 0,
                     "last_reason": "unsupported",
+                    "last_reason_since": _OBSERVED,
                     "files": {},
                 }
             ),
@@ -2722,26 +2994,33 @@ class TestHostUsageBuckets:
 class TestCounterSemantics:
     """Track 35A: inclusive readers emit disjoint buckets."""
 
-    def test_reader_totals_reconcile_codex(self) -> None:
-        """Three identities from a real-shaped Codex token_count record.
+    def test_reader_totals_reconcile_codex(self, isolated_cache, tmp_path, monkeypatch):
+        """Pin inclusive reconciliation through cold, warm, and resumed reads.
 
-        Raw inclusive: input 2,801,950 + output 11,813 == total 2,813,763
-        and cached_input 2,668,288 is NOT added. Measured 2026-09-01.
+        The real-shaped opening carries input 2,801,950 and output 11,813;
+        cached input is included in that input and must not be added twice.
         """
-        raw_input, raw_cache_read, raw_cache_create, raw_output = 2_801_950, 2_668_288, 0, 11_813
-        raw_total = 2_813_763
-        assert raw_input + raw_output == raw_total
-        record = _token(
-            raw_input,
-            cache_create=raw_cache_create,
-            cache_read=raw_cache_read,
-            output=raw_output,
-        )
-        usage = hu._terminal_from_record(record, "gpt-5.6-terra").usage
-        assert usage["input"] + usage["cache_read"] + usage["cache_create"] == raw_input
-        assert (
-            usage["input"] + usage["cache_read"] + usage["cache_create"] + usage["output"]
-            == raw_total
+        root = tmp_path / "sessions"
+        model = "gpt-5.6-terra"
+        record = _token(2_801_950, cache_read=2_668_288, output=11_813)
+        path = _write_rollout(root, "rollout-totals.jsonl", [_context(model, turn="t"), record])
+        expected = {"input": 133_662, "cache_create": 0, "cache_read": 2_668_288, "output": 11_813}
+
+        def check(result, counters):
+            assert result.complete
+            assert result.hosts == {"codex": {"2026-08-15": counters}}
+            day = result.tokens_by_day["2026-08-15"]
+            assert {key: day[key] for key in tu.TOKEN_FIELDS} == counters
+            assert day["by_model"] == {model: counters}
+
+        check(hu.read_codex_usage(root), expected)
+        monkeypatch.setattr(hu, "_read_full_rollout", lambda *a: pytest.fail("full re-walk"))
+        check(hu.read_codex_usage(root), expected)
+        with path.open("a") as fp:
+            fp.write(json.dumps(_token(2_802_950, cache_read=2_668_388, output=11_833)) + "\n")
+        check(
+            hu.read_codex_usage(root),
+            {**expected, "input": 134_562, "cache_read": 2_668_388, "output": 11_833},
         )
 
     def test_reader_totals_reconcile_grok(self) -> None:
@@ -2832,26 +3111,20 @@ class TestCounterSemantics:
             )
         assert caught.value.reason == "malformed"
 
-    def test_aggregate_does_not_normalize_terminal_buckets(self) -> None:
-        """Disjoint extractors emit ``cache_read`` that may exceed ``input``.
+    def test_aggregate_passes_disjoint_grok_turns_through_unnormalized(self):
+        """The live Grok turns branch already carries disjoint buckets.
 
-        ``_aggregate``'s ``_Terminal`` branch must pass those buckets through
-        ``_add_usage`` without ``_normalize_inclusive_usage``. Track 42A merges
-        extractors here; a normalize call would clamp those tokens to zero.
-        Historically OpenCode was the live counterexample; the shape is the
-        pin, not the reader.
+        Preserve this in "Share host-reader filesystem resume primitives only
+        after measuring duplication cost" (docs/roadmap-future.md).
         """
-        terminal = hu._Terminal(
-            "2026-08-15",
-            "gpt-5",
-            {"input": 10, "cache_create": 2, "cache_read": 50, "output": 15},
+        usage = {"input": 10, "cache_create": 2, "cache_read": 50, "output": 15}
+        buckets = hu._aggregate(
+            [{"turns": [{"day": "2026-08-15", "model": "grok-4", "usage": usage}]}]
         )
-        buckets = hu._aggregate([terminal])
-        day = buckets.by_family["codex"]["2026-08-15"]
-        assert day["input"] == 10
-        assert day["cache_read"] == 50
-        assert day["cache_create"] == 2
-        assert day["output"] == 15
+        assert buckets.by_family == {"grok": {"2026-08-15": usage}}
+        day = buckets.by_day["2026-08-15"]
+        assert {key: day[key] for key in tu.TOKEN_FIELDS} == usage
+        assert day["by_model"] == {"grok-4": usage}
 
     def test_codex_reader_round_trips_to_per_machine_floor(
         self, isolated_cache: Path, tmp_path: Path

@@ -22,9 +22,9 @@ Inclusive extractors therefore emit disjoint buckets via
 cache_create``). Do **not** normalize in ``_add_usage``: that is where
 readers converge, and subtracting ``cache_read`` from an already-disjoint
 bucket (Claude today; historically OpenCode) would clamp real billable
-tokens to zero. Track 42A merges extractors into this path; the prohibition
-is load-bearing for that merge, not a comment about the current two
-inclusive survivors. Malformed inclusive counters
+tokens to zero. Keep this boundary in any future extraction; see
+"Share host-reader filesystem resume primitives only after measuring
+duplication cost" in ``docs/roadmap-future.md``. Malformed inclusive counters
 (``cache_read + cache_create > input``) raise ``_ReadFailure("malformed")``
 so Track 31A isolates that reader.
 
@@ -67,11 +67,13 @@ callers still publish only from a bounded read.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
 import stat
+import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -103,6 +105,7 @@ _HEAD_PROBE_BYTES = 4096
 _TAIL_PROBE_BYTES = 4096
 _MAX_MODEL_ID_BYTES = 256
 _MAX_PROMPT_ID_BYTES = 256
+_MAX_REASON_SINCE_CHARS = 40
 _MAX_COUNTER = 2**53
 _GROK_STOPS = frozenset({"end_turn", "cancelled"})
 _GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
@@ -143,6 +146,13 @@ to this reader so a caller never silently omits it from coverage). A caller
 may treat ``no_metadata_ledger`` as "this source is not installed"; it must
 not do that with any other reason."""
 HostTokens = dict[str, dict[str, Usage]]
+
+PERMANENT_REASONS: frozenset[Reason] = frozenset({"unsupported"})
+"""Standing blockers a retry alone cannot fix; distinct from source absence."""
+PERSISTABLE_REASONS: frozenset[Reason] = frozenset(get_args(Reason)) - {
+    "locked",
+    "no_metadata_ledger",
+}
 
 
 @dataclass
@@ -245,8 +255,8 @@ class _CacheEntry(TypedDict, total=False):
     ``models`` and keeping ``last`` only on a file's FIRST state (the only place
     ``_aggregate`` reads it) brings that to 13.5 MB and 56 ms. Still 34x the
     v0.12.47 cache, and it grows with the corpus. Encoding work is deferred
-    until the trigger in ``docs/TODOS.md`` (host cache encoding, Group 46
-    deferral) fires: 25 MB or 100 ms json round-trip. Measured 2026-09-04
+    until "Host cache encoding trigger" in ``docs/roadmap-future.md`` fires:
+    25 MB or 100 ms json round-trip. Measured 2026-09-04
     at 4.11 MB / 23.3 ms / 20,047 states / 716 rollouts, about 6x headroom.
     """
 
@@ -276,22 +286,6 @@ class _Fingerprint:
     head_len: int
     tail: str
     tail_len: int
-
-
-@dataclass(frozen=True)
-class _Terminal:
-    """One already-reduced ``(day, model, usage)`` contribution.
-
-    The unit for a reader whose rows are already per-turn and disjoint:
-    nothing to dedup and no cumulative counter to difference. Codex stopped
-    using this in favour of ``_TurnState``; do not reintroduce it there.
-    ``_terminal_from_record`` is the remaining producer (test-only after
-    Track 32A); Track 42A owns its fate.
-    """
-
-    day: str
-    model: str
-    usage: Usage
 
 
 @dataclass(frozen=True)
@@ -382,21 +376,19 @@ def read_codex_usage(
         ) as locked:
             if not locked.is_locked:
                 return _incomplete("locked")
-            if _expired(read_deadline):
-                raise _NoCacheCommit(_incomplete("deadline"))
-
+            prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
             cached_files = _cached_files(locked.data)
-            result, staged_files, learned = _scan_codex_root(
-                source_root, cached_files, read_deadline
-            )
-            if not learned and not result.complete:
-                # Nothing NEW was learned about any file — escape without
-                # rewriting (and re-permissioning) the cache. Gating on
-                # `learned` rather than on `staged_files` matters: cache hits
-                # are staged too, so an already-warm machine with one
-                # permanently unreadable rollout would otherwise pay a full
-                # read/modify/write of the whole cache on every push to
-                # persist content identical to what it just read.
+            if _expired(read_deadline):
+                result, staged_files, learned = _incomplete("deadline"), {}, False
+            else:
+                result, staged_files, learned = _scan_codex_root(
+                    source_root, cached_files, read_deadline
+                )
+            carried = _carry_reason(*prior, result, datetime.now(timezone.utc))
+            if not learned and not result.complete and prior == carried:
+                # Cache hits are staged too. Only newly learned files or a
+                # changed (reason, since) pair justify rewriting a failed pass.
+                # The pair comparison dates a migrated blocker exactly once.
                 raise _NoCacheCommit(result)
             # Cache persistence is DECOUPLED from result validity. Whether the
             # scan may be published is one question; whether we learned
@@ -408,6 +400,8 @@ def read_codex_usage(
             # bounded scans, zero bytes cached.
             locked.data = {
                 "version": CACHE_VERSION,
+                "last_reason": carried[0],
+                "last_reason_since": carried[1],
                 # A complete pass observed every rollout on disk, so REPLACING
                 # the map is what prunes entries for deleted files. A partial
                 # pass must MERGE: replacing would delete the entries for every
@@ -419,13 +413,12 @@ def read_codex_usage(
                 # head+tail fingerprint before it is trusted.
                 "files": staged_files if result.complete else {**cached_files, **staged_files},
             }
-            if not result.complete:
-                return result
-            if _expired(read_deadline):
+            if result.complete and _expired(read_deadline):
                 # The scan finished but overran its budget: refuse to publish
                 # (unchanged), yet keep the cache above so the work counts.
-                return _incomplete("deadline")
-            return result
+                result = _incomplete("deadline")
+        _notice_cache_write_failure(locked.write_error)
+        return result
     except _NoCacheCommit as aborted:
         return aborted.result
     except OSError:
@@ -466,7 +459,7 @@ def grok_completed_once() -> bool:
     Missing, corrupt, or lock-contended cache is pre-success (fail safe).
     Diagnostic only: the host-sweep no longer keys publication policy on this
     latch (Track 31A). ``mm status`` / ``mm diag`` prefer ``last_reason``
-    when it is a permanent failure, then this latch.
+    whenever a standing blocker exists, then this latch.
     """
     return grok_usage_diag()["complete_once"] is True
 
@@ -499,6 +492,8 @@ def codex_usage_diag() -> dict[str, Any]:
         "pending": None,
         "model_count": 0,
         "models": [],
+        "last_reason": None,
+        "last_reason_since": None,
     }
     try:
         with locked_json_snapshot(CACHE_PATH) as snap:
@@ -548,6 +543,8 @@ def codex_usage_diag() -> dict[str, Any]:
         "pending": None if on_disk is None else max(0, on_disk - cached),
         "model_count": models["model_count"],
         "models": models["models"],
+        "last_reason": _cached_last_reason(data),
+        "last_reason_since": _cached_reason_since(data),
     }
 
 
@@ -558,29 +555,28 @@ def grok_usage_diag() -> dict[str, Any]:
     this reads only the private cache. Absence, lock contention, and
     unreadable files are reported as ``cache_state``, never raised.
     """
+    blank = {
+        "complete_once": False,
+        "usage_less_skipped": 0,
+        "last_reason": None,
+        "last_reason_since": None,
+        "cache_state": "unreadable",
+        "model_count": 0,
+        "models": [],
+    }
     try:
         with locked_json_snapshot(GROK_CACHE_PATH) as snap:
             data = snap.data
             state = snap.state
     except OSError:
-        return {
-            "complete_once": False,
-            "usage_less_skipped": 0,
-            "last_reason": None,
-            "cache_state": "unreadable",
-            "model_count": 0,
-            "models": [],
-        }
+        return blank
     if state != "valid" or not isinstance(data, dict):
-        cache_state = "missing" if state in {"missing", "empty"} else "unreadable"
         return {
-            "complete_once": False,
-            "usage_less_skipped": 0,
-            "last_reason": None,
-            "cache_state": cache_state,
-            "model_count": 0,
-            "models": [],
+            **blank,
+            "cache_state": "missing" if state in {"missing", "empty"} else "unreadable",
         }
+    if data.get("version") != CACHE_VERSION:
+        data = _empty_grok_cache()
     raw_skip = data.get("usage_less_skipped", 0)
     skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
     files = data.get("files")
@@ -589,6 +585,7 @@ def grok_usage_diag() -> dict[str, Any]:
         "complete_once": data.get("complete_once") is True,
         "usage_less_skipped": skipped,
         "last_reason": _cached_last_reason(data),
+        "last_reason_since": _cached_reason_since(data),
         "cache_state": "ok",
         "model_count": models["model_count"],
         "models": models["models"],
@@ -677,34 +674,22 @@ def read_grok_usage(
         ) as locked:
             if not locked.is_locked:
                 return _incomplete("locked")
-            if _expired(read_deadline):
-                raise _NoCacheCommit(_incomplete("deadline"))
-
+            prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
             cached_files = _cached_files(locked.data)
-            prior_complete = locked.data.get("complete_once") is True
-            prior_reason = _cached_last_reason(locked.data)
-            result, staged_files, learned, saw_files = _scan_grok_root(
-                source_root, cached_files, read_deadline
+            prior_complete = (
+                locked.data.get("version") == CACHE_VERSION
+                and locked.data.get("complete_once") is True
             )
-            new_reason = None if result.complete else result.reason
-            # A later deadline/locked/io_error must not erase a standing
-            # unsupported. mm status only special-cases permanent reasons;
-            # clobbering them would reprint "prior scan completed successfully"
-            # while Grok is still dropped. Keep in sync with
-            # events_tail._HOST_PERMANENT_REASONS.
-            if (
-                not result.complete
-                and prior_reason == "unsupported"
-                and new_reason != "unsupported"
-            ):
-                new_reason = prior_reason
-            # Persist the last failure reason even when every file was a cache
-            # hit. The previous gate (`not learned and not complete`) left a
-            # permanently-drifted store unable to write anything, so mm status
-            # and mm diag never saw the reason class and prescribed `mm push`
-            # forever. Absence of `last_reason` is the pre-46A discriminator
-            # — not a CACHE_VERSION bump, which shares a constant with Codex.
-            if not learned and not result.complete and prior_reason == new_reason:
+            if _expired(read_deadline):
+                result, staged_files, learned, saw_files = _incomplete("deadline"), {}, False, False
+            else:
+                result, staged_files, learned, saw_files = _scan_grok_root(
+                    source_root, cached_files, read_deadline
+                )
+            carried = _carry_reason(*prior, result, datetime.now(timezone.utc))
+            # Failed passes write only newly learned files or a changed pair,
+            # including the first observation of a migrated, undated blocker.
+            if not learned and not result.complete and prior == carried:
                 raise _NoCacheCommit(result)
             complete_once = prior_complete or (result.complete and saw_files)
             files = staged_files if result.complete else {**cached_files, **staged_files}
@@ -722,14 +707,14 @@ def read_grok_usage(
                 "version": CACHE_VERSION,
                 "complete_once": complete_once,
                 "usage_less_skipped": skip_total,
-                "last_reason": new_reason,
+                "last_reason": carried[0],
+                "last_reason_since": carried[1],
                 "files": files,
             }
-            if not result.complete:
-                return result
-            if _expired(read_deadline):
-                return _incomplete("deadline")
-            return result
+            if result.complete and _expired(read_deadline):
+                result = _incomplete("deadline")
+        _notice_cache_write_failure(locked.write_error)
+        return result
     except _NoCacheCommit as aborted:
         return aborted.result
     except OSError:
@@ -742,20 +727,72 @@ def _empty_grok_cache() -> dict[str, Any]:
         "complete_once": False,
         "usage_less_skipped": 0,
         "last_reason": None,
+        "last_reason_since": None,
         "files": {},
     }
 
 
 def _cached_last_reason(data: dict[str, Any]) -> Reason | None:
-    """Read a closed ``Reason`` off the Grok cache root, or None.
+    """Read a standing blocker off either current-version cache root.
 
-    Key-absence is the pre-46A discriminator. Garbage is treated as absent
-    so a hand-edited cache cannot smuggle peer text onto ``mm diag``.
+    Absence is documentary, not a migration gate. Garbage and non-persistable
+    reasons are absent so a hand-edited cache cannot forge diagnostic text.
     """
+    if data.get("version") != CACHE_VERSION:
+        return None
     raw = data.get("last_reason")
-    if raw in get_args(Reason):
+    if isinstance(raw, str) and raw in PERSISTABLE_REASONS:
         return raw  # type: ignore[return-value]
     return None
+
+
+def _cached_reason_since(data: dict[str, Any]) -> str | None:
+    """Validated, normalized UTC first-observed time; never an orphan date.
+
+    A bad date does not erase a valid reason. A subsequent failed read dates
+    an undated blocker once, without inventing when the original failure began.
+    """
+    if _cached_last_reason(data) is None:
+        return None
+    raw = data.get("last_reason_since")
+    if not isinstance(raw, str) or len(raw) > _MAX_REASON_SINCE_CHARS or not raw.isascii():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).isoformat()
+    except (ValueError, OverflowError):
+        pass
+    return None
+
+
+def _carry_reason(
+    prior_reason: Reason | None,
+    prior_since: str | None,
+    result: HostUsageResult,
+    now: datetime,
+) -> tuple[Reason | None, str | None]:
+    """Carry the standing read blocker, not the latest publication outcome.
+
+    A complete read clears it, even if publication then overruns its budget.
+    A permanent blocker survives later transient failures until a read completes.
+    Locked/absent attempts cannot persist. ``now`` dates this version's first
+    observation of the current reason, never the original onset of an outage.
+    Callers validate prior fields and compare the pair when deciding to write.
+    """
+    if result.complete:
+        return None, None
+    if result.reason not in PERSISTABLE_REASONS:
+        return prior_reason, prior_since
+    reason = prior_reason if prior_reason in PERMANENT_REASONS else result.reason
+    since = prior_since if reason == prior_reason and prior_since is not None else now.isoformat()
+    return reason, since
+
+
+def _notice_cache_write_failure(error: OSError | None) -> None:
+    if error is not None:
+        name = errno.errorcode.get(error.errno, "OSError")
+        sys.stderr.write(f"mm: notice: host token cache write failed: {name}\n")
 
 
 def _scan_grok_root(
@@ -1096,8 +1133,9 @@ def _classify_grok_update(update: dict[str, Any]) -> GrokUpdateClass:
     / ``_GROK_REQUIRED_KEYS``. An ignorable key is dropped before the
     required-set comparison so a usage-less terminal that also carries
     ``elapsed_ms`` stays a skip, not a drift. Unknown extra keys are
-    ``drift``; this Track still refuses them (Track 46B owns quarantine).
-    One caller; hoistable for Track 49A, not generalized here.
+    ``drift`` and refuse this reader. See "Reader-agnostic quarantine and
+    drift classification" in ``docs/roadmap-future.md``. Sharing filesystem
+    resume primitives is separately deferred there pending measured need.
     """
     keys = set(update)
     if _GROK_CONTENT_FIELDS & keys:
@@ -1122,11 +1160,10 @@ def _normalize_inclusive_usage(usage: Usage) -> Usage:
     failure and raises ``_ReadFailure("malformed")`` so Track 31A isolates
     that reader for the capture.
 
-    Never call this on an already-disjoint bucket. Track 42A merges
-    extractors into ``_add_usage``; normalizing there would clamp a
-    disjoint reader's ``cache_read > input`` shape to zero. The live
-    survivors (Codex, Grok CLI) are inclusive — the prohibition is for
-    the merge, not a description of today's readers.
+    Never call this on an already-disjoint bucket. A second normalization
+    would destroy the valid ``cache_read > input`` shape. See "Share host-reader
+    filesystem resume primitives only after measuring duplication cost" in
+    ``docs/roadmap-future.md`` before extracting shared reader code.
     """
     input_tokens = usage["input"]
     cache_create = usage["cache_create"]
@@ -1278,14 +1315,6 @@ def _aggregate_grok(entries: Any) -> HostUsageBuckets:
     differs — it deliberately does not, and a second implementation here is how
     the two readers drifted apart in the first place."""
     return _aggregate(entry for entry in entries if isinstance(entry, dict))
-
-
-def _model_id(record: dict[str, Any], keys: tuple[str, ...]) -> str:
-    for key in keys:
-        value = record.get(key)
-        if isinstance(value, str) and value and len(value.encode("utf-8")) <= _MAX_MODEL_ID_BYTES:
-            return value
-    raise _ReadFailure("unsupported")
 
 
 def _utc_day(value: Any) -> str:
@@ -1783,7 +1812,7 @@ def _carries_usage(record: dict[str, Any]) -> bool:
     A null or absent ``payload.info`` is Codex's "nothing to report yet"
     marker. An ``info`` that is PRESENT but not a dict is malformed and is
     refused HERE rather than downstream: the caller's model-attribution
-    ``continue`` runs before ``_terminal_from_record``, so a broken ledger
+    buffering runs before counter validation, so a broken ledger
     arriving before the first ``turn_context`` used to slip past the refusal
     entirely. Do not widen this to "any info I can't parse is fine": the
     distinction between an empty marker and a broken ledger is the whole
@@ -1798,36 +1827,6 @@ def _carries_usage(record: dict[str, Any]) -> bool:
     return True
 
 
-def _terminal_from_record(record: dict[str, Any], model: str) -> _Terminal:
-    payload = record.get("payload")
-    info = payload.get("info") if isinstance(payload, dict) else None
-    totals = info.get("total_token_usage") if isinstance(info, dict) else None
-    if not isinstance(totals, dict):
-        raise _ReadFailure("unsupported")
-    usage: Usage = _normalize_inclusive_usage(
-        {
-            "input": _counter(totals, "input_tokens", required=True),
-            "cache_create": _counter(totals, "cache_write_input_tokens", required=False),
-            "cache_read": _counter(totals, "cached_input_tokens", required=True),
-            "output": _counter(totals, "output_tokens", required=True),
-        }
-    )
-    # These fields are deliberately validated but never summed: total_tokens
-    # omits cache counters and reasoning_output_tokens is inside output_tokens.
-    _counter(totals, "reasoning_output_tokens", required=False)
-    _counter(totals, "total_tokens", required=False)
-    timestamp = record.get("timestamp")
-    if not isinstance(timestamp, str):
-        raise _ReadFailure("unsupported")
-    try:
-        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise _ReadFailure("unsupported") from exc
-    if parsed.tzinfo is None:
-        raise _ReadFailure("unsupported")
-    return _Terminal(parsed.astimezone(timezone.utc).date().isoformat(), model, usage)
-
-
 def _counter(totals: dict[str, Any], key: str, *, required: bool) -> int:
     value = totals.get(key, 0)
     if key not in totals and required:
@@ -1840,12 +1839,10 @@ def _counter(totals: dict[str, Any], key: str, *, required: bool) -> int:
 def _aggregate(entries: Any) -> HostUsageBuckets:
     """Reduce cached entries to family totals AND per-model day buckets.
 
-    Handles every reader's entry shape, which is why there is one of these and
-    not one per reader: ``_Terminal`` rows are already-reduced (day, model,
-    usage) and already disjoint, Grok contributes pre-deduped ``turns``, and
-    Codex contributes ``states`` that must be deduped HERE, across files.
-    Do not call ``_normalize_inclusive_usage`` on the ``_Terminal`` branch —
-    those buckets are already exclusive. Track 42A merges extractors here.
+    Grok contributes pre-deduped, disjoint ``turns``; Codex contributes
+    cumulative ``states`` that must be deduped HERE, across files. Do not
+    normalize the Grok turns again. See "Share host-reader filesystem resume
+    primitives only after measuring duplication cost" in ``docs/roadmap-future.md``.
 
     **Why Codex dedup cannot live in the per-file walk.** A rollout file is not
     the unit of accounting. Measured on a real corpus: 195 ``turn_id`` values
@@ -1898,10 +1895,7 @@ def _aggregate(entries: Any) -> HostUsageBuckets:
         # No-ledger entries exist only to make an unchanged ledger-less file a
         # cheap cache hit. They carry nothing attributable and must never reach
         # `host_family`, which would bucket "" as the `other` family.
-        if not isinstance(entry, _Terminal) and entry.get("no_ledger"):
-            continue
-        if isinstance(entry, _Terminal):
-            _add_usage(buckets, entry.day, entry.model, entry.usage)
+        if entry.get("no_ledger"):
             continue
         for turn in entry.get("turns") or ():
             _add_usage(buckets, turn["day"], turn["model"], turn["usage"])
@@ -2172,7 +2166,7 @@ def _cached_files(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _empty_cache() -> dict[str, Any]:
-    return {"version": CACHE_VERSION, "files": {}}
+    return {"version": CACHE_VERSION, "last_reason": None, "last_reason_since": None, "files": {}}
 
 
 def _validated_entry(value: Any) -> _CacheEntry | None:

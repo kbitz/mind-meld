@@ -110,10 +110,114 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "complete_once",
         "usage_less_skipped",
         "last_reason",
+        "last_reason_since",
         "cache_state",
         "model_count",
         "models",
     }
+
+    assert set(payload["host_usage"]["codex"]) == {
+        "cache_state",
+        "state",
+        "files_cached",
+        "files_migrated",
+        "files_pre_track",
+        "files_on_disk",
+        "pending",
+        "model_count",
+        "models",
+        "last_reason",
+        "last_reason_since",
+    }
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize(
+    "reason,since,version,expected_reason,expected_since",
+    [
+        ("unsupported", "2026-09-04T01:00:00+02:00", 1, "unsupported", "2026-09-03T23:00:00+00:00"),
+        ("deadline", None, 1, "deadline", None),
+        ("malformed", "invalid", 1, "malformed", None),
+        ("io_error", "2026-09-04T01:00:00", 1, "io_error", None),
+        ("stale", "\x1b[31m\n" * 2000, 1, "stale", None),
+        ("partial", "\ud800", 1, "partial", None),
+        (None, "2026-09-04T01:00:00Z", 1, None, None),
+        ("locked", "2026-09-04T01:00:00Z", 1, None, None),
+        ("no_metadata_ledger", "2026-09-04T01:00:00Z", 1, None, None),
+        ("unsupported\nforged", None, 1, None, None),
+        ({"bad": "reason"}, None, 1, None, None),
+        ("unsupported", "2026-09-04T01:00:00Z", 2, None, None),
+    ],
+)
+def test_diag_blocker_fields_are_validated_and_rendered(
+    tmp_path, monkeypatch, reader, reason, since, version, expected_reason, expected_since
+):
+    _setup(tmp_path, monkeypatch)
+    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "files": {},
+                "complete_once": True,
+                "last_reason": reason,
+                "last_reason_since": since,
+            }
+        )
+    )
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    state = json.loads(result.stdout)["host_usage"][reader]
+    assert state["last_reason"] == expected_reason
+    assert state["last_reason_since"] == expected_since
+    plain = runner.invoke(app, ["diag"])
+    assert plain.exit_code == 0, plain.output
+    text = " ".join(plain.output.split())
+    assert f"{reader} cache inventory:" in text
+    assert f"{reader} usage read blocker:" in text
+    if expected_reason is None:
+        assert f"{reader} usage read blocker: none" in text
+    else:
+        assert f"({reader} {expected_reason})" in text
+    if expected_reason == "unsupported":
+        assert "pipx upgrade mind-meld" in text
+    if expected_reason == "deadline":
+        assert "warm it (up to 5 s per push)" in text
+    if expected_since:
+        assert "(first observed 2026-09-03 UTC)" in text
+    else:
+        assert "first observed" not in text
+    assert "\x1b" not in plain.output
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("state", ["missing", "unreadable"])
+def test_diag_omits_blocker_line_when_cache_is_not_ok(tmp_path, monkeypatch, reader, state):
+    _setup(tmp_path, monkeypatch)
+    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    if state == "unreadable":
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text("{broken")
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    assert f"{reader} usage read blocker" not in result.output
+    assert "blocker: none" not in result.output
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_diag_legacy_root_emits_null_blocker_fields(tmp_path, monkeypatch, reader):
+    _setup(tmp_path, monkeypatch)
+    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"version": 1, "files": {}}))
+    before = cache.read_bytes()
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    state = json.loads(result.stdout)["host_usage"][reader]
+    assert state["last_reason"] is None
+    assert state["last_reason_since"] is None
+    assert cache.read_bytes() == before
 
 
 def test_diag_host_usage_does_not_open_the_host_store(tmp_path, monkeypatch):
@@ -160,7 +264,7 @@ def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["host_usage"]["grok"]["usage_less_skipped"] == 3
     assert payload["host_usage"]["grok"]["last_reason"] is None
-    assert "grok last failure" not in result.output
+    assert "grok usage read blocker" not in result.output
 
 
 def test_diag_renders_persisted_last_reason(tmp_path, monkeypatch):
@@ -184,7 +288,7 @@ def test_diag_renders_persisted_last_reason(tmp_path, monkeypatch):
     assert payload["host_usage"]["grok"]["last_reason"] == "unsupported"
     plain = runner.invoke(app, ["diag"])
     assert plain.exit_code == 0, plain.output
-    assert "grok last failure" in plain.output
+    assert "grok usage read blocker" in plain.output
     assert "pipx upgrade mind-meld" in plain.output
 
 

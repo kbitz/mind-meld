@@ -353,11 +353,11 @@ class TestBackfillHostSnapshot:
         assert (
             "mm: notice: host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
-            "grok's log format changed in a way this version cannot read. "
-            "Run `pipx upgrade mind-meld`, or run "
+            "grok wrote a record this version cannot read. A newer mm may read it: "
+            "run `pipx upgrade mind-meld`, or run "
             "`mm disable-source grok` to stop retrying.\n" in err
         )
-        assert "A later substantive push will retry" not in err, (
+        assert "The next push that uploads a change retries" not in err, (
             "unsupported storage is permanent — never promise a retry"
         )
         assert "events backfill failed" not in err
