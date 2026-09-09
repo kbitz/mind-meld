@@ -713,9 +713,10 @@ class TestStatusBreadcrumbs:
         )
         warming = runner.invoke(app, ["status"])
         assert warming.exit_code == 0, warming.output
-        assert "no successful scan yet" in warming.output
-        assert "run" in warming.output
-        assert "mm push" in warming.output
+        warming_text = " ".join(warming.output.split())
+        assert "(grok deadline)" in warming_text
+        assert "no successful scan yet" not in warming_text
+        assert "Run `mm push` interactively to warm it (up to 5 s per push)" in warming_text
 
         runner.invoke(app, ["disable-source", "grok"])
         _host_usage.GROK_SESSIONS_PATH.mkdir(parents=True)

@@ -142,6 +142,24 @@ mm enable-source codex
 mm enable-source grok
 ```
 
+To verify Codex usage capture on an initialized Mac with Codex logs and the
+`mm-events` source enabled:
+
+1. `mm enable-source codex`
+2. Run an interactive `mm push` after a real customization or other synced
+   file changes. A push with nothing to upload does not read host usage.
+3. Run `mm diag`. After a complete read, expect these lines:
+
+   ```text
+   codex cache inventory:   ready
+   codex usage read blocker: none
+   ```
+
+`ready` describes cached rollout inventory; `none` means no known standing
+read blocker. Neither proves a snapshot was published. `mm status` stays quiet
+about healthy Codex capture. For a blocker, see
+[Host usage capture](#host-usage-capture-codex-and-grok).
+
 ### Grok usage in fleet retro
 
 `mm enable-source grok` does two things: it syncs `~/.grok` `skills/`, `commands/`, and `rules/` (session files stay local), and it opts this Mac into reading terminal token totals from local `updates.jsonl`. Prompts never leave the Mac. The fleet retro's `AGENT LOGS` block then gains a `Grok models: seen on N days` line — a day count, not a token magnitude.
@@ -149,10 +167,10 @@ mm enable-source grok
 Upgrade is per Mac, and **upgrading is not enough**. On each Mac:
 
 1. `mm enable-source grok`
-2. One **interactive** `mm push` (the fast path — it may warm the Grok cache once). Autopush never warms and converges over about three pushes instead.
-3. Verify: `mm status` should read `Grok usage capture: enabled; a prior scan completed successfully`, and `mm diag` should show `grok prior successful scan: yes`. Then `mm retro-fleet 7d`.
+2. An **interactive** `mm push` that uploads a real change (it may warm the Grok cache once, up to 5 s). Autopush never warms and can converge over several substantive pushes; a no-op push does not retry capture.
+3. Verify: `mm status` should read `Grok usage capture: enabled; a prior scan completed successfully`, and `mm diag` should show `grok prior successful scan: yes` and `grok usage read blocker: none`. Then `mm retro-fleet 7d`.
 
-If a later Grok release changes the log format, that Mac drops Grok (declared on `mm status` / `mm diag` / push stderr) and keeps publishing Codex. Run `pipx upgrade mind-meld`, or `mm disable-source grok` to stop retrying.
+If Grok writes a record this version cannot read, that Mac drops Grok (declared on `mm status` / `mm diag` / push stderr) and keeps publishing Codex. A newer mm may read it: run `pipx upgrade mind-meld`, or `mm disable-source grok` to stop retrying. See [Host usage capture](#host-usage-capture-codex-and-grok) for all blockers.
 
 Then give each agent the same lifecycle contract. For Codex, add this to `~/.codex/AGENTS.md` (or merge it into your existing global guidance):
 
@@ -464,7 +482,9 @@ Use the real path from your filesystem: displayed nonprintable characters are vi
 
 **Why is my host cost missing (`—` on the economics table)?** That Mac reported token counters in an older format (mm < v0.12.52), has not pushed per-model `tokens_by_day` yet (mm < v0.12.49), or its latest snapshot predates the requested window. On **that** Mac: `pipx upgrade mind-meld`, then an interactive `mm push`. Confirm with `mm diag` (Host usage block). Then re-run `mm retro-fleet 30d` here. An upgraded peer's retained 90 days generally **do** become priceable on repush. `—` is unavailable, not zero; do not add the other machines' figures to fill it in.
 
-**I enabled Grok, but no Grok activity appears.** Upgrade is not enough — run `mm enable-source grok` on that Mac, then one interactive `mm push`. `mm status` reports outcome, not config, and has three readings: `enabled; a prior scan completed successfully`, `enabled, but no successful scan yet` (a push will finish it), and `enabled — host-usage snapshot skipped (grok unsupported) …` (a push will **not** — that one names `pipx upgrade mind-meld`). `mm diag` shows consent, whether a prior scan completed, how many usage-less turns were skipped, and a `grok last failure:` line when the last read failed for a reason no push can clear — all without opening `~/.grok/sessions`. If push stderr names `grok` with `unsupported`, the log format changed; run `pipx upgrade mind-meld`, or `mm disable-source grok` to stop retrying. Codex totals are unaffected. Grok API-list-rate figures stay unpriced until the xAI rate table lands.
+**I enabled Grok, but no Grok activity appears.** Check the standing blocker
+and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture-codex-and-grok).
+Grok API-list-rate figures stay unpriced until the xAI rate table lands.
 
 **`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either.
 
@@ -495,6 +515,75 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm diff` predicts them before a pull, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
 
 **A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud/Dropbox conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
+
+### Host usage capture (Codex and Grok)
+
+If Codex totals stopped appearing, or Grok is enabled but absent from the
+retro, run `mm status` and `mm diag` on the Mac that owns the logs. Status
+shows any standing read blocker before rebuilding or warming advice. Codex
+is quiet when healthy and when its source is disabled. Grok reports its
+standing blocker, otherwise whether a prior scan completed; a disabled Grok
+source can still have the older usage-only consent bit enabled.
+
+Diag separates `<reader> cache inventory:` from `<reader> usage read blocker:`.
+A readable cache with no known blocker says `none`; a blocker can appear beside
+a ready inventory. `last_reason` means the most recent incomplete read's
+standing blocker, retained until a read completes, with `unsupported`
+surviving later transient failures. `(first observed 2026-09-04 UTC)` dates
+this version's first observation of that reason, not the start of an outage.
+Older undated blockers gain a date when this version first observes them.
+
+| Reason | Meaning | Remedy |
+|---|---|---|
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `pipx upgrade mind-meld`, or `mm disable-source codex` / `mm disable-source grok` to stop the corresponding source reader. A retry alone cannot fix it. |
+| `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then retry on a substantive push. If it persists, report the mm version and Host usage diag block. |
+| `io_error` | A host log could not be read. | Restore read access and retry on a substantive push. |
+| `stale` | A file changed while it was being read. | Let the host finish writing and retry on a substantive push. |
+| `partial` | A final record is unfinished. | Let the host finish the record. The next push that uploads a change retries; `mm diag` shows the reader's state. |
+| `deadline` | The read exceeded its budget. | Run `mm push` interactively to warm it (up to 5 s per push), or `mm diag` to see how much is left. Warming requires a substantive push; large stores can need several. |
+
+The next push that uploads a change retries; `mm diag` shows the reader's
+state. A no-op `mm push` or `mm autopush` does not re-read usage, including
+after upgrading. Wait for a real synced change; do not edit meaningful data
+just to force capture. Orchestration failures (`unavailable`, or expiry
+before a reader was invoked) stay on push stderr and the autorun breadcrumb;
+they cannot be recorded by a reader that never ran. A no-op autopush may
+replace that breadcrumb with `success` while the standing reader blocker
+remains. A completed read clears the blocker even if publication subsequently
+exceeds its budget. Inventory plus `none` is not proof of publication.
+
+`mm disable-source codex` also stops syncing Codex customizations and skill-link
+maintenance under the default source-derived policy; an explicit `[skills]
+agents` grant is the exception for maintenance. There is no independent Codex
+usage opt-out yet. Grok's existing `[retro] grok_host_usage = true` remains a
+separate opt-in: turn that off too if you want to stop usage after disabling
+the source. Content sync and other readers' captures survive one reader's
+failure.
+
+If `mm --version` does not change after `pipx upgrade`, see [Upgrading](#upgrading).
+No cache migration is needed for 0.14.8. To roll back this change:
+
+```bash
+pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.7
+```
+
+That pins an older release; use the `@latest` reinstall in Upgrading to resume
+updates. Older mm ignores the additive root keys.
+
+`mm diag --json` exposes `host_usage.codex` keys `cache_state`, `state`,
+`files_cached`, `files_migrated`, `files_pre_track`, `files_on_disk`, `pending`,
+`model_count`, `models`, `last_reason`, and `last_reason_since`.
+`host_usage.grok` keys are `consented`, `complete_once`, `usage_less_skipped`,
+`cache_state`, `model_count`, `models`, `last_reason`, and `last_reason_since`.
+The date is normalized UTC ISO text or null; missing old fields become null,
+and an invalid date never erases a valid blocker. Diag reads caches without
+opening host logs or needing a passphrase; Codex also counts rollout paths.
+`cache_state: missing` or `unreadable` leaves the blocker unknown.
+
+A `mm: notice: host token cache write failed: <ErrnoName>` means the read's
+result still stands but its cache could not be saved. The write may leave an
+empty or unreadable cache, losing the old blocker. A subsequent failing read
+can record it again; this notice does not itself become a stored blocker.
 
 ### Snapshot failures
 

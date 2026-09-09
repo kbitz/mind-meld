@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.8] - 2026-09-09
+
+**Failed Codex usage reads now stay visible.** Both readers retain a standing read blocker and its first-observed UTC date, so `mm status` and `mm diag` distinguish cached inventory from a failed capture even after a no-op autopush reports success.
+
+### Fixed
+
+- Codex and Grok share one blocker policy: `unsupported` survives transient failures, completed reads clear the blocker, and migrated undated blockers are dated once. Post-lock deadline expiry also records the blocker without scanning.
+- Status reports any standing reader reason before inventory-based remedies; Codex advice is source-gated. Diag labels cache inventory separately, exposes `last_reason` and `last_reason_since` for both readers, and says `none` for a readable healthy cache.
+- Cache-write errors now emit one notice while retaining the scan result. Repeated unchanged failures avoid rewriting the cache; newly learned files still commit.
+- Recovery text distinguishes an unfinished record from cache warming, bounds attended warming at 5 s per substantive push, and states that a newer mm may read unsupported records. No-op pushes still do not re-read usage.
+
+### Changed
+
+- Removed unused reader helpers and the obsolete terminal representation. Counter reconciliation is pinned through cold, warm, and appended Codex reads, with disjoint Grok turns preserved through aggregation.
+- Added host-usage troubleshooting, verification steps, diagnostic keys, source-disable consequences, and a rollback command. Updated blocker, timestamp, and cache-write invariants.
+
 ## [0.14.7] - 2026-09-08
 
 **One blocked file during `mm pull` no longer aborts the whole batch.** An unhandled `OSError` or `MindMeldError` from one file's write, merge, or conflict resolution used to propagate out of the apply loop, so every later file in that pull, every other configured source, and every other peer's changes stopped arriving — with no record of what had already landed. `mm pull` and `mm autopull` now record each successful publication the moment it happens, contain a failing file's exception, print one warning naming the peer, path, cause, and remedy, and keep applying the rest of the batch.

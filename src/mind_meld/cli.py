@@ -5375,20 +5375,22 @@ def status(
 
     from mind_meld import host_usage as _host_usage
 
-    # Codex has no consent bit to report (enabling the source is the consent),
-    # so this line exists only for the state a user cannot otherwise see: a
-    # cache mid-rebuild publishes less than it will, and autopush never warms.
-    codex_diag = _host_usage.codex_usage_diag()
-    if codex_diag.get("files_pre_track"):
-        console.print(
-            f"  Codex usage capture: rebuilding — {codex_diag['files_pre_track']} rollouts "
-            "awaiting re-walk; run [bold]mm push[/bold] to finish it"
-        )
-    elif codex_diag.get("state") == "migrating":
-        console.print(
-            f"  Codex usage capture: warming — {codex_diag.get('pending') or 0} rollouts "
-            "not yet scanned; run [bold]mm push[/bold] to finish it"
-        )
+    # Enabling the Codex source is consent. A standing blocker takes priority
+    # over inventory-based remedies; healthy Codex capture stays quiet here.
+    if any(s.get("name") == "codex" for s in sources_configs):
+        codex_diag = _host_usage.codex_usage_diag()
+        if codex_diag.get("last_reason"):
+            console.print("  Codex usage capture: " + _host_usage_blocker("codex", codex_diag))
+        elif codex_diag.get("files_pre_track"):
+            console.print(
+                f"  Codex usage capture: rebuilding — {codex_diag['files_pre_track']} rollouts "
+                "awaiting re-walk; run [bold]mm push[/bold] to finish it"
+            )
+        elif codex_diag.get("state") == "migrating":
+            console.print(
+                f"  Codex usage capture: warming — {codex_diag.get('pending') or 0} rollouts "
+                "not yet scanned; run [bold]mm push[/bold] to finish it"
+            )
 
     grok_source_on = any(s.get("name") == "grok" for s in sources_configs)
     grok_on = grok_source_on or grok_host_usage_enabled(config)
@@ -5401,13 +5403,9 @@ def status(
         if grok_on:
             grok_diag = _host_usage.grok_usage_diag()
             last_reason = grok_diag.get("last_reason")
-            if last_reason in events_tail._HOST_PERMANENT_REASONS:
-                # Reuse the skip phrase so status, diag, and push stderr
-                # cannot drift apart. A permanent reason is not fixed by
-                # `mm push`.
+            if last_reason:
                 console.print(
-                    "  Grok usage capture: enabled — "
-                    + events_tail._host_skip_phrase("grok", str(last_reason))
+                    "  Grok usage capture: enabled — " + _host_usage_blocker("grok", grok_diag)
                 )
             elif grok_diag.get("complete_once") is True:
                 console.print("  Grok usage capture: enabled; a prior scan completed successfully")
@@ -5514,6 +5512,23 @@ this second, smaller bound is a readability one — the block is optimized for
 paste into a support chat, and 32 ids on one line is not that. The COUNT is
 always exact, so a truncated list never reads as the whole set.
 """
+
+
+def _host_usage_blocker(reader: str, state: dict) -> str:
+    """Render cache-validated blocker metadata for both diagnostic surfaces."""
+    reason = state.get("last_reason")
+    if reason is None:
+        return "none"
+    phrase = events_tail._host_skip_phrase(reader, reason)
+    since = state.get("last_reason_since")
+    if since is not None:
+        try:
+            day = datetime.fromisoformat(since).date().isoformat()
+        except (TypeError, ValueError, OverflowError):
+            day = None
+        if day is not None:
+            phrase += f" (first observed {day} UTC)"
+    return phrase
 
 
 def _diag_models_line(state: dict) -> str:
@@ -5724,9 +5739,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         grok_version) plus host/status
       * host_usage values other than the cache-only diag keys: grok's
         consented / complete_once / usage_less_skipped / last_reason /
-        cache_state / model_count / models, and Codex's cache_state / state /
+        last_reason_since / cache_state / model_count / models, and Codex's cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
-        pending / model_count / models (never a path, never a host store,
+        pending / model_count / models / last_reason / last_reason_since
+        (never a path, never a host store,
         never a token magnitude)
       * local_emails (this machine's author-email trust set, and peers'
         after a pull merge) — project an allowlist, never render the row
@@ -5856,6 +5872,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "complete_once": grok_diag["complete_once"],
             "usage_less_skipped": grok_diag["usage_less_skipped"],
             "last_reason": grok_diag.get("last_reason"),
+            "last_reason_since": grok_diag.get("last_reason_since"),
             "cache_state": grok_diag["cache_state"],
             "model_count": grok_diag.get("model_count", 0),
             "models": grok_diag.get("models", []),
@@ -6035,25 +6052,25 @@ def diag(
         scan_shown = "no"
     console.print(f"  grok consented:          {consented_shown}")
     console.print(f"  grok prior successful scan: {scan_shown}")
-    last_reason = hu_state.get("last_reason")
-    if last_reason in events_tail._HOST_PERMANENT_REASONS:
-        console.print(
-            "  grok last failure:        " + events_tail._host_skip_phrase("grok", str(last_reason))
-        )
+    console.print(f"  grok cache inventory:    {safe_str(str(hu_state.get('cache_state', '')))}")
+    if hu_state.get("cache_state") == "ok":
+        console.print("  grok usage read blocker: " + _host_usage_blocker("grok", hu_state))
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
     console.print(f"  grok cache:              {safe_str(str(hu_state.get('cache_state', '')))}")
     console.print(f"  grok models cached:      {_diag_models_line(hu_state)}")
 
     cx_state = (state.get("host_usage") or {}).get("codex") or {}
     console.print(f"  codex cache:             {safe_str(str(cx_state.get('cache_state', '')))}")
-    console.print(f"  codex reader state:      {safe_str(str(cx_state.get('state', '')))}")
+    console.print(f"  codex cache inventory:   {safe_str(str(cx_state.get('state', '')))}")
+    if cx_state.get("cache_state") == "ok":
+        console.print("  codex usage read blocker: " + _host_usage_blocker("codex", cx_state))
     cx_disk = cx_state.get("files_on_disk")
     console.print(
         f"  codex rollouts cached:   {cx_state.get('files_cached', 0)}"
         f" of {'unknown' if cx_disk is None else cx_disk}"
     )
     console.print(f"  codex models cached:     {_diag_models_line(cx_state)}")
-    if cx_state.get("files_pre_track"):
+    if cx_state.get("files_pre_track") and not cx_state.get("last_reason"):
         # The actionable half: these entries predate per-turn accounting and
         # are re-walked once. Autopush never warms the host cache, so on a
         # quiet Mac the nudge is the only way a user learns to finish it.
