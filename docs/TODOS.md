@@ -45,6 +45,35 @@ here by hand, use the H3 form.
 ## Unprocessed
 
 
+### [plan-eng-review:severity=moderate] Re-read standing host-usage blockers on an interactive no-op push (T3-B)
+
+- **What:** An interactive, non-dry-run `mm push` that finds nothing to upload still re-reads any consented host reader whose cache carries a standing `last_reason`, rewrites that cache, prints the outcome, and writes no event row.
+- **Why:** After `pipx upgrade mind-meld` a quiet Mac's `mm push` prints `Nothing to push` and returns before the events tail (`cli.py:3775-3791`), so a blocker recorded by Track 54A survives a successful upgrade until some synced file changes. Track 54A ships the honest wording instead ("the next push that uploads a change retries").
+- **Hypothesis (untested):** design requirements from the 54A eng voices: a root-only blocker probe (`locked_json_snapshot` + `_cached_last_reason`, never `codex_usage_diag`'s rglob); a host-only capture helper extracted from `_capture_event_snapshots` (shared warm/retry gate, sibling isolation); preserved exclusions (dry-run, unresolved `mm-events`, consent, autopush); no event row, no cursor advance, no publication; the printed outcome must say totals were not published; pins for every excluded case; `test_no_content_push_touches_no_host_reader` (`tests/test_integration.py`) becomes blocker-gated with a dry-run sibling. The "zero work when there is nothing to say" invariant in `docs/invariants/events-retro.md` gains exactly this one exception. An orchestration-owned per-reader capture receipt (covering `unavailable` and pre-invocation deadline, which a reader cache can never record) is the alternative design.
+- **Trigger:** the first blocker that survives a `pipx upgrade` on a quiet Mac.
+- **Effort:** M
+- **Priority:** P2
+- **Context:** filed by Track 54A /autoplan, 2026-09-09. Raised as HIGH by the Claude DX voice; both eng voices and the Codex DX voice judged it a new orchestration path and recommended deferring; the user chose the honest-wording option at the gate.
+
+### [plan-eng-review:severity=minor] Autopush warm-read headroom and the healthy-pass rewrite on large Codex corpora
+
+- **What:** Watch item: a warm bounded Codex read must fit the 250 ms autopush budget, and every healthy pass rewrites the whole cache.
+- **Why:** Measured 2026-09-09 on device 889e42c0: a warm read of 752 rollouts completes in ~186 ms (about 0.25 ms per cache hit: two 4 KB digests plus stats), so headroom runs out near 900-1000 rollouts; `locked_json_rmw` writes on every normal exit, so a healthy pass rewrites the 4 MB cache on each push (23 ms measured at v0.14.1). Past the budget, autopush never publishes Codex and Track 54A's diagnostics show a standing `deadline` with a first-observed date on a converged store.
+- **Repro:** copy `~/.config/mind-meld/host-tokens.json` to a scratch path, point `host_usage.CACHE_PATH` at the copy, call `read_codex_usage(Path.home() / ".codex" / "sessions", deadline=time.monotonic() + 0.25)`; evidence in `~/.gstack/projects/kbitz-mind-meld/54a-reproductions.json`.
+- **Hypothesis (untested):** newest-first walk so cold files are reached first; the encoding trigger (25 MB / 100 ms) in `docs/roadmap-future.md` is the other axis. Skipping the fingerprint on a metadata match is NOT a fix: `test_same_size_same_mtime_rewrite_replaces_terminal_total` pins it.
+- **Trigger:** warm pass above 200 ms, or corpus above ~900 rollouts.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by Track 54A /autoplan, 2026-09-09. The Claude CEO voice's walk-order reframing was rejected on this same measurement; the corpus is not monotonic (Codex prunes its own sessions).
+
+### [plan-eng-review:severity=minor] Add a `[retro] codex_host_usage` knob so usage reading can stop without disabling the Codex source
+
+- **What:** `[retro] codex_host_usage = false`, mirroring Grok's `grok_host_usage` bit, ANDed with the enabled `codex` source on the Codex side; Grok's OR is unchanged.
+- **Why:** The only way to silence a failing Codex reader is `mm disable-source codex`, which also stops syncing `~/.codex/AGENTS.md`, `skills/`, `plugins/` and skill-link maintenance. Track 54A documents that consequence in README; the knob is the real escape hatch.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** `HOST_READER_SOURCE_GATE` and `_default_host_readers` in `events_tail.py`; `mm diag` consent display; README. Raised independently by both DX voices of the Track 54A /autoplan, 2026-09-09.
+
 ### [plan-eng-review:severity=minor] Complete the deferred plain-stderr display audit beyond direct safe_str calls
 
 - **What:** Extend the existing plain-stderr follow-up's inventory to direct strip_terminal_escapes consumers, indirect skill_link._reason consumers, and messages Rich-escaped during construction.
