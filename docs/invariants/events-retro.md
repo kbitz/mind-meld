@@ -9,7 +9,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
-- `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `CACHE_PATH` / `TTL_SECONDS`
+- `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
+- `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
@@ -20,6 +21,7 @@ Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events
 
 - [`mm-events` default source](#mm-events-default-source--bootstrap-load-bearing-v0101)
 - [Events tail in `_push_core`](#events-tail-in-_push_core-load-bearing-v0103-gated-v0122)
+- [Git subprocess environment](#git-subprocess-environment-load-bearing-track-55a)
 - [Cursor gate + recapture](#cursor-gate--recapture-load-bearing-track-30a)
 - [Host-usage snapshot capture](#host-usage-snapshot-capture-load-bearing-track-19a)
 - [Track 22A consumer](#track-22a-consumer-last-known-good-inventory)
@@ -68,7 +70,7 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 **Git-root discovery budget and reuse (Track 18C, classifier Track 29A).** Root discovery has its own cooperative deadline before the independent git/session walks: `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS` (50) for autopush and `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS` (100) for interactive push and init. `events.discover_git_roots()` returns one frozen `GitRootDiscovery(roots, errors, exceeded)` that remains compatible with `roots, errors = ...`; capture retains that exact object and passes it to a cold tail gather or forced init identity refresh so one invocation never repeats the root probes. Explicit `[retro].repo_roots` classify before automatic Claude probes (the gstack prober was deleted in Track 29A — `repo-mode.json` never carried a root path). The deadline is checked before every registry entry, JSONL file/line, and git-root classify step; classification is a `.git` + `HEAD`/`gitdir:` stat, not a `git rev-parse` subprocess. It is cooperative rather than a filesystem-interrupt guarantee: a system call already running may finish, but no later discovery step starts after expiry. Preserve successful roots and append the stable `git root discovery exceeded its time budget` forensic error with `exceeded=True`; never report it as a clean no-repositories result. `Path.exists()` / `Path.is_dir()` raise `PermissionError` on Python 3.11 (the declared floor) and return False on 3.13+; the classifier body is `try/except OSError` and prober `validate()` sits inside the prober `try`, so one unreadable directory cannot abort the events tail. `mm diag` runs discovery at the autopush budget and is the support-facing observation surface.
 
-**Incomplete identity discovery never refreshes cache.** When the supplied `GitRootDiscovery` is incomplete, identity may return `cached identities ∪ newly gathered identities` to that event only, under the phase-3 cache lock. It MUST NOT write cache bytes or `refreshed_at`, even for `refresh_identity_cache(force=True)`: persisting that union would make identities removed from config or a repository survive as trusted local identities. A later complete refresh remains authoritative and may prune them.
+**Incomplete identity discovery never refreshes cache.** When the supplied `GitRootDiscovery` is incomplete, identity may return `cached identities ∪ newly gathered identities` to that event only, under the phase-3 cache lock. It MUST NOT write cache bytes or `refreshed_at`, even for `refresh_identity_cache(force=True)`: persisting that union would make identities removed from config or a repository survive as trusted local identities. A later complete refresh remains authoritative and may prune them. The version-upgrade normalization below may first mark the cache stale, retaining its old emails; incomplete discovery never persists the newly gathered union.
 
 **No content heartbeat.** The substantive-change gate remains authoritative across UTC rollover: a no-op push writes no `mm-push` row, does not advance the retro cursor, and must not create a daily event file merely to express liveness. The next substantive push uses the old cursor and captures the idle interval. A no-op `autopush` can still refresh its local `last-autorun.json` success breadcrumb; that means the hook ran, **not** that fleet retro received activity. Liveness needs a separate signal if it is ever required.
 
@@ -76,21 +78,21 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 That stderr line is the *interactive* signal only. `_run_events_tail` runs from `mm autopush`, which fires unattended from a Claude Code hook, so its stderr reaches nobody — and pre-v0.12.16 `autopush` wrote `_write_autorun_breadcrumb("push", "success")` unconditionally, so `mm status` reported success no matter how badly the retro pipeline had degraded. **`_run_events_tail` therefore RETURNS `list[str]`** — one human-readable phrase per degradation, empty when healthy — which `_push_core` carries on `PushResult.events_degradations` and `autopush` turns into `_write_autorun_breadcrumb("push", "degraded", "; ".join(reasons))`. This mirrors the `degradations` list `autopull` has carried since v0.8.1, and it is the same argument CLAUDE.md already makes for the `no-sources` breadcrumb: without it, `mm status` only ever sees `success` and monitoring built on top of it never catches the wedge. Conditions that populate the list: whole-tail exception, session-walk budget exceeded, token cache cold (tokens + skills omitted), root discovery time-budget expiry, a prober exception (`errors and not exceeded`), and complete discovery that found zero repositories (a prober ran). The budget phrase is fixed: `git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`; it contains no paths or raw probe errors or the `; ` separator used between breadcrumb reasons. Do not widen the exceeded gate to `bool(errors)` — the budget phrase would then be a lie. An ordinary rejected candidate stays silent. Init backfill has no `mm-push` row or autorun breadcrumb, so it prints the equivalent `initial retro capture` notice only. **Any new degradation detected in the tail MUST be appended to the returned list as well as printed** — a `mm: notice:` with no corresponding entry is invisible to the only surface the user actually reads. CHANGELOG v0.12.13 records the cost of getting this wrong: the unpriced-model breadcrumb "fired for four unpriced models across the whole v0.12.x line and nobody saw it." Pinned by `test_silent_failure_contract.py::test_autopush_breadcrumb_degraded_when_events_tail_fails`. `last-autorun.json` is keyed per verb (`{"push": {...}, "pull": {...}}`) so the documented autopull-at-start / autopush-at-end lifecycle cannot erase a degraded push crumb.
 
-**Tolerant binary reads across every jsonl reader on the push path (load-bearing, v0.12.16).** `_read_cwd_from_latest_jsonl`, `_last_mm_push_ts`, `token_usage.is_cache_cold`, and `pullhistory._yield_lines` all read BINARY and tolerate a bad line rather than a bad file. Text mode decodes in ~8 KB **chunks**, not per line, and `UnicodeDecodeError` is a `ValueError` — NOT an `OSError` — so the `except OSError` these functions carried never caught it and one invalid byte took down the entire events tail on every push. (Chunked decoding is also why a `cwd` on line 1 did not protect against a bad byte on line 2; measured, it raises at 2 lines apart and returns cleanly at 80 KB apart.) `json.loads` accepts bytes, and both malformed JSON and invalid UTF-8 surface as `ValueError`, so the guard is `except ValueError: continue` per line. Two traps:
+**Tolerant binary reads across every jsonl reader on the push path (load-bearing, v0.12.16).** `_read_cwd_from_latest_jsonl`, `_iter_mm_push_objs`, `token_usage.is_cache_cold`, and `pullhistory._yield_lines` all read BINARY and tolerate a bad line rather than a bad file. Text mode decodes in ~8 KB **chunks**, not per line, and `UnicodeDecodeError` is a `ValueError` — NOT an `OSError` — so the `except OSError` these functions carried never caught it and one invalid byte took down the entire events tail on every push. (Chunked decoding is also why a `cwd` on line 1 did not protect against a bad byte on line 2; measured, it raises at 2 lines apart and returns cleanly at 80 KB apart.) `json.loads` accepts bytes, and both malformed JSON and invalid UTF-8 surface as `ValueError`, so the guard is `except ValueError: continue` per line. Two traps:
 
 - **A reader whose bytes can come from a peer MUST be bounded, not merely tolerant.** `open(path, "rb")` + `for line in fp:` lets Python extend its buffer to newline-or-EOF, so one pathological line kills the push — the OOM `token_usage.iter_bounded_lines` exists to prevent. Which readers need it follows from where the bytes originate, so the rule is per-corpus, not blanket:
 
   | Reader | Corpus | Bounded? |
   |---|---|---|
   | `_read_cwd_from_latest_jsonl` | Claude Code session jsonls | **Yes** — `iter_bounded_lines` |
-  | `_last_mm_push_ts` | `mm-events` daily files, **synced**, peer bytes arrive via the pull apply path | **Yes** — `iter_bounded_lines` |
+  | `_iter_mm_push_objs` | `mm-events` daily files, **synced**, peer bytes arrive via the pull apply path | **Yes** — `iter_bounded_lines` |
   | `token_usage.is_cache_cold` | local token cache | N/A — whole-file `read_bytes` behind an `st_size` gate, no line iteration |
   | `pullhistory._yield_lines` | `~/.config/mind-meld/pull-history.jsonl` | No, and that is fine — the config dir is **never synced** and the file is written only by `pullhistory.append`. Tolerant reading is the requirement here; bounding would buy nothing and would import `token_usage` into a forensic-log reader for no gain. |
 
   `iter_bounded_lines` is public since v0.12.16 precisely because it grew consumers outside `token_usage`. Its `label` kwarg names a call site in the oversize notice, so do not hardcode "token walker" back into it — but note the notice is deduped by PATH ONLY, so when two sites read the same file the label shown is whichever reached it first.
 
 - **One-shot readers MUST pass `yield_final_partial=True`.** `iter_bounded_lines` defaults to discarding a trailing chunk with no newline, because for `walk_jsonl_segment` that is a partial write to re-read on the next push. A one-shot reader has no next push: the default silently drops a complete-but-unterminated final record. Caught by Codex adversarial review during `/review`, after the first fix had already landed — porting the cwd reader without the flag made it return `None` for a session whose only line was not newline-terminated yet, where the old text-mode reader returned the cwd. Pinned by `test_unterminated_final_line_is_still_read`.
-- **`_last_mm_push_ts` returning `None` is NOT a benign fallback.** It rewinds the cursor to `now - INITIAL_CURSOR_LOOKBACK_DAYS` and re-walks 30 days of git history on every subsequent push, forever. Its pin asserts the timestamp comes back, not merely that nothing raised.
+- **`resolve_push_cursor` reaching `CursorResolution.used_floor=True` despite a usable row is NOT a benign fallback.** Losing that row rewinds the cursor to `now - INITIAL_CURSOR_LOOKBACK_DAYS` and re-walks 30 days of git history on every subsequent push, forever. Its pins exercise the bounded `_iter_mm_push_objs` reader through `last_push_ts` and assert the timestamp comes back, not merely that nothing raised.
 
 (`conflictlog.read_records` used to be listed here as a deliberate exclusion. `conflictlog.py` was removed in Track 16A; the exclusion is moot.)
 
@@ -107,6 +109,71 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
 **Retention dry-runs are plan-only (Track 17D).** Every retention reaper selects candidates before applying I/O. `mm gc --dry-run` uses that same selection but must not unlink a file, write a cache, or change metadata, and it prints one stable result line for every reaper it executes. The token-cache plan reads under `lockedjson`'s shared read-only snapshot; apply re-plans under the exclusive R/M/W lock so a preview never leaks a stale plan into a write. Failed deletes count as failures, not cleanup, and one best-effort failure never prevents the other reapers or orphan-blob GC from continuing.
 
 **Initial cursor lookback (Codex C9).** `last_push_ts(events_dir, device_id)` returns `now - INITIAL_CURSOR_LOOKBACK_DAYS` (30) when no prior `mm-push` event exists. New fleet members joining mid-quarter scan back 30 days of git history; older context is recovered with `mm recapture`. Document the bound in skill output: "First-run window: last 30 days of activity. Older history is outside the automatic window — `mm recapture 90d` on the Mac that owns the repositories."
+
+## Git subprocess environment (load-bearing, Track 55A)
+
+Filesystem discovery selects the repository; inherited Git environment must
+not redirect the later subprocess to another repository. All four Git calls
+(`events._walk_one_repo`, `events._origin_remote_url`,
+`identity._gather_global_email`, `identity._gather_per_repo_emails`) pass
+`env=gitenv.scrubbed_git_env()` and explicit `encoding="utf-8"`. The helper is
+a leaf importing only `os` and `collections.abc`, returns a fresh dict, reads
+the environment at call time, and never mutates the caller's environment.
+
+`GIT_REPO_LOCAL_ENV_VARS` mirrors the list `git rev-parse --local-env-vars`
+prints. Remove those names plus every `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*`.
+Keep PATH, HOME, GIT_EXEC_PATH, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM,
+GIT_CONFIG_NOSYSTEM, GIT_SSH*, and XDG_CONFIG_HOME. Global and repository
+configuration (including `includeIf`) still define configured identities;
+inherited `git -c`, GIT_CONFIG_PARAMETERS, and GIT_CONFIG_COUNT/KEY/VALUE
+overrides do not. This deliberately differs from pre-commit's environment
+policy because these reads decide fleet attribution. Use ~/.gitconfig or
+GIT_CONFIG_GLOBAL for supported persistent overrides.
+
+Pin LC_ALL and LANGUAGE to C so Git's localized empty-repository message
+cannot become `git_error`. Decode the history read with `errors="replace"`
+so a bad display byte cannot abort a walk. Remote URLs and configured emails
+use `errors="strict"` and catch `ValueError`: an undecodable identifier is
+unreadable (empty remote / absent email), never a lossy new identity.
+
+`tests/test_gitenv.py::test_all_git_subprocesses_use_scrubbed_environment`
+checks the AST of every literal Git `subprocess.run`/`Popen` call under src:
+the env value must be the canonical helper call, with UTF-8 encoding.
+Every subprocess in events.py and identity.py must use list-literal argv,
+closing the variable-argv escape there. The detector self-tests missing env,
+None, os.environ, and the valid call.
+`test_repo_local_env_vars_cover_installed_git` fails when installed Git adds
+a repository-local variable outside our set (skips only if Git is absent).
+
+**Cache version is stale, not invalid.** Identity CACHE_VERSION is 2.
+`locked_json_rmw` already resets non-dict JSON. `_normalize_cache` resets a
+malformed email list (including non-string entries), but preserves old emails
+on a version mismatch, sets version 2 and `refreshed_at=None`. Its phase-1
+write-on-exit must never erase those emails before a partial gather.
+
+```text
+malformed cache -------------> empty stale v2
+well-formed old version -----> stale v2, old emails retained
+  incomplete discovery -----> return old union partial, keep stale cache
+  complete discovery -------> replace with configured identities, fresh TTL
+```
+
+Upgrade invalidates the cache on its next identity read; the next read that
+completes discovery refreshes it, and incomplete attempts are retried. The
+existing one-off notice and gather timeouts apply. Concurrency is unchanged:
+the lock is released during subprocess gathering. `read_cached_identities`
+uses `lockedjson.locked_json_snapshot`, accepts a string list at any version,
+and returns None for an unknown baseline without creating, repairing, or
+re-permissioning anything. `mm refresh-identity` shows locally resolved email
+changes against that snapshot, including removals before an empty-result
+warning. Its JSON output remains only the email list.
+
+**Prevents new mis-attribution; does not repair published rows.** The local
+cache can refresh and future capture is corrected, but neither refresh nor
+recapture retracts an existing wrong `(remote, sha)` or published identity.
+Event day files become eligible for retention after 90 days by filename date,
+reaped by `mm gc`, which also runs after an interactive `mm push` that uploaded
+changes; never from autopush. No new retraction or generic walker is implied.
 
 ## Cursor gate + recapture (load-bearing, Track 30A)
 
@@ -146,6 +213,8 @@ Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk a
 **Retention-bounded latest-row lookup.** `last_push_ts` scans `CURSOR_SCAN_DAYS` (90, equal to `EVENTS_RETENTION_DAYS`) and records `git_capture.since` so a gap older than retention is still explicit. Neither alone is sufficient. Fresh install (no rows at all) returning the 30-day floor is the documented first-run state, **not** a degradation — fire the hold/coverage phrases only when an older complete row existed and was chosen over a newer incomplete one. Future / timezone-naive / malformed `ts` cannot move the cursor forward.
 
 **Git-walk repository loss is visible.** `walk_git_projects` drops repositories into `skipped` with typed reasons (`budget_abort` / `timeout` / `no_commits` / `git_error` / `raised`). Never interpolate a skip reason into a degradation phrase: git stderr carries branch names and absolute paths onto a synced row. `no_commits` (`rc=128` + "does not have any commits yet") is benign — an empty `git init` directory returns it on every push forever. The session-walk budget flag is named `session_walk_exceeded_budget` so it cannot be mistaken for git-walk loss.
+
+The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. Status repeats the current-failures check before its `mm diag` link. Dry-run lists each skipped path via `safe_str` and its typed reason, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips. These paths already ride the synced git-snapshot row. The dry-run is a fresh scan with interactive budgets, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
 
 **`mm recapture [WINDOW]`** is the only path that recovers already-orphaned intervals. Shape: write git-snapshot rows (marked `origin: recapture`, no mm-push) first, then run the ordinary push path. Catch ``SnapshotError`` from that push the same way interactive ``mm push`` does: print that the recapture was written locally but not synced, then the four-part refusal, exit 1, no traceback. Do **not** add a `recapture_requested` disjunct to the substantive-change gate (that re-opens the v0.12.2 phantom-change path). Do **not** route through `_run_events_backfill`. Window is `Nd`, default `30d` (= init backfill), min `1d`, max `90d`. Partial recovery exits 4 (exit 3 is `pull --conflict-mode fail`). Zero roots writes nothing and exits 1. Retros window by the COMMIT's date, not by when mm captured it: `mm recapture 90d` produces zero visible change on a `mm retro-fleet 7d` card. `_coverage_floor_from_files` still uses the event filename date by design.
 
@@ -1513,7 +1582,7 @@ leak into the gather output.
 `refresh_identity_cache(force=True)` ignoring the TTL. Use after
 editing `[retro].author_emails`, `gh auth login`, or
 `git config --global user.email`. `--json` flag for scripting; default
-output lists the resolved emails. Exits 1 with a `mm: warning:` when
+output lists the resolved emails and, when the prior cache is readable, the `+`/`-` changes. Exits 1 with a `mm: warning:` when
 no emails resolve. Kebab-case-plural matches `mm install-skills` /
 `mm migrate-config` / `mm reconfigure-sources` precedent.
 

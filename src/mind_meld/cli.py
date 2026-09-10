@@ -111,6 +111,7 @@ from mind_meld.devices import (
     update_last_seen,
 )
 from mind_meld.errors import (
+    GIT_WALK_FAILURES_URL,
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
     ConfigError,
@@ -5612,6 +5613,7 @@ def _print_retro_capture_status(sources: list[dict], device_id: str) -> bool:
         f"  [yellow]Retro capture:[/yellow] incomplete since {safe_str(since_day)} — {skip_phrase}."
     )
     console.print(f"  Recover this Mac's last {days} days: [bold]mm recapture {days}d[/bold]")
+    console.print("  Check current repository failures: [bold]mm recapture --dry-run[/bold]")
     console.print("  Details: [bold]mm diag[/bold]")
     return True
 
@@ -7471,6 +7473,17 @@ def recapture(
             console.print("[bold]Recapture dry-run[/bold] — nothing written.")
             console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
             console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
+            non_benign_skip = False
+            if prepared.git_rows:
+                for entry in prepared.git_rows[0].get("skipped", []):
+                    reason = entry["reason"]
+                    if reason == events.WALK_SKIP_NO_COMMITS:
+                        reason = "no commits yet (benign)"
+                    else:
+                        non_benign_skip = True
+                    console.print(f"    skipped: {safe_str(entry['path'])} — {safe_str(reason)}")
+            if non_benign_skip:
+                console.print(f"  See {GIT_WALK_FAILURES_URL}")
             console.print(f"  Commit records:   {len(records)} captured")
             console.print(f"  Estimated size:   {row_bytes} bytes")
             if n_roots == 0:
@@ -7516,19 +7529,37 @@ def recapture(
         )
         n_scanned_ok = n_roots - skipped
         if partial:
-            skip_reason = "the Git walk exceeded its budget"
-            if prepared.walk_errors and not prepared.walk_budget_aborts:
-                skip_reason = "the Git walk failed for those repositories"
-            elif prepared.root_discovery.exceeded:
-                skip_reason = "git repository discovery was incomplete"
             narrower = "7d" if days > 7 else "1d"
-            noun = "repository was" if skipped == 1 else "repositories were"
             console.print(
                 f"Recapture incomplete: captured {len(records)} commit records "
                 f"from {n_scanned_ok} of {n_roots} repositories for "
-                f"{since_day} → {until_day}. {skipped} {noun} skipped because "
-                f"{skip_reason}. Retry a narrower window: mm recapture {narrower}"
+                f"{since_day} → {until_day}."
             )
+            if prepared.walk_errors:
+                n = prepared.walk_errors
+                noun = "repository was" if n == 1 else "repositories were"
+                console.print(
+                    f"{n} {noun} skipped because the Git walk failed for those repositories. "
+                    "Check current repository failures: mm recapture --dry-run, "
+                    f"then retry mm recapture {window}. See {GIT_WALK_FAILURES_URL}"
+                )
+            if prepared.walk_budget_aborts:
+                n = prepared.walk_budget_aborts
+                noun = "repository was" if n == 1 else "repositories were"
+                console.print(
+                    f"{n} {noun} skipped because the Git walk exceeded its budget. "
+                    f"Retry a narrower window: mm recapture {narrower}"
+                )
+            if prepared.root_discovery.exceeded:
+                console.print(
+                    "Git repository discovery was incomplete. "
+                    f"Retry a narrower window: mm recapture {narrower}"
+                )
+            elif prepared.root_discovery.errors:
+                console.print(
+                    "Git repository discovery reported errors. "
+                    f"Check mm diag, then retry mm recapture {window}"
+                )
             raise typer.Exit(RECAPTURE_EXIT_PARTIAL)
 
         if not records:
@@ -7600,10 +7631,19 @@ def refresh_identity_cmd(
     authenticated. A failed source contributes nothing — the cache still
     rebuilds with what was reachable.
     """
+    previous = identity.read_cached_identities()
     emails = identity.refresh_identity_cache(force=True)
     if json_output:
         typer.echo(json.dumps(sorted(emails)))
         return
+    if emails:
+        typer.echo(f"Refreshed identity cache: {len(emails)} email(s)")
+        for e in emails:
+            typer.echo(f"  {e}")
+    if previous is not None and set(previous) != set(emails):
+        added = [f"+{strip_terminal_escapes(e)}" for e in sorted(set(emails) - set(previous))]
+        removed = [f"-{strip_terminal_escapes(e)}" for e in sorted(set(previous) - set(emails))]
+        typer.echo(f"Changes vs previous cache: {' '.join(added + removed)}")
     if not emails:
         typer.echo(
             "mm: warning: no author emails resolved — check `git config "
@@ -7612,9 +7652,6 @@ def refresh_identity_cmd(
             err=True,
         )
         raise typer.Exit(code=1)
-    typer.echo(f"Refreshed identity cache: {len(emails)} email(s)")
-    for e in emails:
-        typer.echo(f"  {e}")
 
 
 # ── log ───────────────────────────────────────────────────────────────

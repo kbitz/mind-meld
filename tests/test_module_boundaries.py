@@ -40,6 +40,7 @@ LEAVES = [
     "conflictdiff",
     "fsutil",
     "host_skill_discovery",
+    "gitenv",
 ]
 
 
