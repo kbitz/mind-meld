@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.10] - 2026-09-10
+
+**`mm push --dry-run` now changes nothing except the local lock file.** Previewing a push used to still migrate config, persist a missing crypto fingerprint, record a pull-history row, and create the mm-events directory — all before you'd decided to actually push. The preview now reports what a real push would set up instead of doing it, and refuses with a clear remedy if the mm-events directory has vanished since files were published from it, rather than silently proving a deletion that was never checked.
+
+### Fixed
+
+- `mm push --dry-run` no longer writes a config migration, persists a missing crypto fingerprint, records a pull-history row, or creates the mm-events directory. It now prints what a real push would still need to set up.
+- If the mm-events directory is missing but this Mac previously published files from it, `mm push --dry-run` refuses with a remedy (restore the directory, or accept the deletion by running a real `mm push`) instead of silently reporting an empty deletion.
+- `mm recapture --dry-run`'s completion message now says "no commits written or uploaded" instead of "nothing written" — recapture's preview already wrote local setup state; only the wording was misleading.
+
+### Changed
+
+- `mm push --dry-run --help` and the README now document exactly what stays untouched, and the preview's exit codes (0 complete, 1 stopped, 2 usage error).
+- `crypto.fetch_crypto_init` takes a `repair=` parameter so read-only callers can report what a shared crypto-storage repair would do without performing it.
+
 ## [0.14.9] - 2026-09-09
 
 **mm's Git reads now stay with each discovered repository.** Inherited repository-redirection and command-scoped configuration variables no longer substitute another repository's history, origin, or configured identity. This prevents new mis-attribution; it does not repair published rows.

@@ -630,3 +630,63 @@ class TestStorePassphrasePytestGuard:
         monkeypatch.setattr(keyring, "set_password", stub_set)
         assert crypto.store_passphrase_in_keyring("real-passphrase") is True
         assert captured == [("mind-meld", "passphrase", "real-passphrase")]
+
+
+class TestCryptoInitRepairPreview56A:
+    @pytest.mark.parametrize("canonical", ["winner", "loser", "missing", "corrupt"])
+    def test_preview_same_winner_no_storage_mutation(self, tmp_path, monkeypatch, canonical):
+        backend = LocalBackend(tmp_path)
+        writer = TestConflictConvergence()._write_raw_init_blob
+        copy = tmp_path / "mm-crypto-init 2"
+        writer(copy, MEMORY_KB, b"\x00" * 16)
+        if canonical in {"winner", "loser"}:
+            if canonical == "winner":
+                (tmp_path / CRYPTO_INIT_KEY).write_bytes(copy.read_bytes())
+            else:
+                writer(tmp_path / CRYPTO_INIT_KEY, MEMORY_KB, b"\xff" * 16)
+        elif canonical == "corrupt":
+            (tmp_path / CRYPTO_INIT_KEY).write_bytes(b"corrupt")
+        unreadable = tmp_path / "mm-crypto-init 3"
+        unreadable.write_bytes(b"unreadable candidate")
+        real_read = Path.read_bytes
+
+        def read(path):
+            if path == unreadable:
+                raise PermissionError("unreadable copy")
+            return real_read(path)
+
+        before = {
+            p.name: (real_read(p), p.stat().st_mtime_ns) for p in tmp_path.iterdir() if p.is_file()
+        }
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "read_bytes", read)
+            patch.setattr(backend, "put", lambda *a: pytest.fail("preview put"))
+            patch.setattr(
+                backend, "delete_conflict_copies", lambda *a: pytest.fail("preview delete")
+            )
+            preview = fetch_crypto_init(backend, repair=False)
+        assert preview.status == "ok"
+        assert preview.root_salt == b"\x00" * 16
+        assert preview.repair_plan.replace_canonical == (canonical != "winner")
+        assert set(preview.repair_plan.remove) == {copy.name, unreadable.name}
+        assert {
+            p.name: (real_read(p), p.stat().st_mtime_ns) for p in tmp_path.iterdir() if p.is_file()
+        } == before
+        applied = fetch_crypto_init(backend)
+        assert applied.root_salt == preview.root_salt
+        assert applied.keycheck_blob == preview.keycheck_blob
+        assert not copy.exists() and not unreadable.exists()
+        assert fetch_crypto_init(backend, repair=False).repair_plan is None
+
+    @pytest.mark.parametrize("state", ["missing", "corrupt"])
+    def test_unusable_storage_never_repairs(self, tmp_path, monkeypatch, state):
+        backend = LocalBackend(tmp_path)
+        if state == "corrupt":
+            (tmp_path / CRYPTO_INIT_KEY).write_bytes(b"bad")
+        monkeypatch.setattr(backend, "put", lambda *a: pytest.fail("preview put"))
+        monkeypatch.setattr(
+            backend, "delete_conflict_copies", lambda *a: pytest.fail("preview delete")
+        )
+        result = fetch_crypto_init(backend, repair=False)
+        assert result.status == state
+        assert result.repair_plan is None

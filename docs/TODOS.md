@@ -44,6 +44,41 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-ceo-review:severity=moderate] Make the other previews write-free (56B)
+
+- **What:** Apply Track 56A's read-only setup to `mm pull --dry-run`, `mm gc --dry-run`, `mm recapture --dry-run`, `mm migrate-config --dry-run` and `mm diff`, after inventorying each command's own writes.
+- **Why:** All five promise no writes in their help or output, and all five write through the same setup helpers: probe evidence `~/.gstack/projects/kbitz-mind-meld/56a-reproductions.json` s8, s9, s11, s12, s13 (config.toml fingerprint, pull-history self-upgrade row, upgrade cache, mm-events root). `recapture --dry-run` also printed "nothing written" after writing four things (56A fixes only that wording).
+- **Hypothesis (untested):** pass 56A's knobs (`_get_config(read_only=)`, `_init_crypto_session(read_only=, pending=)`, `resolve_sources/get_sources(bootstrap=)`, nudge gate) from each preview. Pull has writes of its own that no setup knob touches: `resolveflow._find_conflict_files(config, migrate_pre_inversion=True)` (`cli.py:4819`) and the `action="excluded"` pull-history loop gated only on `not quiet` (`cli.py:4882-4894`); it also resolves through `get_sources(config)` (`:4829`) and `_build_exclude_map(config)` whose fallback calls `get_sources` (`:627`, `:4856`). Recapture checks `available` for mm-events (`:7440`), so a non-bootstrapped missing root must not read as "disabled on this Mac". Reuse 56A's audit-hook contract fixture per command, with deep fixtures (a peer, excluded paths, a pre-v0.9.2 conflict file). Add the registry ratchet (every command with a `dry_run` parameter is in the contract list or explicitly exempted); `mm diff` has no `dry_run` parameter and needs a manual entry.
+- **Effort:** L
+- **Priority:** P2
+- **Context:** filed by Track 56A /autoplan, 2026-09-10 (branch `kbitz/push-dry-run-no-mutation`). The first draft of 56A widened to all six previews; both CEO voices rejected that as under-inventoried (the Claude voice found the pull writes above). Plan: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-10-track-56a.md`.
+
+### [plan-eng-review:severity=moderate] mm-events bootstrap masks the missing-published-root refusal on the real push (E4)
+
+- **What:** `config._bootstrap_mm_events_path` recreates a deleted mm-events root before `_refuse_unavailable_selected_sources` can see it, so a real `mm push` publishes the deletion of every event file this Mac previously published, bypassing `docs/invariants/sync.md:20` ("A missing previously populated selected root refuses the whole push").
+- **Why:** Probe s2b (`56a-reproductions.json`): root deleted after a real push → the next push tombstones the published event file. Pull never removes local bytes for a tombstone (`cli.py:843-844`), so other Macs keep their copies, but this Mac cannot restore them through `mm pull` until `TOMBSTONE_TTL_DAYS` (30) expires. The common form is worse to notice: every non-strict `get_sources` (`mm status`, autopull) and every autopush recreates the root, so the usual state is "root present, `events/` gone", which previews and publishes as a plain `- N deleted`.
+- **Hypothesis (untested):** move the bootstrap after the prior-manifest check in `_push_core` (56A's `resolve_sources(bootstrap=)` knob is the seam): create the root only when the filtered prior manifest lists no mm-events files; otherwise refuse with a remedy that restores from peers or a backup. Decide separately whether an emptied `events/` under an existing root should refuse too. 56A's preview already refuses the root-missing case with a preview-worded message; update that message when the real push changes.
+- **Effort:** M
+- **Priority:** P2
+- **Context:** filed by Track 56A /autoplan, 2026-09-10. Both CEO voices rejected mirroring this behaviour in the preview through an `assume_empty` option on the deletion proof; the Claude eng voice identified the common "`events/` gone" form.
+
+### [plan-ceo-review:severity=moderate] Inspection commands repair shared storage (E7)
+
+- **What:** Every crypto-using command, including `mm status` and `mm diag`, runs `crypto.fetch_crypto_init`, which overwrites the canonical `mm-crypto-init` with the lex-smallest-salt candidate and deletes every regex-matching conflict copy (unreadable ones included) BEFORE `_init_crypto_session`'s drift check and passphrase verification (`crypto.py:389-408`, `cli.py:433-462`, `storage/local.py:243-245`).
+- **Why:** A conflict copy with a different salt is a different encryption lineage; deleting it before anything is verified is irreversible and fleet-wide, and a user inspecting a broken sync reasonably expects `mm status` to preserve evidence. The same inspection commands also persist a missing fingerprint and create the mm-events root.
+- **Hypothesis (untested):** decide whether inspection commands may repair at all; if they may, order the canonicalization after the drift check and passphrase verification, and have the drift error mention pending conflict copies (it currently says only "Re-run 'mm init'"). 56A adds `fetch_crypto_init(repair=False)` and a `CryptoInitRepairPlan`, which are the seams.
+- **Effort:** M
+- **Priority:** P2
+- **Context:** filed by Track 56A /autoplan, 2026-09-10. Raised by Codex CEO #3/#4 and Claude CEO #5, reinforced by the Claude DX voice (H1) and both eng voices.
+
+### [plan-ceo-review:severity=minor] `mm status` fetches over the network despite "reads cache only" (E3b)
+
+- **What:** `mm status` calls `upgrade.check_for_upgrade`, which makes an HTTP request when the cache is stale and rewrites `upgrade-state.json` on every call; `cli.py:5329` and `docs/invariants/auto-upgrade.md` Seam 3 say it "reads cache only, no network call".
+- **Why:** Probe s10 (`56a-reproductions.json`): one fetch and a cache rewrite from `mm status`. 56A corrects the comment and the invariant line but leaves the behaviour.
+- **Hypothesis (untested):** give status a cache-only view through `lockedjson.locked_json_snapshot`; if `check_for_upgrade` itself moves to a snapshot read with an exclusive R/M/W only for fetch or nudge, re-check freshness under the lock (two processes could otherwise both fetch) and weigh Track 10A's measured always-write design recorded in `lockedjson.py`.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** filed by Track 56A /autoplan, 2026-09-10 (Claude CEO voice #4 proposed the upgrade.py refactor; deferred as out of the preview contract).
 
 ### [plan-eng-review:severity=moderate] Re-read standing host-usage blockers on an interactive no-op push (T3-B)
 

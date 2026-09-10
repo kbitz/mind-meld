@@ -6,6 +6,8 @@ Reads and writes ~/.config/mind-meld/config.toml.
 from __future__ import annotations
 
 import copy
+import errno
+import os
 import stat
 import sys
 import tomllib
@@ -510,13 +512,16 @@ class SourceResolution:
     """Configured selection versus currently walkable sources.
 
     ``selected`` is the intended set after disabled-source filtering and
-    before availability. ``available`` is the subset whose root currently
-    exists. Publishing uses both; diagnostics only need ``available``.
+    before availability. ``available`` is the walkable subset, including
+    empty would-create roots when bootstrap is disabled. ``would_create``
+    names missing mm-owned roots; publishing must check their filtered prior
+    state before interpreting the empty walk. Diagnostics need ``available``.
     """
 
     selected: list[dict[str, Any]]
     available: list[dict[str, Any]]
     explicit: bool = False
+    would_create: tuple[str, ...] = ()
 
 
 def _optional_host_present(path: Path) -> bool:
@@ -664,7 +669,9 @@ def _configured_sources(
     return sources, explicit_sources
 
 
-def resolve_sources(config: dict[str, Any], *, strict: bool = False) -> SourceResolution:
+def resolve_sources(
+    config: dict[str, Any], *, strict: bool = False, bootstrap: bool = True
+) -> SourceResolution:
     """Resolve intended selection and currently available sources.
 
     Diagnostic ``get_sources`` returns ``available``. Publishing uses the
@@ -702,20 +709,29 @@ def resolve_sources(config: dict[str, Any], *, strict: bool = False) -> SourceRe
     # mapping explicit and prevents silent inconsistency between
     # _prompt_sources auto-include (cli.py) and bootstrap (here).
     bootstrap_dispatch: dict[str, Any] = {"mm-events": _bootstrap_mm_events_path}
+    would_create: list[str] = []
     for src in sources:
         name = src.get("name")
         if name in MM_INTERNAL_SOURCE_NAMES and name in bootstrap_dispatch:
-            bootstrap_dispatch[name](src["path"], strict=strict)
+            if bootstrap:
+                bootstrap_dispatch[name](src["path"], strict=strict)
+            elif _preview_mm_events_bootstrap(src["path"], strict=strict):
+                would_create.append(name)
 
     available = [
         s
         for s in sources
-        if _source_path_available(s["path"], strict=strict, source_name=s["name"])
+        if s["name"] in would_create
+        or _source_path_available(s["path"], strict=strict, source_name=s["name"])
     ]
-    return SourceResolution(selected=sources, available=available, explicit=explicit)
+    return SourceResolution(
+        selected=sources, available=available, explicit=explicit, would_create=tuple(would_create)
+    )
 
 
-def get_sources(config: dict[str, Any], *, strict: bool = False) -> list[dict[str, Any]]:
+def get_sources(
+    config: dict[str, Any], *, strict: bool = False, bootstrap: bool = True
+) -> list[dict[str, Any]]:
     """Resolve the list of sync sources from config.
 
     Priority:
@@ -726,14 +742,53 @@ def get_sources(config: dict[str, Any], *, strict: bool = False) -> list[dict[st
     Auto-detection: if a known agent directory exists on disk but its source
     is absent from a legacy (non-explicit) config, append that default source.
 
-    Finally, filter to sources whose path actually exists on disk.
+    Finally, filter to sources whose path actually exists on disk. With
+    bootstrap=False, missing mm-owned roots are also returned as empty walks;
+    publishing callers need resolve_sources().would_create for prior-state checks.
 
     Raises ``ConfigError`` when an explicitly configured source path cannot
     be resolved. Callers can then honor the normal typed-config-error path.
     Strict publishing raises ``SnapshotError`` on selected-source probe
     failures instead of silently dropping them.
     """
-    return resolve_sources(config, strict=strict).available
+    return resolve_sources(config, strict=strict, bootstrap=bootstrap).available
+
+
+def _preview_mm_events_bootstrap(path: str, *, strict: bool) -> bool:
+    """Check whether bootstrap would create a root, without attempting mkdir."""
+    p = Path(path).expanduser()
+    try:
+        try:
+            p.stat()
+            return False
+        except FileNotFoundError:
+            pass
+        ancestor = p.parent
+        while True:
+            try:
+                ancestor.stat()
+                break
+            except FileNotFoundError:
+                parent = ancestor.parent
+                if parent == ancestor:
+                    raise
+                ancestor = parent
+        if not os.access(ancestor, os.W_OK | os.X_OK):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(ancestor))
+        return True
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source="mm-events",
+                    problem="could not be created",
+                    cause=os_error_cause(e),
+                    next_action=(
+                        "Restore write access to the mm-events directory, then run mm push."
+                    ),
+                )
+            ) from e
+        return False
 
 
 def _bootstrap_mm_events_path(path: str, *, strict: bool = False) -> None:

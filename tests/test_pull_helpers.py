@@ -2353,7 +2353,7 @@ class TestBootstrapOrVerifyCrypto:
         winner_salt = b"\x00" * 16
         winner_keycheck = b"\x00" * 32
 
-        def fake_retry_fetch(backend):
+        def fake_retry_fetch(backend, **kwargs):
             return CryptoInitFetch(
                 status="ok",
                 root_salt=winner_salt,

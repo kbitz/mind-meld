@@ -958,7 +958,7 @@ class TestPushSkillLinkWiring:
         install_args: list = []
         gs_calls: list = []
 
-        def gs(_config=None, *, strict=False):
+        def gs(_config=None, *, strict=False, bootstrap=True):
             gs_calls.append(1)
             return cli_module.SourceResolution(selected=[], available=[])
 

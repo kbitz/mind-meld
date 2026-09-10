@@ -327,7 +327,8 @@ Built with `typer`. Installed as `mm` (Mind Meld).
 
 ```
 mm init                     # generate device ID, configure storage, set passphrase
-mm push                     # build manifest, diff against remote, upload changes
+mm push [--dry-run]         # build manifest, diff against remote, upload changes
+                            # --dry-run previews publication and deletions; changes nothing except the local lock file (v0.14.10)
 mm pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
 mm status [--source NAME]   # show local vs remote state, pending changes

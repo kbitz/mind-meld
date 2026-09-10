@@ -369,7 +369,7 @@ def test_ordinary_push_still_noops_on_a_clean_tree(tmp_path, monkeypatch):
     assert "recapture" not in second.stdout.lower()
 
 
-def test_recapture_dry_run_writes_nothing(tmp_path, monkeypatch):
+def test_recapture_dry_run_writes_no_commits(tmp_path, monkeypatch):
     from tests.test_silent_failure_contract import _setup_events_tail_config
 
     _setup_events_tail_config(tmp_path, monkeypatch)
@@ -377,7 +377,7 @@ def test_recapture_dry_run_writes_nothing(tmp_path, monkeypatch):
     before = sorted(p.name for p in events_dir.glob("*.jsonl"))
     r = runner.invoke(app, ["recapture", "1d", "--dry-run"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
-    assert "dry-run" in r.stdout.lower() or "nothing written" in r.stdout.lower()
+    assert "no commits written or uploaded" in r.stdout.lower()
     after = sorted(p.name for p in events_dir.glob("*.jsonl"))
     assert after == before
     assert "Push complete" not in r.stdout

@@ -48,6 +48,7 @@ the caveat above applies: a pinned tag stops tracking `latest`, so re-run the
 
 ```bash
 mm init    # configure iCloud storage + passphrase
+mm push --dry-run   # preview: changes nothing except the lock file
 mm push    # upload configured agent context
 mm pull    # download from another device
 ```
@@ -195,6 +196,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm --version` | Print the installed version and exit |
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Push with verbose output |
+| `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
@@ -653,7 +655,11 @@ can record it again; this notice does not itself become a stored blocker.
 
 ### Snapshot failures
 
-A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file, a file that changes while it is being read, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, or a missing source that was previously published, **refuses the whole push** and keeps the previous snapshot. There is no hidden retry; run `mm push` again after the cause is fixed. `mm push --dry-run` previews this scan and deletion proof; it does not prove a later upload read or the post-event mm-events rescan, and existing command setup may still prompt config migration, persist a missing crypto fingerprint, or bootstrap the mm-events directory.
+A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file, a file that changes while it is being read, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, or a missing source that was previously published, **refuses the whole push** and keeps the previous snapshot. There is no hidden retry; run `mm push` again after the cause is fixed. `mm push --dry-run` previews this scan and deletion proof and **changes nothing except the local lock file**. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
+
+Preview exit codes: **0** completed; **1** stopped (snapshot refusal, crypto/config error, or lock held—the message explains which); **2** usage error. Every successful preview, including “Nothing to push,” ends with the lock-qualified completion message.
+
+This contract applies only to **`mm push --dry-run`**. Other previews (`pull`, `gc`, `recapture`, `migrate-config`, and `mm diff`) may still record setup state such as the crypto fingerprint or upgrade record; their setup repair is deferred to Track 56B.
 
 `mm autopush` still exits 0 so an agent hook can continue. Inspect `mm status` (the `last_autorun.detail` field) or run interactive `mm push` if you need an exit status.
 
@@ -662,6 +668,7 @@ A successful `mm push` publishes a complete snapshot of the **selected** sources
 | File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
 | File changed while being read | Wait for the editor/writer to finish, then `mm push`. |
 | Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
+| mm-events directory missing after it was published (the preview stops) | To keep its files, run `mm pull` if another Mac has them and check that `<path>/events` is filled again, or restore `<path>` from backup; then retry `mm push --dry-run`. To accept deletion, run `mm push`: other Macs keep their copies, but this Mac cannot pull them back for 30 days. |
 | Source folder is missing after it was previously published | Restore the folder, or `mm disable-source <name>` if it should stop syncing. |
 | Pull says a file does not match the sending snapshot | Local bytes are kept. Run `mm pull --verbose` for peer/source/path, then `mm log --verb pull --action failed --limit 10`. A metadata-only `touch` or unchanged re-push does not rewrite a blob the diff considers unchanged. |
 
