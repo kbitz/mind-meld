@@ -62,8 +62,8 @@ one-liner, which does not match a search for `resolveflow.py`.)
 
 **Import direction (Track 16A, load-bearing).** `cli` imports the six modules
 above; none of them imports `cli`, at module scope *or* function scope. The
-leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`, `gitenv`) import
-nothing from the CLI layer at all. Enforced by
+leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`,
+`host_skill_discovery`, `gitenv`) import nothing from the CLI layer at all. Enforced by
 `tests/test_module_boundaries.py` and a CI grep gate — ruff's F811 cannot see
 function-local shadowing, so lint alone will never catch a re-introduced cycle.
 `aggregator.py` reaches the CLI as a **subprocess**
