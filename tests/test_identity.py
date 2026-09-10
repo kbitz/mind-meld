@@ -19,10 +19,14 @@ Coverage groups:
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mind_meld import events, identity
+import pytest
+
+from mind_meld import events, identity, lockedjson
+from tests.test_events import _git_env_repos
 
 # ---------------------------------------------------------------------------
 # Helpers — fake subprocess.run dispatch by command prefix.
@@ -163,9 +167,7 @@ class TestCacheLifecycle:
         assert emails == ["kb@example.com"]
 
     def test_wrong_version_in_cache_rebuilds(self, monkeypatch):
-        """A cache with ``version != CACHE_VERSION`` is treated as
-        invalid — rebuilds from scratch instead of silently using a
-        stale schema."""
+        """A different version is treated as stale; a complete gather replaces it."""
         identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         identity.CACHE_PATH.write_text(
             json.dumps(
@@ -689,6 +691,153 @@ class TestIncompleteDiscoveryIdentityCache:
 
         emails = identity.gather_local_identities(root_discovery=supplied)
         assert emails == ["new@example.com"]
+
+
+class TestGitEnvironment:
+    @pytest.mark.parametrize("override", ["dir", "parameters"])
+    def test_repo_identity_ignores_inherited_overrides(self, tmp_path, monkeypatch, override):
+        target, decoy, _ = _git_env_repos(tmp_path, monkeypatch)
+        if override == "dir":
+            monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        else:
+            monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'user.email=injected@example.com'")
+        raw = subprocess.run(
+            ["git", "-C", str(target), "config", "user.email"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert raw.stdout.strip() != "target@example.com"
+        assert identity._gather_per_repo_emails(root_discovery=([target], [])) == {
+            "target@example.com"
+        }
+
+    def test_global_config_survives_while_repo_config_override_is_scrubbed(
+        self, tmp_path, monkeypatch
+    ):
+        _, decoy, _ = _git_env_repos(tmp_path, monkeypatch)
+        global_config = tmp_path / "user.gitconfig"
+        global_config.write_text("[user]\n\temail = global@example.com\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        monkeypatch.setenv("GIT_CONFIG", str(decoy / ".git/config"))
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'user.email=injected@example.com'")
+        assert identity._gather_global_email() == "global@example.com"
+
+    def test_undecodable_identifiers_are_skipped(self, monkeypatch, tmp_path):
+        def run(cmd, **kwargs):
+            assert kwargs["encoding"] == "utf-8"
+            assert kwargs["errors"] == "strict"
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        assert identity._gather_global_email() is None
+        assert identity._gather_per_repo_emails(root_discovery=([tmp_path], [])) == set()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_v1_cache_survives_incomplete_discovery_then_is_replaced(monkeypatch, force):
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    identity.CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "emails": ["old@example.com"],
+            }
+        )
+    )
+    monkeypatch.setattr(identity, "_do_full_gather", lambda **kwargs: ["new@example.com"])
+    incomplete = events.GitRootDiscovery((), ("budget",), True)
+    gather = identity.refresh_identity_cache if force else identity.gather_local_identities
+    kwargs = {"force": True} if force else {}
+    assert gather(root_discovery=incomplete, **kwargs) == ["new@example.com", "old@example.com"]
+    assert json.loads(identity.CACHE_PATH.read_text()) == {
+        "version": 2,
+        "refreshed_at": None,
+        "emails": ["old@example.com"],
+    }
+    assert gather(root_discovery=events.GitRootDiscovery((), (), False), **kwargs) == [
+        "new@example.com"
+    ]
+    stored = json.loads(identity.CACHE_PATH.read_text())
+    assert stored["emails"] == ["new@example.com"]
+    assert stored["refreshed_at"] is not None
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_v1_cache_is_stale_even_with_a_fresh_timestamp(monkeypatch, force):
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    identity.CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "emails": ["old"],
+            }
+        )
+    )
+    monkeypatch.setattr(identity, "_do_full_gather", lambda **kwargs: ["new"])
+    complete = events.GitRootDiscovery((), (), False)
+    result = (
+        identity.refresh_identity_cache(force=True, root_discovery=complete)
+        if force
+        else identity.gather_local_identities(root_discovery=complete)
+    )
+    assert result == ["new"]
+    assert json.loads(identity.CACHE_PATH.read_text())["emails"] == ["new"]
+
+
+@pytest.mark.parametrize("payload", [[], {"emails": "bad"}, {"emails": ["good", 5]}])
+def test_malformed_identity_cache_is_reset(monkeypatch, payload):
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    identity.CACHE_PATH.write_text(json.dumps(payload))
+    assert identity.gather_local_identities(allow_refresh=False) == []
+    assert json.loads(identity.CACHE_PATH.read_text()) == identity._default_cache()
+
+
+@pytest.mark.parametrize("version", [1, 2, 999])
+def test_read_cached_identities_accepts_any_version_without_writing(version):
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"version": version, "emails": ["z@example.com", "a@example.com"]})
+    identity.CACHE_PATH.write_text(payload)
+    identity.CACHE_PATH.chmod(0o640)
+    before = identity.CACHE_PATH.stat()
+    assert identity.read_cached_identities() == ["a@example.com", "z@example.com"]
+    after = identity.CACHE_PATH.stat()
+    assert identity.CACHE_PATH.read_text() == payload
+    assert (after.st_mtime_ns, after.st_mode) == (before.st_mtime_ns, before.st_mode)
+
+
+def test_read_cached_identities_empty_list_is_known_baseline():
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"version": 1, "emails": []})
+    identity.CACHE_PATH.write_text(payload)
+    assert identity.read_cached_identities() == []
+    assert identity.CACHE_PATH.read_text() == payload
+
+
+@pytest.mark.parametrize("payload", [None, "{bad", "[]", '{"emails": [1]}', "{}"])
+def test_read_cached_identities_unknown_does_not_repair(payload):
+    if payload is not None:
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(payload)
+    assert identity.read_cached_identities() is None
+    if payload is None:
+        assert not identity.CACHE_PATH.exists()
+    else:
+        assert identity.CACHE_PATH.read_text() == payload
+
+
+def test_read_cached_identities_lock_failure_is_unknown(monkeypatch):
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    identity.CACHE_PATH.write_text('{"emails": ["cached"]}')
+
+    def fail_lock(*args):
+        raise OSError("lock unavailable")
+
+    monkeypatch.setattr(lockedjson.fcntl, "flock", fail_lock)
+    assert identity.read_cached_identities() is None
+    assert identity.CACHE_PATH.read_text() == '{"emails": ["cached"]}'
 
 
 class TestLockDiscipline:

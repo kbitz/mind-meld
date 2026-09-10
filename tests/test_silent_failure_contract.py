@@ -41,6 +41,44 @@ from tests.conftest import (  # noqa: E402
 runner = CliRunner()
 
 
+def test_git_walk_degradation_names_current_failure_check():
+    from mind_meld import events_tail
+
+    phrase = events_tail._git_walk_degradation(1, 2)
+    assert phrase == (
+        "git walk dropped 3 repositories this push. "
+        "Run mm recapture --dry-run to check current repository failures, "
+        "then mm recapture 30d to recover the omitted commits"
+    )
+    assert "; " not in phrase
+
+
+def test_status_retro_capture_nag_names_current_failure_check(tmp_path, monkeypatch):
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module.console, "width", 240)
+    now = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        _mm_events,
+        "latest_mm_push_row",
+        lambda *args: {
+            "type": "mm-push",
+            "ts": now,
+            "git_capture": {
+                "since": now,
+                "discovery": "complete",
+                "walk_errors": 1,
+                "walk_budget_aborts": 0,
+            },
+        },
+    )
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Check current repository failures: mm recapture --dry-run" in result.stdout
+    assert result.stdout.index("Check current repository failures:") < result.stdout.index(
+        "Details: mm diag"
+    )
+
+
 def _verb_crumb(payload: dict, verb: str) -> dict:
     """Read a per-verb last-autorun entry (Track 29A keyed shape)."""
     entry = payload.get(verb)

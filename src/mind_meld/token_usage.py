@@ -1009,7 +1009,7 @@ def iter_bounded_lines(
 
     PUBLIC (v0.12.16). This is the canonical bounded reader for the Claude
     Code session-jsonl corpus and has consumers outside this module:
-    ``events._read_cwd_from_latest_jsonl`` and ``events._last_mm_push_ts``.
+    ``events._read_cwd_from_latest_jsonl`` and ``events._iter_mm_push_objs``.
 
     ``label`` names a caller in the oversize notice. Note the notice is
     deduped by PATH ONLY (``_WARNED_OVERSIZE_PATHS``), so when two call

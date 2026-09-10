@@ -106,6 +106,13 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Depends on:** Track 53A (the `Pull incomplete:` summary and per-file warnings it introduces).
 
+### [plan-ceo-review:severity=minor] `mm diag` lists repo-local `GIT_*` variables present in mm's own environment
+- **Description:** After the git-environment scrub (Track 55A, 0.14.9), mm's four git reads ignore every name `git rev-parse --local-env-vars` prints, so a `GIT_CONFIG_COUNT`/`git -c`-injected `safe.directory=*` no longer applies to them. A repository owned by another user then fails with `git_error` and shows as `git walk dropped 1 repositories this push`; `mm recapture --dry-run` names the repository and the reason, but nothing says that the environment held variables mm ignored.
+- **Hypothesis (untested):** a local-only `discovery.scrubbed_git_env: [names]` in `mm diag --json` plus one text line, never on the wire. Nesting under `discovery` avoids the `_DIAG_JSON_TOP_LEVEL` pin, but nested fields get their own README pin by the `host_skill_discovery` precedent.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Deferred by Track 55A /autoplan (2026-09-09, branch `kbitz/scrub-git-subprocess-env`) as expansion E6: it explains a correct state rather than a degraded one, and the in-product remedy path (dry-run listing, partial-recapture advice, README anchor) closes the diagnostic gap without it. The Claude CEO voice wanted the minimal version shipped; the Codex DX voice agreed it could stay deferred because listing names alone does not close the gap. Re-open on the first real confusion report. Plan file: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-09-track-55a.md`.
+
 ## Drain records
 
 ### Roadmap drain — 2026-09-06

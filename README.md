@@ -14,6 +14,9 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
+The first push needing that refresh prints `mm: notice: refreshing identity cache (one-off)`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
+
 For `Pull incomplete:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
 
 ```bash
@@ -192,7 +195,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm --version` | Print the installed version and exit |
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Push with verbose output |
-| `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Partial recovery exits 4. Retros window by the COMMIT's date, not by when mm captured it |
+| `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
@@ -207,7 +210,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm sources` | List configured sync sources |
 | `mm log` | Query the per-file pull/push history. Filter with `--source`, `--since`, `--action {written\|merged\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push}`, `--limit`; `--format {jsonl\|table}` |
 | `mm migrate-config` | Append any missing recommended `exclude_patterns` to your existing `[[sync.sources]]` entries. Idempotent and preserves your customizations; `--dry-run` to preview, `--yes` to skip the prompt |
-| `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. `--json` prints the resolved set |
+| `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, and coverage fields `degraded` / `partial` with the reason a coverage field was dropped) and skips the markdown retro. |
@@ -356,7 +359,7 @@ filesystem state, and deletion is the one you do on purpose.
 
 ## Fleet retro (`/retro-fleet`)
 
-Mind Meld v0.11.0 ships a Claude Code skill that stitches engineering activity from every Mac in your fleet into one accurate retrospective. Every substantive `mm push` writes a per-device daily JSONL row (commit metadata, sessions count, sync activity) to the synced `mm-events` source, so any machine can read the union and produce a fleet-wide picture. `mm recapture` writes extra git-snapshot rows (not an mm-push) to recover omitted intervals, then runs an ordinary push.
+Mind Meld v0.11.0 ships a Claude Code skill that stitches engineering activity from every Mac in your fleet into one accurate retrospective. Every substantive `mm push` writes a per-device daily JSONL row (commit metadata, sessions count, sync activity) to the synced `mm-events` source, so any machine can read the union and produce a fleet-wide picture. `mm recapture` writes extra git-snapshot rows (not an mm-push) to recover omitted intervals, then runs an ordinary push. For skipped repositories and environment overrides, see [Git capture troubleshooting](#dropped-repositories-and-ignored-git-environment-variables).
 
 Inside Claude Code:
 
@@ -515,6 +518,69 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm diff` predicts them before a pull, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
 
 **A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud/Dropbox conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
+
+### Dropped repositories and ignored git environment variables
+
+`git walk dropped N repositories this push` means some repository history
+was omitted. Content sync still proceeds. On the Mac that owns those repos:
+
+```bash
+mm recapture --dry-run
+```
+
+The preview names skipped paths and reasons: `git_error` (Git could not read
+the repository), `timeout`, `budget_abort`, or `raised` (an unexpected walk
+exception). `no commits yet (benign)` is an empty repository and needs no fix.
+The preview is a fresh scan at interactive budgets over the requested window
+(default 30d). A clean preview does not prove the earlier push was complete.
+
+For `git_error`, check for a broken checkout or ownership mismatch. If Git
+reports dubious ownership and you trust that specific repository, substitute
+its path in this command:
+
+```bash
+git config --global --add safe.directory /path/to/repo
+```
+
+Then rerun the preview and recover the omitted window:
+
+```bash
+mm recapture --dry-run
+mm recapture 30d
+mm refresh-identity
+```
+
+Use the same `Nd` window (1d–90d) for preview and recovery when changing it.
+Budget aborts may need a narrower window. Git failures need their underlying
+cause fixed; narrowing the window cannot repair a checkout. `refresh-identity`
+lists the locally resolved emails and `+`/`-` changes versus a readable prior
+cache. A missing cache means the previous set is unknown, not empty.
+
+**Ignored Git environment.** mm's four Git reads select each discovered
+repository even when a parent hook or shell exports repository-local state.
+They ignore GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
+GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_IMPLICIT_WORK_TREE,
+GIT_GRAFT_FILE, GIT_NO_REPLACE_OBJECTS, GIT_REPLACE_REF_BASE, GIT_PREFIX,
+GIT_SHALLOW_FILE, GIT_CONFIG, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT, and all
+GIT_CONFIG_KEY_*/GIT_CONFIG_VALUE_* entries: the list
+`git rev-parse --local-env-vars` prints, plus the numbered configuration entries.
+
+Repository and global configuration define attribution. Inherited `git -c`
+and repository-local GIT_CONFIG overrides do not. ~/.gitconfig,
+GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM, XDG_CONFIG_HOME,
+HOME, and `includeIf` still work, as do PATH, GIT_EXEC_PATH and GIT_SSH*.
+Put lasting overrides in the appropriate configuration file. LC_ALL and
+LANGUAGE are C for these subprocesses, so a localized no-commits message
+cannot be misclassified as `git_error`.
+
+**Recovery has three separate outcomes.** The local identity cache refreshes
+on the next identity read that completes discovery after upgrading. Future
+capture uses the correct repository and configured identities. Already
+published rows remain unchanged: recapture restores omissions but cannot
+retract a wrong remote or identity. Event files become eligible for `mm gc`
+after 90 days by their filename date; GC also runs after an interactive
+`mm push` that uploaded changes, never from autopush. Upgrading does not
+claim to repair historical attribution.
 
 ### Host usage capture (Codex and Grok)
 

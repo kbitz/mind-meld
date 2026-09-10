@@ -64,7 +64,8 @@ _ROOT_DISCOVERY_EMPTY_DEGRADATION = (
 )
 _GIT_WALK_DEGRADATION = (
     "git walk dropped {n} repositories this push. "
-    "Run mm diag, then mm recapture 30d to recover the omitted commits"
+    "Run mm recapture --dry-run to check current repository failures, "
+    "then mm recapture 30d to recover the omitted commits"
 )
 _CURSOR_HOLD_DEGRADATION = (
     "retro cursor held at last complete capture. "
@@ -1153,47 +1154,9 @@ def _prepare_recapture(
     )
 
 
-def _run_events_recapture(
-    config: dict,
-    sources: list[dict],
-    device_id: str,
-    *,
-    since: datetime,
-) -> list[str]:
-    """Write recapture git-snapshot rows (no mm-push). Returns degradations.
-
-    Writes nothing when mm-events is unresolved or discovery found zero
-    roots — an empty snapshot would bump the aggregator's zero-capture
-    note. The ordinary push path is the caller's job: writing these rows
-    first makes ``has_substantive`` true with no gate edit.
-    """
-    degradations: list[str] = []
-    try:
-        prepared = _prepare_recapture(config, sources, device_id, since=since)
-        if prepared is None:
-            return degradations
-        if not prepared.root_discovery.roots:
-            return degradations
-        events.write_push_event(prepared.events_dir, device_id, prepared.git_rows)
-        if prepared.root_discovery.exceeded:
-            degradations.append(_ROOT_DISCOVERY_DEGRADATION)
-        elif prepared.root_discovery.errors:
-            degradations.append(_ROOT_DISCOVERY_ERROR_DEGRADATION)
-        walk_phrase = _git_walk_degradation(prepared.walk_budget_aborts, prepared.walk_errors)
-        if walk_phrase is not None:
-            degradations.append(walk_phrase)
-    except Exception as e:
-        sys.stderr.write(
-            f"mm: notice: events recapture failed: {type(e).__name__}: {safe_str(e)}\n"
-        )
-        degradations.append(f"events recapture failed ({type(e).__name__})")
-    return degradations
-
-
 __all__ = [
     "_decide_token_walk_policy",
     "_enabled_claude_paths",
     "_run_events_backfill",
-    "_run_events_recapture",
     "_run_events_tail",
 ]

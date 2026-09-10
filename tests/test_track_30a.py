@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from mind_meld import cli, events, events_tail, retention
+from mind_meld import cli, events, events_tail, identity, retention
 from mind_meld.cli import app
 from mind_meld.skills.retro_fleet import aggregator
 
@@ -675,5 +675,167 @@ def test_autopush_never_reaches_recapture_path() -> None:
 
     src = inspect.getsource(cli.autopush)
     assert "_prepare_recapture" not in src
-    assert "_run_events_recapture" not in src
     assert "recapture(" not in src
+
+
+def _stub_recapture_result(tmp_path, monkeypatch, reasons=(), *, discovery="complete", rows=True):
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    cli.console.size = (240, 40)
+    now = datetime.now(timezone.utc)
+    roots = tuple(tmp_path / f"repo-{i}" for i in range(max(1, len(reasons))))
+    row = {
+        "v": 2,
+        "type": "git-snapshot",
+        "projects": [],
+        "skipped": [{"path": str(root), "reason": reason} for root, reason in zip(roots, reasons)],
+    }
+    prepared = events_tail.RecaptureCapture(
+        git_rows=[row] if rows else [],
+        root_discovery=events.GitRootDiscovery(
+            roots, () if discovery == "complete" else ("probe failed",), discovery == "exceeded"
+        ),
+        walk_budget_aborts=reasons.count(events.WALK_SKIP_BUDGET_ABORT),
+        walk_errors=sum(
+            reason not in {events.WALK_SKIP_BUDGET_ABORT, events.WALK_SKIP_NO_COMMITS}
+            for reason in reasons
+        ),
+        events_dir=tmp_path / "mm-events/events",
+        since=now - timedelta(days=30),
+        until=now,
+    )
+    monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
+    monkeypatch.setattr(events, "write_push_event", lambda *a, **kw: None)
+    monkeypatch.setattr(cli, "_push_core", lambda *a, **kw: object())
+    return prepared
+
+
+def test_recapture_dry_run_names_failures_and_benign_skips(tmp_path, monkeypatch):
+    prepared = _stub_recapture_result(tmp_path, monkeypatch, ("git_error", "no_commits", "raised"))
+    prepared.git_rows[0]["skipped"][0]["path"] = "/repo/[red]literal\x1b[2J"
+    result = runner.invoke(app, ["recapture", "30d", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.stdout.split())
+    assert "skipped: /repo/[red]literal — git_error" in text
+    assert "no commits yet (benign)" in text
+    assert f"skipped: {prepared.root_discovery.roots[2]} — raised" in text
+    assert cli.GIT_WALK_FAILURES_URL in text
+    assert "\x1b" not in result.stdout
+
+
+def test_recapture_dry_run_reports_an_unexpected_walk_exception(tmp_path, monkeypatch):
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    cli.console.size = (240, 40)
+    repo = tmp_path / "broken-walk"
+    monkeypatch.setattr(
+        events, "discover_git_roots", lambda *a, **kw: events.GitRootDiscovery((repo,), (), False)
+    )
+
+    def failed_walk(*args):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(events, "_walk_one_repo", failed_walk)
+    result = runner.invoke(app, ["recapture", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.stdout.split())
+    assert f"skipped: {repo} — raised" in text
+    assert cli.GIT_WALK_FAILURES_URL in text
+
+
+@pytest.mark.parametrize("rows,reasons", [(False, ()), (True, ("no_commits",))])
+def test_recapture_dry_run_without_failures_has_no_remedy_url(tmp_path, monkeypatch, rows, reasons):
+    _stub_recapture_result(tmp_path, monkeypatch, reasons, rows=rows)
+    result = runner.invoke(app, ["recapture", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.stdout.split())
+    assert cli.GIT_WALK_FAILURES_URL not in text
+    if not rows:
+        assert "skipped:" not in text
+
+
+@pytest.mark.parametrize(
+    "reasons,discovery,check_failures,narrower",
+    [
+        (("git_error",), "complete", True, False),
+        (("raised",), "complete", True, False),
+        (("budget_abort",), "complete", False, True),
+        (("git_error", "budget_abort"), "complete", True, True),
+        ((), "exceeded", False, True),
+        ((), "errors", False, False),
+    ],
+)
+def test_recapture_partial_advice_matches_failure(
+    tmp_path, monkeypatch, reasons, discovery, check_failures, narrower
+):
+    _stub_recapture_result(tmp_path, monkeypatch, reasons, discovery=discovery)
+    result = runner.invoke(app, ["recapture", "30d"])
+    assert result.exit_code == 4, result.output
+    text = " ".join(result.stdout.split())
+    assert ("Check current repository failures: mm recapture --dry-run" in text) == check_failures
+    assert ("Retry a narrower window: mm recapture 7d" in text) == narrower
+    if check_failures:
+        assert "then retry mm recapture 30d" in text
+        assert cli.GIT_WALK_FAILURES_URL in text
+        assert "1 repository was skipped because the Git walk failed" in text
+    if "budget_abort" in reasons:
+        assert "1 repository was skipped because the Git walk exceeded its budget" in text
+    if discovery == "exceeded":
+        assert "Git repository discovery was incomplete" in text
+    elif discovery == "errors":
+        assert "Check mm diag, then retry mm recapture 30d" in text
+
+
+def test_recapture_partial_advice_narrows_a_7d_window_to_1d(tmp_path, monkeypatch):
+    _stub_recapture_result(tmp_path, monkeypatch, ("budget_abort",))
+    result = runner.invoke(app, ["recapture", "7d"])
+    assert result.exit_code == 4, result.output
+    text = " ".join(result.stdout.split())
+    assert "Retry a narrower window: mm recapture 1d" in text
+    assert "Check current repository failures:" not in text
+
+
+@pytest.mark.parametrize(
+    "previous,current,json_output,expected_delta,exit_code",
+    [
+        (["b@y"], ["a@x"], False, "+a@x -b@y", 0),
+        (None, ["a@x"], False, None, 0),
+        ([], ["a@x"], False, "+a@x", 0),
+        (["a@x"], ["a@x"], False, None, 0),
+        (["b@y"], [], False, "-b@y", 1),
+        (["b@y"], ["a@x"], True, None, 0),
+        (["b@y"], [], True, None, 0),
+    ],
+)
+def test_refresh_identity_reports_changes_from_known_cache(
+    monkeypatch, previous, current, json_output, expected_delta, exit_code
+):
+    calls = []
+
+    def read():
+        calls.append("read")
+        return previous
+
+    def refresh(*, force):
+        assert force is True
+        calls.append("refresh")
+        return current
+
+    monkeypatch.setattr(identity, "read_cached_identities", read)
+    monkeypatch.setattr(identity, "refresh_identity_cache", refresh)
+    result = runner.invoke(app, ["refresh-identity", *(["--json"] if json_output else [])])
+    assert calls == ["read", "refresh"]
+    assert result.exit_code == exit_code, result.output
+    if expected_delta is not None:
+        assert f"Changes vs previous cache: {expected_delta}" in result.stdout
+    else:
+        assert "Changes vs previous cache:" not in result.stdout
+    if json_output:
+        assert json.loads(result.stdout) == current
+        assert result.stderr == ""
+    elif not current:
+        assert result.output.index("Changes vs previous cache:") < result.output.index(
+            "mm: warning:"
+        )

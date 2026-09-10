@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.9] - 2026-09-09
+
+**mm's Git reads now stay with each discovered repository.** Inherited repository-redirection and command-scoped configuration variables no longer substitute another repository's history, origin, or configured identity. This prevents new mis-attribution; it does not repair published rows.
+
+### Fixed
+
+- All four Git subprocesses use one scrubbed environment. Global and repository configuration remain supported; a drift check against Git's own local-variable list and an AST gate protect future call sites.
+- The identity cache refreshes once after upgrading when discovery completes. An incomplete attempt keeps the previous emails in a stale cache and retries later, preserving the transient union without making removed identities authoritative.
+- Pinning Git's message locale to C prevents a localized no-commits message from being classified as `git_error`. An undecodable byte can no longer abort the walk; undecodable identifiers are skipped.
+- Recapture dry-run names skipped repositories and benign empty repos. Status and autopush point to that check; partial recapture distinguishes Git failures from budget aborts and gives the matching retry command.
+
+### Changed
+
+- `mm refresh-identity` shows locally resolved email additions and removals versus the prior readable cache. JSON output is unchanged.
+- Removed `_last_mm_push_ts`; its active successors are `resolve_push_cursor` and the bounded `_iter_mm_push_objs` reader. Removed `_run_events_recapture`; `mm recapture` orchestrates `_prepare_recapture` directly. Re-pointed live documentation and retained cursor/recapture regression coverage.
+- Documented ignored variables, persistent configuration, diagnosis and recovery, and the limits of correcting previously published attribution.
+
 ## [0.14.8] - 2026-09-09
 
 **Failed Codex usage reads now stay visible.** Both readers retain a standing read blocker and its first-observed UTC date, so `mm status` and `mm diag` distinguish cached inventory from a failed capture even after a no-op autopush reports success.

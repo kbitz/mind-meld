@@ -12,6 +12,9 @@ from mind_meld.safety import safe_str
 
 SNAPSHOT_FAILURES_URL = "https://github.com/kbitz/mind-meld#snapshot-failures"
 PULL_FAILURES_URL = "https://github.com/kbitz/mind-meld#pull-incomplete--could-not-pull-a-file"
+GIT_WALK_FAILURES_URL = (
+    "https://github.com/kbitz/mind-meld#dropped-repositories-and-ignored-git-environment-variables"
+)
 
 
 class MindMeldError(Exception):

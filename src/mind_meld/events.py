@@ -69,7 +69,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypedDict
 from urllib.parse import urlsplit
 
-from mind_meld import fsutil, token_usage
+from mind_meld import fsutil, gitenv, token_usage
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES
 from mind_meld.safety import strip_terminal_escapes
 
@@ -1036,6 +1036,9 @@ def _walk_one_repo(
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=gitenv.scrubbed_git_env(),
             timeout=timeout_ms / 1000.0,
         )
     except subprocess.TimeoutExpired:
@@ -1068,9 +1071,12 @@ def _origin_remote_url(root: Path) -> str:
             ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=gitenv.scrubbed_git_env(),
             timeout=2,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return ""
     if result.returncode != 0:
         return ""
@@ -1594,23 +1600,6 @@ def _iter_mm_push_objs(path: Path):
                 yield obj
     except OSError:
         return
-
-
-def _last_mm_push_ts(path: Path) -> datetime | None:
-    """Return the ts of the LAST mm-push line, or None.
-
-    Kept as the bounded-read primitive the original last-match tests
-    exercise through ``last_push_ts``. Returning ``None`` here is NOT a
-    benign fallback: it rewinds the cursor to
-    ``now - INITIAL_CURSOR_LOOKBACK_DAYS`` and re-walks 30 days of git
-    history on every subsequent push, forever.
-    """
-    last: datetime | None = None
-    for obj in _iter_mm_push_objs(path):
-        ts = _parse_aware_ts(obj.get("ts"))
-        if ts is not None:
-            last = ts
-    return last
 
 
 def latest_mm_push_row(events_dir: Path, device_id: str) -> dict | None:

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from mind_meld import upgrade
+from mind_meld import errors, upgrade
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "mind_meld"
@@ -472,6 +472,7 @@ def test_every_extracted_module_has_a_routing_row() -> None:
         "retention.py",
         "conflictmtime.py",
         "host_skill_discovery.py",
+        "gitenv.py",
     ):
         assert f"`{mod}:" in table, f"{mod} has no routing row — Group 17 would fly blind"
 
@@ -482,6 +483,43 @@ def test_every_extracted_module_has_a_routing_row() -> None:
 # ---------------------------------------------------------------------------
 
 _INVARIANT_ROW = re.compile(r"^- `src/mind_meld/(?P<file>[\w/]+\.py)` — (?P<rest>.+)$", re.M)
+
+
+_REMOVED_EVENT_HELPERS = ("_last_mm_push_ts", "_run_events_recapture")
+
+
+def _removed_helper_citations(paths) -> list[str]:
+    hits = []
+    for path in paths:
+        if path.suffix not in {".py", ".md"} or path.resolve() == Path(__file__).resolve():
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for name in _REMOVED_EVENT_HELPERS:
+                if name in line:
+                    hits.append(f"{path}:{lineno}: {name}")
+    return hits
+
+
+def test_no_live_citations_of_removed_event_helpers():
+    paths = [ROOT / name for name in ("AGENTS.md", "README.md", "SPEC.md")]
+    for directory in ("src", "tests", "docs/invariants", "docs/designs"):
+        paths.extend(path for path in (ROOT / directory).rglob("*") if path.is_file())
+    assert not (hits := _removed_helper_citations(paths)), "\n".join(hits)
+
+
+def test_removed_helper_scanner_catches_a_stale_citation(tmp_path):
+    path = tmp_path / "stale.md"
+    path.write_text("A stale reference: _last_mm_push_ts\n")
+    assert _removed_helper_citations([path]) == [f"{path}:1: _last_mm_push_ts"]
+
+
+def test_error_url_anchors_resolve():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    headings = re.findall(r"^#{2,3} (.+)$", readme, re.M)
+    anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
+    for name, url in vars(errors).items():
+        if name.endswith("_URL") and isinstance(url, str) and "#" in url:
+            assert url.split("#", 1)[1] in anchors, f"{name} has no README heading: {url}"
 
 
 def _invariant_citations() -> list[tuple[str, str, str]]:

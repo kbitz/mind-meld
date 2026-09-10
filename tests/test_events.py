@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import threading
@@ -125,6 +126,7 @@ def _init_git_repo(path: Path) -> None:
         check=True,
     )
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "commit.gpgsign", "false"], check=True)
 
 
 def _make_git_worktree(repo: Path, worktree: Path, branch: str = "wt") -> None:
@@ -144,6 +146,147 @@ def _seed_commit(repo: Path) -> None:
     (repo / "seed.txt").write_text("seed")
     subprocess.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True)
+
+
+def _git_env_repos(tmp_path, monkeypatch):
+    """Build distinct repos before injecting overrides; never use real git config."""
+    for name in list(os.environ):
+        if name.startswith("GIT_"):
+            monkeypatch.delenv(name)
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text("")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    target, decoy = tmp_path / "target", tmp_path / "decoy"
+    for repo in (target, decoy):
+        _init_git_repo(repo)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", f"{repo.name}@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                f"https://example.com/{repo.name}.git",
+            ],
+            check=True,
+        )
+        _seed_commit(repo)
+    sha = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return target, decoy, sha
+
+
+@pytest.mark.parametrize(
+    "case,control",
+    [
+        ("dir", "log_says_decoy"),
+        ("dir_worktree", "log_says_decoy"),
+        ("common", "log_fails"),
+        ("objects", "log_fails"),
+        ("config", "remote_says_decoy"),
+        ("parameters", "remote_says_decoy"),
+        ("count", "remote_says_decoy"),
+    ],
+)
+def test_git_environment_cannot_redirect_capture(tmp_path, monkeypatch, case, control):
+    target, decoy, target_sha = _git_env_repos(tmp_path, monkeypatch)
+    patches = {
+        "dir": {"GIT_DIR": str(decoy / ".git")},
+        "dir_worktree": {"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)},
+        "common": {"GIT_COMMON_DIR": str(decoy / ".git")},
+        "objects": {"GIT_OBJECT_DIRECTORY": str(decoy / ".git/objects")},
+        "config": {"GIT_CONFIG": str(decoy / ".git/config")},
+        "parameters": {
+            "GIT_CONFIG_PARAMETERS": "'remote.origin.url=https://example.com/decoy.git'"
+        },
+        "count": {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "remote.origin.url",
+            "GIT_CONFIG_VALUE_0": "https://example.com/decoy.git",
+        },
+    }
+    for name, value in patches[case].items():
+        monkeypatch.setenv(name, value)
+    # Positive control: the same environment actually corrupts an unscrubbed read.
+    args = (
+        ["config", "--get", "remote.origin.url"]
+        if control == "remote_says_decoy"
+        else ["log", "--format=%ae"]
+    )
+    raw = subprocess.run(["git", "-C", str(target), *args], capture_output=True, text=True)
+    if control == "log_fails":
+        assert raw.returncode != 0
+    else:
+        assert raw.returncode == 0
+        assert "decoy" in raw.stdout
+
+    project, error = events._walk_one_repo(target, "2000-01-01T00:00:00+00:00", 5000)
+    assert error is None
+    assert project["local_path"] == str(target)
+    assert project["remote"] == "example.com/target"
+    assert [commit["sha"] for commit in project["commits"]] == [target_sha]
+    assert events._origin_remote_url(target) == "https://example.com/target.git"
+
+
+def test_scrub_does_not_hide_a_broken_repository(tmp_path, monkeypatch):
+    target, _, _ = _git_env_repos(tmp_path, monkeypatch)
+    shutil.rmtree(target / ".git/objects")
+    project, error = events._walk_one_repo(target, "2000-01-01T00:00:00+00:00", 5000)
+    assert project is None
+    assert error == events.WALK_SKIP_GIT_ERROR
+
+
+def test_git_environment_scrub_preserves_worktree_gitfile_discovery(tmp_path, monkeypatch):
+    target, decoy, target_sha = _git_env_repos(tmp_path, monkeypatch)
+    worktree = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "-C", str(target), "worktree", "add", "--detach", str(worktree)],
+        capture_output=True,
+        check=True,
+    )
+    assert (worktree / ".git").is_file()
+    assert events._classify_git_root(worktree)
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    project, error = events._walk_one_repo(worktree, "2000-01-01T00:00:00+00:00", 5000)
+    assert error is None
+    assert project["local_path"] == str(worktree)
+    assert project["remote"] == "example.com/target"
+    assert [commit["sha"] for commit in project["commits"]] == [target_sha]
+
+
+def test_git_walk_replaces_undecodable_display_bytes(monkeypatch, tmp_path):
+    def run(cmd, **kwargs):
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        return subprocess.CompletedProcess(
+            cmd, 0, "\x1eabc123\t2026-09-09T00:00:00+00:00\ttarget@example.com\tbad\ufffdsubject\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(events, "_origin_remote_url", lambda root: "")
+    project, error = events._walk_one_repo(tmp_path, "2000-01-01T00:00:00+00:00", 5000)
+    assert error is None
+    assert project["commits"][0]["subject"] == "bad\ufffdsubject"
+
+
+def test_git_remote_rejects_undecodable_identifier(monkeypatch, tmp_path):
+    def run(cmd, **kwargs):
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "strict"
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert events._origin_remote_url(tmp_path) == ""
 
 
 def _make_submodule(tmp_path: Path) -> Path:
@@ -1205,7 +1348,7 @@ class TestLastPushTs:
         A torn peer write or a `merge_jsonl` result can leave the final
         mm-push record without a trailing newline. With the shared reader's
         default (`yield_final_partial=False`) that record is discarded,
-        `_last_mm_push_ts` returns None, and the cursor rewinds to
+        `_iter_mm_push_objs` loses the usable row, and `resolve_push_cursor` rewinds to
         `now - INITIAL_CURSOR_LOOKBACK_DAYS` — re-walking 30 days of git
         history on every subsequent push, forever. The cwd reader got a
         regression pin for this after Codex caught it; the cursor reader

@@ -41,10 +41,15 @@ Trust-rooted: only emails sourced from CONFIGURED identities on the running
 machine. Walking ``git log`` for every author email would silently include
 collaborator emails on shared repos — not what we want.
 
+Git environment: both Git reads use ``gitenv.scrubbed_git_env`` so inherited
+repository and command-scoped overrides cannot change attribution. Global
+and repository configuration still apply. Decode identifiers strictly: an
+undecodable email is unreadable, never a replacement-character identity.
+
 Cache schema (forward-compat, ``total=False`` shape):
 
     {
-      "version": 1,
+      "version": 2,
       "refreshed_at": "<ISO 8601 UTC>",
       "emails": ["a@b.c", "d@e.f"]    # lowercased, deduped, sorted
     }
@@ -64,13 +69,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mind_meld import gitenv, lockedjson
 from mind_meld.lockedjson import locked_json_rmw
 
 if TYPE_CHECKING:
     from mind_meld.events import GitRootDiscovery
 
 CACHE_PATH = Path("~/.config/mind-meld/identity-cache.json").expanduser()
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 TTL_SECONDS = 7 * 24 * 3600  # 7 days
 
 # Subprocess budgets. Refresh is a one-off; these are upper bounds, not
@@ -115,9 +121,7 @@ def gather_local_identities(
             on_contention="block",
         ) as ljson:
             cache = ljson.data
-            if not _is_valid_cache(cache):
-                cache.clear()
-                cache.update(_default_cache())
+            _normalize_cache(cache)
             stale = _is_cache_stale(cache)
             if not stale or not allow_refresh:
                 return list(cache.get("emails") or [])
@@ -150,9 +154,11 @@ def refresh_identity_cache(
 
     ``force=True`` rewrites the cache (used by ``mm init`` warm,
     ``mm refresh-identity``) when discovery is complete. A supplied
-    incomplete discovery returns a transient union without rewriting cache
-    bytes or freshness. ``force=False`` is a no-op when the cache is already
-    fresh.
+    incomplete discovery returns a transient union without persisting the
+    newly gathered emails or a fresh timestamp. Phase 1 may still normalize
+    a well-formed older cache to the current version with ``refreshed_at=None``
+    so the previous emails stay available. ``force=False`` is a no-op when
+    the cache is already fresh.
 
     Returns the resulting email list. On failure, returns whatever was in
     the cache before (may be empty).
@@ -169,9 +175,7 @@ def refresh_identity_cache(
             on_contention="block",
         ) as ljson:
             cache = ljson.data
-            if not _is_valid_cache(cache):
-                cache.clear()
-                cache.update(_default_cache())
+            _normalize_cache(cache)
             if not force and not _is_cache_stale(cache):
                 return list(cache.get("emails") or [])
     except Exception:
@@ -262,16 +266,40 @@ def _default_cache() -> dict:
     return {"version": CACHE_VERSION, "refreshed_at": None, "emails": []}
 
 
+def _has_email_list(cache: object) -> bool:
+    return (
+        isinstance(cache, dict)
+        and isinstance(cache.get("emails"), list)
+        and all(isinstance(email, str) for email in cache["emails"])
+    )
+
+
+def _normalize_cache(cache: dict) -> None:
+    """Malformed caches reset; old versions keep identities but become stale.
+
+    locked_json_rmw supplies a dict even for non-dict JSON and persists on
+    exit. Keeping old emails here preserves the transient union if discovery
+    is incomplete; a complete gather can authoritatively replace them.
+    """
+    if not _has_email_list(cache):
+        cache.clear()
+        cache.update(_default_cache())
+    elif cache.get("version") != CACHE_VERSION:
+        cache["version"] = CACHE_VERSION
+        cache["refreshed_at"] = None
+
+
 def _is_valid_cache(cache: dict) -> bool:
-    """Conservative shape check. Out-of-range version, non-list emails, or
-    mistyped fields all fail and trigger a rebuild."""
-    if not isinstance(cache, dict):
-        return False
-    if cache.get("version") != CACHE_VERSION:
-        return False
-    if not isinstance(cache.get("emails"), list):
-        return False
-    return True
+    """A current-version cache containing only string emails."""
+    return _has_email_list(cache) and cache.get("version") == CACHE_VERSION
+
+
+def read_cached_identities() -> list[str] | None:
+    """Read the previous identities without mutation; None means unknown."""
+    with lockedjson.locked_json_snapshot(CACHE_PATH) as snapshot:
+        if snapshot.state == "valid" and _has_email_list(snapshot.data):
+            return sorted(snapshot.data["emails"])
+    return None
 
 
 def _is_cache_stale(cache: dict) -> bool:
@@ -318,9 +346,12 @@ def _gather_global_email() -> str | None:
             ["git", "config", "--global", "user.email"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=gitenv.scrubbed_git_env(),
             timeout=_GIT_GLOBAL_TIMEOUT_S,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
         return None
     if result.returncode != 0:
         return None
@@ -374,9 +405,12 @@ def _gather_per_repo_emails(
                 ["git", "-C", str(root), "config", "user.email"],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="strict",
+                env=gitenv.scrubbed_git_env(),
                 timeout=_PER_REPO_TIMEOUT_S,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
             continue
         if result.returncode != 0:
             continue
@@ -468,5 +502,6 @@ __all__ = [
     "CACHE_VERSION",
     "TTL_SECONDS",
     "gather_local_identities",
+    "read_cached_identities",
     "refresh_identity_cache",
 ]
