@@ -118,6 +118,7 @@ GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Pyt
 ## Commands
 mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture
 
+Push flag: `--dry-run` (v0.14.10). Changes nothing except the local lock file — no uploads, config writes, pull-history rows, upgrade checks, or new directories; reports the setup a real push would still perform instead of performing it. Refuses (exit 1) instead of silently proving an empty deletion when the mm-events directory is missing but this Mac previously published files from it. Exit codes: 0 completed, 1 stopped, 2 usage error. See `docs/invariants/sync.md` and `docs/invariants/init-devices.md`.
 Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 3 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--dry-run` (preview orphan blobs plus retention candidates without mutation; each executed reaper reports candidates, repairs, and skips); `--conflicts` (also reap `.sync-conflict-*` copies older than 30 days — reapable ONLY when the conflict converged, i.e. canonical exists and its bytes are identical; live, missing-canonical and unhashable sidecars are never reaped at any age, see `retention.py:_is_live_conflict`).
 Log flags: `--source NAME`, `--since DATE`, `--action {written|merged|skipped|conflicted|excluded|uploaded|failed}`, `--verb {pull|push}`, `--limit N`, `--format {jsonl|table}`.
@@ -151,6 +152,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `devices.py` / `storage/local.py:put_exclusive` / `find_conflict_copies` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
+| `cli.py:_get_config` / `_init_crypto_session` / `_maybe_prompt_migration` (`read_only=` / `dry_run=` gates) / `crypto.py:fetch_crypto_init` / `CryptoInitRepairPlan` (`repair=` gate) | `docs/invariants/sync.md` and `docs/invariants/init-devices.md` |
 | `events_tail.py:_run_events_tail` / `_run_events_backfill` / `_prepare_recapture` / `_decide_token_walk_policy` / `_enabled_claude_paths` | `docs/invariants/events-retro.md` |
 | `events_tail.py:_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `events.py:make_host_usage_snapshot` / `HostUsageSnapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES` | `docs/invariants/events-retro.md` (host-usage-snapshot section) |
 | `cli.py:PushResult.events_degradations` / the `autopush` breadcrumb outcome / `_breadcrumb_staleness_suffix` | `docs/invariants/events-retro.md` |
@@ -181,7 +183,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `skills/retro_fleet/aggregator.py` (incl. `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_render_ascii_card` / `_aggregate_git_period_pair` / `_classify_commit_subject` / `_detect_bursts` / `_safe_prose`) | `docs/invariants/events-retro.md` |
 | `skills/retro_fleet/aggregator.py` 23A renderers (`AgentRhythmView` / `_agent_rhythm_view` / `_render_agent_block` / `_render_agent_inventory` / `_agent_coverage_notes` / `_agent_state_label` / `_window_day_keys` / `AGENT_FAMILY_ROWS` / `MAX_AGENT_INVENTORY_MACHINES` / `_render_models_block`) and `token_usage.sum_bucket` | `docs/invariants/events-retro.md` (Track 23A renderer contract) |
 | `skills/retro_fleet/SKILL.md` (two-pass card flow; `## Step 0: preflight` and its terminal rule) | `docs/invariants/events-retro.md` |
-| `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |
+| `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `_preview_mm_events_bootstrap` / `resolve_sources` / `get_sources` (`bootstrap=` gate, `SourceResolution.would_create`) / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |
 | `upgrade.py` / `cli.py` upgrade hook seams / `pullhistory.py:append_self_upgrade` | `docs/invariants/auto-upgrade.md` |
 | `pyproject.toml` version bump / tagging | `docs/invariants/auto-upgrade.md` |
 

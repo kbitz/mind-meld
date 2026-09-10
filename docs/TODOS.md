@@ -80,8 +80,6 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Context:** filed by Track 56A /autoplan, 2026-09-10 (Claude CEO voice #4 proposed the upgrade.py refactor; deferred as out of the preview contract).
 
-
-
 ### [plan-eng-review:severity=moderate] Re-read standing host-usage blockers on an interactive no-op push (T3-B)
 
 - **What:** An interactive, non-dry-run `mm push` that finds nothing to upload still re-reads any consented host reader whose cache carries a standing `last_reason`, rewrites that cache, prints the outcome, and writes no event row.
