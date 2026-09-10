@@ -1951,3 +1951,87 @@ class TestGetSourcesStrict:
         assert str(events_root) in config_mod._BOOTSTRAP_WARNED_PATHS
         with pytest.raises(SnapshotError, match="mm-events"):
             get_sources(config, strict=True)
+
+
+class TestSourceBootstrapPreview56A:
+    def test_missing_root_available_without_mkdir(self, tmp_path):
+        root = tmp_path / "nested" / "mm-events"
+        cfg = {
+            "sync": {
+                "sources": [
+                    {
+                        "name": "mm-events",
+                        "path": str(root),
+                        "type": "generic",
+                        "include_dirs": ["events"],
+                    }
+                ]
+            }
+        }
+        result = resolve_sources(cfg, strict=True, bootstrap=False)
+        assert result.would_create == ("mm-events",)
+        assert result.available == result.selected
+        assert get_sources(cfg, strict=True, bootstrap=False) == result.available
+        assert not root.parent.exists()
+        real = resolve_sources(cfg, strict=True)
+        assert real.would_create == ()
+        assert root.is_dir()
+        assert resolve_sources(cfg, strict=True, bootstrap=False).would_create == ()
+
+    def test_stat_error_retains_strict_bootstrap_refusal(self, tmp_path, monkeypatch):
+        import errno
+
+        from mind_meld import config as config_module
+
+        root = tmp_path / "mm-events"
+        original = Path.stat
+
+        def stat(path, *a, **kw):
+            if path == root:
+                raise OSError(errno.EIO, "stat failed")
+            return original(path, *a, **kw)
+
+        # Default paths bypass explicit-config path resolution, reaching the
+        # bootstrap's stat failure boundary, just like real default selection.
+        monkeypatch.setattr(
+            config_module,
+            "DEFAULT_SOURCES",
+            [
+                {
+                    "name": "mm-events",
+                    "path": str(root),
+                    "type": "generic",
+                    "include_dirs": ["events"],
+                }
+            ],
+        )
+        monkeypatch.setattr(config_module, "_optional_host_present", lambda *a: False)
+        monkeypatch.setattr(config_module, "grok_customization_dirs_exist", lambda *a, **kw: False)
+        monkeypatch.setattr(Path, "stat", stat)
+        with pytest.raises(SnapshotError, match="could not be created.*EIO"):
+            resolve_sources({}, strict=True, bootstrap=False)
+        with pytest.raises(FileNotFoundError):
+            original(root)
+
+    def test_legacy_retention_preserves_would_create(self, tmp_path, monkeypatch):
+        from mind_meld import cli
+        from mind_meld import config as config_module
+
+        claude = tmp_path / "claude"
+        claude.mkdir()
+        cfg = {"sync": {"claude_dir": str(claude)}}
+        monkeypatch.setattr(config_module, "_optional_host_present", lambda *a: False)
+        monkeypatch.setattr(config_module, "grok_customization_dirs_exist", lambda *a, **kw: False)
+        resolution = resolve_sources(cfg, strict=True, bootstrap=False)
+        # claude_dir legacy resolution itself never adds mm-events; supply the
+        # pending root in the resolution to exercise the reconstruction seam.
+        from dataclasses import replace
+
+        resolution = replace(resolution, would_create=("mm-events",))
+        retained = cli._retain_prior_default_sources(
+            resolution, {"sources": {"gstack": {"files": {"projects/a.md": {}}}}}, cfg
+        )
+        assert not retained.explicit
+        assert retained.would_create == ("mm-events",)
+        assert [s["name"] for s in retained.selected] == ["claude", "gstack"]
+        assert retained.available == resolution.available

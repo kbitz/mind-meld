@@ -73,8 +73,9 @@ HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
    `_pull_core`/`_push_core` (quiet AND interactive paths) AFTER main work
    completes. Tail position keeps cold-cache HTTP latency (~500ms 1x/24h) from
    stacking on sync latency.
-3. **Status surfacing** in `mm status` — reads cache only, no network call,
-   no last_nudged_at gate (explicit user check).
+3. **Status surfacing** in `mm status` — calls `check_for_upgrade`, fetching
+   when stale and rewriting the cache; no last_nudged_at gate (explicit user
+   check). A cache-only inspection path is deferred (E3b).
 
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
 upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to
@@ -94,6 +95,10 @@ via `pullhistory.append_self_upgrade(...)` (NOT extending `append()` — separat
 event class, separate function). Contract violations silent-skip (NOT assert) so
 forensic log failures don't block sync. `mm log` table renderer adds an `extra`
 column showing `OLD → NEW` for self-upgrade rows; pull/push rows leave it empty.
+
+## Push-preview exception (Track 56A)
+
+`cli._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `emit_nudge_if_due` at its CLI call site: no cache creation/rewrite or HTTP request, even when absent, stale, or due. `upgrade.py` itself is unchanged. A pending transition is recorded by the next command other than `mm push --dry-run` (including sibling previews until 56B). The regression test resets process guards before each invocation and pins a non-dev version, then proves a following `mm status` records exactly one transition.
 
 ## Release discipline (enforced by mm auto-upgrade)
 

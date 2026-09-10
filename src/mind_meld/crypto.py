@@ -34,7 +34,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from argon2.low_level import Type, hash_secret_raw
@@ -294,6 +294,14 @@ def _decrypt_with_master_key(blob: bytes, master_key: bytes) -> bytes:
 
 
 @dataclass(frozen=True)
+class CryptoInitRepairPlan:
+    """Shared-storage reconciliation deferred by a read-only fetch."""
+
+    replace_canonical: bool
+    remove: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CryptoInitFetch:
     """Tri-state result of reading mm-crypto-init from storage.
 
@@ -307,6 +315,7 @@ class CryptoInitFetch:
     root_salt: bytes | None = None
     argon2_memory_kb: int | None = None
     keycheck_blob: bytes | None = None
+    repair_plan: CryptoInitRepairPlan | None = None
 
 
 def _parse_crypto_init(data: bytes) -> CryptoInitFetch:
@@ -345,7 +354,7 @@ def _serialize_crypto_init(argon2_memory_kb: int, root_salt: bytes, keycheck_blo
     )
 
 
-def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
+def fetch_crypto_init(backend: Any, *, repair: bool = True) -> CryptoInitFetch:
     """Read mm-crypto-init from storage with iCloud conflict handling.
 
     If the canonical path is missing but conflict copies exist, pick the
@@ -354,6 +363,8 @@ def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
 
     Tri-state: ok / missing / corrupt. Callers must not treat "corrupt" as
     "missing" — doing so would re-bootstrap over existing valid state.
+    With repair=False, return the same winner and its pending repair without
+    putting or deleting anything. Removal includes unreadable conflict copies.
     """
     canonical_exists = backend.exists(CRYPTO_INIT_KEY)
     conflicts = backend.find_conflict_copies(CRYPTO_INIT_KEY)
@@ -400,6 +411,15 @@ def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
             canonical_raw = backend.get(CRYPTO_INIT_KEY)
         except StorageError:
             canonical_raw = None
+
+    if not repair:
+        plan = CryptoInitRepairPlan(
+            replace_canonical=canonical_raw != winner_raw,
+            remove=tuple(p.name for p in conflicts),
+        )
+        return replace(
+            winner_parsed, repair_plan=plan if plan.replace_canonical or plan.remove else None
+        )
 
     if canonical_raw != winner_raw:
         backend.put(CRYPTO_INIT_KEY, winner_raw)

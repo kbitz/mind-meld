@@ -9,6 +9,7 @@ import sys
 import textwrap
 import time
 import tomllib
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1305,7 +1306,7 @@ class TestDisabledSourcesTombstoneSuppression:
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         # The test drives the post-retirement config itself; do not let
         # the interactive migration prompt rewrite it mid-setup.
-        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config: None)
+        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config, **_kw: None)
         assert runner.invoke(app, ["push"]).exit_code == 0
 
         enc = backend.get("manifests/dev-a/manifest.json.enc")
@@ -1401,7 +1402,7 @@ class TestDisabledSourcesTombstoneSuppression:
         save_config(config_a, config_path_a)
 
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config: None)
+        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config, **_kw: None)
         self._activate(monkeypatch, config_path_b)
         assert runner.invoke(app, ["push"]).exit_code == 0
 
@@ -6056,3 +6057,468 @@ def test_53a_normal_summary_systemexit_propagates(apply_failure_fleet, monkeypat
     assert isinstance(result.exception, SystemExit)
     assert [r["action"] for r in fleet.records()] == ["written"]
     assert fleet.memory in fleet.fsync_calls
+
+
+# One permanent hook, armed only around a preview invocation. Record instead
+# of raising: setup catches OSError/Exception, so a raising guard can lie.
+_PREVIEW_AUDIT = ContextVar("push_preview_audit", default=None)
+
+
+def _record_preview_mutation(event, args):
+    active = _PREVIEW_AUDIT.get()
+    if active is None:
+        return
+    records, lock_path = active
+    if event in {"socket.connect", "urllib.Request"}:
+        records.append((event, repr(args)))
+        return
+    paths = []
+    if event == "open":
+        path, mode, flags = args
+        writing = bool(mode and any(c in mode for c in "wax+")) or bool(
+            flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)
+        )
+        if not writing:
+            return
+        paths = [path]
+    elif event == "os.mkdir":
+        if Path(args[0]).exists():
+            return
+        paths = [args[0]]
+    elif event in {"os.rename", "os.replace", "os.link", "os.symlink"}:
+        paths = list(args[:2])
+    elif event in {"os.remove", "os.rmdir", "os.chmod", "os.utime", "os.truncate"}:
+        paths = [args[0]]
+    else:
+        return
+    for value in paths:
+        if isinstance(value, int) and lock_path.exists():
+            # ftruncate audits the descriptor, not its pathname. Allow only
+            # the lock inode, never every descriptor-based write.
+            fd_stat = os.fstat(value)
+            lock_stat = lock_path.stat()
+            if (fd_stat.st_dev, fd_stat.st_ino) == (lock_stat.st_dev, lock_stat.st_ino):
+                continue
+        if isinstance(value, (str, bytes, os.PathLike)):
+            path = Path(os.fsdecode(value)).absolute()
+            if path in {lock_path, lock_path.parent} or "__pycache__" in path.parts:
+                continue
+        records.append((event, repr(args)))
+        break
+
+
+sys.addaudithook(_record_preview_mutation)
+
+
+def _preview_tree(root, *, pin=False):
+    """Bytes + mode + mtime for the whole fixture tree, including directories."""
+    paths = [root, *root.rglob("*")]
+    if pin:
+        for path in paths:
+            if not path.is_symlink():
+                os.utime(path, ns=(1_600_000_000_000_000_000,) * 2)
+    snapshot = {}
+    for path in paths:
+        rel = path.relative_to(root)
+        if rel == Path("test.lock") or "__pycache__" in rel.parts:
+            continue
+        stat = path.lstat()
+        content = (
+            ("link", os.readlink(path))
+            if path.is_symlink()
+            else ("file", path.read_bytes())
+            if path.is_file()
+            else ("dir",)
+        )
+        # Creating the allowed lock can change its parent's mtime.
+        snapshot[str(rel)] = (content, stat.st_mode, None if path == root else stat.st_mtime_ns)
+    return snapshot
+
+
+@pytest.fixture
+def push_preview56(tmp_path, monkeypatch):
+    from mind_meld import __version__, pullhistory, upgrade
+    from tests.conftest import _make_config, _populate_claude
+
+    assert __version__ != upgrade.DEV_BUILD_SENTINEL
+    claude = tmp_path / "claude"
+    _populate_claude(claude)
+    backend = LocalBackend(tmp_path / "storage")
+    fetch = bootstrap_crypto_init(backend, PASSPHRASE, MEMORY_KB)
+    register_device(backend, "dev-a", "Mac A")
+    config_path, cfg = _make_config(tmp_path, backend.root, claude)
+    events_root = tmp_path / "mm-events"
+    events_root.mkdir()
+    cfg["sync"]["sources"].append(
+        {
+            "name": "mm-events",
+            "path": str(events_root),
+            "type": "generic",
+            "include_dirs": ["events"],
+        }
+    )
+    cfg["crypto"]["root_salt_fp"] = crypto_module.root_salt_fingerprint(fetch.root_salt)
+    save_config(cfg, config_path)
+    monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr(config_module, "_BOOTSTRAP_WARNED_PATHS", set())
+    from mind_meld import seen_sources
+
+    monkeypatch.setattr(seen_sources, "SEEN_DIR", tmp_path / "seen-state")
+    keyring_writes = []
+    monkeypatch.setattr("keyring.set_password", lambda *a, **kw: keyring_writes.append(a))
+    monkeypatch.setattr("keyring.delete_password", lambda *a, **kw: keyring_writes.append(a))
+    fetches = []
+
+    def fetch_tags():
+        fetches.append(True)
+        return ["v99.0.0"]
+
+    monkeypatch.setattr(upgrade, "_fetch_tags", fetch_tags)
+    # Keep the real upgrade hooks active, including their non-dev branches.
+    cache = upgrade._empty_cache()
+    cache.update(
+        last_seen_self_version=__version__,
+        latest_version=__version__,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+    )
+    upgrade.CACHE_PATH.write_text(json.dumps(cache))
+
+    def invoke():
+        upgrade._reset_for_tests()
+        config_module._BOOTSTRAP_WARNED_PATHS.clear()
+        before = _preview_tree(tmp_path, pin=True)
+        records = []
+        token = _PREVIEW_AUDIT.set((records, (tmp_path / "test.lock").absolute()))
+        try:
+            result = runner.invoke(app, ["push", "--dry-run"])
+        finally:
+            _PREVIEW_AUDIT.reset(token)
+        assert records == [], records
+        assert keyring_writes == []
+        assert fetches == []
+        assert _preview_tree(tmp_path) == before
+        return result
+
+    return {
+        "invoke": invoke,
+        "config": cfg,
+        "config_path": config_path,
+        "backend": backend,
+        "events": events_root,
+        "claude": claude,
+        "upgrade": upgrade,
+        "cache": cache,
+        "history": pullhistory.HISTORY_DIR / "pull-history.jsonl",
+        "fetches": fetches,
+    }
+
+
+def _preview_text(result):
+    return " ".join(result.output.split())
+
+
+def _assert_preview_complete(result):
+    assert result.exit_code == 0, result.output
+    text = _preview_text(result)
+    assert "Dry run complete. Nothing was changed except the local lock file." in text
+    assert text.endswith(
+        "Not previewed: the mm-events activity row a real push appends, "
+        "post-push GC of orphaned blobs, and upload re-reads."
+    )
+
+
+def _assert_preview_refused(result):
+    assert result.exit_code == 1, result.output
+    assert "Dry run complete." not in result.output
+    assert _preview_text(result).endswith(
+        "Nothing was changed except the local lock file (dry run)."
+    )
+
+
+def _seed_preview_prior(env, *, event_files=()):
+    cfg = config_module.load_config(env["config_path"])
+    crypto_module.set_crypto_session(
+        crypto_module.fetch_crypto_init(env["backend"], repair=False).root_salt, MEMORY_KB
+    )
+    sources = config_module.get_sources(cfg, bootstrap=False)
+    prior = cli_module.build_manifest_v2("dev-a", "Mac A", sources)
+    for rel in event_files:
+        prior["sources"]["mm-events"]["files"][rel] = {
+            "sha256": hashlib.sha256(b"prior event").hexdigest(),
+            "size": 11,
+            "mtime": "2020-09-13T12:26:40+00:00",
+        }
+    from mind_meld.storage.keys import manifest_key
+
+    env["backend"].put(
+        manifest_key("dev-a"), encrypt(serialize_manifest(prior), PASSPHRASE, MEMORY_KB)
+    )
+    return prior
+
+
+class TestPushPreviewNoMutation56A:
+    def test_guard_records_swallowed_write(self, tmp_path):
+        records = []
+        token = _PREVIEW_AUDIT.set((records, tmp_path / "test.lock"))
+        try:
+            try:
+                (tmp_path / "swallowed").write_text("mutation")
+                raise OSError("swallowed setup failure")
+            except OSError:
+                pass
+        finally:
+            _PREVIEW_AUDIT.reset(token)
+        assert records and records[0][0] == "open"
+        with pytest.raises(AssertionError):
+            assert records == []
+
+    def test_guard_records_os_replace(self, tmp_path):
+        records = []
+        token = _PREVIEW_AUDIT.set((records, tmp_path / "test.lock"))
+        try:
+            src = tmp_path / "a"
+            dst = tmp_path / "b"
+            src.write_text("x")
+            records.clear()
+            os.replace(src, dst)
+        finally:
+            _PREVIEW_AUDIT.reset(token)
+        # POSIX os.replace is rename(2); the audit event is os.rename there.
+        assert records and records[0][0] in {"os.replace", "os.rename"}
+
+    def test_steady_state(self, push_preview56):
+        _assert_preview_complete(push_preview56["invoke"]())
+
+    @pytest.mark.parametrize("cache_state", ["absent", "stale", "due"])
+    def test_upgrade_cache_and_network_untouched(self, push_preview56, cache_state):
+        env = push_preview56
+        cache = env["cache"]
+        if cache_state == "absent":
+            env["upgrade"].CACHE_PATH.unlink()
+        else:
+            cache["latest_version"] = "99.0.0"
+            if cache_state == "stale":
+                cache["checked_at"] = "2000-01-01T00:00:00+00:00"
+            env["upgrade"].CACHE_PATH.write_text(json.dumps(cache))
+        result = env["invoke"]()
+        _assert_preview_complete(result)
+        assert "mm: notice:" not in result.stderr
+
+    def test_s4b_transition_survives_preview_then_status_records_once(self, push_preview56):
+        env = push_preview56
+        env["cache"]["last_seen_self_version"] = "0.0.1"
+        env["upgrade"].CACHE_PATH.write_text(json.dumps(env["cache"]))
+        _assert_preview_complete(env["invoke"]())
+        assert not env["history"].exists()
+        for _ in range(2):
+            env["upgrade"]._reset_for_tests()
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0, result.output
+        rows = [json.loads(line) for line in env["history"].read_text().splitlines()]
+        transitions = [row for row in rows if row["verb"] == "self-upgrade"]
+        assert len(transitions) == 1
+        assert transitions[0]["old_version"] == "0.0.1"
+
+    @pytest.mark.parametrize("no_op", [False, True])
+    def test_s7_crypto_copy_is_retained_and_reported_even_on_noop(self, push_preview56, no_op):
+        env = push_preview56
+        if no_op:
+            _preview_tree(env["events"].parent, pin=True)
+            _seed_preview_prior(env)
+        copy = env["backend"].root / "mm-crypto-init 2"
+        copy.write_bytes(env["backend"].get("mm-crypto-init"))
+        result = env["invoke"]()
+        _assert_preview_complete(result)
+        assert "remove 1 iCloud conflict copy, shared by every Mac." in _preview_text(result)
+        assert "including autopull" in result.output
+        if no_op:
+            assert "Nothing to push" in result.output
+
+    def test_no_sources_still_reports_pending_and_trailer(self, push_preview56):
+        env = push_preview56
+        env["config"]["sync"]["sources"] = []
+        save_config(env["config"], env["config_path"])
+        (env["backend"].root / "mm-crypto-init 2").write_bytes(env["backend"].get("mm-crypto-init"))
+        result = env["invoke"]()
+        _assert_preview_complete(result)
+        assert "no sync sources found" in result.output
+        assert "remove 1 iCloud conflict copy" in _preview_text(result)
+
+    @pytest.mark.parametrize("tty", [False, True])
+    def test_migration_notice_without_prompt(self, push_preview56, monkeypatch, tty):
+        env = push_preview56
+        root = env["events"].parent / "gstack"
+        root.mkdir()
+        (root / "config.yaml").write_text("local config")
+        env["config"]["sync"]["sources"].append(
+            {
+                "name": "gstack",
+                "path": str(root),
+                "type": "generic",
+                "include_dirs": ["."],
+                "exclude_patterns": [],
+            }
+        )
+        save_config(env["config"], env["config_path"])
+        original = cli_module._maybe_prompt_migration
+
+        def migration(config, **kwargs):
+            monkeypatch.setattr(sys.stdin, "isatty", lambda: tty)
+            monkeypatch.setattr(sys.stdout, "isatty", lambda: tty)
+            return original(config, **kwargs)
+
+        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", migration)
+        monkeypatch.setattr(typer, "confirm", lambda *a, **kw: pytest.fail("preview prompted"))
+        result = env["invoke"]()
+        _assert_preview_complete(result)
+        assert "config missing recommended excludes" in result.stderr
+        assert ("This preview uses your current config." in result.stderr) == tty
+        assert ("default: yes" in result.stderr) == tty
+
+    def test_missing_root_preview_matches_empty_root(self, push_preview56):
+        env = push_preview56
+        # A prior manifest with an empty source exercises proof-list omission.
+        _seed_preview_prior(env)
+        env["events"].rmdir()
+        missing = env["invoke"]()
+        _assert_preview_complete(missing)
+        assert "mm push will create" in missing.output
+        assert not env["events"].exists()
+        env["events"].mkdir()
+        present = env["invoke"]()
+        _assert_preview_complete(present)
+        import re
+
+        missing_text = re.sub(
+            r"mm push will create .*? for the mm-events source\. ", "", _preview_text(missing)
+        )
+        assert missing_text == _preview_text(present)
+
+    @pytest.mark.parametrize("excluded", [0, 1, 2])
+    def test_pc3_counts_filtered_prior(self, push_preview56, excluded):
+        env = push_preview56
+        _seed_preview_prior(env, event_files=("events/a.jsonl", "events/b.jsonl"))
+        env["config"]["sync"]["sources"][1]["exclude_patterns"] = [
+            f"events/{name}.jsonl" for name in ("a", "b")[:excluded]
+        ]
+        save_config(env["config"], env["config_path"])
+        env["events"].rmdir()
+        result = env["invoke"]()
+        if excluded == 2:
+            _assert_preview_complete(result)
+            return
+        _assert_preview_refused(result)
+        text = _preview_text(result)
+        assert f"this Mac published {2 - excluded} files" in text
+        assert str(env["events"]) in "".join(result.output.split())
+        from mind_meld.manifest import TOMBSTONE_TTL_DAYS
+
+        for fragment in (
+            f"{TOMBSTONE_TTL_DAYS} days",
+            "mm pull if another Mac has them",
+            "/events is filled again",
+            "from a backup",
+            "To accept the deletion: run mm push.",
+        ):
+            assert fragment in text
+
+    def test_pc3_uses_sidecar_recovered_prior(self, push_preview56):
+        from mind_meld import sidecar as sidecar_mod
+        from mind_meld.storage.keys import manifest_key
+
+        env = push_preview56
+        prior = _seed_preview_prior(env, event_files=("events/a.jsonl",))
+        prior["tombstones"] = {}
+        sidecar_mod.write(prior)
+        env["backend"].put(manifest_key("dev-a"), b"corrupt")
+        env["events"].rmdir()
+        result = env["invoke"]()
+        _assert_preview_refused(result)
+        assert "this Mac published 1 files" in _preview_text(result)
+        assert "recovered prior state from local sidecar" in result.output
+
+    def test_unrecoverable_corrupt_manifest_is_lock_only(self, push_preview56):
+        from mind_meld.storage.keys import manifest_key
+
+        env = push_preview56
+        env["backend"].put(manifest_key("dev-a"), b"corrupt")
+        result = env["invoke"]()
+        _assert_preview_refused(result)
+        assert "remote manifest corrupt" in result.output
+
+    def test_events_subdir_missing_remains_truthful_deletion(self, push_preview56):
+        env = push_preview56
+        _seed_preview_prior(env, event_files=("events/a.jsonl",))
+        result = env["invoke"]()
+        _assert_preview_complete(result)
+        assert "- 1 deleted" in result.output
+        assert "mm push will create" not in result.output
+
+    def test_unwritable_ancestor_refuses(self, push_preview56):
+        env = push_preview56
+        parent = env["events"].parent / "restricted"
+        parent.mkdir(mode=0o500)
+        env["config"]["sync"]["sources"][1]["path"] = str(parent / "missing")
+        save_config(env["config"], env["config_path"])
+        try:
+            result = env["invoke"]()
+            _assert_preview_refused(result)
+            assert "could not be created" in result.output
+            assert "EACCES" in result.output
+        finally:
+            parent.chmod(0o700)
+
+    def test_drift_reports_canonical_replacement_without_repair(self, push_preview56):
+        env = push_preview56
+        # Lexicographically smaller lineage wins; local fingerprint still pins canonical.
+        salt = b"\x00" * 16
+        key = crypto_module.derive_key(PASSPHRASE, salt, memory_kb=MEMORY_KB)
+        blob = crypto_module._serialize_crypto_init(
+            MEMORY_KB,
+            salt,
+            crypto_module._encrypt_with_master_key(crypto_module._KEYCHECK_PLAINTEXT, key),
+        )
+        (env["backend"].root / "mm-crypto-init 2").write_bytes(blob)
+        result = env["invoke"]()
+        _assert_preview_refused(result)
+        text = _preview_text(result)
+        assert "root_salt changed" in text
+        assert "replace the canonical copy and remove 1 iCloud conflict copy" in text
+
+    def test_scan_failure_is_lock_only(self, push_preview56, monkeypatch):
+        env = push_preview56
+        original = cli_module.manifest._open_nofollow_nonblock
+
+        def fail(path):
+            if Path(path).name == "role.md":
+                raise PermissionError("scan refused")
+            return original(path)
+
+        monkeypatch.setattr(cli_module.manifest, "_open_nofollow_nonblock", fail)
+        result = env["invoke"]()
+        _assert_preview_refused(result)
+        assert "could not be read" in result.output
+
+    def test_real_push_performs_deferred_setup_once(self, push_preview56):
+        env = push_preview56
+        del env["config"]["crypto"]["root_salt_fp"]
+        save_config(env["config"], env["config_path"])
+        env["events"].rmdir()
+        env["cache"].update(last_seen_self_version="0.0.1", latest_version="99.0.0")
+        env["upgrade"].CACHE_PATH.write_text(json.dumps(env["cache"]))
+        copy = env["backend"].root / "mm-crypto-init 2"
+        copy.write_bytes(env["backend"].get("mm-crypto-init"))
+        _assert_preview_complete(env["invoke"]())
+        assert "root_salt_fp" not in tomllib.loads(env["config_path"].read_text())["crypto"]
+        for _ in range(2):
+            env["upgrade"]._reset_for_tests()
+            result = runner.invoke(app, ["push"])
+            assert result.exit_code == 0, result.output
+        assert env["events"].is_dir()
+        assert not copy.exists()
+        assert "root_salt_fp" in tomllib.loads(env["config_path"].read_text())["crypto"]
+        rows = [json.loads(line) for line in env["history"].read_text().splitlines()]
+        assert len([row for row in rows if row["verb"] == "self-upgrade"]) == 1
+        cache = json.loads(env["upgrade"].CACHE_PATH.read_text())
+        assert cache["last_nudged_version"] == "99.0.0"

@@ -314,7 +314,7 @@ class TestFinalOutputSinks:
         monkeypatch.setattr(cli, "_get_config", lambda: config)
         monkeypatch.setattr(cli, "_get_passphrase_or_exit", lambda: "passphrase")
         monkeypatch.setattr(cli, "get_backend", lambda _config: object())
-        monkeypatch.setattr(cli, "_init_crypto_session", lambda *args: 1024)
+        monkeypatch.setattr(cli, "_init_crypto_session", lambda *args, **kwargs: 1024)
         monkeypatch.setattr(cli, "get_sources", lambda _config: [])
         monkeypatch.setattr(cli, "build_manifest_v2", lambda *args: {"sources": {}})
         monkeypatch.setattr(

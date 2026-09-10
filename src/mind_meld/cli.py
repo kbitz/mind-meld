@@ -24,7 +24,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -131,6 +131,7 @@ from mind_meld.manifest import (
     CONFLICT_V1_MARKER,
     GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
+    TOMBSTONE_TTL_DAYS,
     DiffResult,
     _under_skip_prefix,
     _validate_rel_path,
@@ -382,7 +383,7 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     return _list_devices_impl(backend, on_drop=_warn)
 
 
-def _get_config() -> dict:
+def _get_config(*, read_only: bool = False) -> dict:
     try:
         config = load_config()
     except MindMeldError as e:
@@ -393,7 +394,8 @@ def _get_config() -> dict:
     # rejected refactoring _auto_command_setup / init_cmd through this
     # function (would break their distinct error policies); both call
     # `upgrade.run_transition_hook` directly instead.
-    upgrade.run_transition_hook(config)
+    if not read_only:
+        upgrade.run_transition_hook(config)
     return config
 
 
@@ -415,7 +417,14 @@ def _get_passphrase_or_exit() -> str:
         raise
 
 
-def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -> int:
+def _init_crypto_session(
+    backend: LocalBackend,
+    passphrase: str,
+    config: dict,
+    *,
+    read_only: bool = False,
+    pending: list[str] | None = None,
+) -> int:
     """Read mm-crypto-init, drift-check against local config, pin process crypto session.
 
     Called at the top of every crypto-using command (push/pull/status/diff/gc/etc).
@@ -425,12 +434,14 @@ def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -
 
     Side-effect: if local config's root_salt_fp is missing (e.g. first command
     after init), populate and save it so future commands can drift-check.
+    With read_only=True, backfill only in memory and defer shared-storage
+    repair; append its description to pending without changing the int return.
 
     Raises:
       MindMeldError subclasses — caller chooses presentation (_error for
       interactive; stderr print for autopull/autopush).
     """
-    fetch = fetch_crypto_init(backend)
+    fetch = fetch_crypto_init(backend, repair=not read_only)
     if fetch.status == "missing":
         raise CryptoError(
             "crypto: mm-crypto-init not found at storage root. "
@@ -447,6 +458,19 @@ def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -
     assert fetch.root_salt is not None and fetch.argon2_memory_kb is not None
     storage_fp = root_salt_fingerprint(fetch.root_salt)
     local_fp = config.get("crypto", {}).get("root_salt_fp")
+    repair_note = ""
+    if read_only and fetch.repair_plan is not None:
+        plan = fetch.repair_plan
+        replacement = "replace the canonical copy and " if plan.replace_canonical else ""
+        count = len(plan.remove)
+        copies = "copy" if count == 1 else "copies"
+        repair_note = (
+            "The next mm command that opens storage (including autopull) will "
+            f"reconcile mm-crypto-init: {replacement}remove {count} iCloud conflict "
+            f"{copies}, shared by every Mac."
+        )
+        if pending is not None:
+            pending.append(repair_note)
 
     if local_fp and local_fp != storage_fp:
         raise CryptoError(
@@ -454,6 +478,7 @@ def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -
             f"initialized (local fp={local_fp}, storage fp={storage_fp}). "
             f"Another device may have bootstrapped storage concurrently. "
             f"Re-run 'mm init' to reconfigure against the current storage."
+            + (f" {repair_note}" if repair_note else "")
         )
 
     set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
@@ -477,6 +502,8 @@ def _init_crypto_session(backend: LocalBackend, passphrase: str, config: dict) -
             "argon2_memory_kb": fetch.argon2_memory_kb,
         }
         config.setdefault("crypto", {}).update(crypto_patch)
+        if read_only:
+            return fetch.argon2_memory_kb
         try:
             patch_config_on_disk({"crypto": crypto_patch})
         except OSError:
@@ -1008,10 +1035,10 @@ def _retain_prior_default_sources(
         extra = True
     if not extra:
         return resolution
-    return SourceResolution(
+    return replace(
+        resolution,
         selected=selected,
         available=list(resolution.available),
-        explicit=False,
     )
 
 
@@ -1208,6 +1235,7 @@ def _recover_prior_manifest(
     memory_kb: int,
     *,
     quiet: bool = False,
+    dry_run: bool = False,
 ) -> dict | None:
     """Resolve a prior-state manifest for tombstone generation.
 
@@ -1267,11 +1295,12 @@ def _recover_prior_manifest(
         return {"sources": {}, "tombstones": peer_tombstones}
 
     # Nothing to recover from — refuse rather than silently drop tombstones.
+    suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
     _error(
         "remote manifest corrupt, no local sidecar, and no peer manifests "
         "available for recovery. Run 'mm status' to inspect storage state, "
         "then 'mm init' if storage is unrecoverable. Pushing now would "
-        "erase this device's deletion records across your fleet."
+        "erase this device's deletion records across your fleet." + suffix
     )
     return None  # unreachable; _error raises
 
@@ -3396,9 +3425,10 @@ def push(
         False,
         "--dry-run",
         help=(
-            "Preview the strict scan and deletion proof without publishing "
-            "blobs or a manifest. Setup may still prompt migration, persist a "
-            "missing crypto fingerprint, or bootstrap mm-events."
+            "Preview what mm push would publish or delete. Changes nothing except "
+            "the local lock file (no uploads, config writes, pull-history rows, "
+            "upgrade checks or new directories); setup the real push would perform "
+            "is reported, not done. Exits 1 if the preview stops."
         ),
     ),
 ) -> None:
@@ -3409,12 +3439,15 @@ def push(
     revision. An unreadable selected file refuses the whole push and
     keeps the previous snapshot.
     """
-    config = _get_config()
-    _maybe_prompt_migration(config)
+    config = _get_config(read_only=dry_run)
+    _maybe_prompt_migration(config, read_only=dry_run)
     # Re-load in case the migration prompt mutated config on disk so the
     # current command sees the new exclude_patterns.
-    config = _get_config()
+    if not dry_run:
+        config = _get_config()
     passphrase = _get_passphrase_or_exit()
+    pending: list[str] = []
+    refusal_suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
 
     try:
         acquire_lock()
@@ -3424,19 +3457,42 @@ def push(
     try:
         backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
+            memory_kb = _init_crypto_session(
+                backend, passphrase, config, read_only=dry_run, pending=pending
+            )
         except MindMeldError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
         try:
-            result = _push_core(config, passphrase, memory_kb, verbose, dry_run)
+            result = _push_core(
+                config, passphrase, memory_kb, verbose, dry_run, preview_notes=pending
+            )
         except SnapshotError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
+        except MindMeldError as e:
+            if dry_run:
+                _error(str(e) + refusal_suffix)
+            raise
+
+        if dry_run:
+            for note in pending:
+                console.print(safe_str(note))
+            console.print(
+                "\n[bold]Dry run complete. Nothing was changed except the local lock file.[/bold]"
+            )
+            console.print(
+                "Not previewed: the mm-events activity row a real push appends, "
+                "post-push GC of orphaned blobs, and upload re-reads."
+            )
 
         # Auto GC on interactive push only (not autopush).
         # Catch only unexpected failures — let typer.Exit (from _do_gc's
         # refuse-on-corrupt path) propagate so the user sees the actionable
         # message. Silent-swallow would hide the safety refusal.
-        if result and (result.total_new or result.total_modified or result.total_deleted):
+        if (
+            not dry_run
+            and result
+            and (result.total_new or result.total_modified or result.total_deleted)
+        ):
             try:
                 gc_count = _do_gc(
                     config,
@@ -3459,7 +3515,8 @@ def push(
         release_lock()
 
     # Seam 2 — interactive push tail nudge.
-    upgrade.emit_nudge_if_due(config)
+    if not dry_run:
+        upgrade.emit_nudge_if_due(config)
 
 
 def _ensure_device_registered(
@@ -3596,6 +3653,8 @@ def _push_core(
     verbose: bool = False,
     dry_run: bool = False,
     quiet: bool = False,
+    *,
+    preview_notes: list[str] | None = None,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
@@ -3617,7 +3676,11 @@ def _push_core(
     # so consent is known before the gate runs (Track 25C). The hook itself
     # stays AFTER _ensure_device_registered and BEFORE _run_events_tail.
     # The mm-events bootstrap mkdir moves a few lines earlier.
-    resolution = resolve_sources(config, strict=True)
+    resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
+    if preview_notes is not None:
+        for src in resolution.selected:
+            if src["name"] in resolution.would_create:
+                preview_notes.append(f"mm push will create {src['path']} for the mm-events source.")
     sources = list(resolution.available)
     may_create = skill_link.consented_agent_keys(config, sources)
 
@@ -3699,7 +3762,7 @@ def _push_core(
     # _recover_prior_manifest's sidecar/peer paths emit the same shape.
     fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     remote_manifest = _recover_prior_manifest(
-        fetch, backend, device_id, passphrase, memory_kb, quiet=quiet
+        fetch, backend, device_id, passphrase, memory_kb, quiet=quiet, dry_run=dry_run
     )
     advertised_prior_sources = set((remote_manifest or {}).get("sources", {}))
     resolution = _retain_prior_default_sources(resolution, remote_manifest, config)
@@ -3748,8 +3811,31 @@ def _push_core(
         remote_manifest = _filter_unselected_sources(remote_manifest, intended_names)
         remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
         remote_manifest = _filter_symlinked_paths(remote_manifest, sources, strict=True)
+        proof_sources = sources
+        if dry_run and resolution.would_create:
+            for src in sources:
+                if src["name"] not in resolution.would_create:
+                    continue
+                prior_files = (
+                    remote_manifest.get("sources", {}).get(src["name"], {}).get("files", {})
+                )
+                if prior_files:
+                    path = src["path"]
+                    raise SnapshotError(
+                        f"Dry run stopped: the mm-events directory {path} is missing, "
+                        f"but this Mac published {len(prior_files)} files from it. "
+                        "A real mm push would recreate it empty and publish their deletion "
+                        "(other Macs keep their copies; this Mac cannot pull them back for "
+                        f"{TOMBSTONE_TTL_DAYS} days). To keep them: run mm pull if another "
+                        f"Mac has them and check that {path}/events is filled again, or "
+                        f"restore {path} from a backup; then run mm push --dry-run again. "
+                        f"To accept the deletion: run mm push. See {SNAPSHOT_FAILURES_URL}."
+                    )
+            # No known prior files for these roots: there is nothing to prove.
+            # Keep the deletion proof itself unchanged for every other source.
+            proof_sources = [s for s in sources if s["name"] not in resolution.would_create]
         _prove_omitted_paths_absent(
-            local_manifest, remote_manifest, sources, max_file_size=max_file_size
+            local_manifest, remote_manifest, proof_sources, max_file_size=max_file_size
         )
 
     # Generate tombstones for files that disappeared since last push
@@ -3874,7 +3960,6 @@ def _push_core(
                 console.print(
                     "\n[bold]Would refresh manifest[/bold] (metadata-only changes pending)."
                 )
-            console.print("\n[bold]Dry run complete.[/bold]")
             console.print(f"  Completed in {elapsed:.1f}s")
         return None
 
@@ -5326,10 +5411,9 @@ def status(
             rendered = f"{rendered}, then restart the agent so it reloads SKILL.md"
         console.print(f"  [yellow]Skill links broken:[/yellow] {rendered}")
 
-    # Seam 3 — auto-upgrade nudge surfacing in status. Reads cache only,
-    # no network call. Distinct from autopull/autopush emission (which gates
-    # on last_nudged_at) — `mm status` is an explicit user check and shows
-    # the cached result every time, regardless of the 24h re-emit gate.
+    # Seam 3 — auto-upgrade surfacing in status. Refreshes over the network
+    # when stale and rewrites the cache. Unlike autopull/autopush emission,
+    # this explicit check is not gated on last_nudged_at (24h re-emit gate).
     upgrade_result = upgrade.check_for_upgrade(config)
     if upgrade_result.state == "upgrade-available" and upgrade_result.latest:
         console.print(
@@ -7470,7 +7554,7 @@ def recapture(
             row_bytes = sum(
                 len(json.dumps(row, sort_keys=True).encode("utf-8")) for row in prepared.git_rows
             )
-            console.print("[bold]Recapture dry-run[/bold] — nothing written.")
+            console.print("[bold]Recapture dry-run[/bold] — no commits written or uploaded.")
             console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
             console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
             non_benign_skip = False
@@ -8211,7 +8295,7 @@ def _write_migration_breadcrumb(missing: list[str]) -> None:
         pass
 
 
-def _maybe_prompt_migration(config: dict) -> None:
+def _maybe_prompt_migration(config: dict, *, read_only: bool = False) -> None:
     """Once-per-invocation interactive prompt for pending config migrations.
 
     Called from the top of `mm push` / `mm pull` / `mm recapture` ONLY
@@ -8225,9 +8309,10 @@ def _maybe_prompt_migration(config: dict) -> None:
     retire_opencode = _explicit_opencode_source_present(config.get("sync", {}).get("sources"))
     if not missing and not retire_opencode:
         return
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        # Non-TTY interactive verb (CI, piped invocation): warn to stderr
-        # but don't block on a prompt nobody can answer.
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if read_only or not is_tty:
+        # Skip the confirm prompt for a read-only preview, or when either
+        # stream is not a TTY (CI, piped invocation).
         bits: list[str] = []
         if missing:
             bits.append(f"config missing recommended excludes for source(s) {', '.join(missing)}")
@@ -8237,6 +8322,11 @@ def _maybe_prompt_migration(config: dict) -> None:
             f"[yellow]warning:[/yellow] {'; '.join(bits)}. Run "
             f"[bold]mm migrate-config[/bold] to update."
         )
+        if read_only and is_tty:
+            stderr_console.print(
+                "This preview uses your current config. A real mm push first offers "
+                "to run mm migrate-config (default: yes)."
+            )
         return
     if missing:
         console.print(
