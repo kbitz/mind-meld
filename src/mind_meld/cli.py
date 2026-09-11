@@ -5823,9 +5823,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * host_skill_discovery values other than the four extracted fields
         (claude_skills_compat, retro_fleet_resolved, retro_fleet_path,
         grok_version) plus host/status
-      * host_usage values other than the cache-only diag keys: grok's
+      * host_usage values other than the cache and path-count diag keys: grok's
         consented / complete_once / usage_less_skipped / last_reason /
-        last_reason_since / cache_state / model_count / models, and Codex's cache_state / state /
+        last_reason_since / cache_state / model_count / models / files_cached /
+        files_on_disk, and Codex's cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
         pending / model_count / models / last_reason / last_reason_since
         (never a path, never a host store,
@@ -5962,6 +5963,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "cache_state": grok_diag["cache_state"],
             "model_count": grok_diag.get("model_count", 0),
             "models": grok_diag.get("models", []),
+            "files_cached": grok_diag.get("files_cached"),
+            "files_on_disk": grok_diag.get("files_on_disk"),
         },
         # Codex needs its own block for the same reason Grok does: a reader
         # whose cache is mid-rebuild publishes less than it will, and nothing
@@ -6142,7 +6145,12 @@ def diag(
     if hu_state.get("cache_state") == "ok":
         console.print("  grok usage read blocker: " + _host_usage_blocker("grok", hu_state))
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
-    console.print(f"  grok cache:              {safe_str(str(hu_state.get('cache_state', '')))}")
+    grok_cached = hu_state.get("files_cached")
+    grok_disk = hu_state.get("files_on_disk")
+    console.print(
+        f"  grok ledgers cached:     {'unknown' if grok_cached is None else grok_cached}"
+        f" of {'unknown' if grok_disk is None else grok_disk}"
+    )
     console.print(f"  grok models cached:      {_diag_models_line(hu_state)}")
 
     cx_state = (state.get("host_usage") or {}).get("codex") or {}

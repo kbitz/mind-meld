@@ -255,6 +255,133 @@ def test_pre_lock_expiry_never_creates_cache(reader_case, monkeypatch):
     scan.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "{broken", "[]", '{"version": 2, "files": {}}', '{"version": 1, "files": []}', "{}"],
+)
+def test_grok_diag_unknown_cache_never_claims_zero_files(tmp_path, monkeypatch, raw):
+    cache = tmp_path / "grok-cache.json"
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+    if raw is not None:
+        cache.write_text(raw)
+    state = hu.grok_usage_diag()
+    assert state["files_cached"] is None
+    assert state["cache_state"] != "ok"
+    assert cache.exists() == (raw is not None)
+    if raw is not None:
+        assert cache.read_text() == raw
+
+
+def test_grok_diag_counts_resolved_two_level_ledgers_without_reading(tmp_path, monkeypatch):
+    home = tmp_path / "custom-grok"
+    monkeypatch.setenv("GROK_HOME", str(home))
+    for rel in (
+        "w/s1/updates.jsonl",
+        "w/s2/updates.jsonl",
+        "w/s3/chat_history.jsonl",
+        "w/s4/deeper/updates.jsonl",
+        "updates.jsonl",
+    ):
+        path = home / "sessions" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("private bytes are never opened")
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"version": hu.CACHE_VERSION, "files": {"one": {}}}))
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+    state = hu.grok_usage_diag()
+    assert state["files_cached"] == 1
+    assert state["files_on_disk"] == 2
+    assert state["cache_state"] == "ok"
+
+
+def test_grok_diag_locked_cache_has_unknown_count(tmp_path, monkeypatch):
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"version": hu.CACHE_VERSION, "files": {}}))
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+    with cache.open("r+") as fp:
+        fcntl.flock(fp, fcntl.LOCK_EX)
+        real_flock = fcntl.flock
+
+        def no_blocking_reads(fd, operation):
+            if operation & fcntl.LOCK_SH:
+                assert operation & fcntl.LOCK_NB, "diag must report contention, never wait"
+            return real_flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", no_blocking_reads)
+        assert hu.grok_usage_diag()["files_cached"] is None
+
+
+def test_grok_diag_glob_error_preserves_known_cache_count(tmp_path, monkeypatch):
+    home = tmp_path / "custom-grok"
+    (home / "sessions").mkdir(parents=True)
+    monkeypatch.setenv("GROK_HOME", str(home))
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"version": hu.CACHE_VERSION, "files": {}}))
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+
+    def broken_scandir(*_args, **_kwargs):
+        raise OSError("cannot list")
+
+    monkeypatch.setattr(os, "scandir", broken_scandir)
+    state = hu.grok_usage_diag()
+    assert state["files_cached"] == 0
+    assert state["files_on_disk"] is None
+
+
+def test_grok_diag_unreadable_sessions_root_is_unknown(tmp_path, monkeypatch):
+    home = tmp_path / "custom-grok"
+    (home / "sessions").mkdir(parents=True)
+    monkeypatch.setenv("GROK_HOME", str(home))
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"version": hu.CACHE_VERSION, "files": {"one": {}}}))
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+    real_scandir = os.scandir
+
+    def deny_root(path):
+        if Path(path) == home / "sessions":
+            raise PermissionError(errno.EACCES, "denied", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", deny_root)
+    state = hu.grok_usage_diag()
+    assert state["files_cached"] == 1
+    assert state["files_on_disk"] is None
+    assert state["cache_state"] == "ok"
+
+
+def test_grok_diag_missing_sessions_root_counts_zero(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "absent-grok"))
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"version": hu.CACHE_VERSION, "files": {}}))
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+    state = hu.grok_usage_diag()
+    assert state["files_on_disk"] == 0
+    assert state["files_cached"] == 0
+
+
+def test_grok_diag_symlink_or_file_sessions_root_is_unknown(tmp_path, monkeypatch):
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"version": hu.CACHE_VERSION, "files": {"one": {}}}))
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+    real = tmp_path / "real-sessions"
+    (real / "w" / "s1").mkdir(parents=True)
+    (real / "w" / "s1" / "updates.jsonl").write_text("{}")
+    linked = tmp_path / "linked-grok" / "sessions"
+    linked.parent.mkdir()
+    linked.symlink_to(real)
+    monkeypatch.setenv("GROK_HOME", str(linked.parent))
+    state = hu.grok_usage_diag()
+    assert state["files_cached"] == 1
+    assert state["files_on_disk"] is None
+
+    file_home = tmp_path / "file-grok"
+    file_home.mkdir()
+    (file_home / "sessions").write_text("not a directory")
+    monkeypatch.setenv("GROK_HOME", str(file_home))
+    state = hu.grok_usage_diag()
+    assert state["files_on_disk"] is None
+
+
 def test_post_lock_expiry_records_deadline_once_without_scanning(reader_case, monkeypatch):
     read, cache, diag, set_scan = reader_case
     files = {"kept": {"no_ledger": True, "usage_less_skipped": 2}}

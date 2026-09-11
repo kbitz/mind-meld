@@ -114,6 +114,8 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "cache_state",
         "model_count",
         "models",
+        "files_cached",
+        "files_on_disk",
     }
 
     assert set(payload["host_usage"]["codex"]) == {
@@ -175,6 +177,10 @@ def test_diag_blocker_fields_are_validated_and_rendered(
     assert plain.exit_code == 0, plain.output
     text = " ".join(plain.output.split())
     assert f"{reader} cache inventory:" in text
+    if reader == "grok" and version != host_usage.CACHE_VERSION:
+        assert "grok ledgers cached: unknown of" in text
+        assert "grok usage read blocker:" not in text
+        return
     assert f"{reader} usage read blocker:" in text
     if expected_reason is None:
         assert f"{reader} usage read blocker: none" in text
@@ -183,7 +189,7 @@ def test_diag_blocker_fields_are_validated_and_rendered(
     if expected_reason == "unsupported":
         assert "pipx upgrade mind-meld" in text
     if expected_reason == "deadline":
-        assert "warm it (up to 5 s per push)" in text
+        assert "about 5 s of scanning per cold reader, not a hard ceiling" in text
     if expected_since:
         assert "(first observed 2026-09-03 UTC)" in text
     else:
@@ -221,22 +227,43 @@ def test_diag_legacy_root_emits_null_blocker_fields(tmp_path, monkeypatch, reade
 
 
 def test_diag_host_usage_does_not_open_the_host_store(tmp_path, monkeypatch):
-    """X-5: mm diag's no-passphrase / no-valid-config contract. Host usage
-    state comes from the private cache, never from ~/.grok/sessions."""
+    """Diag counts ledger paths but never opens their contents."""
     _setup(tmp_path, monkeypatch)
+    ledger = tmp_path / "grok-sessions" / "workspace" / "session" / "updates.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text("not a log to parse")
+    monkeypatch.setattr(host_usage, "GROK_SESSIONS_PATH", ledger.parents[2])
+    real_open = Path.open
 
-    def boom():
-        raise AssertionError("diag must not open the Grok host store")
+    def checked_open(path, *args, **kwargs):
+        assert path != ledger, "diag must not open a host log"
+        return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr("mind_meld.host_usage.grok_sessions_root", boom)
+    monkeypatch.setattr(Path, "open", checked_open)
     result = runner.invoke(app, ["diag", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["host_usage"]["grok"]["cache_state"] in {"missing", "ok", "unreadable"}
+    assert payload["host_usage"]["grok"]["files_on_disk"] == 1
     grok = payload["host_usage"]["grok"]
     assert "model_count" in grok
     assert isinstance(grok["models"], list)
     assert "model_count" in payload["host_usage"]["codex"]
+
+
+@pytest.mark.parametrize("files", [None, {}, {"one": {}}])
+def test_diag_grok_ledger_count_replaces_duplicate_cache_line(tmp_path, monkeypatch, files):
+    _setup(tmp_path, monkeypatch)
+    if files is not None:
+        cache = host_usage.GROK_CACHE_PATH
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"version": host_usage.CACHE_VERSION, "files": files}))
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.output.split())
+    count = "unknown" if files is None else str(len(files))
+    assert f"grok ledgers cached: {count} of 0" in text
+    assert "grok cache:" not in text
 
 
 def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
@@ -255,10 +282,10 @@ def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    def boom():
+    def boom(*_args, **_kwargs):
         raise AssertionError("diag must not open the Grok host store")
 
-    monkeypatch.setattr("mind_meld.host_usage.grok_sessions_root", boom)
+    monkeypatch.setattr("mind_meld.host_usage.read_grok_usage", boom)
     result = runner.invoke(app, ["diag", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)

@@ -221,7 +221,7 @@ This is the Anthropic date only. OpenAI rates have
 ``PRICING_OPENAI_LAST_UPDATED``. One date over two vendors' tables would
 be a lie of composition."""
 
-PRICING_OPENAI_LAST_UPDATED = "2026-09-01"
+PRICING_OPENAI_LAST_UPDATED = "2026-09-10"
 """Date the OpenAI short-context list rates in ``VENDOR_FAMILY_TIERS``
 were last verified against https://developers.openai.com/api/docs/pricing
 (also published at https://platform.openai.com/docs/pricing). Standard
@@ -231,6 +231,17 @@ short-context, not Batch / Flex / Fast / long-context.
 2026-11-21). Two public sources disagreed by 20-25% on
 ``gpt-5.6-terra`` during review ($2/$12 vs $2.50/$15); this table uses
 the official page on this date, not a third-party aggregator."""
+
+PRICING_XAI_LAST_UPDATED = "2026-09-10"
+"""xAI rates: https://docs.x.ai/developers/models/grok-4.6, accessed on
+this date. Requests whose prompt reaches 200k tokens pay the higher rate
+for ALL tokens in the request. https://docs.x.ai/build/overview identifies
+grok-4.6 as the model powering Grok Build. The observed ``grok-4.6-build``
+alias is exact; ``grok-build-0.1`` is a different model and a name trap.
+The 303-turn costUsdTicks census fits this rate SHAPE exactly, but at the
+API's documented 1e10 ticks/USD the CLI field is 0.17x list. It is never
+decoded or used for pricing; the Build overview establishes the rate level.
+No cache-write price is published; nonzero writes suppress the ceiling."""
 
 # Cache read/write multipliers. Anthropic prices both as fixed multiples
 # of a model's input rate, uniformly across every tier — a cache read at
@@ -337,29 +348,37 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # the write bucket has a published rate, but its relationship to inclusive
 # input has not been censused. Literal four-field cards, one row per family.
 #
-# Grok / xAI is HELD (gate D1, 2026-09-01; discharged-as-blocker Track 46A
-# 2026-09-04). No ``grok-4.6-build`` alias, no xAI tier. The two named
-# blockers are both false: (1) the ``offset == size`` wedge never fired
-# (0 of 42 live Grok cache entries; the actual outage was additive
-# ``elapsed_ms`` on ``turn_completed``, which 46A allowlists); (2) the
-# OpenCode ``$.id`` defect died with that reader in v0.12.53. Track 46A
-# restores Grok ingestion; adding the rate is Track 35A's gate, filed
-# as a TODO. ``resolve_prices("grok-4.6-build")`` returning None is still
-# a decision — tokens without cost until that TODO lands — not an
-# omission and not a reader defect.
+# Track 57A ships verified Grok pricing WITH the delivery fix: Track 46A
+# repaired the reader, but no Grok tokens had reached the wire. The base
+# card is always a floor: aggregate counters cannot recover request tiers.
 PRICING_FAMILY_BY_MODEL: dict[str, str] = {
+    "grok-4.6-build": "grok-4.6",
+    "gpt-6-astra": "gpt-6-astra",
     "gpt-5.6-terra": "gpt-5.6-terra",
     "gpt-5.6-sol": "gpt-5.6-sol",
     "gpt-5.4": "gpt-5.4",
     "gpt-5.5": "gpt-5.5",
 }
 
-# Per-family OpenAI short-context list rates, USD per million tokens.
+# Per-family vendor short-context list rates, USD per million tokens.
 # Source: https://developers.openai.com/api/docs/pricing verified
 # PRICING_OPENAI_LAST_UPDATED. The official table publishes cache-write
 # rates for GPT-5.6 and ``-`` for GPT-5.4/5.5; the latter map to 0.0.
+# xAI's source and alias evidence are documented at PRICING_XAI_LAST_UPDATED.
 # Do not derive these from ``_tier``.
 VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
+    "grok-4.6": {
+        "input": 2.00,
+        "cache_read": 0.50,
+        "cache_create": 0.0,
+        "output": 6.00,
+    },
+    "gpt-6-astra": {
+        "input": 10.00,
+        "cache_read": 1.00,
+        "cache_create": 12.50,
+        "output": 50.00,
+    },
     "gpt-5.6-terra": {
         "input": 2.00,
         "cache_read": 0.20,
@@ -383,6 +402,18 @@ VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
         "cache_read": 0.50,
         "cache_create": 0.0,
         "output": 30.00,
+    },
+}
+
+# Literal long-context cards, never Anthropic's `_tier` multipliers.
+# Codex's observed 258,400-token window is below OpenAI's 272K threshold;
+# its short-context estimate rests on that assumption (tripwire in TODOS).
+VENDOR_LONG_CONTEXT_TIERS: dict[str, dict[str, float]] = {
+    "grok-4.6": {
+        "input": 4.00,
+        "cache_read": 1.00,
+        "cache_create": 0.0,
+        "output": 12.00,
     },
 }
 
@@ -686,6 +717,13 @@ def resolve_prices(model: str) -> dict[str, float] | None:
     if vendor_prices is None:
         return None
     return dict(vendor_prices)
+
+
+def resolve_long_context_prices(model: str) -> dict[str, float] | None:
+    """Copy the exact alias's long card, if known. Not a priced-predicate."""
+    family = PRICING_FAMILY_BY_MODEL.get(model)
+    card = VENDOR_LONG_CONTEXT_TIERS.get(family) if family is not None else None
+    return dict(card) if card is not None else None
 
 
 def parse_usage(message: Any) -> tuple[Usage, str, str | None] | None:
@@ -1461,6 +1499,11 @@ def slice_window(
 # ---------------------------------------------------------------------------
 
 
+def _cost_under(card: dict[str, float], usage: Usage) -> float:
+    """Price one disjoint usage bucket under an explicit per-MTok card."""
+    return sum(usage.get(k, 0) * card[k] for k in TOKEN_FIELDS) / 1_000_000.0
+
+
 def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, float]]:
     """Compute total cost + per-model split from a ``by_model`` dict.
 
@@ -1494,7 +1537,7 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
                 )
                 _WARNED_UNKNOWN_MODELS.add(model)
             continue
-        cost = sum(usage.get(k, 0) * prices[k] for k in TOKEN_FIELDS) / 1_000_000.0
+        cost = _cost_under(prices, usage)
         per_model[model] = cost
         total += cost
     return total, per_model
@@ -1910,7 +1953,9 @@ __all__ = [
     "PRICING_FAMILY_BY_MODEL",
     "PRICING_LAST_UPDATED",
     "PRICING_OPENAI_LAST_UPDATED",
+    "PRICING_XAI_LAST_UPDATED",
     "VENDOR_FAMILY_TIERS",
+    "VENDOR_LONG_CONTEXT_TIERS",
     "SUBSCRIPTION_CAVEAT",
     "SkillBuckets",
     "TAIL_MSG_ID_LOOKBACK",
@@ -1936,6 +1981,7 @@ __all__ = [
     "model_family",
     "parse_usage",
     "resolve_prices",
+    "resolve_long_context_prices",
     "slice_window",
     "sum_bucket",
     "walk_jsonl_buckets",

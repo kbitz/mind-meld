@@ -526,9 +526,8 @@ class TestHostDeadline:
         assert capture.dropped == ()
         assert log == []
 
-    def test_expiry_after_some_readers_publishes_them_and_drops_the_rest(self):
-        """Codex completed, then the deadline hit before Grok: publish Codex,
-        declare remaining readers as deadline. Not a veto."""
+    def test_later_readers_get_grace_after_codex_spends_the_sweep_budget(self):
+        """Every later reader gets 50 ms even when the sweep has expired."""
         log: list = []
         clock = {"t": 0.0}
         names = ["codex", "grok", SYNTH]
@@ -536,8 +535,15 @@ class TestHostDeadline:
         def reader_for(index: int):
             def read(*, deadline):
                 log.append(names[index])
-                clock["t"] = 100.0
-                return _complete({"codex": {"2026-08-15": _usage(1)}} if index == 0 else {})
+                if index == 0:
+                    assert deadline == 10.0
+                    clock["t"] = 10.0
+                else:
+                    assert deadline - clock["t"] == pytest.approx(
+                        events_tail.HOST_READER_GRACE_MS / 1000.0
+                    )
+                    clock["t"] += 0.02
+                return _complete({"grok" if index else "codex": {"2026-08-15": _usage(1)}})
 
             return read
 
@@ -547,9 +553,52 @@ class TestHostDeadline:
         )
 
         assert capture.complete is True
-        assert capture.token_sources == ("codex",)
-        assert capture.dropped == (("grok", "deadline"), (SYNTH, "deadline"))
-        assert log == ["codex"]
+        assert capture.token_sources == ("codex", "grok", SYNTH)
+        assert capture.dropped == ()
+        assert capture.hosts["grok"]["2026-08-15"] == _usage(2)
+        assert log == names
+
+    def test_later_reader_grace_extends_a_short_remaining_sweep(self):
+        clock = {"t": 0.0}
+        seen: list[tuple[str, float]] = []
+
+        def codex(*, deadline):
+            seen.append(("codex", deadline))
+            clock["t"] = 9.97
+            return _complete({"codex": {"2026-08-15": _usage(1)}})
+
+        def grok(*, deadline):
+            seen.append(("grok", deadline))
+            return _complete({"grok": {"2026-08-15": _usage(1)}})
+
+        capture = events_tail._capture_host_usage(
+            deadline=10.0,
+            readers=_readers(("codex", codex), ("grok", grok)),
+            now=lambda: clock["t"],
+        )
+        assert seen[0][1] == 10.0
+        assert seen[1][1] - 9.97 == pytest.approx(events_tail.HOST_READER_GRACE_MS / 1000.0)
+        assert capture.token_sources == ("codex", "grok")
+
+    def test_first_reader_deadline_still_publishes_a_later_reader_that_finishes_in_grace(self):
+        clock = {"t": 0.0}
+
+        def codex(*, deadline):
+            clock["t"] = 100.0
+            return _incomplete("deadline")
+
+        def grok(*, deadline):
+            assert deadline - 100.0 == pytest.approx(events_tail.HOST_READER_GRACE_MS / 1000.0)
+            return _complete({"grok": {"2026-08-15": _usage(3)}})
+
+        capture = events_tail._capture_host_usage(
+            deadline=10.0,
+            readers=_readers(("codex", codex), ("grok", grok)),
+            now=lambda: clock["t"],
+        )
+        assert capture.complete is True
+        assert capture.token_sources == ("grok",)
+        assert capture.dropped == (("codex", "deadline"),)
 
     def test_expiry_after_a_failed_reader_keeps_it_declared(self):
         """An invoked failure is not a pre-invoke sweep veto.
@@ -569,8 +618,8 @@ class TestHostDeadline:
             deadline=10.0,
             readers=_readers(
                 ("codex", codex),
-                ("grok", lambda **_kw: pytest.fail("Grok must not run")),
-                (SYNTH, lambda **_kw: pytest.fail("synth must not run")),
+                ("grok", _recording_reader(_incomplete("deadline"), log, "grok")),
+                (SYNTH, _recording_reader(_incomplete("deadline"), log, SYNTH)),
             ),
             now=lambda: clock["t"],
         )
@@ -584,7 +633,8 @@ class TestHostDeadline:
             ("grok", "deadline"),
             (SYNTH, "deadline"),
         )
-        assert log == ["codex"]
+        grace = 100.0 + events_tail.HOST_READER_GRACE_MS / 1000.0
+        assert log == ["codex", ("grok", grace), (SYNTH, grace)]
 
     def test_budgets_are_separate_from_the_walk_budget(self):
         """Deliberately its own pair of constants: reusing the walk budget
@@ -627,7 +677,7 @@ class TestHostDeadline:
         after = _time.monotonic()
 
         assert len(seen) == 2
-        assert len(set(seen)) == 1, "every reader must share one absolute deadline"
+        assert len(set(seen)) == 1, "cheap reads with ample time retain the sweep deadline"
         assert before + 0.25 <= seen[0] <= after + 0.25
 
 
@@ -1285,7 +1335,7 @@ class TestTailWiring:
 
 class TestColdCacheWarmAndRetry:
     """A cold corpus does not fit the per-capture budget (573 ms measured
-    against a 250/500 ms bound), so an attended command may spend one warm.
+    against a 250/500 ms bound), so an attended command may warm each cold reader.
 
     The gate is a FAILED bounded attempt, not an "is it cold?" predicate:
     that costs nothing on the happy path, needs no persisted marker, and a
@@ -1311,6 +1361,87 @@ class TestColdCacheWarmAndRetry:
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", lambda **_kw: _complete())
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
 
+    @pytest.mark.parametrize("preinvoke", [False, True])
+    @pytest.mark.parametrize("codex_warm", ["complete", "deadline", "raises"])
+    def test_every_cold_reader_warms_and_only_completed_warms_retry(
+        self, tmp_path, monkeypatch, capsys, preinvoke, codex_warm
+    ):
+        """Independent retry budgets and exact replacement sets reach the wire.
+
+        Each successful retry spends 400 ms of its own 500 ms. Sharing one
+        retry deadline would lose Grok even after both warms completed.
+        """
+        _stub_fast_walks(monkeypatch)
+        clock = [100.0]
+        calls = []
+        warm = set()
+        day = "2026-08-15"
+        real_capture = events_tail._capture_host_usage
+        capture_calls = []
+        merge_sets = []
+        real_merge = events_tail._merge_warm_retry_capture
+
+        def capture(readers, *, deadline):
+            capture_calls.append(tuple(name for name, _ in readers))
+            now = deadline if preinvoke and len(capture_calls) == 1 else clock[0]
+            return real_capture(readers, deadline=deadline, now=lambda: now)
+
+        def merge(initial, retry, *, readers, retried_names):
+            merge_sets.append(retried_names)
+            assert retried_names == set(capture_calls[-1])
+            return real_merge(initial, retry, readers=readers, retried_names=retried_names)
+
+        def reader(name):
+            def read(*, deadline, **_kw):
+                calls.append(f"read:{name}")
+                if name not in warm:
+                    return _incomplete("deadline")
+                assert deadline - clock[0] == pytest.approx(0.5)
+                clock[0] += 0.4
+                model = "gpt-6-astra" if name == "codex" else "grok-4.6-build"
+                return _complete(
+                    {name: {day: _usage(7)}},
+                    {day: {**_usage(7), "by_model": {model: _usage(7)}}},
+                )
+
+            return read
+
+        def warm_reader(*, reader):
+            calls.append(f"warm:{reader}")
+            if reader == "codex" and codex_warm != "complete":
+                if codex_warm == "raises":
+                    raise OSError("synthetic warm error")
+                return _incomplete("deadline")
+            warm.add(reader)
+            return _complete()
+
+        monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(events_tail, "_capture_host_usage", capture)
+        monkeypatch.setattr(events_tail, "_merge_warm_retry_capture", merge)
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", reader("codex"))
+        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", reader("grok"))
+        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm_reader)
+        root = tmp_path / "events_root"
+        sources = _sources(root, hosts=("codex", "grok"))
+        degradations = events_tail._run_events_tail(
+            {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
+        )
+        retried = ["codex", "grok"] if codex_warm == "complete" else ["grok"]
+        assert calls == (
+            ([] if preinvoke else ["read:codex", "read:grok"])
+            + ["warm:codex", "warm:grok"]
+            + [f"read:{name}" for name in retried]
+        )
+        assert merge_sets == [{name} for name in retried]
+        row = next(r for r in _rows(root) if r["type"] == "host-usage-snapshot")
+        assert row["token_sources"] == retried
+        assert row.get("degraded_sources", []) == ([] if codex_warm == "complete" else ["codex"])
+        assert row["tokens_by_day"][day]["by_model"]["grok-4.6-build"] == _usage(7)
+        assert len(degradations) == (0 if codex_warm == "complete" else 1)
+        err = capsys.readouterr().err
+        assert "mm: warming grok usage cache (about 5 s of scanning)..." in err
+        assert "one-time" not in err
+
     def test_interactive_push_warms_then_retries_and_publishes(self, tmp_path, monkeypatch, capsys):
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
@@ -1326,7 +1457,9 @@ class TestColdCacheWarmAndRetry:
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
-        assert "warming host usage cache" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "mm: warming codex usage cache (about 5 s of scanning)..." in err
+        assert "one-time" not in err
 
     def test_interactive_push_warms_a_dropped_grok_reader_then_retries(self, tmp_path, monkeypatch):
         """X-2: the warm target comes from ``dropped``, not the no-row labels."""
@@ -1577,7 +1710,7 @@ class TestColdCacheWarmAndRetry:
         )
 
         assert "warm" not in calls
-        assert "warming host usage cache" not in capsys.readouterr().err
+        assert "usage cache (about" not in capsys.readouterr().err
 
     @pytest.mark.parametrize("reason", ["unsupported", "locked", "malformed", "io_error"])
     def test_only_a_deadline_triggers_the_warm(self, tmp_path, monkeypatch, reason):
@@ -1939,5 +2072,5 @@ def test_partial_takes_the_retry_sentence_not_warming(reader):
 @pytest.mark.parametrize("reader", ["codex", "grok"])
 def test_deadline_names_bounded_interactive_warm(reader):
     phrase = events_tail._host_skip_phrase(reader, "deadline")
-    assert "interactively to warm it (up to 5 s per push)" in phrase
+    assert "about 5 s of scanning per cold reader, not a hard ceiling" in phrase
     assert "one pass" not in phrase

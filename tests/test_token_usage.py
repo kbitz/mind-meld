@@ -917,6 +917,7 @@ class TestResolvePrices:
             *tu.PRICING.values(),
             *tu.MODEL_FAMILY_TIERS.values(),
             *tu.VENDOR_FAMILY_TIERS.values(),
+            *tu.VENDOR_LONG_CONTEXT_TIERS.values(),
         ):
             assert set(card) == set(tu.TOKEN_FIELDS)
 
@@ -930,6 +931,10 @@ class TestResolvePrices:
             ("gpt-5.6-sol", {"input": 4.0, "cache_read": 0.4, "cache_create": 5.0, "output": 20.0}),
             ("gpt-5.4", {"input": 2.5, "cache_read": 0.25, "cache_create": 0.0, "output": 15.0}),
             ("gpt-5.5", {"input": 5.0, "cache_read": 0.5, "cache_create": 0.0, "output": 30.0}),
+            (
+                "gpt-6-astra",
+                {"input": 10.0, "cache_read": 1.0, "cache_create": 12.5, "output": 50.0},
+            ),
         ],
     )
     def test_gpt_models_resolve_literal_four_field_cards(
@@ -937,13 +942,59 @@ class TestResolvePrices:
     ) -> None:
         assert tu.resolve_prices(model) == pytest.approx(expected)
 
-    def test_grok_is_held_unpriced(self) -> None:
-        """Gate D1: Grok rates stay unpriced. Track 46A discharged the two
-        named blockers (offset==size never fired; OpenCode reader is gone)
-        but does not add the xAI tier — that is its own TODO."""
-        assert tu.resolve_prices("grok-4.6-build") is None
-        assert "grok-4.6-build" not in tu.PRICING_FAMILY_BY_MODEL
-        assert "grok" not in tu.VENDOR_FAMILY_TIERS
+    def test_grok_4_6_build_prices_at_grok_4_6(self, capsys, monkeypatch) -> None:
+        """57A lifts D1 with verified rates and delivery in the same release."""
+        assert tu.PRICING_FAMILY_BY_MODEL["grok-4.6-build"] == "grok-4.6"
+        assert tu.resolve_prices("grok-4.6-build") == {
+            "input": 2.0,
+            "cache_read": 0.5,
+            "cache_create": 0.0,
+            "output": 6.0,
+        }
+        resolved = []
+        real = tu.resolve_prices
+
+        def spy(model):
+            resolved.append(model)
+            return real(model)
+
+        monkeypatch.setattr(tu, "resolve_prices", spy)
+        usage = {field: 1_000_000 for field in tu.TOKEN_FIELDS}
+        assert tu.estimate_cost({"grok-4.6-build": usage, "gpt-6-astra": usage}) == (
+            82.0,
+            {"grok-4.6-build": 8.5, "gpt-6-astra": 73.5},
+        )
+        assert resolved == ["grok-4.6-build", "gpt-6-astra"]
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize(
+        "model", ["grok-build-0.1", "grok-4.6", "x-grok-4.6-build", "GROK-4.6-BUILD"]
+    )
+    def test_grok_alias_is_exact_and_never_the_name_trap(self, model):
+        assert tu.resolve_prices(model) is None
+        assert tu.resolve_long_context_prices(model) is None
+
+    def test_long_cards_are_literal_complete_and_bound_the_base(self):
+        assert tu.resolve_long_context_prices("grok-4.6-build") == {
+            "input": 4.0,
+            "cache_read": 1.0,
+            "cache_create": 0.0,
+            "output": 12.0,
+        }
+        for family, card in tu.VENDOR_LONG_CONTEXT_TIERS.items():
+            assert family in tu.VENDOR_FAMILY_TIERS
+            assert set(card) == set(tu.TOKEN_FIELDS)
+            assert card != tu._tier(card["input"], card["output"])
+            assert all(card[k] >= tu.VENDOR_FAMILY_TIERS[family][k] for k in tu.TOKEN_FIELDS)
+        xai_families = {f for f in tu.VENDOR_FAMILY_TIERS if f.startswith("grok-")}
+        assert xai_families <= tu.VENDOR_LONG_CONTEXT_TIERS.keys()
+
+    def test_long_resolver_returns_a_copy_and_is_not_a_priced_predicate(self):
+        card = tu.resolve_long_context_prices("grok-4.6-build")
+        card["input"] = 999.0
+        assert tu.resolve_long_context_prices("grok-4.6-build")["input"] == 4.0
+        assert tu.resolve_prices("gpt-6-astra") is not None
+        assert tu.resolve_long_context_prices("gpt-6-astra") is None
 
     def test_unknown_gpt_stays_unpriced(self) -> None:
         assert tu.resolve_prices("gpt-5.7-whatever") is None

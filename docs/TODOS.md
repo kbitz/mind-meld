@@ -44,6 +44,54 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review] Record the Grok costUsdTicks census against the "Grok publishes its own billed cost" Future item
+- **Why:** That Future item's precondition was "needs its own census first". 57A ran the census on 303 turns from Grok 1.0.25. Grok's per-turn cost is exactly proportional to xAI's published grok-4.6 rates: the modal turn sits at 1.700e9 ticks per list-USD, to 4 significant figures. It doubles exactly when a prompt reaches 200k (77 turns at exactly 2.0x). Above-2x outliers are tool charges. At xAI's documented API unit (1 USD = 1e10 ticks, docs.x.ai/developers/cost-tracking), the CLI value is 0.17x list, so it is not the list-rate figure. It is probably plan billing.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Do not decode the unit. The ratio could classify each turn as base-tier or long-tier at ingest, but only through a census-calibrated constant. Revisit if xAI documents the CLI field or Grok logs per-request prompt sizes.
+
+### [plan-eng-review] Re-pin the Grok usage census from 1.0.13 to 1.0.25
+- **Why:** The 57A census found zero drift across 12 patch releases: the same four `turn_completed` key sets, the same two `usage` key sets, 185 ledgers, 312 terminal records. `GROK_USAGE_CENSUS_HOST_VERSION` still says 1.0.13.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Reader contract only (`tests/fixtures/host_sessions/grok/CONTRACT.md` + `host_usage.py:114` + the pin test). No behaviour change.
+
+### [plan-eng-review] Tripwire when a Codex request reaches OpenAI's 272K long-context tier
+- **Why:** Codex host figures render `~` on one assumption: Codex CLI's `model_context_window` (258,400 on every one of 20,955 events) is below OpenAI's ">272K input tokens → 2x input, 1.5x output for the full request" threshold. The window is user-configurable and does not travel on the wire.
+- **Hypothesis (untested):** The Codex reader sees per-request `last_token_usage.input_tokens`. It can mark the day partial when a request is at or above 272K, the same way the Grok `cache_create` tripwire works, which turns the assumption into a detected condition.
+- **Effort:** S
+- **Priority:** P3
+
+### [plan-devex-review] First-class attended usage refresh (`mm push --capture-usage`)
+- **Why:** On a converged Mac, `mm push` returns "Nothing to push" before the events tail, so host usage never refreshes. README tells users not to edit data to force it. 57A documents `mm recapture 1d` as a bridge. It works because it writes git rows, then calls `_push_core(quiet=False)`. But it needs discovered git roots, exits 4 on partial git recovery, and is documented as a git-only primitive.
+- **Effort:** M
+- **Priority:** P2
+- **Context:** Must preserve the v0.12.2 phantom-change rule (no bare disjunct on the substantive-change gate). Likely shape: write the host row first, then push, like recapture.
+
+### [plan-eng-review] Profile and shrink the Codex host-cache round trip
+- **Why:** 57A's budget probe measured the steady-state warm Codex read at 0.18-0.20 s of the 0.25 s autopush budget. The cache is 4.3 MB and is rewritten on every healthy pass. That is what starved Grok. 57A adds a 50 ms grace floor per later reader, but Codex itself is near its budget.
+- **Repro:** the temp-pytest budget probe (learning `mm-host-budget-probe-pattern`).
+- **Effort:** M
+- **Priority:** P2
+- **Context:** Track 46A killed the cache-encoding card on a 23.3 ms *load* measurement, not the full read. Profile load vs re-walk vs write first. Trigger: the Codex steady-state read exceeds 200 ms of the 250 ms autopush budget (already close).
+
+### [plan-ceo-review] Refresh Anthropic rates: Sonnet 5 standard $2/$10, Fable 5.1 cache hits 0.025x
+- **Why:** platform.claude.com pricing (read 2026-09-10) says Sonnet 5's $2/$10 is now standard; the $3/$15 increase will not occur. Fable 5.1 and Mythos 5.1 cache hits are $0.25 (0.025x). mm prices Sonnet 5 at $3/$15 and Fable 5.1 cache reads at $1.00. Both models are in the local Claude token cache, so the Claude fleet line is overstated.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** A correct fix sets the `sonnet` tier to $2/$10 AND adds `PRICING` overrides at `_tier(3, 15)` for Sonnet 4.x ids that normalize into the tier (4.6 is still $3/$15 and not retired; follow the Opus 4.1 precedent). Add a full four-field `claude-fable-5-1` card with cache_read 0.25. Make no Mythos 5.1 claim beyond the page. Update `test_token_usage.py:705`/`:897` and the "introductory" sentence in events-retro.md. Bump `PRICING_LAST_UPDATED` only after re-reading every row.
+
+### [plan-ceo-review] Cross-machine dedup of host usage by turn key
+- **Why:** Host totals can never be summed across machines, because migrated home directories duplicate history under two device ids. Deduplicating by host turn key (Grok `prompt_id`, Codex lineage) would make a fleet sum valid.
+- **Effort:** L
+- **Priority:** P3
+- **Context:** New wire content plus a new accounting schema. 58A's card already demands "a separately justified proposal".
+
+### [plan-devex-review] `mm status`: say whether the last push published each host reader
+- **Why:** For 3.5 weeks `mm status`/`mm diag` read "prior successful scan: yes" while no Grok token was ever published (0 of 5 host rows). The push already knows `token_sources`. Status could report "last push published Grok: yes/no/unknown".
+- **Effort:** S
+- **Priority:** P3
+
 ### [plan-ceo-review:severity=moderate] Make the other previews write-free (56B)
 
 - **What:** Apply Track 56A's read-only setup to `mm pull --dry-run`, `mm gc --dry-run`, `mm recapture --dry-run`, `mm migrate-config --dry-run` and `mm diff`, after inventorying each command's own writes.

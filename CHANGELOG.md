@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [Unreleased]
+
+**Grok usage delivery and verified API list-rate pricing ship together.** Later readers get 50 ms of grace, and attended captures warm every deadline-dropped warmable reader before retrying each successful warm on its own budget. Grok's recorded tokens now contribute a pricing floor, with a model-scoped at-most figure only when coverage allows it. `gpt-6-astra` is also priced.
+
+### Changed
+
+- Upgrade the **Grok-producing Mac** for delivery and the **rendering Mac** for the rate tables and wording. Run **`mm install-skills` and restart the agent** to load the updated explanation of pricing floors.
+- `mm diag` shows `grok ledgers cached: N of M`, preserving unknown counts. The README documents `mm recapture 1d` as the attended refresh bridge, its prerequisites, and publication checks from a second Mac.
+- xAI and OpenAI rate provenance is 2026-09-10. `grok-4.6-build` uses the verified grok-4.6 card by exact key; `grok-build-0.1` stays unpriced. Grok always renders `>=`; no machine-level range, billed-tick decoding, or Anthropic rate refresh is included.
+
 ## [0.14.10] - 2026-09-10
 
 **`mm push --dry-run` now changes nothing except the local lock file.** Previewing a push used to still migrate config, persist a missing crypto fingerprint, record a pull-history row, and create the mm-events directory — all before you'd decided to actually push. The preview now reports what a real push would set up instead of doing it, and refuses with a clear remedy if the mm-events directory has vanished since files were published from it, rather than silently proving a deletion that was never checked.

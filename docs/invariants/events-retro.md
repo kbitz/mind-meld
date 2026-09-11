@@ -316,7 +316,10 @@ is kept as a **diagnostic** latch (and so the three
 CI-enforced doc citations to it still resolve). `mm status` / `mm diag`
 prefer any standing `last_reason`, then this diagnostic latch. Do not reintroduce it as a sweep gate. Warm a warmable reader on a `deadline` in `dropped` (or on the
 sweep-level `reader`/`reason` for a pre-any-reader expiry); autopush never
-warms. After a successful warm, retry only deadline-dropped readers and merge
+warms. Warm every deadline-dropped warmable reader in reader order, including
+uninvoked readers. Pre-invoke sweep expiry declares every reader dropped and
+warms every warmable reader. Retry only readers whose warm completed, each
+with its own `host_budget_ms` deadline, and merge
 their fresh outcomes with the first pass's completed readers — a flaky
 second-pass read of an already-completed reader must never erase totals
 already captured. If
@@ -819,8 +822,13 @@ would let `a_b` mean `a/b` on Monday and `a?b` on Tuesday and read as per-day
 movement that never happened.
 
 **Its own deadline, started after `walk_done`.**
-`HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500), passed
-explicitly to every reader. Two halves, both load-bearing: capture begins
+`HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500) set the
+sweep deadline. The first reader receives it unchanged; each later reader
+receives `max(sweep_deadline, start_i + HOST_READER_GRACE_MS / 1000)`.
+`HOST_READER_GRACE_MS = 50`: Track 57A's E16 probe measured warm Grok at
+19–20 ms while Codex consumed 73–80% of the autopush budget. This is a
+cooperative grace floor, not a hard elapsed-time ceiling or a full second
+reader budget. Two halves remain load-bearing: capture begins
 AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
 redefine the session-walk notice, and the deadline is FRESH rather than the
 walk's leftovers — reusing `deadline` would make the row vanish exactly on the
@@ -854,7 +862,10 @@ read; a newer mm **may** read it (`pipx upgrade mind-meld`), or the user can
 `mm disable-source <reader>`. A retry alone is not a remedy. `partial` takes
 the generic retry sentence: "The next push that uploads a change retries;
 `mm diag` shows the reader's state." Only `deadline` names an interactive
-warm (up to 5 s per substantive push). The phrase and the joined breadcrumb
+warm (about 5 s of scanning per cold reader, not a hard ceiling). An attended
+push must upload a change; `mm recapture 1d` is the bridge on a converged Mac,
+requiring discovered git roots and the enabled, resolved mm-events source
+(exit 1 on zero roots, exit 4 on partial git recovery). The phrase and the joined breadcrumb
 are prose, not a semicolon-delimited schema: the approved retry sentence
 contains `; ` too. Nothing parses the detail by that separator. One
 degradation is appended per dropped reader.
@@ -921,7 +932,16 @@ Healthy Codex stays silent. Diag labels inventory and blocker separately:
 healthy caches say `none`, and a valid date renders
 `(first observed YYYY-MM-DD UTC)`. Inventory `ready` plus blocker `none`
 still does not prove totals were published. Diag reads cache metadata without
-opening host logs or requiring a passphrase; Codex also counts rollout paths.
+opening host logs or requiring a passphrase; Codex counts rollout paths and
+Grok counts two-level `*/*/updates.jsonl` paths under `grok_sessions_root()`
+via `os.scandir` (not `Path.glob`, which swallows scan errors on Python 3.13).
+`grok_usage_diag.files_cached` counts entries only in a valid current-version
+cache with a `files` map; missing, malformed, version-mismatched or locked
+caches return None, never a synthetic zero. A missing sessions root is 0;
+`files_on_disk` is None on any scan `OSError`. The text surface is `grok ledgers cached: N of M`, with `unknown`
+for either missing count. Grok requests `locked_json_snapshot(blocking=False)`
+so contention reports unknown immediately; other shared-snapshot callers
+retain the blocking default. No ad-hoc flock path is added to the reader.
 
 Orchestration failures (a reader exception normalized to `unavailable`, or a
 sweep deadline before invocation) remain per-push stderr/breadcrumb signals.
@@ -1049,16 +1069,25 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 `deadline` charged to a non-warmable reader cannot be helped by it; a future
 reader whose cache stores no totals must not be added to the set. Without
 the reader half of the gate an interactive push pays
-bounded-attempt + up to 5s warm + bounded-retry — ~6s, on every push, forever,
+bounded-attempt + about 5 s of scanning per cold reader + bounded-retry, on every push, forever,
 still publishing nothing.
 A cold scan does not fit the per-capture budget (573 ms vs 250/500 ms), so
-`_capture_event_snapshots` may retry once after `warm_host_cache_inline`, but
-ONLY when the first attempt returned reason `deadline` — the only reason a warm
+`_capture_event_snapshots` warms every warmable reader dropped for `deadline`
+in reader order, then retries each reader whose warm completed, with its OWN
+`host_budget_ms` deadline. Each merge's `retried_names` is exactly its singleton
+retry set: a failed warm cannot erase that reader's declaration when another
+succeeds. On pre-invoke expiry every reader is declared dropped, including
+non-warmable ones, and every warmable reader is offered a warm.
+ONLY reason `deadline` qualifies — the only reason a warm
 can fix. Gating this way costs nothing on the happy path, needs no persisted
 "have I warmed?" marker, and cannot misfire on a machine that legitimately has
 no host data: that machine's first attempt COMPLETES, so it never warms. An
 entry-count predicate would have asked exactly that machine to warm on every
 push forever.
+
+The notice names the reader: `mm: warming grok usage cache (about 5 s of scanning)...`.
+The scan deadline is cooperative; an in-flight filesystem call or subsequent
+cache serialization can exceed it. It is never a hard per-push ceiling.
 
 `warm_host_cache` is supplied by the wrapper and is `None` on autopush — an
 unattended hook never spends seconds on optional analytics; it converges via
@@ -1950,18 +1979,75 @@ Host model ids (Track 35A) do not go through `model_family`. They resolve
 via the curated alias registry `PRICING_FAMILY_BY_MODEL` (exact-key,
 never substring) onto `VENDOR_FAMILY_TIERS` literal four-field cards.
 Do not reach for `_tier` for non-Anthropic rates: its cache multipliers
-are Anthropic-specific. `resolve_prices` stays the single priced-
-predicate and gained exactly one branch. Grok / xAI rates are held
-until ingestion is proven (gate D1); `resolve_prices("grok-4.6-build")`
-returning `None` is a decision, not an omission.
+are Anthropic-specific. `resolve_prices` stays the single priced-predicate.
+Track 57A lifts the Grok hold WITH delivery: the 46A reader repair had never
+delivered Grok tokens to the wire (zero across all five local host rows).
+The shared deadline and one-reader warm caused starvation. The later-reader
+grace floor and every-reader warm/retry ship with the rate table.
+
+**Grok pricing floor and model-scoped ceiling (57A).** Only the exact observed
+`grok-4.6-build` alias maps to `grok-4.6`. Bare `grok-4.6`, `grok-build-0.1`,
+prefix/suffix variants and case variants stay unpriced. The literal base card
+is $2 input / $0.50 cached input / $0 cache writes / $6 output per MTok;
+the long card is $4 / $1 / $0 / $12. Requests whose prompt reaches 200k
+tokens pay the higher rates for ALL tokens in that request. Aggregate
+counters cannot reconstruct request sizes, so every device with in-window
+Grok tokens renders `>=`. `_cost_under(card, usage)` owns the arithmetic;
+`estimate_cost` keeps its signature, priced-predicate calls and warnings.
+`resolve_long_context_prices` returns a copy through the same exact alias
+registry and is not a priced-predicate. Every xAI family must have a long card.
+
+The inherent cause says: "Grok's logs do not record per-request prompt sizes;
+no action resolves this". The base and at-most values cover **this model's
+recorded tokens, in token charges; server-side tool fees excluded**. Never
+average them, sum machines, or present a machine-level range. Omit the at-most
+figure if ANY snapshot reader is partial or degraded (the wire cannot map
+readers to models), or that model has nonzero `cache_create`. A cache-write-only
+bucket is still `>=` and must never claim "at most $0". Missing, stale or
+legacy-counter snapshots retain their `—` paths. No in-window Grok tokens
+means no inherent cause. Unpriced models name the rendering-Mac remedy:
+upgrading mm there may add a rate; republishing cannot; do not estimate.
+At-most figures round upward to cents so display rounding cannot understate
+the bound; the machine cell's existing estimate formatter is unchanged.
+
+**Evidence, 2026-09-10.** Grok 1.0.25: 185 ledgers, 312 terminal records,
+308 with usage, one model id (`grok-4.6-build`), zero nonzero cache-write
+counters, zero shape drift against the 1.0.13 contract (pin unchanged).
+https://docs.x.ai/build/overview establishes the model identity/rate level;
+https://docs.x.ai/developers/models/grok-4.6 establishes the rate cards and
+threshold. The 303-turn `costUsdTicks` census corroborates the rate shape
+(modal 1.700e9 ticks per list-USD; 77 turns exactly double), but the CLI
+field is 0.17x list at the documented API unit of 1e10 ticks/USD. Never
+decode it or use a census-calibrated constant to infer request tiers.
+`grok-build-0.1` is a different SKU and a name trap.
+
+**Other vendors' context assumptions.** Codex's observed 258,400-token window
+cannot reach OpenAI's >272K prompt threshold: 20,955 events across 789
+rollouts, max observed input 244,361. Codex's `~` rests on that assumption;
+the window is configurable and absent from the wire, so a tripwire is deferred
+in TODOS. Anthropic 4.6+ bills the full 1M context at standard rates. The
+Anthropic rate refresh (X6) is a separate Track; 57A leaves that table unchanged.
 
 Provenance is per vendor, because one date over two vendors' tables is
 a lie of composition. Anthropic: `PRICING_LAST_UPDATED` (verified
 against Anthropic's public pricing page). OpenAI:
 `PRICING_OPENAI_LAST_UPDATED` (verified against
 https://developers.openai.com/api/docs/pricing, short-context Standard).
-mm has no network by design, so provenance is a comment or it does not
-exist.
+xAI: `PRICING_XAI_LAST_UPDATED` (2026-09-10, model page and Build overview
+above). OpenAI's five cards, including `gpt-6-astra` ($10 / $1 / $12.50 / $50),
+were all re-read 2026-09-10. Each vendor gets a dated source bullet in the
+rendered header, followed by the marker legend. "Current rates" means rates
+bundled with this mm release, verified on those dates. mm does not fetch rates.
+
+**Publication-proof release evidence.** After merge and upgrade on the
+Grok-producing Mac, use the attended recapture bridge or a substantive push;
+observe the Grok warm notice when cold. On a SECOND Mac, `mm pull` then
+`mm retro-fleet 7d --dump-host-usage` must show a new `as_of`, Grok in
+`consulted`, and nonzero `grok-4.6-build` counters. The retro must name its
+inherent floor. After the next real capture, require an advanced `as_of` with
+Grok still consulted. Cache success alone never proves publication. Upgrade
+the producing Mac for delivery, the rendering Mac for prices, and refresh
+the agent with `mm install-skills` plus restart for the decoder.
 
 **Invariant 3 — `model_family` matches POSITIONALLY against a literal
 allowlist, never by substring.** Model ids are peer-controlled (peer's

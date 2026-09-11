@@ -434,6 +434,44 @@ def test_every_notes_line_has_a_skill_decoder_entry() -> None:
     # the AST walk above cannot discover this critical fail-closed decoder.
     decoder_one_line = " ".join(decoder.split())
     assert "that Mac runs an mm that reported token counters in an older format" in decoder_one_line
+    assert (
+        "Grok's logs do not record per-request prompt sizes; no action resolves this"
+        in decoder_one_line
+    )
+    assert (
+        "The at-most figure bounds that model's recorded token charges only: never average it "
+        "with the floor, never sum machines, never present it as the machine's cost"
+    ) in decoder_one_line
+    assert "upgrading mm on the machine that renders this report may price it" in decoder_one_line
+    assert "republishing does not add a rate; do not estimate" in decoder_one_line
+
+
+def test_readme_prices_all_three_vendors_with_matching_provenance():
+    from mind_meld import token_usage
+
+    readme = (ROOT / "README.md").read_text()
+    for vendor, date, url in (
+        (
+            "Anthropic",
+            token_usage.PRICING_LAST_UPDATED,
+            "https://platform.claude.com/docs/en/about-claude/pricing",
+        ),
+        (
+            "OpenAI",
+            token_usage.PRICING_OPENAI_LAST_UPDATED,
+            "https://developers.openai.com/api/docs/pricing",
+        ),
+        (
+            "xAI",
+            token_usage.PRICING_XAI_LAST_UPDATED,
+            "https://docs.x.ai/developers/models/grok-4.6",
+        ),
+    ):
+        assert vendor in readme
+        assert date in readme
+        assert url in readme
+    assert "mm recapture 1d" in readme
+    assert "exits 1 on zero roots and 4 on partial git recovery" in readme
 
 
 def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:

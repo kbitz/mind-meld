@@ -171,8 +171,24 @@ about healthy Codex capture. For a blocker, see
 Upgrade is per Mac, and **upgrading is not enough**. On each Mac:
 
 1. `mm enable-source grok`
-2. An **interactive** `mm push` that uploads a real change (it may warm the Grok cache once, up to 5 s). Autopush never warms and can converge over several substantive pushes; a no-op push does not retry capture.
-3. Verify: `mm status` should read `Grok usage capture: enabled; a prior scan completed successfully`, and `mm diag` should show `grok prior successful scan: yes` and `grok usage read blocker: none`. Then `mm retro-fleet 7d`.
+2. Run **`mm recapture 1d`** to refresh usage on a converged Mac, or an attended `mm push` that uploads a change. Recapture is a bridge through git recovery: it requires discovered git roots and an enabled, resolved `mm-events` source; it exits 1 on zero roots and 4 on partial git recovery. Inspect `mm diag` and configure `[retro].repo_roots` if discovery has no roots. A no-op push does not capture usage. Each cold reader may print `mm: warming grok usage cache (about 5 s of scanning)...`; scanning is cooperative, not a hard ceiling. Autopush never warms and can converge over several substantive pushes.
+3. Verify **publication from a second Mac**. A prior successful scan or `grok usage read blocker: none` only describes the local cache; neither proves publication. Replace `<id>` below with the producing Mac's device id:
+
+```sh
+mm pull
+mm retro-fleet 7d --dump-host-usage | jq '.by_device["<id>"] | {as_of, consulted, degraded}'
+mm retro-fleet 7d --dump-host-usage | jq '[.by_device["<id>"].tokens_by_day[]?.by_model | keys[]] | unique'
+mm retro-fleet 7d
+```
+
+Expected: a new `as_of`, `"grok"` in `consulted`, Grok absent from `degraded`, and `"grok-4.6-build"` in the model list with nonzero counters in `tokens_by_day`. For example:
+
+```json
+{"as_of": "2026-09-11T12:00:00+00:00", "consulted": ["codex", "grok"], "degraded": []}
+["gpt-6-astra", "grok-4.6-build"]
+```
+
+The retro should name Grok's inherent pricing floor. After the next real capture, repeat the second-Mac check: `as_of` must advance with Grok still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
 
 If Grok writes a record this version cannot read, that Mac drops Grok (declared on `mm status` / `mm diag` / push stderr) and keeps publishing Codex. A newer mm may read it: run `pipx upgrade mind-meld`, or `mm disable-source grok` to stop retrying. See [Host usage capture](#host-usage-capture-codex-and-grok) for all blockers.
 
@@ -383,27 +399,35 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 **Token usage and API list-rate equivalent (v0.11.14, hosts in v0.12.52).** Under **Claude Code activity** the retro answers: how much did Claude Code consume this window, was it Sonnet- or Opus-heavy, did the cache do its job, what would this have cost at API list rates. Those numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
 
-From v0.12.52 the body also has **`## API list-rate equivalent (per machine)`** for the four observed `gpt-*` host models (and, later, Grok). It is not subscription spend: all three hosts on this fleet are subscription products, and the figure is today's short-context list rate applied to historical tokens. Sample:
+The body also has **`## API list-rate equivalent (per machine)`** for the five observed `gpt-*` host models and `grok-4.6-build`. It is not subscription spend: historical tokens are repriced at current rates, meaning the rates bundled with this mm release, verified on the dates shown. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. Sample:
 
 ```text
 ## API list-rate equivalent (per machine)
 
-OpenAI short-context list rates, verified 2026-09-01 against
-https://developers.openai.com/api/docs/pricing. …
+- Anthropic list rates, verified 2026-08-11: https://platform.claude.com/docs/en/about-claude/pricing
+- OpenAI short-context list rates, verified 2026-09-10: https://developers.openai.com/api/docs/pricing
+- xAI base and long-context list rates, verified 2026-09-10: https://docs.x.ai/developers/models/grok-4.6
+
 ### Do not sum these values
 Machines may hold duplicated history … and these values must not be summed.
 
 | Machine   | API list-rate equivalent |
 |-----------|--------------------------|
 | 3a6c7dc9  | ~$1,269                  |
-| 889e42c0  | —                        |
+| 889e42c0  | >=$781                   |
 ```
 
-Legend: `~` is an estimate over complete priced data; `>=` is a floor (unpriced models, a host that declared totals incomplete, a dropped reader, or tokens the per-day model cap left unattributed — Notes names which); `—` is unavailable, not zero. An all-unpriced device therefore shows `>=$0.00` plus the named cause, while a snapshot that predates the window shows `—`. A Mac on mm older than v0.12.52 reported inclusive token counters that would read up to ~2x high, so its row is also `—` until that Mac upgrades and re-pushes. The table shows estimates before unavailable rows when its 12-machine display cap applies, and states how many machines were omitted.
+Legend:
 
-`--dump-host-usage` is the structured equivalent: it already carries `tokens_by_day`, so a script can compute the same number. Host totals never enter the Claude cost line, and there is no fleet sum.
+- `~` is an estimate over complete priced data.
+- `>=` is a floor: unpriced models, incomplete totals, a dropped reader, unattributed tokens, or a model's unreconstructable long-context tier. Notes names the cause.
+- `—` is unavailable, not zero.
 
-**Rate provenance.** Anthropic list rates: `PRICING_LAST_UPDATED` in `token_usage.py`, verified against Anthropic's public pricing page. OpenAI short-context Standard: `PRICING_OPENAI_LAST_UPDATED`, verified against https://developers.openai.com/api/docs/pricing. Grok / xAI rates are held until Grok ingestion is proven. mm has no network, so a rate change is a code change.
+An all-unpriced device shows `>=$0.00` plus the named cause; a snapshot predating the window shows `—`. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so its row is also `—` until it upgrades and republishes. Estimates take priority under the 12-machine display cap, with omissions stated. Grok's Notes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. This is never a machine-level range. Any partial/degraded reader or nonzero model cache writes suppress that figure.
+
+`--dump-host-usage` carries the inputs (`tokens_by_day` and coverage); the rate table is bundled with mm and is not in the dump. Host totals never enter the Claude cost line, and there is no fleet sum.
+
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-08-11 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-09-10 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)). mm has no network, so a rate change is a code change.
 
 **Adding an alias or refreshing a rate.** Exact observed model id → `PRICING_FAMILY_BY_MODEL` (never a substring). Family → literal four-field card in `VENDOR_FAMILY_TIERS` (do not use `_tier`; those multipliers are Anthropic). Refresh the matching `PRICING_*_LAST_UPDATED` in the same commit. `resolve_prices` is the only "is this priced" predicate; a test fails the build if an alias points at a missing tier.
 
@@ -489,7 +513,13 @@ Use the real path from your filesystem: displayed nonprintable characters are vi
 
 **I enabled Grok, but no Grok activity appears.** Check the standing blocker
 and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture-codex-and-grok).
-Grok API-list-rate figures stay unpriced until the xAI rate table lands.
+Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache success alone does not prove that Grok reached the wire.
+
+**Why is my Grok machine always `>=`?** Grok's logs do not record per-request prompt sizes; no action resolves this. Requests reaching 200k prompt tokens pay twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost.
+
+**Why grok-4.6 rates, not grok-build-0.1?** xAI's Build overview identifies grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
+
+**An unknown model is unpriced.** Upgrading mm on the machine that renders this report may price it; republishing does not add a rate; do not estimate.
 
 **`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either.
 
@@ -608,7 +638,7 @@ Older undated blockers gain a date when this version first observes them.
 | `io_error` | A host log could not be read. | Restore read access and retry on a substantive push. |
 | `stale` | A file changed while it was being read. | Let the host finish writing and retry on a substantive push. |
 | `partial` | A final record is unfinished. | Let the host finish the record. The next push that uploads a change retries; `mm diag` shows the reader's state. |
-| `deadline` | The read exceeded its budget. | Run `mm push` interactively to warm it (up to 5 s per push), or `mm diag` to see how much is left. Warming requires a substantive push; large stores can need several. |
+| `deadline` | The read exceeded its budget. | Run an attended `mm push` that uploads a change, or `mm recapture 1d` with its [prerequisites](#grok-usage-in-fleet-retro), to warm each cold reader (about 5 s of scanning per reader, not a hard ceiling). `mm diag` shows ledger/rollout counts; large stores can need several captures. |
 
 The next push that uploads a change retries; `mm diag` shows the reader's
 state. A no-op `mm push` or `mm autopush` does not re-read usage, including
@@ -642,10 +672,13 @@ updates. Older mm ignores the additive root keys.
 `files_cached`, `files_migrated`, `files_pre_track`, `files_on_disk`, `pending`,
 `model_count`, `models`, `last_reason`, and `last_reason_since`.
 `host_usage.grok` keys are `consented`, `complete_once`, `usage_less_skipped`,
-`cache_state`, `model_count`, `models`, `last_reason`, and `last_reason_since`.
+`cache_state`, `model_count`, `models`, `last_reason`, `last_reason_since`,
+`files_cached`, and `files_on_disk`. The text line is `grok ledgers cached: N of M`;
+missing, malformed, version-mismatched or locked caches show `unknown`, not 0.
 The date is normalized UTC ISO text or null; missing old fields become null,
 and an invalid date never erases a valid blocker. Diag reads caches without
-opening host logs or needing a passphrase; Codex also counts rollout paths.
+opening host logs or needing a passphrase; Codex counts rollout paths and Grok
+counts two-level `*/*/updates.jsonl` paths under its resolved sessions root.
 `cache_state: missing` or `unreadable` leaves the blocker unknown.
 
 A `mm: notice: host token cache write failed: <ErrnoName>` means the read's
