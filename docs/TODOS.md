@@ -44,159 +44,48 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review] Record the Grok costUsdTicks census against the "Grok publishes its own billed cost" Future item
-- **Why:** That Future item's precondition was "needs its own census first". 57A ran the census on 303 turns from Grok 1.0.25. Grok's per-turn cost is exactly proportional to xAI's published grok-4.6 rates: the modal turn sits at 1.700e9 ticks per list-USD, to 4 significant figures. It doubles exactly when a prompt reaches 200k (77 turns at exactly 2.0x). Above-2x outliers are tool charges. At xAI's documented API unit (1 USD = 1e10 ticks, docs.x.ai/developers/cost-tracking), the CLI value is 0.17x list, so it is not the list-rate figure. It is probably plan billing.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Do not decode the unit. The ratio could classify each turn as base-tier or long-tier at ingest, but only through a census-calibrated constant. Revisit if xAI documents the CLI field or Grok logs per-request prompt sizes.
-
-### [plan-eng-review] Re-pin the Grok usage census from 1.0.13 to 1.0.25
-- **Why:** The 57A census found zero drift across 12 patch releases: the same four `turn_completed` key sets, the same two `usage` key sets, 185 ledgers, 312 terminal records. `GROK_USAGE_CENSUS_HOST_VERSION` still says 1.0.13.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Reader contract only (`tests/fixtures/host_sessions/grok/CONTRACT.md` + `host_usage.py:114` + the pin test). No behaviour change.
-
-### [plan-eng-review] Tripwire when a Codex request reaches OpenAI's 272K long-context tier
-- **Why:** Codex host figures render `~` on one assumption: Codex CLI's `model_context_window` (258,400 on every one of 20,955 events) is below OpenAI's ">272K input tokens → 2x input, 1.5x output for the full request" threshold. The window is user-configurable and does not travel on the wire.
-- **Hypothesis (untested):** The Codex reader sees per-request `last_token_usage.input_tokens`. It can mark the day partial when a request is at or above 272K, the same way the Grok `cache_create` tripwire works, which turns the assumption into a detected condition.
-- **Effort:** S
-- **Priority:** P3
-
-### [plan-devex-review] First-class attended usage refresh (`mm push --capture-usage`)
-- **Why:** On a converged Mac, `mm push` returns "Nothing to push" before the events tail, so host usage never refreshes. README tells users not to edit data to force it. 57A documents `mm recapture 1d` as a bridge. It works because it writes git rows, then calls `_push_core(quiet=False)`. But it needs discovered git roots, exits 4 on partial git recovery, and is documented as a git-only primitive.
-- **Effort:** M
-- **Priority:** P2
-- **Context:** Must preserve the v0.12.2 phantom-change rule (no bare disjunct on the substantive-change gate). Likely shape: write the host row first, then push, like recapture.
-
-### [plan-eng-review] Profile and shrink the Codex host-cache round trip
-- **Why:** 57A's budget probe measured the steady-state warm Codex read at 0.18-0.20 s of the 0.25 s autopush budget. The cache is 4.3 MB and is rewritten on every healthy pass. That is what starved Grok. 57A adds a 50 ms grace floor per later reader, but Codex itself is near its budget.
-- **Repro:** the temp-pytest budget probe (learning `mm-host-budget-probe-pattern`).
-- **Effort:** M
-- **Priority:** P2
-- **Context:** Track 46A killed the cache-encoding card on a 23.3 ms *load* measurement, not the full read. Profile load vs re-walk vs write first. Trigger: the Codex steady-state read exceeds 200 ms of the 250 ms autopush budget (already close).
-
-### [plan-ceo-review] Refresh Anthropic rates: Sonnet 5 standard $2/$10, Fable 5.1 cache hits 0.025x
-- **Why:** platform.claude.com pricing (read 2026-09-10) says Sonnet 5's $2/$10 is now standard; the $3/$15 increase will not occur. Fable 5.1 and Mythos 5.1 cache hits are $0.25 (0.025x). mm prices Sonnet 5 at $3/$15 and Fable 5.1 cache reads at $1.00. Both models are in the local Claude token cache, so the Claude fleet line is overstated.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** A correct fix sets the `sonnet` tier to $2/$10 AND adds `PRICING` overrides at `_tier(3, 15)` for Sonnet 4.x ids that normalize into the tier (4.6 is still $3/$15 and not retired; follow the Opus 4.1 precedent). Add a full four-field `claude-fable-5-1` card with cache_read 0.25. Make no Mythos 5.1 claim beyond the page. Update `test_token_usage.py:705`/`:897` and the "introductory" sentence in events-retro.md. Bump `PRICING_LAST_UPDATED` only after re-reading every row.
-
-### [plan-ceo-review] Cross-machine dedup of host usage by turn key
-- **Why:** Host totals can never be summed across machines, because migrated home directories duplicate history under two device ids. Deduplicating by host turn key (Grok `prompt_id`, Codex lineage) would make a fleet sum valid.
-- **Effort:** L
-- **Priority:** P3
-- **Context:** New wire content plus a new accounting schema. 58A's card already demands "a separately justified proposal".
-
-### [plan-devex-review] `mm status`: say whether the last push published each host reader
-- **Why:** For 3.5 weeks `mm status`/`mm diag` read "prior successful scan: yes" while no Grok token was ever published (0 of 5 host rows). The push already knows `token_sources`. Status could report "last push published Grok: yes/no/unknown".
-- **Effort:** S
-- **Priority:** P3
-
-### [plan-ceo-review:severity=moderate] Make the other previews write-free (56B)
-
-- **What:** Apply Track 56A's read-only setup to `mm pull --dry-run`, `mm gc --dry-run`, `mm recapture --dry-run`, `mm migrate-config --dry-run` and `mm diff`, after inventorying each command's own writes.
-- **Why:** All five promise no writes in their help or output, and all five write through the same setup helpers: probe evidence `~/.gstack/projects/kbitz-mind-meld/56a-reproductions.json` s8, s9, s11, s12, s13 (config.toml fingerprint, pull-history self-upgrade row, upgrade cache, mm-events root). `recapture --dry-run` also printed "nothing written" after writing four things (56A fixes only that wording).
-- **Hypothesis (untested):** pass 56A's knobs (`_get_config(read_only=)`, `_init_crypto_session(read_only=, pending=)`, `resolve_sources/get_sources(bootstrap=)`, nudge gate) from each preview. Pull has writes of its own that no setup knob touches: `resolveflow._find_conflict_files(config, migrate_pre_inversion=True)` (`cli.py:4819`) and the `action="excluded"` pull-history loop gated only on `not quiet` (`cli.py:4882-4894`); it also resolves through `get_sources(config)` (`:4829`) and `_build_exclude_map(config)` whose fallback calls `get_sources` (`:627`, `:4856`). Recapture checks `available` for mm-events (`:7440`), so a non-bootstrapped missing root must not read as "disabled on this Mac". Reuse 56A's audit-hook contract fixture per command, with deep fixtures (a peer, excluded paths, a pre-v0.9.2 conflict file). Add the registry ratchet (every command with a `dry_run` parameter is in the contract list or explicitly exempted); `mm diff` has no `dry_run` parameter and needs a manual entry.
-- **Effort:** L
-- **Priority:** P2
-- **Context:** filed by Track 56A /autoplan, 2026-09-10 (branch `kbitz/push-dry-run-no-mutation`). The first draft of 56A widened to all six previews; both CEO voices rejected that as under-inventoried (the Claude voice found the pull writes above). Plan: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-10-track-56a.md`.
-
-### [plan-eng-review:severity=moderate] mm-events bootstrap masks the missing-published-root refusal on the real push (E4)
-
-- **What:** `config._bootstrap_mm_events_path` recreates a deleted mm-events root before `_refuse_unavailable_selected_sources` can see it, so a real `mm push` publishes the deletion of every event file this Mac previously published, bypassing `docs/invariants/sync.md:20` ("A missing previously populated selected root refuses the whole push").
-- **Why:** Probe s2b (`56a-reproductions.json`): root deleted after a real push → the next push tombstones the published event file. Pull never removes local bytes for a tombstone (`cli.py:843-844`), so other Macs keep their copies, but this Mac cannot restore them through `mm pull` until `TOMBSTONE_TTL_DAYS` (30) expires. The common form is worse to notice: every non-strict `get_sources` (`mm status`, autopull) and every autopush recreates the root, so the usual state is "root present, `events/` gone", which previews and publishes as a plain `- N deleted`.
-- **Hypothesis (untested):** move the bootstrap after the prior-manifest check in `_push_core` (56A's `resolve_sources(bootstrap=)` knob is the seam): create the root only when the filtered prior manifest lists no mm-events files; otherwise refuse with a remedy that restores from peers or a backup. Decide separately whether an emptied `events/` under an existing root should refuse too. 56A's preview already refuses the root-missing case with a preview-worded message; update that message when the real push changes.
-- **Effort:** M
-- **Priority:** P2
-- **Context:** filed by Track 56A /autoplan, 2026-09-10. Both CEO voices rejected mirroring this behaviour in the preview through an `assume_empty` option on the deletion proof; the Claude eng voice identified the common "`events/` gone" form.
-
-### [plan-ceo-review:severity=moderate] Inspection commands repair shared storage (E7)
-
-- **What:** Every crypto-using command, including `mm status` and `mm diag`, runs `crypto.fetch_crypto_init`, which overwrites the canonical `mm-crypto-init` with the lex-smallest-salt candidate and deletes every regex-matching conflict copy (unreadable ones included) BEFORE `_init_crypto_session`'s drift check and passphrase verification (`crypto.py:389-408`, `cli.py:433-462`, `storage/local.py:243-245`).
-- **Why:** A conflict copy with a different salt is a different encryption lineage; deleting it before anything is verified is irreversible and fleet-wide, and a user inspecting a broken sync reasonably expects `mm status` to preserve evidence. The same inspection commands also persist a missing fingerprint and create the mm-events root.
-- **Hypothesis (untested):** decide whether inspection commands may repair at all; if they may, order the canonicalization after the drift check and passphrase verification, and have the drift error mention pending conflict copies (it currently says only "Re-run 'mm init'"). 56A adds `fetch_crypto_init(repair=False)` and a `CryptoInitRepairPlan`, which are the seams.
-- **Effort:** M
-- **Priority:** P2
-- **Context:** filed by Track 56A /autoplan, 2026-09-10. Raised by Codex CEO #3/#4 and Claude CEO #5, reinforced by the Claude DX voice (H1) and both eng voices.
-
-### [plan-ceo-review:severity=minor] `mm status` fetches over the network despite "reads cache only" (E3b)
-
-- **What:** `mm status` calls `upgrade.check_for_upgrade`, which makes an HTTP request when the cache is stale and rewrites `upgrade-state.json` on every call; `cli.py:5329` and `docs/invariants/auto-upgrade.md` Seam 3 say it "reads cache only, no network call".
-- **Why:** Probe s10 (`56a-reproductions.json`): one fetch and a cache rewrite from `mm status`. 56A corrects the comment and the invariant line but leaves the behaviour.
-- **Hypothesis (untested):** give status a cache-only view through `lockedjson.locked_json_snapshot`; if `check_for_upgrade` itself moves to a snapshot read with an exclusive R/M/W only for fetch or nudge, re-check freshness under the lock (two processes could otherwise both fetch) and weigh Track 10A's measured always-write design recorded in `lockedjson.py`.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by Track 56A /autoplan, 2026-09-10 (Claude CEO voice #4 proposed the upgrade.py refactor; deferred as out of the preview contract).
-
-### [plan-eng-review:severity=moderate] Re-read standing host-usage blockers on an interactive no-op push (T3-B)
-
-- **What:** An interactive, non-dry-run `mm push` that finds nothing to upload still re-reads any consented host reader whose cache carries a standing `last_reason`, rewrites that cache, prints the outcome, and writes no event row.
-- **Why:** After `pipx upgrade mind-meld` a quiet Mac's `mm push` prints `Nothing to push` and returns before the events tail (`cli.py:3775-3791`), so a blocker recorded by Track 54A survives a successful upgrade until some synced file changes. Track 54A ships the honest wording instead ("the next push that uploads a change retries").
-- **Hypothesis (untested):** design requirements from the 54A eng voices: a root-only blocker probe (`locked_json_snapshot` + `_cached_last_reason`, never `codex_usage_diag`'s rglob); a host-only capture helper extracted from `_capture_event_snapshots` (shared warm/retry gate, sibling isolation); preserved exclusions (dry-run, unresolved `mm-events`, consent, autopush); no event row, no cursor advance, no publication; the printed outcome must say totals were not published; pins for every excluded case; `test_no_content_push_touches_no_host_reader` (`tests/test_integration.py`) becomes blocker-gated with a dry-run sibling. The "zero work when there is nothing to say" invariant in `docs/invariants/events-retro.md` gains exactly this one exception. An orchestration-owned per-reader capture receipt (covering `unavailable` and pre-invocation deadline, which a reader cache can never record) is the alternative design.
-- **Trigger:** the first blocker that survives a `pipx upgrade` on a quiet Mac.
-- **Effort:** M
-- **Priority:** P2
-- **Context:** filed by Track 54A /autoplan, 2026-09-09. Raised as HIGH by the Claude DX voice; both eng voices and the Codex DX voice judged it a new orchestration path and recommended deferring; the user chose the honest-wording option at the gate.
-
-### [plan-eng-review:severity=minor] Autopush warm-read headroom and the healthy-pass rewrite on large Codex corpora
-
-- **What:** Watch item: a warm bounded Codex read must fit the 250 ms autopush budget, and every healthy pass rewrites the whole cache.
-- **Why:** Measured 2026-09-09 on device 889e42c0: a warm read of 752 rollouts completes in ~186 ms (about 0.25 ms per cache hit: two 4 KB digests plus stats), so headroom runs out near 900-1000 rollouts; `locked_json_rmw` writes on every normal exit, so a healthy pass rewrites the 4 MB cache on each push (23 ms measured at v0.14.1). Past the budget, autopush never publishes Codex and Track 54A's diagnostics show a standing `deadline` with a first-observed date on a converged store.
-- **Repro:** copy `~/.config/mind-meld/host-tokens.json` to a scratch path, point `host_usage.CACHE_PATH` at the copy, call `read_codex_usage(Path.home() / ".codex" / "sessions", deadline=time.monotonic() + 0.25)`; evidence in `~/.gstack/projects/kbitz-mind-meld/54a-reproductions.json`.
-- **Hypothesis (untested):** newest-first walk so cold files are reached first; the encoding trigger (25 MB / 100 ms) in `docs/roadmap-future.md` is the other axis. Skipping the fingerprint on a metadata match is NOT a fix: `test_same_size_same_mtime_rewrite_replaces_terminal_total` pins it.
-- **Trigger:** warm pass above 200 ms, or corpus above ~900 rollouts.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** filed by Track 54A /autoplan, 2026-09-09. The Claude CEO voice's walk-order reframing was rejected on this same measurement; the corpus is not monotonic (Codex prunes its own sessions).
-
-### [plan-eng-review:severity=minor] Add a `[retro] codex_host_usage` knob so usage reading can stop without disabling the Codex source
-
-- **What:** `[retro] codex_host_usage = false`, mirroring Grok's `grok_host_usage` bit, ANDed with the enabled `codex` source on the Codex side; Grok's OR is unchanged.
-- **Why:** The only way to silence a failing Codex reader is `mm disable-source codex`, which also stops syncing `~/.codex/AGENTS.md`, `skills/`, `plugins/` and skill-link maintenance. Track 54A documents that consequence in README; the knob is the real escape hatch.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** `HOST_READER_SOURCE_GATE` and `_default_host_readers` in `events_tail.py`; `mm diag` consent display; README. Raised independently by both DX voices of the Track 54A /autoplan, 2026-09-09.
-
-### [plan-eng-review:severity=minor] Complete the deferred plain-stderr display audit beyond direct safe_str calls
-
-- **What:** Extend the existing plain-stderr follow-up's inventory to direct strip_terminal_escapes consumers, indirect skill_link._reason consumers, and messages Rich-escaped during construction.
-- **Why:** The twelve-site census counts direct safe_str calls, not all plain-output paths. The shared ESC/C1 fix protects these other paths too, but a later single-line/display migration would remain incomplete if it only revisits the recorded nine sites. A downstream helper swap also cannot remove Rich backslashes already added upstream.
-- **Context:** Verified against ba53612 during the Track 52A /autoplan review, 2026-09-07. Additional direct-strip paths are config.py:_bootstrap_mm_events_path (stderr at 792), events.py:walk_git_projects (whole-walk failure at 1002), and cli.py:_print_auto_typed_error (8085). skill_link.py:_reason constructs a safe_str message at 420–422 that several plain stderr callers reuse. errors.py:os_error_cause and snapshot_refusal escape fields at construction; the latter reaches plain typed-error output. Trace all consumers before changing these builders, since Rich sinks also consume them.
-- **Repro:** snapshot_refusal(problem="failed", next_action="Retry.", rel_path="[red]file[/red]") currently contains literal backslashes before the brackets; _print_auto_typed_error prints the constructed message to plain stderr. Capture through StringIO and assert on escaped representations. Separately trace direct strip and _reason consumers rather than relying on a same-line safe_str grep.
-- **Scope:** Fold this inventory into the existing nine-site follow-up in docs/roadmap-future.md when it is taken up. Decide the legitimate multiline contract for typed errors before migrating them. Preserve raw path/model identities and apply Rich escaping at the actual Rich sink. This is a display audit, not a new blanket control policy or an AST enforcement project.
-- **Tradeoff:** Complete sink-specific migration avoids misleading names and duplicate escaping; tracing mixed Rich/plain consumers is required to avoid breaking existing formatting.
-- **Effort:** S (human ~2h / agent ~20min)
-- **Priority:** P3
-- **Depends on:** Shared sanitizer hardening; retain the existing follow-up's scheduling trigger rather than adding these runtime files to Track 52A.
-
-### [plan-eng-review:severity=minor] Carry a sanitized failure reason on pull-history `failed` rows
-
-- **What:** Add an optional `detail` field to `pullhistory.append` for `failed` rows and render it in `mm log --format table`, so `mm log --verb pull --action failed` explains a failure without a verbose re-run.
-- **Why:** After Track 53A every per-file apply failure prints one actionable `mm: warning:` line to stderr at the moment it happens, but the forensic log still records only `failed`. A hook's stderr scrolls away; the history row is what survives.
-- **Context:** Filed 2026-09-08 by the Track 53A /autoplan review (CEO Codex voice, Medium; DX Claude voice). The boundary has the sanitized cause in hand (`_warn_apply_failure` builds it), so the plumbing is one keyword on `append` plus the table renderer. The 2026-09-05 drain deferred the sibling `sidecar=` parameter on the same row shape; take both together. Use `safe_terminal_str` for the stored text; treat the row as display text, never as a path.
-- **Repro:** cause a parent-file collision (regular file where a peer publishes a folder), run `mm autopull`, then `mm log --verb pull --action failed --limit 5`: the row names the file but not the cause.
-- **Effort:** S (human ~2h / agent ~15min)
-- **Priority:** P3
-- **Depends on:** Track 53A (the formatter that produces the reason).
-
-### [plan-eng-review:severity=minor] Decide whether interactive `mm pull` should exit non-zero when files failed to apply
-
-- **What:** Give interactive `mm pull` a dedicated non-zero exit (a new code 4, distinct from 3 for the conflict-mode preflight) when `total_failed > 0`; `mm autopull` stays 0 for hook continuity. Update the `pull` docstring exit table, README, and the exit-code tests.
-- **Why:** After Track 53A a per-file apply failure inside a batch is contained, so the reproduced parent-file collision moves from a crash with exit 1 to a green exit 0. Every other per-file failure class (decrypt, blob, write) has always exited 0, so today a script cannot tell a partial pull from a complete one; `--conflict-mode fail` gives CI a signal for conflicts but none for apply failures.
-- **Context:** Raised independently by both DX outside voices of the Track 53A /autoplan on 2026-09-08 (Claude proposed code 4; Codex preferred reusing 1). Presented as a User Challenge at the final gate; the user kept the documented exit-0 contract, so this is filed rather than built. `pull()` at `cli.py:3835` discards `_pull_core`'s result, so the change is one branch on `result.total_failed` plus the docstring at `cli.py:3811` and a README row in the Snapshot-failures / pull-failures table.
-- **Repro:** cause a parent-file collision, run `mm pull`, `echo $?` prints 0 while the summary says `Pull incomplete:`.
-- **Effort:** S (human ~1h / agent ~10min)
-- **Priority:** P3
-- **Depends on:** Track 53A (the `Pull incomplete:` summary and per-file warnings it introduces).
-
-### [plan-ceo-review:severity=minor] `mm diag` lists repo-local `GIT_*` variables present in mm's own environment
-- **Description:** After the git-environment scrub (Track 55A, 0.14.9), mm's four git reads ignore every name `git rev-parse --local-env-vars` prints, so a `GIT_CONFIG_COUNT`/`git -c`-injected `safe.directory=*` no longer applies to them. A repository owned by another user then fails with `git_error` and shows as `git walk dropped 1 repositories this push`; `mm recapture --dry-run` names the repository and the reason, but nothing says that the environment held variables mm ignored.
-- **Hypothesis (untested):** a local-only `discovery.scrubbed_git_env: [names]` in `mm diag --json` plus one text line, never on the wire. Nesting under `discovery` avoids the `_DIAG_JSON_TOP_LEVEL` pin, but nested fields get their own README pin by the `host_skill_discovery` precedent.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Deferred by Track 55A /autoplan (2026-09-09, branch `kbitz/scrub-git-subprocess-env`) as expansion E6: it explains a correct state rather than a degraded one, and the in-product remedy path (dry-run listing, partial-recapture advice, README anchor) closes the diagnostic gap without it. The Claude CEO voice wanted the minimal version shipped; the Codex DX voice agreed it could stay deferred because listing names alone does not close the gap. Re-open on the first real confusion report. Plan file: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-09-track-55a.md`.
-
 ## Drain records
+
+### Roadmap drain — 2026-09-14
+
+19 inbox items from the Track 52A–57A /autoplan reviews: **9 placed, 10 deferred, 0 discharged, 0 killed**. Authored-false rate: 0 / (9 + 0) = 0%. Verification baseline: `a7d9bca` (v0.14.11). Ground truth closed six Tracks first: 52A (v0.14.6 `bb39230`), 53A (v0.14.7 `fe21a57`), 54A (v0.14.8 `735ed02`), 55A (v0.14.9 `d85e504`), 56A (v0.14.10 `dbc926e`), 57A (v0.14.11 `a7d9bca`); Groups 52–57 are appended to `docs/roadmap-shipped.md`. The pricing page was re-read on 2026-09-14 before item 6 was placed.
+
+| Inbox item | Title | Disposition / destination | Evidence or reason |
+|---|---|---|---|
+| 1 | Record the Grok costUsdTicks census against the "Grok publishes its own billed cost" Future item | defer → Future bullet edited in place | The bullet still said "needs its own census first"; the 303-turn census is now recorded on it. |
+| 2 | Re-pin the Grok usage census from 1.0.13 to 1.0.25 | place → Track 58A | `GROK_USAGE_CENSUS_HOST_VERSION = "1.0.13"` in host_usage.py; the contract header agrees. |
+| 3 | Tripwire when a Codex request reaches OpenAI's 272K long-context tier | defer → docs/roadmap-future.md | Forward defence; `model_context_window` is not read by host_usage.py (0 hits). |
+| 4 | First-class attended usage refresh (`mm push --capture-usage`) | place → Track 61A | `_push_core` returns before the events tail on "Nothing to push"; README sends users to `mm recapture 1d`. |
+| 5 | Profile and shrink the Codex host-cache round trip | defer → merged into the retitled "Warm Codex read headroom" bullet | Trigger not yet fired (0.18–0.20 s of 0.25 s); `read_codex_usage` commits `locked.data` on every complete pass. |
+| 6 | Refresh Anthropic rates: Sonnet 5 $2/$10, Fable 5.1 cache hits 0.025x | place → Track 58A | `sonnet` tier is `_tier(3.0, 15.0)`; `fable` tier derives a $1.00 cache read; the pricing page confirms both claims and adds that Fable 5 / Mythos 5 keep 0.1x. |
+| 7 | Cross-machine dedup of host usage by turn key | defer → docs/roadmap-future.md | New wire content plus an accounting schema; needs its own proposal. |
+| 8 | `mm status`: say whether the last push published each host reader | place → Track 61A | status prints "grok prior successful scan"; nothing reads a row's `token_sources` back. |
+| 9 | Make the other previews write-free (56B) | place → Track 62A | Five commands call `_get_config()` / `_init_crypto_session` with the defaults; pull's conflict migration and excluded rows have no knob. |
+| 10 | mm-events bootstrap masks the missing-published-root refusal on the real push (E4) | place → Track 59A | `resolve_sources(..., bootstrap=not dry_run)` precedes `_refuse_unavailable_selected_sources` in `_push_core`; `get_sources` defaults `bootstrap=True`. |
+| 11 | Inspection commands repair shared storage (E7) | place → Track 60A | `status` → `_init_crypto_session` default `read_only=False`; `diag` and init's probe → `fetch_crypto_init(backend)` default `repair=True`; deletion precedes `verify_passphrase`. |
+| 12 | `mm status` fetches over the network despite "reads cache only" (E3b) | place → Track 60A | `status` calls `upgrade.check_for_upgrade(config)`, which write-throughs via `locked_json_rmw`. |
+| 13 | Re-read standing host-usage blockers on an interactive no-op push (T3-B) | defer → docs/roadmap-future.md | Trigger unchanged; Track 61A gives the attended path. |
+| 14 | Autopush warm-read headroom and the healthy-pass rewrite on large Codex corpora | defer → merged into the retitled "Warm Codex read headroom" bullet | Same measurement as item 5; one bullet, one trigger. |
+| 15 | Add a `[retro] codex_host_usage` knob | defer → docs/roadmap-future.md | No `codex_host_usage` in config.py; no user need demonstrated. |
+| 16 | Complete the deferred plain-stderr display audit beyond direct safe_str calls | defer → merged into the plain-stderr bullet | The item's own instruction; the builders it names exist. The bullet's "55A ships" trigger fired 2026-09-09 and it stays deferred as display quality. |
+| 17 | Carry a sanitized failure reason on pull-history `failed` rows | defer → docs/roadmap-future.md | `pullhistory.append` has `sidecar=` and no `detail=`. |
+| 18 | Decide whether interactive `mm pull` should exit non-zero when files failed to apply | defer → docs/roadmap-future.md | User kept exit 0 at the 53A gate; `pull()` still exits 0 with `Pull incomplete:`. |
+| 19 | `mm diag` lists repo-local `GIT_*` variables present in mm's own environment | defer → docs/roadmap-future.md | No `scrubbed_git_env` in cli.py (0 hits); deferred by the 55A /autoplan as E6. |
+
+**Former active plan:** IDs below refer to the 2026-09-06 plan. Six of its seven Tracks shipped; the survivor kept its number and absorbed the provenance refresh by user decision (D1 = A, "5 PRs"), so one PR closes Phase 3. The audit's caps were raised for this repo (`roadmap_max_files_per_track=16`, `roadmap_max_session_weight=6`, via gstack-extend `bin/config`) because release-bearing cards here declare 9–14 files and shipped Tracks routinely land 10x their carded size as one PR (53A: 1,790 insertions on a weight-4 card).
+
+| 2026-09-06 ID | Title | 2026-09-14 disposition / ID |
+|---|---|---|
+| 52A | Enforce a no-control postcondition in the shared sanitizers | shipped as 52A (v0.14.6) |
+| 53A | Contain apply exceptions without losing completed-file bookkeeping | shipped as 53A (v0.14.7) |
+| 54A | Report failed Codex capture and remove obsolete reader helpers | shipped as 54A (v0.14.8) |
+| 55A | Scrub the git environment for mm's git subprocesses | shipped as 55A (v0.14.9) |
+| 56A | Make push dry-run setup honor the no-mutation contract | shipped as 56A (v0.14.10) |
+| 57A | Price verified Grok usage | shipped as 57A (v0.14.11) |
+| 58A | Make model usage easier to read without changing what totals mean | 58A, retitled "Refresh verified rates, re-pin the Grok census, and make model usage easier to read" (premises re-verified; v0.14.11's Grok `>=` rendering added to the example) |
+
+New Tracks: 59A (mm-events root ownership, E4), 60A (inspection without repair, E7 + E3b), 61A (attended host-usage refresh), 62A (write-free previews, 56B). Future: 79 → 86 (three bullets edited in place, seven appended). Shipped history is append-only. Not acted on: the audit's archive advisory for `docs/designs/sync-gstack-context.md` (a live design doc cited from AGENTS.md).
+
 
 ### Roadmap drain — 2026-09-06
 
@@ -452,4 +341,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-06 by /roadmap; the inbox is empty. Prior drain records are historical._
+_Last updated 2026-09-14 by /roadmap; the inbox is empty. Prior drain records are historical._
