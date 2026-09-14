@@ -470,6 +470,8 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
         assert vendor in readme
         assert date in readme
         assert url in readme
+    invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
+    assert token_usage.PRICING_LAST_UPDATED in invariant
     assert "mm recapture 1d" in readme
     assert "exits 1 on zero roots and 4 on partial git recovery" in readme
 
@@ -523,7 +525,7 @@ def test_every_extracted_module_has_a_routing_row() -> None:
 _INVARIANT_ROW = re.compile(r"^- `src/mind_meld/(?P<file>[\w/]+\.py)` — (?P<rest>.+)$", re.M)
 
 
-_REMOVED_EVENT_HELPERS = ("_last_mm_push_ts", "_run_events_recapture")
+_REMOVED_EVENT_HELPERS = ("_last_mm_push_ts", "_run_events_recapture", "_read_events")
 
 
 def _removed_helper_citations(paths) -> list[str]:
@@ -785,3 +787,60 @@ def test_release_yml_latest_advance_compares_tag_to_head() -> None:
     assert 'git rev-parse "$tag^{commit}"' in body
     assert 'if [ "$tag_commit" != "$head_commit" ]' in body
     assert "::warning::Skipping latest-advance" in body
+
+
+def test_usage_scope_sentences_are_pinned_in_decoder_and_render():
+    from mind_meld.skills.retro_fleet import aggregator as agg
+    from tests.test_retro_usage_presentation import presentation_data
+
+    skill = (ROOT / "src/mind_meld/skills/retro_fleet/SKILL.md").read_text()
+    out = agg.format_retro(presentation_data())
+    for sentence in (
+        "Source: Claude Code session logs; sum of per-machine inventories, not deduplicated "
+        "(a migrated home directory can be counted twice).",
+        "Source: latest host-usage snapshots; per machine, never summed. "
+        "Host logs can lose old records; observed endpoints do not prove continuous coverage.",
+    ):
+        assert sentence in skill and sentence in out
+    assert out.index("## Claude Code activity") < out.index("## Agent activity")
+    assert out.index("## Agent activity") < out.index("## API list-rate equivalent")
+    assert "## Rates and markers" not in out
+    assert (
+        "Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates." in out
+    )
+
+
+def test_notes_decoder_compatibility_fixtures_both_directions():
+    from mind_meld.skills.retro_fleet import aggregator as agg
+    from tests.test_retro_usage_presentation import GOLDENS, presentation_data
+
+    old_decoder = (GOLDENS / "decoder-before.md").read_text()
+    old_output = (GOLDENS / "output-before.md").read_text()
+    new_decoder = (
+        (ROOT / "src/mind_meld/skills/retro_fleet/SKILL.md")
+        .read_text()
+        .split("## Notes section in aggregator output", 1)[1]
+        .split("## Trends vs prior", 1)[0]
+    )
+    new_output = agg.format_retro(presentation_data("degraded"), name="Example")
+    # The decoder is prose: preserve every old instruction, not a mock parser
+    # invented for the test. A new decoder must still understand old output.
+    assert all(line in new_decoder for line in old_decoder.splitlines() if line.strip())
+    old_notes = old_output.split("## Notes\n", 1)[1].splitlines()
+    new_notes = new_output.split("## Notes\n", 1)[1].splitlines()
+    assert all(line in new_notes for line in old_notes if line.strip())
+    # An old decoder receives new distinct stems through its existing unknown-
+    # line rule. No new meaning is hidden under an old stem.
+    additions = [line for line in new_notes if line not in old_notes and line.strip()]
+    assert len(additions) == 2
+    assert all(
+        line.startswith(
+            (
+                "- Claude Code API list-rate equivalent is a floor",
+                "- API list-rate equivalent uses floor rates",
+            )
+        )
+        for line in additions
+    )
+    for decoder in (old_decoder, new_decoder):
+        assert "reported verbatim" in decoder and "never interpreted" in decoder

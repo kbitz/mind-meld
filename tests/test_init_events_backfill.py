@@ -26,7 +26,7 @@ from mind_meld import identity as _mm_identity
 from mind_meld import token_usage as _mm_token_usage
 
 
-def _read_events(events_file: Path) -> list[dict]:
+def _read_event_rows(events_file: Path) -> list[dict]:
     return [json.loads(ln) for ln in events_file.read_text().splitlines() if ln.strip()]
 
 
@@ -101,7 +101,7 @@ class TestRunEventsBackfill:
 
         files = sorted((events_root / "events").glob("*.jsonl"))
         assert len(files) == 1, "exactly one events file expected"
-        rows = _read_events(files[0])
+        rows = _read_event_rows(files[0])
 
         types = [r["type"] for r in rows]
         assert "git-snapshot" in types
@@ -167,7 +167,7 @@ class TestRunEventsBackfill:
 
         files = sorted((events_root / "events").glob("*.jsonl"))
         assert len(files) == 1
-        rows = _read_events(files[0])
+        rows = _read_event_rows(files[0])
         types = [r["type"] for r in rows]
         assert "sessions-snapshot" not in types
         # walk_git_projects always returns one snapshot (possibly with empty
@@ -305,7 +305,7 @@ class TestBackfillHostSnapshot:
 
         events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
 
-        rows = _read_events(sorted((events_root / "events").glob("*.jsonl"))[0])
+        rows = _read_event_rows(sorted((events_root / "events").glob("*.jsonl"))[0])
         assert [r["type"] for r in rows] == [
             "git-snapshot",
             "sessions-snapshot",
@@ -325,7 +325,7 @@ class TestBackfillHostSnapshot:
 
         events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
 
-        rows = _read_events(sorted((events_root / "events").glob("*.jsonl"))[0])
+        rows = _read_event_rows(sorted((events_root / "events").glob("*.jsonl"))[0])
         types = [r["type"] for r in rows]
         assert types == ["git-snapshot", "host-usage-snapshot"]
         assert rows[-1]["hosts"] == {}, "a completed empty scan is a fact, not a failure"
@@ -346,7 +346,7 @@ class TestBackfillHostSnapshot:
             "dev-a",
         )
 
-        rows = _read_events(sorted((events_root / "events").glob("*.jsonl"))[0])
+        rows = _read_event_rows(sorted((events_root / "events").glob("*.jsonl"))[0])
         assert [r["type"] for r in rows] == ["git-snapshot"]
         err = capsys.readouterr().err
         assert err.count("host-usage snapshot skipped") == 1

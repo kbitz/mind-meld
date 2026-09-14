@@ -570,16 +570,21 @@ does not).
   `_aggregate_model_families`, taking down the whole render.
 - **Body, `## Agent activity`** (`_render_agent_inventory`): one row per
   `(machine, model family)`, never per `(machine, agent)`. Columns are
-  `Tokens (last 90 active days)` — the writer caps the payload at
-  `MAX_BY_DAY_DAYS`, so "lifetime" is false past 90 active days (verified: 91 in,
-  90 kept, oldest silently dropped) — and `Tokens in this window`. A row for
-  every known machine, including `no snapshot`. An accepted-but-idle machine
-  renders **`0`, not `—`**: zero is known data, `—` means unavailable. Rows are
+  `Machine / Family / As of UTC / State / Retained / Window`, fitting 80
+  columns. `Retained` means what the host logs still hold, at most
+  `MAX_BY_DAY_DAYS` active UTC days; host deletion can reduce it. Observation
+  timestamps, observed day ranges and coverage are per machine below the table;
+  endpoints do not prove continuous coverage. All four fields (input, cache
+  write, cache read, output) contribute. A row for every known machine,
+  including `missing` (no snapshot). An accepted-but-idle current machine
+  renders **`0`, not `—`**; a stale window is **`—`**, including an empty-family
+  row. Retained counters remain visible for disjoint stale snapshots. Rows are
   capped (`MAX_AGENT_INVENTORY_MACHINES`) because the registry is loaded
   wholesale and uncapped. Which readers ran is reported per machine, below the
   table, never per row.
-- **State strings are display strings**, never raw fields: `current` /
-  `current, no agent activity observed` / `last seen before window` /
+- **State strings are display strings**, never raw fields. Compact cells are
+  `current` / `idle` / `stale` / `ahead` / `missing`; the adjacent legend expands
+  them to `current, no agent activity observed` / `last seen before window` /
   `clock ahead (<=24h)` / `no snapshot`. The skew band really is ≤24h and the
   boundary itself is accepted (the rejection test is `>`).
 - **Absence is never silent.** `_agent_coverage_notes` names the cause with a
@@ -1501,11 +1506,11 @@ The retro-fleet output has two artifacts with different production paths:
 
 `## Trends vs prior <N>d (A → B)` is a four-row `prior | current` table computed from the already-in-memory synced events corpus. It is fleet-deterministic for the first time: two machines that have pushed-and-pulled produce the same trends section, because the baseline is a function of the corpus, the window, and `now`, not of this machine's command history. The v0.12.0 machine-local snapshot cache (`~/.local/share/mind-meld/retros/`) is gone. Mixed-fleet window: snapshots were never synced, so an upgraded Mac and an old one produce different trend sections from the same corpus until both upgrade — that is the pre-existing non-determinism being fixed, not a new bug.
 
-**Architecture.** `_aggregate_git_period_pair(events, prior_start, boundary, until, author_emails) -> (PriorPeriod, PriorPeriod)`, not `aggregate(compare_prior=True)`. A union scan first rejects out-of-pair occurrences, then dedups `(canonical remote, sha)` GLOBALLY across the eligible copies before updating either bucket. An out-of-window first copy must never consume the key and hide a valid in-window copy; eligible duplicates still cannot enter both periods. Do NOT call `aggregate()` twice: `get_known_devices()` shells out inside it. `_read_events` is unwindowed, so the prior period is a second pass over the same in-memory list. Pinned by `test_aggregate_reads_events_dir_once_and_shells_out_once` and `test_out_of_window_duplicate_does_not_hide_current_commit`.
+**Architecture.** `_aggregate_git_period_pair(events, prior_start, boundary, until, author_emails) -> (PriorPeriod, PriorPeriod)`, not `aggregate(compare_prior=True)`. A union scan first rejects out-of-pair occurrences, then dedups `(canonical remote, sha)` GLOBALLY across the eligible copies before updating either bucket. An out-of-window first copy must never consume the key and hide a valid in-window copy; eligible duplicates still cannot enter both periods. Do NOT call `aggregate()` twice: `get_known_devices()` shells out inside it. `aggregate` materializes `_list_event_files` / `_iter_jsonl` once, unwindowed, so the prior period is a second pass over the same in-memory list. Pinned by `test_aggregate_reads_events_dir_once_and_shells_out_once` and `test_out_of_window_duplicate_does_not_hide_current_commit`.
 
 **Half-open periods.** Shared predicates are inclusive on both ends (`since <= x <= until`). A naive adjacent prior period double-counts the boundary. Fix at the call site with `prior_until = since - timedelta(microseconds=1)`. Do NOT edit the shared predicates — that silently moves the current window's numbers. Pinned by `test_commit_at_exactly_since_counts_once`.
 
-**Coverage floor, not arithmetic.** `coverage_floor = min(YYYY-MM-DD parsed from the event filenames `_read_events` already globs)`. Gate: `coverage_floor <= prior_start.date()`. Filename date is push day, so a `git-snapshot` row can carry commits older than its file — the floor is a LOWER BOUND on coverage and fails safe (it can refuse a comparison that would have been fine, never the reverse). Do not "optimize" this into using commit dates or file mtimes. The filename proof is valid only when every globbed event file parses cleanly: any skipped event record makes Trends unavailable, because an unreadable prior record must never render as a known zero. `2 * window_days > EVENTS_RETENTION_DAYS` is off-by-one (`age_days >= 90`) and measures a max-age policy that only runs from the manual `mm gc` command; it survives only as a fast path for unavailable-message wording. Pinned by `test_prior_window_before_coverage_floor_is_unavailable`, `test_unreadable_event_records_make_trends_unavailable`, and `test_45d_window_refused_at_retention_boundary`.
+**Coverage floor, not arithmetic.** `coverage_floor = min(YYYY-MM-DD parsed from the event filenames `_list_event_files` already globs)`. Gate: `coverage_floor <= prior_start.date()`. Filename date is push day, so a `git-snapshot` row can carry commits older than its file — the floor is a LOWER BOUND on coverage and fails safe (it can refuse a comparison that would have been fine, never the reverse). Do not "optimize" this into using commit dates or file mtimes. The filename proof is valid only when every globbed event file parses cleanly: any skipped event record makes Trends unavailable, because an unreadable prior record must never render as a known zero. `2 * window_days > EVENTS_RETENTION_DAYS` is off-by-one (`age_days >= 90`) and measures a max-age policy that only runs from the manual `mm gc` command; it survives only as a fast path for unavailable-message wording. Pinned by `test_prior_window_before_coverage_floor_is_unavailable`, `test_unreadable_event_records_make_trends_unavailable`, and `test_45d_window_refused_at_retention_boundary`.
 
 **Row set.** `commits`, `additions`, `deletions`, `active_days` — four genuine flows windowed on the commit's own date. Trends use UTC day keys and UTC period labels, unlike the intentionally local streak and weekly views, so the table remains fleet-deterministic across timezones. Dropped, recorded here so nobody re-adds one:
 
@@ -1963,17 +1968,21 @@ models to `PRICING` unless they actually show up in fleet data. Pinned by
 `test_retired_model_prices_at_current_family_tier`.
 
 **`PRICING` is an OVERRIDE table.** It shipped empty at v0.12.13's first
-draft; since that release it carries the two Opus 4.0/4.1 rows whose
-rates permanently depart from the modern Opus tier (`$15/$75` vs
-`$5/$25`). Every *current* Claude model still prices at its family
-tier. A per-model entry that *duplicates* its family recreates the
+draft. After Track 58A it carries Opus 4/4.0/4.1, Sonnet 4/4.0/4.5/4.6,
+and Fable/Mythos 5.1 cards
+whose rates differ from the family fallback. Date-suffix normalization makes
+Opus/Sonnet `-4` reachable; the published `-4-0` aliases remain reachable too.
+A per-model entry that *duplicates* its family recreates the
 multi-site drift this release removed: an Opus rate change would need N
 identical edits plus the tier, and missing one would silently price
 some models at the old rate. Add an entry ONLY when a model permanently
 departs from its tier; `test_pricing_holds_no_redundant_entries` fails
-the build if an entry duplicates its family. (Claude Sonnet 5's
-introductory `$2/$10` through 2026-08-31 is *not* such a case — mm
-reports list price.)
+the build if an entry duplicates its family. Sonnet 5's `$2/$10` is now
+standard pricing, verified 2026-09-14;
+the scheduled `$3/$15` increase was cancelled. Sonnet 4.x retains `$3/$15`
+overrides. Fable/Mythos 5.1 uses a 0.025x cache read ($0.25/MTok), while
+5.0's family tiers remain at 0.1x ($1/MTok), preserving the conservative
+error direction for a future unverified id.
 
 Host model ids (Track 35A) do not go through `model_family`. They resolve
 via the curated alias registry `PRICING_FAMILY_BY_MODEL` (exact-key,
@@ -2007,12 +2016,19 @@ bucket is still `>=` and must never claim "at most $0". Missing, stale or
 legacy-counter snapshots retain their `—` paths. No in-window Grok tokens
 means no inherent cause. Unpriced models name the rendering-Mac remedy:
 upgrading mm there may add a rate; republishing cannot; do not estimate.
-At-most figures round upward to cents so display rounding cannot understate
-the bound; the machine cell's existing estimate formatter is unchanged.
+At-most figures round upward so display rounding cannot understate the bound; `_format_usd(bound=...)` rounds floors down, ceilings up and estimates
+to nearest, including on both sides of the $100 precision transition.
 
-**Evidence, 2026-09-10.** Grok 1.0.25: 185 ledgers, 312 terminal records,
-308 with usage, one model id (`grok-4.6-build`), zero nonzero cache-write
-counters, zero shape drift against the 1.0.13 contract (pin unchanged).
+**Evidence, 2026-09-14.** Installed Grok 1.0.30: 188 ledgers, 390.6 MB,
+312 terminal records, 308 with usage, 4 usage-less, 4 incomplete. Corpus span
+2026-08-17 → 2026-09-14; separately, 33 post-1.0.25-census terminals retain
+the same `elapsed_ms` shape. Four terminal key sets (126/182/3/1), two usage
+key sets, one model (`grok-4.6-build`), no multi-model turns or nonzero cache
+writes. The 18 August 14 records seen September 4 are gone; no retention
+policy is inferred. The pin is the census host version, not a compatibility
+proof across intervening releases; CONTRACT keeps earlier fixture provenance.
+The real reader returned complete, 12 days, 3 partial days, 1.94s cold.
+The prior 2026-09-10 census used 1.0.25 (185 ledgers).
 https://docs.x.ai/build/overview establishes the model identity/rate level;
 https://docs.x.ai/developers/models/grok-4.6 establishes the rate cards and
 threshold. The 303-turn `costUsdTicks` census corroborates the rate shape
@@ -2026,7 +2042,8 @@ cannot reach OpenAI's >272K prompt threshold: 20,955 events across 789
 rollouts, max observed input 244,361. Codex's `~` rests on that assumption;
 the window is configurable and absent from the wire, so a tripwire is deferred
 in TODOS. Anthropic 4.6+ bills the full 1M context at standard rates. The
-Anthropic rate refresh (X6) is a separate Track; 57A leaves that table unchanged.
+Anthropic rate refresh landed in Track 58A, verified 2026-09-14; 57A's
+host delivery and model-scoped at-most Notes contract remain in force.
 
 Provenance is per vendor, because one date over two vendors' tables is
 a lie of composition. Anthropic: `PRICING_LAST_UPDATED` (verified
@@ -2048,6 +2065,49 @@ inherent floor. After the next real capture, require an advanced `as_of` with
 Grok still consulted. Cache success alone never proves publication. Upgrade
 the producing Mac for delivery, the rendering Mac for prices, and refresh
 the agent with `mm install-skills` plus restart for the decoder.
+
+**Track 58A presentation and floor arithmetic.** `VERIFIED_MODEL_IDS` is a
+separate explicit set covering every override and currently verified family
+id, plus the curated vendor ids at their respective dates. It does not gate
+pricing. A priced id outside it gets a bounded, sanitized "Models priced by
+family extrapolation" Notes line, never an unpriced label.
+
+`floor_prices` lives beside `resolve_prices`: Anthropic uses the minimum 5m
+cache-write rate (1.25x input), vendor literal cards are unchanged. One floor
+condition makes **every priced cell in that source section** use floor cards;
+`_section_costs` computes models and total from that same basis. Host machines
+remain separate subtotals, never summed. `RATE_MARKER_LEGEND` defines `~`
+estimate, `>=` floor of a priced subtotal under bundled assumptions, **not a
+guaranteed billing minimum**, and `—` unavailable. Estimates may extrapolate.
+Claude coverage gaps floor all priced Claude rows. The old Tokens incomplete
+line retains its meaning; a new line explains the floor and missing-project /
+session scale, without claiming to measure pre-v2 omissions.
+
+`window_bounds` rejects instant-stale snapshots before inclusive day slicing;
+`contributes_in_window` is shared by inventory, rhythm and economics. `as_of`
+before `since` but on the first UTC day contributes nothing to all three. The
+retained count survives, empty-family stale cells are unavailable, and exact
+`as_of == since` plus the accepted 24h future clamp keep their semantics.
+
+H2 names and order are unchanged. Claude's four-counter model table caps at
+five rows by token volume plus an omitted count, sanitizing every id through
+`_safe_short`. The all-model total reconciles with MODELS on the same data.
+Per-machine model dollar tables belong only in economics, with a cap, omitted
+count, and "does not sum to the row" header; model at-most values stay in Notes.
+Scope lines name source, machine scope, observation, UTC window and coverage.
+The economics section retains provenance first (the existing structural pin),
+then the shared legend and scope before figures. The Claude footer names its
+own rate date and points there. Both scopes say never add their figures.
+Body tables fit 80 columns; goldens exercise 80 and 120-column terminals.
+
+Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.
+D1 = B: disclosure only. Local evidence, 2026-09-14: zero fast rows among
+22,042 carrying `speed`, 4,297 lacking it (absence is not chronology). No
+detector, cache field or wire flag is added; exposure elsewhere is unknown.
+Producer, renderer and decoder upgrades are separate, documented in README.
+Existing Notes keep their meaning; new conditions have distinct decoder
+entries. Compatibility fixtures preserve old decoder/new output and new
+decoder/old output behavior; unknown lines must be echoed verbatim.
 
 **Invariant 3 — `model_family` matches POSITIONALLY against a literal
 allowlist, never by substring.** Model ids are peer-controlled (peer's

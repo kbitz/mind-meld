@@ -286,6 +286,31 @@ should feel like investment advice. Skip generic compliments. If the
 data doesn't support a confident take, say so and skip the section
 rather than fluffing.
 
+## Usage scope and markers
+
+The existing H2 sections keep their source boundaries. These scope sentences
+are a renderer contract:
+
+- Source: Claude Code session logs; sum of per-machine inventories, not deduplicated (a migrated home directory can be counted twice).
+- Source: latest host-usage snapshots; per machine, never summed. Host logs can lose old records; observed endpoints do not prove continuous coverage.
+
+Claude names its contributing machine count, newest snapshot, UTC window and
+coverage before its table. Agent activity names the window, then each machine's
+snapshot and observed day range below its family table. Short states decode as
+stale = last seen before window; ahead = clock ahead (<=24h); idle = current,
+no agent activity observed; missing = no snapshot. Claude* means Claude (via agents).
+A stale snapshot contributes no in-window figure, even on the first UTC day,
+but its retained total still appears. Input, cache write, cache read and output
+all contribute to token totals. Model tables cap at five, with an omitted count.
+
+API list-rate equivalent (Claude Code, window sum) and API list-rate equivalent
+(per machine — do not sum) come from different logs; never add them. The shared
+legend stays after the vendor provenance in the economics H2. `~` is an estimate;
+`>=` is a floor of the priced subtotal under bundled assumptions, never a
+billing minimum; `—` is unavailable, not zero. Every dollar cell has a marker.
+Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.
+Per-model host dollars belong only in economics; at-most figures stay in Notes.
+
 ## Notes section in aggregator output
 
 The body's `## Notes` section consolidates these data-quality lines (the
@@ -347,6 +372,18 @@ Known lines:
   **machines**, not rows, so one broken writer cannot inflate it.
 - `Known-fleet count unavailable (`mm devices --format=json` failed).` — the
   header drops the "of M known" tail. Not a data-loss signal.
+- `Models priced by family extrapolation (<scope>): <ids>.` — these priced ids
+  were not checked on the bundled rate date. The list is sanitized and capped.
+  `~` or `>=` can include this assumption; do not call those particular rates verified.
+  Upgrade mm on the rendering Mac for newly verified cards.
+- `Claude Code API list-rate equivalent is a floor (>=): token coverage is incomplete;`
+  — every priced Claude row and the total use the 5m cache-write floor. The
+  project/session counts describe missing v2 token data only; pre-v2 peers
+  cannot be measured. Preserve the older Tokens incomplete remedy.
+- `API list-rate equivalent uses floor rates throughout the per-machine section:`
+  — one machine's floor condition sets the rate basis for all priced cells
+  in that section. This does not assert a reader failed on every machine.
+  Each model subtotal and machine row uses floor rates; no cross-machine sum.
 - `N tokens from N unpriced model(s) excluded from cost estimate: <ids>.` —
   those models contribute to the token total but not the cost line. The ids
   are sanitized, sorted, and capped. Do not invent a rate for a named id.

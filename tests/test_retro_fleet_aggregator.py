@@ -1908,12 +1908,12 @@ class TestTokenBlockRender:
 
         data = self._data_with_tokens()
         out = format_retro(data)
-        assert "Tokens this window:" in out
-        assert "12.4M in" in out
-        assert "87.3M cache_read" in out
+        assert "| Model | In | Cache w | Cache r | Out | List-rate $ |" in out
+        assert "| 12.4M |" in out
+        assert "| 87.3M |" in out
         assert "Cache hit ratio:" in out
-        assert "Estimated cost:" in out
-        assert "Per-model:" in out
+        assert "API list-rate equivalent (Claude Code, window sum)" in out
+        assert "| All models |" in out
         assert "Sonnet 4.6" in out
         assert "Opus 4.7" in out
         # Subscription caveat as italicized footer.
@@ -1934,7 +1934,7 @@ class TestTokenBlockRender:
         data.sessions = SessionsAggregate(total_sessions=5, projects=1)
         out = format_retro(data)
         # Token block lines absent.
-        assert "Tokens this window:" not in out
+        assert "| Model | In | Cache w | Cache r | Out | List-rate $ |" not in out
         assert "Cache hit ratio:" not in out
         # But the section is still present with sessions count.
         assert "5 sessions" in out
@@ -2094,7 +2094,7 @@ class TestSyntheticAndUnpricedTokens:
             },
         )
         out = format_retro(data)
-        assert "unpriced" not in out
+        assert "unpriced model(s) excluded from cost estimate" not in out
 
     def test_synthetic_alone_does_not_trigger_unpriced_note(self):
         """Synthetic is cost-excluded by design, not unpriced. A fleet whose
@@ -2131,7 +2131,7 @@ class TestSyntheticAndUnpricedTokens:
             },
         )
         out = format_retro(data)
-        assert "unpriced" not in out
+        assert "unpriced model(s) excluded from cost estimate" not in out
 
 
 class TestCostLineHonesty:
@@ -2195,7 +2195,7 @@ class TestCostLineHonesty:
         assert unpriced_models == 0
         assert unpriced_tokens == 0
         out = format_retro(self._data(by_model))
-        assert "unpriced" not in out
+        assert "unpriced model(s) excluded from cost estimate" not in out
 
     def test_unpriced_volume_downgrades_estimate_to_lower_bound(self):
         """A confident ``~`` over incomplete data is the v0.12.13 bug.
@@ -2220,7 +2220,7 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert "Estimated cost:     >=$200" in out
+        assert "| >=$200 |" in out
         assert "1 unpriced model(s)" in out
 
     def test_fully_priced_window_keeps_tilde_and_drops_cents(self):
@@ -2238,9 +2238,9 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert "Estimated cost:     ~$200" in out
+        assert "| ~$200 |" in out
         assert "~$200.00" not in out
-        assert "unpriced" not in out
+        assert "unpriced model(s) excluded from cost estimate" not in out
 
     def test_all_models_unpriced_says_so_explicitly(self):
         """When nothing resolves, total_cost is 0. Dropping the cost line
@@ -2260,7 +2260,9 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert "Estimated cost:     unavailable" in out
+        assert next(
+            line for line in out.splitlines() if line.startswith("| All models |")
+        ).endswith("| — |")
         assert "1 unpriced model(s)" in out
         assert "40.0M tokens" in out
 
@@ -2283,7 +2285,9 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert "Estimated cost:     unavailable" in out
+        assert next(
+            line for line in out.splitlines() if line.startswith("| All models |")
+        ).endswith("| — |")
         assert "1 unpriced model(s)" in out
 
     def test_caveat_carries_verification_date(self):
@@ -2305,7 +2309,7 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert f"List pricing last verified {PRICING_LAST_UPDATED}" in out
+        assert f"Anthropic rates verified {PRICING_LAST_UPDATED}" in out
 
 
 class TestShortModelName:
@@ -6562,10 +6566,10 @@ class TestAgentInventoryBody:
                 )
             )
         )
-        assert "| dev-a | Codex models | 2026-04-28 | current | 10 | 10 |" in body
+        assert "| dev-a | Codex | 2026-04-28 | current | 10 | 10 |" in body
         # Accepted but nothing observed: 0 is KNOWN data, `—` means unavailable.
-        assert "| dev-b | — | 2026-04-28 | current, no agent activity observed | 0 | 0 |" in body
-        assert "| dev-c | — | — | no snapshot | — | — |" in body
+        assert "| dev-b | — | 2026-04-28 | idle | 0 | 0 |" in body
+        assert "| dev-c | — | — | missing | — | — |" in body
         assert (
             "Readers per machine (`none` = no reader contributed): dev-a codex; dev-b grok." in body
         )
@@ -6593,7 +6597,7 @@ class TestAgentInventoryBody:
         assert "last seen before window" in body
         assert "clock ahead (<=24h)" in body
         assert "future_dated" not in body
-        assert "stale" not in body
+        assert "| stale |" in body  # compact state is expanded in the legend
 
     def test_rows_are_capped_and_the_omission_is_stated(self):
         n = aggregator.MAX_AGENT_INVENTORY_MACHINES + 4
@@ -6802,13 +6806,13 @@ class TestAgentInventoryHardening:
             )
         )
         assert "zzz-a" in body, "the only machine with data was evicted by the cap"
-        assert "| zzz-a | Codex models |" in body
+        assert "| zzz-a | Codex |" in body
         assert "Readers per machine" in body
 
     def test_non_snapshot_value_does_not_crash_the_render(self):
         data = self._data({"dev-a": {"not": "a snapshot"}}, known_ids=("dev-a",))
         body = aggregator._render_agent_inventory(data)  # must not raise
-        assert "| dev-a | — | — | no snapshot | — | — |" in "\n".join(body)
+        assert "| dev-a | — | — | missing | — | — |" in "\n".join(body)
         assert aggregator._agent_coverage_notes(data) is not None
 
     def test_consulted_names_are_sanitized_like_device_ids(self):
@@ -6836,7 +6840,7 @@ class TestAgentInventoryHardening:
             if ln.startswith("| ") and not ln.startswith("| Machine") and not ln.startswith("|---")
         ]
         assert len(rows) == 2, f"header rendered with no rows: {body}"
-        assert all("no snapshot" in row for row in rows)
+        assert all("missing" in row for row in rows)
 
     def test_body_clamps_in_window_days_to_as_of(self):
         """The body's own clamp, distinct from the rhythm view's. Every other
@@ -6859,7 +6863,9 @@ class TestAgentInventoryHardening:
         body = "\n".join(
             aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
         )
-        assert "current, no agent activity observed" in body
+        row = next(ln for ln in body.splitlines() if ln.startswith("| dev-a |"))
+        assert "| idle |" in row
+        assert "| current |" not in row
         assert "| 500 | 0 |" in body
 
     def test_no_snapshots_and_no_missing_still_names_a_cause(self):
@@ -7502,7 +7508,7 @@ class TestHostEconomics:
         assert "no action resolves this" in out
 
     @pytest.mark.parametrize(
-        "tokens,ceiling", [(1, "$0.01"), (250_001, "$1.01"), (250_001_001, "$1,000.01")]
+        "tokens,ceiling", [(1, "$0.01"), (250_001, "$1.01"), (250_001_001, "$1,001")]
     )
     def test_grok_at_most_rounds_up_to_preserve_the_bound(self, tokens, ceiling):
         hosts = _priced_hosts(n=tokens)
@@ -7598,7 +7604,7 @@ class TestHostEconomics:
         out = aggregator.format_retro(_econ_data([ev]))
         assert "| dev-a | — |" in out
         activity = out.split("## Agent activity", 1)[1].split("## API list-rate equivalent", 1)[0]
-        assert "| dev-a | Codex models | 2026-04-28 | current | — | — |" in activity
+        assert "| dev-a | Codex | 2026-04-28 | current | — | — |" in activity
         section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
         assert "~$" not in section
         assert "older format" in out
@@ -7613,7 +7619,7 @@ class TestHostEconomics:
         )
         out = aggregator.format_retro(_econ_data([ev]))
         section = out.split("## Agent activity", 1)[1].split("## API list-rate equivalent", 1)[0]
-        assert "| dev-a | — | 2026-04-28 | current, no agent activity observed | — | — |" in section
+        assert "| dev-a | — | 2026-04-28 | idle | — | — |" in section
         assert "| 0 | 0 |" not in section
 
     def test_marker_unpriced_flips_to_floor(self):

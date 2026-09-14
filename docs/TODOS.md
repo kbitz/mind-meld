@@ -44,6 +44,35 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-ceo-review] Price Claude fast mode when it is first used
+
+- **Why:** Fast mode bills Opus 5 and Opus 4.8 at $10/$50, twice the standard tier, and prompt-caching multipliers
+  stack on top (platform.claude.com pricing, read 2026-09-14). mm prices every Opus token at the standard tier, so
+  a fast-mode window under-reports by up to 2x under a confident `~`. Track 58A ships the disclosure — the rendered
+  rate legend, README and `docs/invariants/events-retro.md` all say fast-mode turns are priced at standard rates —
+  but not the detector.
+- **Evidence:** a census of 228 session jsonls touched in the last 45 days (26,339 assistant usage rows) found
+  `usage.speed` present on 22,042 rows, **all `"standard"`**, and **absent on 4,297** (absence of the field, not
+  evidence about when those rows were written). `parse_usage` discards `speed`, and the sessions-snapshot wire
+  carries no speed field, so fleet-wide exposure cannot be measured from the wire today.
+- **Trigger (human, deliberately not a machine trigger):** you knowingly run Claude Code in fast mode, or Anthropic
+  extends fast mode beyond Opus 5 / 4.8. The /autoplan gate chose this trigger over building a detector for a
+  condition observed zero times.
+- **Hypothesis (untested):** the cheapest honest shape is local-only — record fast-mode days in the token cache and
+  report them in `mm diag`, with no wire field and no marker change.
+- **Context / cost, measured during the 58A review:** the cache path is the expensive part, and both eng voices
+  flagged it independently. The shape check must land in BOTH cache-reuse gates — `get_or_compute`'s size/mtime hit
+  AND `_resume_plan` — because a pre-58A entry carries `offset`/`head` and would otherwise resume and persist
+  "zero fast turns" forever without ever inspecting history. It also needs a counter schema (a day-set cannot supply
+  counts), `MAX_BY_DAY_DAYS` trimming, message-id dedup, concurrent-append handling, and full-walk-vs-incremental
+  equivalence tests. `JsonlSegment` is a 4-field NamedTuple, so every construction site changes. A fleet-wide wire
+  flag was rejected separately: `speed` is absent on 16% of rows, so it would ship a third coverage state
+  (detected / checked-and-absent / unknown) that nothing models, plus new wire content the 58A card requires a
+  separate proposal for.
+- **Effort:** M
+- **Priority:** P3
+
+
 ## Drain records
 
 ### Roadmap drain — 2026-09-14
