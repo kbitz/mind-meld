@@ -349,6 +349,31 @@ def test_grok_diag_unreadable_sessions_root_is_unknown(tmp_path, monkeypatch):
     assert state["cache_state"] == "ok"
 
 
+def test_grok_diag_root_stat_error_is_unknown_not_missing(tmp_path, monkeypatch):
+    """The outer ``root.exists()``/``is_dir()`` probe has its own OSError
+    guard, distinct from the inner scandir guard covered above. A denied
+    stat (e.g. a non-traversable parent directory) must report the count
+    as unknown, never fall through to the "missing root" zero."""
+    home = tmp_path / "custom-grok"
+    (home / "sessions").mkdir(parents=True)
+    monkeypatch.setenv("GROK_HOME", str(home))
+    cache = tmp_path / "cache.json"
+    cache.write_text(json.dumps({"version": hu.CACHE_VERSION, "files": {"one": {}}}))
+    monkeypatch.setattr(hu, "GROK_CACHE_PATH", cache)
+    real_exists = Path.exists
+
+    def deny_exists(self, *args, **kwargs):
+        if self == home / "sessions":
+            raise PermissionError(errno.EACCES, "denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", deny_exists)
+    state = hu.grok_usage_diag()
+    assert state["files_cached"] == 1
+    assert state["files_on_disk"] is None
+    assert state["cache_state"] == "ok"
+
+
 def test_grok_diag_missing_sessions_root_counts_zero(tmp_path, monkeypatch):
     monkeypatch.setenv("GROK_HOME", str(tmp_path / "absent-grok"))
     cache = tmp_path / "cache.json"

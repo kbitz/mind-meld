@@ -7314,6 +7314,39 @@ class TestHostEconomics:
         assert "## Cost" not in out
         assert section.lstrip().startswith("- Anthropic")
 
+    def test_host_economics_header_names_all_three_vendors_with_provenance(self):
+        """Track 57A rewrote the header into one dated bullet per vendor plus
+        a separate marker legend. Pin the actual rendered text, not just the
+        hand-maintained README mirror asserted elsewhere."""
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        section = out.split("## API list-rate equivalent (per machine)")[1].split("### Do not sum")[
+            0
+        ]
+        tu = aggregator.token_usage
+        assert (
+            f"Anthropic list rates, verified {tu.PRICING_LAST_UPDATED}: "
+            "https://platform.claude.com/docs/en/about-claude/pricing" in section
+        )
+        assert (
+            "OpenAI short-context list rates, verified "
+            f"{tu.PRICING_OPENAI_LAST_UPDATED} against "
+            "https://developers.openai.com/api/docs/pricing" in section
+        )
+        assert (
+            f"xAI base and long-context list rates, verified {tu.PRICING_XAI_LAST_UPDATED}: "
+            "https://docs.x.ai/developers/models/grok-4.6" in section
+        )
+        assert "- ``~``: estimate from the recorded tokens and bundled rates." in section
+        assert "a model whose long-context tier cannot be reconstructed" in section
+        assert "- ``—``: the figure is unavailable, not zero." in section
+
     @pytest.mark.parametrize("family,readers", [("grok", ("grok",)), ("codex", ("codex",))])
     def test_grok_always_floor_and_ceiling_names_model_not_reader(self, family, readers):
         hosts = {
