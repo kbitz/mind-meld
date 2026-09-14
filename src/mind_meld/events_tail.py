@@ -51,6 +51,12 @@ time can never trigger or redefine the session-walk notice, and it is passed
 explicitly to every reader — no caller may fall through to ``host_usage``'s
 5-second default, which is ~20x an autopush's entire walk budget."""
 
+HOST_READER_GRACE_MS = 50
+"""Minimum time for each reader after the first, beyond the sweep deadline.
+Track 57A evidence E16 measured warm Grok reads at 19–20 ms while Codex
+used 73–80% of the autopush budget. This floor gives Grok about 2.5x that
+read time. Deadlines are cooperative, not filesystem-interrupt ceilings."""
+
 _ROOT_DISCOVERY_DEGRADATION = (
     "git repository discovery hit its time budget: this push captured an incomplete "
     "repository set. Run mm diag, then mm recapture 30d to recover the omitted commits"
@@ -314,7 +320,7 @@ def _capture_host_usage(
     deadline: float,
     now: Callable[[], float] = time.monotonic,
 ) -> HostUsageCapture:
-    """Read the consented host sources under ONE explicit deadline.
+    """Read consented hosts under a sweep deadline plus later-reader grace.
 
     Reader-scoped for FAILURES (Track 31A): a file/record failure still fails
     that whole reader, but a reader failure no longer discards the others.
@@ -342,35 +348,16 @@ def _capture_host_usage(
     contributed: list[str] = []
     dropped: list[tuple[str, str]] = []
     partial_days: dict[str, frozenset[str]] = {}
-    remaining = list(readers)
     names_in_order = tuple(name for name, _ in readers)
-    invoked = False
-    while remaining:
-        name, read = remaining[0]
-        if now() >= deadline:
-            if invoked:
-                dropped.extend((rest_name, "deadline") for rest_name, _ in remaining)
-                if contributed:
-                    return HostUsageCapture(
-                        merged,
-                        token_sources=tuple(contributed),
-                        dropped=tuple(dropped),
-                        tokens_by_day=merged_by_day,
-                        partial_days=dict(partial_days),
-                        partial=_canonical_partial(names_in_order, partial_days),
-                    )
-                first_reader, first_reason = dropped[0]
-                return HostUsageCapture(
-                    None,
-                    first_reader,
-                    first_reason,
-                    dropped=tuple(dropped),
-                )
+    for index, (name, read) in enumerate(readers):
+        start = now()
+        if index == 0 and start >= deadline:
             return HostUsageCapture(None, name, "deadline", invoked=False)
-        remaining.pop(0)
-        invoked = True
+        reader_deadline = (
+            max(deadline, start + HOST_READER_GRACE_MS / 1000.0) if index else deadline
+        )
         try:
-            result = read(deadline=deadline)
+            result = read(deadline=reader_deadline)
         except Exception as e:
             # The breadcrumb reason stays a closed vocabulary, but the TYPE
             # goes to stderr like every other swallow in this module. Without
@@ -513,7 +500,7 @@ def _merge_warm_retry_capture(
 
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> bool:
-    """Telegraph and run the one-off host-cache warm. Never raises.
+    """Telegraph and run a reader's cooperative cache warm. Never raises.
 
     Returns whether the warm actually COMPLETED. That return value is the
     retry backstop: if the warm could not finish inside its own (much larger)
@@ -525,12 +512,10 @@ def _warm_host_cache_with_notice(reader: str = "codex") -> bool:
     Wrapper policy, kept out of the capture core so that core stays notice-free
     (it is shared by push and init, which report differently).
     """
-    # States the real ceiling rather than a measured-once estimate: the warm is
-    # bounded by `DEFAULT_READ_BUDGET_S`, not by the ~600ms one corpus happened
-    # to take.
+    # Scanning is cooperatively bounded; serialization can finish afterwards.
     sys.stderr.write(
-        f"mm: warming host usage cache (one-time, up to "
-        f"{host_usage.DEFAULT_READ_BUDGET_S:.0f}s)...\n"
+        f"mm: warming {reader} usage cache "
+        f"(about {host_usage.DEFAULT_READ_BUDGET_S:.0f} s of scanning)...\n"
     )
     try:
         return host_usage.warm_host_cache_inline(reader=reader).complete
@@ -562,12 +547,13 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
             f"`mm disable-source {reader}` to stop retrying."
         )
     if reason == "deadline":
-        # Only an attended substantive push warms, and its budget is bounded.
+        # Only an attended capture warms; serialization may exceed the budget.
         budget = f"{host_usage.DEFAULT_READ_BUDGET_S:.0f}"
         return (
             f"{phrase}. The {reader} cache is still warming. Run `mm push` "
-            f"interactively to warm it (up to {budget} s per push), or `mm diag` to see how "
-            "much is left."
+            f"interactively when it uploads a change, or `mm recapture 1d`, to warm it "
+            f"(about {budget} s of scanning per cold reader, not a hard ceiling). "
+            "`mm diag` shows how much is left."
         )
     return (
         f"{phrase}. The next push that uploads a change retries; "
@@ -603,7 +589,7 @@ def _capture_event_snapshots(
     optional row. Its outcome is returned as data — the notice and the
     ``autopush`` breadcrumb are wrapper policy. ``warm_host_cache`` is the
     attended-command escape hatch: supplied by callers that may spend a
-    one-off multi-second warm (interactive push, init), omitted by ``autopush``
+    multi-second warm per cold reader (interactive push, init), omitted by ``autopush``
     so an unattended hook never does. Published rows always come from a bounded
     capture, warm or not.
     """
@@ -675,59 +661,36 @@ def _capture_event_snapshots(
     host_capture = _capture_host_usage(
         host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
     )
-    warm_reader = next(
-        (
-            name
-            for name, reason in host_capture.dropped
-            if reason == "deadline" and name in WARMABLE_HOST_READERS
-        ),
-        None,
-    )
-    if (
-        warm_reader is None
-        and host_capture.reason == "deadline"
-        and host_capture.reader in WARMABLE_HOST_READERS
-    ):
-        warm_reader = host_capture.reader
-    if warm_host_cache is not None and warm_reader is not None:
-        # Warm-and-retry, and ONLY after a bounded attempt has already proven
-        # the cache is too cold to fit. Gating on the failure instead of on a
-        # "is it cold?" predicate costs nothing on the happy path, needs no
-        # persisted marker, and cannot misfire on a machine that legitimately
-        # has no host data — that machine's first attempt completes, so it
-        # never warms. `deadline` is also the only reason a warm can fix.
-        #
-        # After Track 31A a Grok deadline no longer vetoes Codex, so the
-        # warmable reader may live in `dropped` rather than `reader`/`reason`.
-        # Retry ONLY if the warm finished. A corpus large enough to outgrow the
-        # warm's own budget keeps reporting (deadline, reader) forever, so both
-        # halves of the gate above keep passing and the reader gate alone does
-        # not bound the repeat cost — the warm's own outcome does.
-        if warm_host_cache(warm_reader):
-            # Never re-read a reader that already completed: a transient
-            # second-pass failure must not erase its first-pass totals. If the
-            # initial deadline was pre-invoke there is nothing to preserve, so
-            # retry the whole sweep. Otherwise retry every reader dropped for
-            # deadline (including later readers that were never reached), then
-            # merge those fresh outcomes with the completed first-pass subset.
-            retried_names = {name for name, reason in host_capture.dropped if reason == "deadline"}
-            retry_readers = (
-                tuple((name, read) for name, read in host_readers if name in retried_names)
-                if host_capture.invoked
-                else host_readers
-            )
+    if not host_capture.invoked and host_capture.reason == "deadline":
+        # No reader ran: declare every omission so a failed warm cannot vanish
+        # when a sibling's retry succeeds. Non-warmable readers stay declared.
+        host_capture = HostUsageCapture(
+            None,
+            host_capture.reader,
+            "deadline",
+            dropped=tuple((name, "deadline") for name, _ in host_readers),
+            invoked=False,
+        )
+    deadline_names = {name for name, reason in host_capture.dropped if reason == "deadline"}
+    if warm_host_cache is not None:
+        # Warm every eligible miss in reader order. Only completed warms get
+        # retried; each retry has its OWN full bounded deadline. The exact
+        # singleton retry set preserves every other reader's first outcome.
+        warmed: list[tuple[str, HostReader]] = []
+        for name, read in host_readers:
+            if name not in deadline_names or name not in WARMABLE_HOST_READERS:
+                continue
+            if warm_host_cache(name):
+                warmed.append((name, read))
+        for name, read in warmed:
             retry_capture = _capture_host_usage(
-                retry_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+                ((name, read),), deadline=time.monotonic() + host_budget_ms / 1000.0
             )
-            host_capture = (
-                _merge_warm_retry_capture(
-                    host_capture,
-                    retry_capture,
-                    readers=host_readers,
-                    retried_names=retried_names,
-                )
-                if host_capture.invoked
-                else retry_capture
+            host_capture = _merge_warm_retry_capture(
+                host_capture,
+                retry_capture,
+                readers=host_readers,
+                retried_names={name},
             )
     host_rows: list[dict] = []
     if host_capture.hosts is not None:
@@ -885,7 +848,7 @@ def _run_events_tail(
                 if quiet
                 else HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
             ),
-            # Only the attended path may spend the one-off warm. On autopush a
+            # Only the attended path may spend seconds warming each cold reader. On autopush a
             # cold corpus instead converges across pushes, because an aborted
             # scan now keeps its per-file progress.
             warm_host_cache=None if quiet else _warm_host_cache_with_notice,

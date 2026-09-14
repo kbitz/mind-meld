@@ -549,12 +549,13 @@ def codex_usage_diag() -> dict[str, Any]:
 
 
 def grok_usage_diag() -> dict[str, Any]:
-    """On-disk Grok usage-reader state. Does not open the host store.
+    """Grok cache inventory and ledger path count. Never opens host logs.
 
     ``mm diag`` must run without a passphrase and without a valid config, so
-    this reads only the private cache. Absence, lock contention, and
-    unreadable files are reported as ``cache_state``, never raised.
+    this reads the private cache and counts only two-level ledger paths.
+    Unknown cache states keep the count unknown, never a fabricated zero.
     """
+    on_disk = _count_two_level_ledgers(grok_sessions_root())
     blank = {
         "complete_once": False,
         "usage_less_skipped": 0,
@@ -563,9 +564,11 @@ def grok_usage_diag() -> dict[str, Any]:
         "cache_state": "unreadable",
         "model_count": 0,
         "models": [],
+        "files_cached": None,
+        "files_on_disk": on_disk,
     }
     try:
-        with locked_json_snapshot(GROK_CACHE_PATH) as snap:
+        with locked_json_snapshot(GROK_CACHE_PATH, blocking=False) as snap:
             data = snap.data
             state = snap.state
     except OSError:
@@ -575,12 +578,12 @@ def grok_usage_diag() -> dict[str, Any]:
             **blank,
             "cache_state": "missing" if state in {"missing", "empty"} else "unreadable",
         }
-    if data.get("version") != CACHE_VERSION:
-        data = _empty_grok_cache()
+    files = data.get("files")
+    if data.get("version") != CACHE_VERSION or not isinstance(files, dict):
+        return blank
     raw_skip = data.get("usage_less_skipped", 0)
     skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
-    files = data.get("files")
-    models = _diag_grok_model_ids(files if isinstance(files, dict) else {})
+    models = _diag_grok_model_ids(files)
     return {
         "complete_once": data.get("complete_once") is True,
         "usage_less_skipped": skipped,
@@ -589,6 +592,8 @@ def grok_usage_diag() -> dict[str, Any]:
         "cache_state": "ok",
         "model_count": models["model_count"],
         "models": models["models"],
+        "files_cached": len(files),
+        "files_on_disk": on_disk,
     }
 
 
@@ -643,6 +648,40 @@ def grok_sessions_root() -> Path:
     if env:
         return Path(env).expanduser() / "sessions"
     return GROK_SESSIONS_PATH
+
+
+def _count_two_level_ledgers(root: Path) -> int | None:
+    """Count reader-visible ``*/*/updates.jsonl`` without swallowing scan errors.
+
+    ``Path.glob`` on Python 3.13 suppresses directory-scan ``OSError``, so an
+    unreadable Grok store would render as empty. A missing root is 0. A
+    symlink or non-directory root is unknown (the reader refuses those as
+    unsupported). Directory and file predicates match ``_iter_grok_ledgers``.
+    """
+    try:
+        if not root.exists():
+            return 0
+        if root.is_symlink() or not root.is_dir():
+            return None
+    except OSError:
+        return None
+    try:
+        count = 0
+        with os.scandir(root) as workspaces:
+            for workspace in workspaces:
+                workspace_path = Path(workspace.path)
+                if not _is_directory(workspace_path):
+                    continue
+                with os.scandir(workspace.path) as sessions:
+                    for session in sessions:
+                        session_path = Path(session.path)
+                        if not _is_directory(session_path):
+                            continue
+                        if _is_regular_non_symlink(session_path / "updates.jsonl"):
+                            count += 1
+        return count
+    except (_ReadFailure, OSError):
+        return None
 
 
 def read_grok_usage(

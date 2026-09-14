@@ -361,10 +361,21 @@ Known lines:
   shows `—`, never a confident `$0`.
 - API list-rate equivalent for `<device>` is a floor (>=): <causes>. —
   the marker is binary; the causes name which of: unpriced models, a host
-  that declared totals incomplete, a dropped reader, or tokens the per-day
-  model cap left unattributed. An all-unpriced device renders `>=$0.00`, not
+  that declared totals incomplete, a dropped reader, tokens the per-day
+  model cap left unattributed, or an unreconstructable long-context tier.
+  An all-unpriced device renders `>=$0.00`, not
   unavailable: zero is the priced subtotal and the named tokens sit above
   that floor. Report the named cause. Do not sum the per-machine figures.
+- Grok's logs do not record per-request prompt sizes; no action resolves this.
+  — an inherent floor cause, distinct from actionable reader or pricing gaps.
+  The at-most figure bounds that model's recorded token charges only: never
+  average it with the floor, never sum machines, never present it as the
+  machine's cost. Server-side tool fees are excluded. An incomplete snapshot
+  or nonzero model cache writes suppress the at-most figure entirely.
+- Unpriced model(s): upgrading mm on the machine that renders this report may
+  price it; republishing does not add a rate; do not estimate. Name the ids and
+  the rendering-machine remedy; do not tell the producing Mac to republish
+  merely to add a price.
 - `N discovery error(s) recorded — run mm diag.` —
   forensic; do not invent a cause. Those notices go to an unattended hook's
   stderr and are persisted nowhere.

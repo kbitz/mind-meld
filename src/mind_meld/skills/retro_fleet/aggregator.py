@@ -70,6 +70,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from heapq import nsmallest
+from math import ceil
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -3605,15 +3606,26 @@ def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
     lines = [
         "## API list-rate equivalent (per machine)",
         "",
-        "OpenAI short-context list rates, verified "
+        "- Anthropic list rates, verified "
+        f"{token_usage.PRICING_LAST_UPDATED}: "
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "- OpenAI short-context list rates, verified "
         f"{token_usage.PRICING_OPENAI_LAST_UPDATED} against "
-        "https://developers.openai.com/api/docs/pricing. Anthropic list "
-        f"rates, verified {token_usage.PRICING_LAST_UPDATED}. Historical "
-        "usage is repriced at current rates. Not subscription spend. "
-        f"{token_usage.SUBSCRIPTION_CAVEAT} ``>=`` means at least one of: "
+        "https://developers.openai.com/api/docs/pricing",
+        "- xAI base and long-context list rates, verified "
+        f"{token_usage.PRICING_XAI_LAST_UPDATED}: "
+        "https://docs.x.ai/developers/models/grok-4.6",
+        "",
+        "Historical usage is repriced at current rates: the rates bundled with "
+        "this mm release, verified on the dates above. Not subscription spend. "
+        f"{token_usage.SUBSCRIPTION_CAVEAT}",
+        "",
+        "- ``~``: estimate from the recorded tokens and bundled rates.",
+        "- ``>=``: floor; at least one of: "
         "unpriced models, a host reader that declared incomplete totals, "
         "a dropped reader, or tokens the per-day model cap left "
-        "unattributed. ``—`` means the figure is unavailable, not zero.",
+        "unattributed, or a model whose long-context tier cannot be reconstructed.",
+        "- ``—``: the figure is unavailable, not zero.",
         "",
         "### Do not sum these values",
         "",
@@ -3635,6 +3647,40 @@ def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
         )
         lines.append("")
     return lines, notes
+
+
+def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool) -> str | None:
+    """Explain inherent tier uncertainty over each model's recorded tokens.
+
+    Coverage is row-scoped: the wire cannot attribute a partial or failed
+    reader to a model, so any such reader suppresses every at-most figure.
+    """
+    models: list[str] = []
+    for model, usage in sorted(by_model.items()):
+        long_card = token_usage.resolve_long_context_prices(model)
+        if long_card is None or token_usage.sum_bucket(usage) <= 0:
+            continue
+        base_card = token_usage.resolve_prices(model)
+        if base_card is None:
+            continue
+        floor = token_usage._cost_under(base_card, usage)
+        detail = f"`{_safe_short(model)}`: {_format_usd(floor)} at the base tier"
+        if not incomplete and usage.get("cache_create", 0) == 0:
+            ceiling = token_usage._cost_under(long_card, usage)
+            # An upper bound must round UP: the estimate formatter can round
+            # down (even to $0 for a tiny positive bucket). Keep cents here.
+            detail += f", at most ${ceil(ceiling * 100) / 100:,.2f} at the long-context tier"
+        detail += (
+            " for this model's recorded tokens, in token charges; server-side tool fees excluded"
+        )
+        models.append(detail)
+    if not models:
+        return None
+    return (
+        "Grok's logs do not record per-request prompt sizes; no action resolves this ("
+        + "; ".join(models)
+        + ")"
+    )
 
 
 def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[str, list[str]]:
@@ -3667,7 +3713,11 @@ def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[
     causes: list[str] = []
     if unpriced_tokens > 0:
         named = _format_unpriced_model_ids(unpriced_ids)
-        causes.append(f"{unpriced_n} unpriced model(s) ({named})")
+        causes.append(
+            f"{unpriced_n} unpriced model(s) ({named}); upgrading mm on the machine "
+            "that renders this report may price it; republishing does not add a rate; "
+            "do not estimate"
+        )
     if snap.partial:
         causes.append(
             "host declared totals incomplete ("
@@ -3678,8 +3728,16 @@ def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[
         causes.append(
             "a host reader failed (" + ", ".join(_reader_display_labels(snap.degraded)) + ")"
         )
+    coverage_unknown = bool(
+        snap.partial or snap.degraded or snap.partial_reason or snap.degraded_reason
+    )
+    if (snap.partial_reason or snap.degraded_reason) and not (snap.partial or snap.degraded):
+        causes.append("host coverage metadata was unusable")
     if residual:
         causes.append("some tokens were not attributed to a named model (the per-day model cap)")
+    long_context = _long_context_cause(by_model, incomplete=coverage_unknown)
+    if long_context:
+        causes.append(long_context)
     if not by_model and total_cost == 0 and unpriced_tokens == 0 and not causes:
         # Known empty window, not unavailable.
         return f"~{_format_usd(0.0)}", notes

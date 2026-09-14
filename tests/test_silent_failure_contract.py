@@ -158,7 +158,7 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
     assert result.exit_code == 0, result.output
     text = " ".join(result.output.split())
     assert "(codex deadline)" in text
-    assert "warm it (up to 5 s per push)" in text
+    assert "about 5 s of scanning per cold reader, not a hard ceiling" in text
     assert "not yet scanned" not in text
 
 

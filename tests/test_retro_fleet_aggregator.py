@@ -7312,7 +7312,270 @@ class TestHostEconomics:
         assert "~$2.00" in out or "~$2" in out
         section = out.split("## API list-rate equivalent (per machine)")[1].split("## ")[0]
         assert "## Cost" not in out
-        assert section.lstrip().startswith("OpenAI")
+        assert section.lstrip().startswith("- Anthropic")
+
+    def test_host_economics_header_names_all_three_vendors_with_provenance(self):
+        """Track 57A rewrote the header into one dated bullet per vendor plus
+        a separate marker legend. Pin the actual rendered text, not just the
+        hand-maintained README mirror asserted elsewhere."""
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        section = out.split("## API list-rate equivalent (per machine)")[1].split("### Do not sum")[
+            0
+        ]
+        tu = aggregator.token_usage
+        assert (
+            f"Anthropic list rates, verified {tu.PRICING_LAST_UPDATED}: "
+            "https://platform.claude.com/docs/en/about-claude/pricing" in section
+        )
+        assert (
+            "OpenAI short-context list rates, verified "
+            f"{tu.PRICING_OPENAI_LAST_UPDATED} against "
+            "https://developers.openai.com/api/docs/pricing" in section
+        )
+        assert (
+            f"xAI base and long-context list rates, verified {tu.PRICING_XAI_LAST_UPDATED}: "
+            "https://docs.x.ai/developers/models/grok-4.6" in section
+        )
+        assert "- ``~``: estimate from the recorded tokens and bundled rates." in section
+        assert "a model whose long-context tier cannot be reconstructed" in section
+        assert "- ``—``: the figure is unavailable, not zero." in section
+
+    @pytest.mark.parametrize("family,readers", [("grok", ("grok",)), ("codex", ("codex",))])
+    def test_grok_always_floor_and_ceiling_names_model_not_reader(self, family, readers):
+        hosts = {
+            family: {
+                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+            }
+        }
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=readers,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | >=$2.00 |" in out
+        assert "`grok-4.6-build`: $2.00 at the base tier, at most $4.00" in out
+        assert "Grok's logs do not record per-request prompt sizes; no action resolves this" in out
+        assert (
+            "this model's recorded tokens, in token charges; server-side tool fees excluded" in out
+        )
+
+    @pytest.mark.parametrize(
+        "coverage",
+        [
+            {"partial_sources": ["grok"]},
+            {"degraded_sources": ["codex"]},
+            {"partial_sources": ["codex"]},
+        ],
+    )
+    def test_any_reader_coverage_loss_suppresses_grok_ceiling(self, coverage):
+        hosts = {
+            "grok": {
+                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+            }
+        }
+        readers = ("grok",) if "degraded_sources" in coverage else ("codex", "grok")
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=readers,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build"), **coverage},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | >=$2.00 |" in out
+        assert "at most $" not in out
+        assert "no action resolves this" in out
+        assert "$-" not in out
+
+    def test_invalid_coverage_metadata_suppresses_grok_ceiling(self):
+        hosts = {
+            "grok": {
+                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+            }
+        }
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("grok",),
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build"), "partial_sources": "grok"},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | >=$2.00 |" in out
+        assert "at most $" not in out
+        assert "no action resolves this" in out
+
+    def test_invalid_coverage_on_codex_only_row_is_a_floor_not_a_tilde(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-6-astra"), "partial_sources": "codex"},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | >=$" in out
+        assert "| dev-a | ~$" not in out
+        assert "host coverage metadata was unusable" in out
+
+    def test_grok_cache_reads_do_not_suppress_the_ceiling(self):
+        hosts = {
+            "grok": {
+                "2026-04-22": {
+                    "input": 1_000_000,
+                    "cache_read": 1_000_000,
+                    "cache_create": 0,
+                    "output": 0,
+                }
+            }
+        }
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("grok",),
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | >=$2.50 |" in out
+        assert "`grok-4.6-build`: $2.50 at the base tier, at most $5.00" in out
+
+    def test_residual_does_not_suppress_the_grok_model_ceiling(self):
+        day = "2026-04-22"
+        grok = {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("grok",),
+            hosts={
+                "grok": {day: {"input": 1_000_100, "cache_read": 0, "cache_create": 0, "output": 0}}
+            },
+            extra={
+                "tokens_by_day": {
+                    day: {
+                        "input": 1_000_100,
+                        "cache_read": 0,
+                        "cache_create": 0,
+                        "output": 0,
+                        "by_model": {"grok-4.6-build": grok},
+                    }
+                }
+            },
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | >=$2.00 |" in out
+        assert "not attributed to a named model" in out
+        assert "at most $4.00" in out
+
+    @pytest.mark.parametrize("input_tokens", [0, 1_000_000])
+    def test_grok_cache_writes_suppress_ceiling_without_a_partial_marker(self, input_tokens):
+        hosts = {
+            "grok": {
+                "2026-04-22": {
+                    "input": input_tokens,
+                    "cache_read": 0,
+                    "cache_create": 1_000_000,
+                    "output": 0,
+                }
+            }
+        }
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("grok",),
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert f"| dev-a | >=${input_tokens / 500_000:.2f} |" in out
+        assert "at most $" not in out
+        assert "no action resolves this" in out
+
+    @pytest.mark.parametrize(
+        "tokens,ceiling", [(1, "$0.01"), (250_001, "$1.01"), (250_001_001, "$1,000.01")]
+    )
+    def test_grok_at_most_rounds_up_to_preserve_the_bound(self, tokens, ceiling):
+        hosts = _priced_hosts(n=tokens)
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert f"at most {ceiling} at the long-context tier" in out
+
+    def test_mixed_models_ceiling_covers_only_grok(self):
+        day = "2026-04-22"
+        usage = {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+        hosts = {"codex": {day: usage}, "grok": {day: usage}}
+        sibling = {
+            day: {
+                **usage,
+                "input": 2_000_000,
+                "by_model": {"gpt-6-astra": usage, "grok-4.6-build": usage},
+            }
+        }
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            token_sources=("codex", "grok"),
+            extra={"tokens_by_day": sibling},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | >=$12.00 |" in out
+        assert "`grok-4.6-build`: $2.00 at the base tier, at most $4.00" in out
+        assert "at most $14" not in out
+
+    def test_no_in_window_grok_tokens_has_no_inherent_cause(self):
+        hosts = _priced_hosts(day="2026-04-20")
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        assert "| dev-a | ~$0.00 |" in out
+        assert "no action resolves this" not in out
+
+    def test_duplicate_grok_history_is_two_floors_in_either_device_order(self):
+        hosts = {
+            "grok": {
+                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+            }
+        }
+        rows = [
+            _host_event(
+                device,
+                self.TS,
+                token_sources=("grok",),
+                hosts=hosts,
+                extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
+            )
+            for device in ("aaa", "bbb")
+        ]
+        forward = aggregator.format_retro(_econ_data(rows))
+        assert forward == aggregator.format_retro(_econ_data(list(reversed(rows))))
+        section = forward.split("## API list-rate equivalent", 1)[1].split(
+            "## mm sync activity", 1
+        )[0]
+        assert "| aaa | >=$2.00 |" in section
+        assert "| bbb | >=$2.00 |" in section
+        assert "$4.00" not in section  # ceilings belong only to model-scoped Notes
+        assert forward.count("at most $4.00") == 2
+        assert "Do not sum these values" in section
 
     def test_tokens_by_day_none_renders_em_dash_never_zero_dollars(self):
         ev = _host_event("dev-a", self.TS, hosts=_priced_hosts())
@@ -7365,6 +7628,8 @@ class TestHostEconomics:
         assert "gpt-5.7-sol" in out
         assert "unpriced" in out.lower()
         assert "| dev-a | >=$0.00 |" in out
+        assert "upgrading mm on the machine that renders this report may price it" in out
+        assert "republishing does not add a rate; do not estimate" in out
 
     def test_stale_snapshot_renders_unavailable_never_confident_zero(self):
         hosts = _priced_hosts(day="2026-04-20")

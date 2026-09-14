@@ -216,12 +216,14 @@ def _acquire_lock(
 
 
 @contextmanager
-def locked_json_snapshot(path: Path) -> Iterator[LockedJsonSnapshot]:
+def locked_json_snapshot(path: Path, *, blocking: bool = True) -> Iterator[LockedJsonSnapshot]:
     """Yield a read-only, shared-lock snapshot of an existing JSON cache.
 
     Missing, malformed, and unreadable paths are represented in the snapshot
     rather than normalized. This is intentionally separate from the R/M/W
     helper because a dry-run must not turn inspection into cache repair.
+    Diagnostics can use ``blocking=False`` to report a contended cache as
+    unknown immediately; existing planners retain the blocking default.
     """
     try:
         fd = os.open(str(path), os.O_RDONLY)
@@ -235,7 +237,7 @@ def locked_json_snapshot(path: Path) -> Iterator[LockedJsonSnapshot]:
     locked = False
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH)
+            fcntl.flock(fd, fcntl.LOCK_SH | (0 if blocking else fcntl.LOCK_NB))
             locked = True
         except OSError as e:
             yield LockedJsonSnapshot(data=None, state="lock_failed", error=e)
