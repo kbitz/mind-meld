@@ -279,27 +279,37 @@ def test_empty_device_label_keeps_unnamed_parens():
     out = agg.format_retro(data)
     assert "(unnamed)" in out
     assert "(unnamed |" not in out
+    assert out.count("| (unnamed) |") >= 2
 
 
 def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
+    import os
     import time
     from io import StringIO
 
     from rich.console import Console
     from rich.markdown import Markdown
 
-    monkeypatch.setenv("TZ", "UTC")
+    original_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "UTC"
     time.tzset()
-    for width in (80, 120):
-        monkeypatch.setenv("COLUMNS", str(width))
-        for state in ("populated", "absent", "degraded"):
-            out = agg.format_retro(presentation_data(state), name="Example")
-            assert out == (GOLDENS / f"{state}.md").read_text()
-            assert all(len(line) <= 80 for line in out.splitlines() if line.startswith("|"))
-            stream = StringIO()
-            console = Console(file=stream, width=width, color_system=None)
-            console.print(Markdown(out))
-            assert all(len(line) <= width for line in stream.getvalue().splitlines())
+    try:
+        for width in (80, 120):
+            monkeypatch.setenv("COLUMNS", str(width))
+            for state in ("populated", "absent", "degraded"):
+                out = agg.format_retro(presentation_data(state), name="Example")
+                assert out == (GOLDENS / f"{state}.md").read_text()
+                assert all(len(line) <= 80 for line in out.splitlines() if line.startswith("|"))
+                stream = StringIO()
+                console = Console(file=stream, width=width, color_system=None)
+                console.print(Markdown(out))
+                assert all(len(line) <= width for line in stream.getvalue().splitlines())
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
 
 
 def test_section_floor_does_not_let_zero_rows_evict_positive_rows():

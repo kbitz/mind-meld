@@ -1787,7 +1787,26 @@ class TestTokenAggregation:
             until=datetime(2026, 5, 2, tzinfo=timezone.utc),
         )
         assert "dev-a" in result.pre_token_peers
+        assert result.token_missing_projects == 1
         assert result.tokens_input == 0
+
+    def test_present_empty_tokens_by_day_is_not_missing_coverage(self):
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        ev = self._make_sessions_event(
+            "dev-a",
+            "2026-05-01T12:00:00+00:00",
+            tokens_by_day={},
+            sessions=3,
+        )
+        result, _skills_unused = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        assert "dev-a" not in result.pre_token_peers
+        assert result.token_missing_projects == 0
+        assert result.token_missing_sessions == 0
 
     def test_tokens_summed_across_window_days(self):
         from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
@@ -7820,7 +7839,8 @@ class TestHostEconomics:
         )
         out = aggregator.format_retro(_econ_data([*unavailable, priced]))
         section = out.split("## API list-rate equivalent", 1)[1].split("## mm sync activity", 1)[0]
-        assert "| zzz-priced | ~$2.00 |" in section
+        assert "| zzz-pric | ~$2.00 |" in section
+        assert "| zzz-pric | gpt-5.6-terra | ~$2.00 |" in section
         assert section.count("| aaa-") == aggregator.MAX_AGENT_INVENTORY_MACHINES - 1
         assert "(+1 more machines omitted; those with an estimate are shown first.)" in section
 

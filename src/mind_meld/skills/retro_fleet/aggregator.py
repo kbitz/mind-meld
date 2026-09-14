@@ -2342,11 +2342,10 @@ def aggregate_sessions(
             )
             if after != before:
                 out.token_devices[device] = max(_ts, out.token_devices.get(device, _ts))
-        elif sessions > 0:
-            # Sessions exist but tokens_by_day is missing/empty. Either a
-            # pre-v0.11.14 peer (no field) or a peer whose token cache is
-            # cold (autopush gate skipped the token walk this push). Same
-            # user-visible signal: "tokens incomplete: device X."
+        elif sessions > 0 and ("tokens_by_day" not in proj or not isinstance(tokens_by_day, dict)):
+            # KEY-ABSENT (or non-dict) is incomplete: pre-v0.11.14 or a skipped
+            # token walk. A present empty map is a completed observation of
+            # zero tokens, same D4 discriminator as skills_by_day.
             out.pre_token_peers.add(device)
             out.token_missing_projects += 1
             out.token_missing_sessions += sessions
@@ -2844,6 +2843,14 @@ def _aggregate_model_families(tokens_by_model: object) -> list[tuple[str, int]]:
 
 
 MAX_MODEL_COST_ROWS = 5
+_DEVICE_TABLE_LABEL_WIDTH = 8
+
+
+def _device_table_label(device: str) -> str:
+    """One prefix width for Agent activity, economics, and model subtotals."""
+    return _safe_short(device)[:_DEVICE_TABLE_LABEL_WIDTH] or "(unnamed)"
+
+
 RATE_MARKER_LEGEND = (
     "- ``~``: estimate from the recorded tokens and bundled rates. "
     "May use a family-extrapolated rate.",
@@ -3495,7 +3502,7 @@ def _render_agent_inventory(
     readers: list[str] = []
     observations: list[str] = []
     for device in shown:
-        label = _safe_short(device)[:8] or "(unnamed)"
+        label = _device_table_label(device)
         snap = inventory.by_device.get(device)
         # Mirror _agent_rhythm_view's guard: by_device is a public dataclass
         # field, so a hand-built inventory can carry a non-snapshot value.
@@ -3738,7 +3745,7 @@ def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
     ]
     notes: list[str] = []
     for device, cell, device_notes, _by_model, _costs in shown:
-        label = _safe_short(device)[:24] or "(unnamed)"
+        label = _device_table_label(device)
         lines.append(f"| {label} | {cell} |")
         notes.extend(device_notes)
     lines.append("")
@@ -3780,7 +3787,7 @@ def _per_model_cost_summary(device: str, by_model: dict, costs: dict, *, floor: 
         (m for m in by_model if m not in token_usage.COST_EXCLUDED_MODELS),
         key=lambda m: (-token_usage.sum_bucket(by_model[m]), m),
     )
-    label = _safe_short(device)[:12] or "(unnamed)"
+    label = _device_table_label(device)
     lines = []
     for model in ordered[:MAX_MODEL_COST_ROWS]:
         cell = _marked_cost(costs[model], floor=floor) if model in costs else "—"
