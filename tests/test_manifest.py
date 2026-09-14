@@ -684,6 +684,8 @@ class TestWalkGenericSourceDedup:
         This models an existing explicit source configuration, before its
         default exclude globs have been migrated.
         """
+        from datetime import datetime, timedelta, timezone
+
         from mind_meld.cli import _filter_symlinked_paths
 
         base = tmp_path / "codex"
@@ -691,12 +693,13 @@ class TestWalkGenericSourceDedup:
         target = tmp_path / "managed-agents.md"
         target.write_text("managed")
         (base / "AGENTS.md").symlink_to(target)
+        recent_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         remote = {
             "sources": {"codex": {"files": {"AGENTS.md": {"sha256": "a"}}}},
             "tombstones": {
-                "codex:AGENTS.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
-                "codex:real.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
-                "legacy.md": {"deleted_at": "2026-08-15T00:00:00+00:00"},
+                "codex:AGENTS.md": {"deleted_at": recent_iso},
+                "codex:real.md": {"deleted_at": recent_iso},
+                "legacy.md": {"deleted_at": recent_iso},
             },
         }
 
