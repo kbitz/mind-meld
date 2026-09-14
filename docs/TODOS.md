@@ -48,7 +48,7 @@ here by hand, use the H3 form.
 
 ### Roadmap drain — 2026-09-14
 
-19 inbox items from the Track 52A–57A /autoplan reviews: **9 placed, 10 deferred, 0 discharged, 0 killed**. Authored-false rate: 0 / (9 + 0) = 0%. Verification baseline: `a7d9bca` (v0.14.11). Ground truth closed six Tracks first: 52A (v0.14.6 `bb39230`), 53A (v0.14.7 `fe21a57`), 54A (v0.14.8 `735ed02`), 55A (v0.14.9 `d85e504`), 56A (v0.14.10 `dbc926e`), 57A (v0.14.11 `a7d9bca`); Groups 52–57 are appended to `docs/roadmap-shipped.md`. The pricing page was re-read on 2026-09-14 before item 6 was placed.
+19 inbox items from the Track 52A–57A /autoplan reviews: **8 placed, 11 deferred, 0 discharged, 0 killed**. Authored-false rate: 0 / (8 + 0) = 0%. Verification baseline: `a7d9bca` (v0.14.11). Ground truth closed six Tracks first: 52A (v0.14.6 `bb39230`), 53A (v0.14.7 `fe21a57`), 54A (v0.14.8 `735ed02`), 55A (v0.14.9 `d85e504`), 56A (v0.14.10 `dbc926e`), 57A (v0.14.11 `a7d9bca`); Groups 52–57 are appended to `docs/roadmap-shipped.md`. The pricing page was re-read on 2026-09-14 before item 6 was placed.
 
 | Inbox item | Title | Disposition / destination | Evidence or reason |
 |---|---|---|---|
