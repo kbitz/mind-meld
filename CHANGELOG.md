@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [Unreleased]
+## [0.14.11] - 2026-09-14
 
 **Grok usage delivery and verified API list-rate pricing ship together.** Later readers get 50 ms of grace, and attended captures warm every deadline-dropped warmable reader before retrying each successful warm on its own budget. Grok's recorded tokens now contribute a pricing floor, with a model-scoped at-most figure only when coverage allows it. `gpt-6-astra` is also priced.
 
