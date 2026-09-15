@@ -38,6 +38,18 @@ class TestDetectCaseInsensitiveFs:
         assert _detect_case_insensitive_fs(tmp_path / "nope" / "missing") is True
         assert calls == [tmp_path]
 
+    def test_oserror_on_probe_assumes_case_insensitive(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        d = tmp_path / "Projects"
+        d.mkdir()
+
+        def boom(self, other):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "samefile", boom)
+        assert _detect_case_insensitive_fs(d) is True
+
     def test_returns_false_on_alpha_free_basename(self, tmp_path):
         """A path whose basename has no alphabetic chars can't be case-mangled."""
         d = tmp_path / "12345"

@@ -12,7 +12,7 @@ All notable changes to Mind Meld will be documented in this file.
 - A missing custom mm-events folder is warned about and skipped for that push, without new tombstones or an events tail. Other sources publish and autopush records a degraded breadcrumb. Recapture refuses before writing rows; pull skips the unavailable source with a warning.
 - Pull checks case collisions on the nearest existing ancestor when the destination root is missing, preventing case-only peer paths from overwriting each other on macOS.
 - `mm status`, `mm diag`, `mm diff`, `mm pull --dry-run`, `mm gc --dry-run`, and `mm recapture --dry-run` no longer repair shared crypto-init copies. `mm push --dry-run` retains its existing no-repair contract. Pending repair is reported as counts; status never persists a missing crypto fingerprint.
-- Verified crypto repair deletes only byte-identical conflict copies and durably preserves distinct bytes, including same-salt copies with different parameters or keychecks. A changed winner aborts before publication or init registration; late/replaced copies stay in place and write/fsync failures retain conflict candidates.
+- Verified crypto repair deletes only byte-identical conflict copies and durably preserves distinct bytes, including same-salt copies with different parameters or keychecks. Symlinked conflict names are treated as unreadable and are not copied into storage. A changed winner aborts before publication or init registration; late/replaced copies stay in place and write/fsync failures retain conflict candidates.
 - `mm status` reads the upgrade cache without HTTP requests or writes, reports unknown cache states and stale check age, and preserves pending upgrade transitions for a following mutating command.
 
 ### Changed

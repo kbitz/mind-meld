@@ -138,6 +138,18 @@ class TestFsyncRouting:
         assert len(spy) == 1
         assert spy[0]["fsync"] is False
 
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "mm-crypto-init",
+            "mm-crypto-init.preserved-abcd1234-20260101T000000Z",
+        ],
+    )
+    def test_crypto_init_keys_use_fsync_true(self, backend, spy, key):
+        backend.put(key, b"blob")
+        assert spy[-1]["fsync"] is True
+        assert spy[-1]["mode"] == 0o600
+
     def test_all_storage_writes_use_mode_0600(self, backend, spy):
         """All storage keys hold encrypted secrets — explicit 0600 to
         prevent world-readable leaks via umask on new files."""

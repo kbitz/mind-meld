@@ -106,15 +106,21 @@ def set_invocation_skip(skip: bool) -> None:
 
 @dataclass
 class UpgradeCheckResult:
-    """Return value of `check_for_upgrade`.
+    """Return value of `check_for_upgrade` and `cached_upgrade_view`.
 
     state:
       "skip"               — dev build, opt-out, --no-check-version, or
                              cache-fresh-and-equal. Caller does nothing.
       "current"            — local version matches latest. No nudge.
       "upgrade-available"  — caller may nudge, gated by `should_nudge`.
-      "unknown"            — network or parse failure; cached state used
-                             where possible. Caller does nothing.
+      "unknown"            — missing, malformed, or contended cache
+                             (`cached_upgrade_view`); network or parse
+                             failure (`check_for_upgrade`). Caller does
+                             nothing.
+
+    `cache_state` names why a cache-only view is unknown (`missing`,
+    `malformed`, `lock_failed`) or `valid` when the cache parsed.
+    `checked_at` / `stale` carry the cache's age for status display.
     """
 
     state: str

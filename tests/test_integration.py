@@ -6707,6 +6707,7 @@ class TestMmEventsOwnership59A:
         assert set(manifest["tombstones"]) == {existing_key}
         if command == "autopush":
             assert breadcrumbs[-1][1] == "degraded"
+            assert "pushed 0 files" not in result.output
             assert str(custom) in breadcrumbs[-1][2]
         (custom / "events").mkdir(parents=True)
         (custom / "events" / "returned.jsonl").write_text("{}\n")

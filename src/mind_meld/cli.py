@@ -8895,15 +8895,16 @@ def autopush() -> None:
             return
 
         if result:
-            parts = []
-            if result.total_new:
-                parts.append(f"{result.total_new} new")
-            if result.total_modified:
-                parts.append(f"{result.total_modified} modified")
-            if result.total_deleted:
-                parts.append(f"{result.total_deleted} deleted")
             total = result.total_new + result.total_modified + result.total_deleted
-            print(f"mm: pushed {total} files ({', '.join(parts)})")
+            if total:
+                parts = []
+                if result.total_new:
+                    parts.append(f"{result.total_new} new")
+                if result.total_modified:
+                    parts.append(f"{result.total_modified} modified")
+                if result.total_deleted:
+                    parts.append(f"{result.total_deleted} deleted")
+                print(f"mm: pushed {total} files ({', '.join(parts)})")
 
         # Persist events-tail degradation the same way autopull persists its
         # own (see the `degradations` list in `autopull` below). The tail is

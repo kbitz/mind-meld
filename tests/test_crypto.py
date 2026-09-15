@@ -655,17 +655,18 @@ class TestCryptoInitRepairPreview56A:
         unreadable = tmp_path / "mm-crypto-init 3"
         unreadable.write_bytes(b"unreadable candidate")
         real_read = Path.read_bytes
+        real_nofollow = crypto._read_regular_nofollow
 
-        def read(path):
+        def read_nofollow(path):
             if path == unreadable:
-                raise PermissionError("unreadable copy")
-            return real_read(path)
+                return None
+            return real_nofollow(path)
 
         before = {
             p.name: (real_read(p), p.stat().st_mtime_ns) for p in tmp_path.iterdir() if p.is_file()
         }
         with monkeypatch.context() as patch:
-            patch.setattr(Path, "read_bytes", read)
+            patch.setattr(crypto, "_read_regular_nofollow", read_nofollow)
             patch.setattr(backend, "put", lambda *a: pytest.fail("preview put"))
             patch.setattr(
                 backend, "delete_conflict_copies", lambda *a: pytest.fail("preview delete")
@@ -678,10 +679,11 @@ class TestCryptoInitRepairPreview56A:
             copy.name: "delete",
             unreadable.name: "preserve",
         }
+        unreadable_plan = next(c for c in preview.repair_plan.copies if c.name == unreadable.name)
+        assert unreadable_plan.content_hash is None
         assert {
             p.name: (real_read(p), p.stat().st_mtime_ns) for p in tmp_path.iterdir() if p.is_file()
         } == before
-        from mind_meld import crypto
 
         crypto.apply_crypto_init_repair(backend, preview)
         assert not copy.exists()
@@ -810,6 +812,57 @@ class TestVerifiedRepair60A:
         fetch = replace(fetch, repair_plan=replace(fetch.repair_plan, copies=(fake,)))
         crypto.apply_crypto_init_repair(backend, fetch)
         assert outside.read_bytes() == b"untouched"
+
+    def test_symlink_conflict_is_unreadable_and_not_copied(self, tmp_path):
+        backend, canonical, same, distinct = self._seed(tmp_path)
+        secret = tmp_path.parent / (tmp_path.name + "-secret")
+        secret.write_bytes(b"credential-bytes")
+        same.unlink()
+        same.symlink_to(secret)
+        fetch = fetch_crypto_init(backend)
+        copy = next(c for c in fetch.repair_plan.copies if c.name == same.name)
+        assert copy.content_hash is None
+        assert copy.disposition == "preserve"
+        crypto.apply_crypto_init_repair(backend, fetch)
+        assert same.is_symlink()
+        assert secret.read_bytes() == b"credential-bytes"
+        assert not any(
+            p.read_bytes() == b"credential-bytes"
+            for p in tmp_path.glob("mm-crypto-init.preserved-*")
+        )
+
+    def test_symlink_canonical_aborts_repair_without_copying_target(self, tmp_path):
+        backend, canonical, same, distinct = self._seed(tmp_path)
+        secret = tmp_path.parent / (tmp_path.name + "-secret")
+        secret.write_bytes(b"credential-bytes")
+        canonical.unlink()
+        canonical.symlink_to(secret)
+        fetch = fetch_crypto_init(backend)
+        assert fetch.status == "ok"
+        with pytest.raises(CryptoError, match="cannot preserve unreadable canonical"):
+            crypto.apply_crypto_init_repair(backend, fetch)
+        assert canonical.is_symlink()
+        assert secret.read_bytes() == b"credential-bytes"
+        assert not any(
+            p.read_bytes() == b"credential-bytes"
+            for p in tmp_path.glob("mm-crypto-init.preserved-*")
+        )
+
+    def test_unreadable_canonical_aborts_repair_without_writes(self, tmp_path, monkeypatch):
+        backend, canonical, same, distinct = self._seed(tmp_path)
+        before = {p: p.read_bytes() for p in (canonical, same, distinct)}
+        fetch = fetch_crypto_init(backend)
+        real = crypto._read_regular_nofollow
+
+        def boom(path):
+            if path == canonical:
+                return None
+            return real(path)
+
+        monkeypatch.setattr(crypto, "_read_regular_nofollow", boom)
+        with pytest.raises(CryptoError, match="cannot preserve unreadable canonical"):
+            crypto.apply_crypto_init_repair(backend, fetch)
+        assert {p: p.read_bytes() for p in before} == before
 
 
 def test_crypto_repair_has_one_mutating_owner():

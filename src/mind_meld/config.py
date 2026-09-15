@@ -744,7 +744,7 @@ def _preview_mm_events_bootstrap(path: str, *, strict: bool) -> bool:
     p = Path(path).expanduser()
     try:
         try:
-            p.stat()
+            p.lstat()
             return False
         except FileNotFoundError:
             pass

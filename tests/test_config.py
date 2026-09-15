@@ -1480,11 +1480,11 @@ class TestUpdateConfigOnDisk:
 
 
 class TestMmEventsSource:
-    """Group 7 preflight #6 + D9: mm-events DEFAULT_SOURCES entry +
-    get_sources() bootstrap. Codex outside-voice finding #9 flagged that
-    without bootstrap, the source ships inert — get_sources() drops it
-    via the path-existence filter at line 292. Bootstrap creates the
-    base path on first call so the source is live from preflight ship.
+    """mm-events DEFAULT_SOURCES entry and explicit-writer bootstrap.
+
+    `get_sources` / `resolve_sources` default to `bootstrap=False`.
+    Inspection walks a missing default root as empty; init, real push,
+    recapture, and pull-apply pass `bootstrap=True` / `not dry_run`.
     """
 
     def test_default_sources_includes_mm_events(self):
@@ -1510,9 +1510,9 @@ class TestMmEventsSource:
 
     @pytest.mark.no_mm_events_isolation
     def test_get_sources_bootstraps_mm_events_path(self, tmp_path, monkeypatch):
-        """First get_sources() call on a fresh machine creates the
-        mm-events base dir at mode 0700. Path-existence filter then
-        keeps the source in the resolved list.
+        """`get_sources(..., bootstrap=True)` creates the mm-events
+        base dir at mode 0700. Path-existence filter then keeps the
+        source in the resolved list.
 
         Opts out of `_isolate_mm_events_path` so the canonical
         `~/.local/share/mind-meld` path is used; HOME redirection then

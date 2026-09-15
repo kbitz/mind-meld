@@ -34,8 +34,10 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
+import stat
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 from argon2.low_level import Type, hash_secret_raw
@@ -43,7 +45,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from mind_meld.errors import CryptoError, StorageError
+from mind_meld.errors import CryptoError
 from mind_meld.storage.keys import CRYPTO_INIT_KEY
 
 __all__ = [
@@ -369,6 +371,41 @@ def _serialize_crypto_init(argon2_memory_kb: int, root_salt: bytes, keycheck_blo
     )
 
 
+def _read_regular_nofollow(path: Path) -> bytes | None:
+    """Read a regular file without following a final symlink.
+
+    Symlinks, non-regular files, and unreadable names return None so they
+    stay unhashed: no digest authorizes deletion or a preserve-copy into
+    shared storage.
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        chunks: list[bytes] = []
+        remaining = info.st_size
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
     """Pure tri-state read, with deterministic selection and a bound repair plan.
 
@@ -376,26 +413,22 @@ def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
     bytes represent potentially useful crypto lineage, including malformed or
     unreadable copies, and are never authorized for deletion by a read.
     """
-    canonical_exists = backend.exists(CRYPTO_INIT_KEY)
+    canonical_path = Path(backend.root) / CRYPTO_INIT_KEY
+    try:
+        canonical_path.lstat()
+        canonical_exists = True
+    except FileNotFoundError:
+        canonical_exists = False
     conflicts = backend.find_conflict_copies(CRYPTO_INIT_KEY)
     if not canonical_exists and not conflicts:
         return CryptoInitFetch(status="missing")
 
-    canonical_raw: bytes | None = None
-    if canonical_exists:
-        try:
-            canonical_raw = backend.get(CRYPTO_INIT_KEY)
-        except StorageError:
-            pass
+    canonical_raw = _read_regular_nofollow(canonical_path) if canonical_exists else None
     observed: list[tuple[str, bytes | None]] = []
     if canonical_exists:
         observed.append((CRYPTO_INIT_KEY, canonical_raw))
     for path in conflicts:
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            raw = None
-        observed.append((path.name, raw))
+        observed.append((path.name, _read_regular_nofollow(path)))
     valid = [(raw, _parse_crypto_init(raw)) for _, raw in observed if raw is not None]
     valid = [(raw, parsed) for raw, parsed in valid if parsed.status == "ok"]
     if not valid:
@@ -452,12 +485,18 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
     plan = fetch.repair_plan
     if plan is None:
         return
+    canonical_path = Path(backend.root) / CRYPTO_INIT_KEY
     try:
-        canonical_raw = backend.get(CRYPTO_INIT_KEY) if backend.exists(CRYPTO_INIT_KEY) else None
-    except StorageError as e:
-        raise CryptoError(
-            "crypto: cannot preserve unreadable canonical mm-crypto-init; nothing was published."
-        ) from e
+        canonical_path.lstat()
+    except FileNotFoundError:
+        canonical_raw = None
+    else:
+        canonical_raw = _read_regular_nofollow(canonical_path)
+        if canonical_raw is None:
+            raise CryptoError(
+                "crypto: cannot preserve unreadable canonical mm-crypto-init; "
+                "nothing was published."
+            )
     current_hash = hashlib.sha256(canonical_raw).hexdigest() if canonical_raw is not None else None
     if current_hash != (plan.canonical.content_hash if plan.canonical else None):
         raise CryptoError(changed)
@@ -488,11 +527,8 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
         candidate = planned.get(path.name)
         if candidate is None or candidate.content_hash is None:
             continue
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        if hashlib.sha256(raw).hexdigest() != candidate.content_hash:
+        raw = _read_regular_nofollow(path)
+        if raw is None or hashlib.sha256(raw).hexdigest() != candidate.content_hash:
             continue
         if candidate.disposition == "preserve":
             preserve(raw)
@@ -505,7 +541,8 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
         if digest is None:
             continue
         try:
-            if hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+            raw = _read_regular_nofollow(path)
+            if raw is not None and hashlib.sha256(raw).hexdigest() == digest:
                 path.unlink()
         except FileNotFoundError:
             pass
