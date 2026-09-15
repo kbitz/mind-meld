@@ -4182,6 +4182,7 @@ class TestTrack7BEventsTail:
         for i, extra in enumerate(extra_claude_dirs or []):
             sources.append({"name": f"claude-{i + 2}", "path": str(extra), "type": "claude"})
         if include_mm_events:
+            (tmp_path / "events_root").mkdir(exist_ok=True)
             sources.append(
                 {
                     "name": "mm-events",
@@ -6147,8 +6148,9 @@ def push_preview56(tmp_path, monkeypatch):
     fetch = bootstrap_crypto_init(backend, PASSPHRASE, MEMORY_KB)
     register_device(backend, "dev-a", "Mac A")
     config_path, cfg = _make_config(tmp_path, backend.root, claude)
-    events_root = tmp_path / "mm-events"
-    events_root.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    events_root = tmp_path / ".local" / "share" / "mind-meld"
+    events_root.mkdir(parents=True)
     cfg["sync"]["sources"].append(
         {
             "name": "mm-events",
@@ -6396,34 +6398,23 @@ class TestPushPreviewNoMutation56A:
         assert missing_text == _preview_text(present)
 
     @pytest.mark.parametrize("excluded", [0, 1, 2])
-    def test_pc3_counts_filtered_prior(self, push_preview56, excluded):
+    def test_missing_default_root_previews_filtered_deletions(self, push_preview56, excluded):
         env = push_preview56
-        _seed_preview_prior(env, event_files=("events/a.jsonl", "events/b.jsonl"))
+        _seed_preview_prior(
+            env, event_files=("events/dev-a-2026-09-10.jsonl", "events/dev-b-2026-09-12.jsonl")
+        )
         env["config"]["sync"]["sources"][1]["exclude_patterns"] = [
-            f"events/{name}.jsonl" for name in ("a", "b")[:excluded]
+            f"events/{name}.jsonl" for name in ("dev-a-2026-09-10", "dev-b-2026-09-12")[:excluded]
         ]
         save_config(env["config"], env["config_path"])
         env["events"].rmdir()
         result = env["invoke"]()
-        if excluded == 2:
-            _assert_preview_complete(result)
-            return
-        _assert_preview_refused(result)
-        text = _preview_text(result)
-        assert f"this Mac published {2 - excluded} files" in text
-        assert str(env["events"]) in "".join(result.output.split())
-        from mind_meld.manifest import TOMBSTONE_TTL_DAYS
+        _assert_preview_complete(result)
+        if excluded < 2:
+            # Display compares against the advertised snapshot, including exclusions.
+            assert "- 2 deleted" in result.output
 
-        for fragment in (
-            f"{TOMBSTONE_TTL_DAYS} days",
-            "mm pull if another Mac has them",
-            "/events is filled again",
-            "from a backup",
-            "To accept the deletion: run mm push.",
-        ):
-            assert fragment in text
-
-    def test_pc3_uses_sidecar_recovered_prior(self, push_preview56):
+    def test_missing_root_deletions_use_sidecar_recovered_prior(self, push_preview56):
         from mind_meld import sidecar as sidecar_mod
         from mind_meld.storage.keys import manifest_key
 
@@ -6434,8 +6425,7 @@ class TestPushPreviewNoMutation56A:
         env["backend"].put(manifest_key("dev-a"), b"corrupt")
         env["events"].rmdir()
         result = env["invoke"]()
-        _assert_preview_refused(result)
-        assert "this Mac published 1 files" in _preview_text(result)
+        _assert_preview_complete(result)
         assert "recovered prior state from local sidecar" in result.output
 
     def test_unrecoverable_corrupt_manifest_is_lock_only(self, push_preview56):
@@ -6457,10 +6447,9 @@ class TestPushPreviewNoMutation56A:
 
     def test_unwritable_ancestor_refuses(self, push_preview56):
         env = push_preview56
-        parent = env["events"].parent / "restricted"
-        parent.mkdir(mode=0o500)
-        env["config"]["sync"]["sources"][1]["path"] = str(parent / "missing")
-        save_config(env["config"], env["config_path"])
+        env["events"].rmdir()
+        parent = env["events"].parent
+        parent.chmod(0o500)
         try:
             result = env["invoke"]()
             _assert_preview_refused(result)
@@ -6522,3 +6511,262 @@ class TestPushPreviewNoMutation56A:
         assert len([row for row in rows if row["verb"] == "self-upgrade"]) == 1
         cache = json.loads(env["upgrade"].CACHE_PATH.read_text())
         assert cache["last_nudged_version"] == "99.0.0"
+
+
+class TestMmEventsOwnership59A:
+    @pytest.mark.no_mm_events_isolation
+    def test_init_creates_private_root_before_backfill(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = tmp_path / ".local" / "share" / "mind-meld"
+        TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
+        monkeypatch.setattr(cli_module.skill_link, "_ensure_retro_skill_links", lambda **kw: ())
+        calls = []
+
+        def backfill(*args):
+            calls.append(True)
+            assert root.stat().st_mode & 0o777 == 0o700
+
+        monkeypatch.setattr(cli_module.events_tail, "_run_events_backfill", backfill)
+        result = runner.invoke(
+            app, ["init"], input=f"{tmp_path / 'storage'}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\n"
+        )
+        assert result.exit_code == 0, result.output
+        assert calls == [True]
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="APFS-default needed")
+    def test_pull_case_collision_into_missing_default_root(self, push_preview56):
+        from mind_meld.storage.keys import blob_key, manifest_key
+
+        env = push_preview56
+        prior = _seed_preview_prior(env)
+        files = {}
+        for rel, data in [("events/A.jsonl", b"upper\n"), ("events/a.jsonl", b"lower\n")]:
+            digest = hashlib.sha256(data).hexdigest()
+            files[rel] = {"sha256": digest, "size": len(data), "mtime": None}
+            env["backend"].put(blob_key("dev-a", digest), encrypt(data, PASSPHRASE, MEMORY_KB))
+        prior["sources"]["mm-events"]["files"] = files
+        env["backend"].put(
+            manifest_key("dev-a"), encrypt(serialize_manifest(prior), PASSPHRASE, MEMORY_KB)
+        )
+        env["events"].rmdir()
+        result = runner.invoke(app, ["pull", "--from", "dev-a", "--source", "mm-events"])
+        assert result.exit_code == 0, result.output
+        assert "mm: warning:" in result.stderr
+        assert (env["events"] / "events" / "A.jsonl").read_bytes() == b"upper\n"
+        assert len(list((env["events"] / "events").iterdir())) == 1
+        assert env["events"].stat().st_mode & 0o777 == 0o700
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            ["status"],
+            ["diag"],
+            ["sources"],
+            ["diff"],
+            ["conflicts"],
+            ["resolve"],
+            ["gc"],
+            ["disable-source", "mm-events"],
+            ["enable-source", "mm-events"],
+            ["reconfigure-sources"],
+            ["autopush"],
+            ["pull"],
+            ["pull", "--source", "claude"],
+        ],
+    )
+    def test_inspection_does_not_create_root(self, push_preview56, monkeypatch, command):
+        env = push_preview56
+        monkeypatch.setattr(cli_module, "__version__", "0.14.12")
+        monkeypatch.setattr(env["upgrade"], "__version__", "0.14.12")
+        monkeypatch.delenv("MM_SKILLS_DIR", raising=False)
+        if command == ["autopush"]:
+            # Isolate the post-core no-sources inspection from the real writer.
+            monkeypatch.setattr(cli_module, "_push_core", lambda *a, **kw: None)
+        env["events"].rmdir()
+        records = []
+        token = _PREVIEW_AUDIT.set((records, env["events"].parents[2] / "test.lock"))
+        try:
+            result = runner.invoke(app, command, input="\n" * 20)
+        finally:
+            _PREVIEW_AUDIT.reset(token)
+        assert result.exit_code == 0, result.output
+        assert not env["events"].exists()
+        assert not [r for r in records if str(env["events"]) in r[1]], records
+
+    @pytest.mark.parametrize("kind", ["default", "custom", "symlink", "chmod-failure"])
+    def test_push_tightens_only_owned_default_root(self, push_preview56, monkeypatch, kind):
+        from mind_meld.storage.keys import manifest_key
+
+        env = push_preview56
+        root = env["events"]
+        target = root
+        if kind in {"custom", "symlink"}:
+            target = root.parent / "custom"
+            target.mkdir()
+            if kind == "symlink":
+                root.rmdir()
+                root.symlink_to(target, target_is_directory=True)
+            else:
+                env["config"]["sync"]["sources"][1]["path"] = str(target)
+                save_config(env["config"], env["config_path"])
+        target.chmod(0o755)
+        if kind == "chmod-failure":
+            original = os.fchmod
+            info = root.stat()
+
+            def fchmod(fd, mode):
+                actual = os.fstat(fd)
+                if (actual.st_dev, actual.st_ino) == (info.st_dev, info.st_ino):
+                    raise PermissionError("tightening denied")
+                return original(fd, mode)
+
+            monkeypatch.setattr(os, "fchmod", fchmod)
+        errors = []
+        for _ in range(2):
+            result = runner.invoke(app, ["push"])
+            assert result.exit_code == 0, result.output
+            errors.append(result.stderr)
+        expected_mode = 0o700 if kind == "default" else 0o755
+        assert target.stat().st_mode & 0o777 == expected_mode
+        assert sum(text.count("could not tighten mm-events") for text in errors) == (
+            1 if kind == "chmod-failure" else 0
+        )
+        assert env["backend"].exists(manifest_key("dev-a"))
+
+    @pytest.mark.parametrize("own_today", [False, True])
+    @pytest.mark.parametrize("wipe_root", [False, True])
+    def test_preview_matches_push_except_activity_row(self, push_preview56, own_today, wipe_root):
+        env = push_preview56
+        today = datetime.now(timezone.utc).date().isoformat()
+        own = f"events/dev-a-{today}.jsonl"
+        prior_paths = ["events/dev-a-2026-09-10.jsonl", "events/dev-b-2026-09-12.jsonl"]
+        if own_today:
+            prior_paths.append(own)
+        _seed_preview_prior(env, event_files=prior_paths)
+        if wipe_root:
+            env["events"].rmdir()
+        preview = env["invoke"]()
+        _assert_preview_complete(preview)
+        assert f"- {len(prior_paths)} deleted" in preview.output
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        manifest = cli_module._fetch_remote_manifest(
+            env["backend"], "dev-a", PASSPHRASE, MEMORY_KB
+        ).manifest
+        assert set(manifest["sources"]["mm-events"]["files"]) == {own}
+        assert set(manifest["tombstones"]) == {f"mm-events:{p}" for p in prior_paths if p != own}
+        assert env["events"].stat().st_mode & 0o777 == 0o700
+
+    @pytest.mark.parametrize("command", ["push", "autopush"])
+    def test_missing_custom_root_skips_without_tombstones_and_resumes(
+        self, push_preview56, monkeypatch, command
+    ):
+        env = push_preview56
+        prior = _seed_preview_prior(env, event_files=["events/dev-a-2026-09-10.jsonl"])
+        existing_key = "mm-events:events/old.jsonl"
+        prior["tombstones"] = {
+            existing_key: {
+                "deleted_at": datetime.now(timezone.utc).isoformat(),
+                "deleted_by": "dev-a",
+            }
+        }
+        from mind_meld.storage.keys import manifest_key
+
+        env["backend"].put(
+            manifest_key("dev-a"), encrypt(serialize_manifest(prior), PASSPHRASE, MEMORY_KB)
+        )
+        custom = env["events"].parent / "unplugged"
+        env["config"]["sync"]["sources"][1]["path"] = str(custom)
+        save_config(env["config"], env["config_path"])
+
+        def no_tail(*a, **kw):
+            pytest.fail("missing custom source ran events tail")
+
+        monkeypatch.setattr(cli_module.events_tail, "_run_events_tail", no_tail)
+        breadcrumbs = []
+        monkeypatch.setattr(
+            cli_module, "_write_autorun_breadcrumb", lambda *args: breadcrumbs.append(args)
+        )
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert result.stderr.count("mm: warning:") == 1
+        assert str(custom) in result.stderr
+        assert "plug it in, create it, or run mm disable-source mm-events" in result.stderr
+        assert not custom.exists()
+        manifest = cli_module._fetch_remote_manifest(
+            env["backend"], "dev-a", PASSPHRASE, MEMORY_KB
+        ).manifest
+        assert "mm-events" not in manifest["sources"]
+        assert "claude" in manifest["sources"]
+        assert set(manifest["tombstones"]) == {existing_key}
+        if command == "autopush":
+            assert breadcrumbs[-1][1] == "degraded"
+            assert str(custom) in breadcrumbs[-1][2]
+        (custom / "events").mkdir(parents=True)
+        (custom / "events" / "returned.jsonl").write_text("{}\n")
+        monkeypatch.setattr(cli_module.events_tail, "_run_events_tail", lambda *a, **kw: [])
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        manifest = cli_module._fetch_remote_manifest(
+            env["backend"], "dev-a", PASSPHRASE, MEMORY_KB
+        ).manifest
+        assert set(manifest["sources"]["mm-events"]["files"]) == {"events/returned.jsonl"}
+
+    @pytest.mark.parametrize("failure", ["parent", "unrelated", "custom"])
+    def test_recapture_setup_failure_writes_no_rows(self, push_preview56, monkeypatch, failure):
+        env = push_preview56
+        env["events"].rmdir()
+        if failure == "parent":
+            original = Path.mkdir
+
+            def mkdir(path, *a, **kw):
+                if path == env["events"]:
+                    raise PermissionError(13, "denied", str(path))
+                return original(path, *a, **kw)
+
+            monkeypatch.setattr(Path, "mkdir", mkdir)
+        elif failure == "unrelated":
+            original = Path.stat
+
+            def stat(path, *a, **kw):
+                if path == env["claude"]:
+                    raise PermissionError(13, "denied", str(path))
+                return original(path, *a, **kw)
+
+            monkeypatch.setattr(Path, "stat", stat)
+        else:
+            env["config"]["sync"]["sources"][1]["path"] = str(env["events"].parent / "custom")
+            save_config(env["config"], env["config_path"])
+        result = runner.invoke(app, ["recapture", "1d"])
+        assert result.exit_code == 1, result.output
+        assert "No recapture rows were written." in _preview_text(result)
+        assert "disabled on this Mac" not in result.output
+        assert not env["events"].exists()
+
+
+def test_bootstrap_calls_stay_in_explicit_writers59a():
+    import ast
+
+    root = Path(__file__).parents[1] / "src" / "mind_meld"
+    found = set()
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+            bootstrap = next((kw.value for kw in node.keywords if kw.arg == "bootstrap"), None)
+            writes = name == "_bootstrap_mm_events_path" or (
+                bootstrap is not None
+                and not (isinstance(bootstrap, ast.Constant) and bootstrap.value is False)
+            )
+            if not writes or path.name == "config.py":
+                continue
+            owner = parents.get(node)
+            while owner is not None and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                owner = parents.get(owner)
+            found.add((path.name, owner.name if owner else None))
+    assert found == {("cli.py", n) for n in ("init", "_push_core", "recapture", "_pull_one_source")}

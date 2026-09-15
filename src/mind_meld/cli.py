@@ -131,7 +131,6 @@ from mind_meld.manifest import (
     CONFLICT_V1_MARKER,
     GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
-    TOMBSTONE_TTL_DAYS,
     DiffResult,
     _under_skip_prefix,
     _validate_rel_path,
@@ -1141,19 +1140,24 @@ def _detect_case_insensitive_fs(path: Path) -> bool:
     case-mangled meaningfully). Skips when the swapcase produces the same
     name (basename was already case-neutral).
     """
-    if not path.exists():
-        return False
-    name = path.name
-    if not any(c.isalpha() for c in name):
-        return False
-    alt_name = name.swapcase()
-    if alt_name == name:
-        return False
-    alt = path.parent / alt_name
     try:
-        return alt.exists() and alt.samefile(path)
+        while True:
+            try:
+                path.stat()
+                break
+            except FileNotFoundError:
+                if path.parent == path:
+                    return True
+                path = path.parent
+        if path.name.swapcase() == path.name:
+            return True
+        alt = path.with_name(path.name.swapcase())
+        try:
+            return alt.samefile(path)
+        except FileNotFoundError:
+            return False
     except OSError:
-        return False
+        return True
 
 
 def _detect_pull_case_collisions(
@@ -3390,7 +3394,7 @@ def init() -> None:
     # Track 25C: resolve sources BEFORE the installer so consent is known.
     # Hook position relative to _register_and_save and _run_events_backfill
     # is unchanged. The mm-events bootstrap mkdir moves a few lines earlier.
-    resolved_sources = get_sources(config)
+    resolved_sources = get_sources(config, bootstrap=True)
     may_create = skill_link.consented_agent_keys(config, resolved_sources)
     try:
         skill_link._ensure_retro_skill_links(dry_run=False, explicit=True, may_create=may_create)
@@ -3677,6 +3681,24 @@ def _push_core(
     # stays AFTER _ensure_device_registered and BEFORE _run_events_tail.
     # The mm-events bootstrap mkdir moves a few lines earlier.
     resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
+    events_degradations: list[str] = []
+    available_names = {src["name"] for src in resolution.available}
+    skipped_internal = [
+        src
+        for src in resolution.selected
+        if src["name"] in MM_INTERNAL_SOURCE_NAMES
+        and src["name"] not in available_names
+        and not _config_module._is_default_mm_events_path(src["path"])
+    ]
+    for src in skipped_internal:
+        message = _config_module._missing_custom_mm_events_message(src["path"])
+        print(f"mm: warning: {safety.safe_terminal_str(message)}", file=sys.stderr)
+        events_degradations.append(message)
+    if skipped_internal:
+        resolution = replace(
+            resolution,
+            selected=[src for src in resolution.selected if src not in skipped_internal],
+        )
     if preview_notes is not None:
         for src in resolution.selected:
             if src["name"] in resolution.would_create:
@@ -3714,7 +3736,7 @@ def _push_core(
                 f"mm: notice: retro-fleet skill installation failed: "
                 f"{type(e).__name__}: {safe_str(e)}"
             )
-    if not resolution.selected:
+    if not resolution.selected and not skipped_internal:
         msg = "no sync sources found. Run 'mm init' to configure."
         if quiet:
             # Load-bearing: a misconfigured sources list silently no-ops every
@@ -3724,7 +3746,11 @@ def _push_core(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return None
+        return (
+            PushResult(events_degradations=events_degradations)
+            if events_degradations and not dry_run
+            else None
+        )
 
     skipped: list[tuple[str, str]] = []
 
@@ -3780,13 +3806,17 @@ def _push_core(
     intended_names = {src["name"] for src in resolution.selected}
     intended_names.update(src["name"] for src in sources)
     _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
-    if not sources:
+    if not sources and not skipped_internal:
         msg = "no sync sources found. Run 'mm init' to configure."
         if quiet:
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return None
+        return (
+            PushResult(events_degradations=events_degradations)
+            if events_degradations and not dry_run
+            else None
+        )
 
     # Consumer-boundary filters. Strip from prior_manifest BOTH (1) paths
     # the local config now excludes via per-source `exclude_patterns` and
@@ -3813,26 +3843,7 @@ def _push_core(
         remote_manifest = _filter_symlinked_paths(remote_manifest, sources, strict=True)
         proof_sources = sources
         if dry_run and resolution.would_create:
-            for src in sources:
-                if src["name"] not in resolution.would_create:
-                    continue
-                prior_files = (
-                    remote_manifest.get("sources", {}).get(src["name"], {}).get("files", {})
-                )
-                if prior_files:
-                    path = src["path"]
-                    raise SnapshotError(
-                        f"Dry run stopped: the mm-events directory {path} is missing, "
-                        f"but this Mac published {len(prior_files)} files from it. "
-                        "A real mm push would recreate it empty and publish their deletion "
-                        "(other Macs keep their copies; this Mac cannot pull them back for "
-                        f"{TOMBSTONE_TTL_DAYS} days). To keep them: run mm pull if another "
-                        f"Mac has them and check that {path}/events is filled again, or "
-                        f"restore {path} from a backup; then run mm push --dry-run again. "
-                        f"To accept the deletion: run mm push. See {SNAPSHOT_FAILURES_URL}."
-                    )
-            # No known prior files for these roots: there is nothing to prove.
-            # Keep the deletion proof itself unchanged for every other source.
+            # Missing default roots truthfully preview deletions.
             proof_sources = [s for s in sources if s["name"] not in resolution.would_create]
         _prove_omitted_paths_absent(
             local_manifest, remote_manifest, proof_sources, max_file_size=max_file_size
@@ -3874,15 +3885,20 @@ def _push_core(
     ):
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
-        return None
+        return (
+            PushResult(events_degradations=events_degradations)
+            if events_degradations and not dry_run
+            else None
+        )
 
     # OK, this push will upload bytes. Run the events tail now to capture
     # the cursor + git/sessions snapshots, then re-walk mm-events to fold
     # the just-written event row into local_manifest. dry_run still gates
     # the tail's own writes; the re-walk reads existing on-disk state.
-    events_degradations = events_tail._run_events_tail(
-        config, sources, device_id, dry_run=dry_run, quiet=quiet
-    )
+    if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
+        events_degradations.extend(
+            events_tail._run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
+        )
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
@@ -4476,6 +4492,16 @@ def _pull_one_source(
     if not to_download:
         return base_result
 
+    if src_name in MM_INTERNAL_SOURCE_NAMES:
+        try:
+            _config_module._bootstrap_mm_events_path(
+                str(base_path), strict=True, on_created=reporter.created_ancestor
+            )
+        except SnapshotError as e:
+            _print_apply_warning(f"mm: warning: {safety.safe_terminal_str(e)}")
+            reporter.outcomes["failed"].extend(to_download)
+            return base_result
+
     bt, outcomes = _download_and_apply(
         backend,
         base_path,
@@ -4906,12 +4932,19 @@ def _pull_core(
     # Widened to carry path + type per source. Type is load-bearing for
     # the sync-log gate in _pull_one_source — keying on type (not name)
     # lets users rename the claude source without losing per-project logs.
+    pull_resolution = resolve_sources(config)
+    pull_sources = list(pull_resolution.available)
+    pull_sources.extend(
+        src
+        for src in pull_resolution.selected
+        if src["name"] in MM_INTERNAL_SOURCE_NAMES and src not in pull_sources
+    )
     local_sources_map: dict[str, dict[str, Any]] = {
         src_cfg["name"]: {
-            "path": Path(src_cfg["path"]).expanduser().resolve(),
+            "path": Path(src_cfg["path"]).expanduser().absolute(),
             "type": src_cfg["type"],
         }
-        for src_cfg in get_sources(config)
+        for src_cfg in pull_sources
     }
 
     all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
@@ -7527,7 +7560,17 @@ def recapture(
             memory_kb = _init_crypto_session(backend, passphrase, config)
         except MindMeldError as e:
             _error(str(e))
-        sources = get_sources(config)
+        try:
+            resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
+            sources = resolution.available
+            for src in resolution.selected:
+                if src["name"] == "mm-events" and src not in sources:
+                    raise SnapshotError(
+                        _config_module._missing_custom_mm_events_message(src["path"])
+                    )
+        except SnapshotError as e:
+            suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+            _error(f"{e} No recapture rows were written.{suffix}")
         disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
         if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
             stderr_console.print(

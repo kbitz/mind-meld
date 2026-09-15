@@ -1524,7 +1524,7 @@ class TestMmEventsSource:
             "storage": {"path": str(tmp_path / "icloud")},
             "sync": {},  # no explicit sources → DEFAULT_SOURCES applies
         }
-        sources = get_sources(config)
+        sources = get_sources(config, bootstrap=True)
         names = [s["name"] for s in sources]
         assert "mm-events" in names
 
@@ -1544,9 +1544,9 @@ class TestMmEventsSource:
             "storage": {"path": str(tmp_path / "icloud")},
             "sync": {},
         }
-        get_sources(config)
+        get_sources(config, bootstrap=True)
         # Second call must not raise; same source list.
-        sources = get_sources(config)
+        sources = get_sources(config, bootstrap=True)
         assert "mm-events" in [s["name"] for s in sources]
 
     @pytest.mark.no_mm_events_isolation
@@ -1570,7 +1570,7 @@ class TestMmEventsSource:
                 "storage": {"path": str(tmp_path / "icloud")},
                 "sync": {},
             }
-            sources = get_sources(config)
+            sources = get_sources(config, bootstrap=True)
             captured = capsys.readouterr()
             assert "mm: warning:" in captured.err
             assert "mm-events" in captured.err
@@ -1609,7 +1609,7 @@ class TestMmEventsSource:
             # Simulate 5 invocations (~roughly the read-only command-chain
             # observed when a user runs `mm status` in the wedged state).
             for _ in range(5):
-                sources = get_sources(config)
+                sources = get_sources(config, bootstrap=True)
                 # Path-existence filter drops mm-events on every call (no
                 # behavior change there) — the cache only suppresses the
                 # warning emit + mkdir attempt.
@@ -1926,7 +1926,8 @@ class TestGetSourcesStrict:
         from mind_meld import config as config_mod
 
         monkeypatch.setattr(config_mod, "_BOOTSTRAP_WARNED_PATHS", set())
-        events_root = tmp_path / "mm-events-root"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        events_root = tmp_path / ".local" / "share" / "mind-meld"
         config = self._base_config(tmp_path)
         config["sync"] = {
             "max_file_size": 52_428_800,
@@ -1947,15 +1948,55 @@ class TestGetSourcesStrict:
             return real_mkdir(self, *a, **kw)
 
         monkeypatch.setattr(Path, "mkdir", boom)
-        get_sources(config)
+        get_sources(config, bootstrap=True)
         assert str(events_root) in config_mod._BOOTSTRAP_WARNED_PATHS
         with pytest.raises(SnapshotError, match="mm-events"):
-            get_sources(config, strict=True)
+            get_sources(config, strict=True, bootstrap=True)
 
 
 class TestSourceBootstrapPreview56A:
-    def test_missing_root_available_without_mkdir(self, tmp_path):
-        root = tmp_path / "nested" / "mm-events"
+    def test_resolution_defaults_do_not_create_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = tmp_path / ".local" / "share" / "mind-meld"
+        cfg = {"sync": {"sources": [{"name": "mm-events", "path": str(root), "type": "generic"}]}}
+        assert resolve_sources(cfg).would_create == ("mm-events",)
+        assert get_sources(cfg)
+        assert not root.exists()
+
+    @pytest.mark.parametrize("kind", ["default", "custom", "symlink"])
+    def test_bootstrap_tightens_only_real_default_root(self, tmp_path, monkeypatch, kind):
+        from mind_meld import config as mod
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = tmp_path / ".local" / "share" / "mind-meld"
+        root.parent.mkdir(parents=True)
+        target = root if kind == "default" else tmp_path / "custom"
+        target.mkdir(mode=0o755)
+        if kind == "symlink":
+            root.symlink_to(target, target_is_directory=True)
+        path = root if kind != "custom" else target
+        mod._bootstrap_mm_events_path(str(path), strict=True)
+        assert target.stat().st_mode & 0o777 == (0o700 if kind == "default" else 0o755)
+
+    def test_tighten_failure_warns_once_and_does_not_refuse(self, tmp_path, monkeypatch, capsys):
+        from mind_meld import config as mod
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = tmp_path / ".local" / "share" / "mind-meld"
+        root.mkdir(mode=0o755, parents=True)
+        monkeypatch.setattr(mod, "_BOOTSTRAP_WARNED_PATHS", set())
+
+        def fail(*args):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(mod.os, "fchmod", fail)
+        for _ in range(2):
+            mod._bootstrap_mm_events_path(str(root), strict=True)
+        assert capsys.readouterr().err.count("mm: warning:") == 1
+
+    def test_missing_root_available_without_mkdir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = tmp_path / ".local" / "share" / "mind-meld"
         cfg = {
             "sync": {
                 "sources": [
@@ -1973,7 +2014,7 @@ class TestSourceBootstrapPreview56A:
         assert result.available == result.selected
         assert get_sources(cfg, strict=True, bootstrap=False) == result.available
         assert not root.parent.exists()
-        real = resolve_sources(cfg, strict=True)
+        real = resolve_sources(cfg, strict=True, bootstrap=True)
         assert real.would_create == ()
         assert root.is_dir()
         assert resolve_sources(cfg, strict=True, bootstrap=False).would_create == ()
@@ -1983,7 +2024,8 @@ class TestSourceBootstrapPreview56A:
 
         from mind_meld import config as config_module
 
-        root = tmp_path / "mm-events"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = tmp_path / ".local" / "share" / "mind-meld"
         original = Path.stat
 
         def stat(path, *a, **kw):

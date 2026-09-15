@@ -610,7 +610,8 @@ def _publish_skill_store(skill_src: Path) -> Path:
     try:
         _ensure_real_dir(store.parent)
     except FileNotFoundError:
-        store.parent.mkdir(mode=0o700, parents=True)
+        store.parent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        store.parent.mkdir(mode=0o700, exist_ok=True)
         _ensure_real_dir(store.parent)
 
     with _store_publish_lock(store):

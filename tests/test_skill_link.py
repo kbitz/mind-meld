@@ -38,6 +38,17 @@ def _assert_store_link(target):
     assert not (store / "aggregator.py").exists()
 
 
+def test_install_skills_creates_private_shared_root(_isolate_paths, skill_src):
+    from typer.testing import CliRunner
+
+    _write_mm_config(_isolate_paths)
+    result = CliRunner().invoke(cli_module.app, ["install-skills"])
+    assert result.exit_code == 0, result.output
+    root = _isolate_paths / ".local" / "share" / "mind-meld"
+    assert root.stat().st_mode & 0o777 == 0o700
+    assert not (root / "events").exists()
+
+
 # This file owns its own path isolation: it moves $HOME deliberately, because
 # it is testing the installer's real path resolution. conftest's autouse
 # _isolate_skill_links redirects roots via the override map, which would
@@ -958,7 +969,7 @@ class TestPushSkillLinkWiring:
         install_args: list = []
         gs_calls: list = []
 
-        def gs(_config=None, *, strict=False, bootstrap=True):
+        def gs(_config=None, *, strict=False, bootstrap=False):
             gs_calls.append(1)
             return cli_module.SourceResolution(selected=[], available=[])
 

@@ -25,14 +25,24 @@ from mind_meld.cli import (
 
 
 class TestDetectCaseInsensitiveFs:
-    def test_returns_false_on_nonexistent_path(self, tmp_path):
-        assert _detect_case_insensitive_fs(tmp_path / "nope") is False
+    def test_missing_path_probes_existing_ancestor(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        calls = []
+
+        def samefile(path, other):
+            calls.append(other)
+            return True
+
+        monkeypatch.setattr(Path, "samefile", samefile)
+        assert _detect_case_insensitive_fs(tmp_path / "nope" / "missing") is True
+        assert calls == [tmp_path]
 
     def test_returns_false_on_alpha_free_basename(self, tmp_path):
         """A path whose basename has no alphabetic chars can't be case-mangled."""
         d = tmp_path / "12345"
         d.mkdir()
-        assert _detect_case_insensitive_fs(d) is False
+        assert _detect_case_insensitive_fs(d) is True
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="APFS-default needed")
     def test_apfs_default_is_case_insensitive(self, tmp_path):
