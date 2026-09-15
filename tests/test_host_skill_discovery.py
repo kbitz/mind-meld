@@ -12,6 +12,9 @@ from mind_meld import host_skill_discovery as hsd
 
 
 def _install_fake_grok(tmp_path: Path, monkeypatch, body: str, *, name: str = "grok") -> Path:
+    # First execution of a fresh script can exceed 2s on macOS. These fixtures
+    # test output classification; test_timeout sets its own short deadline.
+    monkeypatch.setattr(hsd, "PROBE_TIMEOUT_S", 10.0)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     path = bin_dir / name
