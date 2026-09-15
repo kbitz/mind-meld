@@ -331,7 +331,16 @@ def _isolate_mm_events_path(request, monkeypatch, tmp_path) -> None:
     )
     if target is None:
         return
-    monkeypatch.setitem(target, "path", str(tmp_path / "_isolated_mm_events"))
+    isolated = str(tmp_path / "_isolated_mm_events")
+    monkeypatch.setitem(target, "path", isolated)
+    real = _config._is_default_mm_events_path
+
+    def is_default(path: str, _real=real, _iso=isolated) -> bool:
+        return _real(path) or _config._normalized_mm_events_path(
+            path
+        ) == _config._normalized_mm_events_path(_iso)
+
+    monkeypatch.setattr(_config, "_is_default_mm_events_path", is_default)
 
 
 def pytest_configure(config) -> None:

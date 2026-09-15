@@ -1508,6 +1508,13 @@ class TestMmEventsSource:
 
         assert "mm-events" in MM_INTERNAL_SOURCE_NAMES
 
+    def test_isolated_default_path_is_still_the_default(self, tmp_path):
+        from mind_meld.config import DEFAULT_SOURCES, _is_default_mm_events_path
+
+        isolated = next(s["path"] for s in DEFAULT_SOURCES if s["name"] == "mm-events")
+        assert _is_default_mm_events_path(isolated)
+        assert not _is_default_mm_events_path(str(tmp_path / "custom"))
+
     @pytest.mark.no_mm_events_isolation
     def test_get_sources_bootstraps_mm_events_path(self, tmp_path, monkeypatch):
         """`get_sources(..., bootstrap=True)` creates the mm-events
