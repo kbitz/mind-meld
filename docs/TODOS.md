@@ -44,6 +44,21 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [ship:severity=informational] Disambiguate historical device IDs with shared display prefixes
+
+- **Why:** the shared eight-character machine label keeps Agent activity,
+  economics, and model subtotals consistent, but two accepted historical IDs
+  with the same prefix still look identical. Calculations use full IDs and
+  remain separate; newly generated IDs are already eight characters.
+- **Repro:** `_device_table_label("abcdefgh-first")` and
+  `_device_table_label("abcdefgh-second")` both return `abcdefgh`.
+- **Hypothesis (untested):** derive one collision-aware label map for all three
+  views while preserving their terminal width and sanitization contracts.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #176 Greptile follow-up, `aggregator.py` machine-label helper.
+  User chose to ship v0.14.12 with this display limitation on 2026-09-15.
+
 ### [plan-ceo-review] Price Claude fast mode when it is first used
 
 - **Why:** Fast mode bills Opus 5 and Opus 4.8 at $10/$50, twice the standard tier, and prompt-caching multipliers
