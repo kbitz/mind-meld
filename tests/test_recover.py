@@ -179,6 +179,22 @@ def test_recover_yes_flag_skips_prompt(tmp_path, monkeypatch):
     assert not backend.exists("manifests/mac-a/manifest.json.enc")
 
 
+def test_recover_reconciles_real_crypto_conflict_copy(tmp_path, monkeypatch):
+    """recover's _init_crypto_session call uses read_only=False (the
+    default), so it runs the same real crypto-init repair as push/pull/gc.
+    Prove it actually reconciles a conflict copy, not just that recover
+    itself succeeds."""
+    storage, backend = _mk(tmp_path, monkeypatch)
+    _plant_corrupt_manifest(backend)
+    canonical = storage / "mm-crypto-init"
+    duplicate = storage / "mm-crypto-init 2"
+    duplicate.write_bytes(canonical.read_bytes())
+
+    result = runner.invoke(app, ["recover", "--abandon-manifest", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert not duplicate.exists()  # real repair reconciled the identical conflict copy
+
+
 # ── Quarantine durability + collision handling ──────────────────────────
 
 

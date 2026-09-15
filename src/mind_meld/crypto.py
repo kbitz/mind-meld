@@ -46,6 +46,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from mind_meld.errors import CryptoError
+from mind_meld.safety import safe_str
 from mind_meld.storage.keys import CRYPTO_INIT_KEY
 
 __all__ = [
@@ -534,6 +535,19 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
             preserve(raw)
         removable[path.name] = candidate.content_hash
 
+    # A concurrent writer may have replaced canonical again after our own
+    # put() above. If canonical no longer holds our winner, the conflict
+    # copies about to be unlinked may be the only remaining copy of it —
+    # retain everything instead of deleting. A later, uncontended repair
+    # pass will finish the cleanup once storage settles.
+    winner_hash = hashlib.sha256(plan.winner_bytes).hexdigest()
+    canonical_now = _read_regular_nofollow(canonical_path)
+    canonical_now_hash = (
+        hashlib.sha256(canonical_now).hexdigest() if canonical_now is not None else None
+    )
+    if canonical_now_hash != winner_hash:
+        return
+
     # No fallible write or fsync remains after this point. Re-check each
     # observed name immediately before unlink to leave late replacements alone.
     for path in backend.find_conflict_copies(CRYPTO_INIT_KEY):
@@ -547,7 +561,9 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
         except FileNotFoundError:
             pass
         except OSError as e:
-            raise CryptoError(f"crypto: could not finish mm-crypto-init reconciliation: {e}") from e
+            raise CryptoError(
+                f"crypto: could not finish mm-crypto-init reconciliation: {safe_str(e)}"
+            ) from e
 
 
 def bootstrap_crypto_init(backend: Any, passphrase: str, argon2_memory_kb: int) -> CryptoInitFetch:

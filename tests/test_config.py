@@ -961,6 +961,25 @@ class TestGetSourcesResolve:
         assert len(sources) == 1
         assert sources[0]["path"] == str(real_dir.resolve())
 
+    def test_symlinked_mm_events_source_path_is_not_resolved(self, tmp_path, monkeypatch):
+        """Custom mm-events paths use .absolute(), not .resolve() -- a
+        symlinked custom root is preserved as-is (routing is local to this
+        Mac), unlike the claude source above which intentionally dereferences."""
+        target = tmp_path / "real_events"
+        target.mkdir()
+        link = tmp_path / "link_events"
+        os.symlink(target, link)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {"sources": [{"name": "mm-events", "path": str(link), "type": "generic"}]},
+        }
+        sources = get_sources(config)
+        assert len(sources) == 1
+        assert sources[0]["path"] == str(link)
+
     def test_minimal_sync_block_falls_through_to_default_sources(self, tmp_path, monkeypatch):
         """Config with [sync] but no claude_dir and no sources must still work
         (no KeyError) and resolve via DEFAULT_SOURCES. Regression for legacy-cleanup."""

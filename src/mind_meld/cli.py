@@ -1176,7 +1176,11 @@ def _detect_pull_case_collisions(
     collisions: dict[str, dict[str, list[str]]] = {}
     for src_name, src_info in local_sources_map.items():
         base_path = src_info["path"]
-        if not _detect_case_insensitive_fs(base_path):
+        # Probe the filesystem the files actually land on, not the symlink's
+        # own location — local_sources_map keeps mm-events' custom roots
+        # unresolved for ownership checks, but a link can cross a volume
+        # boundary with different case-sensitivity than its parent directory.
+        if not _detect_case_insensitive_fs(base_path.resolve()):
             continue
         seen_paths_by_key: dict[str, set[str]] = {}
         for peer_manifest in manifest_cache.values():
@@ -3659,6 +3663,14 @@ def _has_mtime_only_changes_vs_remote(
     return False
 
 
+def _push_result_or_none(events_degradations: list[str], dry_run: bool) -> "PushResult | None":
+    """Shared early-return shape for `_push_core`'s no-op exits — a degraded
+    events tail must still be reported even when there's nothing to push."""
+    if events_degradations and not dry_run:
+        return PushResult(events_degradations=events_degradations)
+    return None
+
+
 def _push_core(
     config: dict,
     passphrase: str,
@@ -3755,11 +3767,7 @@ def _push_core(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return (
-            PushResult(events_degradations=events_degradations)
-            if events_degradations and not dry_run
-            else None
-        )
+        return _push_result_or_none(events_degradations, dry_run)
 
     skipped: list[tuple[str, str]] = []
 
@@ -3821,11 +3829,7 @@ def _push_core(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return (
-            PushResult(events_degradations=events_degradations)
-            if events_degradations and not dry_run
-            else None
-        )
+        return _push_result_or_none(events_degradations, dry_run)
 
     # Consumer-boundary filters. Strip from prior_manifest BOTH (1) paths
     # the local config now excludes via per-source `exclude_patterns` and
@@ -3894,16 +3898,13 @@ def _push_core(
     ):
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
-        return (
-            PushResult(events_degradations=events_degradations)
-            if events_degradations and not dry_run
-            else None
-        )
+        return _push_result_or_none(events_degradations, dry_run)
 
     # OK, this push will upload bytes. Run the events tail now to capture
     # the cursor + git/sessions snapshots, then re-walk mm-events to fold
     # the just-written event row into local_manifest. dry_run still gates
     # the tail's own writes; the re-walk reads existing on-disk state.
+    # Skipped entirely when no mm-internal source is selected for this push.
     if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
         events_degradations.extend(
             events_tail._run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)

@@ -6942,3 +6942,21 @@ def test_status_keeps_upgrade_cache_and_network_untouched60a(push_preview56, sta
     if state == "stale":
         assert "Upgrade cache: checked" in result.output
         assert "(stale)" in result.output
+    if state == "due":
+        assert "Upgrade available" in result.output
+        assert "99.0.0" in result.output
+        assert env["upgrade"].INSTALL_CMD in _preview_text(result)
+
+
+def test_status_shows_contended_upgrade_cache(push_preview56):
+    """cache_state == 'lock_failed' remaps to 'contended' in status's display
+    text -- untested by the parametrized test above, which only covers
+    missing/stale/due/malformed cache shapes, never lock contention."""
+    from mind_meld.lockedjson import locked_json_rmw
+
+    env = push_preview56
+    env["upgrade"]._reset_for_tests()
+    with locked_json_rmw(env["upgrade"].CACHE_PATH):
+        result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "Upgrade check: unknown (contended cache)." in result.output

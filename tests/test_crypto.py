@@ -422,6 +422,66 @@ class TestConflictConvergence:
         assert not (tmp_path / f"{CRYPTO_INIT_KEY} 2").exists()
         assert next(tmp_path.glob("mm-crypto-init.preserved-*")).read_bytes()[5:21] == salt_higher
 
+    def test_concurrent_canonical_replacement_retains_conflict_copies(self, tmp_path):
+        """Codex adversarial finding (PR #177): if a concurrent writer
+        replaces canonical again AFTER this process's own overwrite, the
+        conflict copy holding the verified winner must survive -- deleting
+        it would destroy the only remaining copy of that winner anywhere."""
+        crypto.clear_crypto_session()
+        backend = LocalBackend(tmp_path)
+        salt_higher = bytes([0xFF] * 16)  # canonical, loses
+        salt_lower = bytes([0x00] * 16)  # conflict copy, wins
+        salt_third = bytes([0x77] * 16)  # a concurrent racer's write
+        self._write_raw_init_blob(tmp_path / CRYPTO_INIT_KEY, 1024, salt_higher)
+        self._write_raw_init_blob(tmp_path / f"{CRYPTO_INIT_KEY} 2", 1024, salt_lower)
+
+        fetch = fetch_crypto_init(backend)
+        assert fetch.root_salt == salt_lower
+        master = load_master_key(PASSPHRASE, fetch.root_salt, fetch.argon2_memory_kb)
+        verify_passphrase(master, fetch.keycheck_blob)
+
+        racer_path = tmp_path / "racer.tmp"
+        self._write_raw_init_blob(racer_path, 1024, salt_third)
+        racer_raw = racer_path.read_bytes()
+        racer_path.unlink()
+
+        real_put = backend.put
+
+        def racing_put(key, data):
+            real_put(key, data)
+            if key == CRYPTO_INIT_KEY:
+                # Simulate another device's write landing immediately after
+                # ours -- e.g. iCloud delivering a concurrent repair.
+                real_put(key, racer_raw)
+
+        backend.put = racing_put
+        crypto.apply_crypto_init_repair(backend, fetch)
+
+        # Canonical now holds the racer's value, not our winner.
+        assert (tmp_path / CRYPTO_INIT_KEY).read_bytes()[5:21] == salt_third
+        # The conflict copy -- the only remaining place the verified winner
+        # lived -- must NOT have been deleted.
+        assert (tmp_path / f"{CRYPTO_INIT_KEY} 2").exists()
+        assert (tmp_path / f"{CRYPTO_INIT_KEY} 2").read_bytes()[5:21] == salt_lower
+
+    def test_counts_include_displaced_canonical_when_replaced(self, tmp_path):
+        """crypto_init_repair_counts must count a displaced (losing) canonical
+        under 'preserve', not silently drop it. Every existing convergence
+        test seeds canonical as the winner, so this branch was untested."""
+        crypto.clear_crypto_session()
+        backend = LocalBackend(tmp_path)
+        salt_higher = bytes([0xFF] * 16)
+        salt_lower = bytes([0x00] * 16)
+        # Canonical loses (higher salt); the conflict copy wins.
+        self._write_raw_init_blob(tmp_path / CRYPTO_INIT_KEY, 1024, salt_higher)
+        self._write_raw_init_blob(tmp_path / f"{CRYPTO_INIT_KEY} 2", 1024, salt_lower)
+
+        fetch = fetch_crypto_init(backend)
+        counts = crypto.crypto_init_repair_counts(fetch)
+        assert counts["replace_canonical"] is True
+        assert counts["delete"] == 1  # the winning conflict copy itself
+        assert counts["preserve"] == 1  # the displaced canonical
+
     def test_all_copies_corrupt_returns_corrupt(self, tmp_path):
         """Canonical and conflicts both present but all unparseable → corrupt.
 

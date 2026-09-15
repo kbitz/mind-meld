@@ -695,6 +695,10 @@ def resolve_sources(
 
     # Only explicit writers bootstrap. Missing default roots remain empty
     # walks for inspection and previews; custom roots are never created.
+    # `_is_default_mm_events_path` / `_bootstrap_mm_events_path` are named
+    # for the current sole member of MM_INTERNAL_SOURCE_NAMES ("mm-events").
+    # A second internal source would need its own default-path helper, not
+    # reuse these unconditionally by name membership.
     would_create: list[str] = []
     for src in sources:
         if src["name"] in MM_INTERNAL_SOURCE_NAMES and _is_default_mm_events_path(src["path"]):
@@ -842,7 +846,7 @@ def _bootstrap_mm_events_path(
         if stat.S_ISLNK(info.st_mode):
             return created
         if not stat.S_ISDIR(info.st_mode):
-            raise NotADirectoryError(str(p))
+            raise NotADirectoryError(f"{p} exists and is not a directory")
     except OSError as e:
         message = snapshot_refusal(
             source="mm-events",
