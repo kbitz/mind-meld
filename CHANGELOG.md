@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.12] - 2026-09-15
+
+**Retro reports now show all four token fields, model-level API list-rate equivalents, and the coverage behind each figure.** Refreshed Anthropic rate cards correct Sonnet 5, older Opus/Sonnet models, and Fable/Mythos 5.1 cache reads. Claude and per-machine figures use consistent estimate, floor, and unavailable markers, and stale snapshots no longer contribute on the first day of a window.
+
+### Changed
+
+- Show input, cache-write, cache-read, and output tokens together with per-model dollars. Per-machine model subtotals appear in the economics section; scope lines name the source logs, observation dates, and coverage. Claude and host-log figures must not be added together; per-machine economics has no fleet sum.
+- Refresh Anthropic cards verified on 2026-09-14, name family-extrapolated model rates in Notes, and price floors using the minimum cache-write rate. Fast-mode turns remain priced at standard rates, with the 2x limitation disclosed.
+- Re-pin the Grok usage census to 1.0.30 with a sanitized fixture and reproduction recipe; parsing behavior is unchanged.
+- Upgrade the rendering Mac for the refreshed rates and report, then run `mm install-skills` and restart the agent to refresh the report explanation.
+
+### Fixed
+
+- Apply one window-eligibility rule across agent activity and economics, including stale snapshots on the first UTC day.
+- Treat a present empty token map as an observed zero, so it no longer falsely lowers coverage. Use a shared machine-label format across activity, economics, and model subtotals.
+- Keep floor arithmetic and rounded dollar amounts consistent between model rows and totals.
+
 ## [0.14.11] - 2026-09-14
 
 **Grok usage delivery and verified API list-rate pricing ship together.** Later readers get 50 ms of grace, and attended captures warm every deadline-dropped warmable reader before retrying each successful warm on its own budget. Grok's recorded tokens now contribute a pricing floor, with a model-scoped at-most figure only when coverage allows it. `gpt-6-astra` is also priced.

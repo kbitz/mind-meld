@@ -84,8 +84,9 @@ credentials, session state, and whole-file configuration remain local.
    `_classify_grok_update` is the single decision point for all three
    dispositions plus drift, so no carve-out may be added downstream of it.
 
-   **Ignorable keys (v0.14.1, Track 46A).** Grok Build 1.0.13 added
-   `elapsed_ms` to `turn_completed`. Under the original exact-match rule one
+   **Ignorable keys (v0.14.1, Track 46A).** The census on Grok Build 1.0.13
+   observed `elapsed_ms` on `turn_completed`; it does not establish which
+   producer version introduced the field. Under the original exact-match rule one
    additive field made the record unsupported, and that refusal aborted the
    whole Grok store — every Grok Mac reported zero tokens from 2026-09-01.
    `_GROK_IGNORABLE_KEYS` is a one-name allowlist, not a permissive mode: an

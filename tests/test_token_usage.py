@@ -702,9 +702,9 @@ class TestEstimateCost:
         total, per_model = tu.estimate_cost(by_model)
         assert per_model["claude-opus-5"] == pytest.approx(5.0)
         assert per_model["claude-opus-4-8"] == pytest.approx(5.0)
-        assert per_model["claude-sonnet-5"] == pytest.approx(3.0)
+        assert per_model["claude-sonnet-5"] == pytest.approx(2.0)
         assert per_model["claude-fable-5"] == pytest.approx(10.0)
-        assert total == pytest.approx(23.0)
+        assert total == pytest.approx(22.0)
 
     def test_hostile_unknown_model_uses_raw_id_and_printable_notice(self, monkeypatch) -> None:
         from tests.test_safe_str import (
@@ -894,7 +894,7 @@ class TestResolvePrices:
         (Claude 3 Opus really billed $15/$75, not $5/$25). Tolerable only
         because retired models don't appear in live session data — see
         Invariant 2 in docs/invariants/events-retro.md."""
-        assert tu.resolve_prices("claude-sonnet-3-7")["input"] == pytest.approx(3.0)
+        assert tu.resolve_prices("claude-sonnet-3-7")["input"] == pytest.approx(2.0)
         assert tu.resolve_prices("claude-opus-3-0")["input"] == pytest.approx(5.0)
 
     def test_family_fallback_for_unlisted_model(self) -> None:
@@ -2575,3 +2575,62 @@ class TestHeadFingerprint:
         entry = _entry(path, cache)
         assert "offset" not in entry
         assert entry["by_day"]["2026-05-01"]["input"] == 100
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("claude-sonnet-5", (2, 4, 0.2, 10)),
+        ("claude-sonnet-4-6", (3, 6, 0.3, 15)),
+        ("claude-sonnet-4-5", (3, 6, 0.3, 15)),
+        ("claude-sonnet-4-20250514", (3, 6, 0.3, 15)),
+        ("claude-sonnet-4-0", (3, 6, 0.3, 15)),
+        ("claude-opus-4-20250514", (15, 30, 1.5, 75)),
+        ("claude-opus-4-0", (15, 30, 1.5, 75)),
+        ("claude-fable-5-1", (10, 20, 0.25, 50)),
+        ("claude-mythos-5-1", (10, 20, 0.25, 50)),
+        ("claude-fable-5", (10, 20, 1, 50)),
+        ("claude-mythos-5", (10, 20, 1, 50)),
+    ],
+)
+def test_september_verified_literal_cards(model, expected):
+    card = tu.resolve_prices(tu._normalize_model_id(model))
+    assert card == pytest.approx(dict(zip(tu.TOKEN_FIELDS, expected, strict=True)))
+
+
+def test_verified_ids_cover_overrides_and_live_families():
+    live = {
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+    }
+    assert set(tu.PRICING) | set(tu.PRICING_FAMILY_BY_MODEL) | live <= tu.VERIFIED_MODEL_IDS
+    assert all(tu.resolve_prices(m) is not None for m in tu.VERIFIED_MODEL_IDS)
+    assert tu.PRICING_LAST_UPDATED == "2026-09-14"
+
+
+@pytest.mark.parametrize("model", sorted(tu.VERIFIED_MODEL_IDS) + ["claude-opus-99"])
+def test_floor_cards_bound_every_nonnegative_usage(model):
+    estimate = tu.resolve_prices(model)
+    floor = tu.floor_prices(model)
+    assert all(0 <= floor[k] <= estimate[k] for k in tu.TOKEN_FIELDS)
+    if model in tu.PRICING_FAMILY_BY_MODEL:
+        assert floor == estimate
+    else:
+        assert floor["cache_create"] == pytest.approx(1.25 * estimate["input"])
+    # Check each basis vector: linearity then proves the inequality for every
+    # nonnegative combination; exercise mixed magnitudes too.
+    for field in tu.TOKEN_FIELDS:
+        for count in (0, 1, 999_999, 1_000_000, 2**53):
+            bucket = dict.fromkeys(tu.TOKEN_FIELDS, 0)
+            bucket[field] = count
+            assert tu._cost_under(floor, bucket) <= tu._cost_under(estimate, bucket)
+    floor["input"] = -1
+    assert tu.floor_prices(model)["input"] >= 0
+    assert tu.floor_prices("unknown") is None

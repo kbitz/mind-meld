@@ -69,8 +69,8 @@ import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from heapq import nsmallest
-from math import ceil
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -330,6 +330,10 @@ class SessionsAggregate:
     # tokens_by_day flags the device. Pre-v0.11.14 peers (mixed-fleet
     # rollout window) AND any peer with cold token cache appear here.
     pre_token_peers: set[str] = field(default_factory=set)
+    # Render-only contribution metadata; never affects accounting or the wire.
+    token_devices: dict[str, datetime] = field(default_factory=dict)
+    token_missing_projects: int = 0
+    token_missing_sessions: int = 0
 
 
 @dataclass
@@ -795,23 +799,6 @@ def _coverage_allows_prior(coverage_floor: date | None, prior_start: datetime) -
     if coverage_floor is None:
         return False
     return coverage_floor <= prior_start.date()
-
-
-def _read_events(events_dir: Path, *, skip_counter: dict[str, int]) -> Iterator[dict]:
-    """Iterate every line of every ``*.jsonl`` under ``events_dir``.
-
-    Unwindowed: the events list already spans everything on disk (up to
-    retention). Window filters happen downstream. A second pass over the
-    same in-memory list is how the prior period is computed — do not add
-    a since/until argument here.
-
-    Per-file tolerance: an unreadable file bumps the skip counter and
-    continues. Per-line tolerance: torn / non-JSON lines bump the skip
-    counter and continue. Glob failure (rare; would need a vanished
-    parent dir) bumps the counter once and returns.
-    """
-    for f in _list_event_files(events_dir, skip_counter=skip_counter):
-        yield from _iter_jsonl(f, skip_counter=skip_counter, category=SKIP_CATEGORY_EVENTS)
 
 
 # ---------------------------------------------------------------------------
@@ -2340,13 +2327,28 @@ def aggregate_sessions(
         # and merge into the running totals.
         tokens_by_day = proj.get("tokens_by_day")
         if isinstance(tokens_by_day, dict) and tokens_by_day:
+            before = (
+                out.tokens_input,
+                out.tokens_cache_create,
+                out.tokens_cache_read,
+                out.tokens_output,
+            )
             _merge_token_window(out, tokens_by_day, since=since, until=until)
-        elif sessions > 0:
-            # Sessions exist but tokens_by_day is missing/empty. Either a
-            # pre-v0.11.14 peer (no field) or a peer whose token cache is
-            # cold (autopush gate skipped the token walk this push). Same
-            # user-visible signal: "tokens incomplete: device X."
+            after = (
+                out.tokens_input,
+                out.tokens_cache_create,
+                out.tokens_cache_read,
+                out.tokens_output,
+            )
+            if after != before:
+                out.token_devices[device] = max(_ts, out.token_devices.get(device, _ts))
+        elif sessions > 0 and ("tokens_by_day" not in proj or not isinstance(tokens_by_day, dict)):
+            # KEY-ABSENT (or non-dict) is incomplete: pre-v0.11.14 or a skipped
+            # token walk. A present empty map is a completed observation of
+            # zero tokens, same D4 discriminator as skills_by_day.
             out.pre_token_peers.add(device)
+            out.token_missing_projects += 1
+            out.token_missing_sessions += sessions
 
         # Skill aggregation (v0.11.27+). KEY-ABSENT-vs-EMPTY-DICT is the
         # discriminator (D4 from /plan-eng-review 2026-05-06). Absent ⇒
@@ -2421,7 +2423,7 @@ def _merge_token_window(
 
     Top-level totals (``tokens_input`` / ``tokens_output`` / etc.) derive
     from per-model entries EXCLUDING ``COST_EXCLUDED_MODELS`` so the
-    rendered "Tokens this window" line shares the same basis as the cost
+    four-field All-models row shares the same basis as the cost
     estimate. ``<synthetic>`` rows are Claude Code's internal tool-execution
     turns that don't actually call the API — they belong neither in cost
     nor in the user-facing total. ``tokens_by_model`` retains every peer-
@@ -2840,103 +2842,128 @@ def _aggregate_model_families(tokens_by_model: object) -> list[tuple[str, int]]:
     return [(label, totals[family]) for family, label in MODEL_FAMILY_ROWS if totals[family] > 0]
 
 
+MAX_MODEL_COST_ROWS = 5
+_DEVICE_TABLE_LABEL_WIDTH = 8
+
+
+def _device_table_label(device: str) -> str:
+    """One prefix width for Agent activity, economics, and model subtotals."""
+    return _safe_short(device)[:_DEVICE_TABLE_LABEL_WIDTH] or "(unnamed)"
+
+
+RATE_MARKER_LEGEND = (
+    "- ``~``: estimate from the recorded tokens and bundled rates. "
+    "May use a family-extrapolated rate.",
+    "- ``>=``: floor of the priced subtotal under bundled rate assumptions, never a guaranteed "
+    "billing minimum; causes include unpriced models, incomplete coverage, a dropped reader, "
+    "unattributed tokens, or a model whose long-context tier cannot be reconstructed. See Notes.",
+    "- ``—``: the figure is unavailable, not zero.",
+    "- Anthropic cache writes use the 1-hour rate for estimates and the 5-minute rate for floors. "
+    "Once a floor applies, every priced cell in that section uses floor rates.",
+    "- Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.",
+)
+CLAUDE_SCOPE = (
+    "Source: Claude Code session logs; sum of per-machine inventories, not deduplicated "
+    "(a migrated home directory can be counted twice)."
+)
+HOST_SCOPE = (
+    "Source: latest host-usage snapshots; per machine, never summed. "
+    "Host logs can lose old records; observed endpoints do not prove continuous coverage."
+)
+
+
+def _section_costs(by_model: dict, *, floor: bool) -> tuple[float, dict[str, float]]:
+    """Use one card basis for every model and the total, retaining estimate warnings."""
+    total, costs = token_usage.estimate_cost(by_model)
+    if floor:
+        return _floor_costs(by_model, costs)
+    return total, costs
+
+
+def _floor_costs(by_model: dict, costs: dict) -> tuple[float, dict[str, float]]:
+    """Reprice an already resolved model set without repeating warnings or estimates."""
+    floors = {
+        model: token_usage._cost_under(card, by_model[model])
+        for model in costs
+        if (card := token_usage.floor_prices(model)) is not None
+    }
+    return sum(floors.values()), floors
+
+
+def _marked_cost(amount: float, *, floor: bool) -> str:
+    return (">=" if floor else "~") + _format_usd(amount, bound="floor" if floor else "estimate")
+
+
+def _model_cost_rows(by_model: dict, costs: dict, *, floor: bool) -> list[str]:
+    """Bounded, sanitized four-counter model rows, ordered by token volume."""
+    ordered = sorted(
+        (m for m in by_model if m not in token_usage.COST_EXCLUDED_MODELS),
+        key=lambda m: (-token_usage.sum_bucket(by_model[m]), m),
+    )
+    rows = []
+    for model in ordered[:MAX_MODEL_COST_ROWS]:
+        counters = by_model[model]
+        cells = [
+            _format_token_count(_safe_aggregate_token_int(counters.get(k)))
+            for k in token_usage.TOKEN_FIELDS
+        ]
+        cell = _marked_cost(costs[model], floor=floor) if model in costs else "—"
+        label = _safe_short(_short_model_name(_safe_short(model)))[:22]
+        rows.append(f"| {label} | {' | '.join(cells)} | {cell} |")
+    if len(ordered) > MAX_MODEL_COST_ROWS:
+        rows.append(f"| (+{len(ordered) - MAX_MODEL_COST_ROWS} more) | | | | | |")
+    return rows
+
+
 def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
-    """Append the v0.11.14+ token-usage block to ``lines``. Renders ONLY when
-    the fleet has any token data this window — otherwise no-op (clean
-    fresh-fleet output).
-
-    Format (4 lines of data + 1 caveat footer):
-
-      - Tokens this window: 12.4M in / 87.3M cache_read / 142k out
-      - Cache hit ratio:    87%
-      - Estimated cost:     ~$2,410 (Sonnet $1,800, Opus $610)
-      - Per-model:          Sonnet 4.6, Opus 5
-      - *List pricing last verified 2026-08-11. Cost estimates do not
-        account for subscription plan pricing.*
-
-    The cost figure is prefixed ``>=`` instead of ``~`` whenever any
-    model in the window resolved to no price at all — the number is then
-    a floor, not an estimate, and saying ``~`` would repeat the
-    v0.12.13 failure of printing a confident total over incomplete data.
-    """
-    total_in = sessions.tokens_input
-    total_cc = sessions.tokens_cache_create
-    total_cr = sessions.tokens_cache_read
-    total_out = sessions.tokens_output
-    total_all = total_in + total_cc + total_cr + total_out
-    if total_all == 0:
-        return  # no token data — hide block entirely
-
-    lines.append(
-        f"- Tokens this window: {_format_token_count(total_in)} in / "
-        f"{_format_token_count(total_cr)} cache_read / "
-        f"{_format_token_count(total_out)} out"
+    """Render all four fields and bounded per-model list-rate equivalents."""
+    totals = [
+        sessions.tokens_input,
+        sessions.tokens_cache_create,
+        sessions.tokens_cache_read,
+        sessions.tokens_output,
+    ]
+    if not sum(totals):
+        return
+    consumed = sum(totals[:3])
+    if consumed:
+        lines.append(f"- Cache hit ratio:    {sessions.tokens_cache_read / consumed:.0%}")
+    unpriced, _, _ = _unpriced_token_summary(sessions.tokens_by_model)
+    floor = bool(unpriced or _token_coverage_peers(sessions))
+    total, costs = _section_costs(sessions.tokens_by_model, floor=floor)
+    cell = _marked_cost(total, floor=floor) if costs else "—"
+    lines.extend(
+        [
+            "",
+            "API list-rate equivalent (Claude Code, window sum)",
+            "",
+            "In = input; Cache w = cache write; Cache r = cache read; Out = output.",
+            "",
+            "| Model | In | Cache w | Cache r | Out | List-rate $ |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
     )
-
-    # Cache hit ratio = cache_read / (cache_read + cache_create + input).
-    # Output tokens are excluded — they're produced, not consumed via cache.
-    consumed = total_cr + total_cc + total_in
-    if consumed > 0:
-        hit_ratio = total_cr / consumed
-        lines.append(f"- Cache hit ratio:    {hit_ratio:.0%}")
-
-    total_cost, per_model_cost = token_usage.estimate_cost(sessions.tokens_by_model)
-    # Any unpriced volume makes the figure a lower bound, not an estimate.
-    unpriced_tokens, _, _ = _unpriced_token_summary(sessions.tokens_by_model)
-    if total_cost > 0:
-        # Sort per-model by cost descending; render compact "Sonnet $X, Opus $Y".
-        per_model_sorted = sorted(per_model_cost.items(), key=lambda kv: kv[1], reverse=True)
-        per_model_str = ", ".join(
-            f"{_short_model_name(m)} ${c:,.0f}" for m, c in per_model_sorted if c >= 1.0
-        )
-        marker = ">=" if unpriced_tokens > 0 else "~"
-        cost_line = f"- Estimated cost:     {marker}{_format_usd(total_cost)}"
-        if per_model_str:
-            cost_line += f" ({per_model_str})"
-        lines.append(cost_line)
-    elif unpriced_tokens > 0:
-        # Nothing resolved. Staying silent here reads as "no cost data"
-        # when the truth is "we could not price ANY of it" — and it is
-        # reachable today: a fleet running Claude Code through Bedrock
-        # sends ids like `us.anthropic.claude-opus-4-5-v1:0`, which fail
-        # the `claude-` prefix check, so every model goes unpriced and the
-        # cost line would vanish entirely. Say so instead.
-        lines.append("- Estimated cost:     unavailable — no model in this window could be priced")
-
-    # Per-model session-name breadcrumb (which model families were active).
-    # Filter out <synthetic> — Claude Code internal turns aren't a user-
-    # facing model choice; including it in the list confuses the user.
-    active_models = sorted(m for m in sessions.tokens_by_model.keys() if m != "<synthetic>")
-    if active_models:
-        short_names = ", ".join(_short_model_name(m) for m in active_models)
-        lines.append(f"- Per-model:          {short_names}")
-
-    lines.append(
-        f"- *List pricing last verified {token_usage.PRICING_LAST_UPDATED}. "
-        f"{token_usage.SUBSCRIPTION_CAVEAT}*"
+    lines.extend(_model_cost_rows(sessions.tokens_by_model, costs, floor=floor))
+    cells = " | ".join(_format_token_count(n) for n in totals)
+    lines.append(f"| All models | {cells} | {cell} |")
+    lines.extend(
+        [
+            "",
+            f"Anthropic rates verified {token_usage.PRICING_LAST_UPDATED}; "
+            "see the shared legend in API list-rate equivalent (per machine); "
+            "these two figures come from different logs; never add them.",
+        ]
     )
 
 
-def _format_usd(amount: float) -> str:
-    """Render a USD estimate without false precision.
-
-    Cents on a four-figure number that already disclaims subscription
-    pricing is noise pretending to be rigor — the v0.12.13 card read
-    ``~$3.37`` for a window the corrected table prices at ~$11,015.
-    Whole dollars from $100 up; cents below, where they still carry
-    information.
-
-    The per-model breakdown on the same line does NOT route through
-    here: it is always whole-dollar (``${c:,.0f}``) because the
-    ``c >= 1.0`` filter already drops anything where cents would
-    matter, and a compact "(Opus 4.8 $5,490, Opus 5 $4,265)" summary
-    reads worse with them. Deliberate, not an oversight."""
-    # Branch on the ROUNDED value, not the raw one: 99.996 formats as
-    # "$100.00" under the cents branch, so an unrounded test would print
-    # two different shapes for the same displayed dollar amount.
-    if abs(round(amount, 2)) >= 100:
-        return f"${amount:,.0f}"
-    return f"${amount:,.2f}"
+def _format_usd(amount: float, *, bound: str = "estimate") -> str:
+    """Nearest estimates, downward floors, upward ceilings; whole dollars at $100."""
+    rounding = {"estimate": ROUND_HALF_EVEN, "floor": ROUND_FLOOR, "ceiling": ROUND_CEILING}[bound]
+    value = Decimal(str(amount))
+    cents = value.quantize(Decimal("0.01"), rounding=rounding)
+    if abs(cents) >= 100:
+        return f"${value.quantize(Decimal('1'), rounding=rounding):,}"
+    return f"${cents:,.2f}"
 
 
 def _unpriced_token_summary(
@@ -2981,6 +3008,27 @@ def _format_unpriced_model_ids(models: tuple[str, ...] | list[str]) -> str:
     if extra:
         text += f" (+{extra} more)"
     return text
+
+
+def _extrapolation_notes(by_model: dict, *, scope: str) -> list[str]:
+    models = [
+        m
+        for m, bucket in by_model.items()
+        if token_usage.sum_bucket(bucket) > 0
+        and token_usage.resolve_prices(m) is not None
+        and m not in token_usage.VERIFIED_MODEL_IDS
+    ]
+    notes: list[str] = []
+    if models:
+        notes.append(
+            "Models priced by family extrapolation ("
+            + _safe_short(scope)
+            + "): "
+            + _format_unpriced_model_ids(models)
+            + ". These ids were not verified on the bundled rate date; upgrade the rendering Mac "
+            "for newly verified rates. The ~ or >= marker may include this assumption."
+        )
+    return notes
 
 
 def _short_model_name(model: str) -> str:
@@ -3207,6 +3255,17 @@ def _window_day_keys(since: datetime, until: datetime) -> tuple[str, str]:
     return since.date().isoformat(), until.date().isoformat()
 
 
+def window_bounds(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[str, str] | None:
+    """Reject instant-stale snapshots before slicing their inclusive UTC days."""
+    if snap.stale:
+        return None
+    return lo, _snapshot_day_ceiling(snap, hi)
+
+
+def contributes_in_window(day: str, bounds: tuple[str, str] | None) -> bool:
+    return bounds is not None and bounds[0] <= day <= bounds[1]
+
+
 def _agent_rhythm_view(
     inventory: object,
     *,
@@ -3240,7 +3299,7 @@ def _agent_rhythm_view(
     FORMAT and ``ts`` independently and never relates them, so a backdated peer
     can otherwise ship ``as_of`` well before the window WITH in-window day keys —
     verified constructible. The clamp makes the property true by arithmetic and
-    subsumes the stale case: ``as_of < since`` then yields zero in-window days.
+    is paired with the instant-stale gate in ``window_bounds``.
     """
     if not isinstance(inventory, HostUsageInventory):
         return AgentRhythmView(machines_known=machines_known)
@@ -3255,7 +3314,7 @@ def _agent_rhythm_view(
         families = snap.lifetime_by_family
         if not isinstance(families, dict):
             continue
-        ceiling = _snapshot_day_ceiling(snap, hi)
+        bounds = window_bounds(snap, lo, hi)
         active_here = False
         for family, days in families.items():
             if family not in _HOST_FAMILIES or not isinstance(days, dict):
@@ -3267,7 +3326,7 @@ def _agent_rhythm_view(
                 # rendering it would be absence-as-zero from the other side.
                 if token_usage.sum_bucket(bucket) <= 0:
                     continue
-                if lo <= day <= ceiling:
+                if contributes_in_window(day, bounds):
                     union.setdefault(family, set()).add(day)
                     active_here = True
         machines_with_activity += 1 if active_here else 0
@@ -3328,8 +3387,8 @@ def _snapshot_day_ceiling(snap: HostDeviceSnapshot, window_hi: str) -> str:
     ``ts`` independently and never relates them, so a backdated peer can ship an
     ``as_of`` before the window WITH in-window day keys (verified constructible).
     Clamping here makes "a snapshot cannot report activity later than it was
-    taken" true by arithmetic instead of by assumption, and subsumes the stale
-    case: ``as_of < since`` then yields no in-window day at all.
+    taken" true by arithmetic. ``window_bounds`` separately rejects instant-stale
+    snapshots, including those on the window's first UTC day.
     """
     return min(window_hi, snap.as_of.date().isoformat())
 
@@ -3355,6 +3414,15 @@ def _agent_state_label(snap: HostDeviceSnapshot, *, has_window_activity: bool) -
     if not has_window_activity:
         return "current, no agent activity observed"
     return "current"
+
+
+def _agent_state_cell(snap: HostDeviceSnapshot, *, active: bool) -> str:
+    return {
+        "current": "current",
+        "current, no agent activity observed": "idle",
+        "last seen before window": "stale",
+        "clock ahead (<=24h)": "ahead",
+    }[_agent_state_label(snap, has_window_activity=active)]
 
 
 _UNKNOWN_READER_LABEL = "unknown/retired reader"
@@ -3432,22 +3500,42 @@ def _render_agent_inventory(
 
     rows: list[str] = []
     readers: list[str] = []
+    observations: list[str] = []
     for device in shown:
-        label = _safe_short(device) or "(unnamed)"
+        label = _device_table_label(device)
         snap = inventory.by_device.get(device)
         # Mirror _agent_rhythm_view's guard: by_device is a public dataclass
         # field, so a hand-built inventory can carry a non-snapshot value.
         # Without this the whole retro render dies on an AttributeError.
         if not isinstance(snap, HostDeviceSnapshot):
-            rows.append(f"| {label} | — | — | no snapshot | — | — |")
+            rows.append(f"| {label} | — | — | missing | — | — |")
             continue
         # The acceptor retains identifier-bounded unknown names for wire
         # compatibility, but peer-controlled reader ids never become prose.
         consulted = ", ".join(_reader_display_labels(snap.consulted)) or "none"
         readers.append(f"{label} {consulted}")
         families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
-        ceiling = _snapshot_day_ceiling(snap, hi)
+        bounds = window_bounds(snap, lo, hi)
         as_of = snap.as_of.date().isoformat()
+        observed = sorted(
+            {day for days in families.values() if isinstance(days, dict) for day in days}
+        )
+        extent = f"{observed[0]} → {observed[-1]}" if observed else "no recorded days"
+        coverage = (
+            "incomplete; see Notes"
+            if (
+                snap.partial
+                or snap.degraded
+                or snap.partial_reason
+                or snap.degraded_reason
+                or not snap.counters_disjoint
+            )
+            else "historical coverage unknown"
+        )
+        observations.append(
+            f"- {_safe_short(device)}: snapshot {snap.as_of.isoformat()}; "
+            f"observed UTC days {extent}; {coverage}."
+        )
         emitted = False
         priceable = snap.counters_disjoint
         for family, family_label in AGENT_FAMILY_ROWS:
@@ -3461,21 +3549,27 @@ def _render_agent_inventory(
                 if total <= 0:
                     continue
                 retained += total
-                if lo <= day <= ceiling:
+                if contributes_in_window(day, bounds):
                     in_window += total
             if retained <= 0:
                 continue
-            state = _agent_state_label(snap, has_window_activity=in_window > 0)
             if priceable:
                 retained_cell = _format_token_count(retained)
-                window_cell = _format_token_count(in_window)
+                window_cell = _format_token_count(in_window) if bounds is not None else "—"
             else:
                 # Inclusive counters would be a ceiling up to ~2x high.
                 # Never show that under ``>=``; ``—`` means unavailable.
                 retained_cell = "—"
                 window_cell = "—"
+            short_family = {
+                "claude": "Claude*",
+                "codex": "Codex",
+                "grok": "Grok",
+                "other": "Other",
+            }[family]
+            short_state = _agent_state_cell(snap, active=in_window > 0)
             rows.append(
-                f"| {label} | {family_label} | {as_of} | {state} "
+                f"| {label} | {short_family} | {as_of} | {short_state} "
                 f"| {retained_cell} | {window_cell} |"
             )
             emitted = True
@@ -3484,24 +3578,32 @@ def _render_agent_inventory(
             # disjoint-v1 peer; a legacy inclusive counter is unavailable even
             # when its retained map is empty. Otherwise this fallback bypasses
             # the pre-marker guard used by the populated-family rows above.
-            state = _agent_state_label(snap, has_window_activity=False)
+            state = _agent_state_cell(snap, active=False)
             retained_cell = "0" if priceable else "—"
-            window_cell = "0" if priceable else "—"
+            window_cell = "0" if priceable and bounds is not None else "—"
             rows.append(f"| {label} | — | {as_of} | {state} | {retained_cell} | {window_cell} |")
 
     cap = token_usage.MAX_BY_DAY_DAYS
     out = [
         "## Agent activity",
         "",
-        "Per-machine per-turn counters; never safe to sum across machines "
-        "(host stores move by OS migration, so two device ids can hold one history).",
+        HOST_SCOPE + f" Window: {lo} → {hi} UTC days; observation and coverage per machine below.",
         "",
-        f"| Machine | Model family | Snapshot (UTC) | State | Tokens (last {cap} active days) "
-        "| Tokens in this window |",
+        "| Machine | Family | As of UTC | State | Retained | Window |",
         "|---|---|---|---|---|---|",
     ]
     out.extend(rows)
-    out.append("")
+    out.extend(
+        [
+            "",
+            "All token counts sum input, cache write, cache read and output. "
+            "Claude* = Claude (via agents). State: stale = last seen before window; "
+            "ahead = clock ahead (<=24h); idle = current, no agent activity observed; "
+            "missing = no snapshot.",
+            "",
+        ]
+    )
+    out.extend(observations)
     if readers:
         # "no reader contributed" is exactly what an empty `token_sources` says.
         # "not authorized" would overclaim: the wire cannot distinguish an
@@ -3539,11 +3641,11 @@ def _windowed_host_by_model(
     merged: dict[str, dict[str, int]] = {}
     residual = False
     days = snap.tokens_by_day or {}
-    ceiling = _snapshot_day_ceiling(snap, hi)
+    bounds = window_bounds(snap, lo, hi)
     for day, bucket in days.items():
         if not isinstance(day, str) or not isinstance(bucket, dict):
             continue
-        if not (lo <= day <= ceiling):
+        if not contributes_in_window(day, bounds):
             continue
         by_model = bucket.get("by_model") or {}
         if not isinstance(by_model, dict):
@@ -3579,24 +3681,31 @@ def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
         for device, snap in inventory.by_device.items()
         if isinstance(snap, HostDeviceSnapshot)
     ]
-    if not snaps:
+    if not snaps and not data.sessions.tokens_by_model:
         return [], []
 
     lo, hi = _window_day_keys(data.since, data.until)
-    evaluated: list[tuple[str, str, list[str]]] = []
-    for device, snap in snaps:
-        cell, device_notes = _device_economics_cell(snap, lo, hi)
-        evaluated.append((device, cell, device_notes))
+    evaluated = [(device, *_device_economics_cell(snap, lo, hi)) for device, snap in snaps]
+    floor_trigger = next((row for row in evaluated if row[1].startswith(">=")), None)
+    section_floor = floor_trigger is not None
+    if section_floor:
+        repriced = []
+        for device, cell, device_notes, by_model, costs in evaluated:
+            if cell != "—":
+                total, costs = _floor_costs(by_model, costs)
+                cell = _marked_cost(total, floor=True)
+            repriced.append((device, cell, device_notes, by_model, costs))
+        evaluated = repriced
 
     # ORDER BY INFORMATION CONTENT before capping, mirroring Agent activity.
     # Alphabetical truncation can otherwise hide the fleet's only estimate
     # behind twelve unavailable rows. A known zero is still more informative
     # than unavailable, but positive/floor estimates come first.
-    def _rank(row: tuple[str, str, list[str]]) -> tuple[int, str]:
-        device, cell, _notes = row
+    def _rank(row: tuple) -> tuple[int, str]:
+        device, cell, _notes, _by_model, costs = row
         if cell == "—":
             return (2, device)
-        if cell == f"~{_format_usd(0.0)}":
+        if not costs or sum(costs.values()) == 0:
             return (1, device)
         return (0, device)
 
@@ -3620,12 +3729,11 @@ def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
         "this mm release, verified on the dates above. Not subscription spend. "
         f"{token_usage.SUBSCRIPTION_CAVEAT}",
         "",
-        "- ``~``: estimate from the recorded tokens and bundled rates.",
-        "- ``>=``: floor; at least one of: "
-        "unpriced models, a host reader that declared incomplete totals, "
-        "a dropped reader, or tokens the per-day model cap left "
-        "unattributed, or a model whose long-context tier cannot be reconstructed.",
-        "- ``—``: the figure is unavailable, not zero.",
+        *RATE_MARKER_LEGEND,
+        "",
+        HOST_SCOPE + f" Window: {lo} → {hi} UTC days; observation times, observed day ranges "
+        "and coverage are listed in Agent activity. API list-rate equivalent "
+        "(per machine — do not sum).",
         "",
         "### Do not sum these values",
         "",
@@ -3636,17 +3744,57 @@ def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
         "|---|---|",
     ]
     notes: list[str] = []
-    for device, cell, device_notes in shown:
-        label = _safe_short(device) or "(unnamed)"
+    for device, cell, device_notes, _by_model, _costs in shown:
+        label = _device_table_label(device)
         lines.append(f"| {label} | {cell} |")
         notes.extend(device_notes)
     lines.append("")
+    if floor_trigger is not None:
+        if floor_trigger[0] not in {row[0] for row in shown}:
+            # A hidden trigger still explains the basis of every visible row.
+            notes.extend(floor_trigger[2])
+        notes.append(
+            "API list-rate equivalent uses floor rates throughout the per-machine section: "
+            "at least one machine has a floor condition described in Notes; every priced row "
+            "and model subtotal uses the same minimum cache-write assumptions."
+        )
+    if shown:
+        lines.extend(
+            [
+                "### Largest priced models (per machine; does not sum to the row in general)",
+                "",
+                "Top models by tokens, capped per machine; unpriced model cells are —.",
+                "",
+                "| Machine | Model | List-rate $ |",
+                "|---|---|---:|",
+            ]
+        )
+        for device, cell, _, by_model, costs in shown:
+            if cell != "—":
+                lines.extend(_per_model_cost_summary(device, by_model, costs, floor=section_floor))
+        lines.append("")
     if omitted:
         lines.append(
             f"- (+{len(omitted)} more machines omitted; those with an estimate are shown first.)"
         )
         lines.append("")
     return lines, notes
+
+
+def _per_model_cost_summary(device: str, by_model: dict, costs: dict, *, floor: bool) -> list[str]:
+    """Small per-machine model table; reuse the machine total's exact pricing."""
+    ordered = sorted(
+        (m for m in by_model if m not in token_usage.COST_EXCLUDED_MODELS),
+        key=lambda m: (-token_usage.sum_bucket(by_model[m]), m),
+    )
+    label = _device_table_label(device)
+    lines = []
+    for model in ordered[:MAX_MODEL_COST_ROWS]:
+        cell = _marked_cost(costs[model], floor=floor) if model in costs else "—"
+        lines.append(f"| {label} | {_safe_short(model)[:28]} | {cell} |")
+    if len(ordered) > MAX_MODEL_COST_ROWS:
+        lines.append(f"| {label} | (+{len(ordered) - MAX_MODEL_COST_ROWS} more) | |")
+    return lines
 
 
 def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool) -> str | None:
@@ -3664,12 +3812,13 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
         if base_card is None:
             continue
         floor = token_usage._cost_under(base_card, usage)
-        detail = f"`{_safe_short(model)}`: {_format_usd(floor)} at the base tier"
+        detail = f"`{_safe_short(model)}`: {_format_usd(floor, bound='floor')} at the base tier"
         if not incomplete and usage.get("cache_create", 0) == 0:
             ceiling = token_usage._cost_under(long_card, usage)
             # An upper bound must round UP: the estimate formatter can round
-            # down (even to $0 for a tiny positive bucket). Keep cents here.
-            detail += f", at most ${ceil(ceiling * 100) / 100:,.2f} at the long-context tier"
+            # down (even to $0 for a tiny positive bucket). Apply the same
+            # precision boundary, while preserving the upper bound.
+            detail += f", at most {_format_usd(ceiling, bound='ceiling')} at the long-context tier"
         detail += (
             " for this model's recorded tokens, in token charges; server-side tool fees excluded"
         )
@@ -3683,21 +3832,23 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
     )
 
 
-def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[str, list[str]]:
+def _device_economics_cell(
+    snap: HostDeviceSnapshot, lo: str, hi: str
+) -> tuple[str, list[str], dict, dict]:
     """One per-device cell and the Notes lines that diagnose it."""
     device = snap.device
     notes: list[str] = []
     if not snap.counters_disjoint:
         notes.append(_host_detail_phrase("absent", "legacy_counters", device=device))
-        return "—", notes
-    if snap.stale:
+        return "—", notes, {}, {}
+    if window_bounds(snap, lo, hi) is None:
         notes.append(
             "API list-rate equivalent unavailable for `"
             + _safe_short(device)
             + "`: its agent-log snapshot predates this window. Run `mm push` "
             "on that Mac, then re-run."
         )
-        return "—", notes
+        return "—", notes, {}, {}
     if snap.tokens_by_day is None:
         notes.append(
             "Not available for `"
@@ -3705,10 +3856,9 @@ def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[
             + "`: "
             + _host_detail_phrase(snap.detail, snap.detail_reason, device=device)
         )
-        return "—", notes
+        return "—", notes, {}, {}
 
     by_model, residual = _windowed_host_by_model(snap, lo, hi)
-    total_cost, _per_model = token_usage.estimate_cost(by_model)
     unpriced_tokens, unpriced_n, unpriced_ids = _unpriced_token_summary(by_model)
     causes: list[str] = []
     if unpriced_tokens > 0:
@@ -3738,10 +3888,9 @@ def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[
     long_context = _long_context_cause(by_model, incomplete=coverage_unknown)
     if long_context:
         causes.append(long_context)
-    if not by_model and total_cost == 0 and unpriced_tokens == 0 and not causes:
-        # Known empty window, not unavailable.
-        return f"~{_format_usd(0.0)}", notes
-    marker = ">=" if causes else "~"
+    floor = bool(causes)
+    total_cost, costs = _section_costs(by_model, floor=floor)
+    notes.extend(_extrapolation_notes(by_model, scope=device))
     if causes:
         notes.append(
             "API list-rate equivalent for `"
@@ -3750,9 +3899,7 @@ def _device_economics_cell(snap: HostDeviceSnapshot, lo: str, hi: str) -> tuple[
             + "; ".join(causes)
             + "."
         )
-    if total_cost == 0:
-        return f"{marker}{_format_usd(0.0)}", notes
-    return f"{marker}{_format_usd(total_cost)}", notes
+    return _marked_cost(total_cost, floor=floor), notes, by_model, costs
 
 
 def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = None) -> list[str]:
@@ -4288,9 +4435,26 @@ def format_retro(
     # Claude Code activity. Per-user feedback v0.11.12: drop MB total,
     # "counted separately" parenthetical, and Most active list — they were
     # noise. v0.11.14 adds the token-usage block (raw counts, cache hit
-    # ratio, cost equivalent) when the fleet has any token data; the
-    # subscription caveat is the closing footer.
+    # ratio, cost equivalent) when the fleet has any token data. The
+    # Claude footer names its rate date and points at the shared legend.
     lines.append("## Claude Code activity")
+    contributors = data.sessions.token_devices
+    newest = max(contributors.values()).isoformat() if contributors else "unavailable"
+    known = data.fleet.devices_known if data.fleet.devices_known is not None else "unknown"
+    coverage = (
+        "incomplete; see Notes"
+        if _token_coverage_peers(data.sessions)
+        else "no known token-capture gaps"
+    )
+    lines.extend(
+        [
+            "",
+            CLAUDE_SCOPE + f" Tokens from {len(contributors)} of {known} machines; "
+            f"newest contributing snapshot {newest}; window {data.since.date()} → "
+            f"{data.until.date()} UTC days; coverage {coverage}.",
+            "",
+        ]
+    )
     if data.sessions.total_sessions == 0 and not data.sessions.pre_v2_peers:
         lines.append("- No Claude Code sessions captured in this window.")
     else:
@@ -4373,6 +4537,19 @@ def format_retro(
             "`mm push` on those machines; upgrade if the warning persists for accurate "
             "token totals."
         )
+    if token_coverage_peers and any(
+        token_usage.resolve_prices(m) is not None
+        for m in data.sessions.tokens_by_model
+        if m not in token_usage.COST_EXCLUDED_MODELS
+    ):
+        notes.append(
+            "Claude Code API list-rate equivalent is a floor (>=): token coverage is incomplete; "
+            f"{data.sessions.token_missing_projects} of {data.sessions.projects} selected projects "
+            f"({data.sessions.token_missing_sessions} of {data.sessions.total_sessions} sessions) "
+            "lack token data in v2 snapshots; pre-v2 peers are not measurable. "
+            "Every priced Claude row uses floor rates; see Tokens incomplete for the remedy."
+        )
+    notes.extend(_extrapolation_notes(data.sessions.tokens_by_model, scope="Claude Code"))
     if data.skills.pre_skills_peers:
         n_skills = len(data.skills.pre_skills_peers)
         notes.append(

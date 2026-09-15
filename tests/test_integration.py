@@ -4223,7 +4223,7 @@ class TestTrack7BEventsTail:
             return []
         return sorted(events_dir.glob("*.jsonl"))
 
-    def _read_events(self, events_file: Path) -> list[dict]:
+    def _read_event_rows(self, events_file: Path) -> list[dict]:
         return [json.loads(ln) for ln in events_file.read_text().splitlines() if ln.strip()]
 
     def test_events_tail_fires_on_successful_push(self, tmp_path, monkeypatch):
@@ -4244,7 +4244,7 @@ class TestTrack7BEventsTail:
 
         events_files = self._events_files(self._events_dir(tmp_path))
         assert len(events_files) == 1, "exactly one events file expected for one device"
-        rows = self._read_events(events_files[0])
+        rows = self._read_event_rows(events_files[0])
         assert rows, "events file must not be empty"
         # CT-4: mm-push is the LAST row.
         assert rows[-1]["type"] == "mm-push"
@@ -4360,14 +4360,14 @@ class TestTrack7BEventsTail:
         assert runner.invoke(app, ["push"]).exit_code == 0
         first = self._events_files(self._events_dir(tmp_path))
         assert len(first) == 1
-        first_rows = self._read_events(first[0])
+        first_rows = self._read_event_rows(first[0])
         first_mtime = first[0].stat().st_mtime_ns
 
         # Second push: nothing changed in claude_a → empty push. Events
         # file must NOT gain a new row; mtime must NOT advance; the file
         # must remain the only events file.
         assert runner.invoke(app, ["push"]).exit_code == 0
-        second_rows = self._read_events(first[0])
+        second_rows = self._read_event_rows(first[0])
         assert len(second_rows) == len(first_rows), (
             f"empty push wrote a phantom event row (was {len(first_rows)}, now {len(second_rows)})"
         )
@@ -4379,7 +4379,7 @@ class TestTrack7BEventsTail:
         # Third push WITH a real change: events tail must fire again.
         (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "new.md").write_text("new content")
         assert runner.invoke(app, ["push"]).exit_code == 0
-        third_rows = self._read_events(first[0])
+        third_rows = self._read_event_rows(first[0])
         assert len(third_rows) > len(second_rows), "events tail did not fire on a substantive push"
         assert third_rows[-1]["type"] == "mm-push"
 
@@ -4418,7 +4418,7 @@ class TestTrack7BEventsTail:
         )
 
         assert runner.invoke(app, ["push"]).exit_code == 0
-        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        rows = self._read_event_rows(self._events_files(self._events_dir(tmp_path))[0])
         types = [r["type"] for r in rows]
         assert types.index("host-usage-snapshot") < types.index("mm-push")
         assert types[-1] == "mm-push"
@@ -4506,7 +4506,7 @@ class TestTrack7BEventsTail:
         assert runner.invoke(app, ["push"]).exit_code == 0
         first_files = self._events_files(self._events_dir(tmp_path))
         assert len(first_files) == 1
-        first_rows = self._read_events(first_files[0])
+        first_rows = self._read_event_rows(first_files[0])
         first_cursor = [row for row in first_rows if row["type"] == "mm-push"][-1]["ts"]
 
         FrozenDatetime.current = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
@@ -4523,9 +4523,9 @@ class TestTrack7BEventsTail:
         # No synced source changed: no day-two event file and no new cursor.
         assert runner.invoke(app, ["push"]).exit_code == 0
         assert self._events_files(self._events_dir(tmp_path)) == first_files
-        assert [row for row in self._read_events(first_files[0]) if row["type"] == "mm-push"][-1][
-            "ts"
-        ] == first_cursor
+        assert [row for row in self._read_event_rows(first_files[0]) if row["type"] == "mm-push"][
+            -1
+        ]["ts"] == first_cursor
 
         (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "trigger.md").write_text(
             "substantive"
@@ -4534,7 +4534,7 @@ class TestTrack7BEventsTail:
         rows = [
             row
             for event_file in self._events_files(self._events_dir(tmp_path))
-            for row in self._read_events(event_file)
+            for row in self._read_event_rows(event_file)
         ]
         captured_shas = [
             commit["sha"]
@@ -4560,7 +4560,7 @@ class TestTrack7BEventsTail:
         self._activate(monkeypatch, config)
 
         assert runner.invoke(app, ["push"]).exit_code == 0
-        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        rows = self._read_event_rows(self._events_files(self._events_dir(tmp_path))[0])
         push_row = next(r for r in rows if r.get("type") == "mm-push")
         assert "mm-events" not in push_row["sources"]
         assert "claude" in push_row["sources"]
@@ -4589,7 +4589,7 @@ class TestTrack7BEventsTail:
         self._activate(monkeypatch, config)
 
         assert runner.invoke(app, ["push"]).exit_code == 0
-        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        rows = self._read_event_rows(self._events_files(self._events_dir(tmp_path))[0])
         sessions_rows = [r for r in rows if r.get("type") == "sessions-snapshot"]
         assert len(sessions_rows) == 1, (
             f"expected exactly one sessions-snapshot row across multi-claude, "
@@ -4611,7 +4611,7 @@ class TestTrack7BEventsTail:
         self._activate(monkeypatch, config)
 
         assert runner.invoke(app, ["push"]).exit_code == 0
-        rows = self._read_events(self._events_files(self._events_dir(tmp_path))[0])
+        rows = self._read_event_rows(self._events_files(self._events_dir(tmp_path))[0])
         # Every row stamped with dev-a (no orphaned "" devices).
         for row in rows:
             assert row.get("device") == "dev-a", row

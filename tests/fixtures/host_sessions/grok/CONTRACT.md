@@ -1,15 +1,18 @@
-# Grok usage-source contract (census 2026-09-04)
+# Grok usage-source contract (census 2026-09-14)
 
-**Host version: Grok 1.0.13** (previous census 2026-08-27 was Grok 1.0.5;
-2026-08-17 was Grok 1.0.4). Bound to `host_usage.GROK_USAGE_CENSUS_HOST_VERSION`
-by `test_contract_census_pin_matches_src_constant`. Re-census on any Grok
-minor bump; grep this file for `Grok 1.0.13`.
+**Host version: Grok 1.0.30** — the installed host at the census, not a
+compatibility proof across every intervening release and not the provenance
+of every historical record. Bound to `host_usage.GROK_USAGE_CENSUS_HOST_VERSION`
+by `test_contract_census_pin_matches_src_constant`. Re-census on any Grok minor bump.
+
+Census history: 2026-08-17 on 1.0.4; 2026-08-27 on 1.0.5;
+2026-09-04 on 1.0.13; 2026-09-10 on 1.0.25; 2026-09-14 on 1.0.30.
 
 Do not confuse this pin with the four `Grok 1.0.5` mentions in README.md —
 those are a different census (skill discovery via `grok inspect --json`,
 verified 2026-08-24).
 
-Grok 1.0.13 persists sessions at `~/.grok/sessions/<encoded-cwd>/<session-id>/`.
+Grok 1.0.30 persists sessions at `~/.grok/sessions/<encoded-cwd>/<session-id>/`.
 `updates.jsonl` is the authoritative update stream. A completed turn is a
 terminal metadata record:
 
@@ -34,15 +37,26 @@ compared on resume.
 
 ## Observed `params.update` key sets on `turn_completed`
 
-Live census 2026-09-04, device 889e42c0, Grok 1.0.13: 111 ledgers / 261.4 MB
-/ 229 terminal records.
+Census 2026-09-14 on installed Grok 1.0.30: 188 ledgers / 390.6 MB /
+312 terminal records, 308 with usage, 4 usage-less, 4 `usageIsIncomplete`.
+Corpus span: 2026-08-17 → 2026-09-14. Separately, 33 terminals written after
+2026-09-10T18Z (the 1.0.25 census) span 3 UTC days; all have the modeled
+`elapsed_ms` shape. These are observations of retained records, not proof
+that every historical record was produced by 1.0.30.
+
+The same four terminal key sets and two usage key sets remain. One model,
+`grok-4.6-build`; zero multi-model turns; zero nonzero cache writes. The real
+reader returned `complete=True`, 12 days, 3 partial days, cold scan 1.94 s.
+`background_tasks` is newly observed (63 records), non-terminal, and ignored
+before terminal classification. Outer keys are `{method, params, timestamp}`;
+params keys are `{_meta, sessionId, update}` in all 312 terminals.
 
 | key set | records | disposition |
 |---|---|---|
-| `{prompt_id, sessionUpdate, stop_reason, usage}` | 144 | modeled — counted |
-| `{elapsed_ms, prompt_id, sessionUpdate, stop_reason, usage}` | 81 | modeled — counted (ignorable key dropped before the projection) |
+| `{prompt_id, sessionUpdate, stop_reason, usage}` | 126 | modeled — counted |
+| `{elapsed_ms, prompt_id, sessionUpdate, stop_reason, usage}` | 182 | modeled — counted (ignorable key dropped before the projection) |
 | `{prompt_id, sessionUpdate, stop_reason}` | 3 | usage-less skip (`return []`), tallied as `usage_less_skipped` |
-| `{elapsed_ms, prompt_id, sessionUpdate, stop_reason}` | 1 | usage-less skip. Load-bearing: miss this and 1 of 229 silently changes category |
+| `{elapsed_ms, prompt_id, sessionUpdate, stop_reason}` | 1 | usage-less skip. Load-bearing: miss this and 1 of 312 silently changes category |
 
 An *unknown* extra non-content key on a terminal is still `unsupported`.
 Exact-match on the required key set (after subtracting `_GROK_IGNORABLE_KEYS`)
@@ -50,13 +64,13 @@ is deliberate: T3 isolates the punishment (Grok drops, declared; Codex
 unaffected), so the detector stays. Track 46A allowlists `elapsed_ms` only;
 Track 46B owns per-record quarantine of unknown keys.
 
-`stop_reason` observed: `end_turn` (210), `cancelled` (19). `cancelled` is
+In the historical 2026-09-04 census, `stop_reason` observed: `end_turn` (210), `cancelled` (19). `cancelled` is
 not a proxy for "spent nothing" — cancelled turns with a full `usage` block
 are counted.
 
-## `elapsed_ms` date cutover
+## Historical `elapsed_ms` date cutover (2026-09-04 census)
 
-Hard producer-version cutover. Zero mixing on either side of the boundary.
+Observed date boundary in that corpus. Zero mixing on either side of the boundary.
 Last record without `elapsed_ms`: 2026-08-19 19:06 UTC. First record with
 it: 2026-09-01 12:48 UTC. 49 of 111 ledgers contain at least one drifted
 record.
@@ -106,6 +120,24 @@ are detected by key-absence of `partial_days` and re-walked once — not a
 `CACHE_VERSION` bump. The caveat is kept so the discharge is visible;
 do not delete it.
 
+## Retained history and census recipe
+
+The 18 terminal records dated 2026-08-14 present on 2026-09-04 no longer
+exist in the 2026-09-14 corpus; the earliest retained day is now 2026-08-17.
+Grok deleted old sessions. This is an observation, not a retention policy.
+Retained totals can fall; observed endpoints do not prove continuous coverage.
+
+For the next census, record the installed host version and observation time
+separately from the corpus span. Walk the authoritative update ledgers once,
+parse JSON lines, and count update kinds. For `turn_completed`, count distinct
+outer, params, update, usage and modelUsage-bucket key sets; usage-less and
+`usageIsIncomplete` records; multi-model turns; nonzero cache writes; and UTC
+day extents. Count records after the prior census separately. Report key names
+and counts only: never content, filesystem paths, session ids or prompt ids.
+Run the real reader with its cache redirected to a disposable test directory;
+record completeness, partial-day count and elapsed time without mutating the
+live cache. Compare shapes to this contract before moving the pin.
+
 ## Fatal checks that stay fatal
 
 Live corpus at census: one of thirteen fatal checks fired (the usage-less
@@ -128,6 +160,7 @@ not `io_error`.
 | `cancelled-with-usage/workspace/session/updates.jsonl` | cancelled terminal *with* usage |
 | `incomplete-usage/workspace/session/updates.jsonl` | `usageIsIncomplete: true` |
 | `no-ledger/workspace/session/summary.json` | session dir lacking `updates.jsonl` |
+| `census-1.0.30/workspace/session/updates.jsonl` | sanitized recent 1.0.30-census terminal with the live params `_meta` shape |
 | `elapsed-ms/workspace/session/updates.jsonl` | sanitized real 1.0.13 modeled terminal with `elapsed_ms` |
 | `usage-less-elapsed-ms/workspace/session/updates.jsonl` | sanitized real 1-in-229 usage-less terminal with `elapsed_ms` |
 
@@ -137,3 +170,8 @@ magnitudes. The two 1.0.13 fixtures keep the live outer shape
 (`method: "_x.ai/session/update"`, `params.sessionId`, `_meta`) and the
 live `usage` key set (`costUsdTicks`, `apiDurationMs`, `modelCalls`);
 identifiers and magnitudes are replaced.
+
+The 1.0.30 fixture was derived from a post-2026-09-10 terminal during this
+implementation; counters, identifiers and timestamps are replaced. Earlier
+fixtures retain their original 1.0.13 provenance. The pin records the census
+host version, not fixture provenance.

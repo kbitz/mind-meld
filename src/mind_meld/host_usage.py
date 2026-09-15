@@ -111,7 +111,7 @@ _GROK_STOPS = frozenset({"end_turn", "cancelled"})
 _GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
 _GROK_REQUIRED_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
 _GROK_IGNORABLE_KEYS = frozenset({"elapsed_ms"})
-GROK_USAGE_CENSUS_HOST_VERSION = "1.0.13"
+GROK_USAGE_CENSUS_HOST_VERSION = "1.0.30"
 """Host version of the last Grok usage-reader wire census.
 
 Bound to ``tests/fixtures/host_sessions/grok/CONTRACT.md`` by

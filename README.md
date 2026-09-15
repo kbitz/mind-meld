@@ -399,35 +399,80 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 **Token usage and API list-rate equivalent (v0.11.14, hosts in v0.12.52).** Under **Claude Code activity** the retro answers: how much did Claude Code consume this window, was it Sonnet- or Opus-heavy, did the cache do its job, what would this have cost at API list rates. Those numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
 
-The body also has **`## API list-rate equivalent (per machine)`** for the five observed `gpt-*` host models and `grok-4.6-build`. It is not subscription spend: historical tokens are repriced at current rates, meaning the rates bundled with this mm release, verified on the dates shown. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. Sample:
+The body also has **`## API list-rate equivalent (per machine)`** for the five observed `gpt-*` host models and `grok-4.6-build`. It is not subscription spend: historical tokens are repriced at current rates, meaning the rates bundled with this mm release, verified on the dates shown. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. A synthetic example (all four token fields are included):
 
 ```text
-## API list-rate equivalent (per machine)
+API list-rate equivalent (Claude Code, window sum)
+| Model | In | Cache w | Cache r | Out | List-rate $ |
+|---|---:|---:|---:|---:|---:|
+| Sonnet 5 | 1.0M | 2.0M | 3.0M | 100.0k | >=$8.60 |
+| Fable 5.1 | 100.0k | 1.0M | 4.0M | 100.0k | >=$19.50 |
+| All models | 1.1M | 3.0M | 7.0M | 200.0k | >=$28.10 |
 
-- Anthropic list rates, verified 2026-08-11: https://platform.claude.com/docs/en/about-claude/pricing
-- OpenAI short-context list rates, verified 2026-09-10: https://developers.openai.com/api/docs/pricing
-- xAI base and long-context list rates, verified 2026-09-10: https://docs.x.ai/developers/models/grok-4.6
-
-### Do not sum these values
-Machines may hold duplicated history … and these values must not be summed.
-
-| Machine   | API list-rate equivalent |
-|-----------|--------------------------|
-| 3a6c7dc9  | ~$1,269                  |
-| 889e42c0  | >=$781                   |
+API list-rate equivalent (per machine — do not sum)
+| Machine | API list-rate equivalent |
+|---|---|
+| dev-a | >=$20.25 |
+| dev-b | >=$11.25 |
 ```
+
+Here the Claude token cache is incomplete on one project, so every Claude row
+uses floor rates. Host dev-a has an unpriced Grok model and Grok's inherent
+context-tier uncertainty; dev-b's Grok reader failed. Each cause appears in
+Notes. These two figures come from different logs; never add them. Claude's
+sum is itself a sum of per-machine inventories, not deduplicated: a migrated
+home directory can be counted twice. Per-machine model subtotals live in the
+economics section, capped at five with an omitted count, never in Agent activity.
+The compact table headers mean input, cache write, cache read and output.
 
 Legend:
 
-- `~` is an estimate over complete priced data.
-- `>=` is a floor: unpriced models, incomplete totals, a dropped reader, unattributed tokens, or a model's unreconstructable long-context tier. Notes names the cause.
+- `~` is an estimate; it may use a family-extrapolated rate, named in Notes.
+- `>=` is a floor of the priced subtotal under bundled rate assumptions,
+  never a guaranteed billing minimum. Causes include unpriced models,
+  incomplete coverage, dropped readers, unattributed tokens and an unknown
+  long-context tier. One floor condition makes every priced cell in that
+  section use floor rates; model amounts and totals share one basis.
 - `—` is unavailable, not zero.
 
 An all-unpriced device shows `>=$0.00` plus the named cause; a snapshot predating the window shows `—`. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so its row is also `—` until it upgrades and republishes. Estimates take priority under the 12-machine display cap, with omissions stated. Grok's Notes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. This is never a machine-level range. Any partial/degraded reader or nonzero model cache writes suppress that figure.
 
 `--dump-host-usage` carries the inputs (`tokens_by_day` and coverage); the rate table is bundled with mm and is not in the dump. Host totals never enter the Claude cost line, and there is no fleet sum.
 
-**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-08-11 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-09-10 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)). mm has no network, so a rate change is a code change.
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-09-10 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)). mm has no network, so a rate change is a code change.
+
+Sonnet 5 now uses the standard $2/$10 input/output rates; Sonnet 4.x
+stays at $3/$15. Fable/Mythos 5.1 cache reads are $0.25 per MTok; 5.0 stays
+at $1.00. Anthropic estimates assume 1h cache writes (2x input), while floors
+use 5m writes (1.25x); the wire does not distinguish TTLs. Verified model ids
+are recorded separately from the family fallback, which still prices new ids
+but names them as extrapolated in Notes.
+
+Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.
+The 2026-09-14 local census found 0 fast rows in 22,042 carrying `speed`, and
+4,297 rows lacking the field. Absence does not establish chronology. No detector,
+cache field or wire flag ships here; fleet exposure cannot be inferred.
+
+**Terminal recipe** (run each command separately):
+
+```bash
+mm pull
+mm push
+mm retro-fleet 7d
+```
+
+Pull refreshes peer snapshots; attended push refreshes this Mac's capture.
+Direct rendering reads available snapshots and skips the skill's refresh step.
+In `## Agent activity`, Retained is what the host logs still hold (at most 90
+active UTC days); Window counts only eligible snapshots. Host logs can lose old
+records. Observation dates are endpoints, not proof of continuous coverage.
+A stale snapshot on the window's first UTC day still shows Window `—`.
+
+Upgrade roles are separate: upgrade the **producer** and republish for reader
+or counter fixes; upgrade the **renderer** for new rates and presentation (old
+snapshots are repriced locally); refresh the **decoder** with `mm install-skills`
+and restart the agent. `--dump-host-usage` inspects host inputs; inspect
+`~/.config/mind-meld/session-tokens.json` for local Claude token inputs.
 
 **Adding an alias or refreshing a rate.** Exact observed model id → `PRICING_FAMILY_BY_MODEL` (never a substring). Family → literal four-field card in `VENDOR_FAMILY_TIERS` (do not use `_tier`; those multipliers are Anthropic). Refresh the matching `PRICING_*_LAST_UPDATED` in the same commit. `resolve_prices` is the only "is this priced" predicate; a test fails the build if an alias points at a missing tier.
 

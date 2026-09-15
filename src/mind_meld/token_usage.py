@@ -209,7 +209,7 @@ aggregator's render side reference this string."""
 # Pricing (per-million-token rates in USD, list price)
 # ---------------------------------------------------------------------------
 
-PRICING_LAST_UPDATED = "2026-08-11"
+PRICING_LAST_UPDATED = "2026-09-14"
 """Date the Anthropic rates below were last verified against Anthropic's
 public pricing page. Rendered onto the Claude token-block caveat line so
 the reader can judge staleness themselves. Deliberately NOT a threshold:
@@ -244,8 +244,8 @@ decoded or used for pricing; the Build overview establishes the rate level.
 No cache-write price is published; nonzero writes suppress the ceiling."""
 
 # Cache read/write multipliers. Anthropic prices both as fixed multiples
-# of a model's input rate, uniformly across every tier — a cache read at
-# 0.1x input, a cache write at 1.25x (5-minute TTL) or 2x (1-hour TTL).
+# of a model's input rate — a cache read at 0.1x input (0.025x for
+# Fable/Mythos 5.1), a cache write at 1.25x (5m TTL) or 2x (1h TTL).
 # Both verified against the published pricing table on
 # PRICING_LAST_UPDATED.
 #
@@ -259,10 +259,14 @@ No cache-write price is published; nonzero writes suppress the ceiling."""
 # the whole line by ~11%. Exact per-TTL pricing needs a wire-format
 # change; see TODOS.md.
 _CACHE_WRITE_MULT = 2.0
+_CACHE_WRITE_FLOOR_MULT = 1.25
 _CACHE_READ_MULT = 0.1
+_CACHE_READ_MULT_FABLE_MYTHOS_51 = 0.025
 
 
-def _tier(input_rate: float, output_rate: float) -> dict[str, float]:
+def _tier(
+    input_rate: float, output_rate: float, *, cache_read_mult: float = _CACHE_READ_MULT
+) -> dict[str, float]:
     """Build a full four-field rate card from the two published rates.
 
     Anthropic publishes input and output per-MTok; cache read and cache
@@ -271,7 +275,7 @@ def _tier(input_rate: float, output_rate: float) -> dict[str, float]:
     apart between entries."""
     return {
         "input": input_rate,
-        "cache_read": input_rate * _CACHE_READ_MULT,
+        "cache_read": input_rate * cache_read_mult,
         "cache_create": input_rate * _CACHE_WRITE_MULT,
         "output": output_rate,
     }
@@ -304,6 +308,13 @@ def _tier(input_rate: float, output_rate: float) -> dict[str, float]:
 PRICING: dict[str, dict[str, float]] = {
     "claude-opus-4-1": _tier(15.0, 75.0),
     "claude-opus-4-0": _tier(15.0, 75.0),
+    "claude-opus-4": _tier(15.0, 75.0),
+    "claude-sonnet-4-6": _tier(3.0, 15.0),
+    "claude-sonnet-4-5": _tier(3.0, 15.0),
+    "claude-sonnet-4": _tier(3.0, 15.0),
+    "claude-sonnet-4-0": _tier(3.0, 15.0),
+    "claude-fable-5-1": _tier(10.0, 50.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
+    "claude-mythos-5-1": _tier(10.0, 50.0, cache_read_mult=_CACHE_READ_MULT_FABLE_MYTHOS_51),
 }
 
 # Family-tier fallback. Keyed on the FAMILY segment of a
@@ -325,14 +336,13 @@ PRICING: dict[str, dict[str, float]] = {
 #   fable / mythos  $10 / $50   (Claude Fable 5, Claude Mythos 5)
 #   opus            $5  / $25   (Opus 5, 4.8, 4.7, 4.6, 4.5 — NOT 4.1/4.0,
 #                                which billed $15/$75; see PRICING above)
-#   sonnet          $3  / $15   (Sonnet 5 list; its $2/$10 introductory
-#                                rate through 2026-08-31 is not list price)
+#   sonnet          $2  / $10   (Sonnet 5 standard; scheduled increase cancelled)
 #   haiku           $1  / $5    (Haiku 4.5)
 MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
     "fable": _tier(10.0, 50.0),
     "mythos": _tier(10.0, 50.0),
     "opus": _tier(5.0, 25.0),
-    "sonnet": _tier(3.0, 15.0),
+    "sonnet": _tier(2.0, 10.0),
     "haiku": _tier(1.0, 5.0),
 }
 
@@ -359,6 +369,37 @@ PRICING_FAMILY_BY_MODEL: dict[str, str] = {
     "gpt-5.4": "gpt-5.4",
     "gpt-5.5": "gpt-5.5",
 }
+
+# Disclosure only, never a priced-predicate. List independently of PRICING so
+# a new override cannot silently claim verification. Dates remain per vendor.
+VERIFIED_MODEL_IDS = frozenset(
+    {
+        "claude-opus-4",
+        "claude-opus-4-0",
+        "claude-opus-4-1",
+        "claude-opus-4-5",
+        "claude-opus-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-4",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-5",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+        "claude-fable-5-1",
+        "claude-mythos-5",
+        "claude-mythos-5-1",
+        "grok-4.6-build",
+        "gpt-6-astra",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "gpt-5.4",
+        "gpt-5.5",
+    }
+)
 
 # Per-family vendor short-context list rates, USD per million tokens.
 # Source: https://developers.openai.com/api/docs/pricing verified
@@ -717,6 +758,18 @@ def resolve_prices(model: str) -> dict[str, float] | None:
     if vendor_prices is None:
         return None
     return dict(vendor_prices)
+
+
+def floor_prices(model: str) -> dict[str, float] | None:
+    """The resolved card with minimum applicable cache-write pricing.
+
+    Anthropic cards use 5m writes for floors; vendor literal cards stay whole.
+    This bounds the bundled token calculation, not anyone's actual invoice.
+    """
+    card = resolve_prices(model)
+    if card is not None and model_family(model) is not None:
+        card["cache_create"] = min(card["cache_create"], card["input"] * _CACHE_WRITE_FLOOR_MULT)
+    return card
 
 
 def resolve_long_context_prices(model: str) -> dict[str, float] | None:
@@ -1981,6 +2034,8 @@ __all__ = [
     "model_family",
     "parse_usage",
     "resolve_prices",
+    "floor_prices",
+    "VERIFIED_MODEL_IDS",
     "resolve_long_context_prices",
     "slice_window",
     "sum_bucket",

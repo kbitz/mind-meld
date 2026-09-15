@@ -1873,7 +1873,7 @@ class TestGrokUsage:
     def test_contract_census_pin_matches_src_constant(self) -> None:
         contract = (FIXTURES / "grok" / "CONTRACT.md").read_text(encoding="utf-8")
         pin = hu.GROK_USAGE_CENSUS_HOST_VERSION
-        assert pin == "1.0.13"
+        assert pin == "1.0.30"
         assert f"Host version: Grok {pin}" in contract
         assert "_GROK_TERMINAL_KEYS" not in contract
 
@@ -3335,3 +3335,15 @@ class TestCounterSemantics:
         )[0]
         assert "| dev-a | >=$1.84 |" in economics
         assert "host declared totals incomplete (codex)" in output
+
+
+def test_census_1030_fixture_embodies_the_new_pin(isolated_adapter_caches):
+    root = FIXTURES / "grok" / "census-1.0.30"
+    record = json.loads((root / "workspace/session/updates.jsonl").read_text())
+    assert hu._classify_grok_update(record["params"]["update"]) == "terminal"
+    assert "_meta" in record["params"]
+    result = hu.read_grok_usage(root, consented=True)
+    assert result.complete is True
+    assert result.tokens_by_day["2026-09-14"]["by_model"]["grok-4.6-build"]["output"] == 6
+    contract = (FIXTURES / "grok/CONTRACT.md").read_text()
+    assert "not fixture provenance" in " ".join(contract.split())
