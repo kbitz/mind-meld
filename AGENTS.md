@@ -154,7 +154,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
 | `crypto.py:apply_crypto_init_repair` / `CryptoInitCandidate` / `crypto_init_repair_counts` / `storage/local.py:_needs_fsync` (crypto-init durability) | `docs/invariants/init-devices.md` |
 | `upgrade.py:cached_upgrade_view` / `cli.py:status` (cached upgrade view) | `docs/invariants/auto-upgrade.md` |
-| `cli.py:_detect_case_insensitive_fs` | `docs/invariants/sync.md` |
+| `cli.py:_detect_case_insensitive_fs` / `_detect_pull_case_collisions` | `docs/invariants/sync.md` |
 | `cli.py:_get_config` / `_init_crypto_session` / `_maybe_prompt_migration` (`read_only=` / `dry_run=` gates) / `crypto.py:fetch_crypto_init` / `CryptoInitRepairPlan` (pure fetch and bound repair plan) | `docs/invariants/sync.md` and `docs/invariants/init-devices.md` |
 | `events_tail.py:_run_events_tail` / `_run_events_backfill` / `_prepare_recapture` / `_decide_token_walk_policy` / `_enabled_claude_paths` | `docs/invariants/events-retro.md` |
 | `events_tail.py:_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_GRACE_MS` / `WARMABLE_HOST_READERS` / `events.py:make_host_usage_snapshot` / `HostUsageSnapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES` | `docs/invariants/events-retro.md` (host-usage-snapshot section) |
