@@ -5467,16 +5467,24 @@ def status(
             rendered = f"{rendered}, then restart the agent so it reloads SKILL.md"
         console.print(f"  [yellow]Skill links broken:[/yellow] {rendered}")
 
-    # Seam 3 — auto-upgrade surfacing in status. Refreshes over the network
-    # when stale and rewrites the cache. Unlike autopull/autopush emission,
-    # this explicit check is not gated on last_nudged_at (24h re-emit gate).
-    upgrade_result = upgrade.check_for_upgrade(config)
+    # Seam 3 — status inspects cached upgrade knowledge without refreshing it.
+    upgrade_result = upgrade.cached_upgrade_view(config)
     if upgrade_result.state == "upgrade-available" and upgrade_result.latest:
         console.print(
             f"  [yellow]Upgrade available:[/yellow] "
             f"{safe_str(upgrade_result.local)} → {safe_str(upgrade_result.latest)} "
             f"(run [bold]{safe_str(upgrade_result.install_cmd)}[/bold])"
         )
+    elif upgrade_result.state == "unknown":
+        reason = (
+            "contended"
+            if upgrade_result.cache_state == "lock_failed"
+            else upgrade_result.cache_state
+        )
+        console.print(f"  Upgrade check: unknown ({safe_str(reason)} cache).")
+    if upgrade_result.stale and upgrade_result.checked_at is not None:
+        age = datetime.now(timezone.utc) - upgrade_result.checked_at
+        console.print(f"  [dim]Upgrade cache: checked {age.days}d ago (stale).[/dim]")
 
     # Per-machine source-toggle visibility (v0.10.0). Two breadcrumbs:
     #   1. Disabled list: surfaces intentional state so future-you doesn't

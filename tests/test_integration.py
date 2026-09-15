@@ -6307,15 +6307,21 @@ class TestPushPreviewNoMutation56A:
         _assert_preview_complete(result)
         assert "mm: notice:" not in result.stderr
 
-    def test_s4b_transition_survives_preview_then_status_records_once(self, push_preview56):
+    def test_s4b_transition_survives_preview_and_status_then_push_records_once(
+        self, push_preview56
+    ):
         env = push_preview56
         env["cache"]["last_seen_self_version"] = "0.0.1"
         env["upgrade"].CACHE_PATH.write_text(json.dumps(env["cache"]))
         _assert_preview_complete(env["invoke"]())
         assert not env["history"].exists()
+        env["upgrade"]._reset_for_tests()
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert not env["history"].exists()
         for _ in range(2):
             env["upgrade"]._reset_for_tests()
-            result = runner.invoke(app, ["status"])
+            result = runner.invoke(app, ["push"])
             assert result.exit_code == 0, result.output
         rows = [json.loads(line) for line in env["history"].read_text().splitlines()]
         transitions = [row for row in rows if row["verb"] == "self-upgrade"]
@@ -6909,3 +6915,29 @@ class TestCryptoInspection60A:
         assert "nothing was published" in _preview_text(result)
         assert not cfg.exists()
         assert backend.list_keys("devices/") == []
+
+
+@pytest.mark.parametrize("state", ["absent", "stale", "due", "malformed"])
+def test_status_keeps_upgrade_cache_and_network_untouched60a(push_preview56, state):
+    env = push_preview56
+    path = env["upgrade"].CACHE_PATH
+    if state == "absent":
+        path.unlink()
+    elif state == "malformed":
+        path.write_text("bad json")
+    else:
+        env["cache"]["latest_version"] = "99.0.0"
+        if state == "stale":
+            env["cache"]["checked_at"] = "2000-01-01T00:00:00+00:00"
+        path.write_text(json.dumps(env["cache"]))
+    before = (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+    env["upgrade"]._reset_for_tests()
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert env["fetches"] == []
+    assert ((path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None) == before
+    if state in ("absent", "malformed"):
+        assert "Upgrade check: unknown" in result.output
+    if state == "stale":
+        assert "Upgrade cache: checked" in result.output
+        assert "(stale)" in result.output
