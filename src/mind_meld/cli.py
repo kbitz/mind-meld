@@ -1135,12 +1135,8 @@ def _detect_case_insensitive_fs(path: Path) -> bool:
 
     Non-invasive: no writes. Constructs a swapcase variant of the path's
     own basename and checks via `samefile()` whether both names resolve
-    to the same inode. Returns False on any failure (safer default — no
-    spurious case-collision warnings on Linux ext4).
-
-    Skips paths whose basename has no alphabetic characters (can't be
-    case-mangled meaningfully). Skips when the swapcase produces the same
-    name (basename was already case-neutral).
+    to the same inode. Missing roots use the nearest existing ancestor.
+    Inconclusive probes conservatively assume case insensitivity.
     """
     try:
         while True:
@@ -3406,7 +3402,7 @@ def init() -> None:
     # notice; failures are forensic-only.
     # Track 25C: resolve sources BEFORE the installer so consent is known.
     # Hook position relative to _register_and_save and _run_events_backfill
-    # is unchanged. The mm-events bootstrap mkdir moves a few lines earlier.
+    # is unchanged. Init explicitly creates the default root before backfill.
     resolved_sources = get_sources(config, bootstrap=True)
     may_create = skill_link.consented_agent_keys(config, resolved_sources)
     try:
@@ -3419,8 +3415,8 @@ def init() -> None:
     # Init-time event backfill (v0.11.8). Captures the past 30 days of git
     # commits + a full sessions inventory so retro-fleet works immediately
     # after init, without waiting for the first push to populate events.
-    # Resolves sources via get_sources() so mm-events bootstraps the events
-    # dir before walk runs. Forensic-only on failure; init proceeds.
+    # Sources were explicitly bootstrapped above; the backfill creates events/
+    # when appending rows. Forensic-only on failure; init proceeds.
     events_tail._run_events_backfill(config, resolved_sources, device_id)
 
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
@@ -3692,7 +3688,7 @@ def _push_core(
     # Build local manifest (v2 with sources). Hoisted above the skill hook
     # so consent is known before the gate runs (Track 25C). The hook itself
     # stays AFTER _ensure_device_registered and BEFORE _run_events_tail.
-    # The mm-events bootstrap mkdir moves a few lines earlier.
+    # Only real push creates/tightens the default mm-events root here.
     resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
     events_degradations: list[str] = []
     available_names = {src["name"] for src in resolution.available}

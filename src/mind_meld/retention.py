@@ -232,9 +232,10 @@ def _gc_old_event_files(
     Track 7B fleet retention. The retro skill reads events by walking the
     synced manifest at retro time, so deletion via tombstone propagation
     is the fleet-wide retention mechanism: this device drops the file
-    locally → next push generates a tombstone → all peers drop it on
-    pull. An offline peer that comes back online sees the tombstone
-    too, suppressing resurrection of the deleted day file.
+    locally → next push generates a tombstone → peers suppress incoming
+    copies while keeping any local copy until their own retention pass.
+    Peers that receive an unexpired tombstone suppress incoming restoration
+    of the deleted day file.
 
     Reap by filename date (``<device>-YYYY-MM-DD.jsonl``), NOT mtime —
     iCloud restores can rewrite mtimes back to "now" while the filename

@@ -7,6 +7,7 @@ safety; durability policy is set per key prefix:
 
     manifests/  → fsync=True (source of truth; loss = silent un-deletion)
     devices/    → fsync=True (peer discovery / GC inputs)
+    mm-crypto-init* → fsync=True (canonical and preserved crypto lineage)
     data/       → fsync=False (hash-addressed blobs, self-healing via re-push)
 
 Conflict-copy detection accepts an optional validator predicate that

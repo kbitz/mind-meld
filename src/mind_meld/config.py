@@ -38,15 +38,9 @@ DEFAULT_STORAGE_PATH = str(
 # not user-prompted). Per-machine opt-out remains via `mm disable-source`.
 MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
 
-# Paths whose bootstrap mkdir has already failed in this process. Used by
-# `_bootstrap_mm_events_path` to suppress repeat `mm: warning:` emit on
-# chmod-restricted homes — the first failed call still surfaces the
-# breadcrumb (visible-failure contract per CLAUDE.md), but the subsequent
-# ~10 read-only command sites that re-call `get_sources()` stay silent.
-# Per-path keying (not per-process) preserves the contract for the unlikely
-# case of two failing mm-internal source paths. Tests touching the failure
-# path must reset via `monkeypatch.setattr(config, "_BOOTSTRAP_WARNED_PATHS",
-# set())` since this is module-level state.
+# Per-normalized-path warning suppression for explicit bootstrap/tightening
+# attempts. Read-only resolution never calls bootstrap. Strict creation
+# errors still raise on every attempt; tests reset this set per case.
 _BOOTSTRAP_WARNED_PATHS: set[str] = set()
 
 # Skill directories that gstack-extend RENDERS per host (`setup --host auto`)
@@ -80,9 +74,8 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
         # mm-owned synced source for the per-device event log used by Group 8's
-        # retro-fleet skill. Bootstrap creates the path on first get_sources()
-        # call (so the source isn't inert until Track 7A's events.py first
-        # writes — Group 7 preflight #6 + D9, codex outside-voice finding #9).
+        # retro-fleet skill. Explicit writers create the default root;
+        # source resolution and inspection leave it absent on a fresh Mac.
         # Per-device daily JSONL files land at events/<device>-<YYYY-MM-DD>.jsonl
         # under this base path. Subdir nesting plays cleanly with
         # walk_generic_source (avoids the include_dirs: ["."] pathlib quirk).
@@ -514,8 +507,8 @@ class SourceResolution:
     ``selected`` is the intended set after disabled-source filtering and
     before availability. ``available`` is the walkable subset, including
     empty would-create roots when bootstrap is disabled. ``would_create``
-    names missing mm-owned roots; publishing must check their filtered prior
-    state before interpreting the empty walk. Diagnostics need ``available``.
+    names missing default mm-owned roots; preview omits them from the
+    deletion proof and treats absent event files as deletions. Diagnostics need ``available``.
     """
 
     selected: list[dict[str, Any]]
@@ -736,7 +729,7 @@ def get_sources(
 
     Finally, filter to sources whose path actually exists on disk. With
     bootstrap=False, missing mm-owned roots are also returned as empty walks;
-    publishing callers need resolve_sources().would_create for prior-state checks.
+    publishing callers need resolve_sources().would_create for the deletion-proof source list.
 
     Raises ``ConfigError`` when an explicitly configured source path cannot
     be resolved. Callers can then honor the normal typed-config-error path.

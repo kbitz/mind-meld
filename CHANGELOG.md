@@ -2,6 +2,23 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [Unreleased]
+
+**mm-events root creation belongs to its writers, and shared crypto repair follows passphrase verification.** Missing default event files remain deletions; preview now matches real push. Status inspects cached upgrade information without fetching or rewriting it.
+
+### Fixed
+
+- Source resolution defaults to read-only. Init, real push/autopush, recapture, and pull applying mm-events files create the default root at 0700; skill installation creates the shared root at 0700 too. Existing owned default roots are tightened best-effort; custom and symlinked roots are unchanged.
+- A missing custom mm-events folder is warned about and skipped for that push, without new tombstones or an events tail. Other sources publish and autopush records a degraded breadcrumb. Recapture refuses before writing rows; pull skips the unavailable source with a warning.
+- Pull checks case collisions on the nearest existing ancestor when the destination root is missing, preventing case-only peer paths from overwriting each other on macOS.
+- `mm status`, `mm diag`, `mm diff`, `mm pull --dry-run`, `mm gc --dry-run`, and `mm recapture --dry-run` no longer repair shared crypto-init copies. `mm push --dry-run` retains its existing no-repair contract. Pending repair is reported as counts; status never persists a missing crypto fingerprint.
+- Verified crypto repair deletes only byte-identical conflict copies and durably preserves distinct bytes, including same-salt copies with different parameters or keychecks. A changed winner aborts before publication or init registration; late/replaced copies stay in place and write/fsync failures retain conflict candidates.
+- `mm status` reads the upgrade cache without HTTP requests or writes, reports unknown cache states and stale check age, and preserves pending upgrade transitions for a following mutating command.
+
+### Changed
+
+- Reverse the missing-default-root refusal from v0.14.10: push preview shows the deletion real push publishes, including when only `events/` is gone. No automatic restoration runs. The README documents restoration before the next push and deletion behavior when local data is removed but config is kept.
+
 ## [0.14.12] - 2026-09-15
 
 **Retro reports now show all four token fields, model-level API list-rate equivalents, and the coverage behind each figure.** Refreshed Anthropic rate cards correct Sonnet 5, older Opus/Sonnet models, and Fable/Mythos 5.1 cache reads. Claude and per-machine figures use consistent estimate, floor, and unavailable markers, and stale snapshots no longer contribute on the first day of a window.

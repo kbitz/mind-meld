@@ -21,8 +21,8 @@ Lock-order invariants (load-bearing):
   1. NEVER acquire the mm lockfile while holding upgrade-state's flock.
   2. RELEASE upgrade-state's flock BEFORE appending to pullhistory.jsonl.
   3. Transition detection runs OUTSIDE the mm lockfile by design — its
-     correctness is bounded by upgrade-state's own flock. This is what lets
-     `mm status` and other read-only commands also detect transitions.
+     correctness is bounded by upgrade-state's own flock. Status and push
+     preview skip this hook so inspection does not consume transitions.
 
 Visible-failure stance: this is NOT a data-at-risk signal. Network failures
 degrade silently because `_check_fleet_version_or_refuse` already backstops
