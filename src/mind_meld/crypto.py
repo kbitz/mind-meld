@@ -35,6 +35,7 @@ import gzip
 import hashlib
 import os
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from argon2.low_level import Type, hash_secret_raw
@@ -51,6 +52,8 @@ __all__ = [
     "FORMAT_VERSION",
     "FORMAT_VERSION_LEGACY_V1",
     "bootstrap_crypto_init",
+    "apply_crypto_init_repair",
+    "crypto_init_repair_counts",
     "decrypt",
     "derive_key",
     "encrypt",
@@ -294,11 +297,22 @@ def _decrypt_with_master_key(blob: bytes, master_key: bytes) -> bytes:
 
 
 @dataclass(frozen=True)
-class CryptoInitRepairPlan:
-    """Shared-storage reconciliation deferred by a read-only fetch."""
+class CryptoInitCandidate:
+    """A name and observed digest, never a path authorized for later joining."""
 
+    name: str
+    content_hash: str | None
+    disposition: Literal["delete", "preserve"]
+
+
+@dataclass(frozen=True)
+class CryptoInitRepairPlan:
+    """Reconciliation bound to the exact winner and each observed candidate."""
+
+    winner_bytes: bytes
+    canonical: CryptoInitCandidate | None
+    copies: tuple[CryptoInitCandidate, ...]
     replace_canonical: bool
-    remove: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -316,6 +330,7 @@ class CryptoInitFetch:
     argon2_memory_kb: int | None = None
     keycheck_blob: bytes | None = None
     repair_plan: CryptoInitRepairPlan | None = None
+    winner_bytes: bytes | None = None
 
 
 def _parse_crypto_init(data: bytes) -> CryptoInitFetch:
@@ -354,80 +369,148 @@ def _serialize_crypto_init(argon2_memory_kb: int, root_salt: bytes, keycheck_blo
     )
 
 
-def fetch_crypto_init(backend: Any, *, repair: bool = True) -> CryptoInitFetch:
-    """Read mm-crypto-init from storage with iCloud conflict handling.
+def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
+    """Pure tri-state read, with deterministic selection and a bound repair plan.
 
-    If the canonical path is missing but conflict copies exist, pick the
-    deterministic winner (lex-smallest root_salt), canonicalize it atomically,
-    and delete the losers.
-
-    Tri-state: ok / missing / corrupt. Callers must not treat "corrupt" as
-    "missing" — doing so would re-bootstrap over existing valid state.
-    With repair=False, return the same winner and its pending repair without
-    putting or deleting anything. Removal includes unreadable conflict copies.
+    Select the lex-smallest valid salt (canonical first on ties). Different
+    bytes represent potentially useful crypto lineage, including malformed or
+    unreadable copies, and are never authorized for deletion by a read.
     """
     canonical_exists = backend.exists(CRYPTO_INIT_KEY)
     conflicts = backend.find_conflict_copies(CRYPTO_INIT_KEY)
-
     if not canonical_exists and not conflicts:
         return CryptoInitFetch(status="missing")
 
-    # Gather all readable candidates with their parsed view.
-    candidates: list[tuple[bytes, CryptoInitFetch, Any]] = []  # (raw, parsed, path_or_none)
-    if canonical_exists:
-        try:
-            raw = backend.get(CRYPTO_INIT_KEY)
-            parsed = _parse_crypto_init(raw)
-            candidates.append((raw, parsed, None))
-        except StorageError:
-            pass
-
-    for conflict_path in conflicts:
-        try:
-            raw = conflict_path.read_bytes()
-        except OSError:
-            continue
-        parsed = _parse_crypto_init(raw)
-        candidates.append((raw, parsed, conflict_path))
-
-    if not candidates:
-        return CryptoInitFetch(status="corrupt")
-
-    ok_candidates = [c for c in candidates if c[1].status == "ok"]
-    if not ok_candidates:
-        return CryptoInitFetch(status="corrupt")
-
-    # Deterministic winner: lex-smallest root_salt across OK candidates.
-    ok_candidates.sort(key=lambda c: c[1].root_salt)  # type: ignore[arg-type]
-    winner_raw, winner_parsed, winner_path = ok_candidates[0]
-
-    # Canonicalization:
-    # - If canonical exists but its parsed content is not the winner, overwrite it.
-    # - If canonical doesn't exist or is corrupt, write winner to canonical.
-    # - Delete all iCloud conflict copies (regardless of which was winner).
     canonical_raw: bytes | None = None
     if canonical_exists:
         try:
             canonical_raw = backend.get(CRYPTO_INIT_KEY)
         except StorageError:
-            canonical_raw = None
+            pass
+    observed: list[tuple[str, bytes | None]] = []
+    if canonical_exists:
+        observed.append((CRYPTO_INIT_KEY, canonical_raw))
+    for path in conflicts:
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            raw = None
+        observed.append((path.name, raw))
+    valid = [(raw, _parse_crypto_init(raw)) for _, raw in observed if raw is not None]
+    valid = [(raw, parsed) for raw, parsed in valid if parsed.status == "ok"]
+    if not valid:
+        return CryptoInitFetch(status="corrupt")
+    winner_raw, winner = min(valid, key=lambda item: item[1].root_salt)
 
-    if not repair:
-        plan = CryptoInitRepairPlan(
-            replace_canonical=canonical_raw != winner_raw,
-            remove=tuple(p.name for p in conflicts),
+    def candidate(name: str, raw: bytes | None) -> CryptoInitCandidate:
+        return CryptoInitCandidate(
+            name=name,
+            content_hash=hashlib.sha256(raw).hexdigest() if raw is not None else None,
+            disposition="delete" if raw == winner_raw else "preserve",
         )
-        return replace(
-            winner_parsed, repair_plan=plan if plan.replace_canonical or plan.remove else None
+
+    plan = CryptoInitRepairPlan(
+        winner_bytes=winner_raw,
+        canonical=candidate(CRYPTO_INIT_KEY, canonical_raw) if canonical_exists else None,
+        copies=tuple(candidate(name, raw) for name, raw in observed if name != CRYPTO_INIT_KEY),
+        replace_canonical=canonical_raw != winner_raw,
+    )
+    return replace(
+        winner,
+        winner_bytes=winner_raw,
+        repair_plan=plan if plan.replace_canonical or plan.copies else None,
+    )
+
+
+def crypto_init_repair_counts(fetch: CryptoInitFetch) -> dict[str, int | bool]:
+    """Path-free projection shared by inspection and drift diagnostics."""
+    plan = fetch.repair_plan
+    if plan is None:
+        return {"replace_canonical": False, "delete": 0, "preserve": 0}
+    candidates = list(plan.copies)
+    if plan.replace_canonical and plan.canonical is not None:
+        candidates.append(plan.canonical)
+    return {
+        "replace_canonical": plan.replace_canonical,
+        "delete": sum(c.disposition == "delete" for c in plan.copies),
+        "preserve": sum(c.disposition == "preserve" for c in candidates),
+    }
+
+
+def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
+    """Reconcile only after verification, durably preserving distinct bytes.
+
+    Re-list names instead of trusting paths stored in the plan. All required
+    writes/fsyncs precede the first conflict unlink, so a failed write leaves
+    every conflict candidate in place. Concurrent replacements are left alone.
+    First-device bootstrap remains the separate create-only operation.
+    """
+    changed = "crypto: mm-crypto-init changed while the command ran; nothing was published. Retry."
+    fresh = fetch_crypto_init(backend)
+    if fetch.winner_bytes is None or fresh.winner_bytes != fetch.winner_bytes:
+        raise CryptoError(changed)
+    plan = fetch.repair_plan
+    if plan is None:
+        return
+    try:
+        canonical_raw = backend.get(CRYPTO_INIT_KEY) if backend.exists(CRYPTO_INIT_KEY) else None
+    except StorageError as e:
+        raise CryptoError(
+            "crypto: cannot preserve unreadable canonical mm-crypto-init; nothing was published."
+        ) from e
+    current_hash = hashlib.sha256(canonical_raw).hexdigest() if canonical_raw is not None else None
+    if current_hash != (plan.canonical.content_hash if plan.canonical else None):
+        raise CryptoError(changed)
+
+    def preserve(raw: bytes) -> None:
+        parsed = _parse_crypto_init(raw)
+        fp = (
+            root_salt_fingerprint(parsed.root_salt)[:8]
+            if parsed.root_salt
+            else hashlib.sha256(raw).hexdigest()[:8]
         )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        key = f"{CRYPTO_INIT_KEY}.preserved-{fp}-{stamp}"
+        # The hash suffix makes timestamp collisions harmless for equal data,
+        # and prevents different same-salt copies from overwriting one another.
+        if backend.exists(key):
+            key += "-" + hashlib.sha256(raw).hexdigest()
+        backend.put(key, raw)
 
-    if canonical_raw != winner_raw:
-        backend.put(CRYPTO_INIT_KEY, winner_raw)
+    # Preserve a displaced canonical lineage before overwriting it.
+    if canonical_raw is not None and plan.replace_canonical:
+        preserve(canonical_raw)
+    backend.put(CRYPTO_INIT_KEY, plan.winner_bytes)
 
-    # Delete any lingering conflict copies (iCloud reconciliation leftovers).
-    backend.delete_conflict_copies(CRYPTO_INIT_KEY)
+    planned = {candidate.name: candidate for candidate in plan.copies}
+    removable: dict[str, str] = {}
+    for path in backend.find_conflict_copies(CRYPTO_INIT_KEY):
+        candidate = planned.get(path.name)
+        if candidate is None or candidate.content_hash is None:
+            continue
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(raw).hexdigest() != candidate.content_hash:
+            continue
+        if candidate.disposition == "preserve":
+            preserve(raw)
+        removable[path.name] = candidate.content_hash
 
-    return winner_parsed
+    # No fallible write or fsync remains after this point. Re-check each
+    # observed name immediately before unlink to leave late replacements alone.
+    for path in backend.find_conflict_copies(CRYPTO_INIT_KEY):
+        digest = removable.get(path.name)
+        if digest is None:
+            continue
+        try:
+            if hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            raise CryptoError(f"crypto: could not finish mm-crypto-init reconciliation: {e}") from e
 
 
 def bootstrap_crypto_init(backend: Any, passphrase: str, argon2_memory_kb: int) -> CryptoInitFetch:

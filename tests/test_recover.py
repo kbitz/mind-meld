@@ -86,6 +86,7 @@ def test_recover_refuses_when_manifest_is_ok(tmp_path, monkeypatch):
     # `encrypt` requires an active crypto session — set it up the same way
     # cli.py commands do (fetch_crypto_init → set_crypto_session).
     fetch = fetch_crypto_init(backend)
+    assert fetch.repair_plan is None
     set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
     manifest = {
         "device_id": "mac-a",

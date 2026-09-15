@@ -3775,8 +3775,8 @@ class TestInitFlow:
         # Lex-smallest salt wins. Our canonical salt is random; other_salt is 0xFF*16.
         fetched = crypto_module.fetch_crypto_init(backend)
         assert fetched.status == "ok"
-        # Conflict copy is gone after canonicalization.
-        assert not (storage / "mm-crypto-init 2").exists()
+        # Reading selects a winner without changing either lineage.
+        assert (storage / "mm-crypto-init 2").read_bytes() == other_blob
         # Canonical now holds the winner (whichever of the two had the smaller salt).
         canonical_bytes = (storage / "mm-crypto-init").read_bytes()
         winner_salt_in_canonical = canonical_bytes[5:21]
@@ -6241,7 +6241,7 @@ def _assert_preview_refused(result):
 def _seed_preview_prior(env, *, event_files=()):
     cfg = config_module.load_config(env["config_path"])
     crypto_module.set_crypto_session(
-        crypto_module.fetch_crypto_init(env["backend"], repair=False).root_salt, MEMORY_KB
+        crypto_module.fetch_crypto_init(env["backend"]).root_salt, MEMORY_KB
     )
     sources = config_module.get_sources(cfg, bootstrap=False)
     prior = cli_module.build_manifest_v2("dev-a", "Mac A", sources)
@@ -6332,8 +6332,8 @@ class TestPushPreviewNoMutation56A:
         copy.write_bytes(env["backend"].get("mm-crypto-init"))
         result = env["invoke"]()
         _assert_preview_complete(result)
-        assert "remove 1 iCloud conflict copy, shared by every Mac." in _preview_text(result)
-        assert "including autopull" in result.output
+        assert "delete 1 identical conflict copies" in _preview_text(result)
+        assert "autopull or autopush that verifies the passphrase" in _preview_text(result)
         if no_op:
             assert "Nothing to push" in result.output
 
@@ -6345,7 +6345,7 @@ class TestPushPreviewNoMutation56A:
         result = env["invoke"]()
         _assert_preview_complete(result)
         assert "no sync sources found" in result.output
-        assert "remove 1 iCloud conflict copy" in _preview_text(result)
+        assert "delete 1 identical conflict copies" in _preview_text(result)
 
     @pytest.mark.parametrize("tty", [False, True])
     def test_migration_notice_without_prompt(self, push_preview56, monkeypatch, tty):
@@ -6473,7 +6473,7 @@ class TestPushPreviewNoMutation56A:
         _assert_preview_refused(result)
         text = _preview_text(result)
         assert "root_salt changed" in text
-        assert "replace the canonical copy and remove 1 iCloud conflict copy" in text
+        assert "replace the canonical copy; delete 1 identical conflict copies" in text
 
     def test_scan_failure_is_lock_only(self, push_preview56, monkeypatch):
         env = push_preview56
@@ -6770,3 +6770,142 @@ def test_bootstrap_calls_stay_in_explicit_writers59a():
                 owner = parents.get(owner)
             found.add((path.name, owner.name if owner else None))
     assert found == {("cli.py", n) for n in ("init", "_push_core", "recapture", "_pull_one_source")}
+
+
+def _seed_crypto_lineages60(env):
+    def blob(salt):
+        master = crypto_module.load_master_key(PASSPHRASE, salt, MEMORY_KB)
+        return crypto_module._serialize_crypto_init(
+            MEMORY_KB,
+            salt,
+            crypto_module._encrypt_with_master_key(crypto_module._KEYCHECK_PLAINTEXT, master),
+        )
+
+    backend = env["backend"]
+    canonical = backend.root / "mm-crypto-init"
+    canonical.write_bytes(blob(b"\x00" * 16))
+    identical = backend.root / "mm-crypto-init 2"
+    identical.write_bytes(canonical.read_bytes())
+    distinct = backend.root / "mm-crypto-init 3"
+    distinct.write_bytes(blob(b"\xff" * 16))
+    env["config"]["crypto"]["root_salt_fp"] = crypto_module.root_salt_fingerprint(b"\x00" * 16)
+    save_config(env["config"], env["config_path"])
+    return canonical, identical, distinct
+
+
+class TestCryptoInspection60A:
+    @pytest.mark.parametrize("two_distinct", [False, True])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            ["status"],
+            ["diag", "--json"],
+            ["diff"],
+            ["pull", "--dry-run"],
+            ["gc", "--dry-run"],
+            ["recapture", "--dry-run"],
+        ],
+    )
+    def test_inspection_never_repairs(self, push_preview56, command, two_distinct):
+        env = push_preview56
+        paths = _seed_crypto_lineages60(env)
+        if two_distinct:
+            salt = b"\xee" * 16
+            master = crypto_module.load_master_key(PASSPHRASE, salt, MEMORY_KB)
+            paths[1].write_bytes(
+                crypto_module._serialize_crypto_init(
+                    MEMORY_KB,
+                    salt,
+                    crypto_module._encrypt_with_master_key(
+                        crypto_module._KEYCHECK_PLAINTEXT, master
+                    ),
+                )
+            )
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
+        result = runner.invoke(app, command)
+        assert result.exit_code in ([0, 1] if command[0] == "recapture" else [0]), result.output
+        assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths} == before
+        assert not list(env["backend"].root.glob("mm-crypto-init.preserved-*"))
+        if command[0] == "diag":
+            counts = json.loads(result.stdout)["crypto_init"]["pending_repair"]
+            assert counts == {
+                "replace_canonical": False,
+                "delete": 0 if two_distinct else 1,
+                "preserve": 2 if two_distinct else 1,
+            }
+            assert paths[1].name not in result.stdout
+        else:
+            assert (
+                f"delete {0 if two_distinct else 1} identical conflict copies; "
+                f"preserve {2 if two_distinct else 1}" in _preview_text(result)
+            )
+
+    @pytest.mark.parametrize("correct", [False, True])
+    def test_push_repairs_only_after_verification(self, push_preview56, monkeypatch, correct):
+        env = push_preview56
+        paths = _seed_crypto_lineages60(env)
+        before = {p: p.read_bytes() for p in paths}
+        if not correct:
+            monkeypatch.setenv("MINDMELD_PASSPHRASE", "wrong")
+        result = runner.invoke(app, ["push"])
+        if correct:
+            assert result.exit_code == 0, result.output
+            assert not paths[1].exists() and not paths[2].exists()
+            assert paths[0].read_bytes() == before[paths[0]]
+            assert [
+                p.read_bytes() for p in env["backend"].root.glob("mm-crypto-init.preserved-*")
+            ] == [before[paths[2]]]
+        else:
+            assert result.exit_code == 1, result.output
+            assert {p: p.read_bytes() for p in paths} == before
+
+    def test_status_never_persists_missing_fingerprint(self, push_preview56):
+        env = push_preview56
+        env["config"]["crypto"].pop("root_salt_fp")
+        save_config(env["config"], env["config_path"])
+        before = env["config_path"].read_bytes()
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 0, result.output
+        assert env["config_path"].read_bytes() == before
+
+    def test_stale_winner_aborts_push_before_publication(self, push_preview56, monkeypatch):
+        env = push_preview56
+        canonical, _, _ = _seed_crypto_lineages60(env)
+        original = crypto_module.apply_crypto_init_repair
+
+        def replace_winner(backend, fetch):
+            raw = canonical.read_bytes()
+            canonical.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+            return original(backend, fetch)
+
+        monkeypatch.setattr(crypto_module, "apply_crypto_init_repair", replace_winner)
+        monkeypatch.setattr(
+            cli_module, "_push_core", lambda *a, **kw: pytest.fail("published after winner change")
+        )
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 1, result.output
+        assert "nothing was published" in _preview_text(result)
+
+    def test_stale_winner_aborts_init_before_config_or_registration(self, tmp_path, monkeypatch):
+        cfg = TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        backend = LocalBackend(storage)
+        bootstrap_crypto_init(backend, PASSPHRASE, MEMORY_KB)
+        original = crypto_module.apply_crypto_init_repair
+
+        def replace_winner(backend, fetch):
+            canonical = backend.root / "mm-crypto-init"
+            raw = canonical.read_bytes()
+            canonical.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+            return original(backend, fetch)
+
+        monkeypatch.setattr(crypto_module, "apply_crypto_init_repair", replace_winner)
+        monkeypatch.setattr(
+            cli_module, "_register_and_save", lambda *a, **kw: pytest.fail("stale init registered")
+        )
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\n{PASSPHRASE}\n")
+        assert result.exit_code == 1, result.output
+        assert "nothing was published" in _preview_text(result)
+        assert not cfg.exists()
+        assert backend.list_keys("devices/") == []

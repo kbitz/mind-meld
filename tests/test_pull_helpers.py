@@ -2364,7 +2364,16 @@ class TestBootstrapOrVerifyCrypto:
         monkeypatch.setattr(cli_module, "bootstrap_crypto_init", raising_bootstrap)
         monkeypatch.setattr(cli_module, "fetch_crypto_init", fake_retry_fetch)
         monkeypatch.setattr(cli_module, "load_master_key", lambda *a, **kw: b"\x00" * 32)
-        monkeypatch.setattr(cli_module, "verify_passphrase", lambda *a, **kw: None)
+        order = []
+        monkeypatch.setattr(
+            cli_module, "verify_passphrase", lambda *a, **kw: order.append("verify")
+        )
+
+        def repair(backend, fetched):
+            assert fetched.root_salt == winner_salt
+            order.append("repair")
+
+        monkeypatch.setattr(cli_module.crypto, "apply_crypto_init_repair", repair)
         monkeypatch.setattr(cli_module, "set_crypto_session", lambda *a, **kw: None)
 
         # Seed fetch (not used on first-device path but required as param)
@@ -2372,6 +2381,7 @@ class TestBootstrapOrVerifyCrypto:
         rs, mk, kc = _bootstrap_or_verify_crypto(
             backend=None, passphrase="pw", is_first_device=True, fetch=seed_fetch
         )
+        assert order == ["verify", "repair"]
         assert rs == winner_salt
         assert mk == 1024
         assert kc == winner_keycheck

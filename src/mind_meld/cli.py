@@ -42,6 +42,7 @@ from rich.table import Table
 
 from mind_meld import (
     __version__,
+    crypto,
     events,
     events_tail,
     fsutil,
@@ -440,7 +441,7 @@ def _init_crypto_session(
       MindMeldError subclasses — caller chooses presentation (_error for
       interactive; stderr print for autopull/autopush).
     """
-    fetch = fetch_crypto_init(backend, repair=not read_only)
+    fetch = fetch_crypto_init(backend)
     if fetch.status == "missing":
         raise CryptoError(
             "crypto: mm-crypto-init not found at storage root. "
@@ -458,17 +459,16 @@ def _init_crypto_session(
     storage_fp = root_salt_fingerprint(fetch.root_salt)
     local_fp = config.get("crypto", {}).get("root_salt_fp")
     repair_note = ""
-    if read_only and fetch.repair_plan is not None:
-        plan = fetch.repair_plan
-        replacement = "replace the canonical copy and " if plan.replace_canonical else ""
-        count = len(plan.remove)
-        copies = "copy" if count == 1 else "copies"
+    if fetch.repair_plan is not None:
+        counts = crypto.crypto_init_repair_counts(fetch)
+        replacement = "replace the canonical copy; " if counts["replace_canonical"] else ""
         repair_note = (
-            "The next mm command that opens storage (including autopull) will "
-            f"reconcile mm-crypto-init: {replacement}remove {count} iCloud conflict "
-            f"{copies}, shared by every Mac."
+            "The next mm push, pull, autopull or autopush that verifies the passphrase "
+            f"will reconcile mm-crypto-init: {replacement}delete {counts['delete']} identical "
+            f"conflict copies; preserve {counts['preserve']} differing or unreadable copies. "
+            "This storage is shared by every Mac."
         )
-        if pending is not None:
+        if read_only and pending is not None:
             pending.append(repair_note)
 
     if local_fp and local_fp != storage_fp:
@@ -484,6 +484,8 @@ def _init_crypto_session(
     master_key = load_master_key(passphrase, fetch.root_salt, fetch.argon2_memory_kb)
     assert fetch.keycheck_blob is not None
     verify_passphrase(master_key, fetch.keycheck_blob)
+    if not read_only:
+        crypto.apply_crypto_init_repair(backend, fetch)
 
     # Backfill local config if needed (first command after an upgrade or
     # a previously-uninitialized config). Silent one-time write.
@@ -3055,11 +3057,16 @@ def _bootstrap_or_verify_crypto(
             assert retry_fetch.root_salt is not None
             assert retry_fetch.argon2_memory_kb is not None
             assert retry_fetch.keycheck_blob is not None
-            return _verify_existing_crypto_init(
+            verified = _verify_existing_crypto_init(
                 retry_fetch,
                 passphrase,
                 success_message="  Verified passphrase against peer mm-crypto-init.",
             )
+            try:
+                crypto.apply_crypto_init_repair(backend, retry_fetch)
+            except MindMeldError as e:
+                _error(str(e))
+            return verified
 
         assert bootstrap.root_salt is not None
         assert bootstrap.argon2_memory_kb is not None
@@ -3074,7 +3081,7 @@ def _bootstrap_or_verify_crypto(
         return root_salt, argon2_memory_kb, keycheck_blob
 
     # Second-device: verify against the fetch we already did.
-    return _verify_existing_crypto_init(
+    verified = _verify_existing_crypto_init(
         fetch,
         passphrase,
         success_message=(
@@ -3082,6 +3089,12 @@ def _bootstrap_or_verify_crypto(
             f"(root_salt fp={root_salt_fingerprint(fetch.root_salt)})."
         ),
     )
+
+    try:
+        crypto.apply_crypto_init_repair(backend, fetch)
+    except MindMeldError as e:
+        _error(str(e))
+    return verified
 
 
 def _verify_existing_crypto_init(
@@ -4108,7 +4121,12 @@ def pull(
     try:
         backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
+            pending: list[str] = []
+            memory_kb = _init_crypto_session(
+                backend, passphrase, config, read_only=dry_run, pending=pending
+            )
+            for note in pending:
+                console.print(safe_str(note))
         except MindMeldError as e:
             _error(str(e))
         _pull_core(
@@ -5307,7 +5325,7 @@ def status(
     ),
 ) -> None:
     """Show sync status: local vs remote state."""
-    config = _get_config()
+    config = _get_config(read_only=True)
     passphrase = _get_passphrase_or_exit()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -5315,7 +5333,12 @@ def status(
 
     backend = get_backend(config)
     try:
-        memory_kb = _init_crypto_session(backend, passphrase, config)
+        pending: list[str] = []
+        memory_kb = _init_crypto_session(
+            backend, passphrase, config, read_only=True, pending=pending
+        )
+        for note in pending:
+            console.print(safe_str(note))
     except MindMeldError as e:
         _error(str(e))
 
@@ -5899,6 +5922,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "status": "ok",
             "root_salt_fp": root_salt_fingerprint(fetch.root_salt),
             "argon2_memory_kb": fetch.argon2_memory_kb,
+            "pending_repair": crypto.crypto_init_repair_counts(fetch),
         }
     else:
         crypto_init = {"status": fetch.status}
@@ -6368,7 +6392,12 @@ def diff_cmd(
 
     backend = get_backend(config)
     try:
-        memory_kb = _init_crypto_session(backend, passphrase, config)
+        pending: list[str] = []
+        memory_kb = _init_crypto_session(
+            backend, passphrase, config, read_only=True, pending=pending
+        )
+        for note in pending:
+            console.print(safe_str(note))
     except MindMeldError as e:
         _error(str(e))
 
@@ -6469,7 +6498,12 @@ def gc(
     try:
         backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
+            pending: list[str] = []
+            memory_kb = _init_crypto_session(
+                backend, passphrase, config, read_only=dry_run, pending=pending
+            )
+            for note in pending:
+                console.print(safe_str(note))
         except MindMeldError as e:
             _error(str(e))
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
@@ -7557,7 +7591,12 @@ def recapture(
     try:
         backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
+            pending: list[str] = []
+            memory_kb = _init_crypto_session(
+                backend, passphrase, config, read_only=dry_run, pending=pending
+            )
+            for note in pending:
+                console.print(safe_str(note))
         except MindMeldError as e:
             _error(str(e))
         try:
