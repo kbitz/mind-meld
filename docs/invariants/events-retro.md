@@ -1641,13 +1641,15 @@ project's bucket (mirrors token attribution).
 **KEY-ABSENT vs EMPTY-DICT discriminator (v0.11.27, semantic widened
 v0.12.4 post-/plan-eng-review 2026-05-10).** The aggregator's
 `pre_skills_peers` flag uses `"skills_by_day" not in proj`, NOT
-`proj.get("skills_by_day")` falsy-check. **Critical difference vs.
-`pre_token_peers`:** every session generates tokens, so the existing
-token check (missing OR empty AND sessions > 0) is correct. Skills are
-different — a session can legitimately invoke zero skills, so an empty
-`{}` is a content signal ("no skills used in window"), not a version
-signal. Conflating the two would surface "Skills incomplete" on every
-retro for users who don't lean on skills.
+`proj.get("skills_by_day")` falsy-check. A session can legitimately invoke
+zero skills, so an empty `{}` is a content signal ("no skills used in
+window"), not a version signal. Conflating the two would surface "Skills
+incomplete" on every retro for users who don't lean on skills.
+**Track 58A applies the same empty-map distinction to `pre_token_peers`:**
+when `sessions > 0`, only an absent or non-dictionary `tokens_by_day`
+counts as missing token coverage. A present `{}` is a completed
+observation of zero tokens and does not increment the missing-project
+or missing-session counts.
 
 **Two populations land in `pre_skills_peers`:** (1) pre-v0.11.27 mm
 peers whose code never emits the field, and (2) v0.11.27+ peers whose
