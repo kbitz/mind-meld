@@ -1635,7 +1635,7 @@ def build_manifest_v2(
             max_file_size,
             on_skip,
             strict=strict,
-            **({"diagnostic_hash": diagnostic_hash} if diagnostic_hash else {}),
+            diagnostic_hash=diagnostic_hash,
         )
         sources[name] = {
             "base_path": base_path,

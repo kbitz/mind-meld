@@ -163,6 +163,38 @@ here by hand, use the H3 form.
 - **Effort:** M
 - **Priority:** P3
 
+### [ship:severity=informational] Per-reader "completed, no usage" is whole-row-scoped on the mm status/diag read path
+
+- **Why:** `/ship`'s pre-landing review found the SAME bug shape in two places. The
+  live-push console print (`cli.py:_push_captured_usage`, ~line 3499) checked
+  whole-capture `capture.hosts` truthiness instead of the specific reader's own
+  contribution, so a reader that itself completed with zero usage inherited
+  "contributed" whenever a sibling reader in the same sweep had real data. That
+  instance was fixed and pinned in this PR
+  (`test_capture_outcome_labels_each_reader_independently`). The second instance
+  is NOT fixed: `mm status`/`mm diag`'s "; completed, no usage" suffix
+  (`cli.py:_print_host_publication`, `state.get("empty")`) is fed by a single
+  row-level `"empty"` boolean (`aggregator.py:local_host_capture_candidate`,
+  `"empty": not row.lifetime_by_family`) applied uniformly to every reader
+  tagged "contributed" — the same blind spot, on the persisted-row read path.
+- **Hypothesis (untested):** thread a per-reader (per-family) emptiness signal
+  through `local_host_capture_candidate` instead of one row-wide boolean — e.g.
+  `"empty_readers": [name for name in row.consulted if name not in
+  row.lifetime_by_family]` — then have `events.project_host_publication` and
+  `cli._print_host_publication` key the suffix off reader membership in that
+  list. Must stay allowlist-safe (coverage/booleans only, never raw token
+  payload — see the adapter's existing "never the host token payload" docstring
+  rule) and handle a row already synced from an older Mac that lacks the new
+  key (graceful "unknown," not a crash or a silent wrong label).
+- **Effort:** M
+- **Priority:** P2
+- **Context:** PR #178 (Track 61A) pre-landing review, maintainability +
+  checklist + plan-completion-audit specialists converged independently on the
+  live-push instance; maintainability additionally traced this second,
+  unfixed instance. Deferred rather than threading a new field through
+  events.py + aggregator.py + cli.py and reasoning through mixed-fleet
+  backward compatibility during `/ship`.
+
 
 ## Drain records
 

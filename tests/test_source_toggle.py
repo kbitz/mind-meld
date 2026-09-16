@@ -520,6 +520,35 @@ class TestReconfigureSources:
             get_default_source("grok")
         )
 
+    def test_explicit_empty_sources_defaults_non_grok_off(
+        self, cfg, isolated_seen_sources, monkeypatch
+    ):
+        """An explicit empty sources list means nothing is currently active —
+        not "fall back to whether this name is a default". Sibling regression
+        to test_enable_default_from_explicit_empty_sources
+        (tests/test_integration.py): enable-source's has_explicit_sources fix
+        did not originally extend to reconfigure_sources, which still used
+        bare `not explicit_sources` list-truthiness and defaulted every
+        DEFAULT_SOURCES prompt to Y even when the user had explicitly zeroed
+        the list out."""
+        from mind_meld.config import load_config
+
+        config = load_config(cfg)
+        config["sync"]["sources"] = []
+        save_config(config, cfg)
+
+        claude_prompt: dict[str, object] = {}
+
+        def accept_default(prompt, default):
+            if "'claude'" in prompt:
+                claude_prompt.update(prompt=prompt, default=default)
+            return default
+
+        monkeypatch.setattr(typer, "confirm", accept_default)
+        result = runner.invoke(app, ["reconfigure-sources"])
+        assert result.exit_code == 0, result.output
+        assert claude_prompt["default"] is False
+
 
 # ── mm sources display ────────────────────────────────────────────────
 

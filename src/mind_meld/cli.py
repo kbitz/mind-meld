@@ -3496,7 +3496,7 @@ def _push_captured_usage(
             else "partial"
             if name in capture.partial
             else "completed, no usage"
-            if name in capture.token_sources and not capture.hosts
+            if name in capture.token_sources and name not in capture.hosts
             else "contributed"
             if name in capture.token_sources
             else "absent (no metadata ledger)"
@@ -7239,6 +7239,7 @@ def reconfigure_sources() -> None:
     sync = dict(config.get("sync", {}) or {})
     explicit_sources = list(sync.get("sources", []) or [])
     explicit_names = [s["name"] for s in explicit_sources]
+    has_explicit_sources = "sources" in sync
     disabled = list(sync.get("disabled_sources", []) or [])
     default_names = [s["name"] for s in DEFAULT_SOURCES]
 
@@ -7282,7 +7283,7 @@ def reconfigure_sources() -> None:
                 # or authorize the separate usage reader.
                 default_active = detected
             currently_active = (
-                iname in explicit_names or (not explicit_sources and default_active)
+                iname in explicit_names or (not has_explicit_sources and default_active)
             ) and iname not in disabled
             if iname == "grok":
                 # A pre-22B usage-only opt-in is durable consent.  Keep it

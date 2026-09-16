@@ -169,6 +169,14 @@ HOST_SNAPSHOT_MIN_VERSION = "v0.12.32"
 once because it appears in several user-facing remedies; a machine below it cannot
 contribute agent-log activity no matter how often it pushes."""
 
+CAPTURE_USAGE_MIN_VERSION = "v0.14.14"
+"""First mm release with the ``mm push --capture-usage`` flag itself (Track 61A).
+A machine between ``HOST_SNAPSHOT_MIN_VERSION`` and this floor already contributes
+agent-log rows passively via a content-changing push, but rejects the flag as an
+unrecognized option — remedies that name the flag by name must cite this floor,
+not ``HOST_SNAPSHOT_MIN_VERSION``, or a mid-fleet-upgrade Mac reads as "new enough"
+while still lacking the flag it's being told to run."""
+
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
 """Usable content width inside the card. Themes/noteworthy strings
 longer than this are truncated with an ellipsis suffix at render time."""
@@ -3947,7 +3955,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             notes.append(
                 f"No agent-log snapshots yet from "
                 f"{len(inventory.devices_without_accepted_row)} machine(s) — "
-                "run `mm push --capture-usage` "
+                f"run `mm push --capture-usage` (mm {CAPTURE_USAGE_MIN_VERSION}+) "
                 f"there, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
         else:
@@ -3958,7 +3966,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             # becomes the only diagnostic — exactly what the contract forbids.
             notes.append(
                 "No agent-log snapshots were accepted from any machine — "
-                "run `mm push --capture-usage` on "
+                f"run `mm push --capture-usage` (mm {CAPTURE_USAGE_MIN_VERSION}+) on "
                 f"each Mac, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
     else:
@@ -3998,8 +4006,8 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
         if inventory.devices_without_accepted_row:
             notes.append(
                 f"{len(inventory.devices_without_accepted_row)} machine(s) have no agent-log "
-                "snapshot (unknown, not zero) — run `mm push --capture-usage` there, "
-                "and upgrade any "
+                f"snapshot (unknown, not zero) — run `mm push --capture-usage` "
+                f"(mm {CAPTURE_USAGE_MIN_VERSION}+) there, and upgrade any "
                 f"machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
 

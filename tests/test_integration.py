@@ -4228,6 +4228,33 @@ def test_partial_and_absent_capture_reports_own_outcome(capture61, monkeypatch, 
     assert not isinstance(aggregator._accept_host_usage_snapshot(row), aggregator.HostReject)
 
 
+def test_capture_outcome_labels_each_reader_independently(capture61, monkeypatch):
+    """A reader that itself completes with zero usage must not inherit
+    'contributed' just because a SIBLING reader in the same sweep had real
+    data. The outcome computation used to check whole-capture
+    `capture.hosts` truthiness instead of this reader's own membership,
+    mislabeling the empty reader as 'contributed'."""
+    cfg = capture61["cfg"]
+    cfg["retro"] = {"grok_host_usage": True}
+    save_config(cfg, capture61["path"])
+    day = datetime.now(timezone.utc).date().isoformat()
+    usage = {"input": 9, "output": 3, "cache_read": 0, "cache_create": 0}
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({"codex": {day: usage}}, complete=True),
+    )
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_grok_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+    result = runner.invoke(app, ["push", "--capture-usage"])
+    assert result.exit_code == 0, result.output
+    assert "Usage capture: codex — contributed" in result.output
+    assert "Usage capture: grok — completed, no usage" in result.output
+
+
 def test_requested_capture_holds_lock_against_push_and_autopush(capture61, monkeypatch):
     real = _mm_host_usage.read_codex_usage
     blocked = []
