@@ -76,6 +76,139 @@ def _setup(tmp_path, monkeypatch, *, with_config=True, with_crypto_init=True):
 # ── JSON mode ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    "mode", ["absent", "stale", "empty", "degraded", "unreadable", "root-unreadable"]
+)
+def test_host_publication_states_on_both_surfaces(tmp_path, monkeypatch, mode):
+    import builtins
+    from datetime import datetime, timedelta, timezone
+
+    from mind_meld import events
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    root = tmp_path / "mm-events"
+    daydir = root / "events"
+    daydir.mkdir(parents=True)
+    codex = tmp_path / "codex"
+    codex.mkdir()
+    cfg = load_config()
+    cfg["sync"]["sources"] = [
+        {"name": "mm-events", "path": str(root), "type": "generic", "include_dirs": ["events"]},
+        {"name": "codex", "path": str(codex), "type": "generic"},
+    ]
+    cfg["retro"] = {"grok_host_usage": True}
+    save_config(cfg)
+    now = datetime.now(timezone.utc)
+    ts = now - timedelta(days=5) if mode in ("stale", "unreadable") else now
+    if mode != "absent":
+        row = events.make_host_usage_snapshot(
+            device="not-trusted",
+            hosts={},
+            ts=ts,
+            token_sources=["grok"] if mode == "degraded" else ["codex", "grok"],
+            degraded_sources=["codex"] if mode == "degraded" else [],
+        )
+        (daydir / f"mac-a-{ts.date()}.jsonl").write_text(json.dumps(row) + "\n")
+    if mode == "unreadable":
+        current = daydir / f"mac-a-{now.date()}.jsonl"
+        real = builtins.open
+
+        def read(path, *args, **kwargs):
+            if Path(path) == current:
+                raise PermissionError("denied")
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", read)
+    if mode == "root-unreadable":
+        real_stat = Path.stat
+
+        def stat(path, *args, **kwargs):
+            if path == daydir:
+                raise PermissionError("denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", stat)
+    diag = runner.invoke(app, ["diag", "--json"])
+    assert diag.exit_code == 0, diag.output
+    pub = json.loads(diag.stdout)["host_publication"]
+    assert pub["publication"] == pub["latest_attempt"] == "unknown"
+    assert pub["state"] == (
+        "absent" if mode == "absent" else "unknown" if "unreadable" in mode else "recorded"
+    )
+    if mode == "empty":
+        assert pub["empty"] is True
+        assert pub["readers"]["codex"] == "contributed"
+    if mode == "stale":
+        assert pub["age_days"] == 5
+    if mode == "degraded":
+        assert pub["readers"]["codex"] == "degraded"
+    for command in (["status"], ["diag"]):
+        result = runner.invoke(app, command)
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "Host usage last recorded capture" in flat
+        assert "Latest attempt: unknown" in flat
+        assert flat.index("Host usage last recorded capture") < flat.index(
+            "Grok usage capture" if command == ["status"] else "grok consented"
+        )
+        if mode == "empty":
+            assert "completed, no usage" in flat
+        if mode != "empty":
+            assert "mm push --capture-usage" in flat
+        if mode == "absent":
+            assert "no capture in the last 90 days" in flat
+        if "unreadable" in mode:
+            assert "~/mm-events/events" in flat
+
+
+def test_host_publication_config_unknown(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, with_config=False)
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    pub = json.loads(result.stdout)["host_publication"]
+    assert pub["state"] == "unknown"
+    assert "config invalid" in pub["error"]
+
+
+def test_status_opens_each_day_once_even_without_host_rows(tmp_path, monkeypatch):
+    import builtins
+    from datetime import datetime, timedelta, timezone
+
+    from mind_meld import events
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    root = tmp_path / "mm-events"
+    (root / "events").mkdir(parents=True)
+    cfg = load_config()
+    cfg["sync"]["sources"] = [
+        {"name": "mm-events", "type": "generic", "path": str(root), "include_dirs": ["events"]}
+    ]
+    save_config(cfg)
+    now = datetime.now(timezone.utc)
+    paths = []
+    for delta in range(3):
+        ts = now - timedelta(days=delta)
+        path = root / "events" / f"mac-a-{ts.date()}.jsonl"
+        path.write_text(
+            json.dumps(events.make_mm_push_event(device="mac-a", mm_version="1", ts=ts)) + "\n"
+        )
+        paths.append(path)
+    opened = []
+    real = builtins.open
+
+    def read(path, *args, **kwargs):
+        if Path(path) in paths:
+            opened.append(Path(path))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", read)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert sorted(opened) == sorted(paths)
+
+
 def test_diag_json_is_valid_json(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     result = runner.invoke(app, ["diag", "--json"])
@@ -100,6 +233,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "skill_links",
         "host_skill_discovery",
         "host_usage",
+        "host_publication",
         "discovery",
         "git_capture",
     ):

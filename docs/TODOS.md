@@ -44,6 +44,35 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review] Distinguish explicitly requested host captures on the wire
+
+- **Why:** Track 61A shares the existing host snapshot schema. An `origin` field
+  could distinguish flag-driven captures, but needs its own producer/consumer
+  justification rather than being inferred from timestamps or push counts.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 61A approved eng review; no wire change in this Track.
+
+### [plan-devex-review] Host read-budget override
+
+- **Why:** Warm capture can outgrow the autopush read budget. Extend the existing
+  proposal in `docs/roadmap-future.md` (“Make the host-usage read budget
+  configurable”, originally line 47); do not create a competing design.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Track 61A documents the ~900–1,000 Codex-rollout ceiling. Explicit
+  capture/retry is the current remedy; no override is implemented here.
+
+### [plan-eng-review] Audit forensic append callers for silent-write assumptions
+
+- **Why:** `flock_append_jsonl` intentionally ignores write failures by default.
+  Track 61A requests strict outcomes only for its user-requested capture. Audit
+  the other callers for success claims that actually require a written row.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 61A strict append gate; preserve best-effort forensic callers
+  unless an explicit caller contract requires otherwise.
+
 ### [ship:severity=informational] Reconcile docs/ROADMAP.md for Track 59A + 60A
 
 - **Why:** the plan completion audit for PR #177 found all 28 implementation

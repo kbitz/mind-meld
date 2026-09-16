@@ -472,8 +472,8 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
         assert url in readme
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
     assert token_usage.PRICING_LAST_UPDATED in invariant
-    assert "mm recapture 1d" in readme
-    assert "exits 1 on zero roots and 4 on partial git recovery" in readme
+    assert "mm push --capture-usage" in readme
+    assert "no Git roots or content changes" in readme
 
 
 def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:
@@ -622,6 +622,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "skill_links",
     "host_skill_discovery",
     "host_usage",
+    "host_publication",
     "discovery",
     "git_capture",
 )
@@ -825,9 +826,15 @@ def test_notes_decoder_compatibility_fixtures_both_directions():
     new_output = agg.format_retro(presentation_data("degraded"), name="Example")
     # The decoder is prose: preserve every old instruction, not a mock parser
     # invented for the test. A new decoder must still understand old output.
-    assert all(line in new_decoder for line in old_decoder.splitlines() if line.strip())
+    # Track 61A changes only the host-refresh command in retained decoder rules.
+    compatible_decoder = new_decoder.replace("mm push --capture-usage", "mm push")
+    assert all(line in compatible_decoder for line in old_decoder.splitlines() if line.strip())
     old_notes = old_output.split("## Notes\n", 1)[1].splitlines()
-    new_notes = new_output.split("## Notes\n", 1)[1].splitlines()
+    new_notes = (
+        new_output.replace("mm push --capture-usage", "mm push")
+        .split("## Notes\n", 1)[1]
+        .splitlines()
+    )
     assert all(line in new_notes for line in old_notes if line.strip())
     # An old decoder receives new distinct stems through its existing unknown-
     # line rule. No new meaning is hidden under an old stem.

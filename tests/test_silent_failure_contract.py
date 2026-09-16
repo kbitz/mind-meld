@@ -57,19 +57,21 @@ def test_status_retro_capture_nag_names_current_failure_check(tmp_path, monkeypa
     _setup_events_tail_config(tmp_path, monkeypatch)
     monkeypatch.setattr(cli_module.console, "width", 240)
     now = datetime.now(timezone.utc).isoformat()
-    monkeypatch.setattr(
-        _mm_events,
-        "latest_mm_push_row",
-        lambda *args: {
-            "type": "mm-push",
-            "ts": now,
-            "git_capture": {
-                "since": now,
-                "discovery": "complete",
-                "walk_errors": 1,
-                "walk_budget_aborts": 0,
-            },
-        },
+    _mm_events.write_push_event(
+        tmp_path / "mm-events" / "events",
+        "dev-deg",
+        [
+            {
+                "type": "mm-push",
+                "ts": now,
+                "git_capture": {
+                    "since": now,
+                    "discovery": "complete",
+                    "walk_errors": 1,
+                    "walk_budget_aborts": 0,
+                },
+            }
+        ],
     )
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
@@ -136,7 +138,11 @@ def test_status_prioritizes_every_standing_reader_blocker(tmp_path, monkeypatch,
     assert "no successful scan yet" not in text
     if reason == "unsupported":
         assert "pipx upgrade mind-meld" in text
-        assert "mm push" not in text
+        # The device-wide publication block may name the explicit refresh.
+        # The standing unsupported blocker must still prescribe upgrade,
+        # never promise that a retry alone fixes the record.
+        blocker = text.split(f"{reader.title()} usage capture:", 1)[1].split("Source '", 1)[0]
+        assert "mm push" not in blocker
 
 
 def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monkeypatch):

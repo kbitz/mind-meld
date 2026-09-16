@@ -44,4 +44,4 @@ All token counts sum input, cache write, cache read and output. Claude* = Claude
 - 0 pushes across 0 device(s)
 
 ## Notes
-- No agent-log snapshots yet from 2 machine(s) — run `mm push` there, and upgrade any machine below mm v0.12.32.
+- No agent-log snapshots yet from 2 machine(s) — run `mm push --capture-usage` there, and upgrade any machine below mm v0.12.32.

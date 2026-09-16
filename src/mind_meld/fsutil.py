@@ -147,6 +147,7 @@ def flock_append_jsonl(
     *,
     mode: int = 0o600,
     on_locked: Callable[[int], None] | None = None,
+    strict: bool = False,
 ) -> None:
     """Append N JSONL rows to `path` atomically under fcntl.flock(LOCK_EX).
 
@@ -164,6 +165,8 @@ def flock_append_jsonl(
       - Best-effort: OSError swallowed silently. Callers are forensic logs
         (pullhistory, mm-events), not data integrity — a crashed FS or
         permission flip MUST NOT break the calling sync.
+        Explicitly requested captures opt into ``strict``: write errors and
+        short appends raise OSError. Existing forensic callers are unchanged.
       - `on_locked(fd)` runs under flock AFTER the writes complete; pullhistory
         uses this for its line-boundary rotation closure. Exceptions raised
         from the callback are swallowed (same forensic-only stance).
@@ -186,7 +189,24 @@ def flock_append_jsonl(
                 pass  # fchmod can fail on some filesystems; perms are best-effort
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
-                os.write(fd, payload)
+                start = os.fstat(fd).st_size
+
+                def _restore_prefix() -> None:
+                    if not strict:
+                        return
+                    try:
+                        os.ftruncate(fd, start)
+                    except OSError:
+                        pass
+
+                try:
+                    written = os.write(fd, payload)
+                except OSError:
+                    _restore_prefix()
+                    raise
+                if strict and written != len(payload):
+                    _restore_prefix()
+                    raise OSError(f"short JSONL append: wrote {written} of {len(payload)} bytes")
                 if on_locked is not None:
                     try:
                         on_locked(fd)
@@ -197,6 +217,8 @@ def flock_append_jsonl(
         finally:
             os.close(fd)
     except OSError:
+        if strict:
+            raise
         return  # forensic aid only; never block the calling sync
 
 

@@ -4,7 +4,7 @@
 policy those readers were written for: a snapshot when any consulted reader
 completes, other readers dropped and declared on failure, and no row at all
 when no reader completed (or the sweep expired before any ran). Never an
-invented zero.
+invented zero. Zero-work pins remain valid unless capture is explicitly requested.
 
 Every test here injects or monkeypatches the readers. None of them may touch a
 real ``~/.codex/sessions`` or ``~/.grok/sessions`` — the autouse
@@ -770,6 +770,74 @@ def _rows(events_root: Path) -> list[dict]:
     return [json.loads(ln) for f in files for ln in f.read_text().splitlines() if ln.strip()]
 
 
+@pytest.mark.parametrize("entry", ["tail", "backfill", "flag"])
+def test_three_attended_callers_share_one_warm_sweep(tmp_path, monkeypatch, entry):
+    import hashlib
+
+    from mind_meld import cli
+
+    root = tmp_path / "events_root"
+    sources = _sources(root)
+    config = {**_tail_config(sources), "device": {"id": "dev-a"}}
+    _stub_fast_walks(monkeypatch)
+    calls = []
+    warmed = False
+
+    def read(**kwargs):
+        calls.append("read")
+        return (
+            _complete({"codex": {"2026-08-15": _usage(7)}}) if warmed else _incomplete("deadline")
+        )
+
+    def warm(reader):
+        nonlocal warmed
+        calls.append("warm")
+        warmed = True
+        return True
+
+    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
+    monkeypatch.setattr(events_tail, "_warm_host_cache_with_notice", warm)
+    if entry == "tail":
+        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
+    elif entry == "backfill":
+        events_tail._run_events_backfill(config, sources, "dev-a")
+    else:
+
+        def push(*args, on_manifest_accepted, suppress_host_capture, **kwargs):
+            events_tail._run_events_tail(
+                config,
+                sources,
+                "dev-a",
+                dry_run=False,
+                quiet=False,
+                suppress_host_capture=suppress_host_capture,
+            )
+            path = next((root / "events").glob("*.jsonl"))
+            on_manifest_accepted(
+                {
+                    "sources": {
+                        "mm-events": {
+                            "files": {
+                                f"events/{path.name}": {
+                                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+
+        monkeypatch.setattr(cli, "_push_core", push)
+        cli._push_captured_usage(config, "unused", 1024, sources, False)
+    assert calls == ["read", "warm", "read"]
+    rows = _rows(root)
+    hosts = [r for r in rows if r["type"] == "host-usage-snapshot"]
+    assert len(hosts) == 1
+    assert hosts[0]["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
+    assert hosts[0]["token_sources"] == ["codex"]
+    assert sum(r["type"] == "mm-push" for r in rows) == (entry == "tail")
+
+
 class TestTailWiring:
     def test_row_order_is_git_sessions_host_then_mm_push_last(self, tmp_path, monkeypatch):
         """CT-4 still holds: the optional host row sits before the terminal
@@ -1069,21 +1137,15 @@ class TestTailWiring:
         assert degradations[0].startswith(f"host-usage snapshot skipped (grok {reason})")
         # Permanent vs transient: never promise a retry for a failure a later
         # push cannot fix, and never leave a transient one without a next step.
-        promises_retry = "The next push that uploads a change retries" in degradations[0]
+        promises_retry = "Run `mm push --capture-usage`" in degradations[0]
         if reason in events_tail._HOST_PERMANENT_REASONS:
             assert not promises_retry
             assert "pipx upgrade mind-meld" in degradations[0]
         else:
-            # A transient reason must tell the user what happens next, and
-            # exactly one of the two ways. The generic promise is the default.
-            # Only deadline names the attended warm. A trailing partial record
-            # needs a later completed write, not cache warming.
-            names_command = "Run `mm push`" in degradations[0]
-            assert sum((promises_retry, names_command)) == 1
-            if reason == "deadline":
-                assert names_command
-            else:
-                assert promises_retry
+            assert promises_retry
+            # Only deadline warrants warming; all transient remedies work
+            # on a converged Mac as well as a substantive push.
+            assert ("to warm it" in degradations[0]) == (reason == "deadline")
 
     def test_an_absent_source_publishes_a_row_and_no_degradation(self, tmp_path, monkeypatch):
         """The whole point of the revised premise: a machine whose Grok store
@@ -2064,7 +2126,7 @@ if __name__ == "__main__":  # pragma: no cover
 def test_partial_takes_the_retry_sentence_not_warming(reader):
     phrase = events_tail._host_skip_phrase(reader, "partial")
     assert phrase.endswith(
-        "The next push that uploads a change retries; `mm diag` shows the reader's state."
+        "Run `mm push --capture-usage` to retry; `mm diag` shows the reader's state."
     )
     assert "warming" not in phrase
 

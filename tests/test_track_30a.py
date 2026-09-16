@@ -415,10 +415,27 @@ def test_recapture_zero_roots_does_not_create_events_dir(tmp_path, monkeypatch):
     assert not events_dir.exists()
 
 
-def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch):
+@pytest.mark.parametrize("host_state", [None, "cold", "ready", "blocked"])
+def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, host_state):
     from tests.test_silent_failure_contract import _setup_events_tail_config
 
     _setup_events_tail_config(tmp_path, monkeypatch)
+    if host_state is not None:
+        from mind_meld import config, host_usage
+
+        cfg = config.load_config()
+        codex = tmp_path / "codex"
+        codex.mkdir()
+        cfg["sync"]["sources"].append({"name": "codex", "path": str(codex), "type": "generic"})
+        config.save_config(cfg)
+        monkeypatch.setattr(
+            host_usage,
+            "codex_usage_diag",
+            lambda: {
+                "state": "ready" if host_state == "blocked" else host_state,
+                "last_reason": "unsupported" if host_state == "blocked" else None,
+            },
+        )
     now = datetime.now(timezone.utc)
     events_dir = tmp_path / "mm-events" / "events"
     repo = tmp_path / "repo"
@@ -482,6 +499,9 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch):
     assert snapshot_rows is not None
     assert [item["type"] for item in snapshot_rows] == ["git-snapshot"]
     assert snapshot_rows[0]["origin"] == events.GIT_SNAPSHOT_ORIGIN_RECAPTURE
+    assert ("mm push --capture-usage" in " ".join(r.output.split())) == (
+        host_state in ("cold", "blocked")
+    )
 
 
 def test_recapture_snapshoterror_exits_1_no_traceback(tmp_path, monkeypatch):

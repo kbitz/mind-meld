@@ -4548,6 +4548,19 @@ def _accepted(ev: dict):
     return result
 
 
+def test_stale_host_capture_note_is_one_class_for_two_devices():
+    since = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    until = datetime(2026, 4, 28, tzinfo=timezone.utc)
+    rows = [_host_event(device, "2026-04-20T12:00:00+00:00") for device in ("dev-a", "dev-b")]
+    rows.append(_host_event("dev-c", "2026-04-27T12:00:00+00:00"))
+    inventory = aggregator.aggregate_host_usage(rows, since=since, until=until, registered_ids=None)
+    notes = aggregator._host_reader_coverage_notes(list(inventory.by_device.values()))
+    stale = [note for note in notes if "predate this window" in note]
+    assert len(stale) == 1
+    assert "dev-a" in stale[0] and "dev-b" in stale[0] and "dev-c" not in stale[0]
+    assert "2026-04-20" in stale[0] and "mm push --capture-usage" in stale[0]
+
+
 class TestHostSnapshotAcceptance:
     TS = "2026-04-28T12:00:00+00:00"
 
@@ -7669,7 +7682,7 @@ class TestHostEconomics:
         assert "| dev-a | — |" in section
         assert "~$0" not in section
         assert "snapshot predates this window" in out
-        assert "Run `mm push` on that Mac" in out
+        assert "Run `mm push --capture-usage` on that Mac" in out
 
     def test_marker_partial_flips_to_floor(self):
         hosts = _priced_hosts()

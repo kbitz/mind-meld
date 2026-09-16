@@ -48,7 +48,7 @@ Subdir nesting (`include_dirs = ["events"]` rather than `["."]`) plays cleanly w
 
 **Read-only resolution.** `resolve_sources` / `get_sources` default to `bootstrap=False`. A missing default root remains selected and available as an empty walk, with its name in `SourceResolution.would_create`; strict preview checks the nearest existing ancestor with `os.access(W_OK | X_OK)`. `_retain_prior_default_sources` preserves that field. Push preview omits those roots from the unchanged deletion proof and shows their deletions, including after sidecar recovery. Inspection and source-toggle commands create neither the default root nor `events/`. Pull with no mm-events files to apply also creates neither. `mm install-skills` is a writer: its store shares the default root and creates that root at 0700 when absent, even with mm-events disabled.
 
-**Explicit creators.** Init resolves with `bootstrap=True` before backfill; `_push_core` (including autopush) and recapture resolve with `strict=True, bootstrap=not dry_run`. `_pull_one_source` calls `_bootstrap_mm_events_path` once before its first mm-events apply, with the configured path. The bootstrap creates missing components one at a time at 0700, returns them, and reports each to `created_ancestor` through a callback so partial creation is recorded even on a later mkdir failure. Pull fsyncs the existing parent of the topmost new directory. Bootstrap failure fails the source's incoming files with one warning. Recapture catches source-resolution/bootstrap `SnapshotError`, states that no rows were written, and includes the dry-run suffix when applicable; an unavailable source is not called disabled.
+**Explicit creators.** Track 61A explicit capture preflight resolves with `strict=True, bootstrap=True` before Keychain access and reports any setup failure before capture. Init resolves with `bootstrap=True` before backfill; `_push_core` (including autopush) and recapture resolve with `strict=True, bootstrap=not dry_run`. `_pull_one_source` calls `_bootstrap_mm_events_path` once before its first mm-events apply, with the configured path. The bootstrap creates missing components one at a time at 0700, returns them, and reports each to `created_ancestor` through a callback so partial creation is recorded even on a later mkdir failure. Pull fsyncs the existing parent of the topmost new directory. Bootstrap failure fails the source's incoming files with one warning. Recapture catches source-resolution/bootstrap `SnapshotError`, states that no rows were written, and includes the dry-run suffix when applicable; an unavailable source is not called disabled.
 
 **Permission tightening.** Only an existing default root is eligible. Normalize ancestors in both compared paths without following the root itself; leave custom and symlinked roots untouched. Open with `O_NOFOLLOW | O_DIRECTORY`, verify through `fstat` that the descriptor is a directory owned by `os.getuid()`, and `fchmod(0o700)` when group/other bits are present. Failure warns once per normalized path and does not refuse. `_BOOTSTRAP_WARNED_PATHS` suppresses repeated mkdir/tightening warnings; strict creation failures still raise on every attempt. Tests reset that set per case.
 
@@ -867,12 +867,11 @@ exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
 read; a newer mm **may** read it (`pipx upgrade mind-meld`), or the user can
 `mm disable-source <reader>`. A retry alone is not a remedy. `partial` takes
-the generic retry sentence: "The next push that uploads a change retries;
-`mm diag` shows the reader's state." Only `deadline` names an interactive
-warm (about 5 s of scanning per cold reader, not a hard ceiling). An attended
-push must upload a change; `mm recapture 1d` is the bridge on a converged Mac,
-requiring discovered git roots and the enabled, resolved mm-events source
-(exit 1 on zero roots, exit 4 on partial git recovery). The phrase and the joined breadcrumb
+the generic retry sentence naming `mm push --capture-usage` and `mm diag`.
+Only `deadline` names an interactive warm (about 5 s of scanning per cold
+reader, not a hard ceiling). The explicit flag replaces the old
+`mm recapture 1d` bridge on a converged Mac; it requires enabled, resolved
+mm-events and reader consent, but no Git roots. The phrase and the joined breadcrumb
 are prose, not a semicolon-delimited schema: the approved retry sentence
 contains `; ` too. Nothing parses the detail by that separator. One
 degradation is appended per dropped reader.
@@ -954,7 +953,8 @@ Orchestration failures (a reader exception normalized to `unavailable`, or a
 sweep deadline before invocation) remain per-push stderr/breadcrumb signals.
 A no-op autopush may overwrite that breadcrumb with `success` without
 reading either host; a persisted blocker remains visible in status and diag.
-No no-op push re-read was added. See README "Host usage capture (Codex and
+No automatic no-op push re-read was added. Track 61A's explicit flag is the
+sole exception. See README "Host usage capture (Codex and
 Grok)" for remedies and the three existing deferred-work TODOs.
 
 **`degraded_sources` is additive.** No `EVENTS_SCHEMA_VERSION` bump:
@@ -972,12 +972,54 @@ emits the notice alone.
 
 **Row order.** Tail: git rows, sessions row, optional host row, `mm-push`
 LAST (CT-4 unchanged). Backfill: git rows, sessions row, optional host row,
-and never an `mm-push`.
+and never an `mm-push`. Requested `push --capture-usage`: one host row before
+the normal push; that invocation suppresses the tail's host capture AND its
+terminal `mm-push`. Git/session rows can still follow. A usage refresh never
+increments retro push counts or advances the cursor. `_capture_host_snapshot`
+owns the single bounded sweep and warm/retry for all three callers (tail and
+backfill through `_capture_event_snapshots`); no duplicated warm path.
 
-**Zero work when there is nothing to say.** Dry-run, an unresolved/disabled
-`mm-events` source, and a no-op push all return before capture, so no reader
-opens a host store or touches a host cache. Pinned in
+**Zero work unless explicitly requested.** Dry-run, an unresolved/disabled
+`mm-events` source, and a bare no-op push all return before capture, so no
+reader opens a host store or touches a host cache. `push --capture-usage` is
+the named exception, not the deferred automatic no-op refresh (T3-B). It
+refuses incompatible dry-run, unavailable mm-events, uncreatable default roots
+and missing reader consent before Keychain access. Capture runs under the mm
+lock; concurrent autopush contention stays silent without a degraded crumb.
+The tail's suppression flag is keyword-only from `_push_core` through both
+tail helpers. Autopush never warms. Pinned in
 `tests/test_host_usage_snapshot.py` and `tests/test_integration.py`.
+
+**Requested capture publication (61A).** Strict event append reports OSError
+and short writes; forensic append callers keep their existing best-effort
+semantics. Exit 0 requires the requested row in the exact file revision of
+the manifest accepted by `backend.put(manifest_key, ...)`. Exit 4 means no
+row, append failure, or missing inclusion while content sync was otherwise
+fine; exit 1 means stopped before acceptance, and 2 incompatible flags. No row
+means no `_push_core` call. Post-acceptance maintenance is reported separately.
+The flag uses its own `HostUsageCapture`, not the suppressed tail's degradation
+list. Excludes, include dirs and max size are never overridden. A *new* oversized
+day file may be omitted; an already advertised oversized file correctly refuses
+the whole snapshot under the sync invariant (exit 1).
+
+**Local capture evidence (61A).** Status and diag share one filename-scoped,
+bounded binary day-file pass for mm-push and host rows. Status reuses its stable
+file hashes for the diagnostic manifest only (see sync.md), so it does not open
+the same day file again. Names use
+`_safe_device_filename`; row `device` never selects a local file. Cursor
+fail-open physical ordering remains unchanged. The CLI injects the aggregator's
+actual host acceptance/order selector into events, so events never imports the
+skills package. Invalid timestamps, future rows and sibling ties agree with the
+fleet consumer. Read errors are explicit, even with a readable older row.
+`host_publication` contains timestamp/age, allowlisted reader coverage and
+publication/attempt states; never hosts, model ids, tokens or peer ids.
+The accepted-manifest sidecar proves publication only for matching file bytes;
+otherwise it is unknown. No row means no capture in the retained 90-day window,
+not never published. Latest attempt stays unknown without an attempt receipt.
+Complete empty scans have a reader in token_sources and hosts:{}; token_sources:[]
+means all consulted readers were absent. Status reminds after one day or on
+absent/degraded/partial coverage. Fleet notes aggregate snapshots predating the
+retro window into one staleness class. Latest-per-device supersession is unchanged.
 
 **Reader tolerance: an ordinary Codex shape must never refuse the store.**
 One unreadable rollout fails the WHOLE `_scan_codex_root`, and all-or-nothing

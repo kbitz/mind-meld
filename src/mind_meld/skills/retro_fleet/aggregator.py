@@ -811,11 +811,11 @@ def _parse_iso(ts: object) -> datetime | None:
         return None
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
 
 
 def _within_window(ts: object, since: datetime, until: datetime) -> bool:
@@ -1470,11 +1470,11 @@ def _parse_aware_ts(ts: object) -> datetime | None:
         return None
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except ValueError:
+        if dt.tzinfo is None:
+            return None
+        return dt.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
-        return None
-    return dt.astimezone(timezone.utc)
 
 
 def _accept_optional_source_list(ev: dict, key: str) -> tuple[tuple[str, ...], str | None]:
@@ -1728,12 +1728,12 @@ def _host_detail_phrase(detail: str, reason: str | None, *, device: str | None =
                 "Not available for `"
                 + _safe_short(device)
                 + "`: that Mac runs an mm that reported token counters in an "
-                "older format. Run `pipx upgrade mind-meld` and `mm push` "
+                "older format. Run `pipx upgrade mind-meld` and `mm push --capture-usage` "
                 "there, then re-run."
             )
         return (
             "A Mac still showing — on the retro reported token counters in an "
-            "older format. Run `pipx upgrade mind-meld` and `mm push` there, "
+            "older format. Run `pipx upgrade mind-meld` and `mm push --capture-usage` there, "
             "then re-run `mm retro-fleet`."
         )
     if detail == "present":
@@ -1742,34 +1742,34 @@ def _host_detail_phrase(detail: str, reason: str | None, *, device: str | None =
         return (
             "per-model host tokens absent — this machine is on mm older than "
             "v0.12.49, or its last push had an empty host scan. Upgrade mm "
-            "and run `mm push` on that machine."
+            "and run `mm push --capture-usage` on that machine."
         )
     if reason == "active_days_mismatch":
         return (
             "per-model host tokens dropped (active_days_mismatch) — the day "
             "set did not match the family totals. Upgrade mm on that machine "
-            "and run `mm push`."
+            "and run `mm push --capture-usage`."
         )
     if reason == "invalid_counter":
         return (
             "per-model host tokens dropped (invalid_counter) — a counter did "
             "not reconcile with the family totals, or overflowed. Upgrade mm "
-            "on that machine and run `mm push`; if it persists, run `mm diag`."
+            "on that machine and run `mm push --capture-usage`; if it persists, run `mm diag`."
         )
     if reason == "unsupported_schema":
         return (
             "per-model host tokens dropped (unsupported_schema) — a model id "
             "or day bucket was malformed, or exceeded the protocol cap. "
-            "Upgrade mm on that machine and run `mm push`."
+            "Upgrade mm on that machine and run `mm push --capture-usage`."
         )
     if reason == "invalid_day":
         return (
             "per-model host tokens dropped (invalid_day) — a day key was not "
-            "a canonical UTC date. Upgrade mm on that machine and run `mm push`."
+            "a canonical UTC date. Upgrade mm on that machine and run `mm push --capture-usage`."
         )
     return (
         f"per-model host tokens dropped ({reason}) — upgrade mm on that "
-        "machine and run `mm push`; run `mm diag` if it persists."
+        "machine and run `mm push --capture-usage`; run `mm diag` if it persists."
     )
 
 
@@ -2023,14 +2023,38 @@ def _sibling_tie_key(row: _AcceptedHostRow) -> str:
     )
 
 
+def _host_row_order_key(row: _AcceptedHostRow) -> tuple:
+    return row.as_of, row.tie_key, _detail_rank(row), _sibling_tie_key(row)
+
+
 def _row_replaces(candidate: _AcceptedHostRow, incumbent: _AcceptedHostRow) -> bool:
-    if candidate.as_of != incumbent.as_of:
-        return candidate.as_of > incumbent.as_of
-    if candidate.tie_key != incumbent.tie_key:
-        return candidate.tie_key > incumbent.tie_key
-    if _detail_rank(candidate) != _detail_rank(incumbent):
-        return _detail_rank(candidate) > _detail_rank(incumbent)
-    return _sibling_tie_key(candidate) > _sibling_tie_key(incumbent)
+    return _host_row_order_key(candidate) > _host_row_order_key(incumbent)
+
+
+def _accept_host_row_at(ev: dict, until: datetime) -> _AcceptedHostRow | HostReject:
+    result = _accept_host_usage_snapshot(ev)
+    if not isinstance(result, HostReject) and result.as_of > until + _HOST_FUTURE_SKEW:
+        return HostReject(device=result.device, reason="future_timestamp")
+    return result
+
+
+def local_host_capture_candidate(ev: dict, *, until: datetime) -> tuple[tuple, dict] | None:
+    """Supply the local day scanner with the fleet's acceptance and ordering.
+
+    CLI injects this selector into events; events never imports the skills
+    package. Only coverage leaves this adapter, never the host token payload.
+    """
+    row = _accept_host_row_at(ev, until)
+    if isinstance(row, HostReject):
+        return None
+    return _host_row_order_key(row), {
+        "ts": row.as_of.isoformat(),
+        "token_sources": row.consulted,
+        "partial_sources": row.partial,
+        "degraded_sources": row.degraded,
+        "coverage_invalid": bool(row.partial_reason or row.degraded_reason),
+        "empty": not row.lifetime_by_family,
+    }
 
 
 def aggregate_host_usage(
@@ -2051,12 +2075,9 @@ def aggregate_host_usage(
     for ev in events:
         if ev.get("type") != "host-usage-snapshot":
             continue
-        result = _accept_host_usage_snapshot(ev)
+        result = _accept_host_row_at(ev, until)
         if isinstance(result, HostReject):
             rejected.append(result)
-            continue
-        if result.as_of > until + _HOST_FUTURE_SKEW:
-            rejected.append(HostReject(device=result.device, reason="future_timestamp"))
             continue
         prior = latest.get(result.device)
         if prior is None or _row_replaces(result, prior):
@@ -3844,7 +3865,7 @@ def _device_economics_cell(
         notes.append(
             "API list-rate equivalent unavailable for `"
             + _safe_short(device)
-            + "`: its agent-log snapshot predates this window. Run `mm push` "
+            + "`: its agent-log snapshot predates this window. Run `mm push --capture-usage` "
             "on that Mac, then re-run."
         )
         return "—", notes, {}, {}
@@ -3905,7 +3926,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
     """Name why the AGENT LOGS block is quiet, with a remedy for each cause.
 
     Ordered most-actionable first. Each line follows the product's established
-    problem/cause/fix shape ("run `mm push` on those machines; upgrade if the
+    problem/cause/fix shape ("run `mm push --capture-usage` on those machines; upgrade if the
     warning persists") rather than describing a state and stopping.
 
     ``view`` is the same ``AgentRhythmView`` the card rendered. Pass it whenever
@@ -3925,7 +3946,8 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
         if inventory.devices_without_accepted_row:
             notes.append(
                 f"No agent-log snapshots yet from "
-                f"{len(inventory.devices_without_accepted_row)} machine(s) — run `mm push` "
+                f"{len(inventory.devices_without_accepted_row)} machine(s) — "
+                "run `mm push --capture-usage` "
                 f"there, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
         else:
@@ -3935,7 +3957,8 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             # body section AND the notes are all empty, so a vanished block
             # becomes the only diagnostic — exactly what the contract forbids.
             notes.append(
-                "No agent-log snapshots were accepted from any machine — run `mm push` on "
+                "No agent-log snapshots were accepted from any machine — "
+                "run `mm push --capture-usage` on "
                 f"each Mac, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
     else:
@@ -3956,12 +3979,14 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
                 "enable with `mm enable-source codex` (or `grok`) and run "
-                "`mm push`; readers with no attributable local ledger are also omitted."
+                "`mm push --capture-usage`; readers with no attributable local ledger "
+                "are also omitted."
             )
         elif not view.any_activity:
             if all(s.stale for s in snaps):
                 notes.append(
-                    "Agent-log snapshots all predate this window — run `mm push` on those "
+                    "Agent-log snapshots all predate this window — "
+                    "run `mm push --capture-usage` on those "
                     "machines for current agent activity."
                 )
             else:
@@ -3973,7 +3998,8 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
         if inventory.devices_without_accepted_row:
             notes.append(
                 f"{len(inventory.devices_without_accepted_row)} machine(s) have no agent-log "
-                f"snapshot (unknown, not zero) — run `mm push` there, and upgrade any "
+                "snapshot (unknown, not zero) — run `mm push --capture-usage` there, "
+                "and upgrade any "
                 f"machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
             )
 
@@ -4021,6 +4047,15 @@ def _host_reader_coverage_notes(snaps: list[HostDeviceSnapshot]) -> list[str]:
     )
     if partial_note:
         notes.append(partial_note)
+    stale = [s for s in snaps if s.stale]
+    if stale:
+        names = _format_coverage_peer_names({s.device for s in stale})
+        oldest = min(s.as_of for s in stale).date().isoformat()
+        notes.append(
+            f"Host-usage captures from {names} predate this window "
+            f"(oldest {oldest} UTC) — on each named machine, run "
+            "`mm push --capture-usage`, then `mm status`; pull again on this Mac."
+        )
     return notes
 
 

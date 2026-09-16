@@ -17,11 +17,24 @@ Tests pinning the invariants below: `tests/test_integration.py::TestExcludePatte
 
 Publishing scans (`_push_core`, including the mm-events rescan) use strict mode: directory enumeration, classification, descriptor identity, and hash errors raise `SnapshotError` instead of omitting the path. Diagnostic walkers stay permissive. A published entry's digest and size describe the accepted file bytes and mtime describes that same observed revision. This is not a filesystem-wide atomic snapshot.
 
+Status can supply `diagnostic_hash` to reuse hashes from its single event-file
+scan, avoiding a second read just to build the inspection manifest. Reuse
+requires unchanged device/inode/size/mtime/ctime; changed files are rehashed.
+`_record_file`'s strict branch never consults this callback. Publication always
+performs its own descriptor-bound scan and upload verification.
+
 `generate_tombstones` stays a pure comparison. Before each call, `_prove_omitted_paths_absent` checks omitted prior paths against the trusted local source map. ENOENT/ENOTDIR below an accessible root is genuine absence. A still-present regular file omitted by size cap or inode dedup refuses. A missing previously populated selected user-source root refuses the whole push; removing a source from selection drops its file entries, preserves existing tombstones, and is itself a manifest change.
 
 **mm-events ownership (Tracks 59A/60A).** The default `~/.local/share/mind-meld` root is mm-owned: a missing root, a present root with `events/` gone, or individual missing event files represent deletions. A real push creates the default root at 0700 and publishes that snapshot, including its usual new activity row. A missing **custom** mm-events root is never created: push warns with the folder and remedies, drops that source's prior entries without new tombstones, preserves existing tombstones, skips the events tail, and publishes the other sources. Autopush records the same warning as a degraded breadcrumb. When the custom folder returns, the next push publishes it again. User-source missing-root refusal is unchanged.
 
 `_upload_changed_blobs` verifies the upload revision against the scanned digest, size, and mtime **before** `backend.put`. Missing or changed input aborts; it does not `continue`. Earlier correctly keyed encrypted blobs may remain as orphans. The encrypted manifest is the commit boundary; last_seen, sidecar, and conflict cleanup run only after that put.
+
+The requested host capture's acceptance callback runs immediately after that
+manifest put. It requires the exact day-file hash containing the requested
+row, not merely a truthy `PushResult`. A later maintenance error cannot undo
+acceptance. Status/diag use the existing local accepted-manifest sidecar as
+evidence; if the current day-file revision no longer matches it, publication
+is unknown. No new receipt file or wire field is introduced.
 
 `_download_and_apply` hashes plaintext after the non-mutating symlink/containment guards and before `_apply_incoming_file`. A mismatch is a per-file `failed` outcome; later valid files continue. Unchanged historical blobs are not rewritten by a no-op push; incoming verification rejects them if encountered.
 
