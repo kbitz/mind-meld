@@ -133,6 +133,19 @@ Y/N prompt copy + default rule. `_prompt_sources` (init) and
 `reconfigure_sources` both call it; `mm init`'s default-Y-on-path-exists
 behavior is preserved.
 
+**`has_explicit_sources` gates on key presence, not list truthiness (Track 61A
+pre-landing review).** `enable_source`'s `currently_active` check and
+`reconfigure_sources`'s equivalent both need to tell an explicitly-emptied
+`sync.sources: []` apart from an absent key — the two are indistinguishable
+under bare `not explicit_sources` (list truthiness), which reads an empty list
+as "no explicit sources configured" and falls back to defaulting every prompt
+from `default_names`. `enable_source` already computed
+`has_explicit_sources = "sources" in sync` for this; `reconfigure_sources`
+still used the bare-truthiness form, so a user who explicitly cleared
+`sync.sources` had every `DEFAULT_SOURCES` prompt silently default back to Y
+on the next `mm reconfigure-sources` run. Fixed by giving `reconfigure_sources`
+the same key-presence test. A new `sync.sources` consumer should use it too.
+
 ## `walk_generic_source` filesystem-identity dedup (load-bearing, v0.10.1)
 Mirror of `_find_conflict_files`'s dedup at the manifest-walk layer. When `include_files` overlaps `include_dirs`, the same on-disk file lands in `collected_paths` twice. Pre-v0.10.1, the second pass got hashed and overwrote the first manifest entry — wasted CPU on identical bytes. On case-insensitive volumes (APFS default) with case-mismatched config, two distinct rel-keys could be created for one inode — a real correctness bug producing phantom add/delete fleet churn.
 

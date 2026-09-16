@@ -692,6 +692,18 @@ note (git). They aggregate across machines. Remedy is `mm diag` on the
 named machine inspecting `host_usage.<reader>` — never a bare `mm push`.
 Absence of the field produces no upgrade nag.
 
+**Two-tier version floor (corrected during 61A pre-landing review).**
+`aggregator.py` names two separate constants: `HOST_SNAPSHOT_MIN_VERSION`
+(`v0.12.32`, first release that publishes `host-usage-snapshot` rows at all)
+and `CAPTURE_USAGE_MIN_VERSION` (`v0.14.14`, first release with the
+`mm push --capture-usage` flag itself). A machine between the two floors
+already contributes agent-log rows passively via an ordinary content-changing
+push, but rejects `--capture-usage` as an unrecognized flag. Remedy text that
+names the flag by name (`_agent_coverage_notes`, `_host_reader_coverage_notes`)
+must cite `CAPTURE_USAGE_MIN_VERSION`, not `HOST_SNAPSHOT_MIN_VERSION` — citing
+the older floor falsely reassures a machine that is new enough for the schema
+but still lacks the flag it is being told to run.
+
 #### Acceptor and schema
 
 - **The rejected breadcrumb counts DEVICES, not rows.** `aggregate_host_usage`
@@ -1001,6 +1013,23 @@ The flag uses its own `HostUsageCapture`, not the suppressed tail's degradation
 list. Excludes, include dirs and max size are never overridden. A *new* oversized
 day file may be omitted; an already advertised oversized file correctly refuses
 the whole snapshot under the sync invariant (exit 1).
+
+**Per-reader outcome labels (61A, corrected during pre-landing review).**
+`_push_captured_usage` prints one `Usage capture: <reader> — <outcome>` line per
+configured reader, in this precedence: the reader's own `capture.dropped` reason,
+else `"partial"` if in `capture.partial`, else `"completed, no usage"` if in
+`capture.empty`, else `"contributed"` if in `capture.token_sources`, else
+`"absent (no metadata ledger)"`. `HostUsageCapture.empty` is reader-identity-scoped:
+recorded in `_capture_host_usage` from each reader's own un-merged `result.hosts`
+BEFORE the family-keyed merge into `hosts`, never derived from `name not in hosts`
+or any `host_family()` membership check. `host_family()` classifies by MODEL ID
+PREFIX, not reader identity, so an unrecognized model id (e.g. a real OpenAI id
+like `codex-mini-latest`) lands a genuine contribution under family `"other"`
+instead of `"codex"` — checking the family-keyed `hosts` dict for the reader's own
+name would then mislabel a contributing reader as empty. `_canonical_empty` mirrors
+`_canonical_partial`'s exact pattern. The read path (`cli.py:_print_host_publication`
+/ `aggregator.py:local_host_capture_candidate`'s `"empty": not row.lifetime_by_family`)
+still has the family-keyed version of this bug — deferred, see TODOS.md.
 
 **Local capture evidence (61A).** Status and diag share one filename-scoped,
 bounded binary day-file pass for mm-push and host rows. Status reuses its stable
