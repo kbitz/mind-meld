@@ -171,6 +171,23 @@ def test_host_publication_config_unknown(tmp_path, monkeypatch):
     assert "config invalid" in pub["error"]
 
 
+def test_deeply_nested_sidecar_does_not_crash_status_or_diag(tmp_path, monkeypatch):
+    """`_host_publication` reads the sidecar to check publication evidence.
+    `sidecar.read()` only catches (OSError, ManifestError) around
+    `json.loads` — a deeply nested JSON document raises `RecursionError`
+    directly, which is neither. Must degrade (no manifest evidence), not
+    crash a diagnostic command."""
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    sidecar_mod.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
+    sidecar_mod.sidecar_path().write_text("[" * 10_000 + "]" * 10_000)
+
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    diag = runner.invoke(app, ["diag", "--json"])
+    assert diag.exit_code == 0, diag.output
+
+
 def test_status_opens_each_day_once_even_without_host_rows(tmp_path, monkeypatch):
     import builtins
     from datetime import datetime, timedelta, timezone

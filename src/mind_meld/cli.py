@@ -5926,7 +5926,7 @@ def _host_publication(config: dict, sources: list[dict], scan: events.EventScan)
     ]
     try:
         manifest = sidecar.read(config["device"]["id"])
-    except (OSError, MindMeldError, KeyError):
+    except (OSError, MindMeldError, KeyError, RecursionError):
         manifest = None
     projected = events.project_host_publication(scan, readers, manifest)
     if scan.errors and projected["state"] == "unknown":

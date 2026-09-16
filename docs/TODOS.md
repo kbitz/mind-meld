@@ -280,6 +280,37 @@ here by hand, use the H3 form.
   writes an `mm-push` row to advance the cursor) is a known, reviewed
   trade-off of the Approach C design, not a new gap.
 
+### [ship] Investigate a claimed TOCTOU on the accepted-manifest digest check
+
+- **Why:** a Codex outside-adversarial pass on PR #178 (Track 61A) claimed
+  `events.py:recorded_row_revision` has a race: it confirms the requested row
+  is present in the day file via one read (`_iter_typed_objs`), then
+  independently re-opens and hashes the same file (`hash_file(path)`) for the
+  digest compared against the manifest's accepted `sha256`. Between those two
+  reads, the file could change. Codex's own severity read ("Fix before
+  merging... returned published=True for accepted contents {}") was NOT
+  independently reproduced against the real code path here — this ticket
+  records the claim plus a first analysis, not a confirmed bug.
+- **Analysis so far (needs a second pass, not acted on):** `_push_captured_usage`
+  runs "under the mm lock" and `record_acceptance` (the `on_manifest_accepted`
+  callback) fires synchronously right after upload, so mm's OWN processes
+  can't interleave a write here. The realistic race source is external (an
+  iCloud daemon replacing the local file with a peer's conflicting version in
+  that exact window). In the ordinary case a race would make the SECOND read
+  disagree with the manifest's already-fixed accepted digest, which fails
+  CLOSED (`capture_revision_in_manifest` returns `False`, i.e. "not
+  published" — the safe direction), not open. Whether Codex's fault injection
+  reflects a path actually reachable through the real CLI (versus calling the
+  internal functions directly with hand-crafted, not-otherwise-reachable
+  state) is the open question before this is worth a fix.
+- **Effort:** S to investigate further; unknown until reachability is settled
+- **Priority:** P3
+- **Context:** PR #178 (Track 61A), Codex outside-adversarial pass via
+  `/ship`. Not fixed inline: two prior fix attempts already landed in this
+  same `/ship` run (one of which a LATER adversarial pass caught as itself
+  wrong), and a concurrency fix attempted under the same time pressure
+  without settling reachability first risks a repeat of that pattern.
+
 
 ## Drain records
 
