@@ -13,11 +13,11 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from mind_meld import fsutil
 from mind_meld.errors import ConfigError, SnapshotError, os_error_cause, snapshot_refusal
-from mind_meld.safety import strip_terminal_escapes
+from mind_meld.safety import safe_terminal_str
 
 CONFIG_DIR = Path.home() / ".config" / "mind-meld"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -38,15 +38,9 @@ DEFAULT_STORAGE_PATH = str(
 # not user-prompted). Per-machine opt-out remains via `mm disable-source`.
 MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
 
-# Paths whose bootstrap mkdir has already failed in this process. Used by
-# `_bootstrap_mm_events_path` to suppress repeat `mm: warning:` emit on
-# chmod-restricted homes — the first failed call still surfaces the
-# breadcrumb (visible-failure contract per CLAUDE.md), but the subsequent
-# ~10 read-only command sites that re-call `get_sources()` stay silent.
-# Per-path keying (not per-process) preserves the contract for the unlikely
-# case of two failing mm-internal source paths. Tests touching the failure
-# path must reset via `monkeypatch.setattr(config, "_BOOTSTRAP_WARNED_PATHS",
-# set())` since this is module-level state.
+# Per-normalized-path warning suppression for explicit bootstrap/tightening
+# attempts. Read-only resolution never calls bootstrap. Strict creation
+# errors still raise on every attempt; tests reset this set per case.
 _BOOTSTRAP_WARNED_PATHS: set[str] = set()
 
 # Skill directories that gstack-extend RENDERS per host (`setup --host auto`)
@@ -80,9 +74,8 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
         # mm-owned synced source for the per-device event log used by Group 8's
-        # retro-fleet skill. Bootstrap creates the path on first get_sources()
-        # call (so the source isn't inert until Track 7A's events.py first
-        # writes — Group 7 preflight #6 + D9, codex outside-voice finding #9).
+        # retro-fleet skill. Explicit writers create the default root;
+        # source resolution and inspection leave it absent on a fresh Mac.
         # Per-device daily JSONL files land at events/<device>-<YYYY-MM-DD>.jsonl
         # under this base path. Subdir nesting plays cleanly with
         # walk_generic_source (avoids the include_dirs: ["."] pathlib quirk).
@@ -514,8 +507,8 @@ class SourceResolution:
     ``selected`` is the intended set after disabled-source filtering and
     before availability. ``available`` is the walkable subset, including
     empty would-create roots when bootstrap is disabled. ``would_create``
-    names missing mm-owned roots; publishing must check their filtered prior
-    state before interpreting the empty walk. Diagnostics need ``available``.
+    names missing default mm-owned roots; preview omits them from the
+    deletion proof and treats absent event files as deletions. Diagnostics need ``available``.
     """
 
     selected: list[dict[str, Any]]
@@ -567,14 +560,19 @@ def _configured_sources(
     grok_strict = strict and "grok" not in disabled
 
     if explicit_sources:
-        sources = [
-            {
-                **src,
-                "path": _resolve_source_path(src["path"], label=f"source {src['name']!r}"),
-            }
-            for src in sync["sources"]
-            if src.get("name") not in disabled
-        ]
+        sources = []
+        for src in sync["sources"]:
+            if src.get("name") in disabled:
+                continue
+            try:
+                path = _resolve_source_path(src["path"], label=f"source {src['name']!r}")
+            except ConfigError as e:
+                if strict:
+                    raise SnapshotError(str(e)) from e
+                raise
+            if src["name"] in MM_INTERNAL_SOURCE_NAMES:
+                path = str(Path(src["path"]).expanduser().absolute())
+            sources.append({**src, "path": path})
     elif "claude_dir" in sync:
         sources = [
             {
@@ -670,7 +668,7 @@ def _configured_sources(
 
 
 def resolve_sources(
-    config: dict[str, Any], *, strict: bool = False, bootstrap: bool = True
+    config: dict[str, Any], *, strict: bool = False, bootstrap: bool = False
 ) -> SourceResolution:
     """Resolve intended selection and currently available sources.
 
@@ -695,28 +693,19 @@ def resolve_sources(
     if disabled:
         sources = [s for s in sources if s["name"] not in disabled]
 
-    # Bootstrap mm-owned source paths BEFORE the path-existence filter so
-    # they don't fall through as "doesn't exist" on first run. The mm-events
-    # source needs its base dir to exist for `walk_generic_source` to
-    # consider it (Group 7 preflight #6 + D9, codex finding #9). Bootstrap
-    # is mode 0700 (events contain device IDs and per-machine activity
-    # metadata — not user-secret but per-machine-private). Failure emits
-    # mm: warning: per the visible-failure contract; the source then drops
-    # via the path-existence filter below.
-    # Bootstrap registry: maps mm-internal source name → its bootstrap fn.
-    # Adding a new entry to MM_INTERNAL_SOURCE_NAMES requires adding the
-    # parallel bootstrap entry here; the dispatch by name keeps the
-    # mapping explicit and prevents silent inconsistency between
-    # _prompt_sources auto-include (cli.py) and bootstrap (here).
-    bootstrap_dispatch: dict[str, Any] = {"mm-events": _bootstrap_mm_events_path}
+    # Only explicit writers bootstrap. Missing default roots remain empty
+    # walks for inspection and previews; custom roots are never created.
+    # `_is_default_mm_events_path` / `_bootstrap_mm_events_path` are named
+    # for the current sole member of MM_INTERNAL_SOURCE_NAMES ("mm-events").
+    # A second internal source would need its own default-path helper, not
+    # reuse these unconditionally by name membership.
     would_create: list[str] = []
     for src in sources:
-        name = src.get("name")
-        if name in MM_INTERNAL_SOURCE_NAMES and name in bootstrap_dispatch:
+        if src["name"] in MM_INTERNAL_SOURCE_NAMES and _is_default_mm_events_path(src["path"]):
             if bootstrap:
-                bootstrap_dispatch[name](src["path"], strict=strict)
+                _bootstrap_mm_events_path(src["path"], strict=strict)
             elif _preview_mm_events_bootstrap(src["path"], strict=strict):
-                would_create.append(name)
+                would_create.append(src["name"])
 
     available = [
         s
@@ -730,7 +719,7 @@ def resolve_sources(
 
 
 def get_sources(
-    config: dict[str, Any], *, strict: bool = False, bootstrap: bool = True
+    config: dict[str, Any], *, strict: bool = False, bootstrap: bool = False
 ) -> list[dict[str, Any]]:
     """Resolve the list of sync sources from config.
 
@@ -744,7 +733,7 @@ def get_sources(
 
     Finally, filter to sources whose path actually exists on disk. With
     bootstrap=False, missing mm-owned roots are also returned as empty walks;
-    publishing callers need resolve_sources().would_create for prior-state checks.
+    publishing callers need resolve_sources().would_create for the deletion-proof source list.
 
     Raises ``ConfigError`` when an explicitly configured source path cannot
     be resolved. Callers can then honor the normal typed-config-error path.
@@ -759,7 +748,7 @@ def _preview_mm_events_bootstrap(path: str, *, strict: bool) -> bool:
     p = Path(path).expanduser()
     try:
         try:
-            p.stat()
+            p.lstat()
             return False
         except FileNotFoundError:
             pass
@@ -791,65 +780,97 @@ def _preview_mm_events_bootstrap(path: str, *, strict: bool) -> bool:
         return False
 
 
-def _bootstrap_mm_events_path(path: str, *, strict: bool = False) -> None:
-    """Best-effort mkdir for the mm-events source base path.
+def _normalized_mm_events_path(path: str) -> Path:
+    # Normalize ancestors (including /var -> /private/var on macOS), without
+    # following the root itself: symlinked roots are local user routing.
+    p = Path(path).expanduser().absolute()
+    return p.parent.resolve() / p.name
 
-    Idempotent — `exist_ok=True` makes re-call a no-op. Failure (permission
-    denied on a chmod-restricted home, EROFS on a readonly mount) emits a
-    single `mm: warning:` line to stderr per process per path and returns;
-    the path-existence filter in get_sources will then drop the source from
-    the resolved list.
 
-    Warn-once via `_BOOTSTRAP_WARNED_PATHS`: chmod-restricted users see one
-    breadcrumb on the first read-only command in a process, then silence
-    for the ~10 subsequent `get_sources()` call sites. Visible-failure
-    contract is preserved (monitoring catches the first occurrence).
-    Strict publishing ignores the warn-once cache and raises SnapshotError.
+def _is_default_mm_events_path(path: str) -> bool:
+    default = Path.home() / ".local" / "share" / "mind-meld"
+    return _normalized_mm_events_path(path) == _normalized_mm_events_path(str(default))
+
+
+def _missing_custom_mm_events_message(path: str) -> str:
+    return (
+        f"mm-events folder {path} is missing; plug it in, create it, or run "
+        "mm disable-source mm-events. Skipping mm-events for this sync."
+    )
+
+
+def _warn_mm_events_once(path: Path, message: str) -> None:
+    key = str(path)
+    if key not in _BOOTSTRAP_WARNED_PATHS:
+        _BOOTSTRAP_WARNED_PATHS.add(key)
+        print(f"mm: warning: {safe_terminal_str(message)}", file=sys.stderr)
+
+
+def _bootstrap_mm_events_path(
+    path: str,
+    *,
+    strict: bool = False,
+    on_created: Callable[[Path], None] | None = None,
+) -> list[Path]:
+    """Create the default root one component at a time; tighten only owned roots.
+
+    The callback records partial creation even if a later mkdir fails. Custom
+    and symlinked roots are never created or chmodded. Tightening is best effort.
     """
-    p = Path(path).expanduser()
+    p = _normalized_mm_events_path(path)
+    created: list[Path] = []
     try:
-        p.stat()
-        return
-    except FileNotFoundError:
-        pass
+        if not _is_default_mm_events_path(path):
+            if not p.is_dir():
+                raise SnapshotError(_missing_custom_mm_events_message(path))
+            return created
+        try:
+            info = p.lstat()
+        except FileNotFoundError:
+            missing = [p]
+            ancestor = p.parent
+            while not ancestor.exists():
+                missing.append(ancestor)
+                ancestor = ancestor.parent
+            for directory in reversed(missing):
+                try:
+                    directory.mkdir(mode=0o700)
+                except FileExistsError:
+                    if not directory.is_dir():
+                        raise
+                else:
+                    created.append(directory)
+                    if on_created is not None:
+                        on_created(directory)
+            info = p.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            return created
+        if not stat.S_ISDIR(info.st_mode):
+            raise NotADirectoryError(f"{p} exists and is not a directory")
     except OSError as e:
-        if strict:
-            raise SnapshotError(
-                snapshot_refusal(
-                    source="mm-events",
-                    problem="could not be created",
-                    cause=os_error_cause(e),
-                    next_action=(
-                        "Restore write access to the mm-events directory, then run mm push."
-                    ),
-                )
-            ) from e
-        # Fall through to mkdir; a permission error on stat may still be a
-        # missing directory we can create, or mkdir will fail the same way.
-    path_key = str(p)
-    if not strict and path_key in _BOOTSTRAP_WARNED_PATHS:
-        return
-    try:
-        p.mkdir(mode=0o700, parents=True, exist_ok=True)
-    except OSError as e:
-        if strict:
-            raise SnapshotError(
-                snapshot_refusal(
-                    source="mm-events",
-                    problem="could not be created",
-                    cause=os_error_cause(e),
-                    next_action=(
-                        "Restore write access to the mm-events directory, then run mm push."
-                    ),
-                )
-            ) from e
-        _BOOTSTRAP_WARNED_PATHS.add(path_key)
-        sys.stderr.write(
-            "mm: warning: could not create mm-events source dir "
-            f"{strip_terminal_escapes(str(p))} "
-            f"({type(e).__name__}: {strip_terminal_escapes(str(e))}); "
-            "events will not be synced from this device\n"
+        message = snapshot_refusal(
+            source="mm-events",
+            problem="could not be created",
+            cause=os_error_cause(e),
+            next_action="Restore write access to the mm-events directory, then retry.",
         )
+        if strict:
+            raise SnapshotError(message) from e
+        _warn_mm_events_once(p, f"could not create mm-events source dir {p}: {e}")
+        return created
+
+    if info.st_mode & 0o077:
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+            try:
+                actual = os.fstat(fd)
+                if stat.S_ISDIR(actual.st_mode) and actual.st_uid == os.getuid():
+                    os.fchmod(fd, 0o700)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            _warn_mm_events_once(p, f"could not tighten mm-events folder {p} to 0700: {e}")
+    return created
 
 
 def save_config(config: dict[str, Any], path: Path | None = None) -> None:

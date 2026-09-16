@@ -671,3 +671,82 @@ class TestRacePin:
             f"expected exactly 1 self-upgrade row under flock-protected "
             f"read-compare-write, got {len(upgrade_rows)}: {upgrade_rows}"
         )
+
+
+class TestCachedUpgradeView60A:
+    @pytest.mark.parametrize("state", ["missing", "malformed", "stale", "due", "current"])
+    def test_cache_only_view(self, monkeypatch, state):
+        _set_version(monkeypatch, "0.14.12")
+        now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+        if state == "malformed":
+            upgrade.CACHE_PATH.write_text("bad json")
+        elif state != "missing":
+            age = timedelta(days=3) if state == "stale" else timedelta(hours=1)
+            upgrade.CACHE_PATH.write_text(
+                json.dumps(
+                    {
+                        "latest_version": "0.14.12" if state == "current" else "0.15.0",
+                        "checked_at": (now - age).isoformat(),
+                        "last_nudged_at": "2000-01-01T00:00:00+00:00",
+                    }
+                )
+            )
+        before = (
+            (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+            if upgrade.CACHE_PATH.exists()
+            else None
+        )
+        monkeypatch.setattr(upgrade, "_fetch_tags", lambda *a: pytest.fail("inspection fetched"))
+        result = upgrade.cached_upgrade_view({}, now=now)
+        after = (
+            (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+            if upgrade.CACHE_PATH.exists()
+            else None
+        )
+        assert before == after
+        assert result.state == (
+            "unknown"
+            if state in ("missing", "malformed")
+            else "current"
+            if state == "current"
+            else "upgrade-available"
+        )
+        assert result.stale == (state == "stale")
+        assert result.should_nudge is False
+        if state == "stale":
+            assert now - result.checked_at == timedelta(days=3)
+
+    @pytest.mark.parametrize("skip", ["dev", "flag", "config"])
+    def test_skip_modes_do_not_read_cache(self, monkeypatch, skip):
+        _set_version(monkeypatch, upgrade.DEV_BUILD_SENTINEL if skip == "dev" else "0.14.12")
+        upgrade.set_invocation_skip(skip == "flag")
+        monkeypatch.setattr(
+            upgrade, "locked_json_snapshot", lambda *a, **kw: pytest.fail("skip read cache")
+        )
+        result = upgrade.cached_upgrade_view({"upgrade": {"auto_check": skip != "config"}})
+        assert result.state == "skip"
+
+    def test_contended_cache_returns_unknown_immediately(self, monkeypatch):
+        from mind_meld.lockedjson import locked_json_rmw
+
+        _set_version(monkeypatch, "0.14.12")
+        with locked_json_rmw(upgrade.CACHE_PATH):
+            start = time.monotonic()
+            result = upgrade.cached_upgrade_view({})
+            assert time.monotonic() - start < 1
+            assert result.state == "unknown"
+            assert result.cache_state == "lock_failed"
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            [],
+            {},
+            {"latest_version": 123, "checked_at": "bad"},
+            {"latest_version": "bogus", "checked_at": "2026-09-15"},
+        ],
+    )
+    def test_malformed_cache_shapes_are_unknown(self, monkeypatch, data):
+        _set_version(monkeypatch, "0.14.12")
+        upgrade.CACHE_PATH.write_text(json.dumps(data))
+        assert upgrade.cached_upgrade_view({}).state == "unknown"

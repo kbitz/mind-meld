@@ -86,6 +86,7 @@ def test_recover_refuses_when_manifest_is_ok(tmp_path, monkeypatch):
     # `encrypt` requires an active crypto session — set it up the same way
     # cli.py commands do (fetch_crypto_init → set_crypto_session).
     fetch = fetch_crypto_init(backend)
+    assert fetch.repair_plan is None
     set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
     manifest = {
         "device_id": "mac-a",
@@ -176,6 +177,22 @@ def test_recover_yes_flag_skips_prompt(tmp_path, monkeypatch):
     result = runner.invoke(app, ["recover", "--abandon-manifest", "--yes"])
     assert result.exit_code == 0, result.output
     assert not backend.exists("manifests/mac-a/manifest.json.enc")
+
+
+def test_recover_reconciles_real_crypto_conflict_copy(tmp_path, monkeypatch):
+    """recover's _init_crypto_session call uses read_only=False (the
+    default), so it runs the same real crypto-init repair as push/pull/gc.
+    Prove it actually reconciles a conflict copy, not just that recover
+    itself succeeds."""
+    storage, backend = _mk(tmp_path, monkeypatch)
+    _plant_corrupt_manifest(backend)
+    canonical = storage / "mm-crypto-init"
+    duplicate = storage / "mm-crypto-init 2"
+    duplicate.write_bytes(canonical.read_bytes())
+
+    result = runner.invoke(app, ["recover", "--abandon-manifest", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert not duplicate.exists()  # real repair reconciled the identical conflict copy
 
 
 # ── Quarantine durability + collision handling ──────────────────────────

@@ -25,14 +25,51 @@ from mind_meld.cli import (
 
 
 class TestDetectCaseInsensitiveFs:
-    def test_returns_false_on_nonexistent_path(self, tmp_path):
-        assert _detect_case_insensitive_fs(tmp_path / "nope") is False
+    def test_missing_path_probes_existing_ancestor(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        calls = []
+
+        def samefile(path, other):
+            calls.append(other)
+            return True
+
+        monkeypatch.setattr(Path, "samefile", samefile)
+        assert _detect_case_insensitive_fs(tmp_path / "nope" / "missing") is True
+        assert calls == [tmp_path]
+
+    def test_oserror_on_probe_assumes_case_insensitive(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        d = tmp_path / "Projects"
+        d.mkdir()
+
+        def boom(self, other):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "samefile", boom)
+        assert _detect_case_insensitive_fs(d) is True
+
+    def test_alt_case_missing_returns_false(self, tmp_path, monkeypatch):
+        """samefile() raising FileNotFoundError (alt-case name genuinely
+        absent) is the definitive case-sensitive signal -- distinct from
+        the OSError-assumes-insensitive fallback above."""
+        from pathlib import Path
+
+        d = tmp_path / "Projects"
+        d.mkdir()
+
+        def missing(self, other):
+            raise FileNotFoundError("no such file")
+
+        monkeypatch.setattr(Path, "samefile", missing)
+        assert _detect_case_insensitive_fs(d) is False
 
     def test_returns_false_on_alpha_free_basename(self, tmp_path):
         """A path whose basename has no alphabetic chars can't be case-mangled."""
         d = tmp_path / "12345"
         d.mkdir()
-        assert _detect_case_insensitive_fs(d) is False
+        assert _detect_case_insensitive_fs(d) is True
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="APFS-default needed")
     def test_apfs_default_is_case_insensitive(self, tmp_path):
@@ -130,6 +167,32 @@ class TestDetectPullCaseCollisions:
         local_sources = self._make_local_sources_map(base)
         collisions = _detect_pull_case_collisions(manifest_cache, local_sources)
         assert collisions == {}, "Linux peers can legitimately have both casings"
+
+    def test_symlinked_source_probes_resolved_target(self, tmp_path, monkeypatch):
+        """A symlinked source root's case-sensitivity probe must target the
+        symlink's destination, not the link's own parent directory -- a
+        link can cross a volume boundary with different case-sensitivity
+        than where it lives. Codex adversarial finding (PR #177): mm-events
+        custom roots keep their unresolved path in local_sources_map (so
+        ownership checks stay symlink-aware), which previously leaked into
+        this probe too."""
+        from mind_meld import cli as cli_module
+
+        target = tmp_path / "real_target"
+        target.mkdir()
+        link = tmp_path / "link_src"
+        link.symlink_to(target)
+
+        probed = []
+
+        def record_probe(path):
+            probed.append(path)
+            return False
+
+        monkeypatch.setattr(cli_module, "_detect_case_insensitive_fs", record_probe)
+        local_sources = self._make_local_sources_map(link)
+        _detect_pull_case_collisions({}, local_sources)
+        assert probed == [link.resolve()]
 
     def test_skips_source_not_in_local_map(self, tmp_path, monkeypatch):
         """Manifests with sources not configured locally don't produce

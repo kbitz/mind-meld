@@ -90,8 +90,7 @@ module's heavyweight imports. Pinned by ``test_retro_fleet_aggregator``'s
 DEFAULT_EVENTS_DIR = Path("~/.local/share/mind-meld/events").expanduser()
 """Default events directory. Override with ``MM_EVENTS_DIR`` env var
 (CQ#2 from /plan-eng-review). The bootstrap path matches what
-``config.py:_bootstrap_mm_events_path`` materializes on first ``get_sources()``
-call."""
+``config.py:_bootstrap_mm_events_path`` materializes for explicit writers."""
 
 _EVENTS_FILENAME_DATE_RE = re.compile(r"^(?P<device>.+)-(?P<date>\d{4}-\d{2}-\d{2})\.jsonl$")
 """Same intrinsic-filename-date rule ``retention._EVENTS_FILENAME_DATE_RE``

@@ -73,9 +73,12 @@ HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
    `_pull_core`/`_push_core` (quiet AND interactive paths) AFTER main work
    completes. Tail position keeps cold-cache HTTP latency (~500ms 1x/24h) from
    stacking on sync latency.
-3. **Status surfacing** in `mm status` — calls `check_for_upgrade`, fetching
-   when stale and rewriting the cache; no last_nudged_at gate (explicit user
-   check). A cache-only inspection path is deferred (E3b).
+3. **Status surfacing** in `mm status` — calls `cached_upgrade_view`, reading
+   `locked_json_snapshot(blocking=False)` with no HTTP request or cache write.
+   It honors dev-build, `--no-check-version`, and `auto_check = false` skips.
+   Missing, malformed, or contended caches are unknown; stale results show
+   the age of `checked_at`. Push, pull, autopull, and autopush keep the
+   refreshing `check_for_upgrade` path.
 
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
 upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to
@@ -98,7 +101,7 @@ column showing `OLD → NEW` for self-upgrade rows; pull/push rows leave it empt
 
 ## Push-preview exception (Track 56A)
 
-`cli._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `emit_nudge_if_due` at its CLI call site: no cache creation/rewrite or HTTP request, even when absent, stale, or due. `upgrade.py` itself is unchanged. A pending transition is recorded by the next command other than `mm push --dry-run` (including sibling previews until 56B). The regression test resets process guards before each invocation and pins a non-dev version, then proves a following `mm status` records exactly one transition.
+`cli._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `emit_nudge_if_due` at its CLI call site: no cache creation/rewrite or HTTP request, even when absent, stale, or due. Status also loads config read-only and uses the cached upgrade view. A pending transition is recorded by a following mutating command; sibling previews other than push still have their separate setup work (Track 62A). `TestPushPreviewNoMutation56A.test_s4b_transition_survives_preview_and_status_then_push_records_once` resets process guards, uses a non-dev version, and proves that preview and status preserve the pending transition before a real push records it exactly once.
 
 ## Release discipline (enforced by mm auto-upgrade)
 

@@ -44,6 +44,53 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [ship:severity=informational] Reconcile docs/ROADMAP.md for Track 59A + 60A
+
+- **Why:** the plan completion audit for PR #177 found all 28 implementation
+  and test items DONE, but `docs/ROADMAP.md` still lists Track 59A and Track
+  60A as in progress rather than shipped. This repo's convention (confirmed
+  twice before) is that only `/roadmap` writes `ROADMAP.md` — never a hand
+  edit during `/ship` or `/implement`.
+- **Effort:** S
+- **Priority:** P1
+- **Context:** Deferred from plan:
+  `/Users/kb/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-15-track-59a.md`.
+  User chose to ship v0.14.13 and reconcile the roadmap in a follow-up
+  `/roadmap` run (2026-09-15 decision).
+
+### [ship:severity=informational] Extract a shared _open_crypto_session helper
+
+- **Why:** the `pending: list[str] = []` / `_init_crypto_session(..., pending=pending)`
+  / `for note in pending: console.print(safe_str(note))` triplet is duplicated
+  verbatim across `pull`, `status`, `diff`, `gc`, and `recapture` in `cli.py`.
+  A thin wrapper removes ~18-20 lines and keeps the five call sites from
+  drifting apart.
+- **Hypothesis (untested):** wrap it as `_open_crypto_session(backend,
+  passphrase, config, read_only) -> int`, returning `memory_kb` and printing
+  pending notes internally.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #177 pre-landing review (maintainability specialist).
+  Deferred rather than touching 5 call sites with subtly different
+  `read_only` arguments right before shipping.
+
+### [ship:severity=informational] Minor redundant path/hash re-reads in mm-events + crypto repair
+
+- **Why:** two small, explicitly non-blocking redundancies found in review:
+  `_bootstrap_mm_events_path` re-derives a normalized-path comparison that
+  `resolve_sources` already computed; `apply_crypto_init_repair` re-reads and
+  re-hashes the canonical file and every conflict copy that
+  `fetch_crypto_init` just read moments earlier. Both are bounded by tiny
+  file counts/sizes (crypto-init candidates, home-dir ancestor depth), not by
+  peer or history size — real-world cost is negligible.
+- **Hypothesis (untested):** thread the already-computed normalized path /
+  already-read bytes through instead of re-deriving — EXCEPT the final
+  immediate-pre-unlink re-read in `apply_crypto_init_repair`, which is a
+  deliberate TOCTOU guard and must stay exactly as-is.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #177 pre-landing review (performance specialist).
+
 ### [ship:severity=informational] Disambiguate historical device IDs with shared display prefixes
 
 - **Why:** the shared eight-character machine label keeps Agent activity,

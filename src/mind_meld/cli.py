@@ -42,6 +42,7 @@ from rich.table import Table
 
 from mind_meld import (
     __version__,
+    crypto,
     events,
     events_tail,
     fsutil,
@@ -131,7 +132,6 @@ from mind_meld.manifest import (
     CONFLICT_V1_MARKER,
     GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
-    TOMBSTONE_TTL_DAYS,
     DiffResult,
     _under_skip_prefix,
     _validate_rel_path,
@@ -441,7 +441,7 @@ def _init_crypto_session(
       MindMeldError subclasses — caller chooses presentation (_error for
       interactive; stderr print for autopull/autopush).
     """
-    fetch = fetch_crypto_init(backend, repair=not read_only)
+    fetch = fetch_crypto_init(backend)
     if fetch.status == "missing":
         raise CryptoError(
             "crypto: mm-crypto-init not found at storage root. "
@@ -459,17 +459,16 @@ def _init_crypto_session(
     storage_fp = root_salt_fingerprint(fetch.root_salt)
     local_fp = config.get("crypto", {}).get("root_salt_fp")
     repair_note = ""
-    if read_only and fetch.repair_plan is not None:
-        plan = fetch.repair_plan
-        replacement = "replace the canonical copy and " if plan.replace_canonical else ""
-        count = len(plan.remove)
-        copies = "copy" if count == 1 else "copies"
+    if fetch.repair_plan is not None:
+        counts = crypto.crypto_init_repair_counts(fetch)
+        replacement = "replace the canonical copy; " if counts["replace_canonical"] else ""
         repair_note = (
-            "The next mm command that opens storage (including autopull) will "
-            f"reconcile mm-crypto-init: {replacement}remove {count} iCloud conflict "
-            f"{copies}, shared by every Mac."
+            "The next mm push, pull, autopull or autopush that verifies the passphrase "
+            f"will reconcile mm-crypto-init: {replacement}delete {counts['delete']} identical "
+            f"conflict copies; preserve {counts['preserve']} differing or unreadable copies. "
+            "This storage is shared by every Mac."
         )
-        if pending is not None:
+        if read_only and pending is not None:
             pending.append(repair_note)
 
     if local_fp and local_fp != storage_fp:
@@ -485,6 +484,8 @@ def _init_crypto_session(
     master_key = load_master_key(passphrase, fetch.root_salt, fetch.argon2_memory_kb)
     assert fetch.keycheck_blob is not None
     verify_passphrase(master_key, fetch.keycheck_blob)
+    if not read_only:
+        crypto.apply_crypto_init_repair(backend, fetch)
 
     # Backfill local config if needed (first command after an upgrade or
     # a previously-uninitialized config). Silent one-time write.
@@ -1134,26 +1135,27 @@ def _detect_case_insensitive_fs(path: Path) -> bool:
 
     Non-invasive: no writes. Constructs a swapcase variant of the path's
     own basename and checks via `samefile()` whether both names resolve
-    to the same inode. Returns False on any failure (safer default — no
-    spurious case-collision warnings on Linux ext4).
-
-    Skips paths whose basename has no alphabetic characters (can't be
-    case-mangled meaningfully). Skips when the swapcase produces the same
-    name (basename was already case-neutral).
+    to the same inode. Missing roots use the nearest existing ancestor.
+    Inconclusive probes conservatively assume case insensitivity.
     """
-    if not path.exists():
-        return False
-    name = path.name
-    if not any(c.isalpha() for c in name):
-        return False
-    alt_name = name.swapcase()
-    if alt_name == name:
-        return False
-    alt = path.parent / alt_name
     try:
-        return alt.exists() and alt.samefile(path)
+        while True:
+            try:
+                path.stat()
+                break
+            except FileNotFoundError:
+                if path.parent == path:
+                    return True
+                path = path.parent
+        if path.name.swapcase() == path.name:
+            return True
+        alt = path.with_name(path.name.swapcase())
+        try:
+            return alt.samefile(path)
+        except FileNotFoundError:
+            return False
     except OSError:
-        return False
+        return True
 
 
 def _detect_pull_case_collisions(
@@ -1174,7 +1176,11 @@ def _detect_pull_case_collisions(
     collisions: dict[str, dict[str, list[str]]] = {}
     for src_name, src_info in local_sources_map.items():
         base_path = src_info["path"]
-        if not _detect_case_insensitive_fs(base_path):
+        # Probe the filesystem the files actually land on, not the symlink's
+        # own location — local_sources_map keeps mm-events' custom roots
+        # unresolved for ownership checks, but a link can cross a volume
+        # boundary with different case-sensitivity than its parent directory.
+        if not _detect_case_insensitive_fs(base_path.resolve()):
             continue
         seen_paths_by_key: dict[str, set[str]] = {}
         for peer_manifest in manifest_cache.values():
@@ -3051,11 +3057,16 @@ def _bootstrap_or_verify_crypto(
             assert retry_fetch.root_salt is not None
             assert retry_fetch.argon2_memory_kb is not None
             assert retry_fetch.keycheck_blob is not None
-            return _verify_existing_crypto_init(
+            verified = _verify_existing_crypto_init(
                 retry_fetch,
                 passphrase,
                 success_message="  Verified passphrase against peer mm-crypto-init.",
             )
+            try:
+                crypto.apply_crypto_init_repair(backend, retry_fetch)
+            except MindMeldError as e:
+                _error(str(e))
+            return verified
 
         assert bootstrap.root_salt is not None
         assert bootstrap.argon2_memory_kb is not None
@@ -3070,7 +3081,7 @@ def _bootstrap_or_verify_crypto(
         return root_salt, argon2_memory_kb, keycheck_blob
 
     # Second-device: verify against the fetch we already did.
-    return _verify_existing_crypto_init(
+    verified = _verify_existing_crypto_init(
         fetch,
         passphrase,
         success_message=(
@@ -3078,6 +3089,12 @@ def _bootstrap_or_verify_crypto(
             f"(root_salt fp={root_salt_fingerprint(fetch.root_salt)})."
         ),
     )
+
+    try:
+        crypto.apply_crypto_init_repair(backend, fetch)
+    except MindMeldError as e:
+        _error(str(e))
+    return verified
 
 
 def _verify_existing_crypto_init(
@@ -3389,8 +3406,8 @@ def init() -> None:
     # notice; failures are forensic-only.
     # Track 25C: resolve sources BEFORE the installer so consent is known.
     # Hook position relative to _register_and_save and _run_events_backfill
-    # is unchanged. The mm-events bootstrap mkdir moves a few lines earlier.
-    resolved_sources = get_sources(config)
+    # is unchanged. Init explicitly creates the default root before backfill.
+    resolved_sources = get_sources(config, bootstrap=True)
     may_create = skill_link.consented_agent_keys(config, resolved_sources)
     try:
         skill_link._ensure_retro_skill_links(dry_run=False, explicit=True, may_create=may_create)
@@ -3402,8 +3419,8 @@ def init() -> None:
     # Init-time event backfill (v0.11.8). Captures the past 30 days of git
     # commits + a full sessions inventory so retro-fleet works immediately
     # after init, without waiting for the first push to populate events.
-    # Resolves sources via get_sources() so mm-events bootstraps the events
-    # dir before walk runs. Forensic-only on failure; init proceeds.
+    # Sources were explicitly bootstrapped above; the backfill creates events/
+    # when appending rows. Forensic-only on failure; init proceeds.
     events_tail._run_events_backfill(config, resolved_sources, device_id)
 
     console.print("\n[green]Mind Meld initialized. Run 'mm push' to sync.[/green]")
@@ -3646,6 +3663,14 @@ def _has_mtime_only_changes_vs_remote(
     return False
 
 
+def _push_result_or_none(events_degradations: list[str], dry_run: bool) -> "PushResult | None":
+    """Shared early-return shape for `_push_core`'s no-op exits — a degraded
+    events tail must still be reported even when there's nothing to push."""
+    if events_degradations and not dry_run:
+        return PushResult(events_degradations=events_degradations)
+    return None
+
+
 def _push_core(
     config: dict,
     passphrase: str,
@@ -3675,8 +3700,26 @@ def _push_core(
     # Build local manifest (v2 with sources). Hoisted above the skill hook
     # so consent is known before the gate runs (Track 25C). The hook itself
     # stays AFTER _ensure_device_registered and BEFORE _run_events_tail.
-    # The mm-events bootstrap mkdir moves a few lines earlier.
+    # Only real push creates/tightens the default mm-events root here.
     resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
+    events_degradations: list[str] = []
+    available_names = {src["name"] for src in resolution.available}
+    skipped_internal = [
+        src
+        for src in resolution.selected
+        if src["name"] in MM_INTERNAL_SOURCE_NAMES
+        and src["name"] not in available_names
+        and not _config_module._is_default_mm_events_path(src["path"])
+    ]
+    for src in skipped_internal:
+        message = _config_module._missing_custom_mm_events_message(src["path"])
+        print(f"mm: warning: {safety.safe_terminal_str(message)}", file=sys.stderr)
+        events_degradations.append(message)
+    if skipped_internal:
+        resolution = replace(
+            resolution,
+            selected=[src for src in resolution.selected if src not in skipped_internal],
+        )
     if preview_notes is not None:
         for src in resolution.selected:
             if src["name"] in resolution.would_create:
@@ -3714,7 +3757,7 @@ def _push_core(
                 f"mm: notice: retro-fleet skill installation failed: "
                 f"{type(e).__name__}: {safe_str(e)}"
             )
-    if not resolution.selected:
+    if not resolution.selected and not skipped_internal:
         msg = "no sync sources found. Run 'mm init' to configure."
         if quiet:
             # Load-bearing: a misconfigured sources list silently no-ops every
@@ -3724,7 +3767,7 @@ def _push_core(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return None
+        return _push_result_or_none(events_degradations, dry_run)
 
     skipped: list[tuple[str, str]] = []
 
@@ -3780,13 +3823,13 @@ def _push_core(
     intended_names = {src["name"] for src in resolution.selected}
     intended_names.update(src["name"] for src in sources)
     _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
-    if not sources:
+    if not sources and not skipped_internal:
         msg = "no sync sources found. Run 'mm init' to configure."
         if quiet:
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return None
+        return _push_result_or_none(events_degradations, dry_run)
 
     # Consumer-boundary filters. Strip from prior_manifest BOTH (1) paths
     # the local config now excludes via per-source `exclude_patterns` and
@@ -3813,26 +3856,7 @@ def _push_core(
         remote_manifest = _filter_symlinked_paths(remote_manifest, sources, strict=True)
         proof_sources = sources
         if dry_run and resolution.would_create:
-            for src in sources:
-                if src["name"] not in resolution.would_create:
-                    continue
-                prior_files = (
-                    remote_manifest.get("sources", {}).get(src["name"], {}).get("files", {})
-                )
-                if prior_files:
-                    path = src["path"]
-                    raise SnapshotError(
-                        f"Dry run stopped: the mm-events directory {path} is missing, "
-                        f"but this Mac published {len(prior_files)} files from it. "
-                        "A real mm push would recreate it empty and publish their deletion "
-                        "(other Macs keep their copies; this Mac cannot pull them back for "
-                        f"{TOMBSTONE_TTL_DAYS} days). To keep them: run mm pull if another "
-                        f"Mac has them and check that {path}/events is filled again, or "
-                        f"restore {path} from a backup; then run mm push --dry-run again. "
-                        f"To accept the deletion: run mm push. See {SNAPSHOT_FAILURES_URL}."
-                    )
-            # No known prior files for these roots: there is nothing to prove.
-            # Keep the deletion proof itself unchanged for every other source.
+            # Missing default roots truthfully preview deletions.
             proof_sources = [s for s in sources if s["name"] not in resolution.would_create]
         _prove_omitted_paths_absent(
             local_manifest, remote_manifest, proof_sources, max_file_size=max_file_size
@@ -3874,15 +3898,17 @@ def _push_core(
     ):
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
-        return None
+        return _push_result_or_none(events_degradations, dry_run)
 
     # OK, this push will upload bytes. Run the events tail now to capture
     # the cursor + git/sessions snapshots, then re-walk mm-events to fold
     # the just-written event row into local_manifest. dry_run still gates
     # the tail's own writes; the re-walk reads existing on-disk state.
-    events_degradations = events_tail._run_events_tail(
-        config, sources, device_id, dry_run=dry_run, quiet=quiet
-    )
+    # Skipped entirely when no mm-internal source is selected for this push.
+    if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
+        events_degradations.extend(
+            events_tail._run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
+        )
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
@@ -4092,7 +4118,12 @@ def pull(
     try:
         backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
+            pending: list[str] = []
+            memory_kb = _init_crypto_session(
+                backend, passphrase, config, read_only=dry_run, pending=pending
+            )
+            for note in pending:
+                console.print(safe_str(note))
         except MindMeldError as e:
             _error(str(e))
         _pull_core(
@@ -4475,6 +4506,16 @@ def _pull_one_source(
     }
     if not to_download:
         return base_result
+
+    if src_name in MM_INTERNAL_SOURCE_NAMES:
+        try:
+            _config_module._bootstrap_mm_events_path(
+                str(base_path), strict=True, on_created=reporter.created_ancestor
+            )
+        except SnapshotError as e:
+            _print_apply_warning(f"mm: warning: {safety.safe_terminal_str(e)}")
+            reporter.outcomes["failed"].extend(to_download)
+            return base_result
 
     bt, outcomes = _download_and_apply(
         backend,
@@ -4906,12 +4947,19 @@ def _pull_core(
     # Widened to carry path + type per source. Type is load-bearing for
     # the sync-log gate in _pull_one_source — keying on type (not name)
     # lets users rename the claude source without losing per-project logs.
+    pull_resolution = resolve_sources(config)
+    pull_sources = list(pull_resolution.available)
+    pull_sources.extend(
+        src
+        for src in pull_resolution.selected
+        if src["name"] in MM_INTERNAL_SOURCE_NAMES and src not in pull_sources
+    )
     local_sources_map: dict[str, dict[str, Any]] = {
         src_cfg["name"]: {
-            "path": Path(src_cfg["path"]).expanduser().resolve(),
+            "path": Path(src_cfg["path"]).expanduser().absolute(),
             "type": src_cfg["type"],
         }
-        for src_cfg in get_sources(config)
+        for src_cfg in pull_sources
     }
 
     all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
@@ -5274,7 +5322,7 @@ def status(
     ),
 ) -> None:
     """Show sync status: local vs remote state."""
-    config = _get_config()
+    config = _get_config(read_only=True)
     passphrase = _get_passphrase_or_exit()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -5282,7 +5330,12 @@ def status(
 
     backend = get_backend(config)
     try:
-        memory_kb = _init_crypto_session(backend, passphrase, config)
+        pending: list[str] = []
+        memory_kb = _init_crypto_session(
+            backend, passphrase, config, read_only=True, pending=pending
+        )
+        for note in pending:
+            console.print(safe_str(note))
     except MindMeldError as e:
         _error(str(e))
 
@@ -5411,16 +5464,24 @@ def status(
             rendered = f"{rendered}, then restart the agent so it reloads SKILL.md"
         console.print(f"  [yellow]Skill links broken:[/yellow] {rendered}")
 
-    # Seam 3 — auto-upgrade surfacing in status. Refreshes over the network
-    # when stale and rewrites the cache. Unlike autopull/autopush emission,
-    # this explicit check is not gated on last_nudged_at (24h re-emit gate).
-    upgrade_result = upgrade.check_for_upgrade(config)
+    # Seam 3 — status inspects cached upgrade knowledge without refreshing it.
+    upgrade_result = upgrade.cached_upgrade_view(config)
     if upgrade_result.state == "upgrade-available" and upgrade_result.latest:
         console.print(
             f"  [yellow]Upgrade available:[/yellow] "
             f"{safe_str(upgrade_result.local)} → {safe_str(upgrade_result.latest)} "
             f"(run [bold]{safe_str(upgrade_result.install_cmd)}[/bold])"
         )
+    elif upgrade_result.state == "unknown":
+        reason = (
+            "contended"
+            if upgrade_result.cache_state == "lock_failed"
+            else upgrade_result.cache_state
+        )
+        console.print(f"  Upgrade check: unknown ({safe_str(reason)} cache).")
+    if upgrade_result.stale and upgrade_result.checked_at is not None:
+        age = datetime.now(timezone.utc) - upgrade_result.checked_at
+        console.print(f"  [dim]Upgrade cache: checked {age.days}d ago (stale).[/dim]")
 
     # Per-machine source-toggle visibility (v0.10.0). Two breadcrumbs:
     #   1. Disabled list: surfaces intentional state so future-you doesn't
@@ -5866,6 +5927,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "status": "ok",
             "root_salt_fp": root_salt_fingerprint(fetch.root_salt),
             "argon2_memory_kb": fetch.argon2_memory_kb,
+            "pending_repair": crypto.crypto_init_repair_counts(fetch),
         }
     else:
         crypto_init = {"status": fetch.status}
@@ -6335,7 +6397,12 @@ def diff_cmd(
 
     backend = get_backend(config)
     try:
-        memory_kb = _init_crypto_session(backend, passphrase, config)
+        pending: list[str] = []
+        memory_kb = _init_crypto_session(
+            backend, passphrase, config, read_only=True, pending=pending
+        )
+        for note in pending:
+            console.print(safe_str(note))
     except MindMeldError as e:
         _error(str(e))
 
@@ -6436,7 +6503,12 @@ def gc(
     try:
         backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
+            pending: list[str] = []
+            memory_kb = _init_crypto_session(
+                backend, passphrase, config, read_only=dry_run, pending=pending
+            )
+            for note in pending:
+                console.print(safe_str(note))
         except MindMeldError as e:
             _error(str(e))
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
@@ -7524,10 +7596,25 @@ def recapture(
     try:
         backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(backend, passphrase, config)
+            pending: list[str] = []
+            memory_kb = _init_crypto_session(
+                backend, passphrase, config, read_only=dry_run, pending=pending
+            )
+            for note in pending:
+                console.print(safe_str(note))
         except MindMeldError as e:
             _error(str(e))
-        sources = get_sources(config)
+        try:
+            resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
+            sources = resolution.available
+            for src in resolution.selected:
+                if src["name"] == "mm-events" and src not in sources:
+                    raise SnapshotError(
+                        _config_module._missing_custom_mm_events_message(src["path"])
+                    )
+        except SnapshotError as e:
+            suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+            _error(f"{e} No recapture rows were written.{suffix}")
         disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
         if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
             stderr_console.print(
@@ -8809,15 +8896,16 @@ def autopush() -> None:
             return
 
         if result:
-            parts = []
-            if result.total_new:
-                parts.append(f"{result.total_new} new")
-            if result.total_modified:
-                parts.append(f"{result.total_modified} modified")
-            if result.total_deleted:
-                parts.append(f"{result.total_deleted} deleted")
             total = result.total_new + result.total_modified + result.total_deleted
-            print(f"mm: pushed {total} files ({', '.join(parts)})")
+            if total:
+                parts = []
+                if result.total_new:
+                    parts.append(f"{result.total_new} new")
+                if result.total_modified:
+                    parts.append(f"{result.total_modified} modified")
+                if result.total_deleted:
+                    parts.append(f"{result.total_deleted} deleted")
+                print(f"mm: pushed {total} files ({', '.join(parts)})")
 
         # Persist events-tail degradation the same way autopull persists its
         # own (see the `degradations` list in `autopull` below). The tail is

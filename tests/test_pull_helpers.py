@@ -2364,7 +2364,16 @@ class TestBootstrapOrVerifyCrypto:
         monkeypatch.setattr(cli_module, "bootstrap_crypto_init", raising_bootstrap)
         monkeypatch.setattr(cli_module, "fetch_crypto_init", fake_retry_fetch)
         monkeypatch.setattr(cli_module, "load_master_key", lambda *a, **kw: b"\x00" * 32)
-        monkeypatch.setattr(cli_module, "verify_passphrase", lambda *a, **kw: None)
+        order = []
+        monkeypatch.setattr(
+            cli_module, "verify_passphrase", lambda *a, **kw: order.append("verify")
+        )
+
+        def repair(backend, fetched):
+            assert fetched.root_salt == winner_salt
+            order.append("repair")
+
+        monkeypatch.setattr(cli_module.crypto, "apply_crypto_init_repair", repair)
         monkeypatch.setattr(cli_module, "set_crypto_session", lambda *a, **kw: None)
 
         # Seed fetch (not used on first-device path but required as param)
@@ -2372,6 +2381,7 @@ class TestBootstrapOrVerifyCrypto:
         rs, mk, kc = _bootstrap_or_verify_crypto(
             backend=None, passphrase="pw", is_first_device=True, fetch=seed_fetch
         )
+        assert order == ["verify", "repair"]
         assert rs == winner_salt
         assert mk == 1024
         assert kc == winner_keycheck
@@ -3550,3 +3560,78 @@ def test_53a_prescan_exists_permission_error_reaches_apply(tmp_path, monkeypatch
     assert len(calls) >= 2
     assert result.outcomes["failed"] == ["notes.md"]
     assert "check write permission" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_mm_events_bootstrap_tracks_all_created_ancestors(tmp_path, monkeypatch, capsys, failure):
+    from mind_meld import cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    base = tmp_path / ".local" / "share" / "mind-meld"
+    files = {"events/a.jsonl": _info("abc"), "events/b.jsonl": _info("def")}
+    calls = []
+
+    def download(*args, reporter, **kwargs):
+        calls.append(True)
+        assert base.stat().st_mode & 0o777 == 0o700
+        return 0, reporter.outcomes
+
+    monkeypatch.setattr(cli, "_download_and_apply", download)
+    if failure:
+        original = Path.mkdir
+
+        def mkdir(path, *a, **kw):
+            if path == base:
+                raise PermissionError("denied")
+            return original(path, *a, **kw)
+
+        monkeypatch.setattr(Path, "mkdir", mkdir)
+    result = cli._pull_one_source(
+        None,
+        src_name="mm-events",
+        src_type="generic",
+        src_data={"files": files},
+        did="peer",
+        dname="Peer",
+        base_path=base,
+        all_tombstones={},
+        passphrase="pp",
+        memory_kb=1024,
+        interactive_resolve=False,
+        dry_run=False,
+        verbose_console=False,
+    )
+    assert tmp_path in result.touched_parents
+    assert tmp_path / ".local" in result.touched_parents
+    synced = []
+    monkeypatch.setattr(cli.fsutil, "fsync_dir", lambda path: synced.append(path))
+    cli._fsync_touched_parents(result.touched_parents)
+    assert tmp_path in synced
+    if failure:
+        assert result.outcomes["failed"] == list(files)
+        assert capsys.readouterr().err.count("mm: warning:") == 1
+        assert calls == []
+    else:
+        assert base.parent in result.touched_parents
+        assert calls == [True]
+
+
+def test_pull_missing_custom_mm_events_root_is_skipped(tmp_path, capsys):
+    result = _pull_one_source(
+        None,
+        src_name="mm-events",
+        src_type="generic",
+        src_data={"files": {"events/a.jsonl": _info("abc")}},
+        did="peer",
+        dname="Peer",
+        base_path=tmp_path / "unplugged",
+        all_tombstones={},
+        passphrase="pp",
+        memory_kb=1024,
+        interactive_resolve=False,
+        dry_run=False,
+        verbose_console=False,
+    )
+    assert result.outcomes["failed"] == ["events/a.jsonl"]
+    assert not (tmp_path / "unplugged").exists()
+    assert capsys.readouterr().err.count("mm: warning:") == 1

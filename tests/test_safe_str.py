@@ -311,7 +311,7 @@ class TestFinalOutputSinks:
             "sync": {"max_file_size": 0, "disabled_sources": []},
         }
         monkeypatch.setattr(cli, "console", self._console(buf))
-        monkeypatch.setattr(cli, "_get_config", lambda: config)
+        monkeypatch.setattr(cli, "_get_config", lambda **kwargs: config)
         monkeypatch.setattr(cli, "_get_passphrase_or_exit", lambda: "passphrase")
         monkeypatch.setattr(cli, "get_backend", lambda _config: object())
         monkeypatch.setattr(cli, "_init_crypto_session", lambda *args, **kwargs: 1024)
@@ -334,8 +334,8 @@ class TestFinalOutputSinks:
         monkeypatch.setattr(cli, "_config_missing_recommended_excludes", lambda _config: [])
         monkeypatch.setattr(
             cli.upgrade,
-            "check_for_upgrade",
-            lambda _config: SimpleNamespace(state="up-to-date", latest=None),
+            "cached_upgrade_view",
+            lambda _config: cli.upgrade.UpgradeCheckResult("current", "0.14.12", None, None),
         )
         monkeypatch.setattr(cli.seen_sources, "read", lambda *, initial: set())
         monkeypatch.setattr(cli.seen_sources, "compute_new_sources", lambda **kwargs: [])
@@ -421,31 +421,20 @@ class TestFinalOutputSinks:
         assert "ZXZpbA==" not in out
         assert "walkfailure" in out
 
-    def test_config_bootstrap_warning_strips_terminal_escapes(self, monkeypatch, capsys):
+    def test_config_bootstrap_warning_strips_terminal_escapes(self, monkeypatch, capsys, tmp_path):
         from mind_meld import config
 
         evil = "denied\x1b]52;c;ZXZpbA==\x07"
-
-        class FailingPath:
-            def expanduser(self):
-                return self
-
-            def exists(self):
-                return False
-
-            def stat(self):
-                raise FileNotFoundError("missing")
-
-            def mkdir(self, **_kwargs):
-                raise OSError(evil)
-
-            def __str__(self):
-                return "path\x1b[2J"
-
-        monkeypatch.setattr(config, "Path", lambda _path: FailingPath())
+        root = tmp_path / "path\x1b[2J"
+        monkeypatch.setattr(config, "_normalized_mm_events_path", lambda _path: root)
+        monkeypatch.setattr(config, "_is_default_mm_events_path", lambda _path: True)
         monkeypatch.setattr(config, "_BOOTSTRAP_WARNED_PATHS", set())
-        config._bootstrap_mm_events_path("ignored")
 
+        def mkdir(path, **kwargs):
+            raise OSError(evil)
+
+        monkeypatch.setattr(Path, "mkdir", mkdir)
+        config._bootstrap_mm_events_path(str(root))
         out = capsys.readouterr().err
         assert "\x1b" not in out
         assert "ZXZpbA==" not in out

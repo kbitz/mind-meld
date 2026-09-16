@@ -733,11 +733,11 @@ can record it again; this notice does not itself become a stored blocker.
 
 ### Snapshot failures
 
-A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file, a file that changes while it is being read, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, or a missing source that was previously published, **refuses the whole push** and keeps the previous snapshot. There is no hidden retry; run `mm push` again after the cause is fixed. `mm push --dry-run` previews this scan and deletion proof and **changes nothing except the local lock file**. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
+A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file, a file that changes while it is being read, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot. There is no hidden retry; run `mm push` again after the cause is fixed. `mm push --dry-run` previews this scan and deletion proof and **changes nothing except the local lock file**. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
 
 Preview exit codes: **0** completed; **1** stopped (snapshot refusal, crypto/config error, or lock held—the message explains which); **2** usage error. Every successful preview, including “Nothing to push,” ends with the lock-qualified completion message.
 
-This contract applies only to **`mm push --dry-run`**. Other previews (`pull`, `gc`, `recapture`, `migrate-config`, and `mm diff`) may still record setup state such as the crypto fingerprint or upgrade record; their setup repair is deferred to Track 56B.
+The complete lock-only contract applies to **`mm push --dry-run`**. `mm status`, `mm diag`, `mm diff`, `mm pull --dry-run`, `mm gc --dry-run`, and `mm recapture --dry-run` also leave shared crypto-init copies untouched. Read-only crypto sessions do not persist a missing fingerprint. Status reads only the cached upgrade result, showing its age when stale. Other previews may still record local setup state such as upgrade records; that work remains Track 62A.
 
 `mm autopush` still exits 0 so an agent hook can continue. Inspect `mm status` (the `last_autorun.detail` field) or run interactive `mm push` if you need an exit status.
 
@@ -746,7 +746,8 @@ This contract applies only to **`mm push --dry-run`**. Other previews (`pull`, `
 | File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
 | File changed while being read | Wait for the editor/writer to finish, then `mm push`. |
 | Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
-| mm-events directory missing after it was published (the preview stops) | To keep its files, run `mm pull` if another Mac has them and check that `<path>/events` is filled again, or restore `<path>` from backup; then retry `mm push --dry-run`. To accept deletion, run `mm push`: other Macs keep their copies, but this Mac cannot pull them back for 30 days. |
+| Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |
+| Custom mm-events folder is missing | Push warns, skips mm-events for that push without new tombstones, and publishes the other sources; autopush records a degraded breadcrumb. Plug in the drive, create the folder, or run `mm disable-source mm-events`. The next push includes it again when it returns. |
 | Source folder is missing after it was previously published | Restore the folder, or `mm disable-source <name>` if it should stop syncing. |
 | Pull says a file does not match the sending snapshot | Local bytes are kept. Run `mm pull --verbose` for peer/source/path, then `mm log --verb pull --action failed --limit 10`. A metadata-only `touch` or unchanged re-push does not rewrite a blob the diff considers unchanged. |
 
@@ -776,6 +777,8 @@ yourself.
 Only want `/retro-fleet` gone from one agent, and keeping `mm`? That is not this section — see [Removing a skill link](#removing-a-skill-link). Everything below is for removing `mm` itself.
 
 `pipx uninstall mind-meld` removes the `mm` command and nothing else. Everything below is deliberate — an uninstall should not delete your data or your synced fleet history — but the agent skill links and the skill store are worth knowing about.
+
+If you remove `~/.local/share/mind-meld` while keeping `~/.config/mind-meld` and continue using or reinstall `mm`, the next push publishes the missing default mm-events files as deletions. Status and other inspection commands do not recreate that data. The skill store shares this root; reinstalling skills does not restore event history.
 
 The link loop below is written to survive the state you are actually in: it needs no `mm` on `PATH`, no config, and no valid config, so it works whether you run it before or after `pipx uninstall`.
 

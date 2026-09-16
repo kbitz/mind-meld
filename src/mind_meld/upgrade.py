@@ -21,8 +21,8 @@ Lock-order invariants (load-bearing):
   1. NEVER acquire the mm lockfile while holding upgrade-state's flock.
   2. RELEASE upgrade-state's flock BEFORE appending to pullhistory.jsonl.
   3. Transition detection runs OUTSIDE the mm lockfile by design — its
-     correctness is bounded by upgrade-state's own flock. This is what lets
-     `mm status` and other read-only commands also detect transitions.
+     correctness is bounded by upgrade-state's own flock. Status and push
+     preview skip this hook so inspection does not consume transitions.
 
 Visible-failure stance: this is NOT a data-at-risk signal. Network failures
 degrade silently because `_check_fleet_version_or_refuse` already backstops
@@ -44,7 +44,7 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 from mind_meld import __version__, pullhistory
-from mind_meld.lockedjson import locked_json_rmw
+from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 
 CACHE_DIR = Path.home() / ".config" / "mind-meld"
 CACHE_PATH = CACHE_DIR / "upgrade-state.json"
@@ -106,15 +106,21 @@ def set_invocation_skip(skip: bool) -> None:
 
 @dataclass
 class UpgradeCheckResult:
-    """Return value of `check_for_upgrade`.
+    """Return value of `check_for_upgrade` and `cached_upgrade_view`.
 
     state:
       "skip"               — dev build, opt-out, --no-check-version, or
                              cache-fresh-and-equal. Caller does nothing.
       "current"            — local version matches latest. No nudge.
       "upgrade-available"  — caller may nudge, gated by `should_nudge`.
-      "unknown"            — network or parse failure; cached state used
-                             where possible. Caller does nothing.
+      "unknown"            — missing, malformed, or contended cache
+                             (`cached_upgrade_view`); network or parse
+                             failure (`check_for_upgrade`). Caller does
+                             nothing.
+
+    `cache_state` names why a cache-only view is unknown (`missing`,
+    `malformed`, `lock_failed`) or `valid` when the cache parsed.
+    `checked_at` / `stale` carry the cache's age for status display.
     """
 
     state: str
@@ -122,6 +128,9 @@ class UpgradeCheckResult:
     latest: str | None
     install_cmd: str | None
     should_nudge: bool = False  # True only for "upgrade-available" past gate
+    checked_at: datetime | None = None
+    stale: bool = False
+    cache_state: str | None = None
 
 
 # ── Cache I/O (single file, single flock — via mind_meld.lockedjson) ──────
@@ -210,6 +219,40 @@ def _pick_latest_tag(tags: list[dict[str, Any]]) -> tuple[str, Version] | None:
 
 
 # ── Public: check_for_upgrade ─────────────────────────────────────────────
+
+
+def cached_upgrade_view(
+    config: dict[str, Any] | None = None, *, now: datetime | None = None
+) -> UpgradeCheckResult:
+    """Inspect the last check without network, cache writes, or waiting on a writer."""
+    local = __version__
+    upgrade_cfg = (config or {}).get("upgrade", {})
+    if (
+        local == DEV_BUILD_SENTINEL
+        or _INVOCATION_SKIP
+        or (isinstance(upgrade_cfg, dict) and upgrade_cfg.get("auto_check") is False)
+    ):
+        return UpgradeCheckResult("skip", local, None, None)
+    with locked_json_snapshot(CACHE_PATH, blocking=False) as snapshot:
+        if snapshot.state != "valid" or snapshot.data is None:
+            return UpgradeCheckResult("unknown", local, None, None, cache_state=snapshot.state)
+        latest = snapshot.data.get("latest_version")
+        checked_at = _parse_iso(snapshot.data.get("checked_at"))
+        if not isinstance(latest, str) or checked_at is None:
+            return UpgradeCheckResult("unknown", local, None, None, cache_state="malformed")
+        try:
+            available = Version(latest) > Version(local)
+        except InvalidVersion:
+            return UpgradeCheckResult("unknown", local, None, None, cache_state="malformed")
+    return UpgradeCheckResult(
+        "upgrade-available" if available else "current",
+        local,
+        latest,
+        INSTALL_CMD if available else None,
+        checked_at=checked_at,
+        stale=(now or datetime.now(timezone.utc)) - checked_at >= DEFAULT_THROTTLE,
+        cache_state="valid",
+    )
 
 
 def check_for_upgrade(
@@ -538,6 +581,7 @@ __all__ = [
     "TAGS_API_URL",
     "UpgradeCheckResult",
     "check_for_upgrade",
+    "cached_upgrade_view",
     "detect_self_version_transition",
     "emit_nudge_if_due",
     "format_upgrade_message",
