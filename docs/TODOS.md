@@ -275,10 +275,25 @@ here by hand, use the H3 form.
   directly falsified (`str(typer.Exit(1)) == "1"`, not empty); a claim that
   `assert path is not None` is unsafe under `python -O` matches an existing,
   accepted pattern (17 similar asserts already in `cli.py`) rather than a
-  regression introduced here. A third (non-idempotent duplicate git/session
+  regression introduced here. A THIRD (non-idempotent duplicate git/session
   rows on repeated `--capture-usage` invocations, since it deliberately never
-  writes an `mm-push` row to advance the cursor) is a known, reviewed
-  trade-off of the Approach C design, not a new gap.
+  writes an `mm-push` row to advance the cursor) was initially dismissed here
+  as an accepted Approach C trade-off — **that dismissal was too quick.** A
+  separate Codex structured-review pass (`codex review --base main`, [P2])
+  sharpened it with a concrete, reachable harm: `events_tail.py:952-961`
+  never suppresses `capture.git_rows`/`capture.session_rows` under
+  `suppress_host_capture`, only the terminal `mm-push` row, so a repo-less
+  Mac's `--capture-usage` invocation still emits an unmarked `git-snapshot`
+  that `aggregator.py`'s `zero_repo_captures` counts toward "N of M pushes"
+  — the retro's own coverage-gap diagnostic gets polluted by invocations
+  that are not pushes by the feature's own stated definition ("a usage
+  refresh must not count as a push"). This is now judged a real gap in that
+  stated invariant, not just storage bloat, and deserves the SAME weight as
+  the item above (P2 follow-up design review), not a shrug. Two directions
+  named by the earlier Claude pass remain open: suppress git/session capture
+  under the flag too (making it a pure usage-only operation), or mark these
+  rows so `aggregate_git()` (and any other push-keyed consumer) excludes
+  them the same way retro push-count totals already do.
 
 ### [ship] Investigate a claimed TOCTOU on the accepted-manifest digest check
 
