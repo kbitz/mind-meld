@@ -1466,6 +1466,222 @@ class TestLastPushTs:
 # ---------------------------------------------------------------------------
 
 
+class TestLocalCaptureSelection61:
+    def test_diagnostic_hash_reuse_cannot_affect_publishing_scan(self, tmp_path):
+        from mind_meld import manifest
+
+        row = events.make_mm_push_event(device="local", mm_version="1")
+        events.write_push_event(tmp_path / "events", "local", [row])
+        now = datetime.now(timezone.utc)
+        scan = self._scan(tmp_path / "events", "local", now)
+        path = next((tmp_path / "events").glob("*.jsonl"))
+        old = scan.cached_hash(path, path.stat())
+        assert old
+        path.write_text(path.read_text() + "{}\n")
+        assert scan.cached_hash(path, path.stat()) is None
+        source = {
+            "name": "mm-events",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["events"],
+        }
+        actual = manifest.build_manifest_v2(
+            "local",
+            "Local",
+            [source],
+            strict=True,
+            diagnostic_hash=lambda *a: pytest.fail("publishing trusted diagnostic hash"),
+        )
+        info = actual["sources"]["mm-events"]["files"][f"events/{path.name}"]
+        assert info["sha256"] == manifest.hash_file(path) != old
+
+    def _scan(self, root, device, now):
+        from mind_meld.skills.retro_fleet import aggregator
+
+        return events.latest_event_rows(
+            root,
+            device,
+            {"host-usage-snapshot", "mm-push"},
+            now=now,
+            selectors={
+                "host-usage-snapshot": lambda row: aggregator.local_host_capture_candidate(
+                    row, until=now
+                )
+            },
+        )
+
+    def test_combined_scan_is_filename_scoped_and_one_pass(self, tmp_path, monkeypatch):
+        import builtins
+
+        now = datetime.now(timezone.utc)
+        row = events.make_mm_push_event(device="untrusted-body", mm_version="1")
+        events.write_push_event(tmp_path, "local/slash", [row])
+        peer = events.make_host_usage_snapshot(
+            device="local/slash", hosts={}, token_sources=["codex"]
+        )
+        events.write_push_event(tmp_path, "peer", [peer])
+        path = next(p for p in tmp_path.glob("*.jsonl") if not p.name.startswith("peer-"))
+        with path.open("ab") as out:
+            out.write(b"bad json\n\xff\n")
+        opened = []
+        real = builtins.open
+
+        def read(path, *args, **kwargs):
+            if Path(path).exists():
+                opened.append(Path(path))
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", read)
+        scan = self._scan(tmp_path, "local/slash", now)
+        assert scan.rows == {"mm-push": row}
+        assert opened == [path]
+        assert not scan.errors
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            {"ts": None},
+            {"ts": "nope"},
+            {"ts": "2100-01-01T00:00:00+00:00"},
+            {"ts": "0001-01-01T00:00:00+01:00"},
+            {"degraded_sources": ["codex"]},
+            {"partial_sources": ["grok"]},
+            {"token_sources": ["codex", "ESC-hostile\x1b[2J\nforged"]},
+        ],
+    )
+    def test_local_winner_matches_fleet_after_merge(self, tmp_path, bad):
+        from mind_meld import merge
+        from mind_meld.skills.retro_fleet import aggregator
+
+        now = datetime.now(timezone.utc)
+        good = events.make_host_usage_snapshot(
+            device="local", hosts={}, token_sources=["codex"], ts=now
+        )
+        other = {**good, **bad}
+        path = tmp_path / f"local-{now.date()}.jsonl"
+        left = json.dumps(good) + "\n"
+        right = json.dumps(other) + "\n"
+        path.write_bytes(merge.merge_jsonl(left.encode(), right.encode()))
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        fleet = aggregator.aggregate_host_usage(
+            rows, since=now - timedelta(days=7), until=now, registered_ids=None
+        )
+        selected = fleet.by_device["local"]
+        scan = self._scan(tmp_path, "local", now)
+        local = scan.rows["host-usage-snapshot"]
+        assert local["ts"] == selected.as_of.isoformat()
+        assert local["token_sources"] == selected.consulted
+        assert local["partial_sources"] == selected.partial
+        assert local["degraded_sources"] == selected.degraded
+        projected = events.project_host_publication(scan, ["codex", "grok"], None, now=now)
+        assert "ESC-hostile" not in json.dumps(projected)
+        assert "hosts" not in projected and "tokens_by_day" not in projected
+
+    def test_unreadable_current_file_does_not_claim_old_row_is_current(self, tmp_path, monkeypatch):
+        import builtins
+
+        now = datetime.now(timezone.utc)
+        older = now - timedelta(days=3)
+        row = events.make_host_usage_snapshot(
+            device="local", hosts={}, token_sources=["codex"], ts=older
+        )
+        (tmp_path / f"local-{older.date()}.jsonl").write_text(json.dumps(row) + "\n")
+        current = tmp_path / f"local-{now.date()}.jsonl"
+        current.touch()
+        real = builtins.open
+
+        def read(path, *args, **kwargs):
+            if Path(path) == current:
+                raise PermissionError("denied")
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", read)
+        scan = self._scan(tmp_path, "local", now)
+        projected = events.project_host_publication(scan, ["codex"], None, now=now)
+        assert scan.errors == [str(current)]
+        assert projected["state"] == projected["publication"] == "unknown"
+        assert projected["age_days"] == 3
+
+    def test_older_unreadable_file_does_not_unknown_current_capture(self, tmp_path, monkeypatch):
+        import builtins
+
+        now = datetime.now(timezone.utc)
+        older = now - timedelta(days=3)
+        current_row = events.make_host_usage_snapshot(
+            device="local", hosts={}, token_sources=["codex"], ts=now
+        )
+        (tmp_path / f"local-{now.date()}.jsonl").write_text(json.dumps(current_row) + "\n")
+        old_path = tmp_path / f"local-{older.date()}.jsonl"
+        old_path.write_text("{}\n")
+        real = builtins.open
+
+        def read(path, *args, **kwargs):
+            if Path(path) == old_path:
+                raise PermissionError("denied")
+            return real(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", read)
+        pub = events.project_host_publication(
+            self._scan(tmp_path, "local", now), ["codex"], None, now=now
+        )
+        assert pub["state"] == "recorded"
+        assert list(pub["readers"].values()) == ["contributed"]
+
+    def test_recorded_empty_absent_and_stale_are_distinct(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        blank = events.project_host_publication(self._scan(tmp_path, "local", now), ["codex"], None)
+        assert blank["state"] == "absent"
+        for contributors, expected in [(["codex"], "contributed"), ([], "absent")]:
+            ts = now - timedelta(days=4)
+            row = events.make_host_usage_snapshot(
+                device="local", hosts={}, token_sources=contributors, ts=ts
+            )
+            path = tmp_path / f"local-{now.date()}.jsonl"
+            path.write_text(json.dumps(row) + "\n")
+            pub = events.project_host_publication(
+                self._scan(tmp_path, "local", now), ["codex"], None, now=now
+            )
+            assert pub["state"] == "recorded"
+            assert pub["age_days"] == 4
+            assert pub["readers"] == {"codex": expected}
+            assert pub["empty"] is True
+
+    def test_nested_json_and_overflow_ts_do_not_abort_scan(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        good = events.make_host_usage_snapshot(
+            device="local", hosts={}, token_sources=["codex"], ts=now
+        )
+        nested = b'{"a":' * 2000 + b"1" + b"}" * 2000 + b"\n"
+        overflow = json.dumps({**good, "ts": "0001-01-01T00:00:00+01:00"}).encode() + b"\n"
+        path = tmp_path / f"local-{now.date()}.jsonl"
+        path.write_bytes(nested + overflow + (json.dumps(good) + "\n").encode())
+        scan = self._scan(tmp_path, "local", now)
+        assert list(scan.rows["host-usage-snapshot"]["token_sources"]) == ["codex"]
+
+    def test_non_regular_day_path_is_skipped(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        os.mkfifo(tmp_path / f"local-{now.date()}.jsonl")
+        scan = self._scan(tmp_path, "local", now)
+        assert scan.rows == {}
+        assert scan.errors == []
+
+    def test_exists_probe_oserror_is_uncertain_not_a_crash(self, tmp_path, monkeypatch):
+        now = datetime.now(timezone.utc)
+        current = tmp_path / f"local-{now.date()}.jsonl"
+        real_exists = Path.exists
+
+        def exists(path):
+            if path == current:
+                raise PermissionError("denied")
+            return real_exists(path)
+
+        monkeypatch.setattr(Path, "exists", exists)
+        pub = events.project_host_publication(
+            self._scan(tmp_path, "local", now), ["codex"], None, now=now
+        )
+        assert pub["state"] == "unknown"
+
+
 class TestWritePushEvent:
     def test_append_round_trip(self, tmp_path):
         events_dir = tmp_path / "events"

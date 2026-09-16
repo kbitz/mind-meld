@@ -113,6 +113,8 @@ from mind_meld.devices import (
 )
 from mind_meld.errors import (
     GIT_WALK_FAILURES_URL,
+    HOST_USAGE_CAPTURE_URL,
+    HOST_USAGE_CONSENT_URL,
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
     ConfigError,
@@ -3435,6 +3437,135 @@ def init() -> None:
 # ── push ──────────────────────────────────────────────────────────────
 
 
+def _prepare_usage_capture(config: dict) -> list[dict]:
+    """Resolve the writer and refuse unusable requests before the Keychain."""
+    try:
+        resolution = resolve_sources(config, strict=True, bootstrap=True)
+    except SnapshotError as e:
+        _error(
+            f"{e} No usage rows were written. Restore access to the source folder, "
+            f"then run mm push --capture-usage. See {HOST_USAGE_CAPTURE_URL}"
+        )
+    selected = next((s for s in resolution.selected if s["name"] == "mm-events"), None)
+    if selected is None:
+        _error(
+            "Usage capture requires mm-events. Run mm enable-source mm-events, "
+            f"then mm push --capture-usage. See {HOST_USAGE_CAPTURE_URL}"
+        )
+    if selected not in resolution.available:
+        _error(
+            f"{_config_module._missing_custom_mm_events_message(selected['path'])} "
+            "Requested usage capture needs that folder restored and mm-events enabled. "
+            f"See {HOST_USAGE_CAPTURE_URL}"
+        )
+    if not events_tail._default_host_readers(
+        resolution.available, grok_consented=grok_host_usage_enabled(config)
+    ):
+        _error(
+            "No host reader is consented. Run mm enable-source codex or "
+            "mm enable-source grok; Grok usage-only consent also accepts "
+            f"[retro] grok_host_usage = true. See {HOST_USAGE_CONSENT_URL}"
+        )
+    return resolution.available
+
+
+def _push_captured_usage(
+    config: dict, passphrase: str, memory_kb: int, sources: list[dict], verbose: bool
+) -> PushResult | None:
+    """Requested capture under the mm lock; publication has its own receipt.
+
+    Exit 0: row in accepted manifest; 4: capture absent/unpublished, content
+    otherwise fine; 1: stopped before acceptance; 2: incompatible flags.
+    Maintenance after acceptance cannot turn a published row into a failure.
+    """
+    device_id = config["device"]["id"]
+    readers = events_tail._default_host_readers(
+        sources, grok_consented=grok_host_usage_enabled(config)
+    )
+    capture, rows = events_tail._capture_host_snapshot(
+        device_id,
+        readers,
+        host_budget_ms=events_tail.HOST_USAGE_READ_BUDGET_INTERACTIVE_MS,
+        warm_host_cache=events_tail._warm_host_cache_with_notice,
+    )
+    dropped = dict(capture.dropped)
+    for name, _read in readers:
+        outcome = (
+            dropped[name]
+            if name in dropped
+            else "partial"
+            if name in capture.partial
+            else "completed, no usage"
+            if name in capture.empty
+            else "contributed"
+            if name in capture.token_sources
+            else "absent (no metadata ledger)"
+        )
+        console.print(f"Usage capture: {safe_str(name)} — {safe_str(outcome)}")
+    if not rows:
+        console.print(f"No usage snapshot written. Run mm diag; see {HOST_USAGE_CAPTURE_URL}")
+        raise typer.Exit(4)
+    src = next(s for s in sources if s["name"] == "mm-events")
+    try:
+        path = events.write_push_event(Path(src["path"]) / "events", device_id, rows, strict=True)
+    except OSError as e:
+        stderr_console.print(
+            f"Usage snapshot append failed: {safe_str(e)}. Fix the local events folder and retry "
+            f"mm push --capture-usage. See {HOST_USAGE_CAPTURE_URL}"
+        )
+        raise typer.Exit(4)
+    assert path is not None
+    accepted: dict | None = None
+    published = False
+
+    def record_acceptance(manifest: dict) -> None:
+        nonlocal accepted, published
+        # Record the boundary BEFORE any subsequent observation can fail.
+        accepted = manifest
+        digest = events.recorded_row_revision(path, rows[0])
+        published = events.capture_revision_in_manifest(manifest, f"events/{path.name}", digest)
+
+    result = None
+    try:
+        result = _push_core(
+            config,
+            passphrase,
+            memory_kb,
+            verbose=verbose,
+            suppress_host_capture=True,
+            on_manifest_accepted=record_acceptance,
+        )
+    except (OSError, MindMeldError, typer.Exit) as e:
+        if accepted is None:
+            _error(
+                "Usage capture was written locally but not synced. "
+                f"Fix the push failure, then run mm push. {e}"
+            )
+        console.print(f"Manifest accepted; post-publication maintenance failed: {safe_str(e)}")
+    if not published:
+        rel = f"events/{path.name}"
+        cause = "the captured file revision is not in the accepted manifest"
+        if _manifest_is_excluded(rel, src.get("exclude_patterns", [])):
+            cause = "mm-events exclude_patterns excludes this day file"
+        elif not any(
+            Path(rel).is_relative_to(Path(directory)) for directory in src.get("include_dirs", [])
+        ) and not any(Path(rel) == Path(file) for file in src.get("include_files", [])):
+            cause = "mm-events include_dirs does not select events/"
+        else:
+            try:
+                if path.stat().st_size > config["sync"]["max_file_size"]:
+                    cause = "the day file exceeds sync.max_file_size"
+            except OSError:
+                pass  # A lost local file cannot undo manifest acceptance.
+        console.print(
+            f"Usage capture not published: {cause}. Source settings were preserved. "
+            f"Review them, then run mm push. See {HOST_USAGE_CAPTURE_URL}"
+        )
+        raise typer.Exit(4)
+    console.print("Host usage published (manifest accepted).")
+    return result
+
+
 @app.command()
 def push(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed output"),
@@ -3448,6 +3579,14 @@ def push(
             "is reported, not done. Exits 1 if the preview stops."
         ),
     ),
+    capture_usage: bool = typer.Option(
+        False,
+        "--capture-usage",
+        help=(
+            "Refresh and publish host usage, even with no content changes. "
+            "Cannot combine with --dry-run."
+        ),
+    ),
 ) -> None:
     """Push selected agent context to storage.
 
@@ -3456,12 +3595,18 @@ def push(
     revision. An unreadable selected file refuses the whole push and
     keeps the previous snapshot.
     """
+    if capture_usage and dry_run:
+        raise typer.BadParameter(
+            "--capture-usage cannot be combined with --dry-run. "
+            f"Run mm push --capture-usage without --dry-run. See {HOST_USAGE_CAPTURE_URL}"
+        )
     config = _get_config(read_only=dry_run)
     _maybe_prompt_migration(config, read_only=dry_run)
     # Re-load in case the migration prompt mutated config on disk so the
     # current command sees the new exclude_patterns.
     if not dry_run:
         config = _get_config()
+    capture_sources = _prepare_usage_capture(config) if capture_usage else []
     passphrase = _get_passphrase_or_exit()
     pending: list[str] = []
     refusal_suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
@@ -3480,9 +3625,14 @@ def push(
         except MindMeldError as e:
             _error(str(e) + refusal_suffix)
         try:
-            result = _push_core(
-                config, passphrase, memory_kb, verbose, dry_run, preview_notes=pending
-            )
+            if capture_usage:
+                result = _push_captured_usage(
+                    config, passphrase, memory_kb, capture_sources, verbose
+                )
+            else:
+                result = _push_core(
+                    config, passphrase, memory_kb, verbose, dry_run, preview_notes=pending
+                )
         except SnapshotError as e:
             _error(str(e) + refusal_suffix)
         except MindMeldError as e:
@@ -3502,9 +3652,9 @@ def push(
             )
 
         # Auto GC on interactive push only (not autopush).
-        # Catch only unexpected failures — let typer.Exit (from _do_gc's
-        # refuse-on-corrupt path) propagate so the user sees the actionable
-        # message. Silent-swallow would hide the safety refusal.
+        # typer.Exit from _do_gc's refuse-on-corrupt path still aborts a
+        # normal push. After --capture-usage the host row is already in the
+        # accepted manifest, so report GC as post-publication maintenance.
         if (
             not dry_run
             and result
@@ -3522,7 +3672,11 @@ def push(
                 if gc_count:
                     console.print(f"  GC: deleted {gc_count} orphaned blobs.")
             except typer.Exit:
-                raise
+                if not capture_usage:
+                    raise
+                console.print(
+                    "Host usage was published; post-publication GC stopped. Run mm gc for details."
+                )
             except (OSError, MindMeldError) as e:
                 console.print(
                     f"  [yellow]Warning:[/yellow] GC skipped ({e}). "
@@ -3680,6 +3834,8 @@ def _push_core(
     quiet: bool = False,
     *,
     preview_notes: list[str] | None = None,
+    suppress_host_capture: bool = False,
+    on_manifest_accepted: Callable[[dict], None] | None = None,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
@@ -3907,7 +4063,14 @@ def _push_core(
     # Skipped entirely when no mm-internal source is selected for this push.
     if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
         events_degradations.extend(
-            events_tail._run_events_tail(config, sources, device_id, dry_run=dry_run, quiet=quiet)
+            events_tail._run_events_tail(
+                config,
+                sources,
+                device_id,
+                dry_run=dry_run,
+                quiet=quiet,
+                suppress_host_capture=suppress_host_capture,
+            )
         )
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
@@ -4003,6 +4166,8 @@ def _push_core(
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     mkey = manifest_key(device_id)
     backend.put(mkey, enc_manifest)
+    if on_manifest_accepted is not None:
+        on_manifest_accepted(local_manifest)
 
     # Write sidecar (best-effort: failure warns but does not abort push;
     # the remote manifest succeeded, so peers still have a path to recovery).
@@ -5341,7 +5506,14 @@ def status(
 
     # Build local manifest (v2)
     sources_configs = get_sources(config)
-    local_manifest = build_manifest_v2(device_id, device_name, sources_configs, max_file_size)
+    capture_rows = _read_capture_rows(sources_configs, device_id)
+    local_manifest = build_manifest_v2(
+        device_id,
+        device_name,
+        sources_configs,
+        max_file_size,
+        diagnostic_hash=lambda path, stat: capture_rows.cached_hash(path, stat) or hash_file(path),
+    )
 
     # Fetch remote manifest (tri-state — surface missing/corrupt to user).
     # fetch.manifest is pre-normalized via load_manifest.
@@ -5408,7 +5580,7 @@ def status(
             and "git repository discovery" in detail
         ):
             discovery_nag = True
-    retro_nag = _print_retro_capture_status(sources_configs, device_id)
+    retro_nag = _print_retro_capture_status(sources_configs, device_id, scan=capture_rows)
     if discovery_nag and not retro_nag:
         console.print(
             "  [yellow]Git repository discovery incomplete:[/yellow] run [bold]mm diag[/bold]"
@@ -5521,6 +5693,8 @@ def status(
 
     from mind_meld import host_usage as _host_usage
 
+    _print_host_publication(_host_publication(config, sources_configs, capture_rows))
+
     # Enabling the Codex source is consent. A standing blocker takes priority
     # over inventory-based remedies; healthy Codex capture stays quiet here.
     if any(s.get("name") == "codex" for s in sources_configs):
@@ -5530,12 +5704,12 @@ def status(
         elif codex_diag.get("files_pre_track"):
             console.print(
                 f"  Codex usage capture: rebuilding — {codex_diag['files_pre_track']} rollouts "
-                "awaiting re-walk; run [bold]mm push[/bold] to finish it"
+                "awaiting re-walk; run [bold]mm push --capture-usage[/bold] to finish it"
             )
         elif codex_diag.get("state") == "migrating":
             console.print(
                 f"  Codex usage capture: warming — {codex_diag.get('pending') or 0} rollouts "
-                "not yet scanned; run [bold]mm push[/bold] to finish it"
+                "not yet scanned; run [bold]mm push --capture-usage[/bold] to finish it"
             )
 
     grok_source_on = any(s.get("name") == "grok" for s in sources_configs)
@@ -5558,7 +5732,7 @@ def status(
             else:
                 console.print(
                     "  Grok usage capture: enabled, but no successful scan yet — "
-                    "run [bold]mm push[/bold]"
+                    "run [bold]mm push --capture-usage[/bold]"
                 )
         else:
             console.print(
@@ -5722,13 +5896,105 @@ The invariant requires bounding, not merely sanitizing; 128 matches
 ``aggregator._safe_short``."""
 
 
-def _print_retro_capture_status(sources: list[dict], device_id: str) -> bool:
+def _read_capture_rows(sources: list[dict], device_id: str | None) -> events.EventScan:
+    """One day-file pass for both diagnostic blocks, using the fleet acceptor."""
+    from mind_meld.skills.retro_fleet import aggregator
+
+    src = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if not device_id or src is None:
+        return events.EventScan(errors=["config invalid or mm-events unavailable"])
+    now = datetime.now(timezone.utc)
+    return events.latest_event_rows(
+        Path(src["path"]).expanduser() / "events",
+        device_id,
+        {"mm-push", "host-usage-snapshot"},
+        now=now,
+        selectors={
+            "host-usage-snapshot": lambda row: aggregator.local_host_capture_candidate(
+                row, until=now
+            )
+        },
+    )
+
+
+def _host_publication(config: dict, sources: list[dict], scan: events.EventScan) -> dict:
+    readers = [
+        name
+        for name, _ in events_tail._default_host_readers(
+            sources, grok_consented=grok_host_usage_enabled(config)
+        )
+    ]
+    try:
+        manifest = sidecar.read(config["device"]["id"])
+    except (OSError, MindMeldError, KeyError, RecursionError):
+        manifest = None
+    projected = events.project_host_publication(scan, readers, manifest)
+    if scan.errors and projected["state"] == "unknown":
+        # Local paths must remain recognizable even under a long home prefix.
+        projected["error"] = safe_str(_home_relative_path(Path(scan.errors[0])))
+    return projected
+
+
+def _print_host_publication(state: dict) -> None:
+    """Keep recorded coverage, publication evidence and attempts distinct."""
+    if state["state"] == "absent":
+        recorded = f"no capture in the last {events.CURSOR_SCAN_DAYS} days"
+    elif state["state"] == "unknown":
+        recorded = f"unknown ({state.get('error', 'events unreadable')})"
+    else:
+        recorded = f"{state['ts']} ({state['age_days']}d ago)"
+    console.print(f"  Host usage last recorded capture: {safe_str(recorded)}")
+    console.print(f"    Publication: {state['publication']} (accepted manifest evidence)")
+    for reader, coverage in state["readers"].items():
+        empty = "; completed, no usage" if state.get("empty") and coverage == "contributed" else ""
+        console.print(f"    {reader}: {coverage}{empty}")
+    console.print("    Latest attempt: unknown (no attempt receipt)")
+    if state.get("coverage_invalid"):
+        console.print("    Coverage metadata is inconsistent; reader completeness is unknown.")
+    if state["readers"] and (
+        state["state"] != "recorded"
+        or (state.get("age_days") or 0) > 0
+        or state.get("coverage_invalid")
+        or any(v != "contributed" for v in state["readers"].values())
+    ):
+        console.print("    Refresh on this Mac: [bold]mm push --capture-usage[/bold]")
+
+
+def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
+    """Cache-only bridge for operators who previously used git recapture."""
+    from mind_meld import host_usage
+
+    for name, _ in events_tail._default_host_readers(
+        sources, grok_consented=grok_host_usage_enabled(config)
+    ):
+        state = host_usage.codex_usage_diag() if name == "codex" else host_usage.grok_usage_diag()
+        cold = (
+            state.get("state") != "ready"
+            if name == "codex"
+            else state.get("complete_once") is not True
+        )
+        if cold or state.get("last_reason"):
+            console.print(
+                "Recapture covers Git history only. Refresh host usage on this Mac: "
+                "[bold]mm push --capture-usage[/bold]"
+            )
+            return
+
+
+def _print_retro_capture_status(
+    sources: list[dict], device_id: str, *, scan: events.EventScan | None = None
+) -> bool:
     """Nag on an incomplete recorded capture. Returns True if a nag printed."""
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
         return False
     events_dir = Path(mm_events_src["path"]).expanduser() / "events"
-    projected = events.project_recorded_capture(events.latest_mm_push_row(events_dir, device_id))
+    row = (
+        scan.rows.get("mm-push")
+        if scan is not None
+        else events.latest_mm_push_row(events_dir, device_id)
+    )
+    projected = events.project_recorded_capture(row)
     if projected is None:
         return False
     aborts = projected.get("walk_budget_aborts") or 0
@@ -5788,7 +6054,9 @@ def _fresh_discovery_label(diag: dict) -> str:
     return "not-run"
 
 
-def _collect_git_capture_diag(config: dict, device_id: str | None, discovery: dict) -> dict:
+def _collect_git_capture_diag(
+    config: dict, device_id: str | None, discovery: dict, *, scan: events.EventScan | None = None
+) -> dict:
     recorded = None
     if device_id:
         try:
@@ -5797,7 +6065,9 @@ def _collect_git_capture_diag(config: dict, device_id: str | None, discovery: di
             if src is not None:
                 events_dir = Path(src["path"]).expanduser() / "events"
                 projected = events.project_recorded_capture(
-                    events.latest_mm_push_row(events_dir, device_id)
+                    scan.rows.get("mm-push")
+                    if scan is not None
+                    else events.latest_mm_push_row(events_dir, device_id)
                 )
                 if projected is not None:
                     recorded = _sanitize_recorded_capture(projected)
@@ -5894,6 +6164,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         never a token magnitude)
       * local_emails (this machine's author-email trust set, and peers'
         after a pull merge) — project an allowlist, never render the row
+      * host_publication payloads: only state, timestamp/age, allowlisted
+        reader coverage, publication/attempt evidence and sanitized errors
+        may escape; never hosts, tokens_by_day, magnitudes, models or peer ids
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are
@@ -6034,6 +6307,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         # no-passphrase contract.
         "codex": _host_usage.codex_usage_diag(),
     }
+    capture_rows = _read_capture_rows(resolved_sources, dev_id)
     return {
         "mm_version": __version__,
         "config": {
@@ -6059,8 +6333,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
         "host_usage": host_usage_state,
+        "host_publication": _host_publication(cfg, resolved_sources, capture_rows),
         "discovery": discovery,
-        "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery),
+        "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery, scan=capture_rows),
     }
 
 
@@ -6190,6 +6465,7 @@ def diag(
 
     hu_state = (state.get("host_usage") or {}).get("grok") or {}
     console.print("\n[bold]Host usage[/bold]")
+    _print_host_publication(state["host_publication"])
     consented = hu_state.get("consented")
     if consented is None:
         consented_shown = "(config unreadable)"
@@ -6232,7 +6508,7 @@ def diag(
         # quiet Mac the nudge is the only way a user learns to finish it.
         console.print(
             f"  codex awaiting re-walk:  {cx_state['files_pre_track']}"
-            " — run [bold]mm push[/bold] (interactive) to finish the rebuild"
+            " — run [bold]mm push --capture-usage[/bold] to finish the rebuild"
         )
 
     disc = state.get("discovery") or {}
@@ -6908,7 +7184,7 @@ def enable_source(
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
     # has effect (auto-detect doesn't fire when explicit sources are set).
     needs_explicit_append = name not in explicit_names and (
-        name == "grok" or (explicit_sources and name in default_names)
+        name == "grok" or (has_explicit_sources and name in default_names)
     )
     if needs_explicit_append:
         default = get_default_source(name)
@@ -6918,7 +7194,7 @@ def enable_source(
 
     if not updates:
         # Already enabled and configured — no-op message.
-        if name in explicit_names or (not explicit_sources and name in default_names):
+        if name in explicit_names or (not has_explicit_sources and name in default_names):
             if name == "grok":
                 _set_grok_host_usage(config, enabled=True, quiet=True)
             console.print(f"[dim]Source '{name}' is already enabled.[/dim]")
@@ -6963,6 +7239,7 @@ def reconfigure_sources() -> None:
     sync = dict(config.get("sync", {}) or {})
     explicit_sources = list(sync.get("sources", []) or [])
     explicit_names = [s["name"] for s in explicit_sources]
+    has_explicit_sources = "sources" in sync
     disabled = list(sync.get("disabled_sources", []) or [])
     default_names = [s["name"] for s in DEFAULT_SOURCES]
 
@@ -7006,7 +7283,7 @@ def reconfigure_sources() -> None:
                 # or authorize the separate usage reader.
                 default_active = detected
             currently_active = (
-                iname in explicit_names or (not explicit_sources and default_active)
+                iname in explicit_names or (not has_explicit_sources and default_active)
             ) and iname not in disabled
             if iname == "grok":
                 # A pre-22B usage-only opt-in is durable consent.  Keep it
@@ -7703,6 +7980,7 @@ def recapture(
             )
             raise typer.Exit(1)
 
+        _notice_recapture_host_usage(config, sources)
         partial = (
             prepared.root_discovery.exceeded or bool(prepared.root_discovery.errors) or skipped > 0
         )

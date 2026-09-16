@@ -29,12 +29,12 @@ one-liner, which does not match a search for `resolveflow.py`.)
 
 | Module | Owns |
 |---|---|
-| `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
+| `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (61A) requested host capture and local publication diagnostics, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones |
 | `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
 | `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns |
 | `devices.py` | Device registry, short-id generation and lookup |
-| `events.py` | mm-events log: git-root discovery, git/session walkers, budgets |
+| `events.py` | mm-events log: git-root discovery, git/session walkers, budgets; (61A) shared day scan and publication projection |
 | `token_usage.py` | Session-jsonl walker, token + skill caches, pricing, incremental resume |
 | `host_usage.py` | Local Codex and Grok (`updates.jsonl` terminal records, opt-in) usage readers, strict host-family classifier, and isolated host-token caches |
 | `host_skill_discovery.py` | Read-only `grok inspect --json` probe for `mm diag` (`host_skill_discovery` sibling key). Not a `skill_link` registry. |
@@ -48,12 +48,12 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `sidecar.py` | Manifest sidecar read/write |
 | `lockfile.py` | The mm lockfile |
 | `lockedjson.py` | Single-file flock read/modify/write primitive |
-| `fsutil.py` | Atomic write, flock-append, `fsync_dir` |
+| `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome), `fsync_dir` |
 | `errors.py` | Exception hierarchy |
 | **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
 | **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
 | **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, the `AGENT_ROWS` registry — add a new agent HERE — (25C) `consented_agent_keys` / `AgentRow.consent_source` / the installer `declined` status, and (28A) the deletion guard — `_marker_exists`, the `removed-by-user` status, and the rule that an ABSENT link is intent, not damage |
-| **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, (19A) the host-usage capture, (31A) reader-scoped failure isolation, (30A) git-only recapture, and (57A) the later-reader grace floor with full-reader warm/retry |
+| **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, (19A) the host-usage capture, (61A) shared host-only capture/warm helper, (31A) reader-scoped failure isolation, (30A) git-only recapture, and (57A) the later-reader grace floor with full-reader warm/retry |
 | **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
 | **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
 | `safety.py` | Peer-controlled string sanitization |
@@ -118,6 +118,8 @@ GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Pyt
 ## Commands
 mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture
 
+Push flags: `--capture-usage` (61A) refreshes host usage on an attended push, including with no content changes. Shares `_capture_host_snapshot` with tail/backfill; suppresses tail host capture and mm-push, preserving push counts/cursor. Exit 0 requires the row in the accepted manifest; 4 means missing/unpublished capture while content sync was otherwise fine; 1 stopped before acceptance; 2 incompatible `--dry-run`. Status/diag share `latest_event_rows` and fleet acceptance/order, with `host_publication` separated from cache state. See `docs/invariants/events-retro.md`.
+
 Push flag: `--dry-run` (v0.14.10). Changes nothing except the local lock file — no uploads, config writes, pull-history rows, upgrade checks, or new directories; reports the setup a real push would still perform instead of performing it. A missing default mm-events root or event file is previewed as a deletion; a missing custom mm-events root is warned about and skipped for that push without new tombstones. Exit codes: 0 completed, 1 stopped, 2 usage error. See `docs/invariants/sync.md` and `docs/invariants/init-devices.md`.
 Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 3 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--dry-run` (preview orphan blobs plus retention candidates without mutation; each executed reaper reports candidates, repairs, and skips); `--conflicts` (also reap `.sync-conflict-*` copies older than 30 days — reapable ONLY when the conflict converged, i.e. canonical exists and its bytes are identical; live, missing-canonical and unhashable sidecars are never reaped at any age, see `retention.py:_is_live_conflict`).
@@ -130,6 +132,8 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 
 | If you're editing… | READ FIRST |
 |---|---|
+| `cli.py:_prepare_usage_capture` / `_push_captured_usage` / `_read_capture_rows` / `_host_publication` / `_print_host_publication` / `_notice_recapture_host_usage` / `events.py:latest_event_rows` / `project_host_publication` / `capture_revision_in_manifest` / `recorded_row_revision` / `events_tail.py:_capture_host_snapshot` / `skills/retro_fleet/aggregator.py:local_host_capture_candidate` / `_host_row_order_key` / `_accept_host_row_at` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
+| `fsutil.py:flock_append_jsonl` / `events.py:write_push_event` (strict append) / `cli.py:_push_core` (manifest acceptance callback) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `cli.py:_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests` | `docs/invariants/sync.md` |
 | `cli.py:_download_and_apply` / (rel_path + base_path concatenation site) | `docs/invariants/sync.md` |
 | `cli.py:_ApplyReporter` / `_first_existing_ancestor` / `_pull_one_source` / `_record_source_bookkeeping` / `_fsync_touched_parents` / `_PerSourceResult` / `_print_pull_summary` / `_predict_pull_outcome` (publication ledger, recovery, and count wording) | `docs/invariants/sync.md` |

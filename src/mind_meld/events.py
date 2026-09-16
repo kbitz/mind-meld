@@ -49,6 +49,7 @@ see TypedDict definitions below.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -63,7 +64,7 @@ from concurrent.futures import (
 from concurrent.futures import (
     TimeoutError as FuturesTimeoutError,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypedDict
@@ -408,7 +409,9 @@ HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok")
 A row's ``token_sources`` is the per-push SUBSET that actually contributed,
 which is what lets a consumer tell "this host reported nothing" apart from
 "this host was never consulted". Do not serialize this constant into a row;
-see ``make_host_usage_snapshot``.
+see ``make_host_usage_snapshot``. Completed empty readers remain listed; an
+empty list means all readers were absent. Local publication diagnostics
+intersect this allowlist after fleet acceptance/ordering.
 
 The tuple is append-only in the sense that **reordering it is a breaking
 change**: a reorder flips 3 of 7 accepted wire shapes (worse than a deletion,
@@ -1525,7 +1528,7 @@ def resolve_push_cursor(
     held_since: datetime | None = None
     for delta in range(0, CURSOR_SCAN_DAYS + 1):
         day = today - timedelta(days=delta)
-        path = events_dir / f"{device_id}-{day.isoformat()}.jsonl"
+        path = events_dir / f"{_safe_device_filename(device_id)}-{day.isoformat()}.jsonl"
         if not path.is_file():
             continue
         for obj in reversed(list(_iter_mm_push_objs(path))):
@@ -1558,64 +1561,240 @@ def _parse_aware_ts(value: object) -> datetime | None:
         return None
     try:
         ts = datetime.fromisoformat(value)
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
     if ts.tzinfo is None:
         return None
     return ts
 
 
-def _iter_mm_push_objs(path: Path):
-    """Yield mm-push dicts from ``path`` in file order.
+@dataclass
+class EventScan:
+    """One filename-scoped scan, including uncertainty and file revisions."""
 
-    BINARY and BOUNDED (v0.12.16), same rationale as
-    ``_read_cwd_from_latest_jsonl``. This file lives under the SYNCED
-    mm-events source, so its bytes can arrive via the pull apply path and
-    ``merge.merge_jsonl`` rather than only from this device's own writer —
-    which is exactly why it goes through ``token_usage.iter_bounded_lines``
-    rather than a bare ``for raw in f``. The latter lets Python extend its
-    buffer to newline-or-EOF, so one oversized line from a corrupt or
-    hostile peer file would be slurped whole on every push.
+    rows: dict[str, dict] = field(default_factory=dict)
+    files: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+    hashes: dict[Path, tuple[tuple, str]] = field(default_factory=dict)
+    uncertain_types: set[str] = field(default_factory=set)
+
+    def cached_hash(self, path: Path, stat: os.stat_result) -> str | None:
+        """Reuse a diagnostic read only while the file identity is unchanged."""
+        cached = self.hashes.get(path.resolve())
+        return cached[1] if cached and cached[0] == _event_file_identity(stat) else None
+
+
+def _event_file_identity(stat: os.stat_result) -> tuple:
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _iter_typed_objs(path: Path, row_types: set[str], scan: EventScan, revision: dict):
+    """Bounded binary read shared by diagnostics and the fail-open cursor.
+
+    Hash the same bytes we parse, in one pass. An oversized skipped line or
+    a concurrent file change makes the revision unknown, never published.
     """
+    opened = False
     try:
         with open(path, "rb") as f:
+            opened = True
+            before = os.fstat(f.fileno())
+            digest = hashlib.sha256()
+            size = 0
             for raw, _end in token_usage.iter_bounded_lines(
-                f,
-                str(path),
-                0,
-                label="events cursor reader",
-                yield_final_partial=True,  # one-shot read, see the cwd reader
+                f, str(path), 0, label="events cursor reader", yield_final_partial=True
             ):
-                stripped = raw.strip()
-                if not stripped:
-                    continue
+                digest.update(raw)
+                size += len(raw)
                 try:
-                    obj = json.loads(stripped)
-                except ValueError:
+                    obj = json.loads(raw)
+                except (ValueError, RecursionError):
                     continue
-                if not isinstance(obj, dict):
-                    continue
-                if obj.get("type") != "mm-push":
-                    continue
-                yield obj
-    except OSError:
+                if isinstance(obj, dict) and isinstance(obj.get("type"), str):
+                    if obj["type"] in row_types:
+                        yield obj
+            after = path.stat()
+            if (
+                _event_file_identity(before) == _event_file_identity(after)
+                and size == before.st_size == after.st_size
+            ):
+                revision["sha256"] = digest.hexdigest()
+                scan.hashes[path.resolve()] = (_event_file_identity(after), digest.hexdigest())
+            else:
+                scan.errors.append(str(path))
+    except FileNotFoundError:
+        if opened:
+            scan.errors.append(str(path))
         return
+    except OSError:
+        scan.errors.append(str(path))
+
+
+def _iter_mm_push_objs(path: Path):
+    """Keep the cursor's tolerant, fail-open file-order semantics."""
+    yield from _iter_typed_objs(path, {"mm-push"}, EventScan(), {})
+
+
+def latest_event_rows(
+    events_dir: Path,
+    device_id: str,
+    row_types: set[str],
+    *,
+    selectors: Mapping[str, Callable[[dict], tuple[tuple, dict] | None]] | None = None,
+    now: datetime | None = None,
+) -> EventScan:
+    """Newest of each requested type in one pass per retained day file.
+
+    The caller supplies consumer acceptance/order for host snapshots. This
+    keeps events independent of the skills package while local diagnostics
+    use the fleet's actual acceptor, including its sibling tie-breakers.
+    Other types retain latest-filename/last-line ordering. Identity comes
+    exclusively from the filename, never a row's device field.
+    """
+    scan = EventScan()
+    selectors = selectors or {}
+    now = now or datetime.now(timezone.utc)
+    try:
+        if not events_dir.is_dir():
+            events_dir.stat()  # distinguish an unreadable root from absence
+            scan.errors.append(str(events_dir))
+            return scan
+    except FileNotFoundError:
+        return scan
+    except OSError:
+        scan.errors.append(str(events_dir))
+        return scan
+    keys: dict[str, tuple] = {}
+    safe_device = _safe_device_filename(device_id)
+    for delta in range(CURSOR_SCAN_DAYS + 1):
+        day = now.date() - timedelta(days=delta)
+        path = events_dir / f"{safe_device}-{day.isoformat()}.jsonl"
+        try:
+            skip_non_file = path.exists() and not path.is_file()
+        except OSError:
+            scan.errors.append(str(path))
+            scan.uncertain_types.update(kind for kind in row_types if kind not in keys)
+            continue
+        if skip_non_file:
+            continue
+        revision: dict = {}
+        winners: set[str] = set()
+        err_before = len(scan.errors)
+        for index, row in enumerate(_iter_typed_objs(path, row_types, scan, revision)):
+            kind = row["type"]
+            selected = selectors[kind](row) if kind in selectors else ((-delta, index), row)
+            if selected is None:
+                continue
+            key, projected = selected
+            if kind not in keys or key > keys[kind]:
+                keys[kind] = key
+                scan.rows[kind] = projected
+                winners.add(kind)
+        if len(scan.errors) > err_before:
+            scan.uncertain_types.update(kind for kind in row_types if kind not in keys)
+            scan.uncertain_types.update(winners)
+        for kind in winners:
+            scan.files[kind] = (f"events/{path.name}", revision.get("sha256"))
+    return scan
 
 
 def latest_mm_push_row(events_dir: Path, device_id: str) -> dict | None:
     """Newest mm-push dict for this device, or None. Fail-open on I/O."""
-    if not events_dir.is_dir():
+    return latest_event_rows(events_dir, device_id, {"mm-push"}).rows.get("mm-push")
+
+
+def capture_revision_in_manifest(manifest: dict | None, rel: str, digest: str | None) -> bool:
+    """A push result is not a receipt: require the exact accepted file bytes."""
+    if not digest or not isinstance(manifest, dict):
+        return False
+    sources = manifest.get("sources")
+    source = sources.get("mm-events") if isinstance(sources, dict) else None
+    files = source.get("files") if isinstance(source, dict) else None
+    info = files.get(rel) if isinstance(files, dict) else None
+    return isinstance(info, dict) and info.get("sha256") == digest
+
+
+def recorded_row_revision(path: Path, row: dict) -> str | None:
+    """Bind a requested row to the same file bytes the publisher hashed."""
+    from mind_meld.manifest import hash_file
+
+    scan = EventScan()
+    found = False
+    for candidate in _iter_typed_objs(path, {row["type"]}, scan, {}):
+        found = found or candidate == row
+    if not found:
         return None
-    today = datetime.now(timezone.utc).date()
-    for delta in range(0, CURSOR_SCAN_DAYS + 1):
-        day = today - timedelta(days=delta)
-        path = events_dir / f"{device_id}-{day.isoformat()}.jsonl"
-        if not path.is_file():
-            continue
-        rows = list(_iter_mm_push_objs(path))
-        if rows:
-            return rows[-1]
-    return None
+    try:
+        return hash_file(path)
+    except OSError:
+        return None
+
+
+def project_host_publication(
+    scan: EventScan,
+    readers: Sequence[str],
+    accepted_manifest: dict | None,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Allowlisted diagnostics from the fleet-validated local selection.
+
+    No host maps, token magnitudes, model ids or peer device ids escape here.
+    A completed empty scan has token_sources:["codex"], hosts:{}; [] means
+    no reader contributed. Both differ from no recorded capture.
+    """
+    now = now or datetime.now(timezone.utc)
+    row = scan.rows.get("host-usage-snapshot")
+    host_uncertain = "host-usage-snapshot" in scan.uncertain_types or (
+        "host-usage-snapshot" not in scan.rows and bool(scan.errors)
+    )
+    out: dict = {
+        "state": "unknown" if host_uncertain else "absent",
+        "ts": None,
+        "age_days": None,
+        "publication": "unknown",
+        "readers": {r: "unknown" for r in readers if r in HOST_USAGE_TOKEN_SOURCES},
+        "latest_attempt": "unknown",
+    }
+    if not isinstance(row, dict):
+        return out
+    ts = _parse_aware_ts(row.get("ts"))
+    if ts is None:
+        return out
+    coverage = {}
+    for key in ("token_sources", "partial_sources", "degraded_sources"):
+        raw = row.get(key)
+        coverage[key] = (
+            {v for v in raw if isinstance(v, str) and v in HOST_USAGE_TOKEN_SOURCES}
+            if isinstance(raw, (list, tuple))
+            else set()
+        )
+    out.update(
+        state="unknown" if host_uncertain else "recorded",
+        ts=ts.isoformat(),
+        age_days=max(0, (now - ts).days),
+        empty=row.get("empty") is True,
+        coverage_invalid=bool(row.get("coverage_invalid")),
+        readers={
+            r: "partial"
+            if r in coverage["partial_sources"]
+            else "contributed"
+            if r in coverage["token_sources"]
+            else "degraded"
+            if r in coverage["degraded_sources"]
+            else "absent"
+            for r in readers
+            if r in HOST_USAGE_TOKEN_SOURCES
+        },
+    )
+    revision = scan.files.get("host-usage-snapshot")
+    if (
+        not host_uncertain
+        and revision
+        and capture_revision_in_manifest(accepted_manifest, *revision)
+    ):
+        out["publication"] = "published"
+    return out
 
 
 def project_recorded_capture(row: dict | None) -> dict | None:
@@ -1701,16 +1880,22 @@ def write_push_event(
     events_dir: Path,
     device_id: str,
     events: list[dict],
-) -> None:
+    *,
+    strict: bool = False,
+) -> Path | None:
     """Append `events` to today's per-device JSONL.
 
-    Order invariant (CT-4): caller MUST construct `events` with the
-    ``mm-push`` event LAST. Partial write before the mm-push appends →
-    cursor doesn't advance → next push re-walks the range (deduped at
-    retro render via canonical (remote, sha)). The single flock window is
+    Order invariant (CT-4): when an ``mm-push`` row is present, it MUST
+    be last so a partial write cannot advance the cursor. Requested
+    capture and ``suppress_host_capture`` batches may omit it; git and
+    session rows then do not move the cursor. Partial write before the
+    mm-push appends → next push re-walks the range (deduped at retro
+    render via canonical (remote, sha)). The single flock window is
     best-effort batching, NOT transactionality.
 
     File mode 0o600. Per-day naming: ``events/<device>-<YYYY-MM-DD>.jsonl``.
+    A requested capture uses ``strict=True`` to observe append failures and
+    receive the exact day path written (including across a midnight rollover).
     """
     if not events:
         return
@@ -1718,7 +1903,8 @@ def write_push_event(
     safe_device = _safe_device_filename(device_id)
     path = events_dir / f"{safe_device}-{today}.jsonl"
     lines = [json.dumps(e, sort_keys=True).encode("utf-8") for e in events]
-    fsutil.flock_append_jsonl(path, lines, mode=0o600)
+    fsutil.flock_append_jsonl(path, lines, mode=0o600, strict=strict)
+    return path if strict else None
 
 
 _DEVICE_FILENAME_SAFE = re.compile(r"[^A-Za-z0-9._-]")
@@ -1898,6 +2084,10 @@ def make_host_usage_snapshot(
     is dropped. Emitting the full constant instead would claim coverage the
     sweep did not have, and would make "this host reported nothing" and "this
     host was never consulted" indistinguishable on the wire.
+    A completed empty scan includes that reader with ``hosts: {}``; an empty
+    ``token_sources`` means every consulted reader was absent, not a healthy
+    empty scan. The local status/diag selector shares fleet acceptance and
+    ordering and intersects reader names with ``HOST_USAGE_TOKEN_SOURCES``.
 
     ``degraded_sources`` is additive (Track 31A): readers that failed this
     sweep, as a subsequence of ``HOST_USAGE_TOKEN_SOURCES`` disjoint from

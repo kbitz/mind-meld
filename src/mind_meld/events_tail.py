@@ -191,6 +191,19 @@ class HostUsageCapture:
     ``token_sources`` idiom. A naive concatenation produces duplicates,
     the acceptor drops the field, and the card silently renders nothing.
     """
+    empty: tuple[str, ...] = ()
+    """Canonical-order reader names in ``token_sources`` whose OWN result had
+    no usage this sweep.
+
+    Recorded from each reader's un-merged ``result.hosts`` in
+    ``_capture_host_usage``, never derived from family-key membership in the
+    merged ``hosts`` dict: ``host_family()`` classifies by MODEL ID PREFIX,
+    not reader identity ("a reader is not a row of its own"), so a model id
+    it does not recognize lands a real contribution under a different family
+    bucket than the reader's own name — ``name not in hosts`` would then
+    mislabel a genuinely contributing reader as empty. This field is immune
+    to that because it is captured before any family-keyed merge happens.
+    """
 
     @property
     def complete(self) -> bool:
@@ -346,6 +359,7 @@ def _capture_host_usage(
     merged: dict[str, dict[str, token_usage.Usage]] = {}
     merged_by_day: dict[str, token_usage.DayBucket] = {}
     contributed: list[str] = []
+    empty: list[str] = []
     dropped: list[tuple[str, str]] = []
     partial_days: dict[str, frozenset[str]] = {}
     names_in_order = tuple(name for name, _ in readers)
@@ -378,6 +392,8 @@ def _capture_host_usage(
             dropped.append((name, reason))
             continue
         contributed.append(name)
+        if not result.hosts:
+            empty.append(name)
         if result.partial_days:
             partial_days[name] = frozenset(result.partial_days)
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
@@ -389,6 +405,7 @@ def _capture_host_usage(
             tokens_by_day=merged_by_day,
             partial_days=dict(partial_days),
             partial=_canonical_partial(names_in_order, partial_days),
+            empty=_canonical_empty(names_in_order, empty),
         )
     first_reader, first_reason = dropped[0]
     return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
@@ -439,6 +456,15 @@ def _canonical_partial(
     return tuple(name for name in names_in_order if name in partial_days)
 
 
+def _canonical_empty(
+    names_in_order: Sequence[str],
+    empty_names: list[str],
+) -> tuple[str, ...]:
+    """Rebuild the empty-contributor reader list in ``readers`` order."""
+    empty_set = set(empty_names)
+    return tuple(name for name in names_in_order if name in empty_set)
+
+
 def _merge_warm_retry_capture(
     initial: HostUsageCapture,
     retry: HostUsageCapture,
@@ -476,6 +502,7 @@ def _merge_warm_retry_capture(
     )
     partial_days = _merge_partial_days(initial.partial_days, retry.partial_days)
     partial = _canonical_partial(names_in_order, partial_days)
+    empty = _canonical_empty(names_in_order, list(initial.empty) + list(retry.empty))
 
     if initial.complete or retry.complete:
         return HostUsageCapture(
@@ -486,6 +513,7 @@ def _merge_warm_retry_capture(
             tokens_by_day=merged_by_day,
             partial_days=partial_days,
             partial=partial,
+            empty=empty,
         )
     if dropped:
         first_reader, first_reason = dropped[0]
@@ -550,15 +578,77 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
         # Only an attended capture warms; serialization may exceed the budget.
         budget = f"{host_usage.DEFAULT_READ_BUDGET_S:.0f}"
         return (
-            f"{phrase}. The {reader} cache is still warming. Run `mm push` "
-            f"interactively when it uploads a change, or `mm recapture 1d`, to warm it "
+            f"{phrase}. The {reader} cache is still warming. Run `mm push --capture-usage` "
+            f"to warm it "
             f"(about {budget} s of scanning per cold reader, not a hard ceiling). "
             "`mm diag` shows how much is left."
         )
-    return (
-        f"{phrase}. The next push that uploads a change retries; "
-        "`mm diag` shows the reader's state."
+    return f"{phrase}. Run `mm push --capture-usage` to retry; `mm diag` shows the reader's state."
+
+
+def _capture_host_snapshot(
+    device_id: str,
+    host_readers: Sequence[tuple[str, HostReader]],
+    *,
+    host_budget_ms: int,
+    warm_host_cache: Callable[[str], bool] | None = None,
+) -> tuple[HostUsageCapture, list[dict]]:
+    """One bounded sweep, one warm/retry, at most one row. No writes.
+
+    tail ─────┐
+    backfill ─┼─> shared event capture ─> this helper
+    push --capture-usage ──────────────> this helper
+
+    Wrappers own notices and persistence; autopush supplies no warm callback.
+    """
+    host_capture = _capture_host_usage(
+        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
     )
+    if not host_capture.invoked and host_capture.reason == "deadline":
+        # No reader ran: declare every omission so a failed warm cannot vanish
+        # when a sibling's retry succeeds. Non-warmable readers stay declared.
+        host_capture = HostUsageCapture(
+            None,
+            host_capture.reader,
+            "deadline",
+            dropped=tuple((name, "deadline") for name, _ in host_readers),
+            invoked=False,
+        )
+    deadline_names = {name for name, reason in host_capture.dropped if reason == "deadline"}
+    if warm_host_cache is not None:
+        # Warm every eligible miss in reader order. Only completed warms get
+        # retried; each retry has its OWN full bounded deadline. The exact
+        # singleton retry set preserves every other reader's first outcome.
+        warmed: list[tuple[str, HostReader]] = []
+        for name, read in host_readers:
+            if name not in deadline_names or name not in WARMABLE_HOST_READERS:
+                continue
+            if warm_host_cache(name):
+                warmed.append((name, read))
+        for name, read in warmed:
+            retry_capture = _capture_host_usage(
+                ((name, read),), deadline=time.monotonic() + host_budget_ms / 1000.0
+            )
+            host_capture = _merge_warm_retry_capture(
+                host_capture,
+                retry_capture,
+                readers=host_readers,
+                retried_names={name},
+            )
+    host_rows: list[dict] = []
+    if host_capture.hosts is not None:
+        host_rows.append(
+            events.make_host_usage_snapshot(
+                device=device_id,
+                hosts=host_capture.hosts,
+                token_sources=host_capture.token_sources,
+                degraded_sources=tuple(name for name, _ in host_capture.dropped),
+                tokens_by_day=host_capture.tokens_by_day or {},
+                partial_days=host_capture.partial_days,
+            )
+        )
+
+    return host_capture, host_rows
 
 
 def _capture_event_snapshots(
@@ -574,6 +664,7 @@ def _capture_event_snapshots(
     host_budget_ms: int | None = None,
     git_budget_ms: int | None = None,
     warm_host_cache: Callable[[str], bool] | None = None,
+    suppress_host_capture: bool = False,
 ) -> CaptureResult:
     """Capture device-stamped git, session, and host snapshot rows without writing.
 
@@ -658,52 +749,16 @@ def _capture_event_snapshots(
     # notice, and reusing `deadline` would silently spend whatever the walk
     # left over (usually nothing on a busy machine, so the row would vanish
     # exactly when it is most interesting).
-    host_capture = _capture_host_usage(
-        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+    host_capture, host_rows = (
+        (HostUsageCapture({}), [])
+        if suppress_host_capture
+        else _capture_host_snapshot(
+            device_id,
+            host_readers,
+            host_budget_ms=host_budget_ms,
+            warm_host_cache=warm_host_cache,
+        )
     )
-    if not host_capture.invoked and host_capture.reason == "deadline":
-        # No reader ran: declare every omission so a failed warm cannot vanish
-        # when a sibling's retry succeeds. Non-warmable readers stay declared.
-        host_capture = HostUsageCapture(
-            None,
-            host_capture.reader,
-            "deadline",
-            dropped=tuple((name, "deadline") for name, _ in host_readers),
-            invoked=False,
-        )
-    deadline_names = {name for name, reason in host_capture.dropped if reason == "deadline"}
-    if warm_host_cache is not None:
-        # Warm every eligible miss in reader order. Only completed warms get
-        # retried; each retry has its OWN full bounded deadline. The exact
-        # singleton retry set preserves every other reader's first outcome.
-        warmed: list[tuple[str, HostReader]] = []
-        for name, read in host_readers:
-            if name not in deadline_names or name not in WARMABLE_HOST_READERS:
-                continue
-            if warm_host_cache(name):
-                warmed.append((name, read))
-        for name, read in warmed:
-            retry_capture = _capture_host_usage(
-                ((name, read),), deadline=time.monotonic() + host_budget_ms / 1000.0
-            )
-            host_capture = _merge_warm_retry_capture(
-                host_capture,
-                retry_capture,
-                readers=host_readers,
-                retried_names={name},
-            )
-    host_rows: list[dict] = []
-    if host_capture.hosts is not None:
-        host_rows.append(
-            events.make_host_usage_snapshot(
-                device=device_id,
-                hosts=host_capture.hosts,
-                token_sources=host_capture.token_sources,
-                degraded_sources=tuple(name for name, _ in host_capture.dropped),
-                tokens_by_day=host_capture.tokens_by_day or {},
-                partial_days=host_capture.partial_days,
-            )
-        )
 
     return CaptureResult(
         git_rows=git_rows,
@@ -770,6 +825,7 @@ def _run_events_tail(
     *,
     dry_run: bool,
     quiet: bool,
+    suppress_host_capture: bool = False,
 ) -> list[str]:
     """Capture per-push fleet-retro events at the HEAD of ``_push_core``.
 
@@ -800,6 +856,10 @@ def _run_events_tail(
 
     Forensic-only invariant: any failure in this block is swallowed and
     breadcrumbed via ``mm: notice:``. The push proceeds.
+    Track 61A's explicit flag captures first through ``_capture_host_snapshot``
+    with strict append, then suppresses this tail's host capture and mm-push
+    row. Bare no-op pushes still do zero host work; the flag never advances
+    the Git cursor or adds a retro push count.
     """
     degradations: list[str] = []
     if dry_run:
@@ -852,6 +912,7 @@ def _run_events_tail(
             # cold corpus instead converges across pushes, because an aborted
             # scan now keeps its per-file progress.
             warm_host_cache=None if quiet else _warm_host_cache_with_notice,
+            suppress_host_capture=suppress_host_capture,
             prepare_token_cache=prepare_tail_token_cache,
             host_readers=_default_host_readers(
                 sources, grok_consented=grok_host_usage_enabled(config)
@@ -891,7 +952,12 @@ def _run_events_tail(
         events.write_push_event(
             events_dir,
             device_id,
-            [*capture.git_rows, *capture.session_rows, *capture.host_rows, mm_event],
+            [
+                *capture.git_rows,
+                *capture.session_rows,
+                *capture.host_rows,
+                *([] if suppress_host_capture else [mm_event]),
+            ],
         )
 
         if cursor.held:

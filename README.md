@@ -125,7 +125,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
-- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery gets a small independent time budget; if it expires, autopush records a `degraded` breadcrumb and prints `mm: notice: git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`. The detail is deliberately generic: it never exposes local paths or probe errors. Do not retry an empty push—the events tail intentionally runs only after a substantive sync change. A later ordinary push does **not** recapture the omitted interval; `mm recapture 30d` on the Mac that owns the repositories does. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does **not** mean fleet retro received a new activity event.
+- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery gets a small independent time budget; if it expires, autopush records a `degraded` breadcrumb and prints `mm: notice: git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`. The detail is deliberately generic: it never exposes local paths or probe errors. For Git recovery, do not retry a bare empty push—the events tail runs after a substantive sync change. For host usage, run mm push --capture-usage. A later ordinary push does **not** recapture the omitted interval; `mm recapture 30d` on the Mac that owns the repositories does. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does **not** mean fleet retro received a new activity event.
 - **Auto-upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag and emit a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr if you're behind. `mm` never invokes pipx itself; you run the printed command. The command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which plain `pipx upgrade mind-meld` works (see [Upgrading](#upgrading)). Disable with `--no-check-version` for one invocation, or set `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml` to disable persistently. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the nudge fires before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex Integration
@@ -150,9 +150,9 @@ To verify Codex usage capture on an initialized Mac with Codex logs and the
 `mm-events` source enabled:
 
 1. `mm enable-source codex`
-2. Run an interactive `mm push` after a real customization or other synced
-   file changes. A push with nothing to upload does not read host usage.
-3. Run `mm diag`. After a complete read, expect these lines:
+2. Run `mm push --capture-usage`, including on a Mac with no synced changes.
+3. Run `mm status`: expect a recent host capture, Codex contributed, and
+   `Publication: published`. `mm diag` separately describes the cache:
 
    ```text
    codex cache inventory:   ready
@@ -160,8 +160,8 @@ To verify Codex usage capture on an initialized Mac with Codex logs and the
    ```
 
 `ready` describes cached rollout inventory; `none` means no known standing
-read blocker. Neither proves a snapshot was published. `mm status` stays quiet
-about healthy Codex capture. For a blocker, see
+read blocker. Neither proves a snapshot was published. The device-wide capture
+and publication lines in `mm status` provide that evidence. For a blocker, see
 [Host usage capture](#host-usage-capture-codex-and-grok).
 
 ### Grok usage in fleet retro
@@ -171,21 +171,22 @@ about healthy Codex capture. For a blocker, see
 Upgrade is per Mac, and **upgrading is not enough**. On each Mac:
 
 1. `mm enable-source grok`
-2. Run **`mm recapture 1d`** to refresh usage on a converged Mac, or an attended `mm push` that uploads a change. Recapture is a bridge through git recovery: it requires discovered git roots and an enabled, resolved `mm-events` source; it exits 1 on zero roots and 4 on partial git recovery. Inspect `mm diag` and configure `[retro].repo_roots` if discovery has no roots. A no-op push does not capture usage. Each cold reader may print `mm: warming grok usage cache (about 5 s of scanning)...`; scanning is cooperative, not a hard ceiling. Autopush never warms and can converge over several substantive pushes.
-3. Verify **publication from a second Mac**. A prior successful scan or `grok usage read blocker: none` only describes the local cache; neither proves publication. Replace `<id>` below with the producing Mac's device id:
+2. Run **`mm push --capture-usage`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. Each cold reader may print `mm: warming grok usage cache (about 5 s of scanning)...`; scanning is cooperative, not a hard ceiling. Autopush never warms.
+3. Verify on the **producing Mac** with `mm status`: a recent recorded capture, Grok contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `grok usage read blocker: none` describes only the cache.
+4. Optionally verify end to end from a **second Mac** after iCloud delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
 
 ```sh
 mm pull
-mm retro-fleet 7d --dump-host-usage | jq '.by_device["<id>"] | {as_of, consulted, degraded}'
+mm devices --format=json
+mm retro-fleet 7d --dump-host-usage | jq '.by_device["<id>"] | {as_of, consulted, partial, degraded}'
 mm retro-fleet 7d --dump-host-usage | jq '[.by_device["<id>"].tokens_by_day[]?.by_model | keys[]] | unique'
 mm retro-fleet 7d
 ```
 
-Expected: a new `as_of`, `"grok"` in `consulted`, Grok absent from `degraded`, and `"grok-4.6-build"` in the model list with nonzero counters in `tokens_by_day`. For example:
+Expected: a new `as_of`, the enabled readers in `consulted`, and their actual workload's models in the model list when usage exists. A completed empty scan is valid; no fixed model id or nonzero counter is required. Readers in `partial` contributed usable but incomplete totals; readers in `degraded` contributed nothing. For example:
 
 ```json
-{"as_of": "2026-09-11T12:00:00+00:00", "consulted": ["codex", "grok"], "degraded": []}
-["gpt-6-astra", "grok-4.6-build"]
+{"as_of": "2026-09-15T12:00:00+00:00", "consulted": ["codex", "grok"], "partial": [], "degraded": []}
 ```
 
 The retro should name Grok's inherent pricing floor. After the next real capture, repeat the second-Mac check: `as_of` must advance with Grok still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
@@ -213,12 +214,13 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Push with verbose output |
 | `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
+| `mm push --capture-usage` | Refresh and publish host usage even with no content changes. Exit 0: captured row accepted; 4: capture absent or unpublished while content sync was otherwise fine; 1: stopped before acceptance; 2: incompatible `--dry-run` |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
 | `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h. Prints one extra line when a `retro-fleet` skill link is broken |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
@@ -552,9 +554,9 @@ Use the real path from your filesystem: displayed nonprintable characters are vi
 
 `Pull interrupted; completed changes were kept.` means an interrupt or unexpected error stopped the batch. Run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
 
-**Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm`, `mm --version`, `mm diag`, and an interactive `mm push`. If `mm status` or `mm diag` shows an incomplete git capture, recover on that Mac with `mm recapture 30d`, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
+**Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm`, `mm --version`, `mm diag`, and `mm push --capture-usage`. If `mm status` or `mm diag` shows an incomplete git capture, recover on that Mac with `mm recapture 30d`, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 
-**Why is my host cost missing (`—` on the economics table)?** That Mac reported token counters in an older format (mm < v0.12.52), has not pushed per-model `tokens_by_day` yet (mm < v0.12.49), or its latest snapshot predates the requested window. On **that** Mac: `pipx upgrade mind-meld`, then an interactive `mm push`. Confirm with `mm diag` (Host usage block). Then re-run `mm retro-fleet 30d` here. An upgraded peer's retained 90 days generally **do** become priceable on repush. `—` is unavailable, not zero; do not add the other machines' figures to fill it in.
+**Why is my host cost missing (`—` on the economics table)?** That Mac reported token counters in an older format (mm < v0.12.52), has not pushed per-model `tokens_by_day` yet (mm < v0.12.49), or its latest snapshot predates the requested window. On **that** Mac: `pipx upgrade mind-meld`, then `mm push --capture-usage`. Confirm capture and publication with `mm status`. Then re-run `mm retro-fleet 30d` here. An upgraded peer's retained 90 days generally **do** become priceable on repush. `—` is unavailable, not zero; do not add the other machines' figures to fill it in.
 
 **I enabled Grok, but no Grok activity appears.** Check the standing blocker
 and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture-codex-and-grok).
@@ -572,7 +574,7 @@ Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache succes
 
 **`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.55. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` opencode block and records the name in `disabled_sources` so that push does not mint deletion tombstones. mm also removes the `~/.config/opencode/skills/retro-fleet` link it created (v0.13.0); a link you made yourself is left alone. To keep syncing that directory, give the source a name mm does not own — `[[sync.sources]]` accepts any name, so `name = "opencode-local"` with the same `path` and `include_dirs` syncs it as an ordinary generic source today, unchanged.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -586,7 +588,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means some content did not arrive — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). Corrupt peers or unknown sources also leave content incomplete; fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, run `mm diag`, then `mm recapture 30d` on that Mac — a later ordinary push does not recapture the omitted interval.
 
-**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then `mm recapture 30d` (or `mm push` to capture going forward). Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo Claude Code has no session for, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
+**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then `mm recapture 30d` (ordinary substantive pushes capture going forward; `mm push --capture-usage` refreshes host usage). Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo Claude Code has no session for, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
 **`mm push` prints `events tail budget exceeded`.** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 
@@ -662,11 +664,45 @@ claim to repair historical attribution.
 ### Host usage capture (Codex and Grok)
 
 If Codex totals stopped appearing, or Grok is enabled but absent from the
-retro, run `mm status` and `mm diag` on the Mac that owns the logs. Status
-shows any standing read blocker before rebuilding or warming advice. Codex
-is quiet when healthy and when its source is disabled. Grok reports its
-standing blocker, otherwise whether a prior scan completed; a disabled Grok
-source can still have the older usage-only consent bit enabled.
+retro, upgrade the **producing Mac**, run `mm push --capture-usage`, then
+`mm status`. It shows the last recorded capture's timestamp and age, each
+consented reader's coverage, and publication evidence, before the cache lines.
+`mm diag --json` exposes the same facts under `host_publication`, without
+token magnitudes, models, or host payloads. Grok's disabled source can still
+have the older usage-only consent bit enabled.
+
+The flag refreshes usage even when ordinary push would have nothing to upload.
+It performs one bounded capture and at most one warm/retry per cold reader,
+under the mm lock. Another autopush may silently skip while that lock is held.
+It writes at most one host row and no `mm-push` row, so refreshes do not inflate
+retro push counts or advance the Git cursor. `mm recapture 30d` recovers Git
+history; `mm push --capture-usage` refreshes host usage. Run both for both jobs.
+
+For example, the capture-specific output of a completed empty Codex scan is:
+
+```text
+Usage capture: codex — completed, no usage
+Host usage published (manifest accepted).
+```
+
+Exit 0 means the row's file revision is in the accepted manifest, including
+partial coverage or a completed scan with no usage. Exit 4 means no row was
+written, an append failed, or the row was not included while content sync was
+otherwise fine. Exclusions, `include_dirs`, and `max_file_size` are preserved;
+the command explains which setting prevents publication. Exit 1 means the
+push stopped before manifest acceptance; exit 2 rejects `--capture-usage`
+with `--dry-run`. Maintenance errors after acceptance are reported separately.
+Enable `mm-events` with `mm enable-source mm-events`; enable a reader with
+`mm enable-source codex` / `mm enable-source grok`, or Grok's usage-only
+`[retro] grok_host_usage = true` setting. Missing custom roots must be restored.
+
+“Last recorded capture” is not “latest attempt”: a failed attempt may write no
+row, so the latter is explicitly unknown. Publication is proven only when the
+recorded file revision matches the local accepted-manifest sidecar; otherwise
+it is unknown. An absent retained row means “no capture in the last 90 days”,
+not “never published”. An unreadable event file means unknown. Reader coverage
+is contributed, partial, degraded, or absent; a contributed empty scan is
+healthy. A capture at least one day old gets a refresh reminder in status.
 
 Diag separates `<reader> cache inventory:` from `<reader> usage read blocker:`.
 A readable cache with no known blocker says `none`; a blocker can appear beside
@@ -679,16 +715,23 @@ Older undated blockers gain a date when this version first observes them.
 | Reason | Meaning | Remedy |
 |---|---|---|
 | `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `pipx upgrade mind-meld`, or `mm disable-source codex` / `mm disable-source grok` to stop the corresponding source reader. A retry alone cannot fix it. |
-| `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then retry on a substantive push. If it persists, report the mm version and Host usage diag block. |
-| `io_error` | A host log could not be read. | Restore read access and retry on a substantive push. |
-| `stale` | A file changed while it was being read. | Let the host finish writing and retry on a substantive push. |
-| `partial` | A final record is unfinished. | Let the host finish the record. The next push that uploads a change retries; `mm diag` shows the reader's state. |
-| `deadline` | The read exceeded its budget. | Run an attended `mm push` that uploads a change, or `mm recapture 1d` with its [prerequisites](#grok-usage-in-fleet-retro), to warm each cold reader (about 5 s of scanning per reader, not a hard ceiling). `mm diag` shows ledger/rollout counts; large stores can need several captures. |
+| `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push --capture-usage`. If it persists, report the mm version and Host usage diag block. |
+| `io_error` | A host log could not be read. | Restore read access, then `mm push --capture-usage`. |
+| `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push --capture-usage`. |
+| `partial` | A final record is unfinished. | Let the host finish the record, then `mm push --capture-usage`; `mm diag` shows the reader's state. |
+| `deadline` | The read exceeded its budget. | Run `mm push --capture-usage` to warm each cold reader (about 5 s of scanning per reader, not a hard ceiling). `mm diag` shows ledger/rollout counts; large stores can need several captures. |
 
-The next push that uploads a change retries; `mm diag` shows the reader's
-state. A no-op `mm push` or `mm autopush` does not re-read usage, including
-after upgrading. Wait for a real synced change; do not edit meaningful data
-just to force capture. Orchestration failures (`unavailable`, or expiry
+Run `mm push --capture-usage` to refresh now; repeat it if a bounded warm
+needs another pass. There is no read-budget override. A warm Codex read measured
+~186 ms for 752 rollouts against autopush's 250 ms budget, with headroom running
+out around 900–1,000 rollouts. Warming helps ordinary substantive pushes, but
+does not guarantee continuing publication on a larger corpus. A later autopush
+snapshot replaces the whole device snapshot, so it can supersede this capture
+with a reader missing; status shows that latest coverage. Fleet retros aggregate
+a staleness note for devices whose last snapshot predates the requested window.
+Bare no-op `mm push` and `mm autopush` still do not re-read usage, even after
+upgrading. The flag is the deliberate exception; no automatic refresh was added.
+Orchestration failures (`unavailable`, or expiry
 before a reader was invoked) stay on push stderr and the autorun breadcrumb;
 they cannot be recorded by a reader that never ran. A no-op autopush may
 replace that breadcrumb with `success` while the standing reader blocker

@@ -44,6 +44,35 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review] Distinguish explicitly requested host captures on the wire
+
+- **Why:** Track 61A shares the existing host snapshot schema. An `origin` field
+  could distinguish flag-driven captures, but needs its own producer/consumer
+  justification rather than being inferred from timestamps or push counts.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 61A approved eng review; no wire change in this Track.
+
+### [plan-devex-review] Host read-budget override
+
+- **Why:** Warm capture can outgrow the autopush read budget. Extend the existing
+  proposal in `docs/roadmap-future.md` (“Make the host-usage read budget
+  configurable”, originally line 47); do not create a competing design.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Track 61A documents the ~900–1,000 Codex-rollout ceiling. Explicit
+  capture/retry is the current remedy; no override is implemented here.
+
+### [plan-eng-review] Audit forensic append callers for silent-write assumptions
+
+- **Why:** `flock_append_jsonl` intentionally ignores write failures by default.
+  Track 61A requests strict outcomes only for its user-requested capture. Audit
+  the other callers for success claims that actually require a written row.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 61A strict append gate; preserve best-effort forensic callers
+  unless an explicit caller contract requires otherwise.
+
 ### [ship:severity=informational] Reconcile docs/ROADMAP.md for Track 59A + 60A
 
 - **Why:** the plan completion audit for PR #177 found all 28 implementation
@@ -133,6 +162,169 @@ here by hand, use the H3 form.
   separate proposal for.
 - **Effort:** M
 - **Priority:** P3
+
+### [ship:severity=informational] Per-reader "completed, no usage" is whole-row-scoped on the mm status/diag read path
+
+- **Why:** `/ship`'s pre-landing review found the SAME bug shape in two places. The
+  live-push console print (`cli.py:_push_captured_usage`) originally checked
+  whole-capture `capture.hosts` truthiness instead of the specific reader's own
+  contribution, so a reader that itself completed with zero usage inherited
+  "contributed" whenever a sibling reader in the same sweep had real data.
+  A first fix (`name not in capture.hosts`) was caught by a LATER adversarial
+  pass as its own bug: `host_family()` classifies by model-id prefix, not
+  reader identity ("a reader is not a row of its own" — its own docstring),
+  so a model id it doesn't recognize (e.g. a real OpenAI id like
+  `codex-mini-latest`, which matches none of `gpt-`/`o1`/`o3`/`o4-`) lands a
+  genuine contribution under family `"other"` instead of `"codex"`, which
+  `name not in capture.hosts` would then mislabel as empty — trading a narrow
+  bug for a more-reachable one. The ACTUAL fix landed in this PR instead:
+  `HostUsageCapture` gained a reader-identity-scoped `empty: tuple[str, ...]`
+  field, recorded in `_capture_host_usage` from each reader's own
+  `result.hosts` BEFORE the family-keyed merge (mirroring the existing
+  `partial` field's exact pattern), so it never depends on family-key-equals-
+  reader-name. Pinned by
+  `test_empty_is_reader_identity_scoped_not_family_key_scoped`
+  (`tests/test_host_usage_snapshot.py`) and
+  `test_capture_outcome_labels_each_reader_independently`
+  (`tests/test_integration.py`).
+  The SECOND instance is still NOT fixed: `mm status`/`mm diag`'s
+  "; completed, no usage" suffix (`cli.py:_print_host_publication`,
+  `state.get("empty")`) is fed by a single row-level `"empty"` boolean
+  (`aggregator.py:local_host_capture_candidate`, `"empty": not
+  row.lifetime_by_family`) applied uniformly to every reader tagged
+  "contributed" — the same original blind spot, on the persisted-row read
+  path, and it must NOT be fixed the same wrong way this TODO's first
+  attempt was (do not key off `row.lifetime_by_family` membership by name).
+- **Hypothesis (untested):** the live-push fix now computes the correct
+  reader-identity-scoped signal (`capture.empty`) at capture time — thread
+  THAT into the wire row instead of re-deriving anything from
+  `lifetime_by_family` after the fact. `make_host_usage_snapshot` would gain
+  an `empty` (or `empty_readers`) field written from `capture.empty` (already
+  in canonical reader-name form), and `local_host_capture_candidate` /
+  `project_host_publication` / `cli._print_host_publication` would read that
+  field directly instead of computing anything from family-key membership.
+  Must stay allowlist-safe (coverage/booleans only, never raw token payload —
+  see the adapter's existing "never the host token payload" docstring rule)
+  and handle a row already synced from an older Mac that lacks the new key
+  (graceful "unknown," not a crash or a silent wrong label).
+- **Effort:** M
+- **Priority:** P2
+- **Context:** PR #178 (Track 61A) pre-landing review: checklist +
+  maintainability + plan-completion-audit specialists converged independently
+  on the live-push instance; maintainability additionally traced this second,
+  still-unfixed instance; a later fresh-context adversarial pass caught that
+  the first attempted fix for the live-push instance was itself wrong and
+  named the correct (reader-identity-at-capture-time) mechanism, now applied
+  there. Deferred rather than also threading a new wire field through
+  events.py + aggregator.py + cli.py and reasoning through mixed-fleet
+  backward compatibility during `/ship`.
+
+### [ship:severity=informational] Five smaller mm push --capture-usage rough edges from adversarial review
+
+- **Why:** A fresh-context adversarial pass on PR #178 (Track 61A) found five
+  more real but lower-severity gaps in the new `--capture-usage` flag, each
+  verified against the actual code (not taken on the reviewer's word) but
+  judged too narrow or too design-entangled to fix inline during `/ship`:
+  1. **Exit 4 silently means content did not sync either**, contradicting
+     CLAUDE.md's and README's own wording. `_push_captured_usage` raises
+     `typer.Exit(4)` on "no row written" / append failure BEFORE calling
+     `_push_core` — so nothing pushed, not just the capture. This is a
+     confirmed-intentional design boundary (`test_requested_capture_failure_never_calls_push`
+     pins it), but the printed remedy and both docs read as if content sync
+     happened regardless. Minimum fix: add "Content was not pushed; run mm
+     push" to both pre-push exit-4 branches in `cli.py:_push_captured_usage`
+     and correct the two docs.
+  2. **`mm status`/`mm diag` can recommend `mm push --capture-usage` in a
+     configuration where that exact command hard-refuses**: `_host_publication`
+     builds `state["readers"]` from `_default_host_readers` (gated only on
+     codex/grok being enabled), independent of whether `mm-events` itself is
+     a selected source, so a codex-enabled + mm-events-disabled machine gets
+     the nag but the flag immediately exits 1 with "Usage capture requires
+     mm-events." Self-correcting (that refusal message names the real fix),
+     but one avoidable failed command. `cli.py:_print_host_publication`
+     (~line 5954) / `_host_publication`.
+  3. **`_iter_mm_push_objs`'s cursor walk now hashes every day file it opens
+     even when the result (a discarded throwaway `EventScan` + empty revision
+     dict) is never used** — `events.py:_iter_mm_push_objs`, rerouted through
+     `_iter_typed_objs` in this diff. Gate the digest/`scan.hashes` write on
+     `revision is not None`. Low cost today (1-2 files on a healthy machine)
+     but scales with how far back `resolve_push_cursor` must walk.
+  4. **An unreadable OLDER day file cannot mark a host-usage-snapshot row
+     uncertain**, unlike `mm-push` rows: `latest_event_rows` only adds a type
+     to `uncertain_types` when the failing file has no winner yet or won in
+     it, which is filename-order-sound for `mm-push`'s `(-delta, index)` key
+     but not for host rows, whose winner is chosen by `row.as_of` (fleet
+     timestamp) via `local_host_capture_candidate` — a clock correction,
+     restored backup, or merged peer copy of `<device>-<day>.jsonl` could let
+     an older FILE legitimately outrank a newer one, silently skipping the
+     failing file's uncertainty. `events.py:latest_event_rows`.
+  5. **`EventScan.cached_hash` calls `Path.resolve()` for every file across
+     every source on `mm status`**, not just mm-events day files (the only
+     ones `scan.hashes` ever holds) — measured ~26ms/1077 files locally; a
+     wasted realpath call on effectively 100% of non-day-file lookups on a
+     large fleet Mac, and a `resolve()` failure there is swallowed by
+     `_record_file` as a generic "read error", silently dropping the file
+     from the status manifest. A `path.name` pre-check (or keying on the
+     unresolved path) avoids both. `manifest.py` / `cli.py`'s
+     `diagnostic_hash` lambda wiring.
+- **Effort:** S (each individually; #1 and #2 are text/doc-only)
+- **Priority:** P3
+- **Context:** PR #178 (Track 61A), same adversarial pass as the item above.
+  Two additional findings from that pass were evaluated and NOT carried
+  forward: a claim that `safe_str(typer.Exit(...))` renders empty was
+  directly falsified (`str(typer.Exit(1)) == "1"`, not empty); a claim that
+  `assert path is not None` is unsafe under `python -O` matches an existing,
+  accepted pattern (17 similar asserts already in `cli.py`) rather than a
+  regression introduced here. A THIRD (non-idempotent duplicate git/session
+  rows on repeated `--capture-usage` invocations, since it deliberately never
+  writes an `mm-push` row to advance the cursor) was initially dismissed here
+  as an accepted Approach C trade-off — **that dismissal was too quick.** A
+  separate Codex structured-review pass (`codex review --base main`, [P2])
+  sharpened it with a concrete, reachable harm: `events_tail.py:952-961`
+  never suppresses `capture.git_rows`/`capture.session_rows` under
+  `suppress_host_capture`, only the terminal `mm-push` row, so a repo-less
+  Mac's `--capture-usage` invocation still emits an unmarked `git-snapshot`
+  that `aggregator.py`'s `zero_repo_captures` counts toward "N of M pushes"
+  — the retro's own coverage-gap diagnostic gets polluted by invocations
+  that are not pushes by the feature's own stated definition ("a usage
+  refresh must not count as a push"). This is now judged a real gap in that
+  stated invariant, not just storage bloat, and deserves the SAME weight as
+  the item above (P2 follow-up design review), not a shrug. Two directions
+  named by the earlier Claude pass remain open: suppress git/session capture
+  under the flag too (making it a pure usage-only operation), or mark these
+  rows so `aggregate_git()` (and any other push-keyed consumer) excludes
+  them the same way retro push-count totals already do.
+
+### [ship] Investigate a claimed TOCTOU on the accepted-manifest digest check
+
+- **Why:** a Codex outside-adversarial pass on PR #178 (Track 61A) claimed
+  `events.py:recorded_row_revision` has a race: it confirms the requested row
+  is present in the day file via one read (`_iter_typed_objs`), then
+  independently re-opens and hashes the same file (`hash_file(path)`) for the
+  digest compared against the manifest's accepted `sha256`. Between those two
+  reads, the file could change. Codex's own severity read ("Fix before
+  merging... returned published=True for accepted contents {}") was NOT
+  independently reproduced against the real code path here — this ticket
+  records the claim plus a first analysis, not a confirmed bug.
+- **Analysis so far (needs a second pass, not acted on):** `_push_captured_usage`
+  runs "under the mm lock" and `record_acceptance` (the `on_manifest_accepted`
+  callback) fires synchronously right after upload, so mm's OWN processes
+  can't interleave a write here. The realistic race source is external (an
+  iCloud daemon replacing the local file with a peer's conflicting version in
+  that exact window). In the ordinary case a race would make the SECOND read
+  disagree with the manifest's already-fixed accepted digest, which fails
+  CLOSED (`capture_revision_in_manifest` returns `False`, i.e. "not
+  published" — the safe direction), not open. Whether Codex's fault injection
+  reflects a path actually reachable through the real CLI (versus calling the
+  internal functions directly with hand-crafted, not-otherwise-reachable
+  state) is the open question before this is worth a fix.
+- **Effort:** S to investigate further; unknown until reachability is settled
+- **Priority:** P3
+- **Context:** PR #178 (Track 61A), Codex outside-adversarial pass via
+  `/ship`. Not fixed inline: two prior fix attempts already landed in this
+  same `/ship` run (one of which a LATER adversarial pass caught as itself
+  wrong), and a concurrency fix attempted under the same time pressure
+  without settling reachability first risks a repeat of that pattern.
 
 
 ## Drain records

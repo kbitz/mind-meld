@@ -35,7 +35,7 @@ import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 
 from mind_meld.errors import ManifestError, SnapshotError, os_error_cause, snapshot_refusal
 
@@ -1053,6 +1053,7 @@ def _record_file(
     strict: bool = False,
     source_name: str | None = None,
     source_type: str | None = None,
+    diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Apply the per-file walker pipeline to `path` under `base`.
 
@@ -1109,7 +1110,9 @@ def _record_file(
         return None
 
     try:
-        sha = hash_file(path)
+        # Inspection can reuse an unchanged revision from its event scan.
+        # The strict publication branch above NEVER uses this callback.
+        sha = diagnostic_hash(path, file_stat) if diagnostic_hash else hash_file(path)
     except (PermissionError, OSError):
         if on_skip:
             on_skip(rel, "read error")
@@ -1382,6 +1385,7 @@ def walk_generic_source(
     on_skip: Any = None,
     *,
     strict: bool = False,
+    diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a generic source directory with configurable include_dirs/include_files.
 
@@ -1398,6 +1402,8 @@ def walk_generic_source(
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files.
         strict: Publishing scans refuse incomplete observations.
+        diagnostic_hash: Inspection-only hash reuse. Ignored when
+            strict=True; the publisher never consults it.
 
     Returns:
         Dict mapping relative paths (from base) to {sha256, size, mtime}.
@@ -1534,6 +1540,7 @@ def walk_generic_source(
             strict=strict,
             source_name=source_name,
             source_type="generic",
+            diagnostic_hash=diagnostic_hash,
         ):
             rel, info = result
             files[rel] = info
@@ -1547,6 +1554,7 @@ def walk_source(
     on_skip: Any = None,
     *,
     strict: bool = False,
+    diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     """Dispatch to the appropriate walker based on source type.
 
@@ -1558,6 +1566,8 @@ def walk_source(
         max_file_size: Skip files larger than this (bytes).
         on_skip: Optional callback(path, reason) for skipped files.
         strict: Publishing scans refuse incomplete observations.
+        diagnostic_hash: Inspection-only hash reuse. Ignored when
+            strict=True; the publisher never consults it.
 
     Returns:
         Tuple of (resolved_base_path_str, files_dict).
@@ -1577,7 +1587,13 @@ def walk_source(
     elif source_type == "grok":
         files = walk_grok_source(source_config, max_file_size, on_skip, strict=strict)
     elif source_type == "generic":
-        files = walk_generic_source(source_config, max_file_size, on_skip, strict=strict)
+        files = walk_generic_source(
+            source_config,
+            max_file_size,
+            on_skip,
+            strict=strict,
+            diagnostic_hash=diagnostic_hash,
+        )
     else:
         raise ManifestError(f"manifest: unknown source type '{source_type}'")
 
@@ -1592,6 +1608,7 @@ def build_manifest_v2(
     on_skip: Any = None,
     *,
     strict: bool = False,
+    diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
 ) -> dict[str, Any]:
     """Build a v2 manifest with multiple sources.
 
@@ -1603,6 +1620,8 @@ def build_manifest_v2(
         max_file_size: Skip files larger than this (bytes).
         on_skip: Optional callback(path, reason) for skipped files.
         strict: Publishing scans refuse incomplete observations.
+        diagnostic_hash: Inspection-only hash reuse. Ignored when
+            strict=True; the publisher never consults it.
 
     Returns:
         v2 manifest dict with a "sources" dict keyed by source name.
@@ -1611,7 +1630,13 @@ def build_manifest_v2(
 
     for src_cfg in sources_configs:
         name = src_cfg["name"]
-        base_path, files = walk_source(src_cfg, max_file_size, on_skip, strict=strict)
+        base_path, files = walk_source(
+            src_cfg,
+            max_file_size,
+            on_skip,
+            strict=strict,
+            diagnostic_hash=diagnostic_hash,
+        )
         sources[name] = {
             "base_path": base_path,
             "files": files,

@@ -322,6 +322,11 @@ lying.
 
 Known lines:
 
+- `Host-usage captures from <machines> predate this window (oldest <day> UTC)` —
+  one aggregated staleness class, not one note per machine. On the named
+  producing Macs run `mm push --capture-usage`, then `mm status`; pull again
+  on the rendering Mac. It refreshes usage without Git roots or content
+  changes. Do not infer zero spend from a stale capture.
 - `Fleet incomplete: N registered device(s) haven't pushed events in this
   window.` — activity may be incomplete from those peers.
 - `N unregistered device id(s) had events in this window (filtered out).` —
@@ -347,22 +352,22 @@ Known lines:
 - `Requested Nd window exceeds the 90-day events retention.` — user asked
   for a window longer than `EVENTS_RETENTION_DAYS`. Older days are reaped
   by `mm gc` and not in the data.
-- `No agent-log snapshots yet from N machine(s) — run mm push there…` —
+- `No agent-log snapshots yet from N machine(s) — run mm push --capture-usage there…` —
   no accepted host-usage snapshot on those machines. Unknown, not zero.
-- `No agent-log snapshots were accepted from any machine — run mm push on
+- `No agent-log snapshots were accepted from any machine — run mm push --capture-usage on
   each Mac…` — the device registry was unavailable so missing-device
   detection could not run; still unknown, not zero.
 - `No agent-log reader contributed on any machine…` — the row's contributor
   list is empty. That can mean no source is enabled, or that each selected
   reader had no attributable local ledger; it cannot distinguish the two.
-  Enable one of those sources if needed, then run `mm push`; do not report a
+  Enable one of those sources if needed, then run `mm push --capture-usage`; do not report a
   consent failure as a fact.
 - `No agent activity observed in this window. Counts are lower bounds…` —
   readers ran and found nothing dated inside the window. The bound is
   because a machine that has not pushed contributes no days, and a peer on
   an older mm still reports last-touch totals rather than per-turn ones.
   Report it as observed-nothing, not as zero usage.
-- `Agent-log snapshots all predate this window — run mm push…` — every
+- `Agent-log snapshots all predate this window — run mm push --capture-usage…` — every
   accepted snapshot is older than the window, so no current rhythm exists.
 - `N machine(s) have no agent-log snapshot (unknown, not zero)…` — those
   machines have not published one yet (pre-v0.12.32, or no push since).
@@ -388,12 +393,12 @@ Known lines:
   those models contribute to the token total but not the cost line. The ids
   are sanitized, sorted, and capped. Do not invent a rate for a named id.
 - Not available for `<device>`: that Mac runs an mm that reported token
-  counters in an older format. Run `pipx upgrade mind-meld` and `mm push`
+  counters in an older format. Run `pipx upgrade mind-meld` and `mm push --capture-usage`
   there, then re-run. — the economics row (and that machine's token columns)
   show `—`, never a number. Inclusive counters would be a ceiling up to ~2x
   high; do not treat `—` as zero and do not estimate the missing dollars.
 - API list-rate equivalent unavailable for `<device>`: its agent-log
-  snapshot predates this window. Run `mm push` on that Mac, then re-run. —
+  snapshot predates this window. Run `mm push --capture-usage` on that Mac, then re-run. —
   no observation exists inside the requested window, so the economics row
   shows `—`, never a confident `$0`.
 - API list-rate equivalent for `<device>` is a floor (>=): <causes>. —
