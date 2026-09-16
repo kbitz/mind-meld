@@ -13,6 +13,7 @@ All notable changes to Mind Meld will be documented in this file.
 - Publication success requires the requested row's file revision in the accepted manifest. Append errors, short writes, source exclusions and size limits cannot produce a false success. Post-publication maintenance failures are reported separately. `--dry-run` is incompatible; missing source/consent refusals name their remedies before Keychain access.
 - Status and diag use the fleet's acceptance and ordering rules, name read uncertainty, and keep cache state separate from publication. A later autopush can still supersede an attended snapshot; its missing reader coverage is visible.
 - `mm enable-source` now materializes default sources from an explicitly empty source list. `mm recapture` directs operators with cold or blocked host caches to the usage flag.
+- The per-reader capture line (`Usage capture: codex — contributed`, etc.) now labels each reader from its own contribution, not the whole sweep's — a reader with real data no longer risks a wrong "completed, no usage" label just because it classified under an unexpected model family. `mm reconfigure-sources` gets the same explicit-empty-sources fix `mm enable-source` already had. Fleet retro remediation text citing `mm push --capture-usage` now names that flag's own minimum version, not just the older host-snapshot schema floor. `mm status`/`mm diag` no longer crash on a malformed local sidecar file.
 
 ## [0.14.13] - 2026-09-15
 
