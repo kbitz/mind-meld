@@ -191,6 +191,19 @@ class HostUsageCapture:
     ``token_sources`` idiom. A naive concatenation produces duplicates,
     the acceptor drops the field, and the card silently renders nothing.
     """
+    empty: tuple[str, ...] = ()
+    """Canonical-order reader names in ``token_sources`` whose OWN result had
+    no usage this sweep.
+
+    Recorded from each reader's un-merged ``result.hosts`` in
+    ``_capture_host_usage``, never derived from family-key membership in the
+    merged ``hosts`` dict: ``host_family()`` classifies by MODEL ID PREFIX,
+    not reader identity ("a reader is not a row of its own"), so a model id
+    it does not recognize lands a real contribution under a different family
+    bucket than the reader's own name — ``name not in hosts`` would then
+    mislabel a genuinely contributing reader as empty. This field is immune
+    to that because it is captured before any family-keyed merge happens.
+    """
 
     @property
     def complete(self) -> bool:
@@ -346,6 +359,7 @@ def _capture_host_usage(
     merged: dict[str, dict[str, token_usage.Usage]] = {}
     merged_by_day: dict[str, token_usage.DayBucket] = {}
     contributed: list[str] = []
+    empty: list[str] = []
     dropped: list[tuple[str, str]] = []
     partial_days: dict[str, frozenset[str]] = {}
     names_in_order = tuple(name for name, _ in readers)
@@ -378,6 +392,8 @@ def _capture_host_usage(
             dropped.append((name, reason))
             continue
         contributed.append(name)
+        if not result.hosts:
+            empty.append(name)
         if result.partial_days:
             partial_days[name] = frozenset(result.partial_days)
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
@@ -389,6 +405,7 @@ def _capture_host_usage(
             tokens_by_day=merged_by_day,
             partial_days=dict(partial_days),
             partial=_canonical_partial(names_in_order, partial_days),
+            empty=_canonical_empty(names_in_order, empty),
         )
     first_reader, first_reason = dropped[0]
     return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
@@ -439,6 +456,15 @@ def _canonical_partial(
     return tuple(name for name in names_in_order if name in partial_days)
 
 
+def _canonical_empty(
+    names_in_order: Sequence[str],
+    empty_names: list[str],
+) -> tuple[str, ...]:
+    """Rebuild the empty-contributor reader list in ``readers`` order."""
+    empty_set = set(empty_names)
+    return tuple(name for name in names_in_order if name in empty_set)
+
+
 def _merge_warm_retry_capture(
     initial: HostUsageCapture,
     retry: HostUsageCapture,
@@ -476,6 +502,7 @@ def _merge_warm_retry_capture(
     )
     partial_days = _merge_partial_days(initial.partial_days, retry.partial_days)
     partial = _canonical_partial(names_in_order, partial_days)
+    empty = _canonical_empty(names_in_order, list(initial.empty) + list(retry.empty))
 
     if initial.complete or retry.complete:
         return HostUsageCapture(
@@ -486,6 +513,7 @@ def _merge_warm_retry_capture(
             tokens_by_day=merged_by_day,
             partial_days=partial_days,
             partial=partial,
+            empty=empty,
         )
     if dropped:
         first_reader, first_reason = dropped[0]

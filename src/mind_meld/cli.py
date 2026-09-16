@@ -3496,7 +3496,7 @@ def _push_captured_usage(
             else "partial"
             if name in capture.partial
             else "completed, no usage"
-            if name in capture.token_sources and name not in capture.hosts
+            if name in capture.empty
             else "contributed"
             if name in capture.token_sources
             else "absent (no metadata ledger)"

@@ -440,6 +440,32 @@ class TestAdditiveMerge:
             "other": {"d": _usage(1)},
         }
 
+    def test_empty_is_reader_identity_scoped_not_family_key_scoped(self):
+        """A reader that contributes real data under a family key OTHER than
+        its own name (e.g. an unrecognized model id landing in "other") must
+        not be mislabeled empty. `host_family()` classifies by model-id
+        prefix, not reader identity — "a reader is not a row of its own" —
+        so `name not in capture.hosts` is the wrong test; `.empty` is
+        recorded from each reader's own un-merged result before any
+        family-keyed merge happens, exactly to avoid this trap.
+        """
+        capture = events_tail._capture_host_usage(
+            deadline=1_000.0,
+            readers=_readers(
+                # A real contribution that lands under a family key ("other")
+                # that does not equal the reader's own name ("codex") — e.g.
+                # an OpenCode-era-style collision, or a model id host_family()
+                # doesn't recognize.
+                ("codex", lambda **_kw: _complete({"other": {"2026-08-15": _usage(5)}})),
+                ("grok", lambda **_kw: _complete()),
+            ),
+            now=lambda: 0.0,
+        )
+
+        assert "codex" not in capture.hosts
+        assert set(capture.token_sources) == {"codex", "grok"}
+        assert capture.empty == ("grok",)
+
     def test_merge_sums_same_model_across_readers(self):
         capture = events_tail._capture_host_usage(
             deadline=1_000.0,
