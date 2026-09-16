@@ -1665,6 +1665,22 @@ class TestLocalCaptureSelection61:
         assert scan.rows == {}
         assert scan.errors == []
 
+    def test_exists_probe_oserror_is_uncertain_not_a_crash(self, tmp_path, monkeypatch):
+        now = datetime.now(timezone.utc)
+        current = tmp_path / f"local-{now.date()}.jsonl"
+        real_exists = Path.exists
+
+        def exists(path):
+            if path == current:
+                raise PermissionError("denied")
+            return real_exists(path)
+
+        monkeypatch.setattr(Path, "exists", exists)
+        pub = events.project_host_publication(
+            self._scan(tmp_path, "local", now), ["codex"], None, now=now
+        )
+        assert pub["state"] == "unknown"
+
 
 class TestWritePushEvent:
     def test_append_round_trip(self, tmp_path):

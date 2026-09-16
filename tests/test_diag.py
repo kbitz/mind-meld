@@ -207,6 +207,7 @@ def test_status_opens_each_day_once_even_without_host_rows(tmp_path, monkeypatch
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     assert sorted(opened) == sorted(paths)
+    assert "Refresh on this Mac" not in result.output
 
 
 def test_diag_json_is_valid_json(tmp_path, monkeypatch):

@@ -1669,7 +1669,13 @@ def latest_event_rows(
     for delta in range(CURSOR_SCAN_DAYS + 1):
         day = now.date() - timedelta(days=delta)
         path = events_dir / f"{safe_device}-{day.isoformat()}.jsonl"
-        if path.exists() and not path.is_file():
+        try:
+            skip_non_file = path.exists() and not path.is_file()
+        except OSError:
+            scan.errors.append(str(path))
+            scan.uncertain_types.update(kind for kind in row_types if kind not in keys)
+            continue
+        if skip_non_file:
             continue
         revision: dict = {}
         winners: set[str] = set()

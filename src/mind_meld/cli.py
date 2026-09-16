@@ -5951,7 +5951,7 @@ def _print_host_publication(state: dict) -> None:
     console.print("    Latest attempt: unknown (no attempt receipt)")
     if state.get("coverage_invalid"):
         console.print("    Coverage metadata is inconsistent; reader completeness is unknown.")
-    if (
+    if state["readers"] and (
         state["state"] != "recorded"
         or (state.get("age_days") or 0) > 0
         or state.get("coverage_invalid")
