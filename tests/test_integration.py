@@ -4322,7 +4322,9 @@ def test_capture_refusals_precede_keychain(capture61, monkeypatch, case, code, r
     monkeypatch.setattr(cli_module, "_get_passphrase_or_exit", lambda: pytest.fail("Keychain"))
     result = runner.invoke(app, args)
     assert result.exit_code == code, result.output
-    flat = " ".join(result.output.split())
+    from mind_meld.safety import strip_terminal_escapes
+
+    flat = " ".join(strip_terminal_escapes(result.output).split())
     assert remedy in flat
     assert "#host-usage-capture" in flat or "#grok-usage-in-fleet-retro" in flat
     assert env["dayfile"].read_bytes() == before
