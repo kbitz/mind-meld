@@ -251,6 +251,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "skill_links",
         "host_skill_discovery",
         "host_usage",
+        "host_read_budgets",
         "host_publication",
         "discovery",
         "git_capture",
@@ -263,6 +264,9 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "usage_less_skipped",
         "last_reason",
         "last_reason_since",
+        "last_complete_ms",
+        "last_complete_at",
+        "last_deadline_allotted_ms",
         "cache_state",
         "model_count",
         "models",
@@ -282,6 +286,9 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "models",
         "last_reason",
         "last_reason_since",
+        "last_complete_ms",
+        "last_complete_at",
+        "last_deadline_allotted_ms",
     }
 
 
@@ -341,7 +348,7 @@ def test_diag_blocker_fields_are_validated_and_rendered(
     if expected_reason == "unsupported":
         assert "pipx upgrade mind-meld" in text
     if expected_reason == "deadline":
-        assert "about 5 s of scanning per cold reader, not a hard ceiling" in text
+        assert "Last read allowed unknown ms; last complete read unknown ms" in text
     if expected_since:
         assert "(first observed 2026-09-03 UTC)" in text
     else:
@@ -1109,3 +1116,155 @@ class TestDiagGitCapture:
         ver = payload["git_capture"]["recorded"]["mm_version"]
         assert "\x1b" not in ver
         assert len(ver) <= 128
+
+
+@pytest.mark.parametrize(
+    "case,total,margin",
+    [
+        ("both", 215, "35 ms spare"),
+        ("over", 268, "over by 18 ms"),
+        ("codex-only", 197, "53 ms spare"),
+        ("grok-only", 18, "232 ms spare"),
+        ("missing-read", None, "a reader has no complete read"),
+        ("none", None, "no reader enabled"),
+    ],
+)
+def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
+    tmp_path, monkeypatch, case, total, margin
+):
+    from datetime import datetime, timedelta, timezone
+
+    from mind_meld import cli, events_tail
+
+    _setup(tmp_path, monkeypatch)
+    config = load_config()
+    codex = tmp_path / "codex"
+    codex.mkdir()
+    config["sync"]["sources"] = (
+        [{"name": "codex", "path": str(codex), "type": "generic"}]
+        if case not in {"none", "grok-only"}
+        else []
+    )
+    config["retro"] = {
+        "grok_host_usage": case not in {"none", "codex-only"},
+        "host_usage_interactive_budget_ms": 500,
+    }
+    save_config(config)
+    at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds")
+    for reader, ms in (("codex", 250 if case == "over" else 197), ("grok", 18)):
+        path = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "files": {},
+                    "last_complete_ms": None if case == "missing-read" and reader == "grok" else ms,
+                    "last_complete_at": at,
+                    "last_reason": "deadline",
+                    "last_deadline_allotted_ms": 250,
+                }
+            )
+        )
+
+    def never_read(*args, **kwargs):
+        pytest.fail("diag must not read host logs")
+
+    monkeypatch.setattr(host_usage, "read_codex_usage", never_read)
+    monkeypatch.setattr(host_usage, "read_grok_usage", never_read)
+    selection = []
+    real_select = events_tail._default_host_readers
+
+    def select(*args, **kwargs):
+        result = real_select(*args, **kwargs)
+        selection.append(tuple(name for name, _ in result))
+        return result
+
+    monkeypatch.setattr(events_tail, "_default_host_readers", select)
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["host_read_budgets"] == {
+        "autopush_ms": 250,
+        "autopush_source": "default",
+        "interactive_ms": 500,
+        "interactive_source": "config",
+        "warm_ms": 5000,
+    }
+    assert tuple(payload["host_publication"]["readers"]) in selection
+    assert payload["host_usage"]["codex"]["last_complete_at"] == at
+    assert payload["host_usage"]["codex"]["last_deadline_allotted_ms"] == 250
+    line = cli._host_read_sweep_line(payload)
+    if total is None:
+        assert line == f"unknown ({margin})"
+    else:
+        assert line == (
+            f"{total} ms of the 250 ms autopush budget, {margin} "
+            "(excludes cache writes and the later-reader grace; not a publication check)"
+        )
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    plain = " ".join(result.output.split())
+    assert "host read budgets: autopush 250 ms (default) · interactive 500 ms (config)" in plain
+    assert "host read sweep estimate: " + line in plain
+    if case != "over":
+        assert (
+            f"codex last complete read: scan 197 ms (excludes cache write), 3 h ago ({at})" in plain
+        )
+    assert "read it without that budget, then `mm diag`" not in plain
+    if case in {"both", "codex-only"}:
+        assert "Last read allowed 250 ms; last complete read 197 ms" in plain
+    elif case == "over":
+        assert "Last read allowed 250 ms; last complete read 250 ms" in plain
+    elif case == "grok-only":
+        assert "Last read allowed 250 ms; last complete read 18 ms" in plain
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_diag_unknown_host_read_budget_without_usable_config(tmp_path, monkeypatch, invalid):
+    _storage, cfg_path, _backend = _setup(tmp_path, monkeypatch, with_config=invalid)
+    if invalid:
+        config = load_config()
+        config["retro"] = {"host_usage_autopush_budget_ms": 99999}
+        save_config(config)
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["host_read_budgets"] == {
+        "autopush_ms": None,
+        "autopush_source": None,
+        "interactive_ms": None,
+        "interactive_source": None,
+        "warm_ms": 5000,
+    }
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    plain = " ".join(result.output.split())
+    assert "host read budgets: unknown (config unavailable)" in plain
+    assert "host read sweep estimate: unknown (config unavailable)" in plain
+    assert "codex last complete read: unknown" in plain
+    assert "grok last complete read: unknown" in plain
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize(
+    "timestamp", ["2999-01-01T00:00:00+00:00", "bad\nforged", "2026-09-17", None]
+)
+def test_diag_last_complete_read_future_and_invalid_dates(tmp_path, monkeypatch, reader, timestamp):
+    _setup(tmp_path, monkeypatch)
+    path = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"version": 1, "files": {}, "last_complete_ms": 197, "last_complete_at": timestamp}
+        )
+    )
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    plain = " ".join(result.output.split())
+    suffix = (
+        "in the future (2999-01-01T00:00:00+00:00)"
+        if timestamp and timestamp.startswith("2999")
+        else "unknown (unknown)"
+    )
+    assert f"{reader} last complete read: scan 197 ms (excludes cache write), {suffix}" in plain
+    assert "forged" not in plain

@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import gc
+import hashlib
 import json
 import os
+import random
 import shutil
 import time
 from datetime import datetime, timezone
@@ -22,6 +25,7 @@ import pytest
 from mind_meld import host_usage as hu
 from mind_meld import lockedjson
 from mind_meld import token_usage as tu
+from tests import _host_usage_oracle as oracle
 
 FIXTURES = Path(__file__).parent / "fixtures" / "host_sessions"
 
@@ -217,7 +221,7 @@ def test_migrated_reader_root_gains_first_observed_once(reader_case, since, monk
     _seed_blocker(cache, since=since)
     set_scan(hu._incomplete("unsupported"))
     carry = hu._carry_reason
-    monkeypatch.setattr(hu, "_carry_reason", lambda a, b, c, now: carry(a, b, c, _NOW))
+    monkeypatch.setattr(hu, "_carry_reason", lambda a, b, c, now, **kw: carry(a, b, c, _NOW, **kw))
     writer = Mock(wraps=lockedjson._write_json)
     monkeypatch.setattr(lockedjson, "_write_json", writer)
     assert read().reason == "unsupported"
@@ -428,7 +432,7 @@ def test_post_lock_expiry_records_deadline_once_without_scanning(reader_case, mo
             assert data["usage_less_skipped"] == 2
 
 
-def test_complete_then_expired_clears_blocker_and_keeps_cache(reader_case, monkeypatch):
+def test_complete_then_expired_records_deadline_and_keeps_cache(reader_case, monkeypatch):
     read, cache, diag, set_scan = reader_case
     _seed_blocker(cache)
     set_scan(hu.HostUsageResult({}, True), {"learned": {"no_ledger": True}}, True)
@@ -436,8 +440,8 @@ def test_complete_then_expired_clears_blocker_and_keeps_cache(reader_case, monke
     monkeypatch.setattr(hu, "_expired", lambda d: next(ticks))
     assert read().reason == "deadline"
     assert "learned" in json.loads(cache.read_text())["files"]
-    assert diag()["last_reason"] is None
-    assert diag()["last_reason_since"] is None
+    assert diag()["last_reason"] == "deadline"
+    assert diag()["last_reason_since"] != _OBSERVED
 
 
 @pytest.mark.parametrize("write_state", ["intact", "empty", "partial"])
@@ -452,7 +456,7 @@ def test_cache_write_failure_notices_and_preserves_scan_result(
     set_scan(result, {"learned": {"no_ledger": True}}, True)
     real_write = lockedjson._write_json
 
-    def fail_write(fd, data):
+    def fail_write(fd, data, **kwargs):
         if write_state != "intact":
             os.ftruncate(fd, 0)
             os.lseek(fd, 0, os.SEEK_SET)
@@ -482,10 +486,10 @@ def test_slow_commit_does_not_reclassify_completed_read(reader_case, monkeypatch
     expired = False
     real_write = lockedjson._write_json
 
-    def commit_after_deadline(fd, data):
+    def commit_after_deadline(fd, data, **kwargs):
         nonlocal expired
         expired = True
-        return real_write(fd, data)
+        return real_write(fd, data, **kwargs)
 
     monkeypatch.setattr(hu, "_expired", lambda d: expired)
     monkeypatch.setattr(lockedjson, "_write_json", commit_after_deadline)
@@ -1172,8 +1176,8 @@ class TestCacheLifecycle:
 
         assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
         files = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
-        assert hu.codex_usage_diag()["last_reason"] is None
-        assert hu.codex_usage_diag()["last_reason_since"] is None
+        assert hu.codex_usage_diag()["last_reason"] == "deadline"
+        assert hu.codex_usage_diag()["last_complete_ms"] is not None
         assert len(files) == 1, "a complete-but-overbudget scan must still keep its work"
 
         # ...and the work counts: the next in-budget scan re-parses nothing.
@@ -3347,3 +3351,428 @@ def test_census_1030_fixture_embodies_the_new_pin(isolated_adapter_caches):
     assert result.tokens_by_day["2026-09-14"]["by_model"]["grok-4.6-build"]["output"] == 6
     contract = (FIXTURES / "grok/CONTRACT.md").read_text()
     assert "not fixture provenance" in " ".join(contract.split())
+
+
+_ORACLE_RULE = (
+    "tests/_host_usage_oracle.py: frozen at v0.14.15/70abdee; do not edit; "
+    "on an intentional contract change delete and re-freeze from the new release"
+)
+
+
+def _ordered_reduction(module, entries):
+    try:
+        buckets = module._aggregate(entries)
+    except module._ReadFailure as exc:
+        return ("failure", exc.reason)
+    return (
+        "complete",
+        json.dumps([buckets.by_family, buckets.by_day, sorted(buckets.unattributable_days)]),
+    )
+
+
+def _oracle_entry(states, ino=1):
+    return {
+        "dev": 1,
+        "ino": ino,
+        "size": 100,
+        "mtime_ns": 1,
+        "head": "head",
+        "head_len": 100,
+        "tail": "tail",
+        "tail_len": 100,
+        "offset": 100,
+        "turn_ids": ["shared", "next", "unrelated"],
+        "days": ["2026-09-16", "2026-09-17"],
+        "models": ["gpt-5-codex", "grok-4", "claude-sonnet-4"],
+        "states": states,
+        "last_turn": "next",
+        "last_model": "gpt-5-codex",
+        "last_total": [40, 0, 10, 8],
+        "pending": [[[10, 0, 2, 1], "2026-09-17", [5, 0, 1, 0]]],
+    }
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "fork",
+        "resume",
+        "reemit",
+        "t-to-t",
+        "opening-disarm",
+        "malformed-increment",
+        "multi-model",
+        "multi-day",
+        "grok-turns",
+    ],
+)
+def test_reducer_ordered_identity_against_frozen_oracle(shape):
+    a = [0, [100, 0, 20, 10], 0, 0, [20, 0, 2, 3]]
+    b = [0, [150, 0, 40, 20], 0, 0, None]
+    entries = [_oracle_entry([a, b])]
+    if shape == "fork":
+        entries += [_oracle_entry([a, [0, [170, 0, 45, 25], 1, 1, None]], 2)]
+    elif shape in {"resume", "opening-disarm"}:
+        entries += [_oracle_entry([b, [1, [190, 0, 50, 25], 1, 2, None]], 2)]
+    elif shape == "reemit":
+        entries[0]["states"] += [[1, b[1], 1, 1, b[1]]]
+    elif shape == "t-to-t":
+        entries[0]["states"] += [b]
+    elif shape == "malformed-increment":
+        entries[0]["states"] += [[1, [160, 0, 80, 20], 1, 2, None]]
+    elif shape == "multi-model":
+        entries[0]["states"] += [[1, [200, 5, 40, 30], 0, 1, None]]
+    elif shape == "multi-day":
+        entries[0]["states"] += [[1, [200, 0, 40, 30], 1, 0, None]]
+    elif shape == "grok-turns":
+        entries.insert(
+            0,
+            {
+                "turns": [
+                    {
+                        "day": "2026-09-17",
+                        "model": "grok-4",
+                        "usage": {"input": 2, "cache_read": 9},
+                    },
+                    {"day": "2026-09-16", "model": "gpt-5-codex", "usage": {"output": 7}},
+                ]
+            },
+        )
+    assert _ordered_reduction(hu, entries) == _ordered_reduction(oracle, entries), _ORACLE_RULE
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_seeded_lineages_match_frozen_oracle(seed):
+    rng = random.Random(seed)
+    entries = []
+    for lineage in range(rng.randint(1, 4)):
+        states = []
+        total = [0, 0, 0, 0]
+        for _ in range(rng.randint(3, 15)):
+            delta = [rng.randint(0, 100), 0, rng.randint(0, 10), rng.randint(0, 20)]
+            if rng.random() < 0.2:
+                delta = [0, 0, 0, 0]
+            total = [a + b for a, b in zip(total, delta)]
+            states.append([rng.randrange(2), total, rng.randrange(2), rng.randrange(3), delta])
+        for branch in range(rng.randint(2, 5)):
+            cut = rng.randint(1, len(states))
+            selected = states[:cut]
+            if rng.random() < 0.5:  # resumed suffix, linked through turn ids
+                selected = states[cut - 1 :]
+            if rng.random() < 0.5:  # fork with divergent tail
+                last = selected[-1][1]
+                selected = selected + [
+                    [1, [last[0] + 31, last[1], last[2] + 2, last[3] + 5], 1, 2, None]
+                ]
+            if rng.random() < 0.5:  # repeated final reading / turn boundary re-emission
+                selected = selected + [selected[-1]]
+            entry = _oracle_entry(selected, lineage * 10 + branch)
+            entry["turn_ids"] = [f"lineage-{lineage}-a", f"lineage-{lineage}-b", "unused"]
+            entries.append(entry)
+    rng.shuffle(entries)
+    for entry in entries:
+        assert json.dumps(hu._validated_entry(entry)) == json.dumps(
+            oracle._validated_entry(entry)
+        ), (seed, _ORACLE_RULE)
+    assert _ordered_reduction(hu, entries) == _ordered_reduction(oracle, entries), (
+        seed,
+        _ORACLE_RULE,
+    )
+
+
+def test_validator_tamper_corpus_matches_frozen_oracle():
+    base = _oracle_entry([[0, [100, 0, 20, 10], 0, 0, [20, 0, 2, 3]]])
+    mutations = []
+    bad_values = [-1, hu._MAX_COUNTER + 1, True, 1.5, "1", None, [], [1, 2]]
+    for key in (
+        "dev",
+        "ino",
+        "size",
+        "mtime_ns",
+        "head_len",
+        "tail_len",
+        "offset",
+        "head",
+        "tail",
+        "turn_ids",
+        "days",
+        "models",
+        "last_turn",
+        "last_model",
+        "last_total",
+    ):
+        for bad in bad_values:
+            mutations.append(([key], bad))
+    for col in range(5):
+        for bad in bad_values + [9999, [True, 0, 0, 0], [1, 2, 3, -1], [1, 2, 3, 4, 5]]:
+            mutations.append((["states", 0, col], bad))
+    for field in (
+        ["states", 0, 1],
+        ["states", 0, 4],
+        ["pending", 0, 0],
+        ["pending", 0, 2],
+        ["last_total"],
+    ):
+        for col in range(4):
+            for bad in bad_values:
+                mutations.append((field + [col], bad))
+    for col in range(3):
+        for bad in bad_values + ["2026-02-30", "20260917"]:
+            mutations.append((["pending", 0, col], bad))
+    for field in ("pending", "states"):
+        for bad in bad_values:
+            mutations.append(([field, 0], bad))
+        for bad in ([], [1], [[1, 2]], [[0, [1, 2, 3, 4], 0, 0, None, 1]]):
+            mutations.append(([field], bad))
+    for location, bad in mutations:
+        entry = json.loads(json.dumps(base))
+        parent = entry
+        for key in location[:-1]:
+            parent = parent[key]
+        parent[location[-1]] = bad
+        assert json.dumps(hu._validated_entry(entry)) == json.dumps(
+            oracle._validated_entry(entry)
+        ), (location, bad, _ORACLE_RULE)
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_appended_file_validates_cached_entry_once(reader, tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    if reader == "codex":
+        path = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
+
+        def read():
+            return hu.read_codex_usage(root)
+
+        validator = "_validated_entry"
+        extra = _token(150)
+    else:
+        path = _write_grok_session(root, lines=[_grok_turn()])
+
+        def read():
+            return hu.read_grok_usage(root, consented=True)
+
+        validator = "_validated_grok_entry"
+        extra = json.loads(_grok_turn(prompt_id="second"))
+    assert read().complete
+    with path.open("a") as fp:
+        fp.write(json.dumps(extra) + "\n")
+    spy = Mock(wraps=getattr(hu, validator))
+    monkeypatch.setattr(hu, validator, spy)
+    assert read().complete
+    assert spy.call_count == 1
+
+
+@pytest.mark.parametrize("symlinked", [False, True])
+def test_scan_cache_key_matches_canonical_path(symlinked, tmp_path, monkeypatch):
+    root = tmp_path / "real"
+    path = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
+    if symlinked:
+        link = tmp_path / "link"
+        link.symlink_to(root, target_is_directory=True)
+        path = link / path.relative_to(root)
+        root = link
+    expected = hashlib.sha256(os.fsencode(path.resolve())).hexdigest()
+    assert hu._cache_key(path, root=root, canonical_root=root.resolve()) == expected
+    assert hu.read_codex_usage(root).complete
+    assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == {expected}
+
+
+def test_fingerprint_opens_once_and_keeps_digests_and_short_read_failure(tmp_path, monkeypatch):
+    path = tmp_path / "rollout.jsonl"
+    raw = b"abc123" * 2000
+    path.write_bytes(raw)
+    before = path.stat()
+    real_open = Path.open
+    opens = []
+
+    def opened(self, *args, **kwargs):
+        opens.append(self)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", opened)
+    fp = hu._fingerprint(path, before, float("inf"))
+    assert opens == [path]
+    assert fp.head == hashlib.sha256(raw[:4096]).hexdigest()
+    assert fp.tail == hashlib.sha256(raw[-4096:]).hexdigest()
+    path.write_bytes(b"short")
+    with pytest.raises(hu._ReadFailure) as err:
+        hu._fingerprint(path, before, float("inf"))
+    assert err.value.reason == "stale"
+
+
+def test_fingerprint_open_oserror_is_io_error(tmp_path, monkeypatch):
+    path = tmp_path / "rollout.jsonl"
+    path.write_bytes(b"abc123" * 2000)
+    before = path.stat()
+
+    def boom(self, *args, **kwargs):
+        raise OSError("denied")
+
+    monkeypatch.setattr(Path, "open", boom)
+    with pytest.raises(hu._ReadFailure) as err:
+        hu._fingerprint(path, before, float("inf"))
+    assert err.value.reason == "io_error"
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError, KeyboardInterrupt])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_reader_pauses_gc_and_restores_caller_state(reader_case, monkeypatch, error, enabled):
+    read, cache, diag, set_scan = reader_case
+    prior = gc.isenabled()
+    thresholds = gc.get_threshold()
+    starts = []
+
+    def callback(phase, info):
+        if phase == "start":
+            starts.append(info)
+
+    def scan(*args):
+        assert not gc.isenabled()
+        before = len(starts)
+        cycles = []
+        for _ in range(100):
+            cycle = []
+            cycle.append(cycle)
+            cycles.append(cycle)
+        assert len(starts) == before
+        if error:
+            raise error()
+        result = (hu.HostUsageResult({}, True), {}, False)
+        return result if cache == hu.CACHE_PATH else result + (False,)
+
+    name = "_scan_codex_root" if cache == hu.CACHE_PATH else "_scan_grok_root"
+    monkeypatch.setattr(hu, name, scan)
+    try:
+        gc.set_threshold(1, 1, 1)
+        gc.callbacks.append(callback)
+        (gc.enable if enabled else gc.disable)()
+        if error:
+            with pytest.raises(error):
+                read()
+        else:
+            assert read().complete
+        assert gc.isenabled() is enabled
+    finally:
+        gc.callbacks.remove(callback)
+        gc.set_threshold(*thresholds)
+        (gc.enable if prior else gc.disable)()
+
+
+def test_complete_late_timing_prunes_and_preserves_deadline_since(reader_case, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    _seed_blocker(cache, files={"deleted": {}})
+    set_scan(hu.HostUsageResult({}, True), {"live": {"no_ledger": True}})
+    for _ in range(2):
+        clock = iter([10.0, 10.3])  # reader entry, result ready
+        expiry = iter([False, False, True])
+        monkeypatch.setattr(hu.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(hu, "_expired", lambda d: next(expiry))
+        assert read().reason == "deadline"
+        data = json.loads(cache.read_text())
+        assert set(data["files"]) == {"live"}
+        assert data["last_complete_ms"] == 300
+        assert data["last_deadline_allotted_ms"] == 5000
+        assert data["last_reason"] == "deadline"
+        assert data["last_reason_since"] != _OBSERVED
+        assert diag()["last_complete_at"] == data["last_complete_at"]
+        if _ == 0:
+            since = data["last_reason_since"]
+        else:
+            assert data["last_reason_since"] == since
+
+
+def test_timing_carries_on_partial_write_and_drops_allotment_when_clear(reader_case, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    data = _seed_blocker(cache, reason="deadline")
+    data.update(last_complete_ms=197, last_complete_at=_OBSERVED, last_deadline_allotted_ms=250)
+    cache.write_text(json.dumps(data))
+    set_scan(hu._incomplete("partial"), {"new": {}}, True)
+    assert read().reason == "partial"
+    after = json.loads(cache.read_text())
+    assert after["last_complete_ms"] == 197
+    assert after["last_complete_at"] == _OBSERVED
+    assert "last_deadline_allotted_ms" not in after
+    set_scan(hu.HostUsageResult({}, True))
+    assert read().complete
+    assert diag()["last_reason"] is None
+    assert diag()["last_complete_ms"] is not None
+
+
+@pytest.mark.parametrize("reason", ["unsupported", "partial", None])
+def test_allotment_is_hidden_unless_reason_is_deadline(reader_case, reason):
+    _read, cache, diag, _set_scan = reader_case
+    data = _seed_blocker(cache, reason=reason or "unsupported")
+    if reason is None:
+        data["last_reason"] = None
+    data.update(last_deadline_allotted_ms=250, last_complete_ms=197)
+    cache.write_text(json.dumps(data))
+    assert diag()["last_deadline_allotted_ms"] is None
+
+
+@pytest.mark.parametrize("bad", [-1, 86_400_001, True, 1.5, "197", None])
+def test_invalid_timing_fields_are_unknown(reader_case, bad):
+    read, cache, diag, set_scan = reader_case
+    data = _seed_blocker(cache, reason="deadline")
+    data.update(last_complete_ms=bad, last_deadline_allotted_ms=bad, last_complete_at=bad)
+    cache.write_text(json.dumps(data))
+    view = diag()
+    assert view["last_complete_ms"] is None
+    assert view["last_deadline_allotted_ms"] is None
+    assert view["last_complete_at"] is None
+
+
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_host_cache_accepts_both_encodings_and_writes_compact(
+    compact, reader, tmp_path, monkeypatch
+):
+    root = tmp_path / "sessions"
+    if reader == "codex":
+        _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
+        cache, full_reader = hu.CACHE_PATH, "_read_full_rollout"
+    else:
+        _write_grok_session(root, lines=[_grok_turn()])
+        cache, full_reader = hu.GROK_CACHE_PATH, "_read_full_grok_file"
+
+    def read():
+        return (
+            hu.read_codex_usage(root)
+            if reader == "codex"
+            else hu.read_grok_usage(root, consented=True)
+        )
+
+    first = read()
+    data = json.loads(cache.read_text())
+    indented = json.dumps(data, sort_keys=True, indent=2)
+    cache.write_text(json.dumps(data, separators=(",", ":")) if compact else indented)
+    monkeypatch.setattr(hu, full_reader, Mock(side_effect=AssertionError("cache miss")))
+    assert read() == first
+    raw = cache.read_text()
+    assert raw == json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
+    assert len(raw) < len(indented)
+
+
+def test_reduction_overrun_commits_pruning_timing_and_deadline(tmp_path, monkeypatch):
+    root = tmp_path / "sessions"
+    _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
+    deleted = _write_rollout(root, "rollout-b.jsonl", [_context(), _token(200)])
+    assert hu.read_codex_usage(root).complete
+    deleted.unlink()
+    clock = [1000.0]
+    original = hu._aggregate
+
+    def slow_reduction(entries):
+        buckets = original(entries)
+        clock[0] += 0.3
+        return buckets
+
+    monkeypatch.setattr(hu.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(hu, "_aggregate", slow_reduction)
+    assert hu.read_codex_usage(root, deadline=1000.25).reason == "deadline"
+    data = json.loads(hu.CACHE_PATH.read_text())
+    assert len(data["files"]) == 1
+    assert data["last_reason"] == "deadline"
+    assert data["last_complete_ms"] == 300
+    assert data["last_deadline_allotted_ms"] == 250
+    assert datetime.fromisoformat(data["last_complete_at"]).tzinfo is not None

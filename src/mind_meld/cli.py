@@ -3429,7 +3429,7 @@ def _push_captured_usage(
     capture, rows = events_tail._capture_host_snapshot(
         device_id,
         readers,
-        host_budget_ms=events_tail.HOST_USAGE_READ_BUDGET_INTERACTIVE_MS,
+        host_budget_ms=events_tail.resolve_host_read_budget(config, interactive=True)[0],
         warm_host_cache=events_tail._warm_host_cache_with_notice,
     )
     dropped = dict(capture.dropped)
@@ -5840,12 +5840,19 @@ always exact, so a truncated list never reads as the whole set.
 """
 
 
-def _host_usage_blocker(reader: str, state: dict) -> str:
+def _host_usage_blocker(reader: str, state: dict, *, in_diag: bool = False) -> str:
     """Render cache-validated blocker metadata for both diagnostic surfaces."""
     reason = state.get("last_reason")
     if reason is None:
         return "none"
-    phrase = events_tail._host_skip_phrase(reader, reason)
+    evidence = events_tail.HostReadEvidence(
+        last_deadline_allotted_ms=state.get("last_deadline_allotted_ms"),
+        last_complete_ms=state.get("last_complete_ms"),
+        last_complete_at=state.get("last_complete_at"),
+        files_cached=state.get("files_cached"),
+        files_on_disk=state.get("files_on_disk"),
+    )
+    phrase = events_tail._host_skip_phrase(reader, reason, evidence=evidence, in_diag=in_diag)
     since = state.get("last_reason_since")
     if since is not None:
         try:
@@ -5854,7 +5861,58 @@ def _host_usage_blocker(reader: str, state: dict) -> str:
             day = None
         if day is not None:
             phrase += f" (first observed {day} UTC)"
-    return phrase
+    return safe_str(phrase)
+
+
+def _host_read_budgets(config: dict | None) -> dict:
+    from mind_meld import host_usage
+
+    budgets = {
+        "autopush_ms": None,
+        "autopush_source": None,
+        "interactive_ms": None,
+        "interactive_source": None,
+        "warm_ms": round(host_usage.DEFAULT_READ_BUDGET_S * 1000),
+    }
+    if config is not None:
+        for name in ("autopush", "interactive"):
+            budgets[f"{name}_ms"], budgets[f"{name}_source"] = events_tail.resolve_host_read_budget(
+                config, interactive=name == "interactive"
+            )
+    return budgets
+
+
+def _host_complete_read_line(state: dict) -> str:
+    elapsed = state.get("last_complete_ms")
+    at = state.get("last_complete_at")
+    if elapsed is None and at is None:
+        return "unknown"
+    return (
+        f"scan {'unknown' if elapsed is None else elapsed} ms (excludes cache write), "
+        f"{events_tail.host_read_age(at)} ({at or 'unknown'})"
+    )
+
+
+def _host_read_sweep_line(state: dict) -> str:
+    budget = state["host_read_budgets"]["autopush_ms"]
+    if state["config"]["state"] != "ok" or budget is None:
+        return "unknown (config unavailable)"
+    # Publication's reader keys are the current consented/resolved reader set
+    # from _default_host_readers, even when no row exists. Coverage VALUES do
+    # not participate: this estimate is never evidence of publication.
+    readers = state["host_publication"]["readers"]
+    if not readers:
+        return "unknown (no reader enabled)"
+    elapsed = [state["host_usage"].get(name, {}).get("last_complete_ms") for name in readers]
+    if any(value is None for value in elapsed):
+        return "unknown (a reader has no complete read)"
+    total = sum(elapsed)
+    remaining = budget - total
+    margin = f"{remaining} ms spare" if remaining >= 0 else f"over by {-remaining} ms"
+    return (
+        f"{total} ms of the {budget} ms autopush budget, {margin} "
+        "(excludes cache writes and the later-reader grace; not a publication check)"
+    )
 
 
 def _diag_models_line(state: dict) -> str:
@@ -6165,7 +6223,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         last_reason_since / cache_state / model_count / models / files_cached /
         files_on_disk, and Codex's cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
-        pending / model_count / models / last_reason / last_reason_since
+        pending / model_count / models / last_reason / last_reason_since;
+        both readers also expose last_complete_ms / last_complete_at /
+        last_deadline_allotted_ms. Top-level host_read_budgets contains only
+        autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
         (never a path, never a host store,
         never a token magnitude)
       * local_emails (this machine's author-email trust set, and peers'
@@ -6301,6 +6362,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "usage_less_skipped": grok_diag["usage_less_skipped"],
             "last_reason": grok_diag.get("last_reason"),
             "last_reason_since": grok_diag.get("last_reason_since"),
+            "last_complete_ms": grok_diag.get("last_complete_ms"),
+            "last_complete_at": grok_diag.get("last_complete_at"),
+            "last_deadline_allotted_ms": grok_diag.get("last_deadline_allotted_ms"),
             "cache_state": grok_diag["cache_state"],
             "model_count": grok_diag.get("model_count", 0),
             "models": grok_diag.get("models", []),
@@ -6339,6 +6403,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
         "host_usage": host_usage_state,
+        "host_read_budgets": _host_read_budgets(cfg if config_state == "ok" else None),
         "host_publication": _host_publication(cfg, resolved_sources, capture_rows),
         "discovery": discovery,
         "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery, scan=capture_rows),
@@ -6472,6 +6537,16 @@ def diag(
     hu_state = (state.get("host_usage") or {}).get("grok") or {}
     console.print("\n[bold]Host usage[/bold]")
     _print_host_publication(state["host_publication"])
+    budgets = state["host_read_budgets"]
+    if budgets["autopush_ms"] is None:
+        budget_line = "unknown (config unavailable)"
+    else:
+        budget_line = (
+            f"autopush {budgets['autopush_ms']} ms ({budgets['autopush_source']}) · "
+            f"interactive {budgets['interactive_ms']} ms ({budgets['interactive_source']})"
+        )
+    console.print("  host read budgets: " + safe_str(budget_line))
+    console.print("  host read sweep estimate: " + safe_str(_host_read_sweep_line(state)))
     consented = hu_state.get("consented")
     if consented is None:
         consented_shown = "(config unreadable)"
@@ -6487,7 +6562,9 @@ def diag(
     console.print(f"  grok prior successful scan: {scan_shown}")
     console.print(f"  grok cache inventory:    {safe_str(str(hu_state.get('cache_state', '')))}")
     if hu_state.get("cache_state") == "ok":
-        console.print("  grok usage read blocker: " + _host_usage_blocker("grok", hu_state))
+        console.print(
+            "  grok usage read blocker: " + _host_usage_blocker("grok", hu_state, in_diag=True)
+        )
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
     grok_cached = hu_state.get("files_cached")
     grok_disk = hu_state.get("files_on_disk")
@@ -6496,18 +6573,22 @@ def diag(
         f" of {'unknown' if grok_disk is None else grok_disk}"
     )
     console.print(f"  grok models cached:      {_diag_models_line(hu_state)}")
+    console.print("  grok last complete read: " + safe_str(_host_complete_read_line(hu_state)))
 
     cx_state = (state.get("host_usage") or {}).get("codex") or {}
     console.print(f"  codex cache:             {safe_str(str(cx_state.get('cache_state', '')))}")
     console.print(f"  codex cache inventory:   {safe_str(str(cx_state.get('state', '')))}")
     if cx_state.get("cache_state") == "ok":
-        console.print("  codex usage read blocker: " + _host_usage_blocker("codex", cx_state))
+        console.print(
+            "  codex usage read blocker: " + _host_usage_blocker("codex", cx_state, in_diag=True)
+        )
     cx_disk = cx_state.get("files_on_disk")
     console.print(
         f"  codex rollouts cached:   {cx_state.get('files_cached', 0)}"
         f" of {'unknown' if cx_disk is None else cx_disk}"
     )
     console.print(f"  codex models cached:     {_diag_models_line(cx_state)}")
+    console.print("  codex last complete read: " + safe_str(_host_complete_read_line(cx_state)))
     if cx_state.get("files_pre_track") and not cx_state.get("last_reason"):
         # The actionable half: these entries predate per-turn accounting and
         # are re-walked once. Autopush never warms the host cache, so on a

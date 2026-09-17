@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.14.16 | 2026-09-17 | **Warm Codex reads use less of the autopush budget, and attended captures publish their warm read.** Per-Mac read budgets and last-complete-read diagnostics make continuing capture headroom visible. |
 | 0.14.15 | 2026-09-16 | **Previews now leave files and storage untouched, with only their declared local lock allowance.** Pull forecasts account for successive peers, and inspection commands defer upgrade bookkeeping. |
 | 0.14.14 | 2026-09-15 | **Refresh host usage explicitly with `mm push --capture-usage`, even on a converged Mac.** Status and diagnostics distinguish the last recorded capture, reader coverage, and accepted-manifest publication evidence; fleet retros name stale captures. |
 | 0.14.13 | 2026-09-15 | **mm-events root creation belongs to its writers, and shared crypto repair follows passphrase verification.** Missing default event files remain deletions; preview now matches real push. Status inspects cached upgrade information without fetching or rewriting it. |

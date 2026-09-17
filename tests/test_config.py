@@ -8,6 +8,9 @@ import pytest
 from mind_meld.config import (
     _GENERATED_HOST_SKILL_GLOBS,
     DEFAULT_SOURCES,
+    HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS,
+    HOST_USAGE_BUDGET_MAX_MS,
+    HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS,
     _apply_defaults,
     _validate,
     _validate_exclude_patterns,
@@ -2103,3 +2106,79 @@ class TestSourceBootstrapPreview56A:
         assert retained.would_create == ("mm-events",)
         assert [s["name"] for s in retained.selected] == ["claude", "gstack"]
         assert retained.available == resolution.available
+
+
+@pytest.mark.parametrize(
+    "key,minimum",
+    [
+        ("host_usage_autopush_budget_ms", HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS),
+        ("host_usage_interactive_budget_ms", HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS),
+    ],
+)
+@pytest.mark.parametrize("bad", [True, False, 1.5, "500", -1, HOST_USAGE_BUDGET_MAX_MS + 1, None])
+def test_invalid_host_read_budget(key, minimum, bad):
+    config = {
+        "device": {"id": "dev", "name": "Mac"},
+        "storage": {"path": "/tmp/mm"},
+        "retro": {key: bad},
+    }
+    with pytest.raises(ConfigError) as err:
+        _validate(config)
+    assert str(err.value) == (
+        f"config: retro.{key} must be an integer between {minimum} and "
+        f"{HOST_USAGE_BUDGET_MAX_MS}, got {bad}."
+    )
+
+
+@pytest.mark.parametrize(
+    "auto,interactive",
+    [
+        (HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS, HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS),
+        (250, 500),
+        (HOST_USAGE_BUDGET_MAX_MS, HOST_USAGE_BUDGET_MAX_MS),
+    ],
+)
+def test_valid_host_read_budgets(auto, interactive):
+    config = {
+        "device": {"id": "dev", "name": "Mac"},
+        "storage": {"path": "/tmp/mm"},
+        "retro": {
+            "host_usage_autopush_budget_ms": auto,
+            "host_usage_interactive_budget_ms": interactive,
+        },
+    }
+    _validate(config)
+
+
+@pytest.mark.parametrize(
+    "retro,auto,interactive",
+    [
+        ({"host_usage_autopush_budget_ms": 501}, 501, 500),
+        ({"host_usage_autopush_budget_ms": 400, "host_usage_interactive_budget_ms": 300}, 400, 300),
+    ],
+)
+def test_host_read_budgets_check_effective_order(retro, auto, interactive):
+    config = {
+        "device": {"id": "dev", "name": "Mac"},
+        "storage": {"path": "/tmp/mm"},
+        "retro": retro,
+    }
+    with pytest.raises(ConfigError) as err:
+        _validate(config)
+    assert str(err.value) == (
+        f"config: retro.host_usage_autopush_budget_ms ({auto}) must not exceed "
+        f"retro.host_usage_interactive_budget_ms ({interactive})."
+    )
+
+
+@pytest.mark.parametrize(
+    "key,value", [("host_usage_autopush_budget_ms", 99), ("host_usage_interactive_budget_ms", 249)]
+)
+def test_host_read_budget_lower_bounds(key, value):
+    config = {
+        "device": {"id": "dev", "name": "Mac"},
+        "storage": {"path": "/tmp/mm"},
+        "retro": {key: value},
+    }
+    with pytest.raises(ConfigError, match="must be an integer between"):
+        _validate(config)

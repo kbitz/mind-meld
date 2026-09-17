@@ -107,12 +107,15 @@ def locked_json_rmw(
     retry_intervals: Sequence[float] = _DEFAULT_RETRY_INTERVALS,
     on_contention: Literal["block", "raise", "warn"] = "block",
     contention_warning: str = "lock contended; skipping update",
+    compact: bool = False,
 ) -> Iterator[LockedJson]:
     """Open ``path`` with the given ``mode``, flock it, parse JSON, yield
     a ``LockedJson`` for caller mutation, and writes back atomically on
     context exit by default. A specialized caller may set
     ``write_on_exit=False`` after deciding no persistence is needed.
 
+    ``compact=True`` writes sorted JSON without indentation or whitespace
+    separators. Only host caches opt in; the default encoding is unchanged.
     Parent directory is created (``parents=True, exist_ok=True``) if missing.
 
     Corrupt JSON / unreadable / non-dict top-level all degrade to
@@ -169,7 +172,11 @@ def locked_json_rmw(
         else:
             if is_locked and ljson.write_on_exit:
                 ljson.write_attempted = True
-                ljson.write_error = _write_json(fd, ljson.data)
+                ljson.write_error = (
+                    _write_json(fd, ljson.data, compact=True)
+                    if compact
+                    else _write_json(fd, ljson.data)
+                )
     finally:
         if is_locked:
             try:
@@ -272,8 +279,12 @@ def _read_json_snapshot(fd: int) -> LockedJsonSnapshot:
     return LockedJsonSnapshot(data=parsed, state="valid")
 
 
-def _write_json(fd: int, data: dict[str, Any]) -> OSError | None:
-    payload = json.dumps(data, sort_keys=True, indent=2).encode("utf-8")
+def _write_json(fd: int, data: dict[str, Any], *, compact: bool = False) -> OSError | None:
+    payload = (
+        json.dumps(data, sort_keys=True, separators=(",", ":"))
+        if compact
+        else json.dumps(data, sort_keys=True, indent=2)
+    ).encode("utf-8")
     try:
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)

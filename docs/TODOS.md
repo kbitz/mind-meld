@@ -45,6 +45,36 @@ here by hand, use the H3 form.
 ## Unprocessed
 
 
+### [plan-ceo-review] Autopush read-budget predictor
+- **Priority:** P3
+- **Trigger:** A Mac with autopush wired has a standing `deadline` blocker and `last_complete_ms` over its effective autopush budget for 7+ days.
+- **Evidence needed:** That Mac's combined sweep, a cold-filesystem pass, and `sys.version`.
+- **Context:** Track 63A ships the manual budget lever; a count-derived budget remains rejected. Source: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-17-track-63a.md`.
+
+### [plan-ceo-review] Sealed or incremental lineage tier
+- **Priority:** P3
+- **Trigger:** Last complete Codex read exceeds 400 ms after Track 63A, or the corpus exceeds 170,000 states.
+- **Prerequisite:** Track 63A's frozen-oracle parity harness; preserve transition accounting and ordered output.
+- **Context:** Track 63A effective spec; current full reduction remains linear in corpus size.
+
+### [plan-ceo-review] Codex token_usage_record drift tripwire
+- **Priority:** P2
+- **Trigger:** Any rollout with `token_usage_record` but no `token_count`.
+- **Evidence:** The 2026-09-17 planning census found both record types in 250/278 September rollouts and zero with only the new type (codex-cli 0.154.0).
+- **Context:** Track 63A review census; no reader format expansion was approved in this Track.
+
+### [plan-eng-review] Host cache encoding trigger restated and over-cap notice
+- **Priority:** P3
+- **Trigger:** Compact cache reaches 25 MB, or a read reaches the 64 MiB cap; add a named `too_large` snapshot state/notice.
+- **Evidence:** Planning measurement on kb-mbp: 15.87 MB indented / 4.03 MB compact at 1,064 rollouts. Track 63A qualification: 4,040,684 compact bytes, 1,066 rollouts, device `3a6c7dc9`, Python 3.14.7.
+- **Context:** Restate encoding thresholds in compact bytes now that both host caches write compact JSON; Track 63A effective spec.
+
+### [plan-eng-review] Per-reader carry-forward in the fleet aggregator
+- **Priority:** P3
+- **Why:** Use the latest row where each reader contributed, labelled with its `as_of`, so an autopush dropping a reader causes staleness instead of absence.
+- **Context:** Coordinate with Track 65A. Track 63A preserves today's device-wide replacement and tests both all-failed and mixed-reader recovery outcomes.
+
+
 ## Drain records
 
 ### Roadmap drain — 2026-09-17
@@ -380,4 +410,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-17 by /roadmap; the inbox is empty. Prior drain records are historical._
+_Last updated 2026-09-17 by Track 63A implementation; five follow-ups await a separate /roadmap drain. Prior drain records are historical._

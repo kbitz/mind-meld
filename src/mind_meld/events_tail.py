@@ -37,19 +37,39 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence, get_args
 
 from mind_meld import __version__, events, host_usage, identity, token_usage, upgrade
-from mind_meld.config import grok_host_usage_enabled
+from mind_meld.config import (
+    DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS,
+    DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
+    grok_host_usage_enabled,
+)
+from mind_meld.errors import HOST_USAGE_CAPTURE_URL
 from mind_meld.safety import safe_str
 
 CacheLockMode = Literal["warn", "block"] | None
 HostReader = Callable[..., host_usage.HostUsageResult]
 
-HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = 500
-HOST_USAGE_READ_BUDGET_AUTOPUSH_MS = 250
+HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
+HOST_USAGE_READ_BUDGET_AUTOPUSH_MS = DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS
 """Host reads get their OWN absolute deadline, deliberately separate from the
 git/session walk budgets. It starts after the ``walk_done`` snapshot so host
 time can never trigger or redefine the session-walk notice, and it is passed
-explicitly to every reader — no caller may fall through to ``host_usage``'s
+explicitly to every reader — no unattended caller may fall through to ``host_usage``'s
 5-second default, which is ~20x an autopush's entire walk budget."""
+
+
+def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, str]:
+    """Effective per-Mac budget and its source, from an already validated config."""
+    key = "host_usage_interactive_budget_ms" if interactive else "host_usage_autopush_budget_ms"
+    retro = config.get("retro")
+    if isinstance(retro, dict) and key in retro:
+        return retro[key], "config"
+    return (
+        HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
+        if interactive
+        else HOST_USAGE_READ_BUDGET_AUTOPUSH_MS,
+        "default",
+    )
+
 
 HOST_READER_GRACE_MS = 50
 """Minimum time for each reader after the first, beyond the sweep deadline.
@@ -527,43 +547,49 @@ def _merge_warm_retry_capture(
     return HostUsageCapture(None, invoked=True)
 
 
-def _warm_host_cache_with_notice(reader: str = "codex") -> bool:
-    """Telegraph and run a reader's cooperative cache warm. Never raises.
-
-    Returns whether the warm actually COMPLETED. That return value is the
-    retry backstop: if the warm could not finish inside its own (much larger)
-    budget, the bounded read that follows cannot finish either, and paying for
-    it just adds latency to a push that will publish nothing anyway. Without
-    it, a corpus that outgrows even the warm budget makes every interactive
-    push pay bounded-attempt + warm + bounded-retry, forever.
-
-    Wrapper policy, kept out of the capture core so that core stays notice-free
-    (it is shared by push and init, which report differently).
-    """
-    # Scanning is cooperatively bounded; serialization can finish afterwards.
+def _warm_host_cache_with_notice(reader: str = "codex") -> None:
+    """Attended notice only; the capture core contains and publishes the read."""
     sys.stderr.write(
-        f"mm: warming {reader} usage cache "
+        f"mm: reading {reader} usage beyond the push budget "
         f"(about {host_usage.DEFAULT_READ_BUDGET_S:.0f} s of scanning)...\n"
     )
+
+
+@dataclass(frozen=True)
+class HostReadEvidence:
+    last_deadline_allotted_ms: int | None = None
+    last_complete_ms: int | None = None
+    last_complete_at: str | None = None
+    files_cached: int | None = None
+    files_on_disk: int | None = None
+
+
+def host_read_age(timestamp: str | None) -> str:
+    """Age of validated local cache metadata; future clocks are not fresh reads."""
+    if timestamp is None:
+        return "unknown"
     try:
-        return host_usage.warm_host_cache_inline(reader=reader).complete
-    except Exception as e:
-        sys.stderr.write(
-            f"mm: notice: host usage cache warm failed: {type(e).__name__}: {safe_str(e)}\n"
-        )
-        return False
+        when = datetime.fromisoformat(timestamp)
+        seconds = (datetime.now(timezone.utc) - when).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if seconds < 0:
+        return "in the future"
+    for unit, width in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= width:
+            return f"{int(seconds // width)} {unit} ago"
+    return f"{int(seconds)} s ago"
 
 
-def _host_skip_phrase(reader: str, reason: str) -> str:
-    """One stable, safe sentence for a dropped or omitted host reader.
-
-    It names the affected optional subsystem so a `degraded` breadcrumb can't
-    be misread as content-sync loss, and it names only the reader and reason
-    class — never a path, transcript, query, or exception string. Permanent
-    reasons carry a fix clause and never promise a retry. One closed-vocabulary
-    sentence per reader; the sentence may contain ``; ``. Callers join phrases
-    with ``; ``.
-    """
+def _host_skip_phrase(
+    reader: str,
+    reason: str,
+    *,
+    verb: Literal["push", "init"] = "push",
+    evidence: HostReadEvidence | None = None,
+    in_diag: bool = False,
+) -> str:
+    """Closed-vocabulary reader remedy; callers escape at their display sink."""
     phrase = (
         f"host-usage snapshot skipped ({reader} {reason}) — "
         "content sync and git/session capture unaffected"
@@ -575,15 +601,33 @@ def _host_skip_phrase(reader: str, reason: str) -> str:
             f"`mm disable-source {reader}` to stop retrying."
         )
     if reason == "deadline":
-        # Only an attended capture warms; serialization may exceed the budget.
-        budget = f"{host_usage.DEFAULT_READ_BUDGET_S:.0f}"
-        return (
-            f"{phrase}. The {reader} cache is still warming. Run `mm push --capture-usage` "
-            f"to warm it "
-            f"(about {budget} s of scanning per cold reader, not a hard ceiling). "
-            "`mm diag` shows how much is left."
+        if evidence is not None:
+
+            def shown(value: int | None) -> str:
+                return "unknown" if value is None else str(value)
+
+            unit = "ledgers" if reader == "grok" else "rollouts"
+            return (
+                f"{phrase}. Last read allowed {shown(evidence.last_deadline_allotted_ms)} ms; "
+                f"last complete read {shown(evidence.last_complete_ms)} ms "
+                f"({host_read_age(evidence.last_complete_at)}); "
+                f"{shown(evidence.files_cached)} of {shown(evidence.files_on_disk)} {unit} cached. "
+                "If the last complete read is over your autopush budget, raise "
+                "`[retro] host_usage_autopush_budget_ms`; otherwise run `mm push --capture-usage`; "
+                f"see {HOST_USAGE_CAPTURE_URL}."
+            )
+        compare = (
+            "; compare the last complete read with the budget"
+            if in_diag
+            else ", then `mm diag` to compare the last complete read with the budget"
         )
-    return f"{phrase}. Run `mm push --capture-usage` to retry; `mm diag` shows the reader's state."
+        return (
+            f"{phrase}. The {reader} read did not finish inside this {verb}'s read budget. "
+            f"Run `mm push --capture-usage` to read it without that budget{compare}; "
+            f"see {HOST_USAGE_CAPTURE_URL}."
+        )
+    diag = "" if in_diag else "; `mm diag` shows the reader's state"
+    return f"{phrase}. Run `mm push --capture-usage` to retry{diag}."
 
 
 def _capture_host_snapshot(
@@ -591,7 +635,7 @@ def _capture_host_snapshot(
     host_readers: Sequence[tuple[str, HostReader]],
     *,
     host_budget_ms: int,
-    warm_host_cache: Callable[[str], bool] | None = None,
+    warm_host_cache: Callable[[str], None] | None = None,
 ) -> tuple[HostUsageCapture, list[dict]]:
     """One bounded sweep, one warm/retry, at most one row. No writes.
 
@@ -616,18 +660,19 @@ def _capture_host_snapshot(
         )
     deadline_names = {name for name, reason in host_capture.dropped if reason == "deadline"}
     if warm_host_cache is not None:
-        # Warm every eligible miss in reader order. Only completed warms get
-        # retried; each retry has its OWN full bounded deadline. The exact
-        # singleton retry set preserves every other reader's first outcome.
-        warmed: list[tuple[str, HostReader]] = []
-        for name, read in host_readers:
+        # The attended warm IS the retry. Contain it through the same reader
+        # boundary, then replace only that reader's first-pass outcome.
+        for name, _read in host_readers:
             if name not in deadline_names or name not in WARMABLE_HOST_READERS:
                 continue
-            if warm_host_cache(name):
-                warmed.append((name, read))
-        for name, read in warmed:
+            warm_host_cache(name)
+
+            def warm_read(*, deadline: float) -> host_usage.HostUsageResult:
+                return host_usage.warm_host_cache_inline(reader=name)
+
             retry_capture = _capture_host_usage(
-                ((name, read),), deadline=time.monotonic() + host_budget_ms / 1000.0
+                ((name, warm_read),),
+                deadline=time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S,
             )
             host_capture = _merge_warm_retry_capture(
                 host_capture,
@@ -663,7 +708,7 @@ def _capture_event_snapshots(
     root_discovery_budget_ms: int | None = None,
     host_budget_ms: int | None = None,
     git_budget_ms: int | None = None,
-    warm_host_cache: Callable[[str], bool] | None = None,
+    warm_host_cache: Callable[[str], None] | None = None,
     suppress_host_capture: bool = False,
 ) -> CaptureResult:
     """Capture device-stamped git, session, and host snapshot rows without writing.
@@ -679,10 +724,12 @@ def _capture_event_snapshots(
     after the session walk's ``walk_done`` snapshot, and yields at most one
     optional row. Its outcome is returned as data — the notice and the
     ``autopush`` breadcrumb are wrapper policy. ``warm_host_cache`` is the
-    attended-command escape hatch: supplied by callers that may spend a
-    multi-second warm per cold reader (interactive push, init), omitted by ``autopush``
-    so an unattended hook never does. Published rows always come from a bounded
-    capture, warm or not.
+    attended notice hook only: its presence gates the core warm, which always
+    calls ``host_usage.warm_host_cache_inline``. Autopush omits it so an
+    unattended hook never warms. The attended warm result is published
+    directly. On 2026-09-17, device 3a6c7dc9 / Python 3.14.7 measured warm
+    Codex at 166.66–168.26 ms before serialization and an empty-cache parse
+    at 2,949.68 ms; see events-retro.md for the full interpreter/phase split.
     """
     if root_discovery_budget_ms is None:
         root_discovery_budget_ms = (
@@ -691,11 +738,9 @@ def _capture_event_snapshots(
             else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
         )
     if host_budget_ms is None:
-        host_budget_ms = (
-            HOST_USAGE_READ_BUDGET_AUTOPUSH_MS
-            if budget_ms <= events.WALK_TIME_BUDGET_AUTOPUSH_MS
-            else HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
-        )
+        host_budget_ms = resolve_host_read_budget(
+            config, interactive=budget_ms > events.WALK_TIME_BUDGET_AUTOPUSH_MS
+        )[0]
     git_rows, root_discovery, walk_budget_aborts, walk_errors = _capture_git_rows(
         config,
         device_id,
@@ -903,11 +948,7 @@ def _run_events_tail(
                 if quiet
                 else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
             ),
-            host_budget_ms=(
-                HOST_USAGE_READ_BUDGET_AUTOPUSH_MS
-                if quiet
-                else HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
-            ),
+            host_budget_ms=resolve_host_read_budget(config, interactive=not quiet)[0],
             # Only the attended path may spend seconds warming each cold reader. On autopush a
             # cold corpus instead converges across pushes, because an aborted
             # scan now keeps its per-file progress.
@@ -1083,7 +1124,7 @@ def _run_events_backfill(
             since=since,
             budget_ms=budget_ms,
             root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
-            host_budget_ms=HOST_USAGE_READ_BUDGET_INTERACTIVE_MS,
+            host_budget_ms=resolve_host_read_budget(config, interactive=True)[0],
             # Init already warms the token cache inline and is attended; paying
             # the host warm here means the first push after install inherits a
             # hot cache, exactly as it does for tokens.
@@ -1124,12 +1165,16 @@ def _run_events_backfill(
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
                 sys.stderr.write(
-                    "mm: notice: " + _host_skip_phrase(dropped_reader, dropped_reason) + "\n"
+                    "mm: notice: "
+                    + _host_skip_phrase(dropped_reader, dropped_reason, verb="init")
+                    + "\n"
                 )
         elif not capture.host_capture.complete:
             sys.stderr.write(
                 "mm: notice: "
-                + _host_skip_phrase(capture.host_capture.reader, capture.host_capture.reason)
+                + _host_skip_phrase(
+                    capture.host_capture.reader, capture.host_capture.reason, verb="init"
+                )
                 + "\n"
             )
     except Exception as e:
