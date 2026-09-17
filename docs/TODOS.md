@@ -44,311 +44,46 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-ceo-review] pull-history rotation is dominated by push `uploaded` rows
-**What:** Measure and bound push-side `uploaded` rows in `pull-history.jsonl` so the forensic log keeps more than ~9 days of pull outcomes.
-**Why:** On the reviewer's Mac the rotated file held 3,037 rows over 9 days, 2,752 of them `uploaded`; one push wrote 359 rows within a second. The 1 MB cap (`pullhistory.py:64`) evicts `written/merged/conflicted/failed` records that investigations need.
-**Pros:** Longer forensic window for the rows that matter. **Cons:** Changes a logging contract; needs a policy (summarize uploads, separate file, or larger cap).
-**Context:** Found by the Track 62A CEO Claude voice while sizing the `excluded` rows (18 of 3,037). Unrelated to previews.
-**Depends on:** nothing. **Effort / priority:** M / P3.
-
-### [plan-eng-review] Preview/apply parity tests for `gc --dry-run` and `recapture --dry-run`
-**What:** Twin-state tests asserting the candidates `gc --dry-run` reports equal what `gc` (with and without `--conflicts`) deletes, and that `recapture --dry-run`'s commit records equal the rows a real recapture writes.
-**Why:** Track 62A adds parity only for pull; the other two previews can still be write-free but divergent.
-**Pros:** Closes the "useful forecast" guarantee for every preview. **Cons:** Test time; recapture needs git fixtures.
-**Context:** Next rung after Track 62A's pull parity (overlay predictor). Retention reapers already share plan functions (Track 17D), so gc parity is mostly a test.
-**Depends on:** Track 62A. **Effort / priority:** S / P3.
-
-### [plan-devex-review] Prerequisites and a timed two-Mac preview/apply walkthrough in README
-**What:** State prerequisites (Python 3.11+, pipx) and add a copy-paste two-Mac walkthrough (init/push on A, init/`pull --dry-run`/pull on B) with expected output, timed once on a fresh machine.
-**Why:** Codex DX voice: Quick Start taught a real pull directly and the onboarding time is unmeasured.
-**Pros:** New-Mac onboarding with previews from minute one. **Cons:** Docs upkeep; single-operator audience.
-**Context:** Track 62A adds only the Quick Start `mm pull --dry-run` line.
-**Depends on:** Track 62A. **Effort / priority:** S / P3.
-
-### [plan-eng-review] Distinguish explicitly requested host captures on the wire
-
-- **Why:** Track 61A shares the existing host snapshot schema. An `origin` field
-  could distinguish flag-driven captures, but needs its own producer/consumer
-  justification rather than being inferred from timestamps or push counts.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 61A approved eng review; no wire change in this Track.
-
-### [plan-devex-review] Host read-budget override
-
-- **Why:** Warm capture can outgrow the autopush read budget. Extend the existing
-  proposal in `docs/roadmap-future.md` (“Make the host-usage read budget
-  configurable”, originally line 47); do not create a competing design.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Track 61A documents the ~900–1,000 Codex-rollout ceiling. Explicit
-  capture/retry is the current remedy; no override is implemented here.
-
-### [plan-eng-review] Audit forensic append callers for silent-write assumptions
-
-- **Why:** `flock_append_jsonl` intentionally ignores write failures by default.
-  Track 61A requests strict outcomes only for its user-requested capture. Audit
-  the other callers for success claims that actually require a written row.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 61A strict append gate; preserve best-effort forensic callers
-  unless an explicit caller contract requires otherwise.
-
-### [ship:severity=informational] Reconcile docs/ROADMAP.md for Track 59A + 60A
-
-- **Why:** the plan completion audit for PR #177 found all 28 implementation
-  and test items DONE, but `docs/ROADMAP.md` still lists Track 59A and Track
-  60A as in progress rather than shipped. This repo's convention (confirmed
-  twice before) is that only `/roadmap` writes `ROADMAP.md` — never a hand
-  edit during `/ship` or `/implement`.
-- **Effort:** S
-- **Priority:** P1
-- **Context:** Deferred from plan:
-  `/Users/kb/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-15-track-59a.md`.
-  User chose to ship v0.14.13 and reconcile the roadmap in a follow-up
-  `/roadmap` run (2026-09-15 decision).
-
-### [ship:severity=informational] Extract a shared _open_crypto_session helper
-
-- **Why:** the `pending: list[str] = []` / `_init_crypto_session(..., pending=pending)`
-  / `for note in pending: console.print(safe_str(note))` triplet is duplicated
-  verbatim across `pull`, `status`, `diff`, `gc`, and `recapture` in `cli.py`.
-  A thin wrapper removes ~18-20 lines and keeps the five call sites from
-  drifting apart.
-- **Hypothesis (untested):** wrap it as `_open_crypto_session(backend,
-  passphrase, config, read_only) -> int`, returning `memory_kb` and printing
-  pending notes internally.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #177 pre-landing review (maintainability specialist).
-  Deferred rather than touching 5 call sites with subtly different
-  `read_only` arguments right before shipping.
-
-### [ship:severity=informational] Minor redundant path/hash re-reads in mm-events + crypto repair
-
-- **Why:** two small, explicitly non-blocking redundancies found in review:
-  `_bootstrap_mm_events_path` re-derives a normalized-path comparison that
-  `resolve_sources` already computed; `apply_crypto_init_repair` re-reads and
-  re-hashes the canonical file and every conflict copy that
-  `fetch_crypto_init` just read moments earlier. Both are bounded by tiny
-  file counts/sizes (crypto-init candidates, home-dir ancestor depth), not by
-  peer or history size — real-world cost is negligible.
-- **Hypothesis (untested):** thread the already-computed normalized path /
-  already-read bytes through instead of re-deriving — EXCEPT the final
-  immediate-pre-unlink re-read in `apply_crypto_init_repair`, which is a
-  deliberate TOCTOU guard and must stay exactly as-is.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #177 pre-landing review (performance specialist).
-
-### [ship:severity=informational] Disambiguate historical device IDs with shared display prefixes
-
-- **Why:** the shared eight-character machine label keeps Agent activity,
-  economics, and model subtotals consistent, but two accepted historical IDs
-  with the same prefix still look identical. Calculations use full IDs and
-  remain separate; newly generated IDs are already eight characters.
-- **Repro:** `_device_table_label("abcdefgh-first")` and
-  `_device_table_label("abcdefgh-second")` both return `abcdefgh`.
-- **Hypothesis (untested):** derive one collision-aware label map for all three
-  views while preserving their terminal width and sanitization contracts.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #176 Greptile follow-up, `aggregator.py` machine-label helper.
-  User chose to ship v0.14.12 with this display limitation on 2026-09-15.
-
-### [plan-ceo-review] Price Claude fast mode when it is first used
-
-- **Why:** Fast mode bills Opus 5 and Opus 4.8 at $10/$50, twice the standard tier, and prompt-caching multipliers
-  stack on top (platform.claude.com pricing, read 2026-09-14). mm prices every Opus token at the standard tier, so
-  a fast-mode window under-reports by up to 2x under a confident `~`. Track 58A ships the disclosure — the rendered
-  rate legend, README and `docs/invariants/events-retro.md` all say fast-mode turns are priced at standard rates —
-  but not the detector.
-- **Evidence:** a census of 228 session jsonls touched in the last 45 days (26,339 assistant usage rows) found
-  `usage.speed` present on 22,042 rows, **all `"standard"`**, and **absent on 4,297** (absence of the field, not
-  evidence about when those rows were written). `parse_usage` discards `speed`, and the sessions-snapshot wire
-  carries no speed field, so fleet-wide exposure cannot be measured from the wire today.
-- **Trigger (human, deliberately not a machine trigger):** you knowingly run Claude Code in fast mode, or Anthropic
-  extends fast mode beyond Opus 5 / 4.8. The /autoplan gate chose this trigger over building a detector for a
-  condition observed zero times.
-- **Hypothesis (untested):** the cheapest honest shape is local-only — record fast-mode days in the token cache and
-  report them in `mm diag`, with no wire field and no marker change.
-- **Context / cost, measured during the 58A review:** the cache path is the expensive part, and both eng voices
-  flagged it independently. The shape check must land in BOTH cache-reuse gates — `get_or_compute`'s size/mtime hit
-  AND `_resume_plan` — because a pre-58A entry carries `offset`/`head` and would otherwise resume and persist
-  "zero fast turns" forever without ever inspecting history. It also needs a counter schema (a day-set cannot supply
-  counts), `MAX_BY_DAY_DAYS` trimming, message-id dedup, concurrent-append handling, and full-walk-vs-incremental
-  equivalence tests. `JsonlSegment` is a 4-field NamedTuple, so every construction site changes. A fleet-wide wire
-  flag was rejected separately: `speed` is absent on 16% of rows, so it would ship a third coverage state
-  (detected / checked-and-absent / unknown) that nothing models, plus new wire content the 58A card requires a
-  separate proposal for.
-- **Effort:** M
-- **Priority:** P3
-
-### [ship:severity=informational] Per-reader "completed, no usage" is whole-row-scoped on the mm status/diag read path
-
-- **Why:** `/ship`'s pre-landing review found the SAME bug shape in two places. The
-  live-push console print (`cli.py:_push_captured_usage`) originally checked
-  whole-capture `capture.hosts` truthiness instead of the specific reader's own
-  contribution, so a reader that itself completed with zero usage inherited
-  "contributed" whenever a sibling reader in the same sweep had real data.
-  A first fix (`name not in capture.hosts`) was caught by a LATER adversarial
-  pass as its own bug: `host_family()` classifies by model-id prefix, not
-  reader identity ("a reader is not a row of its own" — its own docstring),
-  so a model id it doesn't recognize (e.g. a real OpenAI id like
-  `codex-mini-latest`, which matches none of `gpt-`/`o1`/`o3`/`o4-`) lands a
-  genuine contribution under family `"other"` instead of `"codex"`, which
-  `name not in capture.hosts` would then mislabel as empty — trading a narrow
-  bug for a more-reachable one. The ACTUAL fix landed in this PR instead:
-  `HostUsageCapture` gained a reader-identity-scoped `empty: tuple[str, ...]`
-  field, recorded in `_capture_host_usage` from each reader's own
-  `result.hosts` BEFORE the family-keyed merge (mirroring the existing
-  `partial` field's exact pattern), so it never depends on family-key-equals-
-  reader-name. Pinned by
-  `test_empty_is_reader_identity_scoped_not_family_key_scoped`
-  (`tests/test_host_usage_snapshot.py`) and
-  `test_capture_outcome_labels_each_reader_independently`
-  (`tests/test_integration.py`).
-  The SECOND instance is still NOT fixed: `mm status`/`mm diag`'s
-  "; completed, no usage" suffix (`cli.py:_print_host_publication`,
-  `state.get("empty")`) is fed by a single row-level `"empty"` boolean
-  (`aggregator.py:local_host_capture_candidate`, `"empty": not
-  row.lifetime_by_family`) applied uniformly to every reader tagged
-  "contributed" — the same original blind spot, on the persisted-row read
-  path, and it must NOT be fixed the same wrong way this TODO's first
-  attempt was (do not key off `row.lifetime_by_family` membership by name).
-- **Hypothesis (untested):** the live-push fix now computes the correct
-  reader-identity-scoped signal (`capture.empty`) at capture time — thread
-  THAT into the wire row instead of re-deriving anything from
-  `lifetime_by_family` after the fact. `make_host_usage_snapshot` would gain
-  an `empty` (or `empty_readers`) field written from `capture.empty` (already
-  in canonical reader-name form), and `local_host_capture_candidate` /
-  `project_host_publication` / `cli._print_host_publication` would read that
-  field directly instead of computing anything from family-key membership.
-  Must stay allowlist-safe (coverage/booleans only, never raw token payload —
-  see the adapter's existing "never the host token payload" docstring rule)
-  and handle a row already synced from an older Mac that lacks the new key
-  (graceful "unknown," not a crash or a silent wrong label).
-- **Effort:** M
-- **Priority:** P2
-- **Context:** PR #178 (Track 61A) pre-landing review: checklist +
-  maintainability + plan-completion-audit specialists converged independently
-  on the live-push instance; maintainability additionally traced this second,
-  still-unfixed instance; a later fresh-context adversarial pass caught that
-  the first attempted fix for the live-push instance was itself wrong and
-  named the correct (reader-identity-at-capture-time) mechanism, now applied
-  there. Deferred rather than also threading a new wire field through
-  events.py + aggregator.py + cli.py and reasoning through mixed-fleet
-  backward compatibility during `/ship`.
-
-### [ship:severity=informational] Five smaller mm push --capture-usage rough edges from adversarial review
-
-- **Why:** A fresh-context adversarial pass on PR #178 (Track 61A) found five
-  more real but lower-severity gaps in the new `--capture-usage` flag, each
-  verified against the actual code (not taken on the reviewer's word) but
-  judged too narrow or too design-entangled to fix inline during `/ship`:
-  1. **Exit 4 silently means content did not sync either**, contradicting
-     CLAUDE.md's and README's own wording. `_push_captured_usage` raises
-     `typer.Exit(4)` on "no row written" / append failure BEFORE calling
-     `_push_core` — so nothing pushed, not just the capture. This is a
-     confirmed-intentional design boundary (`test_requested_capture_failure_never_calls_push`
-     pins it), but the printed remedy and both docs read as if content sync
-     happened regardless. Minimum fix: add "Content was not pushed; run mm
-     push" to both pre-push exit-4 branches in `cli.py:_push_captured_usage`
-     and correct the two docs.
-  2. **`mm status`/`mm diag` can recommend `mm push --capture-usage` in a
-     configuration where that exact command hard-refuses**: `_host_publication`
-     builds `state["readers"]` from `_default_host_readers` (gated only on
-     codex/grok being enabled), independent of whether `mm-events` itself is
-     a selected source, so a codex-enabled + mm-events-disabled machine gets
-     the nag but the flag immediately exits 1 with "Usage capture requires
-     mm-events." Self-correcting (that refusal message names the real fix),
-     but one avoidable failed command. `cli.py:_print_host_publication`
-     (~line 5954) / `_host_publication`.
-  3. **`_iter_mm_push_objs`'s cursor walk now hashes every day file it opens
-     even when the result (a discarded throwaway `EventScan` + empty revision
-     dict) is never used** — `events.py:_iter_mm_push_objs`, rerouted through
-     `_iter_typed_objs` in this diff. Gate the digest/`scan.hashes` write on
-     `revision is not None`. Low cost today (1-2 files on a healthy machine)
-     but scales with how far back `resolve_push_cursor` must walk.
-  4. **An unreadable OLDER day file cannot mark a host-usage-snapshot row
-     uncertain**, unlike `mm-push` rows: `latest_event_rows` only adds a type
-     to `uncertain_types` when the failing file has no winner yet or won in
-     it, which is filename-order-sound for `mm-push`'s `(-delta, index)` key
-     but not for host rows, whose winner is chosen by `row.as_of` (fleet
-     timestamp) via `local_host_capture_candidate` — a clock correction,
-     restored backup, or merged peer copy of `<device>-<day>.jsonl` could let
-     an older FILE legitimately outrank a newer one, silently skipping the
-     failing file's uncertainty. `events.py:latest_event_rows`.
-  5. **`EventScan.cached_hash` calls `Path.resolve()` for every file across
-     every source on `mm status`**, not just mm-events day files (the only
-     ones `scan.hashes` ever holds) — measured ~26ms/1077 files locally; a
-     wasted realpath call on effectively 100% of non-day-file lookups on a
-     large fleet Mac, and a `resolve()` failure there is swallowed by
-     `_record_file` as a generic "read error", silently dropping the file
-     from the status manifest. A `path.name` pre-check (or keying on the
-     unresolved path) avoids both. `manifest.py` / `cli.py`'s
-     `diagnostic_hash` lambda wiring.
-- **Effort:** S (each individually; #1 and #2 are text/doc-only)
-- **Priority:** P3
-- **Context:** PR #178 (Track 61A), same adversarial pass as the item above.
-  Two additional findings from that pass were evaluated and NOT carried
-  forward: a claim that `safe_str(typer.Exit(...))` renders empty was
-  directly falsified (`str(typer.Exit(1)) == "1"`, not empty); a claim that
-  `assert path is not None` is unsafe under `python -O` matches an existing,
-  accepted pattern (17 similar asserts already in `cli.py`) rather than a
-  regression introduced here. A THIRD (non-idempotent duplicate git/session
-  rows on repeated `--capture-usage` invocations, since it deliberately never
-  writes an `mm-push` row to advance the cursor) was initially dismissed here
-  as an accepted Approach C trade-off — **that dismissal was too quick.** A
-  separate Codex structured-review pass (`codex review --base main`, [P2])
-  sharpened it with a concrete, reachable harm: `events_tail.py:952-961`
-  never suppresses `capture.git_rows`/`capture.session_rows` under
-  `suppress_host_capture`, only the terminal `mm-push` row, so a repo-less
-  Mac's `--capture-usage` invocation still emits an unmarked `git-snapshot`
-  that `aggregator.py`'s `zero_repo_captures` counts toward "N of M pushes"
-  — the retro's own coverage-gap diagnostic gets polluted by invocations
-  that are not pushes by the feature's own stated definition ("a usage
-  refresh must not count as a push"). This is now judged a real gap in that
-  stated invariant, not just storage bloat, and deserves the SAME weight as
-  the item above (P2 follow-up design review), not a shrug. Two directions
-  named by the earlier Claude pass remain open: suppress git/session capture
-  under the flag too (making it a pure usage-only operation), or mark these
-  rows so `aggregate_git()` (and any other push-keyed consumer) excludes
-  them the same way retro push-count totals already do.
-
-### [ship] Investigate a claimed TOCTOU on the accepted-manifest digest check
-
-- **Why:** a Codex outside-adversarial pass on PR #178 (Track 61A) claimed
-  `events.py:recorded_row_revision` has a race: it confirms the requested row
-  is present in the day file via one read (`_iter_typed_objs`), then
-  independently re-opens and hashes the same file (`hash_file(path)`) for the
-  digest compared against the manifest's accepted `sha256`. Between those two
-  reads, the file could change. Codex's own severity read ("Fix before
-  merging... returned published=True for accepted contents {}") was NOT
-  independently reproduced against the real code path here — this ticket
-  records the claim plus a first analysis, not a confirmed bug.
-- **Analysis so far (needs a second pass, not acted on):** `_push_captured_usage`
-  runs "under the mm lock" and `record_acceptance` (the `on_manifest_accepted`
-  callback) fires synchronously right after upload, so mm's OWN processes
-  can't interleave a write here. The realistic race source is external (an
-  iCloud daemon replacing the local file with a peer's conflicting version in
-  that exact window). In the ordinary case a race would make the SECOND read
-  disagree with the manifest's already-fixed accepted digest, which fails
-  CLOSED (`capture_revision_in_manifest` returns `False`, i.e. "not
-  published" — the safe direction), not open. Whether Codex's fault injection
-  reflects a path actually reachable through the real CLI (versus calling the
-  internal functions directly with hand-crafted, not-otherwise-reachable
-  state) is the open question before this is worth a fix.
-- **Effort:** S to investigate further; unknown until reachability is settled
-- **Priority:** P3
-- **Context:** PR #178 (Track 61A), Codex outside-adversarial pass via
-  `/ship`. Not fixed inline: two prior fix attempts already landed in this
-  same `/ship` run (one of which a LATER adversarial pass caught as itself
-  wrong), and a concurrency fix attempted under the same time pressure
-  without settling reachability first risks a repeat of that pattern.
-
 
 ## Drain records
+
+### Roadmap drain — 2026-09-17
+
+14 inbox items from the Track 58A–62A /autoplan reviews and the PR #176–#178 /ship runs: **4 placed, 8 deferred, 1 killed, 1 discharged**. Authored-false rate: 1 / (4 + 1) = 20%, and the one discharge is the roadmap reconcile this run performs rather than a stale observation. Verification baseline: `66b5293` (v0.14.15). Ground truth closed five Tracks first: 58A (v0.14.12 `dfc7a09`), 59A and 60A (v0.14.13 `e7eb301`, one PR by user decision), 61A (v0.14.14 `5079b3f`), 62A (v0.14.15 `66b5293`); Groups 58–62 are appended to `docs/roadmap-shipped.md` and Phase 3 (Retro fidelity) is complete.
+
+| Inbox item | Title | Disposition / destination | Evidence or reason |
+|---|---|---|---|
+| 1 | pull-history rotation is dominated by push `uploaded` rows | defer → docs/roadmap-future.md | `pullhistory._ROTATE_BYTES = 1_000_000`; a logging-contract change needs a policy first. |
+| 2 | Preview/apply parity tests for `gc --dry-run` and `recapture --dry-run` | defer → docs/roadmap-future.md | No parity or twin-state test in `tests/test_retention.py` or `tests/test_track_30a.py`; tests only, P3. |
+| 3 | Prerequisites and a timed two-Mac preview/apply walkthrough in README | defer → docs/roadmap-future.md | Single-operator audience; time it at the next real onboarding. |
+| 4 | Distinguish explicitly requested host captures on the wire | defer → docs/roadmap-future.md | No reader named; the one candidate is status's "Latest attempt: unknown (no attempt receipt)" line. |
+| 5 | Host read-budget override | place → Track 63A | Its own instruction was to extend the Future proposal, and that proposal's trigger fired (below). |
+| 6 | Audit forensic append callers for silent-write assumptions | defer → docs/roadmap-future.md, audit performed | `flock_append_jsonl` has two callers; of `write_push_event`'s four call sites only `cli.recapture` makes a success claim on a non-strict write. The bullet carries the finding. |
+| 7 | Reconcile docs/ROADMAP.md for Track 59A + 60A | discharged@e7eb301 | This run records Groups 59 and 60 in `docs/roadmap-shipped.md`. |
+| 8 | Extract a shared `_open_crypto_session` helper | defer → docs/roadmap-future.md | Six sites at HEAD, not the five filed; take it with the next change to one of them. |
+| 9 | Minor redundant path/hash re-reads in mm-events + crypto repair | kill | The filer measured the cost as negligible and bounded by design (crypto-init candidates, home-dir ancestor depth), and one of the two re-reads sits beside a deliberate pre-unlink guard. No trigger can fire. |
+| 10 | Disambiguate historical device IDs with shared display prefixes | defer → docs/roadmap-future.md | Display only; `_DEVICE_TABLE_LABEL_WIDTH = 8`; trigger is a real prefix collision. |
+| 11 | Price Claude fast mode when it is first used | defer → docs/roadmap-future.md | Human trigger as filed; `usage.speed` was `"standard"` on all 22,042 rows that carried it. |
+| 12 | Per-reader "completed, no usage" is whole-row-scoped on the mm status/diag read path | place → Track 65A | `local_host_capture_candidate` still emits `"empty": not row.lifetime_by_family`. |
+| 13 | Five smaller mm push --capture-usage rough edges from adversarial review | place → Track 64A (items 1, 2 and the reopened third finding) and Track 65A (items 3, 4, 5) | Every sub-claim re-verified at 66b5293; the third finding's harm is `aggregate_git`'s `snap_total` / `snap_zero`, which exclude only recapture-origin rows. |
+| 14 | Investigate a claimed TOCTOU on the accepted-manifest digest check | place → Track 65A | `_iter_typed_objs` already computes a single-pass digest that `recorded_row_revision` discards; using it is cheaper than settling reachability. |
+
+**Promoted from Future on a fired trigger.** "Warm Codex read headroom and the healthy-pass cache rewrite" named "a warm pass above 200 ms, or a corpus above ~900 rollouts". Measured 2026-09-17 on a scratch copy of the cache: 1,052 rollouts, 384 ms warm, `deadline` on 3 of 3 attempts at the 250 ms autopush budget, 116 ms left under the 500 ms interactive budget; 186 ms over 752 rollouts on 2026-09-09. Probes are kept in `~/.gstack/projects/kbitz-mind-meld/63a-probes/`. It is Track 63A, first in priority, and not a Hotfix: interactive pushes still publish Codex and autopush is not wired on the measuring Mac.
+
+**Recovered, never filed.** The PR #179 /ship doc-sync noted that SPEC.md's command reference lacks `mm recapture` and `mm push --capture-usage` (`grep -c` returns 0 at 66b5293). It rides Track 64A, which settles the exit codes that entry must state.
+
+**Former active plan:** IDs below refer to the 2026-09-14 plan. All five shipped under their own numbers, so nothing recycled and there is no renames table.
+
+| 2026-09-14 ID | Title | 2026-09-17 disposition |
+|---|---|---|
+| 58A | Refresh verified rates, re-pin the Grok census, and make model usage easier to read | shipped as 58A (v0.14.12); census pinned to 1.0.30, not the carded 1.0.25 |
+| 59A | Create the mm-events root only from init and a verified real push | shipped as 59A (v0.14.13); the refusal task was reversed at the gate — a missing event file is a deletion |
+| 60A | Inspection commands observe storage and the upgrade cache without repairing them | shipped as 60A (v0.14.13), inside 59A's PR |
+| 61A | Refresh host usage from an attended push and say what the last push published | shipped as 61A (v0.14.14) |
+| 62A | Make the other previews write-free | shipped as 62A (v0.14.15), with the multi-peer pull predictor |
+
+New Tracks: 63A (Codex read headroom), 64A (usage-only capture), 65A (reader-scoped publication evidence). Future: 86 → 93 (one promoted, eight appended). Shipped history is append-only. ROADMAP.md's audit-configuration paragraph now says the caps are machine-local (16 / 6 where it was written, 24 / 5 on the Mac that ran this regeneration). Not acted on: the audit's archive finding for `docs/designs/sync-gstack-context.md` (a live design doc cited from AGENTS.md).
+
 
 ### Roadmap drain — 2026-09-14
 
@@ -645,4 +380,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-14 by /roadmap; the inbox is empty. Prior drain records are historical._
+_Last updated 2026-09-17 by /roadmap; the inbox is empty. Prior drain records are historical._
