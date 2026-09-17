@@ -109,13 +109,13 @@ def read(initial: Iterable[str]) -> set[str]:
 
 
 def _read_under_lock(fd: int, *, warn: bool = False) -> set[str] | None:
-    size = os.fstat(fd).st_size
-    if size == 0:
-        return None
-    os.lseek(fd, 0, os.SEEK_SET)
     try:
+        size = os.fstat(fd).st_size
+        if size == 0:
+            return None
+        os.lseek(fd, 0, os.SEEK_SET)
         parsed = json.loads(os.read(fd, size))
-    except (ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError):
         reason = "corrupt"
     else:
         if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
@@ -162,24 +162,8 @@ def acknowledge(names: Iterable[str], *, initial: Iterable[str]) -> set[str]:
             pass
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            try:
-                size = os.fstat(fd).st_size
-            except OSError:
-                size = 0
-            if size == 0:
-                current = initial_set
-            else:
-                os.lseek(fd, 0, os.SEEK_SET)
-                raw = os.read(fd, size)
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-                        current = set(parsed)
-                    else:
-                        current = initial_set
-                except json.JSONDecodeError:
-                    current = initial_set
-
+            parsed = _read_under_lock(fd)
+            current = initial_set if parsed is None else parsed
             updated = current | new_names
             payload = (json.dumps(sorted(updated)) + "\n").encode("utf-8")
             # In-place write under the flock — atomic_write_bytes uses

@@ -713,6 +713,69 @@ class TestPreflightConflicts:
         )
         assert predicted == []
 
+    def test_unreadable_local_is_may_fail(self, tmp_path: Path) -> None:
+        blocked = tmp_path / "blocked.md"
+        blocked.write_bytes(b"local")
+        blocked.chmod(0)
+        try:
+            predicted = _preflight_conflicts(
+                [{"device_id": "peerA", "device_name": "A"}],
+                {
+                    "peerA": {
+                        "sources": {
+                            "claude": {"files": {"blocked.md": _info("abc")}},
+                        },
+                        "tombstones": {},
+                    }
+                },
+                {"claude": {"path": tmp_path, "type": "claude"}},
+                None,
+                {},
+            )
+            assert [p.outcome for p in predicted] == ["may fail"]
+            assert predicted[0].reason == "local file unreadable"
+        finally:
+            blocked.chmod(0o600)
+
+    def test_fifo_is_may_fail_without_hanging(self, tmp_path: Path) -> None:
+        fifo = tmp_path / "pipe.md"
+        os.mkfifo(fifo)
+        predicted = _preflight_conflicts(
+            [{"device_id": "peerA", "device_name": "A"}],
+            {
+                "peerA": {
+                    "sources": {
+                        "claude": {"files": {"pipe.md": _info("abc")}},
+                    },
+                    "tombstones": {},
+                }
+            },
+            {"claude": {"path": tmp_path, "type": "claude"}},
+            None,
+            {},
+        )
+        assert [p.outcome for p in predicted] == ["may fail"]
+        assert predicted[0].reason == "local file unreadable"
+
+    def test_directory_collision_is_may_fail(self, tmp_path: Path) -> None:
+        (tmp_path / "as-dir").mkdir()
+        predicted = _preflight_conflicts(
+            [{"device_id": "peerA", "device_name": "A"}],
+            {
+                "peerA": {
+                    "sources": {
+                        "claude": {"files": {"as-dir": _info("abc")}},
+                    },
+                    "tombstones": {},
+                }
+            },
+            {"claude": {"path": tmp_path, "type": "claude"}},
+            None,
+            {},
+        )
+        assert [p.outcome for p in predicted] == ["may fail"]
+        assert predicted[0].reason == "file/directory collision"
+
 
 # ── _pull_one_source ─────────────────────────────────────────────────
 

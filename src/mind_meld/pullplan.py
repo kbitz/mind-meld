@@ -8,6 +8,7 @@ selects downloads for a real pull and cannot predict blob/decrypt failures.
 
 from __future__ import annotations
 
+import stat
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -64,8 +65,13 @@ class PullPlanner:
         key = source, path
         if key not in self.states:
             try:
-                path.stat()
-                state = _LocalState(exists=True, kind="directory" if path.is_dir() else "file")
+                st = path.stat()
+                is_dir = stat.S_ISDIR(st.st_mode)
+                state = _LocalState(
+                    exists=True,
+                    kind="directory" if is_dir else "file",
+                    unreadable=not is_dir and not stat.S_ISREG(st.st_mode),
+                )
                 try:
                     state.mtime = mtime_from_path(path)
                 except (TypeError, ValueError, OverflowError, OSError):
@@ -76,7 +82,13 @@ class PullPlanner:
                 state = _LocalState(exists=True, unreadable=True)
             self.states[key] = state
         state = self.states[key]
-        if hash_contents and state.exists and state.kind == "file" and not state.hashed:
+        if (
+            hash_contents
+            and state.exists
+            and state.kind == "file"
+            and not state.hashed
+            and not state.unreadable
+        ):
             state.hashed = True
             try:
                 state.sha256 = hash_file(path)

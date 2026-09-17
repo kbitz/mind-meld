@@ -7270,6 +7270,29 @@ def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_firs
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
+def test_fail_mode_local_failure_only62(preview62, dry_run):
+    env = preview62
+    prefix = "projects/-Users-kb-myapp/memory/"
+    blocked = env["claude"] / prefix / "blocked.md"
+    blocked.write_bytes(b"local")
+    blocked.chmod(0)
+    try:
+        _publish_peer62(env, "dev-b", {("claude", prefix + "blocked.md"): (b"peer bytes", None)})
+        argv = ["pull", "--conflict-mode", "fail"] + (["--dry-run"] if dry_run else [])
+        result = env["audit"](argv) if dry_run else runner.invoke(app, argv)
+        assert result.exit_code == 3, result.output
+        text = _preview_text(result)
+        assert "may fail (local file unreadable)" in text
+        assert "! conflict" not in text
+        blocked.chmod(0o600)
+        assert blocked.read_bytes() == b"local"
+        if dry_run:
+            _assert_preview_refused(result, 3)
+    finally:
+        blocked.chmod(0o600)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_fail_mode_mergeable_two_peers62(preview62, dry_run):
     env = preview62
     path = "projects/-Users-kb-myapp/memory/merge.jsonl"

@@ -90,6 +90,16 @@ class TestRead:
         mode = stat.S_IMODE(os.stat(seen_sources.seen_path()).st_mode)
         assert mode == 0o600
 
+    def test_fstat_oserror_degrades_without_crash(self, monkeypatch, capsys):
+        seen_sources.SEEN_DIR.mkdir(parents=True, exist_ok=True)
+        seen_sources.seen_path().write_text('["claude"]\n')
+        monkeypatch.setattr(
+            os, "fstat", lambda fd: (_ for _ in ()).throw(OSError("injected fstat failure"))
+        )
+        assert seen_sources.read(initial=["gstack"]) == {"gstack"}
+        captured = capsys.readouterr()
+        assert "seen-sources.json corrupt" in captured.err
+
 
 class TestWrite:
     def test_write_uses_directory_patched_after_import(self, monkeypatch, tmp_path):

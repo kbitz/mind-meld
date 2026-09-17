@@ -4501,6 +4501,15 @@ def _plan_pull(
     return planner, unknown
 
 
+_FAIL_MODE_REFUSALS = frozenset({"conflict", "may fail"})
+
+
+def _fail_mode_refusals(
+    predictions: list[pullplan.PullPrediction],
+) -> list[pullplan.PullPrediction]:
+    return [p for p in predictions if p.outcome in _FAIL_MODE_REFUSALS]
+
+
 def _preflight_conflicts(
     pull_targets: list[dict],
     manifest_cache: dict,
@@ -4511,7 +4520,7 @@ def _preflight_conflicts(
     planner, _ = _plan_pull(
         pull_targets, manifest_cache, local_sources_map, source_filter, all_tombstones
     )
-    return [p for p in planner.predictions if p.outcome in {"conflict", "may fail"}]
+    return _fail_mode_refusals(planner.predictions)
 
 
 def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
@@ -4734,17 +4743,19 @@ def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
 
 
 def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: bool) -> None:
-    """Print predicted conflicts before --conflict-mode=fail raises.
+    """Print predicted fail-mode refusals before --conflict-mode=fail raises.
 
-    Quiet (autopull): one-liner per conflict to stderr.
+    Quiet (autopull): one-liner per conflict or local failure to stderr.
     Non-quiet: rich console with resolution hint.
     """
     # src_name, rel_path, device_name are all peer-controlled — sanitize.
     if quiet:
         for p in predicted:
             print(
-                f"mm: conflict {safe_str(p.src_name)}/{safe_str(p.rel_path)} "
-                f"(from {safe_str(p.device_name)})",
+                f"mm: {safety.safe_terminal_str(p.label)} "
+                f"{safety.safe_terminal_str(p.src_name)}/"
+                f"{safety.safe_terminal_str(p.rel_path)} "
+                f"(from {safety.safe_terminal_str(p.device_name)})",
                 file=sys.stderr,
             )
         return
@@ -5204,7 +5215,7 @@ def _pull_core(
         )
     if conflict_mode == "fail":
         assert planner is not None
-        predicted = [p for p in planner.predictions if p.outcome in {"conflict", "may fail"}]
+        predicted = _fail_mode_refusals(planner.predictions)
         if predicted:
             _print_pull_summary(
                 PullResult(), corrupt_peers, planned_unknown, [], [], quiet, verbose, dry_run=True
