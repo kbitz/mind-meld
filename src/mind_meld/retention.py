@@ -79,12 +79,14 @@ class ReapOutcome:
         return bool(self.failed or self.skipped or self.repair_failed)
 
 
-def _render_reap_outcome(label: str, outcome: ReapOutcome, *, dry_run: bool) -> None:
+def _render_reap_outcome(
+    label: str, outcome: ReapOutcome, *, dry_run: bool, note: str = ""
+) -> None:
     """Print the one stable non-verbose result line for a reaper."""
     if dry_run:
         console.print(
             f"[bold]{label}[/bold] dry-run: candidates={outcome.candidates} "
-            f"repairs={outcome.repairs} skipped={outcome.skipped}"
+            f"repairs={outcome.repairs} skipped={outcome.skipped}{note}"
         )
         return
 
@@ -311,6 +313,7 @@ def _gc_old_conflict_files(
     verbose: bool,
     *,
     now: datetime | None = None,
+    deletion_requires_flag: bool = False,
 ) -> ReapOutcome:
     """Delete .sync-conflict-* files older than CONFLICT_AGE_DAYS.
 
@@ -324,13 +327,14 @@ def _gc_old_conflict_files(
     reaped, regardless of age. Paths print on delete / would-delete,
     not only under ``-v``.
     """
+    note = " (deletion requires --conflicts)" if deletion_requires_flag else ""
     try:
         hits = resolveflow._find_conflict_files(config)
     except OSError as e:
         outcome = ReapOutcome(skipped=1)
         if verbose:
             console.print(f"  [yellow]conflict scan skipped: {safe_str(e)}[/yellow]")
-        _render_reap_outcome("Conflicts", outcome, dry_run=dry_run)
+        _render_reap_outcome("Conflicts", outcome, dry_run=dry_run, note=note)
         return outcome
     current_time = now or datetime.now(timezone.utc)
     cutoff = current_time - timedelta(days=CONFLICT_AGE_DAYS)
@@ -376,7 +380,7 @@ def _gc_old_conflict_files(
         deleted += 1
         console.print(f"  [dim]deleted (age {age_days}d):[/dim] {safe_str(cpath)}")
     outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
-    _render_reap_outcome("Conflicts", outcome, dry_run=dry_run)
+    _render_reap_outcome("Conflicts", outcome, dry_run=dry_run, note=note)
     return outcome
 
 

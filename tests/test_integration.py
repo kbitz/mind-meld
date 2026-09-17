@@ -1578,7 +1578,7 @@ class TestMigrateConfigCommand:
 
         before = config_path.read_bytes()
         config = config_module.load_config(config_path)
-        cli_module._maybe_prompt_migration(config)
+        cli_module._maybe_prompt_migration(config, read_only=False)
         assert config_path.read_bytes() == before
         joined = " ".join(captured)
         assert "retired" in joined.lower() or "opencode" in joined
@@ -6823,9 +6823,12 @@ def _publish_peer62(env, device, files, *, tombstones=None):
 
 @pytest.fixture
 def preview62(push_preview56, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     from mind_meld import identity, seen_sources, token_usage
     from mind_meld.skills.retro_fleet import aggregator
     from mind_meld.storage.keys import blob_key
+    from tests.test_host_skill_discovery import _ok_payload
 
     env = push_preview56
     memory = env["claude"] / "projects/-Users-kb-myapp/memory"
@@ -6886,6 +6889,9 @@ def preview62(push_preview56, tmp_path, monkeypatch):
     )
     env["cache"].update(last_seen_self_version="0.0.1", checked_at="2000-01-01T00:00:00+00:00")
     env["upgrade"].CACHE_PATH.write_text(json.dumps(env["cache"]))
+    breadcrumb = cli_module._migration_state_path()
+    breadcrumb.parent.mkdir(parents=True, exist_ok=True)
+    breadcrumb.write_text('{"missing": ["gstack"]}')
     (env["events"] / "events").mkdir()
     (env["events"] / "events/dev-a-2020-01-01.jsonl").write_text("{}\n")
     env["backend"].put(blob_key("dev-a", hashlib.sha256(b"orphan").hexdigest()), b"orphan")
@@ -6928,15 +6934,26 @@ def preview62(push_preview56, tmp_path, monkeypatch):
         for recorded, result in replay.items():
             if key == tuple(arg for arg in recorded if not arg.startswith("--since=")):
                 return result
-        if argv[0] in {"git", "gh"}:
+        if argv == ["gh", "api", "user"]:
+            return subprocess.CompletedProcess(argv, 0, '{"id": 1, "login": "test"}', "")
+        if argv == ["git", "config", "--global", "user.email"] or (
+            argv[:2] == ["git", "-C"] and argv[3:] == ["config", "user.email"]
+        ):
             return subprocess.CompletedProcess(argv, 0, "test@example.com\n", "")
         pytest.fail(f"Unexpected subprocess: {argv}")
 
     monkeypatch.setattr(subprocess, "run", run)
 
+    grok_output = tmp_path / "grok-inspect.json"
+    grok_output.write_text(json.dumps(_ok_payload()))
+    original_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "grok" if name == "grok" else original_which(name)
+    )
+
     def popen(argv, **kwargs):
         assert argv[1:] == ["inspect", "--json"]
-        raise FileNotFoundError("isolated Grok subprocess")
+        return SimpleNamespace(stdout=grok_output.open("rb"), returncode=0, wait=lambda **kw: 0)
 
     monkeypatch.setattr(subprocess, "Popen", popen)
 
@@ -7069,6 +7086,8 @@ def test_retro_exemptions62(preview62, state):
 def test_inspection_variants62(preview62, argv):
     result = preview62["audit"](list(argv))
     assert result.exit_code == 0, result.output
+    if argv == ("diag", "--json"):
+        assert json.loads(result.stdout)["host_skill_discovery"]["status"] == "ok"
 
 
 def test_real_pull_keeps_migration_and_history62(preview62):
@@ -7087,7 +7106,7 @@ def test_real_pull_keeps_migration_and_history62(preview62):
     assert any(row.get("action") == "excluded" for row in rows)
 
 
-@pytest.mark.parametrize("command", ["pull", "gc"])
+@pytest.mark.parametrize("command", ["pull", "gc", "recapture"])
 def test_preview_storage_refusal62(preview62, monkeypatch, command):
     from mind_meld.errors import StorageError
 
@@ -7096,6 +7115,8 @@ def test_preview_storage_refusal62(preview62, monkeypatch, command):
 
     if command == "pull":
         monkeypatch.setattr(cli_module, "list_devices_with_drops", fail)
+    elif command == "recapture":
+        monkeypatch.setattr(events_tail, "_prepare_recapture", fail)
     else:
         original = LocalBackend.list_keys
 
@@ -7294,6 +7315,311 @@ def test_pull_planner_future_clamp62(tmp_path):
         tmp_path,
     )
     assert (first.outcome, second.outcome) == ("write", "conflict")
+
+
+@pytest.mark.parametrize("command", ["push", "pull", "recapture"])
+def test_preview_tty_notice62(preview62, monkeypatch, command):
+    original = cli_module._maybe_prompt_migration
+    confirms = []
+
+    def prompt(config, **kwargs):
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        return original(config, **kwargs)
+
+    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", prompt)
+    monkeypatch.setattr(typer, "confirm", lambda *a, **kw: confirms.append(True) or True)
+    result = preview62["audit"]([command, "--dry-run", *(["1d"] if command == "recapture" else [])])
+    assert result.exit_code == 0, result.output
+    assert confirms == []
+    assert (
+        "Without --dry-run, this command first offers to run mm migrate-config (default: yes)."
+        in _preview_text(result)
+    )
+    assert preview62["legacy"].exists()
+    assert not cli_module.resolveflow._inversion_marker_path().exists()
+    assert not preview62["history"].exists()
+
+
+@pytest.mark.parametrize("command", ["pull", "gc", "recapture"])
+def test_crypto_refusal_suffix62(preview62, monkeypatch, command):
+    from mind_meld.errors import CryptoError
+
+    def refuse(*a, **kw):
+        raise CryptoError("crypto refused")
+
+    monkeypatch.setattr(cli_module, "_init_crypto_session", refuse)
+    _assert_preview_refused(preview62["audit"]([command, "--dry-run"]))
+
+
+@pytest.mark.parametrize(
+    "case", ["fleet", "device", "gc-corrupt", "custom-root", "zero-repos", "held-lock"]
+)
+def test_refusal_paths62(preview62, monkeypatch, case):
+    from mind_meld.errors import LockError
+    from mind_meld.storage.keys import device_key, manifest_key
+
+    env = preview62
+    argv = ["pull", "--dry-run"]
+    if case == "fleet":
+        key = device_key("dev-b")
+        data = json.loads(env["backend"].get(key))
+        data["last_seen_version"] = "0.8.0"
+        env["backend"].put(key, json.dumps(data).encode())
+    elif case == "device":
+        argv += ["--from", "missing"]
+    elif case == "gc-corrupt":
+        argv = ["gc", "--dry-run"]
+        env["backend"].put(manifest_key("dev-b"), b"corrupt")
+    elif case == "custom-root":
+        argv = ["recapture", "--dry-run"]
+        env["config"]["sync"]["sources"][1]["path"] = str(env["events"].parent / "missing-custom")
+        save_config(env["config"], env["config_path"])
+    elif case == "zero-repos":
+        argv = ["recapture", "--dry-run", "1d"]
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda *a, **kw: _mm_events.GitRootDiscovery((), (), False),
+        )
+    else:
+
+        def held():
+            raise LockError("held lock")
+
+        monkeypatch.setattr(cli_module, "acquire_lock", held)
+    result = env["audit"](argv)
+    if case == "held-lock":
+        assert result.exit_code == 1
+        assert "Nothing was changed" not in result.output
+    else:
+        _assert_preview_refused(result)
+    if case == "zero-repos":
+        assert "then preview again: mm recapture --dry-run 1d" in _preview_text(result)
+
+
+@pytest.mark.parametrize("disabled,configured", [(True, True), (False, False), (True, False)])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_recapture_source_advice62(preview62, disabled, configured, dry_run):
+    env = preview62
+    if disabled:
+        env["config"]["sync"]["disabled_sources"] = ["mm-events"]
+    if not configured:
+        env["config"]["sync"]["sources"] = [
+            s for s in env["config"]["sync"]["sources"] if s["name"] != "mm-events"
+        ]
+    save_config(env["config"], env["config_path"])
+    argv = ["recapture", "1d"] + (["--dry-run"] if dry_run else [])
+    result = env["audit"](argv) if dry_run else runner.invoke(app, argv)
+    assert result.exit_code == 1, result.output
+    assert (
+        f"but it is {'disabled' if disabled else 'not configured'} on this Mac."
+        in _preview_text(result)
+    )
+    if dry_run:
+        _assert_preview_refused(result)
+        assert "Fix (changes config): mm enable-source mm-events" in _preview_text(result)
+        assert "Then preview again: mm recapture --dry-run 1d" in _preview_text(result)
+    else:
+        assert "Then retry: mm recapture 1d" in result.output
+    if not disabled and dry_run:
+        enabled = runner.invoke(app, ["enable-source", "mm-events"])
+        assert enabled.exit_code == 0, enabled.output
+        retried = runner.invoke(app, ["recapture", "--dry-run", "1d"])
+        assert retried.exit_code == 0, retried.output
+
+
+@pytest.mark.parametrize(
+    "discovery,reason",
+    [("complete", "git_error"), ("budget", None), ("errors", None), ("complete", "no_commits")],
+)
+def test_recapture_incomplete_preview62(preview62, monkeypatch, discovery, reason):
+    original = events_tail._prepare_recapture
+
+    def prepare(*a, **kw):
+        from dataclasses import replace
+
+        prepared = original(*a, **kw)
+        if reason:
+            prepared.git_rows[0]["skipped"] = [{"path": "[red]repo\x1b[2J", "reason": reason}]
+            prepared.walk_errors = int(reason != "no_commits")
+        prepared.root_discovery = replace(
+            prepared.root_discovery,
+            exceeded=discovery == "budget",
+            errors=("probe [red]failed\x1b[2J",) if discovery == "errors" else (),
+        )
+        return prepared
+
+    monkeypatch.setattr(events_tail, "_prepare_recapture", prepare)
+    result = preview62["audit"](["recapture", "--dry-run", "1d"])
+    assert result.exit_code == 0, result.output
+    text = _preview_text(result)
+    if reason == "git_error":
+        assert "Preview incomplete: 1 repositories could not be walked" in text
+    elif discovery == "budget":
+        assert "repository discovery exceeded its budget; more repositories may exist." in text
+    elif discovery == "errors":
+        assert "repository discovery reported errors: probe [red]failed" in text
+    else:
+        assert "Preview incomplete" not in text
+    assert "\x1b" not in result.output
+    assert text.endswith(cli_module.RECAPTURE_NOT_PREVIEWED)
+
+
+def test_pending_events_root62(preview62):
+    env = preview62
+    shutil.rmtree(env["events"])
+    _publish_peer62(env, "dev-b", {("mm-events", "events/incoming.jsonl"): (b"{}\n", None)})
+    result = env["audit"](["pull", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "mm pull will create" in result.output
+    assert "(0700) for incoming mm-events files." in _preview_text(result)
+    assert not env["events"].exists()
+
+
+@pytest.mark.parametrize("target", ["dev-a", "dev-b"])
+def test_diff_excludes62(preview62, target):
+    env = preview62
+    prefix = "projects/-Users-kb-myapp/memory/"
+    _publish_peer62(
+        env,
+        target,
+        {("claude", prefix + name): (b"peer", None) for name in ("secret.md", "visible.md")},
+    )
+    argv = ["diff"] + (["--from", target] if target == "dev-b" else [])
+    result = env["audit"](argv)
+    assert result.exit_code == 0, result.output
+    assert "secret.md" not in result.output
+    assert "visible.md" in result.output
+
+
+@pytest.mark.parametrize("state", ["empty", "current", "migration"])
+def test_migrate_completion62(preview62, state):
+    env = preview62
+    if state != "migration":
+        env["config"]["sync"]["sources"] = (
+            [] if state == "empty" else [env["config"]["sync"]["sources"][1]]
+        )
+        save_config(env["config"], env["config_path"])
+    result = env["audit"](["migrate-config", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert _preview_text(result).endswith("Dry run complete. Nothing was changed.")
+
+
+@pytest.mark.parametrize(
+    "state", ["empty", "converged", "corrupt", "unknown", "interrupt", "prompt"]
+)
+def test_pull_preview_output62(preview62, monkeypatch, state):
+    from mind_meld.storage.keys import manifest_key
+
+    env = preview62
+    if state == "empty":
+        _publish_peer62(env, "dev-b", {})
+    if state == "converged":
+        path = "projects/-Users-kb-myapp/memory/role.md"
+        _publish_peer62(
+            env, "dev-b", {("claude", path): ((env["claude"] / path).read_bytes(), None)}
+        )
+    if state == "corrupt":
+        env["backend"].put(manifest_key("dev-b"), b"corrupt")
+    if state == "unknown":
+        _publish_peer62(env, "dev-b", {("unknown", "file"): (b"peer", None)})
+    if state == "interrupt":
+
+        def interrupt(*a, **kw):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(cli_module, "_pull_one_source", interrupt)
+    monkeypatch.setattr(typer, "prompt", lambda *a, **kw: pytest.fail("preview prompted"))
+    argv = ["pull", "--dry-run"] + (["--conflict-mode", "prompt"] if state == "prompt" else [])
+    result = env["audit"](argv)
+    text = _preview_text(result)
+    assert not any(
+        word in text
+        for word in (
+            "Pull complete.",
+            "Completed in",
+            "nothing to apply",
+            "completed changes were kept",
+        )
+    )
+    if state == "interrupt":
+        assert result.exit_code != 0
+        assert "Dry run complete." not in text
+    else:
+        assert result.exit_code == 0, result.output
+        assert text.endswith(cli_module.PULL_NOT_PREVIEWED)
+        assert ("Preview incomplete:" in text) == (state == "corrupt")
+    if state in {"empty", "unknown", "converged"}:
+        assert "No changes predicted." in text
+        assert "Dry run for" not in text
+        if state != "unknown":
+            assert "source '" not in text
+
+
+@pytest.mark.parametrize(
+    "command,phrases",
+    [
+        (
+            "pull",
+            [
+                "no file writes or renames",
+                "Exits 1 if the preview stops",
+                "3 if --conflict-mode fail predicts conflicts",
+                "combine with --dry-run for a write-free check",
+            ],
+        ),
+        ("gc", ["Changes nothing except the local lock file.", "Exits 1 if the preview stops."]),
+        (
+            "recapture",
+            [
+                "no rows, uploads, config writes or upgrade records.",
+                "a partial scan exits 0 and says so.",
+            ],
+        ),
+        ("migrate-config", ["no config, lock or history writes.", "Exits 0."]),
+        (
+            "diff",
+            [
+                "Compare this Mac's files with its last push",
+                "Changes nothing, not even the lock file.",
+                "use mm pull --dry-run.",
+            ],
+        ),
+    ],
+)
+def test_preview_help62(command, phrases):
+    result = runner.invoke(app, [command, "--help"], env={"COLUMNS": "240"})
+    text = _preview_text(result)
+    assert result.exit_code == 0
+    # Rich's option-column borders can split prose; the callback's help data
+    # pins wording independently of terminal width.
+    callback = next(
+        c.callback
+        for c in app.registered_commands
+        if (c.name or c.callback.__name__.replace("_", "-")) == command
+    )
+    help_text = (
+        " ".join((inspect.getdoc(callback) or "").split())
+        + " "
+        + " ".join(
+            getattr(param.default, "help", "") or ""
+            for param in inspect.signature(callback).parameters.values()
+        )
+    )
+    for phrase in phrases:
+        assert phrase in help_text, (phrase, text)
+    if command == "pull":
+        assert "_predict_pull_outcome" not in text
+        assert "(no writes)" not in text
+
+
+@pytest.mark.parametrize("conflicts", [False, True])
+def test_gc_conflict_label62(preview62, conflicts):
+    result = preview62["audit"](["gc", "--dry-run"] + (["--conflicts"] if conflicts else []))
+    assert result.exit_code == 0, result.output
+    assert ("deletion requires --conflicts" in _preview_text(result)) == (not conflicts)
+    assert _preview_text(result).endswith(cli_module.DRY_RUN_COMPLETE)
 
 
 class TestPushPreviewNoMutation56A:

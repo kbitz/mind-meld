@@ -3085,6 +3085,7 @@ class TestApplyExceptionBoundary53A:
             raise error("bad clock")
 
         monkeypatch.setattr(cli, "mtime_from_path", boom)
+        monkeypatch.setattr(cli.pullplan, "mtime_from_path", boom)
         assert (
             cli.pullplan._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer")}, base)
             == "conflict"

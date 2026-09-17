@@ -14,7 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mind_meld import conflictmtime
-from mind_meld.manifest import hash_file, mtime_from_manifest, path_has_descendant_symlink
+from mind_meld.manifest import (
+    hash_file,
+    mtime_from_manifest,
+    mtime_from_path,
+    path_has_descendant_symlink,
+)
 from mind_meld.merge import should_merge
 
 
@@ -59,11 +64,11 @@ class PullPlanner:
         key = source, path
         if key not in self.states:
             try:
-                stat = path.stat()
+                path.stat()
                 state = _LocalState(exists=True, kind="directory" if path.is_dir() else "file")
                 try:
-                    state.mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-                except (ValueError, OverflowError, OSError):
+                    state.mtime = mtime_from_path(path)
+                except (TypeError, ValueError, OverflowError, OSError):
                     pass
             except (FileNotFoundError, NotADirectoryError):
                 state = _LocalState()

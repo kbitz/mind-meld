@@ -4180,35 +4180,39 @@ def pull(
         None, "--source", help="Only pull a specific source (e.g., 'claude', 'gstack')"
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Preview what mm pull would write, merge or conflict. Changes nothing except "
+            "the local lock file: no file writes or renames, config writes, pull-history "
+            "rows or upgrade checks. Exits 1 if the preview stops, 3 if --conflict-mode "
+            "fail predicts conflicts."
+        ),
+    ),
     conflict_mode: ConflictMode = typer.Option(
         "keep-both",
         "--conflict-mode",
         help=(
             "How to handle conflicts (local edited, remote differs). "
             "'keep-both' (default): local stays at canonical, remote saved as "
-            ".sync-conflict-*. 'prompt': ask per-file. 'fail': preflight "
-            "all files and exit 3 (no writes) if any would conflict -- for CI."
+            ".sync-conflict-*. 'prompt': ask per-file (prediction-only with --dry-run). "
+            "fail: preflight and exit 3 before applying any file; combine with "
+            "--dry-run for a write-free check."
         ),
         case_sensitive=False,
     ),
 ) -> None:
-    """Pull session data from storage to local.
+    """Pull selected context from other Macs.
 
-    Conflicts (local edited, remote differs) resolve per `--conflict-mode`:
-    - keep-both (default): local stays at canonical, remote saved as
-      .sync-conflict-*. Files preserved either way.
-    - prompt: interactively pick per file at pull time.
-    - fail: preflight all files via `_predict_pull_outcome`; if any would
-      conflict, print them and exit 3 with no writes (best-effort: a file
-      edited between preflight and apply may still produce a .sync-conflict-*,
-      re-run pull to surface it). For CI use.
+    keep-both preserves local files and saves divergent remote bytes in
+    .sync-conflict-* copies. prompt asks per file; with --dry-run it only
+    predicts. fail exits 3 before applying any file if conflicts or failures
+    are predicted. Use mm pull --dry-run --conflict-mode fail as a write-free
+    CI check. Files can change between preflight and apply.
 
-    Exit codes: 0 success, 1 internal error, 2 usage error (typer default),
-    3 --conflict-mode fail found conflicts. Exit 3 was chosen (not 2) so CI
-    scripts can distinguish "broken invocation" from "conflict refusal" --
-    the removal of --no-prompt / --resolve-interactive would otherwise cause
-    stale scripts to hit usage-error exit 2 and be misclassified as conflicts.
+    Exit codes: 0 completed (warnings may indicate an incomplete preview),
+    1 stopped, 2 usage error, 3 conflicts or failures predicted in fail mode.
     """
     config = _get_config(read_only=dry_run)
     _maybe_prompt_migration(config, read_only=dry_run)
@@ -5020,7 +5024,7 @@ def _pull_core(
       - "keep-both": default; auto keep-both on conflict.
       - "prompt":    ask per-file (interactive only).
       - "fail":      preflight every file; if any would conflict, raise
-                     typer.Exit(3) with no writes. Best-effort (TOCTOU).
+                     typer.Exit(3) before applying any file. Best-effort (TOCTOU).
 
     When quiet=True, load-bearing warnings still reach stderr; cosmetic
     progress chatter is suppressed.
@@ -5172,6 +5176,21 @@ def _pull_core(
         list(manifest_cache.keys()),
         lambda did: manifest_cache.get(did),
     )
+
+    if dry_run and not quiet and (not source_filter or source_filter == "mm-events"):
+        for src in pull_resolution.selected:
+            if src["name"] in pull_resolution.would_create and any(
+                manifest_cache.get(device["device_id"], {})
+                .get("sources", {})
+                .get("mm-events", {})
+                .get("files")
+                for device in pull_targets
+                if manifest_cache.get(device["device_id"]) is not None
+            ):
+                console.print(
+                    f"mm pull will create {safe_str(src['path'])} (0700) "
+                    "for incoming mm-events files."
+                )
 
     planner = None
     planned_unknown = []
@@ -6640,7 +6659,11 @@ def diff_cmd(
     from_device: str | None = typer.Option(None, "--from", help="Diff against a specific device"),
     source: str | None = typer.Option(None, "--source", help="Diff a specific source only"),
 ) -> None:
-    """Show what would change without applying (dry run)."""
+    """Compare this Mac's files with its last push (or with --from DEVICE's manifest).
+
+    Changes nothing, not even the lock file. For incoming changes from other
+    Macs, use mm pull --dry-run.
+    """
     config = _get_config(read_only=True)
     passphrase = _get_passphrase_or_exit()
     device_id = config["device"]["id"]
@@ -6678,6 +6701,10 @@ def diff_cmd(
         )
     # diff_fetch.manifest is pre-normalized via load_manifest.
     remote_manifest = diff_fetch.manifest if diff_fetch.is_ok else None
+
+    if remote_manifest is not None:
+        exclude_map, skip_prefixes = _build_exclude_map(config)
+        remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
@@ -6729,7 +6756,10 @@ def gc(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Preview orphan blobs and retention cleanup without deleting",
+        help=(
+            "Preview orphan blobs and retention cleanup without deleting. Changes nothing "
+            "except the local lock file. Exits 1 if the preview stops."
+        ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     prune_conflicts: bool = typer.Option(
@@ -6778,7 +6808,9 @@ def gc(
         # Bare `--dry-run` previews the conflict reaper (the one that
         # touches user content). Apply still requires `--conflicts`.
         if prune_conflicts or dry_run:
-            retention._gc_old_conflict_files(config, dry_run, verbose)
+            retention._gc_old_conflict_files(
+                config, dry_run, verbose, deletion_requires_flag=dry_run and not prune_conflicts
+            )
         if dry_run:
             console.print(DRY_RUN_COMPLETE)
     except MindMeldError as e:
@@ -7472,7 +7504,9 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
 def migrate_config(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Show the diff without writing config.toml."
+        False,
+        "--dry-run",
+        help="Show the diff. Changes nothing: no config, lock or history writes. Exits 0.",
     ),
 ) -> None:
     """Add recommended `exclude_patterns` to existing `[[sync.sources]]`.
@@ -7837,7 +7871,11 @@ def recapture(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Discover and walk, then report; write and upload nothing.",
+        help=(
+            "Discover and walk, then report. Changes nothing except the local lock file: "
+            "no rows, uploads, config writes or upgrade records. Exits 1 if the preview "
+            "stops or finds no repositories; a partial scan exits 0 and says so."
+        ),
     ),
 ) -> None:
     """Recover omitted git commits into the fleet retro.
@@ -7883,26 +7921,27 @@ def recapture(
             _error(f"{e} No recapture rows were written.{suffix}")
         disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
         if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
+            state = "disabled" if "mm-events" in disabled else "not configured"
             stderr_console.print(
                 "[red]Error:[/red] recapture requires the 'mm-events' source, "
-                "but it is disabled on this Mac."
+                f"but it is {state} on this Mac."
             )
-            stderr_console.print("Fix: mm enable-source mm-events")
-            stderr_console.print(f"Then retry: mm recapture {window}")
+            if dry_run:
+                stderr_console.print("Fix (changes config): mm enable-source mm-events")
+                stderr_console.print(
+                    f"Then preview again: mm recapture --dry-run {safe_str(window)}"
+                )
+                stderr_console.print(DRY_RUN_REFUSAL.strip())
+            else:
+                stderr_console.print("Fix: mm enable-source mm-events")
+                stderr_console.print(f"Then retry: mm recapture {safe_str(window)}")
             raise typer.Exit(1)
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
         prepared = events_tail._prepare_recapture(
             config, sources, config["device"]["id"], since=since
         )
-        if prepared is None:
-            stderr_console.print(
-                "[red]Error:[/red] recapture requires the 'mm-events' source, "
-                "but it is disabled on this Mac."
-            )
-            stderr_console.print("Fix: mm enable-source mm-events")
-            stderr_console.print(f"Then retry: mm recapture {window}")
-            raise typer.Exit(1)
+        assert prepared is not None  # mm-events availability was checked above.
 
         n_roots = len(prepared.root_discovery.roots)
         skipped = prepared.walk_budget_aborts + prepared.walk_errors
@@ -7932,7 +7971,28 @@ def recapture(
             console.print(f"  Commit records:   {len(records)} captured")
             console.print(f"  Estimated size:   {row_bytes} bytes")
             if n_roots == 0:
+                console.print(
+                    "Recapture stopped: no Git repositories were discovered on this Mac. "
+                    "Add their absolute paths under [retro].repo_roots, verify with "
+                    f"'mm diag', then preview again: mm recapture --dry-run {safe_str(window)}"
+                )
+                stderr_console.print(DRY_RUN_REFUSAL.strip())
                 raise typer.Exit(1)
+            if skipped:
+                console.print(
+                    f"Preview incomplete: {skipped} repositories could not be walked "
+                    "(see the skipped lines above)."
+                )
+            if prepared.root_discovery.exceeded:
+                console.print(
+                    "Preview incomplete: repository discovery exceeded its budget; "
+                    "more repositories may exist."
+                )
+            if prepared.root_discovery.errors:
+                reasons = "; ".join(safe_str(reason) for reason in prepared.root_discovery.errors)
+                console.print(
+                    f"Preview incomplete: repository discovery reported errors: {reasons}"
+                )
             console.print(DRY_RUN_COMPLETE)
             console.print(RECAPTURE_NOT_PREVIEWED)
             return
@@ -8692,8 +8752,8 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
         )
         if read_only and is_tty:
             stderr_console.print(
-                "This preview uses your current config. A real mm push first offers "
-                "to run mm migrate-config (default: yes)."
+                "This preview uses your current config. Without --dry-run, this command "
+                "first offers to run mm migrate-config (default: yes)."
             )
         return
     if missing:
