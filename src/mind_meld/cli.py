@@ -8122,7 +8122,8 @@ def recapture(
     finally:
         release_lock()
 
-    upgrade.emit_nudge_if_due(config)
+    if not dry_run:
+        upgrade.emit_nudge_if_due(config)
 
 
 # ── refresh-identity ──────────────────────────────────────────────────
