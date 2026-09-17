@@ -25,6 +25,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
 # The modules extracted out of cli.py, plus the two leaves they depend on.
 # Adding a module here is how a future extraction opts into every gate below.
 EXTRACTED = [
+    "pullplan",
     "consoles",
     "conflictmtime",
     "skill_link",
@@ -34,6 +35,7 @@ EXTRACTED = [
 ]
 
 LEAVES = [
+    "pullplan",
     "consoles",
     "conflictmtime",
     "safety",

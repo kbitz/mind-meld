@@ -50,6 +50,7 @@ from mind_meld import (
     identity,
     manifest,
     pullhistory,
+    pullplan,
     resolveflow,
     retention,
     safety,
@@ -152,7 +153,6 @@ from mind_meld.manifest import (
     mtime_from_path,
     parse_conflict_created_at,
     parse_conflict_device_short,
-    path_has_descendant_symlink,
     read_file_revision,
     serialize_manifest,
     walk_source,
@@ -385,7 +385,21 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     return _list_devices_impl(backend, on_drop=_warn)
 
 
-def _get_config(*, read_only: bool = False) -> dict:
+DRY_RUN_COMPLETE = "Dry run complete. Nothing was changed except the local lock file."
+DRY_RUN_COMPLETE_LOCK_FREE = "Dry run complete. Nothing was changed."
+DRY_RUN_REFUSAL = " Nothing was changed except the local lock file (dry run)."
+PULL_NOT_PREVIEWED = (
+    "Not previewed: renaming pre-v0.9.2 conflict files to the v0- prefix, "
+    "pull-history rows, per-project .mind-meld-log.md sync logs, cleanup of "
+    "merged manifest conflict copies in storage, and blob download and decrypt failures."
+)
+RECAPTURE_NOT_PREVIEWED = (
+    "Not previewed: writing the git-snapshot rows and the full push that publishes "
+    "them together with any other pending local changes."
+)
+
+
+def _get_config(*, read_only: bool) -> dict:
     try:
         config = load_config()
     except MindMeldError as e:
@@ -758,22 +772,6 @@ def _filter_excluded_paths(
     return out
 
 
-def _has_symlinked_component(
-    path: Path,
-    base_path: Path,
-    *,
-    strict: bool = False,
-    source_name: str | None = None,
-) -> bool:
-    """Whether ``path`` traverses a symlink below its source root.
-
-    A symlinked source root is legitimate: it is the user's chosen location
-    for the whole source. Any link below that root is local routing and must
-    neither be published nor followed while applying a peer's bytes.
-    """
-    return path_has_descendant_symlink(path, base_path, strict=strict, source_name=source_name)
-
-
 def _filter_symlinked_paths(
     manifest: dict,
     sources: list[dict[str, Any]],
@@ -804,7 +802,7 @@ def _filter_symlinked_paths(
             _validate_rel_path(rel_path, where=f"{source_name}:{rel_path}")
         except ManifestError:
             return False
-        return _has_symlinked_component(
+        return pullplan._has_symlinked_component(
             base_path / rel_path,
             base_path,
             strict=strict,
@@ -1468,67 +1466,13 @@ def _print_diff_summary(diff: DiffResult, elapsed: float) -> None:
     console.print(f"  Completed in {elapsed:.1f}s")
 
 
-def _predict_pull_outcome(
-    rel_path: str,
-    remote_info: dict,
-    base_path: Path,
-) -> str:
-    """Predict what _apply_incoming_file will do for this file, without applying.
-
-    Returns one of: write, merge, skip, conflict, unchanged. Used by the pull
-    dry-run and the diff command to give the user an accurate preview.
-    """
-    local_path = base_path / rel_path
-    if not local_path.exists():
-        return "write"
-    try:
-        local_hash = hash_file(local_path)
-    except (PermissionError, OSError):
-        return "conflict"  # safest guess — will surface as a real conflict on apply
-    if local_hash == remote_info.get("sha256"):
-        return "unchanged"
-    if should_merge(rel_path):
-        # Conservative: predicting "unchanged" for a no-op line-union merge
-        # would require downloading + decrypting the blob here (the
-        # manifest sha differs because local has lines remote doesn't),
-        # which dry-run can't afford. Real pull suppresses no-op merges
-        # in `_apply_merge`; dry-run may slightly over-count merges by
-        # comparison.
-        return "merge"
-    try:
-        local_mtime = mtime_from_path(local_path)
-        remote_mtime_str = remote_info.get("mtime")
-        remote_mtime = mtime_from_manifest(remote_mtime_str) if remote_mtime_str else None
-        if remote_mtime is not None and local_mtime > remote_mtime:
-            return "skip"
-    except (TypeError, ValueError, OverflowError, OSError):
-        return "conflict"
-    return "conflict"
-
-
-def _print_pull_prediction(diff: DiffResult, base_path: Path, src_name: str) -> None:
-    """Print per-file predicted outcomes for the pull dry-run path.
-
-    Splits diff.modified into skip/merge/conflict buckets so the user can
-    see what pull would actually do, not just a "modified" count.
-    """
+def _print_pull_prediction(
+    predictions: list[pullplan.PullPrediction], base_path: Path, src_name: str
+) -> None:
     console.print(f"  [dim]source '{safe_str(src_name)}' ({safe_str(base_path)}):[/dim]")
-    for path, info in sorted(diff.new.items()):
-        console.print(f"    [green]+ write[/green]    {safe_str(path)}")
-    buckets: dict[str, list[str]] = {"merge": [], "skip": [], "conflict": [], "unchanged": []}
-    for path, info in diff.modified.items():
-        buckets[_predict_pull_outcome(path, info, base_path)].append(path)
-    for path in sorted(buckets["merge"]):
-        console.print(f"    [cyan]~ merge[/cyan]    {safe_str(path)}")
-    for path in sorted(buckets["skip"]):
-        console.print(f"    [dim]= skip[/dim]     {safe_str(path)} (local newer)")
-    for path in sorted(buckets["conflict"]):
-        console.print(
-            f"    [yellow]! conflict[/yellow] {safe_str(path)} "
-            "(would write remote to .sync-conflict-*)"
-        )
-    for path in sorted(buckets["unchanged"]):
-        console.print(f"    [dim]  unchanged[/dim] {safe_str(path)}")
+    for prediction in predictions:
+        if prediction.outcome != "unchanged":
+            console.print(f"    {safe_str(prediction.label)}  {safe_str(prediction.rel_path)}")
 
 
 # ── shared helpers ────────────────────────────────────────────────────
@@ -2710,7 +2654,7 @@ def _download_and_apply(
             # before resolving containment. The root itself may be symlinked,
             # but following a link below it would either escape the source or
             # let atomic_write_bytes replace local routing with peer content.
-            if _has_symlinked_component(local_path, base_path):
+            if pullplan._has_symlinked_component(local_path, base_path):
                 if not quiet:
                     console.print(
                         f"  [yellow]skipped (local symlink preserved):[/yellow] "
@@ -3605,11 +3549,11 @@ def push(
     # Re-load in case the migration prompt mutated config on disk so the
     # current command sees the new exclude_patterns.
     if not dry_run:
-        config = _get_config()
+        config = _get_config(read_only=False)
     capture_sources = _prepare_usage_capture(config) if capture_usage else []
     passphrase = _get_passphrase_or_exit()
     pending: list[str] = []
-    refusal_suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
 
     try:
         acquire_lock()
@@ -3643,9 +3587,7 @@ def push(
         if dry_run:
             for note in pending:
                 console.print(safe_str(note))
-            console.print(
-                "\n[bold]Dry run complete. Nothing was changed except the local lock file.[/bold]"
-            )
+            console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
             console.print(
                 "Not previewed: the mm-events activity row a real push appends, "
                 "post-push GC of orphaned blobs, and upload re-reads."
@@ -4238,41 +4180,47 @@ def pull(
         None, "--source", help="Only pull a specific source (e.g., 'claude', 'gstack')"
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
-    dry_run: bool = typer.Option(False, "--dry-run"),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Preview what mm pull would write, merge or conflict. Changes nothing except "
+            "the local lock file: no file writes or renames, config writes, pull-history "
+            "rows or upgrade checks. Exits 1 if the preview stops, 3 if --conflict-mode "
+            "fail predicts conflicts."
+        ),
+    ),
     conflict_mode: ConflictMode = typer.Option(
         "keep-both",
         "--conflict-mode",
         help=(
             "How to handle conflicts (local edited, remote differs). "
             "'keep-both' (default): local stays at canonical, remote saved as "
-            ".sync-conflict-*. 'prompt': ask per-file. 'fail': preflight "
-            "all files and exit 3 (no writes) if any would conflict -- for CI."
+            ".sync-conflict-*. 'prompt': ask per-file (prediction-only with --dry-run). "
+            "fail: preflight and exit 3 before applying any file; combine with "
+            "--dry-run for a write-free check."
         ),
         case_sensitive=False,
     ),
 ) -> None:
-    """Pull session data from storage to local.
+    """Pull selected context from other Macs.
 
-    Conflicts (local edited, remote differs) resolve per `--conflict-mode`:
-    - keep-both (default): local stays at canonical, remote saved as
-      .sync-conflict-*. Files preserved either way.
-    - prompt: interactively pick per file at pull time.
-    - fail: preflight all files via `_predict_pull_outcome`; if any would
-      conflict, print them and exit 3 with no writes (best-effort: a file
-      edited between preflight and apply may still produce a .sync-conflict-*,
-      re-run pull to surface it). For CI use.
+    keep-both preserves local files and saves divergent remote bytes in
+    .sync-conflict-* copies. prompt asks per file; with --dry-run it only
+    predicts. fail exits 3 before applying any file if conflicts or failures
+    are predicted. Use mm pull --dry-run --conflict-mode fail as a write-free
+    CI check. Files can change between preflight and apply.
 
-    Exit codes: 0 success, 1 internal error, 2 usage error (typer default),
-    3 --conflict-mode fail found conflicts. Exit 3 was chosen (not 2) so CI
-    scripts can distinguish "broken invocation" from "conflict refusal" --
-    the removal of --no-prompt / --resolve-interactive would otherwise cause
-    stale scripts to hit usage-error exit 2 and be misclassified as conflicts.
+    Exit codes: 0 completed (warnings may indicate an incomplete preview),
+    1 stopped, 2 usage error, 3 conflicts or failures predicted in fail mode.
     """
-    config = _get_config()
-    _maybe_prompt_migration(config)
+    config = _get_config(read_only=dry_run)
+    _maybe_prompt_migration(config, read_only=dry_run)
     # Re-load in case the migration prompt mutated config on disk so this
     # pull sees the new exclude_patterns.
-    config = _get_config()
+    if not dry_run:
+        config = _get_config(read_only=False)
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -4290,7 +4238,7 @@ def pull(
             for note in pending:
                 console.print(safe_str(note))
         except MindMeldError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
         _pull_core(
             config,
             passphrase,
@@ -4301,25 +4249,26 @@ def pull(
             dry_run,
             conflict_mode=conflict_mode,
         )
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE)
+            console.print(PULL_NOT_PREVIEWED)
+    except MindMeldError as e:
+        if dry_run:
+            _error(str(e) + refusal_suffix)
+        raise
     finally:
         release_lock()
 
     # Seam 2 — interactive pull tail nudge. Runs AFTER the lock is released
     # so the cold-cache HTTP fetch never blocks pull progress.
-    upgrade.emit_nudge_if_due(config)
+    if not dry_run:
+        upgrade.emit_nudge_if_due(config)
 
 
 @dataclass
 class _CorruptPeer:
     device_id: str
     device_name: str
-
-
-@dataclass
-class _PredictedConflict:
-    device_name: str
-    src_name: str
-    rel_path: str
 
 
 @dataclass
@@ -4349,8 +4298,7 @@ class _PerSourceResult:
     outcomes: dict[ApplyOutcome, list[str]]
     bytes_transferred: int
     touched_parents: set[Path]
-    # Non-empty only in dry-run mode; holds the diff for _print_pull_prediction.
-    dry_run_diff: DiffResult | None = None
+    predictions: list[pullplan.PullPrediction] = field(default_factory=list)
     # Set when src_cfg["type"] == "claude" to trigger write_sync_log in the
     # caller. Keyed off type (not name) so a user renaming their claude
     # source to "my-claude" still gets sync-log entries written — otherwise
@@ -4387,7 +4335,9 @@ class _PerSourceResult:
         return any(self.outcomes[k] for k in self.outcomes if k != "unchanged")
 
 
-def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> None:
+def _check_fleet_version_or_refuse(
+    backend: LocalBackend, my_device_id: str, *, refusal_suffix: str = ""
+) -> None:
     """Refuse pull if any peer's last_seen_version is pre-v0.9.2 OR the
     peer's device.json is corrupt/shape-invalid.
 
@@ -4474,7 +4424,7 @@ def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> 
             + "\n\nRun `mm devices` for the version table. "
             "Last-resort recovery: hand-edit device.json to add "
             f'"last_seen_version": "{INVERSION_MIN_VERSION}"' + " — only after "
-            "verifying the peer is actually upgraded."
+            "verifying the peer is actually upgraded." + refusal_suffix
         )
 
 
@@ -4523,59 +4473,54 @@ def _prefetch_manifests(
     return cache, corrupt
 
 
-def _preflight_conflicts(
+def _plan_pull(
     pull_targets: list[dict],
-    manifest_cache: dict[str, dict | None],
-    local_sources_map: dict[str, dict[str, Any]],
+    manifest_cache: dict,
+    local_sources_map: dict,
     source_filter: str | None,
-    all_tombstones: dict[str, dict[str, str]],
-) -> list[_PredictedConflict]:
-    """Classify every file preflight; return predicted conflicts.
-
-    Cross-peer simulation: walking peers in iteration order, maintain
-    an overlay of (src_name, rel_path) -> predicted-final-sha for files
-    preflight said would be cleanly written. When a later peer ships
-    the same path, predict against the overlay (what local WILL be
-    after the earlier peer's write) rather than the stale on-disk sha.
-    Without this, peer A writing Y then peer B writing Z is missed:
-    preflight sees empty local for both, predicts clean, apply
-    produces a .sync-conflict-* — exactly the "no writes on fail"
-    violation the flag prevents.
-
-    Caller (pull_core) exits 3 if the list is non-empty. Race-safe
-    only best-effort (TOCTOU between preflight and apply is possible;
-    re-run pull to surface late conflicts).
-    """
-    predicted: list[_PredictedConflict] = []
-    overlay: dict[tuple[str, str], str] = {}
+    all_tombstones: dict,
+) -> tuple[pullplan.PullPlanner, list[_UnknownSourceWarning]]:
+    planner = pullplan.PullPlanner()
+    unknown = []
     for device in pull_targets:
-        dname = device["device_name"]
-        remote_manifest = manifest_cache.get(device["device_id"])
-        if remote_manifest is None:
+        did, dname = device["device_id"], device["device_name"]
+        remote = manifest_cache.get(did)
+        if remote is None:
             continue
-        for src_name, src_data in remote_manifest.get("sources", {}).items():
+        for src_name, src_data in remote.get("sources", {}).items():
             if source_filter and src_name != source_filter:
                 continue
             if src_name not in local_sources_map:
-                continue  # unknown source counted elsewhere, not a conflict
-            base_path = local_sources_map[src_name]["path"]
-            for rel_path, info in src_data.get("files", {}).items():
-                if is_tombstoned(src_name, rel_path, all_tombstones):
-                    continue
-                overlay_sha = overlay.get((src_name, rel_path))
-                if overlay_sha is not None:
-                    # An earlier peer already predicted a clean write.
-                    # Next peer conflicts iff its sha differs from what
-                    # the earlier peer will leave.
-                    if overlay_sha != info.get("sha256"):
-                        predicted.append(_PredictedConflict(dname, src_name, rel_path))
-                    continue
-                outcome = _predict_pull_outcome(rel_path, info, base_path)
-                if outcome == "conflict":
-                    predicted.append(_PredictedConflict(dname, src_name, rel_path))
-                elif outcome in ("write", "merge"):
-                    overlay[(src_name, rel_path)] = info.get("sha256", "")
-    return predicted
+                unknown.append(_UnknownSourceWarning(src_name, dname))
+                continue
+            for path, info in src_data.get("files", {}).items():
+                if not is_tombstoned(src_name, path, all_tombstones):
+                    planner.predict(
+                        did, dname, src_name, path, info, local_sources_map[src_name]["path"]
+                    )
+    return planner, unknown
+
+
+_FAIL_MODE_REFUSALS = frozenset({"conflict", "may fail"})
+
+
+def _fail_mode_refusals(
+    predictions: list[pullplan.PullPrediction],
+) -> list[pullplan.PullPrediction]:
+    return [p for p in predictions if p.outcome in _FAIL_MODE_REFUSALS]
+
+
+def _preflight_conflicts(
+    pull_targets: list[dict],
+    manifest_cache: dict,
+    local_sources_map: dict,
+    source_filter: str | None,
+    all_tombstones: dict,
+) -> list[pullplan.PullPrediction]:
+    planner, _ = _plan_pull(
+        pull_targets, manifest_cache, local_sources_map, source_filter, all_tombstones
+    )
+    return _fail_mode_refusals(planner.predictions)
 
 
 def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
@@ -4609,6 +4554,7 @@ def _pull_one_source(
     devices: list[dict[str, Any]] | None = None,
     pending_inline_bumps: dict[Path, float] | None = None,
     reporter: _ApplyReporter | None = None,
+    predictions: list[pullplan.PullPrediction] | None = None,
 ) -> _PerSourceResult:
     """Pull one source from one peer. Returns _PerSourceResult.
 
@@ -4640,6 +4586,16 @@ def _pull_one_source(
         touched_parents=reporter.touched_parents,
         claude_sync_base=str(base_path) if src_type == "claude" else None,
     )
+    if dry_run:
+        if predictions is None:
+            planner = pullplan.PullPlanner()
+            predictions = [
+                planner.predict(did, dname, src_name, path, info, base_path)
+                for path, info in remote_files.items()
+                if not is_tombstoned(src_name, path, all_tombstones)
+            ]
+        base_result.predictions = predictions
+        return base_result
     if not remote_files:
         return base_result
 
@@ -4658,10 +4614,6 @@ def _pull_one_source(
     # Arg-swap: this is the additive pull path. See diff_files docstring
     # — `new`/`modified` are files to download; `deleted` is ignored.
     diff = diff_files(remote_files, local_files)
-
-    if dry_run:
-        base_result.dry_run_diff = diff
-        return base_result
 
     to_download = {**diff.new, **diff.modified}
     to_download = {
@@ -4790,25 +4742,27 @@ def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
     return warnings
 
 
-def _print_preflight_conflicts(predicted: list[_PredictedConflict], quiet: bool) -> None:
-    """Print predicted conflicts before --conflict-mode=fail raises.
+def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: bool) -> None:
+    """Print predicted fail-mode refusals before --conflict-mode=fail raises.
 
-    Quiet (autopull): one-liner per conflict to stderr.
+    Quiet (autopull): one-liner per conflict or local failure to stderr.
     Non-quiet: rich console with resolution hint.
     """
     # src_name, rel_path, device_name are all peer-controlled — sanitize.
     if quiet:
         for p in predicted:
             print(
-                f"mm: conflict {safe_str(p.src_name)}/{safe_str(p.rel_path)} "
-                f"(from {safe_str(p.device_name)})",
+                f"mm: {safety.safe_terminal_str(p.label)} "
+                f"{safety.safe_terminal_str(p.src_name)}/"
+                f"{safety.safe_terminal_str(p.rel_path)} "
+                f"(from {safety.safe_terminal_str(p.device_name)})",
                 file=sys.stderr,
             )
         return
-    console.print(f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict.")
+    console.print(f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict or may fail.")
     for p in predicted:
         console.print(
-            f"  [yellow]! conflict[/yellow] {safe_str(p.src_name)}/"
+            f"  [yellow]! {safe_str(p.label)}[/yellow] {safe_str(p.src_name)}/"
             f"{safe_str(p.rel_path)} (from {safe_str(p.device_name)})"
         )
     console.print(
@@ -4859,6 +4813,7 @@ def _print_pull_summary(
     quiet: bool,
     verbose: bool,
     *,
+    dry_run: bool = False,
     interruption: Literal["interrupted", "aborted"] | None = None,
 ) -> None:
     """Single I/O owner for pull output.
@@ -4904,6 +4859,9 @@ def _print_pull_summary(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"  [yellow]warning:[/yellow] {msg}")
+
+    if dry_run:
+        return
 
     # Load-bearing: per-source conflicts/failures (D11 contract fix).
     # The docstring's promise that these reach stderr in quiet mode was
@@ -5077,11 +5035,12 @@ def _pull_core(
       - "keep-both": default; auto keep-both on conflict.
       - "prompt":    ask per-file (interactive only).
       - "fail":      preflight every file; if any would conflict, raise
-                     typer.Exit(3) with no writes. Best-effort (TOCTOU).
+                     typer.Exit(3) before applying any file. Best-effort (TOCTOU).
 
     When quiet=True, load-bearing warnings still reach stderr; cosmetic
     progress chatter is suppressed.
     """
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     interactive_resolve_flag = conflict_mode == "prompt"
     start = time.time()
     my_device_id = config["device"]["id"]
@@ -5098,7 +5057,7 @@ def _pull_core(
     # pre-inversion migration sweep so we don't accidentally migrate
     # files in a refusal scenario where the user is about to upgrade
     # their peers and re-pull. Exits via _error → typer.Exit(1).
-    _check_fleet_version_or_refuse(backend, my_device_id)
+    _check_fleet_version_or_refuse(backend, my_device_id, refusal_suffix=refusal_suffix)
 
     # Pre-inversion conflict-file migration. Runs once per pull under the
     # already-held mm lockfile — safe against autopull racing with another
@@ -5107,7 +5066,8 @@ def _pull_core(
     # the user's tree would end up with a mix of pre-inversion and post-
     # inversion files indistinguishable except by mtime — and resolve's
     # dual-mode dispatch needs the prefix, not the timestamp.
-    resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
+    if not dry_run:
+        resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
     # Widened to carry path + type per source. Type is load-bearing for
     # the sync-log gate in _pull_one_source — keying on type (not name)
@@ -5130,10 +5090,12 @@ def _pull_core(
     all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
     if from_device and not pull_targets:
         if not quiet:
-            _error(f"Device not found: {from_device}")
+            _error(f"Device not found: {from_device}" + refusal_suffix)
     if not pull_targets:
         if not quiet:
             console.print("[yellow]No other devices found to pull from.[/yellow]")
+        if dry_run and not quiet:
+            console.print("No changes predicted.")
         return PullResult(elapsed=time.time() - start)
 
     manifest_cache, corrupt_peers = _prefetch_manifests(backend, all_devices, passphrase, memory_kb)
@@ -5177,7 +5139,7 @@ def _pull_core(
         # conflicted / failed` records to `.1`. The forensic-aid
         # contract becomes useless. Interactive `mm pull` still
         # logs the full set so users can audit their excludes.
-        if not quiet:
+        if not quiet and not dry_run:
             for src_name, src_data in m.get("sources", {}).items():
                 kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
                 for rel_path, info in src_data.get("files", {}).items():
@@ -5226,16 +5188,41 @@ def _pull_core(
         lambda did: manifest_cache.get(did),
     )
 
-    if conflict_mode == "fail":
-        predicted = _preflight_conflicts(
+    if dry_run and not quiet and (not source_filter or source_filter == "mm-events"):
+        for src in pull_resolution.selected:
+            if src["name"] in pull_resolution.would_create and any(
+                manifest_cache.get(device["device_id"], {})
+                .get("sources", {})
+                .get("mm-events", {})
+                .get("files")
+                for device in pull_targets
+                if manifest_cache.get(device["device_id"]) is not None
+            ):
+                console.print(
+                    f"mm pull will create {safe_str(src['path'])} (0700) "
+                    "for incoming mm-events files."
+                )
+
+    planner = None
+    planned_unknown = []
+    if dry_run or conflict_mode == "fail":
+        planner, planned_unknown = _plan_pull(
             pull_targets,
             manifest_cache,
             local_sources_map,
             source_filter,
             all_tombstones,
         )
+    if conflict_mode == "fail":
+        assert planner is not None
+        predicted = _fail_mode_refusals(planner.predictions)
         if predicted:
+            _print_pull_summary(
+                PullResult(), corrupt_peers, planned_unknown, [], [], quiet, verbose, dry_run=True
+            )
             _print_preflight_conflicts(predicted, quiet)
+            if dry_run:
+                stderr_console.print(DRY_RUN_REFUSAL.strip())
             raise typer.Exit(3)
 
     # Aggregate accumulators. Load-bearing warnings go through lists,
@@ -5275,7 +5262,7 @@ def _pull_core(
         for device in pull_targets:
             did = device["device_id"]
             dname = device["device_name"]
-            if not quiet:
+            if not quiet and not dry_run:
                 console.print(f"\n[bold]Pulling from {safe_str(dname)} ({safe_str(did)})...[/bold]")
 
             remote_manifest = manifest_cache.get(did)
@@ -5300,7 +5287,7 @@ def _pull_core(
                 src_info = local_sources_map[src_name]
                 base_path = src_info["path"]
                 src_type = src_info["type"]
-                if verbose and not quiet:
+                if verbose and not quiet and not dry_run:
                     console.print(
                         f"  [bold]Source '{safe_str(src_name)}' ({safe_str(base_path)}):[/bold]"
                     )
@@ -5331,12 +5318,22 @@ def _pull_core(
                     devices=all_devices,
                     pending_inline_bumps=pending_inline_bumps,
                     reporter=in_flight,
+                    predictions=(
+                        [
+                            p
+                            for p in planner.predictions
+                            if p.device_id == did and p.src_name == src_name
+                        ]
+                        if planner is not None
+                        else None
+                    ),
                 )
 
-                if dry_run and per_source.dry_run_diff is not None:
-                    if not quiet:
+                if dry_run:
+                    per_source_results.append(per_source)
+                    if not quiet and any(p.outcome != "unchanged" for p in per_source.predictions):
                         console.print(f"  Dry run for {safe_str(dname)}/{safe_str(src_name)}:")
-                        _print_pull_prediction(per_source.dry_run_diff, base_path, src_name)
+                        _print_pull_prediction(per_source.predictions, base_path, src_name)
                     in_flight = None
                     continue
 
@@ -5442,11 +5439,20 @@ def _pull_core(
                 quiet=quiet,
                 verbose=verbose,
                 interruption=interruption,
+                dry_run=dry_run,
             )
         except (Exception, SystemExit):
             if not exception_in_flight:
                 raise
 
+    if dry_run and not quiet:
+        assert planner is not None
+        console.print(pullplan.totals(planner.predictions))
+        if corrupt_peers:
+            console.print(
+                f"Preview incomplete: {len(corrupt_peers)} peer(s) could not be "
+                "inspected (see the warnings above)."
+            )
     return _partial_result
 
 
@@ -6583,7 +6589,7 @@ def devices(
     table-rendering convention). Empty fleet renders as ``[]``. Stable contract
     for the Group 8 retro-fleet skill's ``mm devices --format=json`` consumer.
     """
-    config = _get_config()
+    config = _get_config(read_only=True)
     backend = get_backend(config)
     device_list = _list_devices_warn(backend)
     my_id = config["device"]["id"]
@@ -6664,8 +6670,12 @@ def diff_cmd(
     from_device: str | None = typer.Option(None, "--from", help="Diff against a specific device"),
     source: str | None = typer.Option(None, "--source", help="Diff a specific source only"),
 ) -> None:
-    """Show what would change without applying (dry run)."""
-    config = _get_config()
+    """Compare this Mac's files with its last push (or with --from DEVICE's manifest).
+
+    Changes nothing, not even the lock file. For incoming changes from other
+    Macs, use mm pull --dry-run.
+    """
+    config = _get_config(read_only=True)
     passphrase = _get_passphrase_or_exit()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -6703,6 +6713,10 @@ def diff_cmd(
     # diff_fetch.manifest is pre-normalized via load_manifest.
     remote_manifest = diff_fetch.manifest if diff_fetch.is_ok else None
 
+    if remote_manifest is not None:
+        exclude_map, skip_prefixes = _build_exclude_map(config)
+        remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
+
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
     console.print(
@@ -6732,7 +6746,7 @@ def diff_cmd(
             remote_info = remote_files.get(path, {})
             base_path = src_base_paths.get(src_name)
             if base_path is not None and remote_info:
-                outcome = _predict_pull_outcome(path, remote_info, base_path)
+                outcome = pullplan._predict_pull_outcome(path, remote_info, base_path)
                 console.print(
                     f"    [yellow]~ push  [/yellow] {safe_str(path)} (pull would: {outcome})"
                 )
@@ -6753,7 +6767,10 @@ def gc(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Preview orphan blobs and retention cleanup without deleting",
+        help=(
+            "Preview orphan blobs and retention cleanup without deleting. Changes nothing "
+            "except the local lock file. Exits 1 if the preview stops."
+        ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     prune_conflicts: bool = typer.Option(
@@ -6768,7 +6785,8 @@ def gc(
     including a preview of the conflict-sidecar reaper. ``--conflicts`` is
     required to actually reap stale conflict copies.
     """
-    config = _get_config()
+    config = _get_config(read_only=dry_run)
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -6786,7 +6804,7 @@ def gc(
             for note in pending:
                 console.print(safe_str(note))
         except MindMeldError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
         # Track 7B: events retention is always-on (fleet policy, not opt-in).
         # See `_gc_old_event_files` for the tombstone-propagation framing.
@@ -6801,7 +6819,15 @@ def gc(
         # Bare `--dry-run` previews the conflict reaper (the one that
         # touches user content). Apply still requires `--conflicts`.
         if prune_conflicts or dry_run:
-            retention._gc_old_conflict_files(config, dry_run, verbose)
+            retention._gc_old_conflict_files(
+                config, dry_run, verbose, deletion_requires_flag=dry_run and not prune_conflicts
+            )
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE)
+    except MindMeldError as e:
+        if dry_run:
+            _error(str(e) + refusal_suffix)
+        raise
     finally:
         release_lock()
 
@@ -6866,7 +6892,7 @@ def _do_gc(
         # the corrupt manifest's referenced hashes are missing from
         # referenced_hashes. A user who copies that list into a separate
         # delete flow would reap live data.
-        _error(msg)
+        _error(msg + (DRY_RUN_REFUSAL if dry_run else ""))
 
     # List all blobs across all devices
     all_blobs = backend.list_keys(DATA_PREFIX)
@@ -6946,7 +6972,7 @@ def sources() -> None:
     the source's `exclude_patterns` actually matched on this scan; diagnostic
     only, used to sanity-check an over-broad glob.
     """
-    config = _get_config()
+    config = _get_config(read_only=True)
 
     src_list = _resolve_all_configured_sources(config)
     disabled_set = set(config.get("sync", {}).get("disabled_sources", []) or [])
@@ -7074,7 +7100,7 @@ def _record_seen(names: list[str]) -> None:
     crash the calling command. The seen tracker drives the `mm status`
     new-source hint; losing it just means a hint repeats.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     currently_resolved = [s["name"] for s in get_sources(config)]
     seen_sources.acknowledge(names, initial=currently_resolved)
 
@@ -7099,7 +7125,7 @@ def disable_source(
     `--force` accepts unknown names so you can pre-disable a source that
     hasn't shipped yet (e.g. `mm disable-source codex --force`).
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -7150,7 +7176,7 @@ def enable_source(
     `mm install-skills --agent <key>` instead. This command does not
     install the link itself.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -7235,7 +7261,7 @@ def reconfigure_sources() -> None:
     Atomicity: Ctrl-C mid-prompt aborts without writing. The whole
     reconfigured state is committed in a single patch_config_on_disk call.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     sync = dict(config.get("sync", {}) or {})
     explicit_sources = list(sync.get("sources", []) or [])
     explicit_names = [s["name"] for s in explicit_sources]
@@ -7391,7 +7417,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
     `_maybe_prompt_migration` can call it directly without going through
     typer's option-parsing machinery.
     """
-    config = _get_config()
+    config = _get_config(read_only=dry_run)
 
     sources = config.get("sync", {}).get("sources")
     if not sources:
@@ -7400,12 +7426,16 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
             "nothing to migrate. DEFAULT_SOURCES already include the "
             "recommended excludes.[/dim]"
         )
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return
 
     diffs = _compute_recommended_excludes_diff(sources)
     retire_opencode = _explicit_opencode_source_present(sources)
     if not diffs and not retire_opencode:
         console.print("[green]Config is already up to date.[/green]")
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return
 
     if diffs:
@@ -7423,7 +7453,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
         )
 
     if dry_run:
-        console.print("\n[dim]Dry run — no changes written.[/dim]")
+        console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return
 
     if not yes and not typer.confirm("\nApply these updates?", default=True):
@@ -7485,7 +7515,9 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
 def migrate_config(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
     dry_run: bool = typer.Option(
-        False, "--dry-run", help="Show the diff without writing config.toml."
+        False,
+        "--dry-run",
+        help="Show the diff. Changes nothing: no config, lock or history writes. Exits 0.",
     ),
 ) -> None:
     """Add recommended `exclude_patterns` to existing `[[sync.sources]]`.
@@ -7850,7 +7882,11 @@ def recapture(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Discover and walk, then report; write and upload nothing.",
+        help=(
+            "Discover and walk, then report. Changes nothing except the local lock file: "
+            "no rows, uploads, config writes or upgrade records. Exits 1 if the preview "
+            "stops or finds no repositories; a partial scan exits 0 and says so."
+        ),
     ),
 ) -> None:
     """Recover omitted git commits into the fleet retro.
@@ -7860,9 +7896,11 @@ def recapture(
     exits 4. Zero discovered repositories writes nothing and exits 1.
     """
     days = _parse_recapture_window(window)
-    config = _get_config()
-    _maybe_prompt_migration(config)
-    config = _get_config()
+    config = _get_config(read_only=dry_run)
+    _maybe_prompt_migration(config, read_only=dry_run)
+    if not dry_run:
+        config = _get_config(read_only=False)
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -7880,7 +7918,7 @@ def recapture(
             for note in pending:
                 console.print(safe_str(note))
         except MindMeldError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
         try:
             resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
             sources = resolution.available
@@ -7890,30 +7928,31 @@ def recapture(
                         _config_module._missing_custom_mm_events_message(src["path"])
                     )
         except SnapshotError as e:
-            suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+            suffix = refusal_suffix
             _error(f"{e} No recapture rows were written.{suffix}")
         disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
         if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
+            state = "disabled" if "mm-events" in disabled else "not configured"
             stderr_console.print(
                 "[red]Error:[/red] recapture requires the 'mm-events' source, "
-                "but it is disabled on this Mac."
+                f"but it is {state} on this Mac."
             )
-            stderr_console.print("Fix: mm enable-source mm-events")
-            stderr_console.print(f"Then retry: mm recapture {window}")
+            if dry_run:
+                stderr_console.print("Fix (changes config): mm enable-source mm-events")
+                stderr_console.print(
+                    f"Then preview again: mm recapture --dry-run {safe_str(window)}"
+                )
+                stderr_console.print(DRY_RUN_REFUSAL.strip())
+            else:
+                stderr_console.print("Fix: mm enable-source mm-events")
+                stderr_console.print(f"Then retry: mm recapture {safe_str(window)}")
             raise typer.Exit(1)
 
         since = datetime.now(timezone.utc) - timedelta(days=days)
         prepared = events_tail._prepare_recapture(
             config, sources, config["device"]["id"], since=since
         )
-        if prepared is None:
-            stderr_console.print(
-                "[red]Error:[/red] recapture requires the 'mm-events' source, "
-                "but it is disabled on this Mac."
-            )
-            stderr_console.print("Fix: mm enable-source mm-events")
-            stderr_console.print(f"Then retry: mm recapture {window}")
-            raise typer.Exit(1)
+        assert prepared is not None  # mm-events availability was checked above.
 
         n_roots = len(prepared.root_discovery.roots)
         skipped = prepared.walk_budget_aborts + prepared.walk_errors
@@ -7943,7 +7982,30 @@ def recapture(
             console.print(f"  Commit records:   {len(records)} captured")
             console.print(f"  Estimated size:   {row_bytes} bytes")
             if n_roots == 0:
+                console.print(
+                    "Recapture stopped: no Git repositories were discovered on this Mac. "
+                    "Add their absolute paths under [retro].repo_roots, verify with "
+                    f"'mm diag', then preview again: mm recapture --dry-run {safe_str(window)}"
+                )
+                stderr_console.print(DRY_RUN_REFUSAL.strip())
                 raise typer.Exit(1)
+            if skipped:
+                console.print(
+                    f"Preview incomplete: {skipped} repositories could not be walked "
+                    "(see the skipped lines above)."
+                )
+            if prepared.root_discovery.exceeded:
+                console.print(
+                    "Preview incomplete: repository discovery exceeded its budget; "
+                    "more repositories may exist."
+                )
+            if prepared.root_discovery.errors:
+                reasons = "; ".join(safe_str(reason) for reason in prepared.root_discovery.errors)
+                console.print(
+                    f"Preview incomplete: repository discovery reported errors: {reasons}"
+                )
+            console.print(DRY_RUN_COMPLETE)
+            console.print(RECAPTURE_NOT_PREVIEWED)
             return
 
         if n_roots == 0:
@@ -8053,10 +8115,15 @@ def recapture(
         console.print("window will not show the older recoveries:")
         console.print(f"  mm retro-fleet {cover_days}d   # covers everything just recaptured")
         console.print("  mm retro-fleet 7d    # covers the last 7 days only")
+    except MindMeldError as e:
+        if dry_run:
+            _error(str(e) + refusal_suffix)
+        raise
     finally:
         release_lock()
 
-    upgrade.emit_nudge_if_due(config)
+    if not dry_run:
+        upgrade.emit_nudge_if_due(config)
 
 
 # ── refresh-identity ──────────────────────────────────────────────────
@@ -8270,7 +8337,7 @@ def conflicts() -> None:
     prefix happens lock-protected in `mm pull` and `mm resolve` only —
     `mm conflicts` is lockless and any rename here would race autopull.
     """
-    config = _get_config()
+    config = _get_config(read_only=True)
     hits = resolveflow._find_conflict_files(config)
     if not hits:
         console.print("[green]No conflict files.[/green]")
@@ -8408,7 +8475,7 @@ def recover(
             "the next push to start fresh)."
         )
 
-    config = _get_config()
+    config = _get_config(read_only=False)
     passphrase = _get_passphrase_or_exit()
     device_id = config["device"]["id"]
     storage_path = config["storage"]["path"]
@@ -8540,7 +8607,7 @@ def resolve(
     `both` from pre-v0.11.x is aliased to (s)kip with a one-time notice
     until 1.0 -- same on-disk effect, no risk in mapping it through.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     backend = get_backend(config)
 
     try:
@@ -8668,7 +8735,7 @@ def _write_migration_breadcrumb(missing: list[str]) -> None:
         pass
 
 
-def _maybe_prompt_migration(config: dict, *, read_only: bool = False) -> None:
+def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
     """Once-per-invocation interactive prompt for pending config migrations.
 
     Called from the top of `mm push` / `mm pull` / `mm recapture` ONLY
@@ -8697,8 +8764,8 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool = False) -> None:
         )
         if read_only and is_tty:
             stderr_console.print(
-                "This preview uses your current config. A real mm push first offers "
-                "to run mm migrate-config (default: yes)."
+                "This preview uses your current config. Without --dry-run, this command "
+                "first offers to run mm migrate-config (default: yes)."
             )
         return
     if missing:

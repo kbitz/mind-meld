@@ -1,16 +1,18 @@
 """Integration tests for Mind Meld — full push/pull round-trips."""
 
+import ast
 import hashlib
+import inspect
 import json
 import os
 import shutil
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import tomllib
-from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1576,7 +1578,7 @@ class TestMigrateConfigCommand:
 
         before = config_path.read_bytes()
         config = config_module.load_config(config_path)
-        cli_module._maybe_prompt_migration(config)
+        cli_module._maybe_prompt_migration(config, read_only=False)
         assert config_path.read_bytes() == before
         joined = " ".join(captured)
         assert "retired" in joined.lower() or "opencode" in joined
@@ -6392,15 +6394,51 @@ def test_53a_normal_summary_systemexit_propagates(apply_failure_fleet, monkeypat
 
 # One permanent hook, armed only around a preview invocation. Record instead
 # of raising: setup catches OSError/Exception, so a raising guard can lie.
-_PREVIEW_AUDIT = ContextVar("push_preview_audit", default=None)
+class _PreviewAuditWindow:
+    """Only the invoking thread and threads started in this window belong to it."""
+
+    def __init__(self):
+        self.guard = threading.RLock()
+        self.active = None
+        self.threads = set()
+
+    def set(self, value):
+        with self.guard:
+            assert self.active is None
+            previous = sys.dont_write_bytecode, threading.Thread.start
+            sys.dont_write_bytecode = True
+            self.active = value
+            self.threads = {threading.current_thread()}
+
+            def start(thread, *args, **kwargs):
+                with self.guard:
+                    self.threads.add(thread)
+                return previous[1](thread, *args, **kwargs)
+
+            threading.Thread.start = start
+            return previous
+
+    def reset(self, token):
+        with self.guard:
+            self.active = None
+            self.threads.clear()
+            sys.dont_write_bytecode, threading.Thread.start = token
+
+    def get(self):
+        with self.guard:
+            return self.active if threading.current_thread() in self.threads else None
+
+
+_PREVIEW_AUDIT = _PreviewAuditWindow()
 
 
 def _record_preview_mutation(event, args):
     active = _PREVIEW_AUDIT.get()
     if active is None:
         return
-    records, lock_path = active
-    if event in {"socket.connect", "urllib.Request"}:
+    records, lock_path, *declared = active
+    exemptions = ([lock_path] if lock_path is not None else []) + list(declared)
+    if event in {"socket.connect", "urllib.Request", "subprocess.Popen", "os.posix_spawn"}:
         records.append((event, repr(args)))
         return
     paths = []
@@ -6423,16 +6461,20 @@ def _record_preview_mutation(event, args):
     else:
         return
     for value in paths:
-        if isinstance(value, int) and lock_path.exists():
-            # ftruncate audits the descriptor, not its pathname. Allow only
-            # the lock inode, never every descriptor-based write.
+        if isinstance(value, int):
+            # Descriptor numbers are reusable; only the declared inode is exempt.
             fd_stat = os.fstat(value)
-            lock_stat = lock_path.stat()
-            if (fd_stat.st_dev, fd_stat.st_ino) == (lock_stat.st_dev, lock_stat.st_ino):
+            if any(
+                path.exists()
+                and (fd_stat.st_dev, fd_stat.st_ino) == (path.stat().st_dev, path.stat().st_ino)
+                for path in exemptions
+            ):
                 continue
         if isinstance(value, (str, bytes, os.PathLike)):
             path = Path(os.fsdecode(value)).absolute()
-            if path in {lock_path, lock_path.parent} or "__pycache__" in path.parts:
+            if path in exemptions or (
+                event == "os.mkdir" and any(path == p.parent for p in exemptions)
+            ):
                 continue
         records.append((event, repr(args)))
         break
@@ -6441,7 +6483,7 @@ def _record_preview_mutation(event, args):
 sys.addaudithook(_record_preview_mutation)
 
 
-def _preview_tree(root, *, pin=False):
+def _preview_tree(root, *, pin=False, exemptions=()):
     """Bytes + mode + mtime for the whole fixture tree, including directories."""
     paths = [root, *root.rglob("*")]
     if pin:
@@ -6451,18 +6493,22 @@ def _preview_tree(root, *, pin=False):
     snapshot = {}
     for path in paths:
         rel = path.relative_to(root)
-        if rel == Path("test.lock") or "__pycache__" in rel.parts:
+        if rel == Path("test.lock") or path in exemptions:
             continue
         stat = path.lstat()
-        content = (
-            ("link", os.readlink(path))
-            if path.is_symlink()
-            else ("file", path.read_bytes())
-            if path.is_file()
-            else ("dir",)
-        )
+        try:
+            content = (
+                ("link", os.readlink(path))
+                if path.is_symlink()
+                else ("file", path.read_bytes())
+                if path.is_file()
+                else ("dir",)
+            )
+        except PermissionError:
+            content = ("unreadable",)
         # Creating the allowed lock can change its parent's mtime.
-        snapshot[str(rel)] = (content, stat.st_mode, None if path == root else stat.st_mtime_ns)
+        allowed_parent = path == root or any(path == p.parent for p in exemptions)
+        snapshot[str(rel)] = (content, stat.st_mode, None if allowed_parent else stat.st_mtime_ns)
     return snapshot
 
 
@@ -6543,6 +6589,7 @@ def push_preview56(tmp_path, monkeypatch):
         "cache": cache,
         "history": pullhistory.HISTORY_DIR / "pull-history.jsonl",
         "fetches": fetches,
+        "keyring_writes": keyring_writes,
     }
 
 
@@ -6560,8 +6607,8 @@ def _assert_preview_complete(result):
     )
 
 
-def _assert_preview_refused(result):
-    assert result.exit_code == 1, result.output
+def _assert_preview_refused(result, exit_code=1):
+    assert result.exit_code == exit_code, result.output
     assert "Dry run complete." not in result.output
     assert _preview_text(result).endswith(
         "Nothing was changed except the local lock file (dry run)."
@@ -6587,6 +6634,1015 @@ def _seed_preview_prior(env, *, event_files=()):
         manifest_key("dev-a"), encrypt(serialize_manifest(prior), PASSPHRASE, MEMORY_KB)
     )
     return prior
+
+
+# Every new command must make an explicit intent decision here. Exemptions
+# name owned paths and conditions, never broad directories or fd numbers.
+COMMAND_INTENTS62 = {
+    name: (
+        "mutating",
+        "lock"
+        if name in {"push", "pull", "gc", "recapture"}
+        else "none"
+        if name == "migrate-config"
+        else None,
+    )
+    for name in (
+        "init",
+        "push",
+        "pull",
+        "gc",
+        "disable-source",
+        "enable-source",
+        "reconfigure-sources",
+        "migrate-config",
+        "install-skills",
+        "recapture",
+        "refresh-identity",
+        "recover",
+        "resolve",
+        "autopull",
+        "autopush",
+    )
+} | {
+    name: ("inspection", None)
+    for name in ("status", "diag", "devices", "diff", "sources", "log", "conflicts", "retro-fleet")
+}
+
+
+def _check_command_intents62(application, prefix=""):
+    found = set()
+    for command in application.registered_commands:
+        name = prefix + (command.name or command.callback.__name__.replace("_", "-"))
+        message = (
+            f"{name}: update COMMAND_INTENTS62 with an intent and preview lock allowance "
+            "(lock/none), or a reasoned exemption; see docs/invariants/sync.md"
+        )
+        assert name in COMMAND_INTENTS62, message
+        params = inspect.signature(command.callback).parameters
+        preview = "dry_run" in params or any(
+            "--dry-run" in (getattr(p.default, "param_decls", ()) or ()) for p in params.values()
+        )
+        assert preview == (COMMAND_INTENTS62[name][1] is not None), message
+        found.add(name)
+    for group in application.registered_groups:
+        found |= _check_command_intents62(group.typer_instance, prefix + group.name + " ")
+    return found
+
+
+def test_command_intents62():
+    assert _check_command_intents62(app) == set(COMMAND_INTENTS62)
+    synthetic = typer.Typer()
+    synthetic.command()(lambda dry_run=False: None)
+    with pytest.raises(AssertionError, match="COMMAND_INTENTS62.*docs/invariants/sync.md"):
+        _check_command_intents62(synthetic)
+
+
+def _check_read_only_policy62(source):
+    class Policy(ast.NodeVisitor):
+        owner = None
+
+        def visit_FunctionDef(self, node):
+            prior, self.owner = self.owner, node.name
+            self.generic_visit(node)
+            self.owner = prior
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id in {
+                "_get_config",
+                "_maybe_prompt_migration",
+            }:
+                assert any(k.arg == "read_only" for k in node.keywords), (
+                    f"{self.owner}:{node.lineno}: {node.func.id} requires read_only"
+                )
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run_transition_hook"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "upgrade"
+            ):
+                assert self.owner in {"_get_config", "_auto_command_setup", "init"}, self.owner
+            self.generic_visit(node)
+
+    Policy().visit(ast.parse(source))
+
+
+def test_read_only_policy62():
+    _check_read_only_policy62(Path(cli_module.__file__).read_text())
+    for function in (cli_module._get_config, cli_module._maybe_prompt_migration):
+        parameter = inspect.signature(function).parameters["read_only"]
+        assert parameter.kind == inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+    for source in (
+        "def wrong(): _get_config()",
+        "def wrong(): _maybe_prompt_migration({})",
+        "def wrong(): upgrade.run_transition_hook({})",
+    ):
+        with pytest.raises(AssertionError):
+            _check_read_only_policy62(source)
+
+
+@pytest.mark.parametrize("mode", ["worker", "import", "swallowed", "subprocess", "fd"])
+def test_preview_audit62(tmp_path, mode):
+    from concurrent.futures import ThreadPoolExecutor
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    source = tmp_path / "fresh_preview_module.py"
+    source.write_text("answer = 42\n")
+    records = []
+    token = _PREVIEW_AUDIT.set((records, None))
+    try:
+        if mode == "worker":
+            with ThreadPoolExecutor(1) as pool:
+                pool.submit((tmp_path / "worker").write_text, "write").result()
+        elif mode == "import":
+            spec = spec_from_file_location("fresh_preview_module", source)
+            spec.loader.exec_module(module_from_spec(spec))
+        elif mode == "subprocess":
+            subprocess.run([sys.executable, "-c", "pass"], check=True)
+        elif mode == "fd":
+            with source.open("r+") as file:
+                records.clear()
+                os.ftruncate(file.fileno(), 0)
+        else:
+            try:
+                (tmp_path / "test.lock").write_text("not exempt in lock-free mode")
+                raise OSError("swallowed")
+            except OSError:
+                pass
+    finally:
+        _PREVIEW_AUDIT.reset(token)
+    assert bool(records) == (mode != "import"), records
+    assert not (tmp_path / "__pycache__").exists()
+
+
+def test_preview_audit62_ignores_prior_worker(tmp_path):
+    release = threading.Event()
+    records = []
+    token = _PREVIEW_AUDIT.set(([], None))
+    thread = threading.Thread(target=lambda: (release.wait(), (tmp_path / "late").touch()))
+    thread.start()
+    _PREVIEW_AUDIT.reset(token)
+    token = _PREVIEW_AUDIT.set((records, None))
+    try:
+        release.set()
+        thread.join()
+    finally:
+        _PREVIEW_AUDIT.reset(token)
+    assert records == []
+
+
+def _publish_peer62(env, device, files, *, tombstones=None):
+    from mind_meld.devices import update_last_seen
+    from mind_meld.storage.keys import blob_key, manifest_key
+
+    register_device(env["backend"], device, device)
+    update_last_seen(env["backend"], device)
+    manifest_sources = {}
+    for (source, path), (data, mtime) in files.items():
+        digest = hashlib.sha256(data).hexdigest()
+        env["backend"].put(blob_key(device, digest), encrypt(data, PASSPHRASE, MEMORY_KB))
+        manifest_sources.setdefault(source, {"files": {}})["files"][path] = {
+            "sha256": digest,
+            "size": len(data),
+            "mtime": mtime,
+        }
+    peer = {
+        "version": 2,
+        "device_id": device,
+        "device_name": device,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "sources": manifest_sources,
+        "tombstones": tombstones or {},
+    }
+    env["backend"].put(
+        manifest_key(device), encrypt(serialize_manifest(peer), PASSPHRASE, MEMORY_KB)
+    )
+    return peer
+
+
+@pytest.fixture
+def preview62(push_preview56, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mind_meld import identity, seen_sources, token_usage
+    from mind_meld.skills.retro_fleet import aggregator
+    from mind_meld.storage.keys import blob_key
+    from tests.test_host_skill_discovery import _ok_payload
+
+    env = push_preview56
+    memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+    env["legacy"] = memory / "role.sync-conflict-20260101-120000-abcd1234.md"
+    env["legacy"].write_text("old peer bytes")
+    (memory / "role.sync-conflict-20200101-120000-v1-deadbeef.md").write_bytes(
+        (memory / "role.md").read_bytes()
+    )
+    env["config"]["sync"]["sources"][0]["exclude_patterns"] = ["*/secret.md"]
+    groot = tmp_path / "gstack"
+    groot.mkdir()
+    (groot / "config.yaml").write_text("local config")
+    env["config"]["sync"]["sources"].append(
+        {
+            "name": "gstack",
+            "path": str(groot),
+            "type": "generic",
+            "include_dirs": ["."],
+            "exclude_patterns": [],
+        }
+    )
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "seed",
+        ],
+        check=True,
+    )
+    env["config"]["retro"] = {"repo_roots": [str(repo)]}
+    save_config(env["config"], env["config_path"])
+    _seed_preview_prior(env)
+    stamp = datetime.now(timezone.utc).isoformat()
+    prefix = "projects/-Users-kb-myapp/memory/"
+    _publish_peer62(
+        env,
+        "dev-b",
+        {
+            ("claude", prefix + name): (data, stamp)
+            for name, data in (
+                ("new.md", b"new"),
+                ("role.md", b"remote role"),
+                ("secret.md", b"excluded"),
+                ("gone.md", b"tombstoned"),
+            )
+        },
+        tombstones={"claude:" + prefix + "gone.md": {"deleted_at": stamp}},
+    )
+    env["cache"].update(last_seen_self_version="0.0.1", checked_at="2000-01-01T00:00:00+00:00")
+    env["upgrade"].CACHE_PATH.write_text(json.dumps(env["cache"]))
+    breadcrumb = cli_module._migration_state_path()
+    breadcrumb.parent.mkdir(parents=True, exist_ok=True)
+    breadcrumb.write_text('{"missing": ["gstack"]}')
+    (env["events"] / "events").mkdir()
+    (env["events"] / "events/dev-a-2020-01-01.jsonl").write_text("{}\n")
+    env["backend"].put(blob_key("dev-a", hashlib.sha256(b"orphan").hexdigest()), b"orphan")
+    partial = env["backend"].root / "data/dev-a/tmpold.tmp"
+    partial.write_text("partial")
+    token_usage.CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": token_usage.CACHE_VERSION,
+                "files": {
+                    str(tmp_path / "gone.jsonl"): {
+                        "size": 1,
+                        "mtime": 1,
+                        "by_day": {"2020-01-01": {}},
+                    }
+                },
+            }
+        )
+    )
+    seen_sources.read([s["name"] for s in env["config"]["sync"]["sources"]])
+    monkeypatch.setattr(aggregator, "get_known_devices", lambda: (2, []))
+    # Record real read-only git results before arming, replay at the subprocess
+    # boundary. Discovery, walk threads and command wrappers still execute.
+    original_run = subprocess.run
+    replay = {}
+
+    def record(argv, **kwargs):
+        result = original_run(argv, **kwargs)
+        replay[tuple(argv)] = result
+        return result
+
+    monkeypatch.setattr(subprocess, "run", record)
+    sources = config_module.get_sources(env["config"])
+    events_tail._prepare_recapture(
+        env["config"], sources, "dev-a", since=datetime.now(timezone.utc) - timedelta(days=1)
+    )
+
+    def run(argv, **kwargs):
+        key = tuple(arg for arg in argv if not arg.startswith("--since="))
+        for recorded, result in replay.items():
+            if key == tuple(arg for arg in recorded if not arg.startswith("--since=")):
+                return result
+        if argv == ["gh", "api", "user"]:
+            return subprocess.CompletedProcess(argv, 0, '{"id": 1, "login": "test"}', "")
+        if argv == ["git", "config", "--global", "user.email"] or (
+            argv[:2] == ["git", "-C"] and argv[3:] == ["config", "user.email"]
+        ):
+            return subprocess.CompletedProcess(argv, 0, "test@example.com\n", "")
+        pytest.fail(f"Unexpected subprocess: {argv}")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    grok_output = tmp_path / "grok-inspect.json"
+    grok_output.write_text(json.dumps(_ok_payload()))
+    original_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "grok" if name == "grok" else original_which(name)
+    )
+
+    def popen(argv, **kwargs):
+        assert argv[1:] == ["inspect", "--json"]
+        return SimpleNamespace(stdout=grok_output.open("rb"), returncode=0, wait=lambda **kw: 0)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    def invoke(argv, *, exemptions=(), check=True):
+        env["upgrade"]._reset_for_tests()
+        lock = (
+            tmp_path / "test.lock"
+            if "--dry-run" in argv and COMMAND_INTENTS62[argv[0]][1] == "lock"
+            else None
+        )
+        tree_exemptions = (*exemptions, *(p.parent for p in exemptions if not p.parent.exists()))
+        before = _preview_tree(tmp_path, pin=True, exemptions=tree_exemptions)
+        records = []
+        token = _PREVIEW_AUDIT.set((records, lock, *exemptions))
+        try:
+            result = runner.invoke(app, argv)
+        finally:
+            _PREVIEW_AUDIT.reset(token)
+        if check:
+            assert records == [], (result.output, records)
+            assert _preview_tree(tmp_path, exemptions=tree_exemptions) == before
+            assert env["fetches"] == []
+            assert env["keyring_writes"] == []
+            if lock is None:
+                assert not (tmp_path / "test.lock").exists()
+        return result
+
+    env["audit"] = invoke
+    env["identity"] = identity.CACHE_PATH
+    return env
+
+
+INSPECTION_CASES62 = [
+    (name,) for name, (intent, _) in COMMAND_INTENTS62.items() if intent == "inspection"
+]
+PREVIEW_CASES62 = [
+    (name, "--dry-run", *(["1d"] if name == "recapture" else []))
+    for name, (_, lock) in COMMAND_INTENTS62.items()
+    if lock is not None
+]
+
+
+@pytest.mark.parametrize("argv", INSPECTION_CASES62 + PREVIEW_CASES62)
+def test_write_free_contract62(preview62, argv):
+    exemptions = (preview62["identity"],) if argv[0] == "retro-fleet" else ()
+    result = preview62["audit"](list(argv), exemptions=exemptions)
+    assert result.exit_code == 0, (result.output, result.exception)
+
+
+@pytest.mark.parametrize("argv", INSPECTION_CASES62 + PREVIEW_CASES62)
+def test_transition_deferred62(preview62, argv):
+    env = preview62
+    exemptions = (env["identity"],) if argv[0] == "retro-fleet" else ()
+    assert env["audit"](list(argv), exemptions=exemptions).exit_code == 0
+    assert not env["history"].exists()
+    for _ in range(2):
+        env["upgrade"]._reset_for_tests()
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, (result.output, result.exception)
+    transitions = [
+        json.loads(line)
+        for line in env["history"].read_text().splitlines()
+        if json.loads(line)["verb"] == "self-upgrade"
+    ]
+    assert len(transitions) == 1
+    assert transitions[0]["old_version"] == "0.0.1"
+
+
+@pytest.mark.parametrize("state", ["missing", "corrupt", "empty", "malformed"])
+def test_status_seed_then_read_only62(preview62, state):
+    from mind_meld import seen_sources
+
+    path = seen_sources.seen_path()
+    if state == "missing":
+        path.unlink()
+        path.parent.rmdir()
+    else:
+        path.write_bytes({"corrupt": b"\xff", "empty": b"", "malformed": b"{}"}[state])
+    result = preview62["audit"](["status"], exemptions=(path,))
+    assert result.exit_code == 0, result.output
+    assert json.loads(path.read_text())
+    result = preview62["audit"](["status"])
+    assert result.exit_code == 0, result.output
+
+
+def test_seen_recovery_preserves_interleaved_ack62(tmp_path, monkeypatch):
+    from mind_meld import seen_sources
+
+    monkeypatch.setattr(seen_sources, "SEEN_DIR", tmp_path)
+    seen_sources.seen_path().write_text("corrupt")
+    original = os.open
+    interleaved = []
+
+    def opening(path, flags, *args, **kwargs):
+        if flags & os.O_RDWR and not interleaved:
+            interleaved.append(True)
+            seen_sources.acknowledge(["codex"], initial=["claude"])
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+    assert seen_sources.read(["gstack"]) == {"claude", "codex"}
+
+
+@pytest.mark.parametrize("state", ["missing", "fresh", "stale", "no-filter"])
+def test_retro_exemptions62(preview62, state):
+    from mind_meld import identity
+
+    path = preview62["identity"]
+    if state != "missing":
+        path.write_text(
+            json.dumps(
+                {
+                    "version": identity.CACHE_VERSION,
+                    "emails": ["test@example.com"],
+                    "refreshed_at": datetime.now(timezone.utc).isoformat()
+                    if state == "fresh"
+                    else "2000-01-01T00:00:00+00:00",
+                }
+            )
+        )
+    argv = ["retro-fleet"] + (["--no-author-filter"] if state == "no-filter" else [])
+    result = preview62["audit"](argv, exemptions=() if state == "no-filter" else (path,))
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [("diag", "--json"), ("devices", "--format", "json"), ("gc", "--dry-run", "--conflicts")],
+)
+def test_inspection_variants62(preview62, argv):
+    result = preview62["audit"](list(argv))
+    assert result.exit_code == 0, result.output
+    if argv == ("diag", "--json"):
+        assert json.loads(result.stdout)["host_skill_discovery"]["status"] == "ok"
+
+
+def test_real_pull_keeps_migration_and_history62(preview62):
+    from mind_meld import resolveflow
+
+    result = runner.invoke(app, ["pull"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert not preview62["legacy"].exists()
+    assert (
+        preview62["legacy"]
+        .with_name(preview62["legacy"].name.replace("sync-conflict-", "sync-conflict-v0-"))
+        .exists()
+    )
+    assert resolveflow._inversion_marker_path().exists()
+    rows = [json.loads(line) for line in preview62["history"].read_text().splitlines()]
+    assert any(row.get("action") == "excluded" for row in rows)
+
+
+@pytest.mark.parametrize("command", ["pull", "gc", "recapture"])
+def test_preview_storage_refusal62(preview62, monkeypatch, command):
+    from mind_meld.errors import StorageError
+
+    def fail(*args, **kwargs):
+        raise StorageError("injected storage refusal")
+
+    if command == "pull":
+        monkeypatch.setattr(cli_module, "list_devices_with_drops", fail)
+    elif command == "recapture":
+        monkeypatch.setattr(events_tail, "_prepare_recapture", fail)
+    else:
+        original = LocalBackend.list_keys
+
+        def list_keys(backend, prefix=""):
+            if prefix == "data/":
+                return fail()
+            return original(backend, prefix)
+
+        monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+    result = preview62["audit"]([command, "--dry-run"])
+    _assert_preview_refused(result)
+
+
+@pytest.mark.parametrize("directory_first", [False, True])
+def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_first):
+    """(a)-(j): encrypted peer bytes, twin local trees, outcomes keyed by peer."""
+    from mind_meld import pullplan
+
+    env = preview62
+    preview = tmp_path / "forecast"
+    preview.mkdir()
+    for name, data in {
+        "merge.jsonl": b'{"local":1}\n',
+        "older.md": b"local newer",
+        "unreadable.md": b"private",
+        "ancestor": b"file",
+        "canonical-match.md": b"canonical",
+        "remote-match.md": b"canonical",
+    }.items():
+        (preview / name).write_bytes(data)
+    (preview / "link").symlink_to(env["claude"], target_is_directory=True)
+    applied = tmp_path / "applied"
+    shutil.copytree(preview, applied, symlinks=True)
+    for base in (preview, applied):
+        (base / "unreadable.md").chmod(0)
+    cfg = env["config"]
+    cfg["sync"]["sources"] = [
+        {
+            "name": "payload",
+            "type": "generic",
+            "path": str(preview),
+            "include_dirs": ["."],
+            "exclude_patterns": ["excluded.md"],
+        }
+    ]
+    save_config(cfg, env["config_path"])
+    stamp, older = "2021-01-01T00:00:00+00:00", "2019-01-01T00:00:00+00:00"
+    a = {
+        name: (data, stamp)
+        for name, data in {
+            "identical.md": b"same",
+            "divergent.md": b"first",
+            "merge.jsonl": b'{"a":1}\n',
+            "older.md": b"first newer peer",
+            "tombstoned.md": b"gone",
+            "excluded.md": b"excluded",
+            "link/incoming.md": b"link bytes",
+            "unreadable.md": b"peer private",
+            "ancestor/child.md": b"impossible",
+            "canonical-match.md": b"remote",
+            "remote-match.md": b"remote",
+            "foo/bar" if directory_first else "foo": b"first shape",
+        }.items()
+    }
+    b = {
+        name: (data, stamp)
+        for name, data in {
+            "identical.md": b"same",
+            "divergent.md": b"second",
+            "merge.jsonl": b'{"b":1}\n',
+            "canonical-match.md": b"canonical",
+            "remote-match.md": b"remote",
+            "foo" if directory_first else "foo/bar": b"second shape",
+        }.items()
+    }
+    b["older.md"] = (b"older peer", older)
+    for device, files in (("dev-b", a), ("dev-c", b)):
+        _publish_peer62(
+            env,
+            device,
+            {("payload", name): info for name, info in files.items()},
+            tombstones={
+                "payload:tombstoned.md": {
+                    "deleted_at": datetime.now(timezone.utc).isoformat(),
+                    "device_id": device,
+                }
+            },
+        )
+    predictions, actual = [], {}
+    original = cli_module._pull_one_source
+
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        predictions.extend(result.predictions)
+        if not kwargs["dry_run"]:
+            for outcome, paths in result.outcomes.items():
+                actual.setdefault(outcome, set()).update(
+                    (result.device_id, result.src_name, path) for path in paths
+                )
+        return result
+
+    monkeypatch.setattr(cli_module, "_pull_one_source", capture)
+    hashes = []
+    original_hash = pullplan.hash_file
+
+    def hash_once(path):
+        hashes.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(pullplan, "hash_file", hash_once)
+    try:
+        result = env["audit"](["pull", "--dry-run"])
+        assert result.exit_code == 0, (result.output, result.exception)
+        assert len(hashes) == len(set(hashes))
+        assert pullplan.totals(predictions) in _preview_text(result)
+        assert "Pull complete." not in result.output
+        expected = {}
+        for prediction in predictions:
+            expected.setdefault(prediction.outcome, set()).add(
+                (prediction.device_id, prediction.src_name, prediction.rel_path)
+            )
+        cfg["sync"]["sources"][0]["path"] = str(applied)
+        save_config(cfg, env["config_path"])
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, (result.output, result.exception)
+        for predicted, real in (
+            ("write", "written"),
+            ("conflict", "conflicted"),
+            ("skip", "skipped"),
+            ("may fail", "failed"),
+        ):
+            assert expected.get(predicted, set()) == actual.get(real, set()), (
+                predicted,
+                expected,
+                actual,
+            )
+        assert actual.get("merged", set()) <= expected["merge"]
+        assert len(expected["merge"]) == 2
+        assert len(expected["may fail"]) == 3
+        assert len(expected["skip"]) == 2
+        assert ("dev-c", "payload", "canonical-match.md") not in actual["conflicted"]
+        assert ("dev-c", "payload", "remote-match.md") in actual["conflicted"]
+        assert not any(
+            key[2] in {"tombstoned.md", "excluded.md"}
+            for paths in [*expected.values(), *actual.values()]
+            for key in paths
+        )
+    finally:
+        for base in (preview, applied):
+            (base / "unreadable.md").chmod(0o600)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_fail_mode_local_failure_only62(preview62, dry_run):
+    env = preview62
+    prefix = "projects/-Users-kb-myapp/memory/"
+    blocked = env["claude"] / prefix / "blocked.md"
+    blocked.write_bytes(b"local")
+    blocked.chmod(0)
+    try:
+        _publish_peer62(env, "dev-b", {("claude", prefix + "blocked.md"): (b"peer bytes", None)})
+        argv = ["pull", "--conflict-mode", "fail"] + (["--dry-run"] if dry_run else [])
+        result = env["audit"](argv) if dry_run else runner.invoke(app, argv)
+        assert result.exit_code == 3, result.output
+        text = _preview_text(result)
+        assert "may fail (local file unreadable)" in text
+        assert "! conflict" not in text
+        blocked.chmod(0o600)
+        assert blocked.read_bytes() == b"local"
+        if dry_run:
+            _assert_preview_refused(result, 3)
+    finally:
+        blocked.chmod(0o600)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_fail_mode_mergeable_two_peers62(preview62, dry_run):
+    env = preview62
+    path = "projects/-Users-kb-myapp/memory/merge.jsonl"
+    for device in ("dev-b", "dev-c"):
+        _publish_peer62(
+            env, device, {("claude", path): (json.dumps({device: 1}).encode() + b"\n", None)}
+        )
+    argv = ["pull", "--conflict-mode", "fail"] + (["--dry-run"] if dry_run else [])
+    result = env["audit"](argv) if dry_run else runner.invoke(app, argv)
+    assert result.exit_code == 0, result.output
+    assert "Pull refused" not in result.output
+
+
+def test_fail_preview_preserves_warnings62(preview62):
+    from mind_meld.storage.keys import manifest_key
+
+    env = preview62
+    _publish_peer62(env, "dev-c", {("unknown", "file"): (b"data", None)})
+    register_device(env["backend"], "dev-d", "Corrupt peer")
+    env["backend"].put(manifest_key("dev-d"), b"corrupt")
+    result = env["audit"](["pull", "--dry-run", "--conflict-mode", "fail"])
+    _assert_preview_refused(result, 3)
+    assert "corrupt" in result.output
+    assert "skipping unknown source" in result.output
+    assert result.output.index("corrupt") < result.output.index("Pull refused")
+    assert "Nothing was changed except the local lock file (dry run)." in _preview_text(result)
+    assert "Nothing was changed" in result.stderr
+
+
+def test_pull_planner_future_clamp62(tmp_path):
+    from mind_meld import pullplan
+
+    planner = pullplan.PullPlanner()
+    first = planner.predict(
+        "a", "A", "s", "x", {"sha256": "a", "mtime": "2099-01-01T00:00:00+00:00"}, tmp_path
+    )
+    second = planner.predict(
+        "b",
+        "B",
+        "s",
+        "x",
+        {"sha256": "b", "mtime": (planner.now + timedelta(seconds=61)).isoformat()},
+        tmp_path,
+    )
+    assert (first.outcome, second.outcome) == ("write", "conflict")
+
+
+@pytest.mark.parametrize("command", ["push", "pull", "recapture"])
+def test_preview_tty_notice62(preview62, monkeypatch, command):
+    original = cli_module._maybe_prompt_migration
+    confirms = []
+
+    def prompt(config, **kwargs):
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        return original(config, **kwargs)
+
+    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", prompt)
+    monkeypatch.setattr(typer, "confirm", lambda *a, **kw: confirms.append(True) or True)
+    result = preview62["audit"]([command, "--dry-run", *(["1d"] if command == "recapture" else [])])
+    assert result.exit_code == 0, result.output
+    assert confirms == []
+    assert (
+        "Without --dry-run, this command first offers to run mm migrate-config (default: yes)."
+        in _preview_text(result)
+    )
+    assert preview62["legacy"].exists()
+    assert not cli_module.resolveflow._inversion_marker_path().exists()
+    assert not preview62["history"].exists()
+
+
+@pytest.mark.parametrize("command", ["pull", "gc", "recapture"])
+def test_crypto_refusal_suffix62(preview62, monkeypatch, command):
+    from mind_meld.errors import CryptoError
+
+    def refuse(*a, **kw):
+        raise CryptoError("crypto refused")
+
+    monkeypatch.setattr(cli_module, "_init_crypto_session", refuse)
+    _assert_preview_refused(preview62["audit"]([command, "--dry-run"]))
+
+
+@pytest.mark.parametrize(
+    "case", ["fleet", "device", "gc-corrupt", "custom-root", "zero-repos", "held-lock"]
+)
+def test_refusal_paths62(preview62, monkeypatch, case):
+    from mind_meld.errors import LockError
+    from mind_meld.storage.keys import device_key, manifest_key
+
+    env = preview62
+    argv = ["pull", "--dry-run"]
+    if case == "fleet":
+        key = device_key("dev-b")
+        data = json.loads(env["backend"].get(key))
+        data["last_seen_version"] = "0.8.0"
+        env["backend"].put(key, json.dumps(data).encode())
+    elif case == "device":
+        argv += ["--from", "missing"]
+    elif case == "gc-corrupt":
+        argv = ["gc", "--dry-run"]
+        env["backend"].put(manifest_key("dev-b"), b"corrupt")
+    elif case == "custom-root":
+        argv = ["recapture", "--dry-run"]
+        env["config"]["sync"]["sources"][1]["path"] = str(env["events"].parent / "missing-custom")
+        save_config(env["config"], env["config_path"])
+    elif case == "zero-repos":
+        argv = ["recapture", "--dry-run", "1d"]
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda *a, **kw: _mm_events.GitRootDiscovery((), (), False),
+        )
+    else:
+
+        def held():
+            raise LockError("held lock")
+
+        monkeypatch.setattr(cli_module, "acquire_lock", held)
+    result = env["audit"](argv)
+    if case == "held-lock":
+        assert result.exit_code == 1
+        assert "Nothing was changed" not in result.output
+    else:
+        _assert_preview_refused(result)
+    if case == "zero-repos":
+        assert "then preview again: mm recapture --dry-run 1d" in _preview_text(result)
+
+
+@pytest.mark.parametrize("disabled,configured", [(True, True), (False, False), (True, False)])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_recapture_source_advice62(preview62, disabled, configured, dry_run):
+    env = preview62
+    if disabled:
+        env["config"]["sync"]["disabled_sources"] = ["mm-events"]
+    if not configured:
+        env["config"]["sync"]["sources"] = [
+            s for s in env["config"]["sync"]["sources"] if s["name"] != "mm-events"
+        ]
+    save_config(env["config"], env["config_path"])
+    argv = ["recapture", "1d"] + (["--dry-run"] if dry_run else [])
+    result = env["audit"](argv) if dry_run else runner.invoke(app, argv)
+    assert result.exit_code == 1, result.output
+    assert (
+        f"but it is {'disabled' if disabled else 'not configured'} on this Mac."
+        in _preview_text(result)
+    )
+    if dry_run:
+        _assert_preview_refused(result)
+        assert "Fix (changes config): mm enable-source mm-events" in _preview_text(result)
+        assert "Then preview again: mm recapture --dry-run 1d" in _preview_text(result)
+    else:
+        assert "Then retry: mm recapture 1d" in result.output
+    if not disabled and dry_run:
+        enabled = runner.invoke(app, ["enable-source", "mm-events"])
+        assert enabled.exit_code == 0, enabled.output
+        retried = runner.invoke(app, ["recapture", "--dry-run", "1d"])
+        assert retried.exit_code == 0, retried.output
+
+
+@pytest.mark.parametrize(
+    "discovery,reason",
+    [("complete", "git_error"), ("budget", None), ("errors", None), ("complete", "no_commits")],
+)
+def test_recapture_incomplete_preview62(preview62, monkeypatch, discovery, reason):
+    original = events_tail._prepare_recapture
+
+    def prepare(*a, **kw):
+        from dataclasses import replace
+
+        prepared = original(*a, **kw)
+        if reason:
+            prepared.git_rows[0]["skipped"] = [{"path": "[red]repo\x1b[2J", "reason": reason}]
+            prepared.walk_errors = int(reason != "no_commits")
+        prepared.root_discovery = replace(
+            prepared.root_discovery,
+            exceeded=discovery == "budget",
+            errors=("probe [red]failed\x1b[2J",) if discovery == "errors" else (),
+        )
+        return prepared
+
+    monkeypatch.setattr(events_tail, "_prepare_recapture", prepare)
+    result = preview62["audit"](["recapture", "--dry-run", "1d"])
+    assert result.exit_code == 0, result.output
+    text = _preview_text(result)
+    if reason == "git_error":
+        assert "Preview incomplete: 1 repositories could not be walked" in text
+    elif discovery == "budget":
+        assert "repository discovery exceeded its budget; more repositories may exist." in text
+    elif discovery == "errors":
+        assert "repository discovery reported errors: probe [red]failed" in text
+    else:
+        assert "Preview incomplete" not in text
+    assert "\x1b" not in result.output
+    assert text.endswith(cli_module.RECAPTURE_NOT_PREVIEWED)
+
+
+def test_pending_events_root62(preview62):
+    env = preview62
+    shutil.rmtree(env["events"])
+    _publish_peer62(env, "dev-b", {("mm-events", "events/incoming.jsonl"): (b"{}\n", None)})
+    result = env["audit"](["pull", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "mm pull will create" in result.output
+    assert "(0700) for incoming mm-events files." in _preview_text(result)
+    assert not env["events"].exists()
+
+
+@pytest.mark.parametrize("target", ["dev-a", "dev-b"])
+def test_diff_excludes62(preview62, target):
+    env = preview62
+    prefix = "projects/-Users-kb-myapp/memory/"
+    _publish_peer62(
+        env,
+        target,
+        {("claude", prefix + name): (b"peer", None) for name in ("secret.md", "visible.md")},
+    )
+    argv = ["diff"] + (["--from", target] if target == "dev-b" else [])
+    result = env["audit"](argv)
+    assert result.exit_code == 0, result.output
+    assert "secret.md" not in result.output
+    assert "visible.md" in result.output
+
+
+@pytest.mark.parametrize("state", ["empty", "current", "migration"])
+def test_migrate_completion62(preview62, state):
+    env = preview62
+    if state != "migration":
+        env["config"]["sync"]["sources"] = (
+            [] if state == "empty" else [env["config"]["sync"]["sources"][1]]
+        )
+        save_config(env["config"], env["config_path"])
+    result = env["audit"](["migrate-config", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert _preview_text(result).endswith("Dry run complete. Nothing was changed.")
+
+
+@pytest.mark.parametrize(
+    "state", ["empty", "converged", "corrupt", "unknown", "interrupt", "prompt"]
+)
+def test_pull_preview_output62(preview62, monkeypatch, state):
+    from mind_meld.storage.keys import manifest_key
+
+    env = preview62
+    if state == "empty":
+        _publish_peer62(env, "dev-b", {})
+    if state == "converged":
+        path = "projects/-Users-kb-myapp/memory/role.md"
+        _publish_peer62(
+            env, "dev-b", {("claude", path): ((env["claude"] / path).read_bytes(), None)}
+        )
+    if state == "corrupt":
+        env["backend"].put(manifest_key("dev-b"), b"corrupt")
+    if state == "unknown":
+        _publish_peer62(env, "dev-b", {("unknown", "file"): (b"peer", None)})
+    if state == "interrupt":
+
+        def interrupt(*a, **kw):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(cli_module, "_pull_one_source", interrupt)
+    monkeypatch.setattr(typer, "prompt", lambda *a, **kw: pytest.fail("preview prompted"))
+    argv = ["pull", "--dry-run"] + (["--conflict-mode", "prompt"] if state == "prompt" else [])
+    result = env["audit"](argv)
+    text = _preview_text(result)
+    assert not any(
+        word in text
+        for word in (
+            "Pull complete.",
+            "Completed in",
+            "nothing to apply",
+            "completed changes were kept",
+        )
+    )
+    if state == "interrupt":
+        assert result.exit_code != 0
+        assert "Dry run complete." not in text
+    else:
+        assert result.exit_code == 0, result.output
+        assert text.endswith(cli_module.PULL_NOT_PREVIEWED)
+        assert ("Preview incomplete:" in text) == (state == "corrupt")
+    if state in {"empty", "unknown", "converged"}:
+        assert "No changes predicted." in text
+        assert "Dry run for" not in text
+        if state != "unknown":
+            assert "source '" not in text
+
+
+@pytest.mark.parametrize(
+    "command,phrases",
+    [
+        (
+            "pull",
+            [
+                "no file writes or renames",
+                "Exits 1 if the preview stops",
+                "3 if --conflict-mode fail predicts conflicts",
+                "combine with --dry-run for a write-free check",
+            ],
+        ),
+        ("gc", ["Changes nothing except the local lock file.", "Exits 1 if the preview stops."]),
+        (
+            "recapture",
+            [
+                "no rows, uploads, config writes or upgrade records.",
+                "a partial scan exits 0 and says so.",
+            ],
+        ),
+        ("migrate-config", ["no config, lock or history writes.", "Exits 0."]),
+        (
+            "diff",
+            [
+                "Compare this Mac's files with its last push",
+                "Changes nothing, not even the lock file.",
+                "use mm pull --dry-run.",
+            ],
+        ),
+    ],
+)
+def test_preview_help62(command, phrases):
+    result = runner.invoke(app, [command, "--help"], env={"COLUMNS": "240"})
+    text = _preview_text(result)
+    assert result.exit_code == 0
+    # Rich's option-column borders can split prose; the callback's help data
+    # pins wording independently of terminal width.
+    callback = next(
+        c.callback
+        for c in app.registered_commands
+        if (c.name or c.callback.__name__.replace("_", "-")) == command
+    )
+    help_text = (
+        " ".join((inspect.getdoc(callback) or "").split())
+        + " "
+        + " ".join(
+            getattr(param.default, "help", "") or ""
+            for param in inspect.signature(callback).parameters.values()
+        )
+    )
+    for phrase in phrases:
+        assert phrase in help_text, (phrase, text)
+    if command == "pull":
+        assert "_predict_pull_outcome" not in text
+        assert "(no writes)" not in text
+
+
+@pytest.mark.parametrize("conflicts", [False, True])
+def test_gc_conflict_label62(preview62, conflicts):
+    result = preview62["audit"](["gc", "--dry-run"] + (["--conflicts"] if conflicts else []))
+    assert result.exit_code == 0, result.output
+    assert ("deletion requires --conflicts" in _preview_text(result)) == (not conflicts)
+    assert _preview_text(result).endswith(cli_module.DRY_RUN_COMPLETE)
 
 
 class TestPushPreviewNoMutation56A:

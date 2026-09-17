@@ -50,6 +50,7 @@ the caveat above applies: a pinned tag stops tracking `latest`, so re-run the
 mm init    # configure iCloud storage + passphrase
 mm push --dry-run   # preview: changes nothing except the lock file
 mm push    # upload configured agent context
+mm pull --dry-run   # preview: changes nothing except the lock file
 mm pull    # download from another device
 ```
 
@@ -218,12 +219,12 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
-| `mm pull --conflict-mode fail` | Preflight all files; exit 3 (no writes) if any would conflict — for CI |
+| `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h. Prints one extra line when a `retro-fleet` skill link is broken |
 | `mm diag` | Dump non-secret crypto, sync, breadcrumb, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
-| `mm diff` | Dry-run: show what would change (annotates each file with write / merge / skip / conflict) |
+| `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
 | `mm gc` | Delete orphaned blobs and run local retention cleanup |
 | `mm gc --dry-run` | Preview orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
@@ -519,9 +520,9 @@ Managing conflicts:
 - `mm conflicts` — list every `.sync-conflict-*` file across your sources, with conflict age (when mm wrote the copy), peer-edit age (when the other Mac last saved the file), and canonical sibling.
 - `mm resolve` — walk each conflict interactively. Shows color LOCAL/REMOTE banners (with peer-name attribution when the conflict file's device prefix matches a registered peer), created/modified timestamps for each side plus a `-> SIDE is newer by N` recency verdict, a 3-number divergence summary, the unified diff, and prompts: `(m)erge` (accept LCS-merged result) / `(l)ocal` (keep your edits) / `(r)emote` (overwrite with peer's bytes) / `(n)ewer` (keep whichever was modified more recently) / `(p)romote` (keep BOTH — give the conflict file its own first-class filename) / `(s)kip` (leave both files) / `(a)bort` (stop the walk). The default key is always `(s)kip` — Enter never auto-accepts a merge or a recency guess. The merge uses LCS(local, remote) as a synthetic ancestor so additive edits on either side land cleanly; same-region edits show as `<<<<<<<` markers and (m) stays available. Binary content suppresses (m); `(n)ewer` is offered only when both sides' mtimes are readable and re-prompts on an exact tie (it never guesses). The remote side's "created" is shown as `pulled` — it is the local sync time, not the peer's real creation (the manifest carries only modified time). Acquires the mm lockfile so autopull can't race your decision. Pre-1.0 letters `b` / `both` are aliased to `(s)kip` with a one-time stderr notice.
 - `mm pull --conflict-mode prompt` — prompt per-conflict during the pull itself instead of auto keep-both. Shows the same per-side timestamps + recency verdict (display only — no `(n)ewer` shortcut here, since pull already keeps your file when it is the newer one).
-- `mm pull --conflict-mode fail` — preflight all files; if any would conflict, print the list and exit 3 (no writes) so CI can block on human review. Exit 3 is distinct from typer's usage-error exit 2, so a stale script still passing the removed `--no-prompt` flag can't be mistaken for a conflict refusal.
+- `mm pull --conflict-mode fail` — preflight and exit 3 before applying any file if conflicts or local failures are predicted. For a write-free CI check use `mm pull --dry-run --conflict-mode fail`: 0 no conflicts predicted, 1 stopped, 3 conflicts/failures predicted (2 remains usage error). Two peers changing a mergeable file do not by themselves cause a conflict.
 - `mm gc --conflicts` — reap redundant conflict copies older than 30 days. A sidecar is only reapable once the conflict has converged (canonical exists and its bytes are identical); a live conflict, a missing canonical, or a file mm cannot hash is preserved at any age.
-- `mm diff` — predicts each modified file's pull outcome (write / merge / skip / conflict) before you run pull.
+- `mm diff` — compares local files with this Mac’s last push, or `--from DEVICE`. Use `mm pull --dry-run` to preview incoming changes from all selected peers.
 
 ## Troubleshooting
 
@@ -594,7 +595,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **A file came back after you deleted it.** Deletions are recorded as tombstones on the *next* successful push from the machine that deleted it. A tombstone suppresses restoration from peers that still advertise the file; it does not actively delete a copy that is already present. Push on the deleting Mac, then pull elsewhere.
 
-**Conflicts you didn't expect.** `mm conflicts` lists them, `mm diff` predicts them before a pull, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
+**Conflicts you didn't expect.** `mm conflicts` lists them, `mm pull --dry-run` predicts incoming changes; `mm diff` compares against a stored snapshot, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
 
 **A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud/Dropbox conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
 
@@ -780,7 +781,7 @@ A successful `mm push` publishes a complete snapshot of the **selected** sources
 
 Preview exit codes: **0** completed; **1** stopped (snapshot refusal, crypto/config error, or lock held—the message explains which); **2** usage error. Every successful preview, including “Nothing to push,” ends with the lock-qualified completion message.
 
-The complete lock-only contract applies to **`mm push --dry-run`**. `mm status`, `mm diag`, `mm diff`, `mm pull --dry-run`, `mm gc --dry-run`, and `mm recapture --dry-run` also leave shared crypto-init copies untouched. Read-only crypto sessions do not persist a missing fingerprint. Status reads only the cached upgrade result, showing its age when stale. Other previews may still record local setup state such as upgrade records; that work remains Track 62A.
+See [Previews](#previews) for every command’s write allowance, omitted work and exit codes.
 
 `mm autopush` still exits 0 so an agent hook can continue. Inspect `mm status` (the `last_autorun.detail` field) or run interactive `mm push` if you need an exit status.
 
@@ -802,6 +803,50 @@ mm log --verb pull --action failed --limit 10
 mm pull --verbose
 mm push
 ```
+
+### Previews
+
+Previews use your current config without migration prompts, upgrade checks or
+version bookkeeping. They leave shared crypto-init copies and missing
+fingerprints untouched. Pending setup is reported for a following real command.
+The lock allowance includes creating its parent if absent.
+
+| Command | May touch | Not previewed | Exit codes |
+|---|---|---|---|
+| `mm push --dry-run` | Local lock only | Activity row, post-push GC, upload re-reads | 0 completed; 1 stopped |
+| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
+| `mm gc --dry-run` | Local lock only | No cleanup is applied; conflict deletion requires `--conflicts` | 0 completed; 1 stopped |
+| `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and the full push publishing them with other pending changes | 0 completed, including partial scans; 1 stopped or no repositories |
+| `mm migrate-config --dry-run` | Nothing, including no lock | Applying the displayed config changes | 0 completed; 1 config error |
+| `mm diff [--from DEVICE]` | Nothing, including no lock | Snapshot comparison, not a forecast of all incoming peers; use `mm pull --dry-run` for that | 0 completed; 1 stopped |
+
+All commands use exit 2 for invalid usage. Pull and recapture print **Preview
+incomplete:** when a corrupt peer or incomplete repository scan limits their
+preview, while keeping their existing exit codes. Unknown pull sources remain
+warnings. Pull totals count writes, merges (an upper bound), conflicts, skips,
+and possible local failures across peers; conflicts leave canonical bytes alone.
+Files can change between preview and apply.
+
+For a write-free CI gate, run `mm pull --dry-run --conflict-mode fail`: exit 0
+means no conflicts or local failures predicted, 1 means stopped, and 3 means
+conflicts or failures predicted. Without `--dry-run`, fail mode exits 3 before
+applying any file but can still perform setup writes. `--dry-run --conflict-mode
+prompt` only predicts; it never prompts.
+
+Inspection commands leave sync data alone. `status` may seed or recover only
+`~/.config/mind-meld/seen-sources.json`; steady-state reads write nothing.
+Author-filtered `retro-fleet` may write its identity cache on every run,
+including a warm hit; `--no-author-filter` avoids it. `diag`'s `grok inspect`
+and identity discovery's `gh`/`git` subprocesses may manage their own host
+state. Status reads only the cached upgrade result, showing its age when stale.
+
+**Upgrading to v0.14.15:** preview exit codes are unchanged. Pull preview's
+“Pull complete.” becomes outcome totals and “Dry run complete. Nothing was
+changed except the local lock file.” Migration preview's “Dry run — no changes
+written.” becomes “Dry run complete. Nothing was changed.” Fail-mode wording
+changes from “(no writes)” to “before applying any file”; add `--dry-run` for
+the write-free CI gate above. Mergeable files changed by two peers no longer
+cause a false fail-mode exit 3.
 
 ### Shell completion
 

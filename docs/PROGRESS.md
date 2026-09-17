@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.14.15 | 2026-09-16 | **Previews now leave files and storage untouched, with only their declared local lock allowance.** Pull forecasts account for successive peers, and inspection commands defer upgrade bookkeeping. |
 | 0.14.14 | 2026-09-15 | **Refresh host usage explicitly with `mm push --capture-usage`, even on a converged Mac.** Status and diagnostics distinguish the last recorded capture, reader coverage, and accepted-manifest publication evidence; fleet retros name stale captures. |
 | 0.14.13 | 2026-09-15 | **mm-events root creation belongs to its writers, and shared crypto repair follows passphrase verification.** Missing default event files remain deletions; preview now matches real push. Status inspects cached upgrade information without fetching or rewriting it. |
 | 0.14.12 | 2026-09-15 | **Retro reports now show all four token fields, model-level API list-rate equivalents, and the coverage behind each figure.** Refreshed Anthropic rate cards correct Sonnet 5, older Opus/Sonnet models, and Fable/Mythos 5.1 cache reads. Claude and per-machine figures use consistent estimate, floor, and unavailable markers, and stale snapshots no longer contribute on the first day of a window. |

@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.15] - 2026-09-16
+
+**Previews now leave files and storage untouched, with only their declared local lock allowance.** Pull forecasts account for successive peers, and inspection commands defer upgrade bookkeeping.
+
+### Fixed
+
+- Pull, GC and recapture previews skip config migration, version-transition records and other setup writers. Pull preview also skips old conflict-file migration, excluded-path history and upgrade checks. Migration preview and diff make no lock-file change.
+- Every command has a tested intent classification, every config load states its write policy, and audit tests catch in-process mutation attempts including worker threads. Status reads valid seen-sources state without writes, preserves concurrent acknowledgments during seed recovery, and degrades gracefully instead of crashing if its cache can't be stat'd or read. Author-filtered retro-fleet retains its declared identity-cache exception.
+- Pull predictions track canonical state across peers, keeping conflicts from overwriting that virtual state. They account for symlinks, unreadable files, tombstones, exclusions, and file/directory collisions. Two peers changing a mergeable file no longer cause a false `--conflict-mode fail` exit 3. Merges remain an upper bound; blob/decrypt failures are not previewed.
+- Diff applies local exclusions to either comparison target. It compares local files to a stored snapshot; use `mm pull --dry-run` for incoming changes. Recapture distinguishes disabled from unconfigured sources, keeps retry advice in preview mode, reports partial discovery and walk failures, and no longer triggers its upgrade-nudge write during `--dry-run`.
+- Fail-mode pull treats FIFOs, sockets and other non-regular local files as a predicted failure instead of trying to hash them, and shares one refusal filter across the rest of fail-mode. Peer-supplied labels in fail-mode and preview output stay terminal-safe.
+
+### Changed
+
+- Preview exit codes are unchanged. Pull preview replaces “Pull complete.” with outcome totals and “Dry run complete. Nothing was changed except the local lock file.” Migration preview replaces “Dry run — no changes written.” with “Dry run complete. Nothing was changed.” Pending setup stays in its existing output position.
+- Fail-mode wording changes from “(no writes)” to “before applying any file.” For a write-free CI gate use `mm pull --dry-run --conflict-mode fail`: 0 no conflicts/local failures predicted, 1 stopped, 3 conflicts/local failures predicted. Partial pull and recapture previews still exit 0 and print “Preview incomplete:”.
+- GC preview names the `--conflicts` requirement on its conflict cleanup line. README documents each preview’s write allowance and omitted work.
+
 ## [0.14.14] - 2026-09-15
 
 **Refresh host usage explicitly with `mm push --capture-usage`, even on a converged Mac.** Status and diagnostics distinguish the last recorded capture, reader coverage, and accepted-manifest publication evidence; fleet retros name stale captures.
