@@ -385,7 +385,7 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     return _list_devices_impl(backend, on_drop=_warn)
 
 
-def _get_config(*, read_only: bool = False) -> dict:
+def _get_config(*, read_only: bool) -> dict:
     try:
         config = load_config()
     except MindMeldError as e:
@@ -3605,7 +3605,7 @@ def push(
     # Re-load in case the migration prompt mutated config on disk so the
     # current command sees the new exclude_patterns.
     if not dry_run:
-        config = _get_config()
+        config = _get_config(read_only=False)
     capture_sources = _prepare_usage_capture(config) if capture_usage else []
     passphrase = _get_passphrase_or_exit()
     pending: list[str] = []
@@ -4268,11 +4268,11 @@ def pull(
     the removal of --no-prompt / --resolve-interactive would otherwise cause
     stale scripts to hit usage-error exit 2 and be misclassified as conflicts.
     """
-    config = _get_config()
-    _maybe_prompt_migration(config)
+    config = _get_config(read_only=dry_run)
+    _maybe_prompt_migration(config, read_only=dry_run)
     # Re-load in case the migration prompt mutated config on disk so this
     # pull sees the new exclude_patterns.
-    config = _get_config()
+    config = _get_config(read_only=dry_run)
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -6583,7 +6583,7 @@ def devices(
     table-rendering convention). Empty fleet renders as ``[]``. Stable contract
     for the Group 8 retro-fleet skill's ``mm devices --format=json`` consumer.
     """
-    config = _get_config()
+    config = _get_config(read_only=True)
     backend = get_backend(config)
     device_list = _list_devices_warn(backend)
     my_id = config["device"]["id"]
@@ -6665,7 +6665,7 @@ def diff_cmd(
     source: str | None = typer.Option(None, "--source", help="Diff a specific source only"),
 ) -> None:
     """Show what would change without applying (dry run)."""
-    config = _get_config()
+    config = _get_config(read_only=True)
     passphrase = _get_passphrase_or_exit()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -6768,7 +6768,7 @@ def gc(
     including a preview of the conflict-sidecar reaper. ``--conflicts`` is
     required to actually reap stale conflict copies.
     """
-    config = _get_config()
+    config = _get_config(read_only=dry_run)
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -6946,7 +6946,7 @@ def sources() -> None:
     the source's `exclude_patterns` actually matched on this scan; diagnostic
     only, used to sanity-check an over-broad glob.
     """
-    config = _get_config()
+    config = _get_config(read_only=True)
 
     src_list = _resolve_all_configured_sources(config)
     disabled_set = set(config.get("sync", {}).get("disabled_sources", []) or [])
@@ -7074,7 +7074,7 @@ def _record_seen(names: list[str]) -> None:
     crash the calling command. The seen tracker drives the `mm status`
     new-source hint; losing it just means a hint repeats.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     currently_resolved = [s["name"] for s in get_sources(config)]
     seen_sources.acknowledge(names, initial=currently_resolved)
 
@@ -7099,7 +7099,7 @@ def disable_source(
     `--force` accepts unknown names so you can pre-disable a source that
     hasn't shipped yet (e.g. `mm disable-source codex --force`).
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -7150,7 +7150,7 @@ def enable_source(
     `mm install-skills --agent <key>` instead. This command does not
     install the link itself.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -7235,7 +7235,7 @@ def reconfigure_sources() -> None:
     Atomicity: Ctrl-C mid-prompt aborts without writing. The whole
     reconfigured state is committed in a single patch_config_on_disk call.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     sync = dict(config.get("sync", {}) or {})
     explicit_sources = list(sync.get("sources", []) or [])
     explicit_names = [s["name"] for s in explicit_sources]
@@ -7391,7 +7391,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
     `_maybe_prompt_migration` can call it directly without going through
     typer's option-parsing machinery.
     """
-    config = _get_config()
+    config = _get_config(read_only=dry_run)
 
     sources = config.get("sync", {}).get("sources")
     if not sources:
@@ -7860,9 +7860,9 @@ def recapture(
     exits 4. Zero discovered repositories writes nothing and exits 1.
     """
     days = _parse_recapture_window(window)
-    config = _get_config()
-    _maybe_prompt_migration(config)
-    config = _get_config()
+    config = _get_config(read_only=dry_run)
+    _maybe_prompt_migration(config, read_only=dry_run)
+    config = _get_config(read_only=dry_run)
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -8270,7 +8270,7 @@ def conflicts() -> None:
     prefix happens lock-protected in `mm pull` and `mm resolve` only —
     `mm conflicts` is lockless and any rename here would race autopull.
     """
-    config = _get_config()
+    config = _get_config(read_only=True)
     hits = resolveflow._find_conflict_files(config)
     if not hits:
         console.print("[green]No conflict files.[/green]")
@@ -8408,7 +8408,7 @@ def recover(
             "the next push to start fresh)."
         )
 
-    config = _get_config()
+    config = _get_config(read_only=False)
     passphrase = _get_passphrase_or_exit()
     device_id = config["device"]["id"]
     storage_path = config["storage"]["path"]
@@ -8540,7 +8540,7 @@ def resolve(
     `both` from pre-v0.11.x is aliased to (s)kip with a one-time notice
     until 1.0 -- same on-disk effect, no risk in mapping it through.
     """
-    config = _get_config()
+    config = _get_config(read_only=False)
     backend = get_backend(config)
 
     try:
@@ -8668,7 +8668,7 @@ def _write_migration_breadcrumb(missing: list[str]) -> None:
         pass
 
 
-def _maybe_prompt_migration(config: dict, *, read_only: bool = False) -> None:
+def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
     """Once-per-invocation interactive prompt for pending config migrations.
 
     Called from the top of `mm push` / `mm pull` / `mm recapture` ONLY

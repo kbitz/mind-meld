@@ -1,5 +1,6 @@
 """Integration tests for Mind Meld — full push/pull round-trips."""
 
+import ast
 import hashlib
 import inspect
 import json
@@ -6693,6 +6694,50 @@ def test_command_intents62():
     synthetic.command()(lambda dry_run=False: None)
     with pytest.raises(AssertionError, match="COMMAND_INTENTS62.*docs/invariants/sync.md"):
         _check_command_intents62(synthetic)
+
+
+def _check_read_only_policy62(source):
+    class Policy(ast.NodeVisitor):
+        owner = None
+
+        def visit_FunctionDef(self, node):
+            prior, self.owner = self.owner, node.name
+            self.generic_visit(node)
+            self.owner = prior
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name) and node.func.id in {
+                "_get_config",
+                "_maybe_prompt_migration",
+            }:
+                assert any(k.arg == "read_only" for k in node.keywords), (
+                    f"{self.owner}:{node.lineno}: {node.func.id} requires read_only"
+                )
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run_transition_hook"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "upgrade"
+            ):
+                assert self.owner in {"_get_config", "_auto_command_setup", "init"}, self.owner
+            self.generic_visit(node)
+
+    Policy().visit(ast.parse(source))
+
+
+def test_read_only_policy62():
+    _check_read_only_policy62(Path(cli_module.__file__).read_text())
+    for function in (cli_module._get_config, cli_module._maybe_prompt_migration):
+        parameter = inspect.signature(function).parameters["read_only"]
+        assert parameter.kind == inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+    for source in (
+        "def wrong(): _get_config()",
+        "def wrong(): _maybe_prompt_migration({})",
+        "def wrong(): upgrade.run_transition_hook({})",
+    ):
+        with pytest.raises(AssertionError):
+            _check_read_only_policy62(source)
 
 
 @pytest.mark.parametrize("mode", ["worker", "import", "swallowed", "subprocess", "fd"])
