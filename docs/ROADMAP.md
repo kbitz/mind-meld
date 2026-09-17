@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-Audit configuration (recorded 2026-09-14): release-bearing Tracks here declare 9–14 files (source, tests, invariants, README, plus CHANGELOG / PROGRESS / pyproject) and this repo ships weight-6 sessions as one PR (53A landed 1,790 insertions on a weight-4 card, 57A 1,169 on weight 3), so the roadmap audit runs with `roadmap_max_files_per_track=16` and `roadmap_max_session_weight=6` set through gstack-extend's `bin/config`. The defaults (8 files, weight 4) fail every card in this plan and in the 2026-09-06 plan.
+Audit configuration (recorded 2026-09-14): release-bearing Tracks here declare 9–14 files (source, tests, invariants, README, plus CHANGELOG / PROGRESS / pyproject) and this repo ships weight-6 sessions as one PR (53A landed 1,790 insertions on a weight-4 card, 57A 1,169 on weight 3), so the roadmap audit runs with raised caps set through gstack-extend's `bin/config`. The defaults (8 files, weight 4) fail every card in this plan and in the 2026-09-06 plan. The setting is machine-local (`~/.gstack-extend/config`), so it differs by Mac: 16 files / weight 6 where this paragraph was first written, 24 files / weight 5 on the Mac that ran the 2026-09-17 regeneration. Re-read it with `bin/config get` before trusting a SIZE verdict.
 
 **mm supports three agents: Claude Code, Codex, and Grok Build.** OpenCode was dropped on 2026-09-01 by user decision; Groups 36 and 44 removed it (shipped v0.12.53 → v0.13.0). Do not re-add a fourth agent without a measured need — see the skill-link constraint below, which already refuses one on discovery grounds.
 
@@ -24,145 +24,96 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 
 ## In Progress
 
-### Phase 3: Retro fidelity
-
-**End-state:** The retro presents model usage consistently, states each value's collection scope and coverage, and adds only verified estimates without changing accounting semantics.
-**Groups:** 57, 58
-
-Group 57 (Grok pricing) shipped as v0.14.11 and lives in `docs/roadmap-shipped.md`. Group 58 closes the Phase.
-
-#### Group 58: Verified rates and usage presentation
-
-_Depends on: none_
-
-##### Track 58A: Refresh verified rates, re-pin the Grok census, and make model usage easier to read
-_3 tasks . ~275 LOC . medium risk . 8 files_
-_touches: src/mind_meld/token_usage.py, src/mind_meld/host_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/skills/retro_fleet/SKILL.md, tests/test_token_usage.py, tests/test_host_usage.py, tests/test_retro_fleet_aggregator.py, tests/fixtures/host_sessions/grok/CONTRACT.md, docs/invariants/events-retro.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_read-first: docs/invariants/events-retro.md (Track 23A renderer contract, cost-estimation section), tests/fixtures/host_sessions/grok/CONTRACT.md, Group 57's entry in docs/roadmap-shipped.md_
-_produces: every priced Claude model resolves through a rate card verified on a recorded date, the Grok reader contract names the host version its census actually ran on, and the retro presents usage consistently with explicit source logs, machine scope, observation time, window and coverage_
-_session: fresh · effort: high · verify: ./bin/check tests/test_token_usage.py tests/test_host_usage.py tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
-
-_Merged 2026-09-14 by user decision (D1 = A): the 2026-09-06 plan's Track 58A (usage presentation) absorbed the Anthropic rate refresh and the Grok census re-pin so one PR closes the retro-fidelity work. The before/after example needs the corrected rates anyway, so the first two tasks land before the third inside the same session._
-
-_Source (rates and census): `[plan-ceo-review]` and `[plan-eng-review]` items filed by the Track 57A /autoplan, 2026-09-14. Verified at a7d9bca: `MODEL_FAMILY_TIERS["sonnet"]` is `_tier(3.0, 15.0)` under a comment calling `$2/$10` an introductory rate that ended 2026-08-31; `fable` and `mythos` are `_tier(10.0, 50.0)`, so a `claude-fable-5-1` record derives a $1.00 cache read through `_CACHE_READ_MULT`; `PRICING_LAST_UPDATED` is `2026-08-11`; `GROK_USAGE_CENSUS_HOST_VERSION` is `"1.0.13"` in `host_usage.py` and the contract header says the same, although Track 57A's census ran on Grok 1.0.25. The pricing page was re-read by /roadmap on 2026-09-14 and agrees with the filer's 2026-09-10 reading: Sonnet 5 is $2/$10 as standard price ("the previously scheduled increase to $3/$15 on September 1, 2026 will not occur"); Sonnet 4.6, 4.5 and 4 stay $3/$15; Fable 5.1 and Mythos 5.1 cache hits are $0.25 (0.025x) while Fable 5 and Mythos 5 keep $1 (0.1x). Both affected models are in the local Claude token cache, so the Claude fleet line is currently overstated. Re-read the page again at implementation time; a number in this card is a premise, not a source._
-
-_Source (presentation): former Track 50A (2026-09-03 numbering), carded as Track 55A in the 2026-09-05 plan and Track 58A in the 2026-09-06 plan, approved full-review H4, and the user-approved pre-existing-roadmap assessment on 2026-09-05. Re-verified at a7d9bca: `_render_agent_inventory` and `AGENT_FAMILY_ROWS` remain; `aggregate` materializes event rows directly and `_read_events` (one definition in `aggregator.py`, zero callers) is still unused. v0.14.11 changed the surface this card renders: `_render_host_economics` carries a vendor-provenance header, `_long_context_cause` explains a Grok `>=` floor, and Grok always renders `>=` with a model-scoped at-most figure only when coverage allows it — the before/after example must include that shipped rendering. Track 57A supplied verified rates or an explicit unpriced result, not permission to change aggregation._
-
-_Boundary verified at f10bf34 and unchanged at a7d9bca: `SessionsAggregate` holds Claude fleet-window totals; `HostUsageInventory` retains accepted snapshots per machine. Day-bucket slicing is NOT one function: `_windowed_host_by_model` (one caller, `_device_economics_cell`) slices `tokens_by_day` only, while `lifetime_by_family` is sliced inline in `_render_agent_inventory` and in the rhythm view, clamped by `_snapshot_day_ceiling` alone. A renderer rewrite must account for all three sites. Contributing readers are recorded per machine, but the wire has no reader-to-model-family attribution. Presentation must preserve those distinctions. New accounting schemas, cross-machine deduplication (deferred again 2026-09-14, see roadmap-future.md) or reader-to-model wire attribution need a separately justified proposal._
-
-- **Refresh the Anthropic rate card** -- re-read the published pricing table, record the date in `PRICING_LAST_UPDATED`, and make the table say what the page says: set the `sonnet` tier to $2/$10 and add `PRICING` overrides at `_tier(3.0, 15.0)` for the Sonnet 4.x ids that normalize into the tier and still bill the old rate (the Opus 4.1 precedent); add full four-field `claude-fable-5-1` and `claude-mythos-5-1` cards with a $0.25 cache read, which `_tier`'s 0.1x multiple cannot express, and leave the `fable` / `mythos` tiers for the 5.0 models. Claim nothing the page does not say. `test_pricing_holds_no_redundant_entries` still passes; update the per-model expectations pinned in `tests/test_token_usage.py`, the "introductory" sentence in events-retro.md, and README's rate-provenance line. _token_usage.py + tests + docs, ~40 lines._ (S)
-- **Re-pin the Grok census** -- record Track 57A's 1.0.25 census in the contract (185 ledgers, 312 terminal records, the same four `turn_completed` key sets and two `usage` key sets as 1.0.13, zero drift across 12 patch releases) and move `GROK_USAGE_CENSUS_HOST_VERSION` and its pin test to 1.0.25. Reader behaviour is unchanged. _host_usage.py + CONTRACT.md + the pin test, ~15 lines._ (S)
-- **Clarify usage without changing accounting** -- first show a compact before/after rendered example with Claude session data at the refreshed rates, two machines of host inventory, an unpriced Grok model, a Grok `>=` floor and a degraded reader. Use it to settle consistent naming and layout while showing each value's collection scope, observation time, window and coverage. Reuse existing aggregations: host counters never enter the Claude fleet sum; retained inventory stays distinguishable from in-window activity; per-machine host estimates retain the do-not-sum rule. Do not imply per-host model attribution the wire lacks. Preserve the existing global git metrics, unavailable/partial/degraded disclosures, retired-reader tolerance, two-pass skill decoder and no-new-summary-row constraint. Delete the unused `_read_events` iterator and correct its documentation. Pin populated, absent and degraded views plus the one-materialization prior-period path. _aggregator.py + SKILL.md + tests, ~220 lines._ (L)
+Nothing is partially shipped. The retro-fidelity work closed with Group 58 at v0.14.12; Groups 58–62 live in `docs/roadmap-shipped.md`.
 
 ## Current Plan
 
 _tombstone: 27_
 
-#### Group 59: mm-events root ownership
+#### Group 63: Codex read headroom
 
-_Depends on: Group 58_
+_Depends on: none_
 
-##### Track 59A: Create the mm-events root only from init and a verified real push
-_2 tasks . ~120 LOC . medium risk . 5 files_
-_touches: src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_integration.py, tests/test_silent_failure_contract.py, docs/invariants/sync.md, docs/invariants/events-retro.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 58A_
-_read-first: docs/invariants/sync.md (complete snapshots), docs/invariants/events-retro.md (read-only source resolution)_
-_produces: a real push never publishes the deletion of previously published event files because mm itself recreated an empty mm-events root, and read-only commands never create the root_
-_session: fresh · effort: high · verify: ./bin/check tests/test_config.py tests/test_integration.py tests/test_silent_failure_contract.py tests/test_docs_routing.py_
+##### Track 63A: Keep the warm Codex read inside its budget
+_2 tasks . ~150 LOC . medium risk . 5 files_
+_touches: src/mind_meld/host_usage.py, src/mind_meld/events_tail.py, src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_host_usage.py, tests/test_host_usage_snapshot.py, tests/test_events_budget_scope.py, tests/test_config.py, tests/test_diag.py, docs/invariants/events-retro.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_read-first: docs/invariants/events-retro.md (host-usage-snapshot section, standing read blockers), Group 57's entry in docs/roadmap-shipped.md (the 50 ms grace floor), ~/.gstack/projects/kbitz-mind-meld/63a-probes/_
+_produces: a warm Codex read over this fleet's corpus completes inside the autopush budget or the operator has one documented lever that makes it, and `mm diag` shows the effective budget beside the last warm-pass time_
+_session: fresh · effort: high · verify: ./bin/check tests/test_host_usage.py tests/test_host_usage_snapshot.py tests/test_events_budget_scope.py tests/test_config.py tests/test_diag.py tests/test_docs_routing.py_
 
-_Source: [plan-eng-review:severity=moderate] E4, filed by the Track 56A /autoplan, 2026-09-10 (probe s2b in `~/.gstack/projects/kbitz-mind-meld/56a-reproductions.json`). Verified at a7d9bca: `_push_core` calls `resolve_sources(config, strict=True, bootstrap=not dry_run)` and only later `_refuse_unavailable_selected_sources(resolution, remote_manifest, sources)`, so a real push recreates a deleted root before the refusal can see it and then tombstones every event file this Mac published, bypassing sync.md's "a missing previously populated selected root refuses the whole push"; `get_sources` defaults to `bootstrap=True` and is called from status, diag, autopull, pull, resolve and the source-toggle verbs, so the usual state after a root loss is "root present, `events/` gone", which previews and publishes as a plain `- N deleted`. Pull never removes local bytes for a tombstone, so peers keep their copies, but once the tombstones are published this Mac cannot restore them through `mm pull` until `TOMBSTONE_TTL_DAYS` (30) expires. Both CEO voices rejected mirroring the behaviour in the preview through an `assume_empty` option; the Claude eng voice identified the common "`events/` gone" form. v0.14.10's preview refusal is the message to reuse._
+_Source: promoted from roadmap-future.md "Warm Codex read headroom and the healthy-pass cache rewrite" ([plan-eng-review], Track 57A /autoplan 2026-09-14 P2, merged with Track 54A /autoplan 2026-09-09 P3), whose trigger — "a warm pass above 200 ms, or a corpus above ~900 rollouts" — has fired on both halves; merged with inbox `[plan-devex-review]` "Host read-budget override" (Track 61A /autoplan, P2), which says to extend that proposal rather than compete with it. Measured by /roadmap on 2026-09-17 at 66b5293, installed mm 0.14.15, against a scratch copy of the cache (`63a-probes/mm_codex_budget_probe.py`, the deferred bullet's own Repro): 1,052 rollouts under `~/.codex/sessions`, 1,014 cache entries; a warm `read_codex_usage` completes in 384 ms under a 5 s deadline and returns `deadline` on 3 of 3 attempts at `HOST_USAGE_READ_BUDGET_AUTOPUSH_MS = 250`, each spending ~390 ms to publish nothing; `HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = 500` leaves ~116 ms. The same read measured 186 ms over 752 rollouts on 2026-09-09. Profile so far (`63a-probes/mm_codex_cache_profile.py`): `json.loads` of the cache is 35 ms, so load is not the cost; the file is 15.75 MB on disk and 4.63 MB compact because it is written with `indent=2`; `states` is 4.05 MB of the compact bytes (88%). The live cache's `last_reason` is `None` because interactive pushes still complete, and autopush is not wired on this Mac (`autopush.log` last written 2026-08-15), so today's exposure is the interactive budget: once it is breached no push publishes Codex and `mm push --capture-usage` becomes the only path. The "Host cache encoding trigger" (>100 ms load or >25 MB) and "Per-entry `states` cap" bullets stay deferred in roadmap-future.md; their gates have not fired, and the numbers above are the fresh reading for both. Re-run both probes at implementation time; a number in this card is a premise, not a source._
 
-- **Only init and a verified real push create the root** -- flip `resolve_sources` / `get_sources` to `bootstrap=False` by default (a missing mm-owned root is already an empty walk with its name in `would_create`) and opt in at exactly the places that write into it: `init` before its backfill, and the publishing paths of `_push_core` (autopush included) and `recapture`, after the check below. Walk the ~20 `get_sources` call sites in cli.py and events_tail.py and pin that status, diag, autopull, pull and the source-toggle verbs no longer `mkdir`; `recapture`'s availability check must not read a non-bootstrapped missing root as "disabled on this Mac". _config.py + cli.py + tests, ~50 lines._ (M)
-- **Refuse before recreating a previously populated root** -- in the real push, when mm-events is in `would_create`, or its root exists but holds none of the files the recovered prior manifest lists for it, refuse with a `SnapshotError` that names the two honest ways out: `mm pull` to restore the published event files from a peer while the prior manifest still lists them, or accept the deletion through the existing `mm disable-source mm-events` / `mm enable-source mm-events` path, which drops the entries without minting tombstones. Only then create the root. Re-word v0.14.10's preview refusal to match; keep interactive exit 1 and autopush exit 0 with the typed stderr line and failed breadcrumb. Record the "root present, `events/` gone" transition state in sync.md. _cli.py + tests + docs, ~70 lines._ (M)
+- **Profile the warm pass, then stop paying for what did not change** -- split the 384 ms into load, per-file fingerprint (a stat plus two 4 KB digests per cache hit) and write-back before choosing a fix. The bounded fix the deferred bullet names is skipping the unchanged-cache rewrite on a healthy pass: `read_codex_usage` commits `locked.data` on every complete pass and `locked_json_rmw` writes on every normal exit. Compact serialization is the other cheap lever if the write dominates. Not fixes: skipping the fingerprint on a metadata match (`test_same_size_same_mtime_rewrite_replaces_terminal_total` pins it) and a newest-first walk (Codex prunes its own sessions, so the corpus is not monotonic). A warm pass must still return exactly what a cold full read returns. Pin a warm pass over a 1,000-entry cache that performs no write when nothing changed, and record the before/after split in events-retro.md. _host_usage.py + tests + invariants, ~80 lines._ (M)
+- **Give the operator one read-budget lever** -- if the profile leaves the warm pass linear in rollout count, no constant survives the corpus. Settle at review between a validated `[retro]` override read where `events_tail._capture_host_usage` picks its budget, and a budget derived from the cached entry count; autopush stays bounded either way and `HOST_READER_GRACE_MS` stays intact so Grok is not starved again. The setting names its reader in this card: `mm diag` prints the effective budget beside the last warm-pass time. Replace README's "There is no read-budget override" paragraph and the `deadline` remedy row. _events_tail.py + config.py + cli.py + tests + docs, ~70 lines._ (M)
 
-#### Group 60: Inspection without repair
+#### Group 64: Usage-only capture
 
-_Depends on: Group 59_
+_Depends on: Group 63_
 
-##### Track 60A: Inspection commands observe storage and the upgrade cache without repairing them
-_2 tasks . ~120 LOC . medium risk . 7 files_
-_touches: src/mind_meld/crypto.py, src/mind_meld/cli.py, src/mind_meld/upgrade.py, tests/test_crypto.py, tests/test_diag.py, tests/test_upgrade.py, tests/test_integration.py, docs/invariants/init-devices.md, docs/invariants/auto-upgrade.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 59A_
-_read-first: docs/invariants/init-devices.md (push-preview crypto setup), docs/invariants/auto-upgrade.md (Seam 3)_
-_produces: `mm status` and `mm diag` write nothing to shared storage, local config or the upgrade cache and make no network call; every other command reconciles `mm-crypto-init` only after the drift check and passphrase verification pass_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_crypto.py tests/test_diag.py tests/test_upgrade.py tests/test_integration.py tests/test_docs_routing.py_
+##### Track 64A: A usage refresh is not a push, and exit 4 says what it skipped
+_4 tasks . ~150 LOC . medium risk . 3 files_
+_touches: src/mind_meld/cli.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_integration.py, tests/test_events.py, tests/test_retro_fleet_aggregator.py, tests/test_silent_failure_contract.py, tests/test_diag.py, docs/invariants/events-retro.md, README.md, SPEC.md, AGENTS.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_blocked-by: Track 63A_
+_read-first: docs/invariants/events-retro.md (cursor gate + recapture; host-usage-snapshot section), docs/invariants/sync.md, Group 61's entry in docs/roadmap-shipped.md_
+_produces: `mm push --capture-usage` adds nothing to the retro's push counts or zero-repository note however often it runs, and every exit-4 message and document says whether content was pushed_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_integration.py tests/test_events.py tests/test_retro_fleet_aggregator.py tests/test_silent_failure_contract.py tests/test_diag.py tests/test_docs_routing.py_
 
-_Source: [plan-ceo-review:severity=moderate] E7 and [plan-ceo-review:severity=minor] E3b, both filed by the Track 56A /autoplan, 2026-09-10 (probe s10 in `56a-reproductions.json`; E7 raised by Codex CEO #3/#4 and Claude CEO #5, reinforced by the Claude DX voice and both eng voices). Verified at a7d9bca: `fetch_crypto_init` canonicalizes the lex-smallest-salt candidate and deletes every conflict copy, unreadable ones included, before `_init_crypto_session` runs its drift check and `verify_passphrase`; `status` calls `_init_crypto_session(backend, passphrase, config)` with the default `read_only=False`, and `diag` and init's storage probe call `fetch_crypto_init(backend)` with the default `repair=True`; `status` then calls `upgrade.check_for_upgrade(config)`, which fetches over HTTP when the cache is stale and rewrites `upgrade-state.json` through `locked_json_rmw` on every call — v0.14.10 corrected the "reads cache only, no network call" comment and Seam 3 line to describe that behaviour rather than fix it. A conflict copy with a different salt is a different encryption lineage; deleting it before anything is verified is irreversible and fleet-wide, and a user inspecting a broken sync reasonably expects `mm status` to preserve evidence. v0.14.10's `repair=` parameter, `CryptoInitRepairPlan`, `read_only=` and `pending=` are the seams. Decision carried by this card: inspection commands may not repair at all._
+_Source: `[ship:severity=informational]` "Five smaller mm push --capture-usage rough edges from adversarial review", items 1 and 2 plus its reopened third finding (Codex structured review, P2), PR #178 /ship, 2026-09-16; the SPEC.md task is documentation debt recorded by the PR #179 /ship doc-sync and never filed. Verified at 66b5293: `events_tail._run_events_tail` writes `[*capture.git_rows, *capture.session_rows, *capture.host_rows, *([] if suppress_host_capture else [mm_event])]` — the flag drops only the terminal `mm-push` row, so the cursor never advances and every invocation re-emits the same git and session rows; `aggregator.aggregate_git` counts every in-window `git-snapshot` whose `origin` is not `GIT_SNAPSHOT_ORIGIN_RECAPTURE` into `snap_total` / `snap_zero`, so a repo-less Mac's usage refresh lands in the retro's zero-repository "N of M pushes" note. `_push_captured_usage` raises `typer.Exit(4)` from its "No usage snapshot written" and "Usage snapshot append failed" branches before `_push_core` runs, while its docstring, AGENTS.md and README describe exit 4 as content sync being otherwise fine; `test_requested_capture_failure_never_calls_push` pins the ordering as intended, so the words are wrong, not the order. `_host_publication` builds its reader list from `_default_host_readers` alone and `_print_host_publication` prints "Refresh on this Mac: mm push --capture-usage" without checking that mm-events is a selected source, the condition `_prepare_usage_capture` refuses on. `grep -c "recapture\|capture-usage" SPEC.md` returns 0._
 
-- **Repair follows verification** -- `_init_crypto_session` fetches with `repair=False` for every caller, runs the drift check and passphrase verification on the winner, and only then applies the repair plan for mutating commands; `status`, `diag` and init's storage probe pass `read_only=True` / `repair=False`, print the pending plan through the existing `repair_note` seam instead of acting on it, and stop persisting a missing fingerprint (in-memory backfill only). The drift error names pending conflict copies in every mode, not only under `read_only`. A command that could not verify the passphrase never deletes a copy. Pin: status and diag with two differing-salt copies leave both on disk; push with a wrong passphrase leaves both; push with the right passphrase reconciles after `verify_passphrase`. _crypto.py + cli.py + tests, ~80 lines._ (M)
-- **Give status a cache-only upgrade view** -- `mm status` reads the upgrade cache through `locked_json_snapshot` and neither fetches nor rewrites it; `check_for_upgrade`'s fetch and write-through stay on push, pull, autopull and autopush, whose cache is what status now reports. Restore the "reads cache only, no network call" promise at the status seam and in Seam 3 of auto-upgrade.md, which v0.14.10 rewrote to match the defect. _cli.py + upgrade.py + tests, ~40 lines._ (S)
+- **A requested capture writes usage and nothing else** -- settle one direction at review: skip git and session capture entirely under the flag (usage-only; also removes the duplicate rows and the wasted walk), or mark those rows with an origin `aggregate_git` excludes from push counts the way it already excludes recapture. v0.14.14's own rule is the test: a usage refresh must not count as a push. Under the first direction a `--capture-usage` run that also uploads content records no git rows; the content still syncs and the next ordinary push captures git from the unmoved cursor. Pin: a repo-less Mac runs the flag twice, the retro's zero-repository note and push totals do not move, and no duplicate session rows appear. _events_tail.py + aggregator.py + tests + invariants, ~70 lines._ (M)
+- **Exit 4 before the push says content was not pushed** -- both pre-push exit-4 branches add "Content was not pushed; run mm push". Correct the `_push_captured_usage` docstring, the AGENTS.md push-flags paragraph, README's exit-code table and events-retro.md so exit 4 distinguishes "capture failed before the push" from "pushed, capture not in the accepted manifest". _cli.py + docs, ~30 lines._ (S)
+- **Do not recommend a command that will refuse** -- when mm-events is not a selected source, status and diag name `mm enable-source mm-events` instead of the flag. _cli.py + tests, ~25 lines._ (S)
+- **List the two missing commands in SPEC.md** -- add `mm recapture` and `mm push --capture-usage` to the CLI command reference with the exit codes this Track settles. _SPEC.md, ~25 lines._ (S)
 
-#### Group 61: Attended host-usage refresh
+#### Group 65: Reader-scoped publication evidence
 
-_Depends on: Group 60_
+_Depends on: Group 64_
 
-##### Track 61A: Refresh host usage from an attended push and say what the last push published
-_2 tasks . ~1,850 diff lines (code, tests, docs) . medium risk . 26 files_
-_touches: AGENTS.md, CHANGELOG.md, README.md, docs/PROGRESS.md, docs/ROADMAP.md, docs/TODOS.md, docs/invariants/events-retro.md, docs/invariants/sync.md, pyproject.toml, src/mind_meld/cli.py, src/mind_meld/errors.py, src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/fsutil.py, src/mind_meld/manifest.py, src/mind_meld/skills/retro_fleet/SKILL.md, src/mind_meld/skills/retro_fleet/aggregator.py, tests/fixtures/retro_usage/absent.md, tests/test_diag.py, tests/test_docs_routing.py, tests/test_events.py, tests/test_host_usage_snapshot.py, tests/test_integration.py, tests/test_retro_fleet_aggregator.py, tests/test_silent_failure_contract.py, tests/test_track_30a.py_
-_blocked-by: Track 60A_
-_read-first: docs/invariants/events-retro.md (cursor gate + recapture; host-usage-snapshot section), docs/invariants/init-devices.md, docs/invariants/sync.md, Group 57's entry in docs/roadmap-shipped.md_
-_produces: an explicit attended host-usage refresh with manifest-backed publication evidence, local reader coverage, and fleet staleness diagnostics_
-_session: fresh · effort: high · verify: ./bin/check tests/test_integration.py tests/test_host_usage_snapshot.py tests/test_diag.py tests/test_silent_failure_contract.py tests/test_events.py tests/test_config.py tests/test_events_budget_scope.py tests/test_init_events_backfill.py tests/test_track_30a.py tests/test_recovery.py tests/test_host_usage.py tests/test_retro_fleet_aggregator.py tests/test_retro_usage_presentation.py tests/test_docs_routing.py_
+##### Track 65A: Reader-scoped publication evidence on status and diag
+_4 tasks . ~200 LOC . medium risk . 4 files_
+_touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/cli.py, tests/test_events.py, tests/test_host_usage_snapshot.py, tests/test_integration.py, tests/test_diag.py, tests/test_retro_fleet_aggregator.py, docs/invariants/events-retro.md, README.md, AGENTS.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_blocked-by: Track 64A_
+_read-first: docs/invariants/events-retro.md (host-usage-snapshot section, coverage states), docs/invariants/sync.md, Group 61's entry in docs/roadmap-shipped.md_
+_produces: `mm status` and `mm diag` label each host reader from that reader's own recorded result, report uncertainty when any retained day file that could hold the winning host row is unreadable, and bind the publication receipt to the bytes that were parsed_
+_session: fresh · effort: high · verify: ./bin/check tests/test_events.py tests/test_host_usage_snapshot.py tests/test_integration.py tests/test_diag.py tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
 
-Track 60A's dependency is satisfied by v0.14.13 / PR #177. The approved 2026-09-15 Track 61A plan supersedes the original sizing and capture shape below; this correction preserves the single-session, single-PR scope.
+_Source: `[ship:severity=informational]` "Per-reader 'completed, no usage' is whole-row-scoped on the mm status/diag read path" (P2); items 3, 4 and 5 of the rough-edges entry; and `[ship]` "Investigate a claimed TOCTOU on the accepted-manifest digest check" — all PR #178 /ship, 2026-09-16. Verified at 66b5293: `aggregator.local_host_capture_candidate` emits `"empty": not row.lifetime_by_family`, one row-level boolean, and `cli._print_host_publication` appends "; completed, no usage" to every reader marked contributed when it is set, so a mixed sweep labels no reader empty and an all-empty sweep labels every reader empty; the live-push path already holds the right signal, `HostUsageCapture.empty`, recorded per reader before the family-keyed merge, and `make_host_usage_snapshot` writes no per-reader field. `latest_event_rows` marks a type uncertain only when the failing file has no winner yet or won in it — sound for `mm-push`'s `(-delta, index)` key, not for host rows, which `_host_row_order_key` orders by `row.as_of`. `recorded_row_revision` confirms the row through `_iter_typed_objs`, discards the digest that function computed from the bytes it parsed, then re-opens the file through `hash_file`. `_iter_mm_push_objs` runs the same digest into a throwaway `EventScan`. `EventScan.cached_hash` calls `path.resolve()` for every file of every source through `status`'s `diagnostic_hash` lambda although `scan.hashes` only ever holds mm-events day files, and `manifest`'s per-file hash step reports any `OSError` from that callback as "read error" and drops the file._
 
-_Source: two `[plan-devex-review]` items filed by the Track 57A /autoplan, 2026-09-14, and the Track 54A T3-B deferral (2026-09-09), whose automatic no-op-push re-read stays deferred (roadmap-future.md). Verified at a7d9bca: `_push_core` prints "Nothing to push" and returns before `events_tail._run_events_tail` when nothing substantive changed, so a converged Mac never refreshes host usage; README's "Grok usage in fleet retro" section and the `deadline` remedy row send users to `mm recapture 1d`, a git-only primitive that requires discovered git roots and exits 4 on partial git recovery, and events-retro.md records it as "the bridge on a converged Mac". For 3.5 weeks `mm status` read "grok prior successful scan: yes" while 0 of 5 host rows carried a Grok token, because nothing reads a row's `token_sources` back. `host-usage-snapshot` is an existing row type with an existing reader (`aggregator._accept_host_usage_snapshot`); this Track adds no wire field._
-
-- **`mm push --capture-usage`** -- share one host-only capture helper across the tail, backfill, and flag. The flag performs one warm sweep, writes at most one host snapshot and no `mm-push` row, and suppresses the ordinary tail's host capture. Refuse incompatible flags or unavailable sources/consent before the Keychain. Observable append failures and manifest inclusion determine the result; exclusions stay intact. Bare no-op push stays zero-work, autopush keeps its existing policy, and recapture stays git-only. Fix both explicit-empty-source enable paths. Cover R1–R4 and failure/lock/publication boundaries, update the operator remedies and release docs, and file the three approved follow-ups. (M)
-- **Say what the last push published** -- one filename-scoped event scan shares fleet acceptance and ordering. Status and top-level `diag.host_publication` separate last recorded capture, allowlisted per-reader coverage, manifest-backed publication, and unknown latest attempt; cache health follows those facts. Complete empty scans differ from absent readers. Keep latest-device supersession, name unreadable roots, and add one aggregated fleet staleness note without changing the wire format. Verify the producing Mac first and document the post-merge second-Mac check. (M)
-
-#### Group 62: Write-free previews
-
-_Depends on: Group 61_
-
-##### Track 62A: Make the other previews write-free
-_1 task . ~250 LOC . medium risk . 6 files_
-_touches: src/mind_meld/cli.py, src/mind_meld/resolveflow.py, tests/test_integration.py, tests/test_silent_failure_contract.py, tests/test_track_30a.py, tests/test_retention.py, docs/invariants/sync.md, docs/invariants/events-retro.md, docs/invariants/auto-upgrade.md, docs/invariants/conflicts.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 61A_
-_read-first: 59A, 60A, docs/invariants/events-retro.md (`dry_run` no-op contract)_
-_produces: `mm pull --dry-run`, `mm gc --dry-run`, `mm recapture --dry-run`, `mm migrate-config --dry-run` and `mm diff` change nothing on disk or in storage, and a registry ratchet keeps every future `dry_run` parameter inside that contract_
-_session: fresh · effort: high · verify: ./bin/check tests/test_integration.py tests/test_silent_failure_contract.py tests/test_track_30a.py tests/test_retention.py tests/test_docs_routing.py_
-
-_Source: [plan-ceo-review:severity=moderate] 56B, filed by the Track 56A /autoplan, 2026-09-10 (probes s8, s9, s11, s12, s13 in `56a-reproductions.json`; plan `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-10-track-56a.md`). Verified at a7d9bca: all five commands promise no writes in their help or output and all five run `_get_config()` and `_init_crypto_session` with the defaults, so they patch a missing fingerprint, append the transition-hook pull-history row and rewrite the upgrade cache; `recapture --dry-run` said "nothing written" after writing four things until v0.14.10 corrected only the wording. Pull has writes no setup knob touches: `resolveflow._find_conflict_files(config, migrate_pre_inversion=True)` renames pre-v0.9.2 conflict files, and the `action="excluded"` pull-history loop is gated only on `not quiet`. 56A's first draft widened to all six previews and both CEO voices rejected it as under-inventoried; this card carries the inventory. After 59A and 60A the setup helpers no longer bootstrap or repair on their own, which shrinks this to the per-command writes._
-
-- **Inventory each preview's own writes, then thread the read-only knobs** -- for each of the five commands, list every write on its path (setup helpers, conflict migration, pull-history rows, upgrade cache, mm-events root), then pass v0.14.10's knobs (`_get_config(read_only=)`, `_init_crypto_session(read_only=, pending=)`, `resolve_sources(bootstrap=False)`, the nudge gate) and gate the writes no knob covers: pull's conflict-file migration and its `excluded` history rows. `recapture --dry-run` must not read a non-bootstrapped missing root as "disabled on this Mac". Reuse 56A's audit-hook contract fixture per command with deep fixtures (a peer, excluded paths, a pre-v0.9.2 conflict file). Add the registry ratchet: every command with a `dry_run` parameter is in the contract list or explicitly exempted, and `mm diff` gets a manual entry. Each preview's help text says what stays untouched and ends with the lock-qualified completion line push already prints. _cli.py + resolveflow.py + tests + invariants, ~250 lines._ (L)
+- **Put each reader's own empty result on the row** -- `make_host_usage_snapshot` gains an allowlist-safe per-reader list written from `capture.empty` (reader names only, never token payload). Its readers, in this card: `local_host_capture_candidate` → `project_host_publication` → `_print_host_publication`, which stop deriving emptiness from `lifetime_by_family`. Do not key off family-name membership: `host_family()` classifies by model-id prefix, so a Codex model it does not recognize lands under `other` — the first /ship fix made exactly this mistake. A row from an older Mac without the key renders its coverage with no empty claim. Aggregator acceptance tolerates the key across a mixed fleet (`_accept_optional_source_list` is the precedent). Pin mixed, all-empty and legacy rows. _events.py + events_tail.py + aggregator.py + cli.py + tests, ~110 lines._ (M)
+- **An unreadable older day file marks a host row uncertain** -- for a type whose winner is chosen by a selector rather than file order, any read failure in the retained window makes that type uncertain. `mm-push` keeps its filename-order rule. _events.py + tests, ~30 lines._ (S)
+- **Bind the receipt to the bytes that were parsed** -- `recorded_row_revision` returns the revision `_iter_typed_objs` computed in the same pass instead of re-hashing, which removes the claimed race by construction rather than settling whether it is reachable. One behaviour changes and needs a decision at review: a day file holding an oversized skipped line has no single-pass revision, so the receipt would report unpublished where `hash_file` reports published; status already reports that file as unknown. _events.py + tests, ~25 lines._ (S)
+- **Stop hashing where nothing reads the hash** -- the cursor walk skips the digest when no caller wants a revision, and `cached_hash` checks the filename shape (or keys on the unresolved path) before `resolve()`, so a `resolve()` failure can no longer drop a non-event file from the status manifest. _events.py + cli.py + tests, ~35 lines._ (S)
 
 ### Execution Map
 
-**This adjacency is RELEASE order, not launch order.** Every edge is release serialization on `pyproject.toml`: five cards claim five consecutive versions, and only one tag can exist per version. One edge is also a data dependency: 59A / 60A → 62A (the setup helpers stop bootstrapping and repairing on their own before the previews are inventoried). Tracks may be worked in parallel Conductor workspaces; only their version slots serialize, and document order is priority. Retro fidelity finishes first: its one remaining card corrects a fleet line that is overstated today and lands the longest-carried card; the defect cards behind it can be implemented meanwhile.
+**This adjacency is RELEASE order, not launch order.** Every edge is release serialization on `pyproject.toml`: three cards claim three consecutive versions, and only one tag can exist per version. The cards also share `cli.py`, `events_tail.py` and `aggregator.py`, so the packer separates them anyway. Tracks may be worked in parallel Conductor workspaces; only their version slots serialize, and document order is priority. 63A is first because it has a clock: the warm Codex read is at 384 ms of the 500 ms interactive budget, up from 186 ms eight days earlier.
 
-Adjacency from gstack's `roadmap-pack` tool on the drafted Tracks (identical to the audit's GROUP_DEPS after apply; this is the `/roadmap` skill's own packer, not a script in this repo's `bin/`):
+Adjacency from gstack-extend's `roadmap-pack` tool on the drafted Tracks (identical to the audit's GROUP_DEPS after apply; this is the `/roadmap` skill's own packer, not a script in this repo's `bin/`):
 
 ```
-- Group 58 ← {}
-- Group 59 ← {58}
-- Group 60 ← {59}
-- Group 61 ← {60}
-- Group 62 ← {61}
+- Group 63 ← {}
+- Group 64 ← {63}
+- Group 65 ← {64}
 ```
 
 Track detail per group:
 
 ```
-Group 58: Verified rates and usage presentation   (Retro fidelity)
-  +-- Track 58A ........... ~L . 3 tasks
-Group 59: mm-events root ownership
-  +-- Track 59A ........... ~L . 2 tasks
-Group 60: Inspection without repair
-  +-- Track 60A ........... ~M . 2 tasks
-Group 61: Attended host-usage refresh
-  +-- Track 61A ........... ~M . 2 tasks
-Group 62: Write-free previews
-  +-- Track 62A ........... ~L . 1 task
+Group 63: Codex read headroom
+  +-- Track 63A ........... ~L . 2 tasks
+Group 64: Usage-only capture
+  +-- Track 64A ........... ~L . 4 tasks
+Group 65: Reader-scoped publication evidence
+  +-- Track 65A ........... ~L . 4 tasks
 ```
 
-**Total: 5 groups . 5 tracks remaining.**
+**Total: 3 groups . 3 tracks remaining.**
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (86 items)
+Deferred: docs/roadmap-future.md (93 items)
 
 ## Shipped
 
