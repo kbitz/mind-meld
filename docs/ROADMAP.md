@@ -35,7 +35,7 @@ _tombstone: 27_
 _Depends on: none_
 
 ##### Track 63A: Keep the warm Codex read inside its budget
-_2 tasks . ~150 LOC . medium risk . 5 files_
+_2 tasks . ~150 LOC . medium risk . 9 files_
 _touches: src/mind_meld/host_usage.py, src/mind_meld/events_tail.py, src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_host_usage.py, tests/test_host_usage_snapshot.py, tests/test_events_budget_scope.py, tests/test_config.py, tests/test_diag.py, docs/invariants/events-retro.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _read-first: docs/invariants/events-retro.md (host-usage-snapshot section, standing read blockers), Group 57's entry in docs/roadmap-shipped.md (the 50 ms grace floor), ~/.gstack/projects/kbitz-mind-meld/63a-probes/_
 _produces: a warm Codex read over this fleet's corpus completes inside the autopush budget or the operator has one documented lever that makes it, and `mm diag` shows the effective budget beside the last warm-pass time_
@@ -51,7 +51,7 @@ _Source: promoted from roadmap-future.md "Warm Codex read headroom and the healt
 _Depends on: Group 63_
 
 ##### Track 64A: A usage refresh is not a push, and exit 4 says what it skipped
-_4 tasks . ~150 LOC . medium risk . 3 files_
+_4 tasks . ~150 LOC . medium risk . 8 files_
 _touches: src/mind_meld/cli.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_integration.py, tests/test_events.py, tests/test_retro_fleet_aggregator.py, tests/test_silent_failure_contract.py, tests/test_diag.py, docs/invariants/events-retro.md, README.md, SPEC.md, AGENTS.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _blocked-by: Track 63A_
 _read-first: docs/invariants/events-retro.md (cursor gate + recapture; host-usage-snapshot section), docs/invariants/sync.md, Group 61's entry in docs/roadmap-shipped.md_
@@ -70,7 +70,7 @@ _Source: `[ship:severity=informational]` "Five smaller mm push --capture-usage r
 _Depends on: Group 64_
 
 ##### Track 65A: Reader-scoped publication evidence on status and diag
-_4 tasks . ~200 LOC . medium risk . 4 files_
+_4 tasks . ~200 LOC . medium risk . 9 files_
 _touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/cli.py, tests/test_events.py, tests/test_host_usage_snapshot.py, tests/test_integration.py, tests/test_diag.py, tests/test_retro_fleet_aggregator.py, docs/invariants/events-retro.md, README.md, AGENTS.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
 _blocked-by: Track 64A_
 _read-first: docs/invariants/events-retro.md (host-usage-snapshot section, coverage states), docs/invariants/sync.md, Group 61's entry in docs/roadmap-shipped.md_
@@ -86,7 +86,7 @@ _Source: `[ship:severity=informational]` "Per-reader 'completed, no usage' is wh
 
 ### Execution Map
 
-**This adjacency is RELEASE order, not launch order.** Every edge is release serialization on `pyproject.toml`: three cards claim three consecutive versions, and only one tag can exist per version. The cards also share `cli.py`, `events_tail.py` and `aggregator.py`, so the packer separates them anyway. Tracks may be worked in parallel Conductor workspaces; only their version slots serialize, and document order is priority. 63A is first because it has a clock: the warm Codex read is at 384 ms of the 500 ms interactive budget, up from 186 ms eight days earlier.
+**This adjacency is RELEASE order, not launch order.** Every edge is release serialization on `pyproject.toml`: three cards claim three consecutive versions, and only one tag can exist per version. The cards also share `cli.py` and `events_tail.py` across all three, and `aggregator.py` across 64A and 65A, so the packer separates them anyway. Tracks may be worked in parallel Conductor workspaces; only their version slots serialize, and document order is priority. 63A is first because it has a clock: the warm Codex read is at 384 ms of the 500 ms interactive budget, up from 186 ms eight days earlier.
 
 Adjacency from gstack-extend's `roadmap-pack` tool on the drafted Tracks (identical to the audit's GROUP_DEPS after apply; this is the `/roadmap` skill's own packer, not a script in this repo's `bin/`):
 
