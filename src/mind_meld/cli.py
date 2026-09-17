@@ -50,6 +50,7 @@ from mind_meld import (
     identity,
     manifest,
     pullhistory,
+    pullplan,
     resolveflow,
     retention,
     safety,
@@ -152,7 +153,6 @@ from mind_meld.manifest import (
     mtime_from_path,
     parse_conflict_created_at,
     parse_conflict_device_short,
-    path_has_descendant_symlink,
     read_file_revision,
     serialize_manifest,
     walk_source,
@@ -772,22 +772,6 @@ def _filter_excluded_paths(
     return out
 
 
-def _has_symlinked_component(
-    path: Path,
-    base_path: Path,
-    *,
-    strict: bool = False,
-    source_name: str | None = None,
-) -> bool:
-    """Whether ``path`` traverses a symlink below its source root.
-
-    A symlinked source root is legitimate: it is the user's chosen location
-    for the whole source. Any link below that root is local routing and must
-    neither be published nor followed while applying a peer's bytes.
-    """
-    return path_has_descendant_symlink(path, base_path, strict=strict, source_name=source_name)
-
-
 def _filter_symlinked_paths(
     manifest: dict,
     sources: list[dict[str, Any]],
@@ -818,7 +802,7 @@ def _filter_symlinked_paths(
             _validate_rel_path(rel_path, where=f"{source_name}:{rel_path}")
         except ManifestError:
             return False
-        return _has_symlinked_component(
+        return pullplan._has_symlinked_component(
             base_path / rel_path,
             base_path,
             strict=strict,
@@ -1482,67 +1466,13 @@ def _print_diff_summary(diff: DiffResult, elapsed: float) -> None:
     console.print(f"  Completed in {elapsed:.1f}s")
 
 
-def _predict_pull_outcome(
-    rel_path: str,
-    remote_info: dict,
-    base_path: Path,
-) -> str:
-    """Predict what _apply_incoming_file will do for this file, without applying.
-
-    Returns one of: write, merge, skip, conflict, unchanged. Used by the pull
-    dry-run and the diff command to give the user an accurate preview.
-    """
-    local_path = base_path / rel_path
-    if not local_path.exists():
-        return "write"
-    try:
-        local_hash = hash_file(local_path)
-    except (PermissionError, OSError):
-        return "conflict"  # safest guess — will surface as a real conflict on apply
-    if local_hash == remote_info.get("sha256"):
-        return "unchanged"
-    if should_merge(rel_path):
-        # Conservative: predicting "unchanged" for a no-op line-union merge
-        # would require downloading + decrypting the blob here (the
-        # manifest sha differs because local has lines remote doesn't),
-        # which dry-run can't afford. Real pull suppresses no-op merges
-        # in `_apply_merge`; dry-run may slightly over-count merges by
-        # comparison.
-        return "merge"
-    try:
-        local_mtime = mtime_from_path(local_path)
-        remote_mtime_str = remote_info.get("mtime")
-        remote_mtime = mtime_from_manifest(remote_mtime_str) if remote_mtime_str else None
-        if remote_mtime is not None and local_mtime > remote_mtime:
-            return "skip"
-    except (TypeError, ValueError, OverflowError, OSError):
-        return "conflict"
-    return "conflict"
-
-
-def _print_pull_prediction(diff: DiffResult, base_path: Path, src_name: str) -> None:
-    """Print per-file predicted outcomes for the pull dry-run path.
-
-    Splits diff.modified into skip/merge/conflict buckets so the user can
-    see what pull would actually do, not just a "modified" count.
-    """
+def _print_pull_prediction(
+    predictions: list[pullplan.PullPrediction], base_path: Path, src_name: str
+) -> None:
     console.print(f"  [dim]source '{safe_str(src_name)}' ({safe_str(base_path)}):[/dim]")
-    for path, info in sorted(diff.new.items()):
-        console.print(f"    [green]+ write[/green]    {safe_str(path)}")
-    buckets: dict[str, list[str]] = {"merge": [], "skip": [], "conflict": [], "unchanged": []}
-    for path, info in diff.modified.items():
-        buckets[_predict_pull_outcome(path, info, base_path)].append(path)
-    for path in sorted(buckets["merge"]):
-        console.print(f"    [cyan]~ merge[/cyan]    {safe_str(path)}")
-    for path in sorted(buckets["skip"]):
-        console.print(f"    [dim]= skip[/dim]     {safe_str(path)} (local newer)")
-    for path in sorted(buckets["conflict"]):
-        console.print(
-            f"    [yellow]! conflict[/yellow] {safe_str(path)} "
-            "(would write remote to .sync-conflict-*)"
-        )
-    for path in sorted(buckets["unchanged"]):
-        console.print(f"    [dim]  unchanged[/dim] {safe_str(path)}")
+    for prediction in predictions:
+        if prediction.outcome != "unchanged":
+            console.print(f"    {safe_str(prediction.label)}  {safe_str(prediction.rel_path)}")
 
 
 # ── shared helpers ────────────────────────────────────────────────────
@@ -2724,7 +2654,7 @@ def _download_and_apply(
             # before resolving containment. The root itself may be symlinked,
             # but following a link below it would either escape the source or
             # let atomic_write_bytes replace local routing with peer content.
-            if _has_symlinked_component(local_path, base_path):
+            if pullplan._has_symlinked_component(local_path, base_path):
                 if not quiet:
                     console.print(
                         f"  [yellow]skipped (local symlink preserved):[/yellow] "
@@ -4338,13 +4268,6 @@ class _CorruptPeer:
 
 
 @dataclass
-class _PredictedConflict:
-    device_name: str
-    src_name: str
-    rel_path: str
-
-
-@dataclass
 class _FsyncWarning:
     parent_dir: Path
     error: str
@@ -4371,8 +4294,7 @@ class _PerSourceResult:
     outcomes: dict[ApplyOutcome, list[str]]
     bytes_transferred: int
     touched_parents: set[Path]
-    # Non-empty only in dry-run mode; holds the diff for _print_pull_prediction.
-    dry_run_diff: DiffResult | None = None
+    predictions: list[pullplan.PullPrediction] = field(default_factory=list)
     # Set when src_cfg["type"] == "claude" to trigger write_sync_log in the
     # caller. Keyed off type (not name) so a user renaming their claude
     # source to "my-claude" still gets sync-log entries written — otherwise
@@ -4547,59 +4469,45 @@ def _prefetch_manifests(
     return cache, corrupt
 
 
-def _preflight_conflicts(
+def _plan_pull(
     pull_targets: list[dict],
-    manifest_cache: dict[str, dict | None],
-    local_sources_map: dict[str, dict[str, Any]],
+    manifest_cache: dict,
+    local_sources_map: dict,
     source_filter: str | None,
-    all_tombstones: dict[str, dict[str, str]],
-) -> list[_PredictedConflict]:
-    """Classify every file preflight; return predicted conflicts.
-
-    Cross-peer simulation: walking peers in iteration order, maintain
-    an overlay of (src_name, rel_path) -> predicted-final-sha for files
-    preflight said would be cleanly written. When a later peer ships
-    the same path, predict against the overlay (what local WILL be
-    after the earlier peer's write) rather than the stale on-disk sha.
-    Without this, peer A writing Y then peer B writing Z is missed:
-    preflight sees empty local for both, predicts clean, apply
-    produces a .sync-conflict-* — exactly the "no writes on fail"
-    violation the flag prevents.
-
-    Caller (pull_core) exits 3 if the list is non-empty. Race-safe
-    only best-effort (TOCTOU between preflight and apply is possible;
-    re-run pull to surface late conflicts).
-    """
-    predicted: list[_PredictedConflict] = []
-    overlay: dict[tuple[str, str], str] = {}
+    all_tombstones: dict,
+) -> tuple[pullplan.PullPlanner, list[_UnknownSourceWarning]]:
+    planner = pullplan.PullPlanner()
+    unknown = []
     for device in pull_targets:
-        dname = device["device_name"]
-        remote_manifest = manifest_cache.get(device["device_id"])
-        if remote_manifest is None:
+        did, dname = device["device_id"], device["device_name"]
+        remote = manifest_cache.get(did)
+        if remote is None:
             continue
-        for src_name, src_data in remote_manifest.get("sources", {}).items():
+        for src_name, src_data in remote.get("sources", {}).items():
             if source_filter and src_name != source_filter:
                 continue
             if src_name not in local_sources_map:
-                continue  # unknown source counted elsewhere, not a conflict
-            base_path = local_sources_map[src_name]["path"]
-            for rel_path, info in src_data.get("files", {}).items():
-                if is_tombstoned(src_name, rel_path, all_tombstones):
-                    continue
-                overlay_sha = overlay.get((src_name, rel_path))
-                if overlay_sha is not None:
-                    # An earlier peer already predicted a clean write.
-                    # Next peer conflicts iff its sha differs from what
-                    # the earlier peer will leave.
-                    if overlay_sha != info.get("sha256"):
-                        predicted.append(_PredictedConflict(dname, src_name, rel_path))
-                    continue
-                outcome = _predict_pull_outcome(rel_path, info, base_path)
-                if outcome == "conflict":
-                    predicted.append(_PredictedConflict(dname, src_name, rel_path))
-                elif outcome in ("write", "merge"):
-                    overlay[(src_name, rel_path)] = info.get("sha256", "")
-    return predicted
+                unknown.append(_UnknownSourceWarning(src_name, dname))
+                continue
+            for path, info in src_data.get("files", {}).items():
+                if not is_tombstoned(src_name, path, all_tombstones):
+                    planner.predict(
+                        did, dname, src_name, path, info, local_sources_map[src_name]["path"]
+                    )
+    return planner, unknown
+
+
+def _preflight_conflicts(
+    pull_targets: list[dict],
+    manifest_cache: dict,
+    local_sources_map: dict,
+    source_filter: str | None,
+    all_tombstones: dict,
+) -> list[pullplan.PullPrediction]:
+    planner, _ = _plan_pull(
+        pull_targets, manifest_cache, local_sources_map, source_filter, all_tombstones
+    )
+    return [p for p in planner.predictions if p.outcome in {"conflict", "may fail"}]
 
 
 def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
@@ -4633,6 +4541,7 @@ def _pull_one_source(
     devices: list[dict[str, Any]] | None = None,
     pending_inline_bumps: dict[Path, float] | None = None,
     reporter: _ApplyReporter | None = None,
+    predictions: list[pullplan.PullPrediction] | None = None,
 ) -> _PerSourceResult:
     """Pull one source from one peer. Returns _PerSourceResult.
 
@@ -4664,6 +4573,16 @@ def _pull_one_source(
         touched_parents=reporter.touched_parents,
         claude_sync_base=str(base_path) if src_type == "claude" else None,
     )
+    if dry_run:
+        if predictions is None:
+            planner = pullplan.PullPlanner()
+            predictions = [
+                planner.predict(did, dname, src_name, path, info, base_path)
+                for path, info in remote_files.items()
+                if not is_tombstoned(src_name, path, all_tombstones)
+            ]
+        base_result.predictions = predictions
+        return base_result
     if not remote_files:
         return base_result
 
@@ -4682,10 +4601,6 @@ def _pull_one_source(
     # Arg-swap: this is the additive pull path. See diff_files docstring
     # — `new`/`modified` are files to download; `deleted` is ignored.
     diff = diff_files(remote_files, local_files)
-
-    if dry_run:
-        base_result.dry_run_diff = diff
-        return base_result
 
     to_download = {**diff.new, **diff.modified}
     to_download = {
@@ -4814,7 +4729,7 @@ def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
     return warnings
 
 
-def _print_preflight_conflicts(predicted: list[_PredictedConflict], quiet: bool) -> None:
+def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: bool) -> None:
     """Print predicted conflicts before --conflict-mode=fail raises.
 
     Quiet (autopull): one-liner per conflict to stderr.
@@ -4829,10 +4744,10 @@ def _print_preflight_conflicts(predicted: list[_PredictedConflict], quiet: bool)
                 file=sys.stderr,
             )
         return
-    console.print(f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict.")
+    console.print(f"[red]Pull refused:[/red] {len(predicted)} file(s) would conflict or may fail.")
     for p in predicted:
         console.print(
-            f"  [yellow]! conflict[/yellow] {safe_str(p.src_name)}/"
+            f"  [yellow]! {safe_str(p.label)}[/yellow] {safe_str(p.src_name)}/"
             f"{safe_str(p.rel_path)} (from {safe_str(p.device_name)})"
         )
     console.print(
@@ -5164,6 +5079,8 @@ def _pull_core(
     if not pull_targets:
         if not quiet:
             console.print("[yellow]No other devices found to pull from.[/yellow]")
+        if dry_run and not quiet:
+            console.print("No changes predicted.")
         return PullResult(elapsed=time.time() - start)
 
     manifest_cache, corrupt_peers = _prefetch_manifests(backend, all_devices, passphrase, memory_kb)
@@ -5256,17 +5173,22 @@ def _pull_core(
         lambda did: manifest_cache.get(did),
     )
 
-    if conflict_mode == "fail":
-        predicted = _preflight_conflicts(
+    planner = None
+    planned_unknown = []
+    if dry_run or conflict_mode == "fail":
+        planner, planned_unknown = _plan_pull(
             pull_targets,
             manifest_cache,
             local_sources_map,
             source_filter,
             all_tombstones,
         )
+    if conflict_mode == "fail":
+        assert planner is not None
+        predicted = [p for p in planner.predictions if p.outcome in {"conflict", "may fail"}]
         if predicted:
             _print_pull_summary(
-                PullResult(), corrupt_peers, [], [], [], quiet, verbose, dry_run=True
+                PullResult(), corrupt_peers, planned_unknown, [], [], quiet, verbose, dry_run=True
             )
             _print_preflight_conflicts(predicted, quiet)
             if dry_run:
@@ -5310,7 +5232,7 @@ def _pull_core(
         for device in pull_targets:
             did = device["device_id"]
             dname = device["device_name"]
-            if not quiet:
+            if not quiet and not dry_run:
                 console.print(f"\n[bold]Pulling from {safe_str(dname)} ({safe_str(did)})...[/bold]")
 
             remote_manifest = manifest_cache.get(did)
@@ -5335,7 +5257,7 @@ def _pull_core(
                 src_info = local_sources_map[src_name]
                 base_path = src_info["path"]
                 src_type = src_info["type"]
-                if verbose and not quiet:
+                if verbose and not quiet and not dry_run:
                     console.print(
                         f"  [bold]Source '{safe_str(src_name)}' ({safe_str(base_path)}):[/bold]"
                     )
@@ -5366,12 +5288,22 @@ def _pull_core(
                     devices=all_devices,
                     pending_inline_bumps=pending_inline_bumps,
                     reporter=in_flight,
+                    predictions=(
+                        [
+                            p
+                            for p in planner.predictions
+                            if p.device_id == did and p.src_name == src_name
+                        ]
+                        if planner is not None
+                        else None
+                    ),
                 )
 
-                if dry_run and per_source.dry_run_diff is not None:
-                    if not quiet:
+                if dry_run:
+                    per_source_results.append(per_source)
+                    if not quiet and any(p.outcome != "unchanged" for p in per_source.predictions):
                         console.print(f"  Dry run for {safe_str(dname)}/{safe_str(src_name)}:")
-                        _print_pull_prediction(per_source.dry_run_diff, base_path, src_name)
+                        _print_pull_prediction(per_source.predictions, base_path, src_name)
                     in_flight = None
                     continue
 
@@ -5483,6 +5415,14 @@ def _pull_core(
             if not exception_in_flight:
                 raise
 
+    if dry_run and not quiet:
+        assert planner is not None
+        console.print(pullplan.totals(planner.predictions))
+        if corrupt_peers:
+            console.print(
+                f"Preview incomplete: {len(corrupt_peers)} peer(s) could not be "
+                "inspected (see the warnings above)."
+            )
     return _partial_result
 
 
@@ -6768,7 +6708,7 @@ def diff_cmd(
             remote_info = remote_files.get(path, {})
             base_path = src_base_paths.get(src_name)
             if base_path is not None and remote_info:
-                outcome = _predict_pull_outcome(path, remote_info, base_path)
+                outcome = pullplan._predict_pull_outcome(path, remote_info, base_path)
                 console.print(
                     f"    [yellow]~ push  [/yellow] {safe_str(path)} (pull would: {outcome})"
                 )

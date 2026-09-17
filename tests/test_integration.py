@@ -7109,6 +7109,193 @@ def test_preview_storage_refusal62(preview62, monkeypatch, command):
     _assert_preview_refused(result)
 
 
+@pytest.mark.parametrize("directory_first", [False, True])
+def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_first):
+    """(a)-(j): encrypted peer bytes, twin local trees, outcomes keyed by peer."""
+    from mind_meld import pullplan
+
+    env = preview62
+    preview = tmp_path / "forecast"
+    preview.mkdir()
+    for name, data in {
+        "merge.jsonl": b'{"local":1}\n',
+        "older.md": b"local newer",
+        "unreadable.md": b"private",
+        "ancestor": b"file",
+        "canonical-match.md": b"canonical",
+        "remote-match.md": b"canonical",
+    }.items():
+        (preview / name).write_bytes(data)
+    (preview / "link").symlink_to(env["claude"], target_is_directory=True)
+    applied = tmp_path / "applied"
+    shutil.copytree(preview, applied, symlinks=True)
+    for base in (preview, applied):
+        (base / "unreadable.md").chmod(0)
+    cfg = env["config"]
+    cfg["sync"]["sources"] = [
+        {
+            "name": "payload",
+            "type": "generic",
+            "path": str(preview),
+            "include_dirs": ["."],
+            "exclude_patterns": ["excluded.md"],
+        }
+    ]
+    save_config(cfg, env["config_path"])
+    stamp, older = "2021-01-01T00:00:00+00:00", "2019-01-01T00:00:00+00:00"
+    a = {
+        name: (data, stamp)
+        for name, data in {
+            "identical.md": b"same",
+            "divergent.md": b"first",
+            "merge.jsonl": b'{"a":1}\n',
+            "older.md": b"first newer peer",
+            "tombstoned.md": b"gone",
+            "excluded.md": b"excluded",
+            "link/incoming.md": b"link bytes",
+            "unreadable.md": b"peer private",
+            "ancestor/child.md": b"impossible",
+            "canonical-match.md": b"remote",
+            "remote-match.md": b"remote",
+            "foo/bar" if directory_first else "foo": b"first shape",
+        }.items()
+    }
+    b = {
+        name: (data, stamp)
+        for name, data in {
+            "identical.md": b"same",
+            "divergent.md": b"second",
+            "merge.jsonl": b'{"b":1}\n',
+            "canonical-match.md": b"canonical",
+            "remote-match.md": b"remote",
+            "foo" if directory_first else "foo/bar": b"second shape",
+        }.items()
+    }
+    b["older.md"] = (b"older peer", older)
+    for device, files in (("dev-b", a), ("dev-c", b)):
+        _publish_peer62(
+            env,
+            device,
+            {("payload", name): info for name, info in files.items()},
+            tombstones={
+                "payload:tombstoned.md": {
+                    "deleted_at": datetime.now(timezone.utc).isoformat(),
+                    "device_id": device,
+                }
+            },
+        )
+    predictions, actual = [], {}
+    original = cli_module._pull_one_source
+
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        predictions.extend(result.predictions)
+        if not kwargs["dry_run"]:
+            for outcome, paths in result.outcomes.items():
+                actual.setdefault(outcome, set()).update(
+                    (result.device_id, result.src_name, path) for path in paths
+                )
+        return result
+
+    monkeypatch.setattr(cli_module, "_pull_one_source", capture)
+    hashes = []
+    original_hash = pullplan.hash_file
+
+    def hash_once(path):
+        hashes.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(pullplan, "hash_file", hash_once)
+    try:
+        result = env["audit"](["pull", "--dry-run"])
+        assert result.exit_code == 0, (result.output, result.exception)
+        assert len(hashes) == len(set(hashes))
+        assert pullplan.totals(predictions) in _preview_text(result)
+        assert "Pull complete." not in result.output
+        expected = {}
+        for prediction in predictions:
+            expected.setdefault(prediction.outcome, set()).add(
+                (prediction.device_id, prediction.src_name, prediction.rel_path)
+            )
+        cfg["sync"]["sources"][0]["path"] = str(applied)
+        save_config(cfg, env["config_path"])
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, (result.output, result.exception)
+        for predicted, real in (
+            ("write", "written"),
+            ("conflict", "conflicted"),
+            ("skip", "skipped"),
+            ("may fail", "failed"),
+        ):
+            assert expected.get(predicted, set()) == actual.get(real, set()), (
+                predicted,
+                expected,
+                actual,
+            )
+        assert actual.get("merged", set()) <= expected["merge"]
+        assert len(expected["merge"]) == 2
+        assert len(expected["may fail"]) == 3
+        assert len(expected["skip"]) == 2
+        assert ("dev-c", "payload", "canonical-match.md") not in actual["conflicted"]
+        assert ("dev-c", "payload", "remote-match.md") in actual["conflicted"]
+        assert not any(
+            key[2] in {"tombstoned.md", "excluded.md"}
+            for paths in [*expected.values(), *actual.values()]
+            for key in paths
+        )
+    finally:
+        for base in (preview, applied):
+            (base / "unreadable.md").chmod(0o600)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_fail_mode_mergeable_two_peers62(preview62, dry_run):
+    env = preview62
+    path = "projects/-Users-kb-myapp/memory/merge.jsonl"
+    for device in ("dev-b", "dev-c"):
+        _publish_peer62(
+            env, device, {("claude", path): (json.dumps({device: 1}).encode() + b"\n", None)}
+        )
+    argv = ["pull", "--conflict-mode", "fail"] + (["--dry-run"] if dry_run else [])
+    result = env["audit"](argv) if dry_run else runner.invoke(app, argv)
+    assert result.exit_code == 0, result.output
+    assert "Pull refused" not in result.output
+
+
+def test_fail_preview_preserves_warnings62(preview62):
+    from mind_meld.storage.keys import manifest_key
+
+    env = preview62
+    _publish_peer62(env, "dev-c", {("unknown", "file"): (b"data", None)})
+    register_device(env["backend"], "dev-d", "Corrupt peer")
+    env["backend"].put(manifest_key("dev-d"), b"corrupt")
+    result = env["audit"](["pull", "--dry-run", "--conflict-mode", "fail"])
+    _assert_preview_refused(result, 3)
+    assert "corrupt" in result.output
+    assert "skipping unknown source" in result.output
+    assert result.output.index("corrupt") < result.output.index("Pull refused")
+    assert "Nothing was changed except the local lock file (dry run)." in _preview_text(result)
+    assert "Nothing was changed" in result.stderr
+
+
+def test_pull_planner_future_clamp62(tmp_path):
+    from mind_meld import pullplan
+
+    planner = pullplan.PullPlanner()
+    first = planner.predict(
+        "a", "A", "s", "x", {"sha256": "a", "mtime": "2099-01-01T00:00:00+00:00"}, tmp_path
+    )
+    second = planner.predict(
+        "b",
+        "B",
+        "s",
+        "x",
+        {"sha256": "b", "mtime": (planner.now + timedelta(seconds=61)).isoformat()},
+        tmp_path,
+    )
+    assert (first.outcome, second.outcome) == ("write", "conflict")
+
+
 class TestPushPreviewNoMutation56A:
     def test_guard_records_swallowed_write(self, tmp_path):
         records = []

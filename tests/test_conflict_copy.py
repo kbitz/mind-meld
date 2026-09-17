@@ -27,12 +27,11 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from mind_meld import resolveflow
+from mind_meld import pullplan, resolveflow
 from mind_meld.cli import (
     CONFLICT_INFIX,
     _apply_conflict,
     _apply_incoming_file,
-    _predict_pull_outcome,
     _prompt_conflict_choice,
     app,
     conflict_filename,
@@ -1728,33 +1727,33 @@ class TestResolveExitCode:
 class TestPredictPullOutcome:
     def test_predicts_write_for_missing_local(self, tmp_path: Path) -> None:
         info = _remote_info("xxx", datetime.now(timezone.utc))
-        assert _predict_pull_outcome("missing.md", info, tmp_path) == "write"
+        assert pullplan._predict_pull_outcome("missing.md", info, tmp_path) == "write"
 
     def test_predicts_unchanged_for_matching_hash(self, tmp_path: Path) -> None:
         f = tmp_path / "a.md"
         f.write_bytes(b"same")
         info = _remote_info(hash_file(f), datetime.now(timezone.utc))
-        assert _predict_pull_outcome("a.md", info, tmp_path) == "unchanged"
+        assert pullplan._predict_pull_outcome("a.md", info, tmp_path) == "unchanged"
 
     def test_predicts_merge_for_jsonl(self, tmp_path: Path) -> None:
         f = tmp_path / "x.jsonl"
         f.write_bytes(b"line\n")
         info = _remote_info("other", datetime.now(timezone.utc))
-        assert _predict_pull_outcome("x.jsonl", info, tmp_path) == "merge"
+        assert pullplan._predict_pull_outcome("x.jsonl", info, tmp_path) == "merge"
 
     def test_predicts_skip_when_local_newer(self, tmp_path: Path) -> None:
         f = tmp_path / "a.md"
         f.write_bytes(b"local")
         _set_mtime(f, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
         info = _remote_info("other", datetime(2026, 4, 21, 11, 0, tzinfo=timezone.utc))
-        assert _predict_pull_outcome("a.md", info, tmp_path) == "skip"
+        assert pullplan._predict_pull_outcome("a.md", info, tmp_path) == "skip"
 
     def test_predicts_conflict_when_remote_newer(self, tmp_path: Path) -> None:
         f = tmp_path / "a.md"
         f.write_bytes(b"local")
         _set_mtime(f, datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc))
         info = _remote_info("other", datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
-        assert _predict_pull_outcome("a.md", info, tmp_path) == "conflict"
+        assert pullplan._predict_pull_outcome("a.md", info, tmp_path) == "conflict"
 
 
 class TestResolveInteractiveLoopNewBehavior:

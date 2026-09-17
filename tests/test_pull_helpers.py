@@ -754,8 +754,7 @@ class TestPullOneSource:
             dry_run=True,
             verbose_console=False,
         )
-        assert result.dry_run_diff is not None
-        assert "new.md" in result.dry_run_diff.new
+        assert [(p.rel_path, p.outcome) for p in result.predictions] == [("new.md", "write")]
 
     def test_claude_sync_base_set_for_claude(self, tmp_path: Path, monkeypatch) -> None:
         """Non-dry-run with changes — claude_sync_base is set for type=='claude'."""
@@ -3086,7 +3085,10 @@ class TestApplyExceptionBoundary53A:
             raise error("bad clock")
 
         monkeypatch.setattr(cli, "mtime_from_path", boom)
-        assert cli._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer")}, base) == "conflict"
+        assert (
+            cli.pullplan._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer")}, base)
+            == "conflict"
+        )
         run, _, _, _ = prepare([("notes.md", b"peer", 1234), ("later.txt", b"later", None)])
         _, outcomes = run()
         assert outcomes["conflicted"] == ["notes.md"]
@@ -3101,7 +3103,9 @@ class TestApplyExceptionBoundary53A:
         base, prepare = ordered_apply
         (base / "notes.md").write_bytes(b"local")
         assert (
-            cli._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer"), "mtime": 1234}, base)
+            cli.pullplan._predict_pull_outcome(
+                "notes.md", {"sha256": _sha(b"peer"), "mtime": 1234}, base
+            )
             == "conflict"
         )
         run, _, _, _ = prepare([("notes.md", b"peer", 1234), ("later.txt", b"later", None)])
@@ -3115,7 +3119,9 @@ class TestApplyExceptionBoundary53A:
         (base / "notes.md").write_bytes(b"local")
         naive = "2026-09-08T12:00:00"
         assert (
-            cli._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer"), "mtime": naive}, base)
+            cli.pullplan._predict_pull_outcome(
+                "notes.md", {"sha256": _sha(b"peer"), "mtime": naive}, base
+            )
             == "conflict"
         )
         run, _, _, _ = prepare([("notes.md", b"peer", naive), ("later.txt", b"later", None)])
