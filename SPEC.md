@@ -329,8 +329,9 @@ Built with `typer`. Installed as `mm` (Mind Meld).
 mm init                     # generate device ID, configure storage, set passphrase
 mm push [--dry-run]         # build manifest, diff against remote, upload changes
                             # --dry-run previews publication and deletions; changes nothing except the local lock file (v0.14.10)
-mm pull [--from DEVICE] [--source NAME]              # download changes (optionally scoped)
+mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optionally scoped)
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
+                            # --dry-run previews outcome totals; changes nothing except the local lock file. Combine with --conflict-mode fail for a write-free CI gate (v0.14.15)
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
@@ -342,8 +343,8 @@ mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump;
                             # `host_skill_discovery` is a sibling key (Grok inspect probe), never a skill_links row
                             # host_skill_discovery: host, status (ok | binary-absent | timeout | nonzero-exit | malformed-json | unsupported-schema), claude_skills_compat, retro_fleet_resolved, retro_fleet_path, grok_version
 mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
-mm diff [--from DEVICE] [--source NAME]   # show what would change (dry run)
-                                             # annotates modified files as write / merge / skip / conflict
+mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac's last push (or --from DEVICE); changes nothing, not even the lock file
+                                             # annotates each modified file with its predicted pull outcome; for incoming changes from other Macs use mm pull --dry-run (v0.14.15)
 mm gc [--dry-run] [--conflicts]
                             # delete orphaned blobs and local retention data; --dry-run previews candidates without mutation
                             # with --conflicts, also reap converged .sync-conflict-* files >30d; live copies remain
@@ -417,7 +418,7 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 8. Download + decrypt changed blobs. Decompress (gzip).
 9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
 10. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`; `.tmp` siblings are cleaned up on failure).
-11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight all files and exit **3** with the predicted-conflict list if any file would conflict — no writes happen. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
+11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight via `pullplan` and exit **3** before applying any file if a conflict or local failure is predicted (mergeable changes from multiple peers no longer cause a false conflict); combine with `--dry-run` for a write-free CI gate. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
 12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
@@ -547,7 +548,7 @@ Sidecars remain local-only. Promote or copy a managed sidecar to a regular filen
 **Conflict mode.** `mm pull --conflict-mode` takes one of three values:
 - `keep-both` (default): auto-keep-both via the inverted [C] path — local stays at canonical, remote lands in `.sync-conflict-*`.
 - `prompt`: per-file prompt (unified diff + pick `(m)erge` / `(l)ocal` / `(r)emote` / `(s)kip` / `(a)bort`, default skip in v0.11.1+; pre-1.0 letters `b` / `both` accepted as deprecated alias mapping to skip). Since v0.12.10 it also renders each side's timestamps and a recency verdict, but display-only — there is deliberately no `(n)ewer` shortcut at this site, because `_apply_incoming_file` already skipped before prompting whenever local was the newer file, so `(n)` would be a redundant alias of `(r)`.
-- `fail`: preflight every file via `_predict_pull_outcome`. If any file would conflict, print the list and exit **3** with **no writes**. For CI use. Best-effort — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
+- `fail`: preflights via `pullplan` (Track 62A) and exits **3** before applying any file if a conflict or local failure is predicted; mergeable changes from multiple peers no longer cause a false conflict. For CI use; combine with `--dry-run` for a write-free gate (`mm pull --dry-run --conflict-mode fail`). Best-effort without `--dry-run` — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
 
 **Conflict-prompt UX (v0.11.1, extended v0.12.8 / v0.12.10).** Both prompt sites (inline `mm pull --conflict-mode prompt` and `mm resolve`) render:
 1. Color LOCAL/REMOTE banners above the diff (red + green gutters, peer-name attribution on the REMOTE banner via `lookup_device_by_short_id`).
