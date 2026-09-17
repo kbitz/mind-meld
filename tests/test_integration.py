@@ -6507,7 +6507,8 @@ def _preview_tree(root, *, pin=False, exemptions=()):
         except PermissionError:
             content = ("unreadable",)
         # Creating the allowed lock can change its parent's mtime.
-        snapshot[str(rel)] = (content, stat.st_mode, None if path == root else stat.st_mtime_ns)
+        allowed_parent = path == root or any(path == p.parent for p in exemptions)
+        snapshot[str(rel)] = (content, stat.st_mode, None if allowed_parent else stat.st_mtime_ns)
     return snapshot
 
 
@@ -6588,6 +6589,7 @@ def push_preview56(tmp_path, monkeypatch):
         "cache": cache,
         "history": pullhistory.HISTORY_DIR / "pull-history.jsonl",
         "fetches": fetches,
+        "keyring_writes": keyring_writes,
     }
 
 
@@ -6945,7 +6947,8 @@ def preview62(push_preview56, tmp_path, monkeypatch):
             if "--dry-run" in argv and COMMAND_INTENTS62[argv[0]][1] == "lock"
             else None
         )
-        before = _preview_tree(tmp_path, pin=True, exemptions=exemptions)
+        tree_exemptions = (*exemptions, *(p.parent for p in exemptions if not p.parent.exists()))
+        before = _preview_tree(tmp_path, pin=True, exemptions=tree_exemptions)
         records = []
         token = _PREVIEW_AUDIT.set((records, lock, *exemptions))
         try:
@@ -6954,8 +6957,9 @@ def preview62(push_preview56, tmp_path, monkeypatch):
             _PREVIEW_AUDIT.reset(token)
         if check:
             assert records == [], (result.output, records)
-            assert _preview_tree(tmp_path, exemptions=exemptions) == before
+            assert _preview_tree(tmp_path, exemptions=tree_exemptions) == before
             assert env["fetches"] == []
+            assert env["keyring_writes"] == []
             if lock is None:
                 assert not (tmp_path / "test.lock").exists()
         return result
@@ -6980,6 +6984,129 @@ def test_write_free_contract62(preview62, argv):
     exemptions = (preview62["identity"],) if argv[0] == "retro-fleet" else ()
     result = preview62["audit"](list(argv), exemptions=exemptions)
     assert result.exit_code == 0, (result.output, result.exception)
+
+
+@pytest.mark.parametrize("argv", INSPECTION_CASES62 + PREVIEW_CASES62)
+def test_transition_deferred62(preview62, argv):
+    env = preview62
+    exemptions = (env["identity"],) if argv[0] == "retro-fleet" else ()
+    assert env["audit"](list(argv), exemptions=exemptions).exit_code == 0
+    assert not env["history"].exists()
+    for _ in range(2):
+        env["upgrade"]._reset_for_tests()
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, (result.output, result.exception)
+    transitions = [
+        json.loads(line)
+        for line in env["history"].read_text().splitlines()
+        if json.loads(line)["verb"] == "self-upgrade"
+    ]
+    assert len(transitions) == 1
+    assert transitions[0]["old_version"] == "0.0.1"
+
+
+@pytest.mark.parametrize("state", ["missing", "corrupt", "empty", "malformed"])
+def test_status_seed_then_read_only62(preview62, state):
+    from mind_meld import seen_sources
+
+    path = seen_sources.seen_path()
+    if state == "missing":
+        path.unlink()
+        path.parent.rmdir()
+    else:
+        path.write_bytes({"corrupt": b"\xff", "empty": b"", "malformed": b"{}"}[state])
+    result = preview62["audit"](["status"], exemptions=(path,))
+    assert result.exit_code == 0, result.output
+    assert json.loads(path.read_text())
+    result = preview62["audit"](["status"])
+    assert result.exit_code == 0, result.output
+
+
+def test_seen_recovery_preserves_interleaved_ack62(tmp_path, monkeypatch):
+    from mind_meld import seen_sources
+
+    monkeypatch.setattr(seen_sources, "SEEN_DIR", tmp_path)
+    seen_sources.seen_path().write_text("corrupt")
+    original = os.open
+    interleaved = []
+
+    def opening(path, flags, *args, **kwargs):
+        if flags & os.O_RDWR and not interleaved:
+            interleaved.append(True)
+            seen_sources.acknowledge(["codex"], initial=["claude"])
+        return original(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+    assert seen_sources.read(["gstack"]) == {"claude", "codex"}
+
+
+@pytest.mark.parametrize("state", ["missing", "fresh", "stale", "no-filter"])
+def test_retro_exemptions62(preview62, state):
+    from mind_meld import identity
+
+    path = preview62["identity"]
+    if state != "missing":
+        path.write_text(
+            json.dumps(
+                {
+                    "version": identity.CACHE_VERSION,
+                    "emails": ["test@example.com"],
+                    "refreshed_at": datetime.now(timezone.utc).isoformat()
+                    if state == "fresh"
+                    else "2000-01-01T00:00:00+00:00",
+                }
+            )
+        )
+    argv = ["retro-fleet"] + (["--no-author-filter"] if state == "no-filter" else [])
+    result = preview62["audit"](argv, exemptions=() if state == "no-filter" else (path,))
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [("diag", "--json"), ("devices", "--format", "json"), ("gc", "--dry-run", "--conflicts")],
+)
+def test_inspection_variants62(preview62, argv):
+    result = preview62["audit"](list(argv))
+    assert result.exit_code == 0, result.output
+
+
+def test_real_pull_keeps_migration_and_history62(preview62):
+    from mind_meld import resolveflow
+
+    result = runner.invoke(app, ["pull"])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert not preview62["legacy"].exists()
+    assert (
+        preview62["legacy"]
+        .with_name(preview62["legacy"].name.replace("sync-conflict-", "sync-conflict-v0-"))
+        .exists()
+    )
+    assert resolveflow._inversion_marker_path().exists()
+    rows = [json.loads(line) for line in preview62["history"].read_text().splitlines()]
+    assert any(row.get("action") == "excluded" for row in rows)
+
+
+@pytest.mark.parametrize("command", ["pull", "gc"])
+def test_preview_storage_refusal62(preview62, monkeypatch, command):
+    from mind_meld.errors import StorageError
+
+    def fail(*args, **kwargs):
+        raise StorageError("injected storage refusal")
+
+    if command == "pull":
+        monkeypatch.setattr(cli_module, "list_devices_with_drops", fail)
+    else:
+        original = LocalBackend.list_keys
+
+        def list_keys(backend, prefix=""):
+            if prefix == "data/":
+                return fail()
+            return original(backend, prefix)
+
+        monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+    result = preview62["audit"]([command, "--dry-run"])
+    _assert_preview_refused(result)
 
 
 class TestPushPreviewNoMutation56A:

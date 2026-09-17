@@ -385,6 +385,20 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     return _list_devices_impl(backend, on_drop=_warn)
 
 
+DRY_RUN_COMPLETE = "Dry run complete. Nothing was changed except the local lock file."
+DRY_RUN_COMPLETE_LOCK_FREE = "Dry run complete. Nothing was changed."
+DRY_RUN_REFUSAL = " Nothing was changed except the local lock file (dry run)."
+PULL_NOT_PREVIEWED = (
+    "Not previewed: renaming pre-v0.9.2 conflict files to the v0- prefix, "
+    "pull-history rows, per-project .mind-meld-log.md sync logs, cleanup of "
+    "merged manifest conflict copies in storage, and blob download and decrypt failures."
+)
+RECAPTURE_NOT_PREVIEWED = (
+    "Not previewed: writing the git-snapshot rows and the full push that publishes "
+    "them together with any other pending local changes."
+)
+
+
 def _get_config(*, read_only: bool) -> dict:
     try:
         config = load_config()
@@ -3609,7 +3623,7 @@ def push(
     capture_sources = _prepare_usage_capture(config) if capture_usage else []
     passphrase = _get_passphrase_or_exit()
     pending: list[str] = []
-    refusal_suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
 
     try:
         acquire_lock()
@@ -3643,9 +3657,7 @@ def push(
         if dry_run:
             for note in pending:
                 console.print(safe_str(note))
-            console.print(
-                "\n[bold]Dry run complete. Nothing was changed except the local lock file.[/bold]"
-            )
+            console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
             console.print(
                 "Not previewed: the mm-events activity row a real push appends, "
                 "post-push GC of orphaned blobs, and upload re-reads."
@@ -4272,7 +4284,9 @@ def pull(
     _maybe_prompt_migration(config, read_only=dry_run)
     # Re-load in case the migration prompt mutated config on disk so this
     # pull sees the new exclude_patterns.
-    config = _get_config(read_only=dry_run)
+    if not dry_run:
+        config = _get_config(read_only=False)
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -4290,7 +4304,7 @@ def pull(
             for note in pending:
                 console.print(safe_str(note))
         except MindMeldError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
         _pull_core(
             config,
             passphrase,
@@ -4301,12 +4315,20 @@ def pull(
             dry_run,
             conflict_mode=conflict_mode,
         )
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE)
+            console.print(PULL_NOT_PREVIEWED)
+    except MindMeldError as e:
+        if dry_run:
+            _error(str(e) + refusal_suffix)
+        raise
     finally:
         release_lock()
 
     # Seam 2 — interactive pull tail nudge. Runs AFTER the lock is released
     # so the cold-cache HTTP fetch never blocks pull progress.
-    upgrade.emit_nudge_if_due(config)
+    if not dry_run:
+        upgrade.emit_nudge_if_due(config)
 
 
 @dataclass
@@ -4387,7 +4409,9 @@ class _PerSourceResult:
         return any(self.outcomes[k] for k in self.outcomes if k != "unchanged")
 
 
-def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> None:
+def _check_fleet_version_or_refuse(
+    backend: LocalBackend, my_device_id: str, *, refusal_suffix: str = ""
+) -> None:
     """Refuse pull if any peer's last_seen_version is pre-v0.9.2 OR the
     peer's device.json is corrupt/shape-invalid.
 
@@ -4474,7 +4498,7 @@ def _check_fleet_version_or_refuse(backend: LocalBackend, my_device_id: str) -> 
             + "\n\nRun `mm devices` for the version table. "
             "Last-resort recovery: hand-edit device.json to add "
             f'"last_seen_version": "{INVERSION_MIN_VERSION}"' + " — only after "
-            "verifying the peer is actually upgraded."
+            "verifying the peer is actually upgraded." + refusal_suffix
         )
 
 
@@ -4859,6 +4883,7 @@ def _print_pull_summary(
     quiet: bool,
     verbose: bool,
     *,
+    dry_run: bool = False,
     interruption: Literal["interrupted", "aborted"] | None = None,
 ) -> None:
     """Single I/O owner for pull output.
@@ -4904,6 +4929,9 @@ def _print_pull_summary(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"  [yellow]warning:[/yellow] {msg}")
+
+    if dry_run:
+        return
 
     # Load-bearing: per-source conflicts/failures (D11 contract fix).
     # The docstring's promise that these reach stderr in quiet mode was
@@ -5082,6 +5110,7 @@ def _pull_core(
     When quiet=True, load-bearing warnings still reach stderr; cosmetic
     progress chatter is suppressed.
     """
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     interactive_resolve_flag = conflict_mode == "prompt"
     start = time.time()
     my_device_id = config["device"]["id"]
@@ -5098,7 +5127,7 @@ def _pull_core(
     # pre-inversion migration sweep so we don't accidentally migrate
     # files in a refusal scenario where the user is about to upgrade
     # their peers and re-pull. Exits via _error → typer.Exit(1).
-    _check_fleet_version_or_refuse(backend, my_device_id)
+    _check_fleet_version_or_refuse(backend, my_device_id, refusal_suffix=refusal_suffix)
 
     # Pre-inversion conflict-file migration. Runs once per pull under the
     # already-held mm lockfile — safe against autopull racing with another
@@ -5107,7 +5136,8 @@ def _pull_core(
     # the user's tree would end up with a mix of pre-inversion and post-
     # inversion files indistinguishable except by mtime — and resolve's
     # dual-mode dispatch needs the prefix, not the timestamp.
-    resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
+    if not dry_run:
+        resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
     # Widened to carry path + type per source. Type is load-bearing for
     # the sync-log gate in _pull_one_source — keying on type (not name)
@@ -5130,7 +5160,7 @@ def _pull_core(
     all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
     if from_device and not pull_targets:
         if not quiet:
-            _error(f"Device not found: {from_device}")
+            _error(f"Device not found: {from_device}" + refusal_suffix)
     if not pull_targets:
         if not quiet:
             console.print("[yellow]No other devices found to pull from.[/yellow]")
@@ -5177,7 +5207,7 @@ def _pull_core(
         # conflicted / failed` records to `.1`. The forensic-aid
         # contract becomes useless. Interactive `mm pull` still
         # logs the full set so users can audit their excludes.
-        if not quiet:
+        if not quiet and not dry_run:
             for src_name, src_data in m.get("sources", {}).items():
                 kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
                 for rel_path, info in src_data.get("files", {}).items():
@@ -5235,7 +5265,12 @@ def _pull_core(
             all_tombstones,
         )
         if predicted:
+            _print_pull_summary(
+                PullResult(), corrupt_peers, [], [], [], quiet, verbose, dry_run=True
+            )
             _print_preflight_conflicts(predicted, quiet)
+            if dry_run:
+                stderr_console.print(DRY_RUN_REFUSAL.strip())
             raise typer.Exit(3)
 
     # Aggregate accumulators. Load-bearing warnings go through lists,
@@ -5442,6 +5477,7 @@ def _pull_core(
                 quiet=quiet,
                 verbose=verbose,
                 interruption=interruption,
+                dry_run=dry_run,
             )
         except (Exception, SystemExit):
             if not exception_in_flight:
@@ -6769,6 +6805,7 @@ def gc(
     required to actually reap stale conflict copies.
     """
     config = _get_config(read_only=dry_run)
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -6786,7 +6823,7 @@ def gc(
             for note in pending:
                 console.print(safe_str(note))
         except MindMeldError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
         _do_gc(config, passphrase, memory_kb, dry_run, verbose)
         # Track 7B: events retention is always-on (fleet policy, not opt-in).
         # See `_gc_old_event_files` for the tombstone-propagation framing.
@@ -6802,6 +6839,12 @@ def gc(
         # touches user content). Apply still requires `--conflicts`.
         if prune_conflicts or dry_run:
             retention._gc_old_conflict_files(config, dry_run, verbose)
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE)
+    except MindMeldError as e:
+        if dry_run:
+            _error(str(e) + refusal_suffix)
+        raise
     finally:
         release_lock()
 
@@ -6866,7 +6909,7 @@ def _do_gc(
         # the corrupt manifest's referenced hashes are missing from
         # referenced_hashes. A user who copies that list into a separate
         # delete flow would reap live data.
-        _error(msg)
+        _error(msg + (DRY_RUN_REFUSAL if dry_run else ""))
 
     # List all blobs across all devices
     all_blobs = backend.list_keys(DATA_PREFIX)
@@ -7400,12 +7443,16 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
             "nothing to migrate. DEFAULT_SOURCES already include the "
             "recommended excludes.[/dim]"
         )
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return
 
     diffs = _compute_recommended_excludes_diff(sources)
     retire_opencode = _explicit_opencode_source_present(sources)
     if not diffs and not retire_opencode:
         console.print("[green]Config is already up to date.[/green]")
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return
 
     if diffs:
@@ -7423,7 +7470,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
         )
 
     if dry_run:
-        console.print("\n[dim]Dry run — no changes written.[/dim]")
+        console.print(DRY_RUN_COMPLETE_LOCK_FREE)
         return
 
     if not yes and not typer.confirm("\nApply these updates?", default=True):
@@ -7862,7 +7909,9 @@ def recapture(
     days = _parse_recapture_window(window)
     config = _get_config(read_only=dry_run)
     _maybe_prompt_migration(config, read_only=dry_run)
-    config = _get_config(read_only=dry_run)
+    if not dry_run:
+        config = _get_config(read_only=False)
+    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     passphrase = _get_passphrase_or_exit()
 
     try:
@@ -7880,7 +7929,7 @@ def recapture(
             for note in pending:
                 console.print(safe_str(note))
         except MindMeldError as e:
-            _error(str(e))
+            _error(str(e) + refusal_suffix)
         try:
             resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
             sources = resolution.available
@@ -7890,7 +7939,7 @@ def recapture(
                         _config_module._missing_custom_mm_events_message(src["path"])
                     )
         except SnapshotError as e:
-            suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+            suffix = refusal_suffix
             _error(f"{e} No recapture rows were written.{suffix}")
         disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
         if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
@@ -7944,6 +7993,8 @@ def recapture(
             console.print(f"  Estimated size:   {row_bytes} bytes")
             if n_roots == 0:
                 raise typer.Exit(1)
+            console.print(DRY_RUN_COMPLETE)
+            console.print(RECAPTURE_NOT_PREVIEWED)
             return
 
         if n_roots == 0:
@@ -8053,6 +8104,10 @@ def recapture(
         console.print("window will not show the older recoveries:")
         console.print(f"  mm retro-fleet {cover_days}d   # covers everything just recaptured")
         console.print("  mm retro-fleet 7d    # covers the last 7 days only")
+    except MindMeldError as e:
+        if dry_run:
+            _error(str(e) + refusal_suffix)
+        raise
     finally:
         release_lock()
 

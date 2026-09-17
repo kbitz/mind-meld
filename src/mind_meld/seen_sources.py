@@ -16,13 +16,10 @@ next `mm status` would surface spurious "New source: claude!" /
 "New source: gstack!" hints for sources they are already syncing.
 Pinned by `test_seen_sources_initialized_to_existing_on_upgrade`.
 
-Concurrency: every read acquires `fcntl.flock(LOCK_EX)` on the file fd.
-LOCK_EX (not LOCK_SH) because read may write (lazy init / corrupt
-recovery). Concurrent callers either all see the same final content or
-serialize behind the first writer. The os.replace inside
-`atomic_write_bytes` swaps the inode under the lock — a second caller
-holding an fd to the OLD inode will see size==0 and re-init, but with
-the same caller-passed `initial`, so the rewrite is idempotent.
+Concurrency: steady-state readers open O_RDONLY under LOCK_SH. Recovery
+reopens without truncation under LOCK_EX and re-reads before seeding;
+an interleaved acknowledge is preserved. Recovery and acknowledge write
+in place so the flock continues to protect the same inode.
 
 Failures degrade with a stderr breadcrumb (visible-failure contract):
 corrupt JSON or write errors warn but never crash the calling command.
@@ -69,6 +66,20 @@ def read(initial: Iterable[str]) -> set[str]:
     path = seen_path()
 
     try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            parsed = _read_under_lock(fd)
+            if parsed is not None:
+                return parsed
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    try:
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
         # Cannot mkdir the config dir — degrade gracefully. Caller's
@@ -84,41 +95,38 @@ def read(initial: Iterable[str]) -> set[str]:
             pass
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            try:
-                size = os.fstat(fd).st_size
-            except OSError:
-                size = 0
-            if size == 0:
+            # Re-read after obtaining the exclusive lock: acknowledge may
+            # have populated the file since our shared read (or ENOENT).
+            parsed = _read_under_lock(fd, warn=True)
+            if parsed is None:
                 _seed_in_place_under_lock(fd, initial_set)
                 return initial_set
-
-            os.lseek(fd, 0, os.SEEK_SET)
-            raw = os.read(fd, size)
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError as e:
-                print(
-                    f"mm: warning: seen-sources.json corrupt ({e}); "
-                    f"resetting to currently-resolved sources",
-                    file=sys.stderr,
-                )
-                _seed_in_place_under_lock(fd, initial_set)
-                return initial_set
-
-            if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-                print(
-                    "mm: warning: seen-sources.json malformed "
-                    "(expected list[str]); resetting to currently-resolved sources",
-                    file=sys.stderr,
-                )
-                _seed_in_place_under_lock(fd, initial_set)
-                return initial_set
-
-            return set(parsed)
+            return parsed
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)
+
+
+def _read_under_lock(fd: int, *, warn: bool = False) -> set[str] | None:
+    size = os.fstat(fd).st_size
+    if size == 0:
+        return None
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        parsed = json.loads(os.read(fd, size))
+    except (ValueError, UnicodeError):
+        reason = "corrupt"
+    else:
+        if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+            return set(parsed)
+        reason = "malformed (expected list[str])"
+    if warn:
+        print(
+            f"mm: warning: seen-sources.json {reason}; resetting to currently-resolved sources",
+            file=sys.stderr,
+        )
+    return None
 
 
 def acknowledge(names: Iterable[str], *, initial: Iterable[str]) -> set[str]:
