@@ -44,6 +44,27 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-ceo-review] pull-history rotation is dominated by push `uploaded` rows
+**What:** Measure and bound push-side `uploaded` rows in `pull-history.jsonl` so the forensic log keeps more than ~9 days of pull outcomes.
+**Why:** On the reviewer's Mac the rotated file held 3,037 rows over 9 days, 2,752 of them `uploaded`; one push wrote 359 rows within a second. The 1 MB cap (`pullhistory.py:64`) evicts `written/merged/conflicted/failed` records that investigations need.
+**Pros:** Longer forensic window for the rows that matter. **Cons:** Changes a logging contract; needs a policy (summarize uploads, separate file, or larger cap).
+**Context:** Found by the Track 62A CEO Claude voice while sizing the `excluded` rows (18 of 3,037). Unrelated to previews.
+**Depends on:** nothing. **Effort / priority:** M / P3.
+
+### [plan-eng-review] Preview/apply parity tests for `gc --dry-run` and `recapture --dry-run`
+**What:** Twin-state tests asserting the candidates `gc --dry-run` reports equal what `gc` (with and without `--conflicts`) deletes, and that `recapture --dry-run`'s commit records equal the rows a real recapture writes.
+**Why:** Track 62A adds parity only for pull; the other two previews can still be write-free but divergent.
+**Pros:** Closes the "useful forecast" guarantee for every preview. **Cons:** Test time; recapture needs git fixtures.
+**Context:** Next rung after Track 62A's pull parity (overlay predictor). Retention reapers already share plan functions (Track 17D), so gc parity is mostly a test.
+**Depends on:** Track 62A. **Effort / priority:** S / P3.
+
+### [plan-devex-review] Prerequisites and a timed two-Mac preview/apply walkthrough in README
+**What:** State prerequisites (Python 3.11+, pipx) and add a copy-paste two-Mac walkthrough (init/push on A, init/`pull --dry-run`/pull on B) with expected output, timed once on a fresh machine.
+**Why:** Codex DX voice: Quick Start taught a real pull directly and the onboarding time is unmeasured.
+**Pros:** New-Mac onboarding with previews from minute one. **Cons:** Docs upkeep; single-operator audience.
+**Context:** Track 62A adds only the Quick Start `mm pull --dry-run` line.
+**Depends on:** Track 62A. **Effort / priority:** S / P3.
+
 ### [plan-eng-review] Distinguish explicitly requested host captures on the wire
 
 - **Why:** Track 61A shares the existing host snapshot schema. An `origin` field

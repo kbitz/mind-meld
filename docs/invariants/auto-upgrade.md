@@ -65,7 +65,11 @@ HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
 
 **3 hook seams in cli.py:**
 1. **Transition detection** (`upgrade.run_transition_hook`) called AFTER each of
-   3 load_config sites: `_get_config`, `_auto_command_setup`, `init_cmd`. Codex
+   3 load_config sites: `_get_config`, `_auto_command_setup`, `init`.
+   `_get_config(*, read_only: bool)` has no default: every caller states its
+   policy. Read-only callers defer the entire transition to the next mutating
+   command. The AST gate also confines direct transition calls to these three
+   functions, and requires `read_only` at every migration-prompt call. Codex
    outside voice flagged that refactoring all 3 through `_get_config` would break
    `_auto_command_setup`'s silent-on-missing-config contract — preserved by
    shared-helper pattern instead.
@@ -99,9 +103,9 @@ event class, separate function). Contract violations silent-skip (NOT assert) so
 forensic log failures don't block sync. `mm log` table renderer adds an `extra`
 column showing `OLD → NEW` for self-upgrade rows; pull/push rows leave it empty.
 
-## Push-preview exception (Track 56A)
+## Read-only callers (Tracks 56A/62A)
 
-`cli._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `emit_nudge_if_due` at its CLI call site: no cache creation/rewrite or HTTP request, even when absent, stale, or due. Status also loads config read-only and uses the cached upgrade view. A pending transition is recorded by a following mutating command; sibling previews other than push still have their separate setup work (Track 62A). `TestPushPreviewNoMutation56A.test_s4b_transition_survives_preview_and_status_then_push_records_once` resets process guards, uses a non-dev version, and proves that preview and status preserve the pending transition before a real push records it exactly once.
+`cli._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `emit_nudge_if_due` at its CLI call site: no cache creation/rewrite or HTTP request, even when absent, stale, or due. Status also loads config read-only and uses the cached upgrade view. A pending transition is recorded by a following mutating command; every preview and inspection preserves it. See the [README Previews table](../../README.md#previews) and `COMMAND_INTENTS62` for the complete command contract. `TestPushPreviewNoMutation56A.test_s4b_transition_survives_preview_and_status_then_push_records_once` resets process guards, uses a non-dev version, and proves that preview and status preserve the pending transition before a real push records it exactly once.
 
 ## Release discipline (enforced by mm auto-upgrade)
 

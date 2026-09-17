@@ -30,6 +30,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | Module | Owns |
 |---|---|
 | `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (61A) requested host capture and local publication diagnostics, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
+| `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones |
 | `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
 | `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns |
@@ -63,7 +64,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 **Import direction (Track 16A, load-bearing).** `cli` imports the six modules
 above; none of them imports `cli`, at module scope *or* function scope. The
 leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`,
-`host_skill_discovery`, `gitenv`) import nothing from the CLI layer at all. Enforced by
+`host_skill_discovery`, `gitenv`, `pullplan`) import nothing from the CLI layer at all. Enforced by
 `tests/test_module_boundaries.py` and a CI grep gate — ruff's F811 cannot see
 function-local shadowing, so lint alone will never catch a re-introduced cycle.
 `aggregator.py` reaches the CLI as a **subprocess**
@@ -121,10 +122,17 @@ mm --version | init | push | pull | status | diag | devices | diff | gc | source
 Push flags: `--capture-usage` (61A) refreshes host usage on an attended push, including with no content changes. Shares `_capture_host_snapshot` with tail/backfill; suppresses tail host capture and mm-push, preserving push counts/cursor. Exit 0 requires the row in the accepted manifest; 4 means missing/unpublished capture while content sync was otherwise fine; 1 stopped before acceptance; 2 incompatible `--dry-run`. Status/diag share `latest_event_rows` and fleet acceptance/order, with `host_publication` separated from cache state. See `docs/invariants/events-retro.md`.
 
 Push flag: `--dry-run` (v0.14.10). Changes nothing except the local lock file — no uploads, config writes, pull-history rows, upgrade checks, or new directories; reports the setup a real push would still perform instead of performing it. A missing default mm-events root or event file is previewed as a deletion; a missing custom mm-events root is warned about and skipped for that push without new tombstones. Exit codes: 0 completed, 1 stopped, 2 usage error. See `docs/invariants/sync.md` and `docs/invariants/init-devices.md`.
-Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `_predict_pull_outcome` and exits 3 (no writes) if any file would conflict — for CI. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
+Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `pullplan` and exits 3 before applying any file if a conflict or local failure is predicted; combine with `--dry-run` for a write-free CI gate. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
 GC flags: `--dry-run` (preview orphan blobs plus retention candidates without mutation; each executed reaper reports candidates, repairs, and skips); `--conflicts` (also reap `.sync-conflict-*` copies older than 30 days — reapable ONLY when the conflict converged, i.e. canonical exists and its bytes are identical; live, missing-canonical and unhashable sidecars are never reaped at any age, see `retention.py:_is_live_conflict`).
 Log flags: `--source NAME`, `--since DATE`, `--action {written|merged|skipped|conflicted|excluded|uploaded|failed}`, `--verb {pull|push}`, `--limit N`, `--format {jsonl|table}`.
 Migrate-config flags: `--yes`, `--dry-run`. Idempotent: appends missing recommended `exclude_patterns` to existing `[[sync.sources]]` entries; preserves user-customized globs.
+
+Previews (62A): `push`, `pull`, `gc`, and `recapture` allow only the local lock;
+`migrate-config --dry-run` and `diff` take no lock. See README’s Previews table.
+Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`.
+`COMMAND_INTENTS62` in integration tests classifies all 23 commands and audits
+every preview/inspection with exact status-seed and author-filtered identity
+cache exemptions. Never add a command without updating that intent table.
 
 ## Invariant pointer table
 
@@ -132,11 +140,13 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 
 | If you're editing… | READ FIRST |
 |---|---|
+| `pullplan.py` / `cli.py:_plan_pull` / `_preflight_conflicts` / `_print_pull_prediction` / preview completion/refusal constants / `diff_cmd` exclude filtering | `docs/invariants/sync.md` |
+| `seen_sources.py:read` / `_read_under_lock` / status seed recovery and exemptions | `docs/invariants/sync.md` |
 | `cli.py:_prepare_usage_capture` / `_push_captured_usage` / `_read_capture_rows` / `_host_publication` / `_print_host_publication` / `_notice_recapture_host_usage` / `events.py:latest_event_rows` / `project_host_publication` / `capture_revision_in_manifest` / `recorded_row_revision` / `events_tail.py:_capture_host_snapshot` / `skills/retro_fleet/aggregator.py:local_host_capture_candidate` / `_host_row_order_key` / `_accept_host_row_at` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `fsutil.py:flock_append_jsonl` / `events.py:write_push_event` (strict append) / `cli.py:_push_core` (manifest acceptance callback) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `cli.py:_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests` | `docs/invariants/sync.md` |
 | `cli.py:_download_and_apply` / (rel_path + base_path concatenation site) | `docs/invariants/sync.md` |
-| `cli.py:_ApplyReporter` / `_first_existing_ancestor` / `_pull_one_source` / `_record_source_bookkeeping` / `_fsync_touched_parents` / `_PerSourceResult` / `_print_pull_summary` / `_predict_pull_outcome` (publication ledger, recovery, and count wording) | `docs/invariants/sync.md` |
+| `cli.py:_ApplyReporter` / `_first_existing_ancestor` / `_pull_one_source` / `_record_source_bookkeeping` / `_fsync_touched_parents` / `_PerSourceResult` / `_print_pull_summary` / `pullplan._predict_pull_outcome` (publication ledger, recovery, and count wording) | `docs/invariants/sync.md` |
 | `cli.py:_warn_apply_failure` / `_print_apply_warning` / `errors.py:PULL_FAILURES_URL` (plain stderr uses `safety.safe_terminal_str` on every dynamic field) | `docs/invariants/sync.md` and `docs/invariants/init-devices.md` |
 | `cli.py:_ApplyReporter` / (publication-time deferred-bump invalidation) | `docs/invariants/conflicts.md` |
 | `cli.py:autopull` / `status` (failed-file count and breadcrumb detail) | `docs/invariants/sync.md` |

@@ -811,6 +811,15 @@ def test_usage_scope_sentences_are_pinned_in_decoder_and_render():
     )
 
 
+def test_preview_docs_describe_diff_as_snapshot_comparison62():
+    readme = (ROOT / "README.md").read_text()
+    assert "| Command | May touch | Not previewed | Exit codes |" in readme
+    assert "mm pull --dry-run   # preview: changes nothing except the lock file" in readme
+    assert "mm pull --dry-run --conflict-mode fail" in readme
+    assert not re.search(r"`mm diff`[^.;\n]*(?:predicts|pull predictor|Dry-run:)", readme)
+    assert "| `mm diff` | Compare local files with this Mac" in readme
+
+
 def test_notes_decoder_compatibility_fixtures_both_directions():
     from mind_meld.skills.retro_fleet import aggregator as agg
     from tests.test_retro_usage_presentation import GOLDENS, presentation_data
