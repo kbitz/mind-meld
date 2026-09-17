@@ -937,9 +937,11 @@ but absent and null mean the same thing to readers. No `CACHE_VERSION` bump
 and no per-file re-walk is warranted.
 
 Failed passes skip the unconditional locked-json write via `_NoCacheCommit`
-only when no file was learned AND the validated `(reason, since)` pair is
-unchanged. Comparing reason alone would leave migrated blockers undated
-forever. Newly learned files still commit despite an unchanged sticky reason.
+only when no file was learned AND the validated `(reason, since)` pair AND
+the persisted timing evidence are unchanged. Comparing reason alone would
+leave migrated blockers undated forever, and comparing the pair alone would
+keep a stale `last_deadline_allotted_ms` after the operator raised the
+budget. Newly learned files still commit despite an unchanged sticky reason.
 Prior metadata is read immediately after acquiring the lock, **before** the
 post-lock deadline check. Expiry there skips scanning and carries `deadline`
 through the same helper: one write on transition, no repeated rewrites.

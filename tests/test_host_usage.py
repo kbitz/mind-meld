@@ -3699,6 +3699,27 @@ def test_timing_carries_on_partial_write_and_drops_allotment_when_clear(reader_c
     assert diag()["last_complete_ms"] is not None
 
 
+def test_unchanged_deadline_rewrites_when_allotted_budget_changes(reader_case, monkeypatch):
+    read, cache, diag, set_scan = reader_case
+    data = _seed_blocker(cache, reason="deadline")
+    data.update(last_complete_ms=197, last_complete_at=_OBSERVED, last_deadline_allotted_ms=250)
+    cache.write_text(json.dumps(data))
+    set_scan(hu._incomplete("deadline"), {}, False)
+    clock = [1000.0]
+    monkeypatch.setattr(hu.time, "monotonic", lambda: clock[0])
+    if cache == hu.CACHE_PATH:
+        result = hu.read_codex_usage(deadline=1000.4)
+    else:
+        result = hu.read_grok_usage(consented=True, deadline=1000.4)
+    assert result.reason == "deadline"
+    after = json.loads(cache.read_text())
+    assert after["last_reason"] == "deadline"
+    assert after["last_reason_since"] == _OBSERVED
+    assert after["last_deadline_allotted_ms"] == 400
+    assert after["last_complete_ms"] == 197
+    assert diag()["last_deadline_allotted_ms"] == 400
+
+
 @pytest.mark.parametrize("reason", ["unsupported", "partial", None])
 def test_allotment_is_hidden_unless_reason_is_deadline(reader_case, reason):
     _read, cache, diag, _set_scan = reader_case

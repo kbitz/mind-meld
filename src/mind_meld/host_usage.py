@@ -410,10 +410,11 @@ def read_codex_usage(
                 now,
                 over_budget=over_budget,
             )
-            if not learned and not result.complete and prior == carried:
-                # Cache hits are staged too. Only newly learned files or a
-                # changed (reason, since) pair justify rewriting a failed pass.
-                # The pair comparison dates a migrated blocker exactly once.
+            if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
+                # Cache hits are staged too. Only newly learned files, a
+                # changed (reason, since) pair, or changed timing evidence
+                # justify rewriting a failed pass. The pair comparison dates
+                # a migrated blocker exactly once.
                 raise _NoCacheCommit(result)
             # Cache persistence is DECOUPLED from result validity. Whether the
             # scan may be published is one question; whether we learned
@@ -768,9 +769,10 @@ def read_grok_usage(
                 now,
                 over_budget=over_budget,
             )
-            # Failed passes write only newly learned files or a changed pair,
-            # including the first observation of a migrated, undated blocker.
-            if not learned and not result.complete and prior == carried:
+            # Failed passes write only newly learned files, a changed pair,
+            # or changed timing evidence, including the first observation of
+            # a migrated, undated blocker.
+            if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
                 raise _NoCacheCommit(result)
             complete_once = prior_complete or (result.complete and saw_files)
             files = staged_files if result.complete else {**cached_files, **staged_files}
@@ -899,6 +901,23 @@ def _carry_read_timing(
             _MAX_READ_MS, max(0, round((deadline - started) * 1000))
         )
     return {key: value for key, value in timing.items() if value is not None}
+
+
+def _skip_failed_cache_write(
+    learned: bool,
+    result: HostUsageResult,
+    prior: tuple[Reason | None, str | None],
+    carried: tuple[Reason | None, str | None],
+    prior_root: dict[str, Any],
+    timing: dict[str, Any],
+) -> bool:
+    """Skip a failed rewrite only when files, blocker, and timing are unchanged."""
+    if learned or result.complete or prior != carried:
+        return False
+    prior_timing = {
+        key: value for key, value in _cached_read_timing(prior_root).items() if value is not None
+    }
+    return timing == prior_timing
 
 
 def _carry_reason(
