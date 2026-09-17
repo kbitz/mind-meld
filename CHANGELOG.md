@@ -9,9 +9,10 @@ All notable changes to Mind Meld will be documented in this file.
 ### Fixed
 
 - Pull, GC and recapture previews skip config migration, version-transition records and other setup writers. Pull preview also skips old conflict-file migration, excluded-path history and upgrade checks. Migration preview and diff make no lock-file change.
-- Every command has a tested intent classification, every config load states its write policy, and audit tests catch in-process mutation attempts including worker threads. Status reads valid seen-sources state without writes and preserves concurrent acknowledgments during seed recovery. Author-filtered retro-fleet retains its declared identity-cache exception.
+- Every command has a tested intent classification, every config load states its write policy, and audit tests catch in-process mutation attempts including worker threads. Status reads valid seen-sources state without writes, preserves concurrent acknowledgments during seed recovery, and degrades gracefully instead of crashing if its cache can't be stat'd or read. Author-filtered retro-fleet retains its declared identity-cache exception.
 - Pull predictions track canonical state across peers, keeping conflicts from overwriting that virtual state. They account for symlinks, unreadable files, tombstones, exclusions, and file/directory collisions. Two peers changing a mergeable file no longer cause a false `--conflict-mode fail` exit 3. Merges remain an upper bound; blob/decrypt failures are not previewed.
-- Diff applies local exclusions to either comparison target. It compares local files to a stored snapshot; use `mm pull --dry-run` for incoming changes. Recapture distinguishes disabled from unconfigured sources, keeps retry advice in preview mode, and reports partial discovery and walk failures.
+- Diff applies local exclusions to either comparison target. It compares local files to a stored snapshot; use `mm pull --dry-run` for incoming changes. Recapture distinguishes disabled from unconfigured sources, keeps retry advice in preview mode, reports partial discovery and walk failures, and no longer triggers its upgrade-nudge write during `--dry-run`.
+- Fail-mode pull treats FIFOs, sockets and other non-regular local files as a predicted failure instead of trying to hash them, and shares one refusal filter across the rest of fail-mode. Peer-supplied labels in fail-mode and preview output stay terminal-safe.
 
 ### Changed
 
