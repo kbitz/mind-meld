@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mind_meld import resolveflow
+from mind_meld import pullplan, resolveflow
 from mind_meld.cli import (
     _apply_conflict,
     _apply_merge,
@@ -31,6 +31,7 @@ from mind_meld.cli import (
     _PerSourceResult,
     _prefetch_manifests,
     _preflight_conflicts,
+    _print_pull_prediction,
     _prompt_passphrase,
     _prompt_sources,
     _prove_omitted_paths_absent,
@@ -1016,6 +1017,100 @@ class TestPullOneSource:
         )
         assert "old.md" not in downloaded_keys
         assert "keep.md" in downloaded_keys
+
+
+# ── _print_pull_prediction ───────────────────────────────────────────
+#
+# Track 62A rewrote this from a DiffResult-bucketing renderer to a flat
+# iteration over pullplan.PullPrediction.label. No existing test (unit or
+# integration) asserts its actual rendered output — test_pull_preview_output62
+# only pins the negative case ("Dry run for" absent when nothing changed).
+# Assertions avoid the header's interpolated `base_path` (a pytest tmp_path
+# can be long enough to trip Rich's default line-wrap, same reason
+# test_preview_help62 pins COLUMNS=240) and instead check the fixed prefix
+# plus the short per-file label/path tokens, which stay well under the wrap
+# width.
+
+
+class TestPrintPullPrediction:
+    def test_non_unchanged_predictions_render_label_and_path(self, tmp_path: Path, capsys) -> None:
+        predictions = [
+            pullplan.PullPrediction("peerA", "A", "claude", "new.md", "write"),
+            pullplan.PullPrediction(
+                "peerA", "A", "claude", "blocked.md", "may fail", "local file unreadable"
+            ),
+            pullplan.PullPrediction("peerA", "A", "claude", "same-unchanged.md", "unchanged"),
+        ]
+        _print_pull_prediction(predictions, tmp_path, "claude")
+        out = capsys.readouterr().out
+        assert "source 'claude'" in out
+        assert "write" in out
+        assert "new.md" in out
+        assert "may fail (local file unreadable)" in out
+        assert "blocked.md" in out
+        # "unchanged" predictions are the dry-run diff-noise filter — must
+        # never reach the per-file preview lines.
+        assert "same-unchanged.md" not in out
+
+    def test_all_unchanged_prints_only_the_header(self, tmp_path: Path, capsys) -> None:
+        # A short base_path (not the pytest tmp_path fixture, which can be
+        # long enough to wrap under Rich's default width) so the header
+        # renders on exactly one line and a line-count assertion is safe.
+        short_base = Path("/tmp/mm-test")
+        predictions = [
+            pullplan.PullPrediction("peerA", "A", "claude", "same.md", "unchanged"),
+        ]
+        _print_pull_prediction(predictions, short_base, "claude")
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert len(lines) == 1
+        assert "source 'claude'" in lines[0]
+        assert "same.md" not in lines[0]
+
+    def test_empty_predictions_prints_only_the_header(self, tmp_path: Path, capsys) -> None:
+        short_base = Path("/tmp/mm-test")
+        _print_pull_prediction([], short_base, "claude")
+        lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        assert len(lines) == 1
+
+
+# ── pullplan.totals ──────────────────────────────────────────────────
+#
+# test_pull_two_peer_parity62 (test_integration.py) exercises totals()
+# end-to-end, but that assertion is circular: it compares totals(predictions)
+# against a CLI summary line that was ALSO produced by calling totals() on
+# the same predictions, so a bug inside totals() itself would pass both
+# sides. Pin the exact human-readable string against a hand-built list
+# instead, independent of the CLI call site.
+
+
+class TestPullPlanTotals:
+    @staticmethod
+    def _prediction(outcome: str) -> pullplan.PullPrediction:
+        return pullplan.PullPrediction("peerA", "A", "claude", "x.md", outcome)
+
+    def test_empty_predictions(self) -> None:
+        assert pullplan.totals([]) == "No changes predicted."
+
+    def test_all_unchanged_reads_as_no_changes(self) -> None:
+        predictions = [self._prediction("unchanged") for _ in range(3)]
+        assert pullplan.totals(predictions) == "No changes predicted."
+
+    def test_counts_each_outcome_without_may_fail(self) -> None:
+        predictions = (
+            [self._prediction("write")] * 2
+            + [self._prediction("merge")]
+            + [self._prediction("conflict")] * 3
+            + [self._prediction("skip")] * 2
+            + [self._prediction("unchanged")]
+        )
+        assert pullplan.totals(predictions) == "Would write 2, merge up to 1, conflict 3; 2 skipped"
+
+    def test_appends_may_fail_only_when_present(self) -> None:
+        predictions = [self._prediction("write"), self._prediction("may fail")]
+        assert (
+            pullplan.totals(predictions)
+            == "Would write 1, merge up to 0, conflict 0; 0 skipped; 1 may fail"
+        )
 
 
 # ── _fsync_touched_parents ───────────────────────────────────────────

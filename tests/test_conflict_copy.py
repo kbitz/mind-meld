@@ -768,6 +768,33 @@ class TestGcOldConflictFiles:
         assert after.st_mode & 0o777 == before.st_mode & 0o777
         assert after.st_mtime_ns == before.st_mtime_ns
 
+    def test_scan_oserror_is_skipped_not_raised(self, monkeypatch, capsys) -> None:
+        """resolveflow._find_conflict_files raising OSError (e.g. a source
+        root that vanished mid-scan) must degrade to skipped=1, never crash
+        `mm gc`. Track 62A threaded a `note` (--conflicts hint) through this
+        branch's _render_reap_outcome call, but no test exercised the branch
+        itself before or after — pin both the degrade and the note.
+        """
+        config = {"sync": {"sources": []}}
+
+        def boom(cfg, **kwargs):
+            raise OSError("scan root vanished")
+
+        monkeypatch.setattr(resolveflow, "_find_conflict_files", boom)
+        outcome = _gc_old_conflict_files(
+            config, dry_run=True, verbose=True, deletion_requires_flag=True
+        )
+        assert (outcome.candidates, outcome.deleted, outcome.failed, outcome.skipped) == (
+            0,
+            0,
+            0,
+            1,
+        )
+        text = " ".join(capsys.readouterr().out.split())
+        assert "conflict scan skipped: scan root vanished" in text
+        assert "Conflicts dry-run: candidates=0 repairs=0 skipped=1" in text
+        assert "(deletion requires --conflicts)" in text
+
     def test_unlink_failure_is_counted(self, tmp_path: Path, monkeypatch) -> None:
         src = tmp_path / "src"
         conflict = src / "memory" / "a.sync-conflict-20000101-000000-devA1234.md"
