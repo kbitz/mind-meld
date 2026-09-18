@@ -2,6 +2,26 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.16] - 2026-09-17
+
+**Warm Codex reads use less of the autopush budget, and attended captures publish their warm read.** Per-Mac read budgets and last-complete-read diagnostics make continuing capture headroom visible.
+
+### Fixed
+
+- An attended push, init or `mm push --capture-usage` now publishes the completed warm read itself, preserving its totals and partial/empty coverage. There is no second bounded read. Warm failures replace the initial deadline with their actual reason; completed siblings survive. Autopush still never warms.
+- Codex validation and reduction preserve the shipped accept/reject set, totals and insertion order, verified against a frozen v0.14.15 oracle, 200 seeded lineages and the live corpus. Cached entries validate once per pass, fingerprints use one descriptor, and cache keys resolve the sessions root once. Both readers pause cyclic GC and restore the caller's state on every exit.
+- A complete-but-late read now records `deadline`, its allotted time and its last complete read, while committing the complete cache and pruning deleted files. It replaces a prior `unsupported` blocker; an incomplete transient pass still preserves permanent blockers. Only an in-budget completion clears the blocker.
+
+### Added
+
+- `[retro] host_usage_autopush_budget_ms` (100–5,000, default 250) and `host_usage_interactive_budget_ms` (250–5,000, default 500). Effective autopush must not exceed interactive. Invalid values stop sync; larger values trade autopush latency for headroom. The attended 5-second warm remains independent.
+- `mm diag` shows each reader's last complete read and age, effective budget sources, and a consent-scoped sweep estimate excluding writes/grace. JSON adds top-level `host_read_budgets` plus `last_complete_ms`, `last_complete_at` and `last_deadline_allotted_ms` for both readers. Unknown/future values are explicit. Deadline remedies distinguish a slow warm read from an attempt that needs a refresh.
+
+### Changed
+
+- Both host caches write compact JSON without a version bump; older indented caches remain readable. Healthy passes still write. A one-time usage refresh ages if all readers later fail; a newer mixed-reader row supersedes coverage and may omit a failed reader. README gives producing-Mac recovery and publication checks.
+- Qualification on **2026-09-17, device `3a6c7dc9`**, scratch branch wheel using the pipx interpreter, never the live pipx venv: `sys.version = 3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]`. On 1,066 rollouts / 84,910 states, three warm 250 ms reads completed at **168.26 / 166.66 / 166.90 ms before serialization** (196.13 / 194.52 / 194.65 ms total). Empty-cache read: **2,949.68 ms before serialization**, complete within 5 s. The supplied budget probe changed from 3/3 warm deadlines to 3/3 complete; its first cold-ish attempt took 509 ms. The phase probe's cold-ish cache-copy pass was about 211.9 ms before serialization; comparable warm pre-serialization time fell from about **369.8 to 173.2 ms** (validation 106.1→32.8 ms, reduction 170.1→70.1 ms). Live-corpus ordered totals were byte-identical. Pausing GC saved a median **70.77 ms** on this interpreter; no Python 3.13 saving is assumed. Full phase table, methods and cooperative reduction bound are in `docs/invariants/events-retro.md`; raw probe logs are in `~/scratch/track-63a/`. These are recorded measurements, not a merge gate: the budget lever covers Macs that miss the default.
+
 ## [0.14.15] - 2026-09-16
 
 **Previews now leave files and storage untouched, with only their declared local lock allowance.** Pull forecasts account for successive peers, and inspection commands defer upgrade bookkeeping.

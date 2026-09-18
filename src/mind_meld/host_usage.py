@@ -61,13 +61,14 @@ consecutive scans and zero bytes cached. A COMPLETE pass replaces the map
 (that is what prunes deleted rollouts); a PARTIAL pass MERGES, because
 replacing would delete entries it never reached and pruning on a listing it
 never finished would drop files that were never absent. ``warm_host_cache_inline``
-is the attended-command escape hatch for the first cold scan; the bounded
-callers still publish only from a bounded read.
+is the attended-command escape hatch for a deadline miss. Attended callers
+publish that warm read's result; unattended callers keep their short budget.
 """
 
 from __future__ import annotations
 
 import errno
+import gc
 import hashlib
 import json
 import os
@@ -75,11 +76,11 @@ import re
 import stat
 import sys
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, TypedDict, get_args
+from typing import Any, BinaryIO, Iterator, Literal, TypedDict, get_args
 
 from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.token_usage import (
@@ -247,17 +248,13 @@ class _CacheEntry(TypedDict, total=False):
     resumed segment inherits, and ``pending`` holds ledgers observed before any
     ``turn_context`` — which a segment boundary can otherwise strand.
 
-    **This entry is much larger than the terminal it replaced, and that cost is
-    the reason the string columns are interned.** Measured on a 747-rollout /
-    694 MB corpus: 72,654 states, median 17 per file and 1,234 at the maximum.
-    Spelled out, the cache was 23.4 MB and its json round-trip alone was 95 ms
-    of the 250 ms autopush host budget. Interning ``turn_ids`` / ``days`` /
-    ``models`` and keeping ``last`` only on a file's FIRST state (the only place
-    ``_aggregate`` reads it) brings that to 13.5 MB and 56 ms. Still 34x the
-    v0.12.47 cache, and it grows with the corpus. Encoding work is deferred
-    until "Host cache encoding trigger" in ``docs/roadmap-future.md`` fires:
-    25 MB or 100 ms json round-trip. Measured 2026-09-04
-    at 4.11 MB / 23.3 ms / 20,047 states / 716 rollouts, about 6x headroom.
+    **String columns stay interned because this graph is large.** Track 63A
+    measured 84,910 states across 1,066 rollouts on device 3a6c7dc9,
+    2026-09-17, Python 3.14.7. Compact JSON was 4,040,684 bytes; the prior
+    1,053-entry cache was 15,870,126 bytes indented / 4,027,507 compact.
+    Warm reads took 166.66–168.26 ms before serialization. The separate
+    encoding follow-up's 25 MB trigger now refers to compact bytes; see
+    docs/invariants/events-retro.md for the phase split and interpreter.
     """
 
     dev: int
@@ -348,6 +345,19 @@ def host_family(model: str) -> HostFamily:
     return "other"
 
 
+@contextmanager
+def _pause_gc() -> Iterator[None]:
+    """Avoid repeated cyclic-GC scans of short-lived reader graphs."""
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
+
+
+@_pause_gc()
 def read_codex_usage(
     root: Path | None = None,
     *,
@@ -360,8 +370,9 @@ def read_codex_usage(
     Cache contention is a single non-blocking attempt, never the normal
     750ms locked-json retry budget.
     """
+    started = time.monotonic()
     source_root = root if root is not None else CODEX_SESSIONS_PATH
-    read_deadline = deadline if deadline is not None else time.monotonic() + DEFAULT_READ_BUDGET_S
+    read_deadline = deadline if deadline is not None else started + DEFAULT_READ_BUDGET_S
     if _expired(read_deadline):
         return _incomplete("deadline")
 
@@ -369,6 +380,7 @@ def read_codex_usage(
         with locked_json_rmw(
             CACHE_PATH,
             mode=0o600,
+            compact=True,
             default_factory=_empty_cache,
             retry_intervals=(),
             on_contention="warn",
@@ -384,11 +396,25 @@ def read_codex_usage(
                 result, staged_files, learned = _scan_codex_root(
                     source_root, cached_files, read_deadline
                 )
-            carried = _carry_reason(*prior, result, datetime.now(timezone.utc))
-            if not learned and not result.complete and prior == carried:
-                # Cache hits are staged too. Only newly learned files or a
-                # changed (reason, since) pair justify rewriting a failed pass.
-                # The pair comparison dates a migrated blocker exactly once.
+            ready = time.monotonic()
+            over_budget = result.complete and _expired(read_deadline)
+            now = datetime.now(timezone.utc)
+            carried = _carry_reason(*prior, result, now, over_budget=over_budget)
+            timing = _carry_read_timing(
+                locked.data,
+                result,
+                carried[0],
+                started,
+                ready,
+                read_deadline,
+                now,
+                over_budget=over_budget,
+            )
+            if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
+                # Cache hits are staged too. Only newly learned files, a
+                # changed (reason, since) pair, or changed timing evidence
+                # justify rewriting a failed pass. The pair comparison dates
+                # a migrated blocker exactly once.
                 raise _NoCacheCommit(result)
             # Cache persistence is DECOUPLED from result validity. Whether the
             # scan may be published is one question; whether we learned
@@ -399,6 +425,7 @@ def read_codex_usage(
             # attempt 1 did. Measured on a 452-rollout Mac: six consecutive
             # bounded scans, zero bytes cached.
             locked.data = {
+                **timing,
                 "version": CACHE_VERSION,
                 "last_reason": carried[0],
                 "last_reason_since": carried[1],
@@ -413,7 +440,7 @@ def read_codex_usage(
                 # head+tail fingerprint before it is trusted.
                 "files": staged_files if result.complete else {**cached_files, **staged_files},
             }
-            if result.complete and _expired(read_deadline):
+            if over_budget:
                 # The scan finished but overran its budget: refuse to publish
                 # (unchanged), yet keep the cache above so the work counts.
                 result = _incomplete("deadline")
@@ -431,21 +458,17 @@ def warm_host_cache_inline(
     budget_s: float = DEFAULT_READ_BUDGET_S,
     reader: str = "codex",
 ) -> HostUsageResult:
-    """Populate the host cache under a generous one-off budget.
+    """Read host usage under the attended caller's generous one-off budget.
 
-    The push tail's per-capture budget (250ms autopush / 500ms interactive) is
-    sized for a WARM read, and a cold scan of a large corpus does not fit —
-    573ms measured across 452 rollouts. Partial commits make a cold machine
-    converge over a few pushes on their own; this makes it happen once,
-    visibly, on an attended command instead. Mirrors
-    ``token_usage.warm_token_cache_inline``.
+    The result is the retry: attended capture publishes it through the usual
+    reader failure boundary, without a second short-budget read. Autopush
+    never calls this helper; its partial commits converge across pushes.
+    ``reader`` selects a name in ``events_tail.WARMABLE_HOST_READERS``.
 
-    ``reader`` selects which incremental cache to warm. Only names in
-    ``events_tail.WARMABLE_HOST_READERS`` have one.
-
-    The result is returned for tests and callers that want it, but the point is
-    the side effect. Callers must still publish from a bounded capture, so this
-    never becomes a back door around the explicit-deadline rule.
+    2026-09-17, device 3a6c7dc9, Python 3.14.7: an empty-cache parse of
+    1,066 rollouts took 2,949.68 ms before serialization; warm reads took
+    166.66–168.26 ms. The 5 s allowance is cooperative, not an end-to-end
+    ceiling. Full interpreter and phase measurements: events-retro.md.
     """
     deadline = time.monotonic() + budget_s
     if reader == "grok":
@@ -483,6 +506,7 @@ def codex_usage_diag() -> dict[str, Any]:
     disk that no cache entry covers yet.
     """
     blank = {
+        **_cached_read_timing({}),
         "cache_state": "missing",
         "state": "cold",
         "files_cached": 0,
@@ -543,6 +567,7 @@ def codex_usage_diag() -> dict[str, Any]:
         "pending": None if on_disk is None else max(0, on_disk - cached),
         "model_count": models["model_count"],
         "models": models["models"],
+        **_cached_read_timing(data),
         "last_reason": _cached_last_reason(data),
         "last_reason_since": _cached_reason_since(data),
     }
@@ -557,6 +582,7 @@ def grok_usage_diag() -> dict[str, Any]:
     """
     on_disk = _count_two_level_ledgers(grok_sessions_root())
     blank = {
+        **_cached_read_timing({}),
         "complete_once": False,
         "usage_less_skipped": 0,
         "last_reason": None,
@@ -587,6 +613,7 @@ def grok_usage_diag() -> dict[str, Any]:
     return {
         "complete_once": data.get("complete_once") is True,
         "usage_less_skipped": skipped,
+        **_cached_read_timing(data),
         "last_reason": _cached_last_reason(data),
         "last_reason_since": _cached_reason_since(data),
         "cache_state": "ok",
@@ -684,6 +711,7 @@ def _count_two_level_ledgers(root: Path) -> int | None:
         return None
 
 
+@_pause_gc()
 def read_grok_usage(
     root: Path | None = None,
     *,
@@ -695,10 +723,11 @@ def read_grok_usage(
     Closed by default: ``consented=False`` does not stat or open the store.
     A caller that has the local opt-in must pass ``consented=True``.
     """
+    started = time.monotonic()
     if not consented:
         return _incomplete("no_metadata_ledger")
     source_root = root if root is not None else grok_sessions_root()
-    read_deadline = deadline if deadline is not None else time.monotonic() + DEFAULT_READ_BUDGET_S
+    read_deadline = deadline if deadline is not None else started + DEFAULT_READ_BUDGET_S
     if _expired(read_deadline):
         return _incomplete("deadline")
 
@@ -706,6 +735,7 @@ def read_grok_usage(
         with locked_json_rmw(
             GROK_CACHE_PATH,
             mode=0o600,
+            compact=True,
             default_factory=_empty_grok_cache,
             retry_intervals=(),
             on_contention="warn",
@@ -725,10 +755,24 @@ def read_grok_usage(
                 result, staged_files, learned, saw_files = _scan_grok_root(
                     source_root, cached_files, read_deadline
                 )
-            carried = _carry_reason(*prior, result, datetime.now(timezone.utc))
-            # Failed passes write only newly learned files or a changed pair,
-            # including the first observation of a migrated, undated blocker.
-            if not learned and not result.complete and prior == carried:
+            ready = time.monotonic()
+            over_budget = result.complete and _expired(read_deadline)
+            now = datetime.now(timezone.utc)
+            carried = _carry_reason(*prior, result, now, over_budget=over_budget)
+            timing = _carry_read_timing(
+                locked.data,
+                result,
+                carried[0],
+                started,
+                ready,
+                read_deadline,
+                now,
+                over_budget=over_budget,
+            )
+            # Failed passes write only newly learned files, a changed pair,
+            # or changed timing evidence, including the first observation of
+            # a migrated, undated blocker.
+            if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
                 raise _NoCacheCommit(result)
             complete_once = prior_complete or (result.complete and saw_files)
             files = staged_files if result.complete else {**cached_files, **staged_files}
@@ -743,6 +787,7 @@ def read_grok_usage(
                 and _is_nonnegative_int(entry.get("usage_less_skipped", 0))
             )
             locked.data = {
+                **timing,
                 "version": CACHE_VERSION,
                 "complete_once": complete_once,
                 "usage_less_skipped": skip_total,
@@ -750,7 +795,7 @@ def read_grok_usage(
                 "last_reason_since": carried[1],
                 "files": files,
             }
-            if result.complete and _expired(read_deadline):
+            if over_budget:
                 result = _incomplete("deadline")
         _notice_cache_write_failure(locked.write_error)
         return result
@@ -793,7 +838,13 @@ def _cached_reason_since(data: dict[str, Any]) -> str | None:
     """
     if _cached_last_reason(data) is None:
         return None
-    raw = data.get("last_reason_since")
+    return _cached_timestamp(data, "last_reason_since")
+
+
+def _cached_timestamp(data: dict[str, Any], key: str) -> str | None:
+    if data.get("version") != CACHE_VERSION:
+        return None
+    raw = data.get(key)
     if not isinstance(raw, str) or len(raw) > _MAX_REASON_SINCE_CHARS or not raw.isascii():
         return None
     try:
@@ -805,21 +856,92 @@ def _cached_reason_since(data: dict[str, Any]) -> str | None:
     return None
 
 
+_MAX_READ_MS = 86_400_000
+
+
+def _cached_read_ms(data: dict[str, Any], key: str) -> int | None:
+    raw = data.get(key)
+    if data.get("version") == CACHE_VERSION and type(raw) is int and 0 <= raw <= _MAX_READ_MS:
+        return raw
+    return None
+
+
+def _cached_read_timing(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "last_complete_ms": _cached_read_ms(data, "last_complete_ms"),
+        "last_complete_at": _cached_timestamp(data, "last_complete_at"),
+        "last_deadline_allotted_ms": (
+            _cached_read_ms(data, "last_deadline_allotted_ms")
+            if _cached_last_reason(data) == "deadline"
+            else None
+        ),
+    }
+
+
+def _carry_read_timing(
+    prior: dict[str, Any],
+    result: HostUsageResult,
+    reason: Reason | None,
+    started: float,
+    ready: float,
+    deadline: float,
+    now: datetime,
+    *,
+    over_budget: bool,
+) -> dict[str, Any]:
+    """Carry validated metadata on partial writes; measure before serialization."""
+    timing = _cached_read_timing(prior)
+    if result.complete:
+        timing["last_complete_ms"] = min(_MAX_READ_MS, max(0, round((ready - started) * 1000)))
+        timing["last_complete_at"] = now.isoformat(timespec="seconds")
+    if reason != "deadline":
+        timing.pop("last_deadline_allotted_ms", None)
+    elif over_budget or result.reason == "deadline":
+        timing["last_deadline_allotted_ms"] = min(
+            _MAX_READ_MS, max(0, round((deadline - started) * 1000))
+        )
+    return {key: value for key, value in timing.items() if value is not None}
+
+
+def _skip_failed_cache_write(
+    learned: bool,
+    result: HostUsageResult,
+    prior: tuple[Reason | None, str | None],
+    carried: tuple[Reason | None, str | None],
+    prior_root: dict[str, Any],
+    timing: dict[str, Any],
+) -> bool:
+    """Skip a failed rewrite only when files, blocker, and timing are unchanged."""
+    if learned or result.complete or prior != carried:
+        return False
+    prior_timing = {
+        key: value for key, value in _cached_read_timing(prior_root).items() if value is not None
+    }
+    return timing == prior_timing
+
+
 def _carry_reason(
     prior_reason: Reason | None,
     prior_since: str | None,
     result: HostUsageResult,
     now: datetime,
+    *,
+    over_budget: bool = False,
 ) -> tuple[Reason | None, str | None]:
     """Carry the standing read blocker, not the latest publication outcome.
 
-    A complete read clears it, even if publication then overruns its budget.
+    A complete in-budget read clears it. A complete late read proves any
+    permanent blocker gone, but records deadline as the current blocker.
     A permanent blocker survives later transient failures until a read completes.
     Locked/absent attempts cannot persist. ``now`` dates this version's first
     observation of the current reason, never the original onset of an outage.
     Callers validate prior fields and compare the pair when deciding to write.
     """
     if result.complete:
+        if over_budget:
+            return "deadline", (
+                prior_since if prior_reason == "deadline" and prior_since else now.isoformat()
+            )
         return None, None
     if result.reason not in PERSISTABLE_REASONS:
         return prior_reason, prior_since
@@ -845,15 +967,16 @@ def _scan_grok_root(
     except _ReadFailure as failure:
         return _incomplete(failure.reason), {}, False, False
 
+    canonical_root = root.resolve()
     staged: dict[str, Any] = {}
     learned = False
     for workspace, session_id, path in ledgers:
         if _expired(deadline):
             return _incomplete("deadline"), staged, learned, True
-        key = _cache_key(path)
+        key = _cache_key(path, root=root, canonical_root=canonical_root)
         try:
             before = _regular_stat(path)
-            existing = cached_files.get(key)
+            existing = _validated_grok_entry(cached_files.get(key))
             entry = _grok_cache_hit(path, before, existing, deadline)
             if entry is None:
                 resume = _grok_resumable_entry(path, before, existing, deadline)
@@ -903,10 +1026,9 @@ def _iter_grok_ledgers(root: Path, deadline: float):
 def _grok_cache_hit(
     path: Path,
     before: os.stat_result,
-    existing: Any,
+    entry: dict[str, Any] | None,
     deadline: float,
 ) -> dict[str, Any] | None:
-    entry = _validated_grok_entry(existing)
     if entry is None:
         return None
     if not _same_cache_metadata(entry, before):  # type: ignore[arg-type]
@@ -922,10 +1044,9 @@ def _grok_cache_hit(
 def _grok_resumable_entry(
     path: Path,
     source: os.stat_result,
-    existing: Any,
+    entry: dict[str, Any] | None,
     deadline: float,
 ) -> dict[str, Any] | None:
-    entry = _validated_grok_entry(existing)
     if entry is None:
         return None
     if entry["dev"] != source.st_dev or entry["ino"] != source.st_ino:
@@ -1204,17 +1325,17 @@ def _normalize_inclusive_usage(usage: Usage) -> Usage:
     filesystem resume primitives only after measuring duplication cost" in
     ``docs/roadmap-future.md`` before extracting shared reader code.
     """
-    input_tokens = usage["input"]
-    cache_create = usage["cache_create"]
-    cache_read = usage["cache_read"]
+    return dict(
+        zip(TOKEN_FIELDS, _normalize_inclusive_counters(tuple(usage[key] for key in TOKEN_FIELDS)))
+    )
+
+
+def _normalize_inclusive_counters(counters: tuple[int, ...]) -> tuple[int, ...]:
+    """Single normalization rule for both the tuple and mapping consumers."""
+    input_tokens, cache_create, cache_read, output = counters
     if cache_read + cache_create > input_tokens:
         raise _ReadFailure("malformed")
-    return {
-        "input": input_tokens - cache_read - cache_create,
-        "cache_create": cache_create,
-        "cache_read": cache_read,
-        "output": usage["output"],
-    }
+    return input_tokens - cache_read - cache_create, cache_create, cache_read, output
 
 
 def _validate_grok_counters(usage: dict[str, Any]) -> Usage:
@@ -1392,15 +1513,16 @@ def _scan_codex_root(
     except _ReadFailure as failure:
         return _incomplete(failure.reason), {}, False
 
+    canonical_root = root.resolve()
     staged: dict[str, _CacheEntry] = {}
     learned = False
     for path in rollouts:
         if _expired(deadline):
             return _incomplete("deadline"), staged, learned
-        key = _cache_key(path)
+        key = _cache_key(path, root=root, canonical_root=canonical_root)
         try:
             before = _regular_stat(path)
-            existing = cached_files.get(key)
+            existing = _validated_entry(cached_files.get(key))
             entry = _cache_hit(path, before, existing, deadline)
             if entry is None:  # cache miss
                 resume = _resumable_entry(path, before, existing, deadline)
@@ -1512,10 +1634,9 @@ def _read_full_rollout(path: Path, before: os.stat_result, deadline: float) -> _
 def _cache_hit(
     path: Path,
     before: os.stat_result,
-    existing: Any,
+    entry: _CacheEntry | None,
     deadline: float,
 ) -> _CacheEntry | None:
-    entry = _validated_entry(existing)
     if entry is None:
         return None
     if not _same_cache_metadata(entry, before):
@@ -1531,7 +1652,7 @@ def _cache_hit(
 def _resumable_entry(
     path: Path,
     source: os.stat_result,
-    existing: Any,
+    entry: _CacheEntry | None,
     deadline: float,
 ) -> _CacheEntry | None:
     """Return a prior entry only when this is a verified append.
@@ -1540,7 +1661,6 @@ def _resumable_entry(
     This catches common same-path rewrites before using the complete-line
     offset. Any doubt falls back to a bounded full parse.
     """
-    entry = _validated_entry(existing)
     if entry is None:
         return None
     if entry.get("no_ledger"):
@@ -1979,20 +2099,29 @@ def _aggregate(entries: Any) -> HostUsageBuckets:
                 reached.setdefault((root, total), set()).add(position)
             seen.setdefault((root, previous, total), (day, model, increment, position))
             previous = total
+    # Normalize EACH increment before grouping; malformed must fail in the
+    # same order as the ungrouped reducer. First-seen (day, model) order also
+    # preserves insertion order in both output views, including zero buckets.
+    accumulated: dict[tuple[str, str], list[int]] = {}
     for (root, previous, total), (day, model, increment, position) in seen.items():
-        if previous is None and (reached.get((root, total), set()) - {position}):
-            # A resumed or forked file OPENS at a cumulative that some other
-            # file in this lineage already arrived at by spending tokens. That
-            # arrival transition already counted the work, so charging this
-            # file's `last_token_usage` on top double-counts it. Measured: 1 of
-            # 747 rollouts on a real corpus, so rare, but an opening has no
-            # predecessor and therefore no transition identity of its own —
-            # this is the only thing that can disambiguate it.
-            continue
-        usage = _normalize_inclusive_usage(dict(zip(TOKEN_FIELDS, increment)))
-        if usage["cache_create"] > 0:
+        if previous is None:
+            others = reached.get((root, total))
+            if others and (others - {position}):
+                # Another file already paid for this opening transition.
+                continue
+        values = _normalize_inclusive_counters(increment)
+        _uncached, cache_create, _cache_read, _output = values
+        if cache_create > 0:
             buckets.unattributable_days.add(day)
-        _add_usage(buckets, day, model, usage)
+        key = (day, model)
+        slot = accumulated.get(key)
+        if slot is None:
+            accumulated[key] = list(values)
+        else:
+            for index, value in enumerate(values):
+                slot[index] += value
+    for (day, model), values in accumulated.items():
+        _add_usage(buckets, day, model, dict(zip(TOKEN_FIELDS, values)))
     return buckets
 
 
@@ -2209,35 +2338,21 @@ def _empty_cache() -> dict[str, Any]:
 
 
 def _validated_entry(value: Any) -> _CacheEntry | None:
+    """Validate a cached rollout, preserving the v0.14.15 JSON contract."""
     if not isinstance(value, dict):
         return None
-    integer_keys = ("dev", "ino", "size", "mtime_ns", "head_len", "tail_len", "offset")
-    if any(not _is_nonnegative_int(value.get(key)) for key in integer_keys):
-        return None
+    for key in ("dev", "ino", "size", "mtime_ns", "head_len", "tail_len", "offset"):
+        v = value.get(key)
+        if type(v) is not int or v < 0:
+            return None
     if value["offset"] != value["size"]:
         return None
     if not isinstance(value.get("head"), str) or not isinstance(value.get("tail"), str):
         return None
     if value.get("no_ledger") is True:
-        # Identity + fingerprint only, and normalized to exactly that: any
-        # day/model/usage riding along on a no_ledger entry is dropped rather
-        # than trusted, so a hand-edited cache cannot smuggle totals in behind
-        # the flag `_aggregate` uses to skip it.
-        entry: _CacheEntry = {
-            **_identity_fields_from(value),  # type: ignore[typeddict-item]
-            "no_ledger": True,
-        }
-        return entry
+        return {**_identity_fields_from(value), "no_ledger": True}
     raw_states = value.get("states")
     if not isinstance(raw_states, list) or not raw_states:
-        # ABSENCE is the pre-Track discriminator: an entry written before
-        # per-turn accounting carries `day`/`model`/`usage` and cannot seed a
-        # resume (it has no cumulative baseline, turn id, or pending buffer).
-        # Rejecting it forces exactly one full re-walk of that file. Measured
-        # cost on a 746-file / 694 MB corpus: 801 ms cold, so 3 to 6 passes at
-        # the 250 ms autopush budget — the same convergence v0.12.47 shipped.
-        # NOT a CACHE_VERSION bump: that constant is shared with the Grok
-        # namespace and would discard it too.
         return None
     turn_ids = _validated_table(value.get("turn_ids"), _MAX_PROMPT_ID_BYTES, allow_empty=True)
     days = _validated_table(value.get("days"), 32)
@@ -2246,69 +2361,53 @@ def _validated_entry(value: Any) -> _CacheEntry | None:
         return None
     if any(not _validated_day(day) for day in days):
         return None
-    states: list[list[Any]] = []
+    nt, nd, nm = len(turn_ids), len(days), len(models)
+    states = []
+    append = states.append
     for raw in raw_states:
-        parsed = _validated_state(raw, len(turn_ids), len(days), len(models))
-        if parsed is None:
+        if not isinstance(raw, list) or len(raw) != 5:
             return None
-        states.append(parsed)
-    pending: list[list[Any]] = []
+        turn, total, day, model, last = raw
+        if type(turn) is not int or not 0 <= turn < nt:
+            return None
+        if type(day) is not int or not 0 <= day < nd:
+            return None
+        if type(model) is not int or not 0 <= model < nm:
+            return None
+        if not _counter_list_ok(total):
+            return None
+        if last is not None and not _counter_list_ok(last):
+            return None
+        append([turn, list(total), day, model, None if last is None else list(last)])
+    pending = []
     for raw in value.get("pending") or ():
         parsed_pending = _validated_pending(raw)
         if parsed_pending is None:
             return None
         pending.append(parsed_pending)
-    entry_out: _CacheEntry = {
-        **_identity_fields_from(value),  # type: ignore[typeddict-item]
+    out = {
+        **_identity_fields_from(value),
         "turn_ids": turn_ids,
         "days": days,
         "models": models,
         "states": states,
-        # Bounded like any other turn id: `last_turn` is carried into a resumed
-        # walk and becomes a lineage key, so an unbounded string here would be
-        # an unbounded key from a hand-edited cache.
         "last_turn": _validated_turn_id(value.get("last_turn")),
     }
     if pending:
-        entry_out["pending"] = pending
+        out["pending"] = pending
     last_total = _validated_counter_list(value.get("last_total"))
     if last_total is not None:
-        entry_out["last_total"] = last_total
+        out["last_total"] = last_total
     model = value.get("last_model")
     if isinstance(model, str) and model and len(model.encode("utf-8")) <= _MAX_MODEL_ID_BYTES:
-        entry_out["last_model"] = model
-    return entry_out
-
-
-def _validated_state(raw: Any, n_turns: int, n_days: int, n_models: int) -> list[Any] | None:
-    """Validate one stored row. String columns are INDICES into the entry's
-    interned tables, so the bound check is the trust boundary: an out-of-range
-    index from a hand-edited cache would otherwise raise IndexError out of
-    `_aggregate` rather than falling back to a re-parse."""
-    if not isinstance(raw, list) or len(raw) != 5:
-        return None
-    turn, total, day, model, last = raw
-    if not _index_in_range(turn, n_turns):
-        return None
-    if not _index_in_range(day, n_days) or not _index_in_range(model, n_models):
-        return None
-    counters = _validated_counter_list(total)
-    if counters is None:
-        return None
-    last_counters = None if last is None else _validated_counter_list(last)
-    if last is not None and last_counters is None:
-        return None
-    return [turn, counters, day, model, last_counters]
+        out["last_model"] = model
+    return out
 
 
 def _validated_turn_id(value: Any) -> str:
     if not isinstance(value, str) or len(value.encode("utf-8")) > _MAX_PROMPT_ID_BYTES:
         return ""
     return value
-
-
-def _index_in_range(value: Any, size: int) -> bool:
-    return _is_nonnegative_int(value) and value < size
 
 
 def _validated_table(raw: Any, max_bytes: int, *, allow_empty: bool = False) -> list[str] | None:
@@ -2339,10 +2438,18 @@ def _validated_pending(raw: Any) -> list[Any] | None:
     return [counters, day, last_counters]
 
 
+def _counter_list_ok(raw: Any) -> bool:
+    # JSON-decoded counters and fresh parses contain only plain ints. bool is
+    # deliberately rejected, even though it subclasses int.
+    return (
+        isinstance(raw, list)
+        and len(raw) == len(TOKEN_FIELDS)
+        and all(type(value) is int and 0 <= value <= _MAX_COUNTER for value in raw)
+    )
+
+
 def _validated_counter_list(raw: Any) -> list[int] | None:
-    if not isinstance(raw, list) or len(raw) != len(TOKEN_FIELDS):
-        return None
-    if any(not _is_valid_counter(v) for v in raw):
+    if not _counter_list_ok(raw):
         return None
     return list(raw)
 
@@ -2396,12 +2503,16 @@ def _fingerprint(path: Path, source: os.stat_result, deadline: float) -> _Finger
         raise _ReadFailure("deadline")
     head_len = min(source.st_size, _HEAD_PROBE_BYTES)
     tail_len = min(source.st_size, _TAIL_PROBE_BYTES)
-    return _Fingerprint(
-        _digest_range(path, 0, head_len, deadline),
-        head_len,
-        _digest_range(path, source.st_size - tail_len, tail_len, deadline),
-        tail_len,
-    )
+    try:
+        with path.open("rb") as fp:
+            return _Fingerprint(
+                _digest_open_range(fp, 0, head_len, deadline),
+                head_len,
+                _digest_open_range(fp, source.st_size - tail_len, tail_len, deadline),
+                tail_len,
+            )
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
 
 
 def _digest_range(path: Path, offset: int, length: int, deadline: float) -> str:
@@ -2410,10 +2521,16 @@ def _digest_range(path: Path, offset: int, length: int, deadline: float) -> str:
         raise _ReadFailure("deadline")
     try:
         with path.open("rb") as fp:
-            fp.seek(offset)
-            data = fp.read(length)
+            return _digest_open_range(fp, offset, length, deadline)
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
+
+
+def _digest_open_range(fp: BinaryIO, offset: int, length: int, deadline: float) -> str:
+    if _expired(deadline):
+        raise _ReadFailure("deadline")
+    fp.seek(offset)
+    data = fp.read(length)
     if _expired(deadline):
         raise _ReadFailure("deadline")
     if len(data) != length:
@@ -2440,8 +2557,15 @@ def _same_source(left: os.stat_result, right: os.stat_result) -> bool:
     )
 
 
-def _cache_key(path: Path) -> str:
-    """Hash the canonical path; cache data must not retain a raw local path."""
+def _cache_key(path: Path, *, root: Path | None = None, canonical_root: Path | None = None) -> str:
+    """Hash resolve(root) / relative for walker-verified non-symlink descendants.
+
+    Resolve the root once per scan. The fallback supports standalone callers;
+    raw paths never enter the cache. Descendant symlinks stay excluded by both
+    walkers, and a symlinked Codex sessions root preserves the canonical key.
+    """
+    if root is not None and canonical_root is not None:
+        return hashlib.sha256(os.fsencode(canonical_root / path.relative_to(root))).hexdigest()
     with suppress(OSError):
         return hashlib.sha256(os.fsencode(path.resolve())).hexdigest()
     return hashlib.sha256(os.fsencode(path.absolute())).hexdigest()

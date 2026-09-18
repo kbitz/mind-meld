@@ -13,6 +13,8 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from mind_meld import events as _mm_events
 from mind_meld import events_tail
 from mind_meld import identity as _mm_identity
@@ -440,3 +442,82 @@ class TestRootDiscoveryHandoffAndDegradation:
         # absence of writes.
         assert [row["type"] for rows in writes for row in rows] == ["host-usage-snapshot"]
         assert "initial retro capture may omit repositories" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize(
+    "site,interactive",
+    [
+        ("snapshot", False),
+        ("snapshot", True),
+        ("tail", False),
+        ("tail", True),
+        ("backfill", True),
+        ("requested", True),
+    ],
+)
+def test_all_host_budget_sites_use_resolver(site, interactive, configured, tmp_path, monkeypatch):
+    from mind_meld import cli
+
+    sources = _make_sources(tmp_path / "events")
+    config = {"device": {"id": "dev-a"}, "sync": {"sources": sources}}
+    if configured:
+        config["retro"] = {
+            "host_usage_autopush_budget_ms": 350,
+            "host_usage_interactive_budget_ms": 700,
+        }
+    expected = (700 if interactive else 350) if configured else (500 if interactive else 250)
+    assert events_tail.resolve_host_read_budget(config, interactive=interactive) == (
+        expected,
+        "config" if configured else "default",
+    )
+    seen = []
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs["host_budget_ms"])
+        return events_tail.HostUsageCapture(None), []
+
+    monkeypatch.setattr(events_tail, "_capture_host_snapshot", capture)
+    _stub_fast_walks(monkeypatch)
+    monkeypatch.setattr(_mm_identity, "gather_local_identities", lambda **kwargs: [])
+    monkeypatch.setattr(_mm_identity, "refresh_identity_cache", lambda **kwargs: [])
+    if site == "snapshot":
+        events_tail._capture_event_snapshots(
+            config,
+            [],
+            "dev-a",
+            since=datetime.now(timezone.utc),
+            budget_ms=1000 if interactive else 100,
+            prepare_token_cache=lambda: None,
+            host_readers=(),
+        )
+    elif site == "tail":
+        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=not interactive)
+    elif site == "backfill":
+        events_tail._run_events_backfill(config, sources, "dev-a")
+    else:
+        with pytest.raises(cli.typer.Exit) as err:
+            cli._push_captured_usage(config, "test-passphrase", 1024, sources, False)
+        assert err.value.exit_code == 4
+    assert seen == [expected]
+
+
+@pytest.mark.parametrize(
+    "delta,expected",
+    [
+        (timedelta(seconds=0), "0 s ago"),
+        (timedelta(seconds=59), "59 s ago"),
+        (timedelta(seconds=60), "1 m ago"),
+        (timedelta(minutes=59, seconds=59), "59 m ago"),
+        (timedelta(hours=1), "1 h ago"),
+        (timedelta(hours=23, minutes=59, seconds=59), "23 h ago"),
+        (timedelta(days=1), "1 d ago"),
+        (timedelta(days=5, hours=2), "5 d ago"),
+    ],
+)
+def test_host_read_age_boundaries(delta, expected):
+    """Only the hours branch had indirect coverage (via a diag integration
+    test's "3 h ago" assertion); the day/minute/second branches and the exact
+    86400/3600/60-second boundaries had none."""
+    when = datetime.now(timezone.utc) - delta
+    assert events_tail.host_read_age(when.isoformat(timespec="seconds")) == expected

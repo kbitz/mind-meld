@@ -2,17 +2,17 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
+- `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
+- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
-- `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list`
+- `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
 Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_host_skill_discovery.py`, `tests/test_diag.py`.
@@ -320,9 +320,10 @@ prefer any standing `last_reason`, then this diagnostic latch. Do not reintroduc
 sweep-level `reader`/`reason` for a pre-any-reader expiry); autopush never
 warms. Warm every deadline-dropped warmable reader in reader order, including
 uninvoked readers. Pre-invoke sweep expiry declares every reader dropped and
-warms every warmable reader. Retry only readers whose warm completed, each
-with its own `host_budget_ms` deadline, and merge
-their fresh outcomes with the first pass's completed readers — a flaky
+warms every warmable reader. The attended warm IS the retry (Track 63A):
+`warm_host_cache_inline(reader=name)` runs through `_capture_host_usage` on a
+singleton reader with an explicit `DEFAULT_READ_BUDGET_S` deadline. Merge its
+result, including failures, with the first pass's completed readers — a flaky
 second-pass read of an already-completed reader must never erase totals
 already captured. If
 the retry expires before invoking a reader, it has no replacement outcome, so
@@ -851,9 +852,17 @@ reader budget. Two halves remain load-bearing: capture begins
 AFTER the `walk_done` snapshot (invariant 4) so host time can never trip or
 redefine the session-walk notice, and the deadline is FRESH rather than the
 walk's leftovers — reusing `deadline` would make the row vanish exactly on the
-busy machines where it is most interesting. No caller may fall through to
-`host_usage.DEFAULT_READ_BUDGET_S` (5s), which is 20x an entire autopush walk
-budget spent on optional analytics.
+busy machines where it is most interesting. No UNATTENDED caller may fall
+through to `host_usage.DEFAULT_READ_BUDGET_S` (5s), which is 20x an entire
+autopush walk budget spent on optional analytics. Track 63A's attended warm
+publishes its own result through the same reader failure boundary.
+`resolve_host_read_budget` owns effective budgets and their `default`/`config`
+source: `[retro] host_usage_autopush_budget_ms` defaults to 250 (100–5000),
+`host_usage_interactive_budget_ms` to 500 (250–5000). Both reject bools,
+non-integers and out-of-range values; effective autopush cannot exceed
+interactive. Capture defaults, tail, init and requested capture all use this
+resolver. The independent 5-second warm and 50 ms later-reader grace remain
+constants. Invalid config still stops ordinary sync.
 
 **Same-family day collisions still sum.** Historically Codex and OpenCode
 classified GPT models into the same canonical `codex` family, so two readers
@@ -880,8 +889,15 @@ exception string. Reasons outside `host_usage.Reason` normalize to
 read; a newer mm **may** read it (`pipx upgrade mind-meld`), or the user can
 `mm disable-source <reader>`. A retry alone is not a remedy. `partial` takes
 the generic retry sentence naming `mm push --capture-usage` and `mm diag`.
-Only `deadline` names an interactive warm (about 5 s of scanning per cold
-reader, not a hard ceiling). The explicit flag replaces the old
+`deadline` states that this push/init's read did not finish inside its budget.
+It sends attended callers to `mm push --capture-usage` to read beyond that
+budget, then to `mm diag` to compare the last complete read. Status and diag
+instead include the last allotted budget, last complete read and age, and
+cached/on-disk counts (unknown when unavailable). Their conditional remedy
+raises `[retro] host_usage_autopush_budget_ms` if the last complete read is
+over budget, otherwise requests a capture. Every deadline remedy links to
+`HOST_USAGE_CAPTURE_URL`; diag never sends the user back to `mm diag`. A
+deadline is not evidence that a cache is still warming. The explicit flag replaces the old
 `mm recapture 1d` bridge on a converged Mac; it requires enabled, resolved
 mm-events and reader consent, but no Git roots. The phrase and the joined breadcrumb
 are prose, not a semicolon-delimited schema: the approved retry sentence
@@ -891,8 +907,8 @@ degradation is appended per dropped reader.
 ### Standing read blockers (v0.14.8)
 
 `last_reason` is the **standing read blocker**: the reason of the most recent
-read that did not complete, retained until a read completes, with a permanent
-reason surviving later transient failures. It is neither the latest attempt
+read that did not complete inside its budget, retained until an in-budget
+completion, with a permanent reason surviving later incomplete transient failures. It is neither the latest attempt
 nor the latest publication outcome. `host_usage.PERMANENT_REASONS` owns
 `{"unsupported"}`; `events_tail._HOST_PERMANENT_REASONS` derives from it.
 Do not widen the set to `malformed` without evidence and a policy decision.
@@ -901,9 +917,11 @@ contention is not evidence about the store, and no ledger is source absence.
 
 Both roots carry `version`, `files`, `last_reason`, `last_reason_since`.
 Grok additionally carries `complete_once` and `usage_less_skipped`. The shared
-`_carry_reason(prior_reason, prior_since, result, now)` returns the new pair.
-A complete read clears both fields, even if it then overruns the publication
-budget and the caller receives `deadline`. An unchanged permanent blocker
+`_carry_reason(prior_reason, prior_since, result, now, *, over_budget=False)`
+returns the new pair. A complete in-budget read clears both fields. A complete
+but over-budget read records `deadline`, retaining `since` only if the prior
+reason was already `deadline` with a valid date; this completion proves a
+prior permanent blocker is gone. An unchanged permanent blocker
 keeps its original valid date across transient failures; a changed reason
 gets a fresh date. The date is this version's **first observation of the
 current reason**, not the outage start. A migrated or corrupt date is unknown
@@ -919,17 +937,37 @@ but absent and null mean the same thing to readers. No `CACHE_VERSION` bump
 and no per-file re-walk is warranted.
 
 Failed passes skip the unconditional locked-json write via `_NoCacheCommit`
-only when no file was learned AND the validated `(reason, since)` pair is
-unchanged. Comparing reason alone would leave migrated blockers undated
-forever. Newly learned files still commit despite an unchanged sticky reason.
+only when no file was learned AND the validated `(reason, since)` pair AND
+the persisted timing evidence are unchanged. Comparing reason alone would
+leave migrated blockers undated forever, and comparing the pair alone would
+keep a stale `last_deadline_allotted_ms` after the operator raised the
+budget. Newly learned files still commit despite an unchanged sticky reason.
 Prior metadata is read immediately after acquiring the lock, **before** the
 post-lock deadline check. Expiry there skips scanning and carries `deadline`
 through the same helper: one write on transition, no repeated rewrites.
 Pre-lock expiry creates no cache. A completed-but-overbudget scan keeps its
-file cache and clears the blocker, returning `deadline` only for publication.
+file cache (including deletion pruning), records `deadline` as its blocker,
+and records the last complete read before returning `deadline` to the caller.
 Serialization occurs after the final deadline check, so the read budget is
 not an end-to-end ceiling. Healthy passes still rewrite the cache (the
-pre-existing locked-json default); scaling work remains deferred.
+pre-existing locked-json default), now with compact JSON in both host caches.
+Only these callers opt into `locked_json_rmw(compact=True)`; other caches
+retain indented JSON. Both encodings remain readable without migration.
+
+**Optional cache timing fields (Track 63A, no CACHE_VERSION bump).**
+`last_complete_ms` is the reader-entry-to-result-ready time, before cache
+serialization; `last_complete_at` is UTC ISO seconds. Every completed scan
+writes both, even if late; partial writes carry validated prior values.
+`last_deadline_allotted_ms` records `round((deadline - reader_entry) * 1000)`
+when a written root carries `deadline` from this pass, carries while that
+reason remains, and is removed when the reason clears. Millisecond fields
+accept only ints in 0–86,400,000. Date validation matches `last_reason_since`;
+invalid or absent values are unknown, never inferred from counts.
+Diag exposes them for both readers and a top-level `host_read_budgets` map.
+Its sweep sums the last complete reads of `_default_host_readers` for the
+resolved, consented source set only when config state is `ok`. This same set
+already supplies `host_publication.readers`; only its keys are used, never
+coverage values. It excludes writes and grace and cannot prove publication.
 
 **Write failure is a separate observation.** `_write_json` returns an
 `OSError` in `locked.write_error`; it does not raise into the reader's
@@ -1142,39 +1180,90 @@ turning a file that just gained its first response into a whole-store refusal.
 Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
-`warm_host_cache_inline(reader=...)` warms names in `WARMABLE_HOST_READERS`
-(today: Codex and Grok, which happens to equal `ACTIVE_HOST_READERS`). A
-`deadline` charged to a non-warmable reader cannot be helped by it; a future
-reader whose cache stores no totals must not be added to the set. Without
-the reader half of the gate an interactive push pays
-bounded-attempt + about 5 s of scanning per cold reader + bounded-retry, on every push, forever,
-still publishing nothing.
-A cold scan does not fit the per-capture budget (573 ms vs 250/500 ms), so
-`_capture_event_snapshots` warms every warmable reader dropped for `deadline`
-in reader order, then retries each reader whose warm completed, with its OWN
-`host_budget_ms` deadline. Each merge's `retried_names` is exactly its singleton
-retry set: a failed warm cannot erase that reader's declaration when another
-succeeds. On pre-invoke expiry every reader is declared dropped, including
-non-warmable ones, and every warmable reader is offered a warm.
-ONLY reason `deadline` qualifies — the only reason a warm
-can fix. Gating this way costs nothing on the happy path, needs no persisted
-"have I warmed?" marker, and cannot misfire on a machine that legitimately has
-no host data: that machine's first attempt COMPLETES, so it never warms. An
-entry-count predicate would have asked exactly that machine to warm on every
-push forever.
+`warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
+(today Codex and Grok). Only `deadline` qualifies, including a reader whose
+first invocation was prevented by sweep expiry. A healthy empty scan never
+warms. Autopush supplies no warm callback and continues to converge through
+partial commits.
 
-The notice names the reader: `mm: warming grok usage cache (about 5 s of scanning)...`.
-The scan deadline is cooperative; an in-flight filesystem call or subsequent
-cache serialization can exceed it. It is never a hard per-push ceiling.
+`warm_host_cache` is now the attended-notice hook only. After
+`mm: reading <reader> usage beyond the push budget (about 5 s of scanning)...`,
+`_capture_host_snapshot` wraps `warm_host_cache_inline(reader=name)` in a
+singleton `_capture_host_usage` call with an explicit 5-second deadline.
+Its result merges through `_merge_warm_retry_capture(retried_names={name})`.
+There is no second bounded read: a completed warm contributes its totals,
+empty/partial state is preserved, `unsupported` replaces the first deadline,
+exceptions become `unavailable`, and `no_metadata_ledger` silently omits that
+reader. Completed first-pass siblings are never re-read or erased.
 
-`warm_host_cache` is supplied by the wrapper and is `None` on autopush — an
-unattended hook never spends seconds on optional analytics; it converges via
-partial commits instead. Interactive push and init supply it. The published row
-always comes from a BOUNDED capture, warm or not, so the warm never becomes a
-back door around the explicit-deadline rule. Measured on a cold interactive
-push: 501 ms bounded miss + 154 ms warm (cheap precisely because the failed
-attempt cached most of the corpus) + 28 ms retry = 683 ms once, then ~35 ms per
-push forever after.
+An attended capture is a one-time refresh. If all readers later fail, no host
+row is written and the previous snapshot ages. A later row where another
+reader completes supersedes device coverage and may omit the failed reader.
+The budget lever is the lasting remedy for a warm autopush read that is too
+slow. Scanning is cooperative; an in-flight filesystem call, one full
+reduction, or subsequent cache serialization can exceed the allowance.
+
+**Track 63A qualification, 2026-09-17 16:20 UTC, device `3a6c7dc9`.**
+Scratch wheel built from the implementation branch using the pipx interpreter;
+never installed into the live pipx environment. `sys.version`:
+`3.14.7 (main, Aug  5 2026, 10:29:49) [Clang 21.0.0 (clang-2100.1.1.101)]`.
+Probes: `~/.gstack/projects/kbitz-mind-meld/63a-probes/` (`mm_codex_budget_probe.py`,
+`mm_codex_phase_split.py`, `mm_codex_constant_factor_proto.py`). Full logs and
+the extra pre-serialization/cold/GC/differential harness are under
+`~/scratch/track-63a/`. Live logs were read-only; every cache write went to scratch.
+
+The baseline (`70abdee`, v0.14.15) missed all three warm 250 ms attempts
+(365/377/380 ms end-to-end). The branch completed all three
+(194/200/200 ms end-to-end). The phase probe's comparable second warm pass:
+
+| Phase | Baseline ms | Track 63A ms |
+|---|---:|---:|
+| Cache load | 33.6 | 21.1 |
+| Listing | 4.8 | 4.8 |
+| Cache key | 11.8 | 9.1 |
+| Entry validation | 106.1 | 32.8 |
+| Fingerprint | 32.9 | 23.6 |
+| Regular-file stat | 2.7 | 4.1 |
+| Reduction | 170.1 | 70.1 |
+| Cache serialization/write (outside read budget) | 28.2 | 24.8 |
+| Total before serialization (approximately, rounded probe total minus write) | 369.8 | 173.2 |
+
+The phase probe retains historical label strings (`2x open`, `indent=2`);
+Track 63A actually uses one fingerprint descriptor and compact writes. The
+supplied probe's first pass starts from a live-cache copy missing 13 of 1,066
+rollouts: 235 ms total, about 211.9 ms before serialization. The uninstrumented
+budget probe's first cold-ish pass took 509 ms, still complete within its 5 s
+allowance. Filesystem coldness is not controlled by either probe.
+
+A separate pre-write-boundary measurement on **1,066 rollouts / 84,910 states**
+recorded three warm 250 ms attempts at **168.26 / 166.66 / 166.90 ms before
+serialization**, all complete (196.13 / 194.52 / 194.65 ms end-to-end).
+One empty-cache parse was complete at **2,949.68 ms before serialization**
+(2,977.14 ms total). The resulting compact cache was 4,040,684 bytes; the
+original 1,053-entry cache was 15,870,126 bytes indented / 4,027,507 compact.
+
+The frozen-oracle live-corpus differential was **byte-identical in ordered
+JSON**, both validated entries and both aggregate maps plus unattributable
+days. With cyclic GC paused in both versions, validation was 68.82 → 32.60 ms
+and reduction 139.81 → 70.09 ms. The unit harness also runs 200 seeded corpora,
+explicit fork/resume/re-emission/zero/malformed/Grok fixtures, and tampering.
+`tests/_host_usage_oracle.py` is copied verbatim from the shipped contract;
+when that contract intentionally changes, delete and re-freeze it from the
+new release. Never import the implementation into the oracle.
+
+The reader's GC pause measured **242.42 / 236.62 / 231.13 ms enabled** versus
+**165.67 / 165.85 / 166.27 ms paused**, before serialization (median saving
+70.77 ms). This is an interpreter-specific result on Python 3.14.7; CI's
+Python 3.13 must not be assumed to have the same saving. The context manager
+restores the caller's GC state on return, Exception and KeyboardInterrupt.
+
+**Cooperative reduction bound:** `_aggregate` has no deadline check. It runs
+one complete reduction before the existing post-scan check can refuse a late
+result. The measured phase reductions were 69.3–70.7 ms on this corpus; that
+is the measured overshoot component, not a universal ceiling as data grows.
+A complete-but-late read still prunes its cache and records timing/deadline.
+The budget lever ships, so these measurements document headroom rather than
+gate merge. Remeasure on each producing Mac/version before changing its budget.
 
 **Tests must never read a real host store.** `conftest._isolate_host_usage`
 redirects all three reader roots and all three caches per test; tests needing

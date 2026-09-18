@@ -4366,7 +4366,11 @@ def test_requested_capture_failure_never_calls_push(capture61, monkeypatch, reas
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=False, reason=reason),
     )
-    monkeypatch.setattr(events_tail, "_warm_host_cache_with_notice", lambda name: False)
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "warm_host_cache_inline",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=False, reason=reason),
+    )
     monkeypatch.setattr(
         cli_module, "_push_core", lambda *a, **kw: pytest.fail("push after failure")
     )
@@ -8349,3 +8353,58 @@ def test_status_shows_contended_upgrade_cache(push_preview56):
         result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     assert "Upgrade check: unknown (contended cache)." in result.output
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_requested_capture_publishes_warm_read_with_two_invocations(capture61, monkeypatch, empty):
+    day = datetime.now(timezone.utc).date().isoformat()
+    usage = {"input": 17, "output": 3, "cache_read": 0, "cache_create": 0}
+    calls = []
+
+    def bounded(**kwargs):
+        calls.append("bounded")
+        return _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
+
+    def warm(**kwargs):
+        calls.append("warm")
+        return _mm_host_usage.HostUsageResult(
+            {} if empty else {"codex": {day: usage}},
+            complete=True,
+            tokens_by_day={} if empty else {day: {**usage, "by_model": {"gpt-5": usage}}},
+        )
+
+    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", bounded)
+    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+    result = runner.invoke(app, ["push", "--capture-usage"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["bounded", "warm"]
+    assert (
+        "Usage capture: codex — " + ("completed, no usage" if empty else "contributed")
+        in result.output
+    )
+    rows = [json.loads(line) for line in capture61["dayfile"].read_text().splitlines()]
+    row = [r for r in rows if r["type"] == "host-usage-snapshot"][-1]
+    assert row["hosts"] == ({} if empty else {"codex": {day: usage}})
+    publication = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
+    assert publication["publication"] == "published"
+
+
+def test_all_failed_autopush_keeps_previous_snapshot_to_age(capture61, monkeypatch):
+    initial = runner.invoke(app, ["push", "--capture-usage"])
+    assert initial.exit_code == 0, initial.output
+    before = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
+    prior_rows = [json.loads(line) for line in capture61["dayfile"].read_text().splitlines()]
+    prior_hosts = [row for row in prior_rows if row["type"] == "host-usage-snapshot"]
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_codex_usage",
+        lambda **kwargs: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
+    )
+    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("changed")
+    result = runner.invoke(app, ["autopush"])
+    assert result.exit_code == 0, result.output
+    after = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
+    rows = [json.loads(line) for line in capture61["dayfile"].read_text().splitlines()]
+    assert [row for row in rows if row["type"] == "host-usage-snapshot"] == prior_hosts
+    assert after["ts"] == before["ts"]
+    assert after["readers"] == before["readers"] == {"codex": "contributed"}

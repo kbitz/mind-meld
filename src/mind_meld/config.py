@@ -244,6 +244,13 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return config
 
 
+DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS = 250
+DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS = 500
+HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS = 100
+HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS = 250
+HOST_USAGE_BUDGET_MAX_MS = 5000
+
+
 def _validate(config: dict[str, Any]) -> None:
     """Check required fields exist."""
     for section, fields in REQUIRED_FIELDS.items():
@@ -265,6 +272,26 @@ def _validate(config: dict[str, Any]) -> None:
 
     retro = config.get("retro")
     if isinstance(retro, dict):
+        for key, minimum in (
+            ("host_usage_autopush_budget_ms", HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS),
+            ("host_usage_interactive_budget_ms", HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS),
+        ):
+            if key in retro:
+                value = retro[key]
+                if type(value) is not int or not minimum <= value <= HOST_USAGE_BUDGET_MAX_MS:
+                    raise ConfigError(
+                        f"config: retro.{key} must be an integer between {minimum} and "
+                        f"{HOST_USAGE_BUDGET_MAX_MS}, got {value}."
+                    )
+        autopush = retro.get("host_usage_autopush_budget_ms", DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS)
+        interactive = retro.get(
+            "host_usage_interactive_budget_ms", DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
+        )
+        if autopush > interactive:
+            raise ConfigError(
+                f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "
+                f"retro.host_usage_interactive_budget_ms ({interactive})."
+            )
         if "grok_host_usage" in retro:
             if not isinstance(retro["grok_host_usage"], bool):
                 raise ConfigError(

@@ -622,6 +622,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "skill_links",
     "host_skill_discovery",
     "host_usage",
+    "host_read_budgets",
     "host_publication",
     "discovery",
     "git_capture",

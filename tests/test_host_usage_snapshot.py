@@ -819,10 +819,10 @@ def test_three_attended_callers_share_one_warm_sweep(tmp_path, monkeypatch, entr
         nonlocal warmed
         calls.append("warm")
         warmed = True
-        return True
+        return _complete({"codex": {"2026-08-15": _usage(7)}})
 
     monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
-    monkeypatch.setattr(events_tail, "_warm_host_cache_with_notice", warm)
+    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
     if entry == "tail":
         events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
     elif entry == "backfill":
@@ -855,7 +855,7 @@ def test_three_attended_callers_share_one_warm_sweep(tmp_path, monkeypatch, entr
 
         monkeypatch.setattr(cli, "_push_core", push)
         cli._push_captured_usage(config, "unused", 1024, sources, False)
-    assert calls == ["read", "warm", "read"]
+    assert calls == ["read", "warm"]
     rows = _rows(root)
     hosts = [r for r in rows if r["type"] == "host-usage-snapshot"]
     assert len(hosts) == 1
@@ -1171,7 +1171,7 @@ class TestTailWiring:
             assert promises_retry
             # Only deadline warrants warming; all transient remedies work
             # on a converged Mac as well as a substantive push.
-            assert ("to warm it" in degradations[0]) == (reason == "deadline")
+            assert ("to read it without that budget" in degradations[0]) == (reason == "deadline")
 
     def test_an_absent_source_publishes_a_row_and_no_degradation(self, tmp_path, monkeypatch):
         """The whole point of the revised premise: a machine whose Grok store
@@ -1443,7 +1443,7 @@ class TestColdCacheWarmAndRetry:
         def warm(*_a, **_kw):
             calls.append("warm")
             state["warm"] = True
-            return _complete()
+            return _complete({"codex": {"2026-08-15": _usage(7)}})
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", lambda **_kw: _complete())
@@ -1451,14 +1451,10 @@ class TestColdCacheWarmAndRetry:
 
     @pytest.mark.parametrize("preinvoke", [False, True])
     @pytest.mark.parametrize("codex_warm", ["complete", "deadline", "raises"])
-    def test_every_cold_reader_warms_and_only_completed_warms_retry(
+    def test_every_cold_reader_warm_is_its_retry(
         self, tmp_path, monkeypatch, capsys, preinvoke, codex_warm
     ):
-        """Independent retry budgets and exact replacement sets reach the wire.
-
-        Each successful retry spends 400 ms of its own 500 ms. Sharing one
-        retry deadline would lose Grok even after both warms completed.
-        """
+        """Every warm outcome replaces its first pass, including warm failures."""
         _stub_fast_walks(monkeypatch)
         clock = [100.0]
         calls = []
@@ -1482,15 +1478,7 @@ class TestColdCacheWarmAndRetry:
         def reader(name):
             def read(*, deadline, **_kw):
                 calls.append(f"read:{name}")
-                if name not in warm:
-                    return _incomplete("deadline")
-                assert deadline - clock[0] == pytest.approx(0.5)
-                clock[0] += 0.4
-                model = "gpt-6-astra" if name == "codex" else "grok-4.6-build"
-                return _complete(
-                    {name: {day: _usage(7)}},
-                    {day: {**_usage(7), "by_model": {model: _usage(7)}}},
-                )
+                return _incomplete("deadline")
 
             return read
 
@@ -1501,7 +1489,12 @@ class TestColdCacheWarmAndRetry:
                     raise OSError("synthetic warm error")
                 return _incomplete("deadline")
             warm.add(reader)
-            return _complete()
+            clock[0] += 0.4
+            model = "gpt-6-astra" if reader == "codex" else "grok-4.6-build"
+            return _complete(
+                {reader: {day: _usage(7)}},
+                {day: {**_usage(7), "by_model": {model: _usage(7)}}},
+            )
 
         monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(events_tail, "_capture_host_usage", capture)
@@ -1516,18 +1509,16 @@ class TestColdCacheWarmAndRetry:
         )
         retried = ["codex", "grok"] if codex_warm == "complete" else ["grok"]
         assert calls == (
-            ([] if preinvoke else ["read:codex", "read:grok"])
-            + ["warm:codex", "warm:grok"]
-            + [f"read:{name}" for name in retried]
+            ([] if preinvoke else ["read:codex", "read:grok"]) + ["warm:codex", "warm:grok"]
         )
-        assert merge_sets == [{name} for name in retried]
+        assert merge_sets == [{"codex"}, {"grok"}]
         row = next(r for r in _rows(root) if r["type"] == "host-usage-snapshot")
         assert row["token_sources"] == retried
         assert row.get("degraded_sources", []) == ([] if codex_warm == "complete" else ["codex"])
         assert row["tokens_by_day"][day]["by_model"]["grok-4.6-build"] == _usage(7)
         assert len(degradations) == (0 if codex_warm == "complete" else 1)
         err = capsys.readouterr().err
-        assert "mm: warming grok usage cache (about 5 s of scanning)..." in err
+        assert "mm: reading grok usage beyond the push budget (about 5 s of scanning)..." in err
         assert "one-time" not in err
 
     def test_interactive_push_warms_then_retries_and_publishes(self, tmp_path, monkeypatch, capsys):
@@ -1541,12 +1532,12 @@ class TestColdCacheWarmAndRetry:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
 
-        assert calls == ["read-cold", "warm", "read-warm"]
+        assert calls == ["read-cold", "warm"]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
         err = capsys.readouterr().err
-        assert "mm: warming codex usage cache (about 5 s of scanning)..." in err
+        assert "mm: reading codex usage beyond the push budget (about 5 s of scanning)..." in err
         assert "one-time" not in err
 
     def test_interactive_push_warms_a_dropped_grok_reader_then_retries(self, tmp_path, monkeypatch):
@@ -1593,7 +1584,6 @@ class TestColdCacheWarmAndRetry:
             "grok",
             SYNTH,
             "warm:grok",
-            "grok",
         ]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
@@ -1636,7 +1626,7 @@ class TestColdCacheWarmAndRetry:
         def warm(*, reader):
             calls.append(f"warm:{reader}")
             state["warm"] = True
-            return _complete()
+            return _complete({"grok": {"2026-08-15": _usage(5)}})
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
@@ -1652,7 +1642,7 @@ class TestColdCacheWarmAndRetry:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
 
-        assert calls == ["codex", "grok", SYNTH, "warm:grok", "grok"]
+        assert calls == ["codex", "grok", SYNTH, "warm:grok"]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {
@@ -1681,7 +1671,7 @@ class TestColdCacheWarmAndRetry:
 
         def warm(*, reader):
             calls.append(f"warm:{reader}")
-            return _complete()
+            return _incomplete("deadline")
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
@@ -1691,7 +1681,7 @@ class TestColdCacheWarmAndRetry:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
 
-        assert calls == ["codex", "grok", "warm:grok", "grok"]
+        assert calls == ["codex", "grok", "warm:grok"]
         assert len(degradations) == 1
         assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
@@ -1886,7 +1876,7 @@ class TestColdCacheWarmAndRetry:
         )
 
         err = capsys.readouterr().err
-        assert "host usage cache warm failed: RuntimeError" in err
+        assert "host reader codex raised: RuntimeError" in err
         assert "events tail failed" not in err, "a failed warm must not abort the tail"
         types = [r["type"] for r in _rows(events_root)]
         assert "mm-push" in types
@@ -1903,7 +1893,7 @@ class TestColdCacheWarmAndRetry:
 
         events_tail._run_events_backfill({"sync": {"sources": sources}}, sources, "dev-a")
 
-        assert calls == ["read-cold", "warm", "read-warm"]
+        assert calls == ["read-cold", "warm"]
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
 
@@ -2160,5 +2150,111 @@ def test_partial_takes_the_retry_sentence_not_warming(reader):
 @pytest.mark.parametrize("reader", ["codex", "grok"])
 def test_deadline_names_bounded_interactive_warm(reader):
     phrase = events_tail._host_skip_phrase(reader, "deadline")
-    assert "about 5 s of scanning per cold reader, not a hard ceiling" in phrase
+    assert "to read it without that budget" in phrase
     assert "one pass" not in phrase
+
+
+@pytest.mark.parametrize(
+    "outcome", ["usage", "empty", "partial", "unsupported", "raises", "absent"]
+)
+@pytest.mark.parametrize("mixed", [False, True])
+def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, monkeypatch, capsys):
+    day = datetime.now(timezone.utc).date().isoformat()
+    calls = []
+
+    def codex(*, deadline):
+        calls.append("codex-bounded")
+        return _incomplete("deadline")
+
+    def grok(*, deadline):
+        calls.append("grok-bounded")
+        return _complete({"grok": {day: _usage(3)}})
+
+    def warm(*, reader):
+        assert reader == "codex"
+        calls.append("codex-warm")
+        if outcome == "raises":
+            raise RuntimeError("synthetic failure")
+        if outcome == "unsupported":
+            return _incomplete("unsupported")
+        if outcome == "absent":
+            return _incomplete("no_metadata_ledger")
+        if outcome == "empty":
+            return _complete()
+        return _complete(
+            {"codex": {day: _usage(7)}},
+            {day: {**_usage(7), "by_model": {"gpt-5": _usage(7)}}},
+            partial_days=frozenset({day}) if outcome == "partial" else frozenset(),
+        )
+
+    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+    readers = (("codex", codex), ("grok", grok)) if mixed else (("codex", codex),)
+    capture, rows = events_tail._capture_host_snapshot(
+        "dev-a",
+        readers,
+        host_budget_ms=500,
+        warm_host_cache=events_tail._warm_host_cache_with_notice,
+    )
+    assert calls == (
+        ["codex-bounded", "grok-bounded", "codex-warm"]
+        if mixed
+        else ["codex-bounded", "codex-warm"]
+    )
+    if mixed:
+        assert rows[0]["hosts"]["grok"][day] == _usage(3)
+    if outcome in {"usage", "partial"}:
+        assert rows[0]["hosts"]["codex"][day] == _usage(7)
+        assert rows[0]["tokens_by_day"][day]["by_model"]["gpt-5"] == _usage(7)
+        assert capture.partial_days == ({"codex": frozenset({day})} if outcome == "partial" else {})
+    elif outcome == "empty":
+        assert capture.empty == ("codex",)
+        assert "codex" in rows[0]["token_sources"]
+    elif outcome == "absent":
+        assert "codex" not in rows[0]["token_sources"]
+        assert not capture.dropped
+    else:
+        assert capture.dropped == (("codex", "unavailable" if outcome == "raises" else outcome),)
+        if not mixed:
+            assert rows == []
+    if outcome == "raises":
+        assert "host reader codex raised: RuntimeError" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("verb", ["push", "init"])
+@pytest.mark.parametrize("in_diag", [False, True])
+@pytest.mark.parametrize("evidence_state", ["absent", "unknown", "known"])
+def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evidence_state):
+    from mind_meld.errors import HOST_USAGE_CAPTURE_URL
+
+    evidence = None
+    if evidence_state != "absent":
+        evidence = events_tail.HostReadEvidence()
+    if evidence_state == "known":
+        evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 50, 51)
+    phrase = events_tail._host_skip_phrase(
+        reader, "deadline", verb=verb, evidence=evidence, in_diag=in_diag
+    )
+    assert phrase.startswith(
+        f"host-usage snapshot skipped ({reader} deadline) — "
+        "content sync and git/session capture unaffected."
+    )
+    assert phrase.endswith(f"see {HOST_USAGE_CAPTURE_URL}.")
+    assert "warming" not in phrase
+    if evidence is None:
+        assert f"this {verb}'s read budget" in phrase
+        assert "Run `mm push --capture-usage` to read it without that budget" in phrase
+    else:
+        unit = "ledgers" if reader == "grok" else "rollouts"
+        assert (
+            "raise `[retro] host_usage_autopush_budget_ms`; otherwise run `mm push --capture-usage`"
+            in phrase
+        )
+        if evidence_state == "known":
+            assert "Last read allowed 250 ms; last complete read 300 ms (in the future)" in phrase
+            assert f"50 of 51 {unit} cached" in phrase
+        else:
+            assert "Last read allowed unknown ms; last complete read unknown ms (unknown)" in phrase
+            assert f"unknown of unknown {unit} cached" in phrase
+    if in_diag:
+        assert "`mm diag`" not in phrase

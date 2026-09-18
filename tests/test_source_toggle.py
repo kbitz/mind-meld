@@ -745,7 +745,7 @@ class TestStatusBreadcrumbs:
         warming_text = " ".join(warming.output.split())
         assert "(grok deadline)" in warming_text
         assert "no successful scan yet" not in warming_text
-        assert "about 5 s of scanning per cold reader, not a hard ceiling" in warming_text
+        assert "Last read allowed unknown ms; last complete read unknown ms" in warming_text
 
         runner.invoke(app, ["disable-source", "grok"])
         _host_usage.GROK_SESSIONS_PATH.mkdir(parents=True)

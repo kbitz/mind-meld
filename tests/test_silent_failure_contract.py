@@ -155,6 +155,9 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
             {
                 "version": 1,
                 "last_reason": "deadline",
+                "last_deadline_allotted_ms": 250,
+                "last_complete_ms": 300,
+                "last_complete_at": "2999-01-01T00:00:00+00:00",
                 "files": {"warm": {"states": []}},
             }
         )
@@ -164,7 +167,7 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
     assert result.exit_code == 0, result.output
     text = " ".join(result.output.split())
     assert "(codex deadline)" in text
-    assert "about 5 s of scanning per cold reader, not a hard ceiling" in text
+    assert "Last read allowed 250 ms; last complete read 300 ms (in the future)" in text
     assert "not yet scanned" not in text
 
 
@@ -1087,13 +1090,13 @@ def test_concurrent_autorun_breadcrumbs_preserve_each_verb(tmp_path, monkeypatch
             second_lock_attempted.set()
         return original_acquire_lock(fd, **kwargs)
 
-    def pause_first_write(fd, data):
+    def pause_first_write(fd, data, compact=False):
         nonlocal write_count
         write_count += 1
         if write_count == 1:
             first_write_entered.set()
             assert release_first_write.wait(timeout=2), "test did not release first writer"
-        return original_write_json(fd, data)
+        return original_write_json(fd, data, compact=compact)
 
     monkeypatch.setattr(lockedjson, "_acquire_lock", note_second_lock_attempt)
     monkeypatch.setattr(lockedjson, "_write_json", pause_first_write)

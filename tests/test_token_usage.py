@@ -1341,7 +1341,7 @@ class TestGcCacheEntries:
             )
         )
         failure = OSError("disk full")
-        monkeypatch.setattr(lockedjson, "_write_json", lambda _fd, _data: failure)
+        monkeypatch.setattr(lockedjson, "_write_json", lambda _fd, _data, compact=False: failure)
 
         result = tu.reap_cache_entries(now=datetime(2026, 1, 1, tzinfo=timezone.utc))
 
