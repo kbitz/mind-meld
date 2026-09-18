@@ -172,11 +172,7 @@ def locked_json_rmw(
         else:
             if is_locked and ljson.write_on_exit:
                 ljson.write_attempted = True
-                ljson.write_error = (
-                    _write_json(fd, ljson.data, compact=True)
-                    if compact
-                    else _write_json(fd, ljson.data)
-                )
+                ljson.write_error = _write_json(fd, ljson.data, compact=compact)
     finally:
         if is_locked:
             try:

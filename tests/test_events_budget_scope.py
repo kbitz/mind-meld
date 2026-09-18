@@ -500,3 +500,24 @@ def test_all_host_budget_sites_use_resolver(site, interactive, configured, tmp_p
             cli._push_captured_usage(config, "test-passphrase", 1024, sources, False)
         assert err.value.exit_code == 4
     assert seen == [expected]
+
+
+@pytest.mark.parametrize(
+    "delta,expected",
+    [
+        (timedelta(seconds=0), "0 s ago"),
+        (timedelta(seconds=59), "59 s ago"),
+        (timedelta(seconds=60), "1 m ago"),
+        (timedelta(minutes=59, seconds=59), "59 m ago"),
+        (timedelta(hours=1), "1 h ago"),
+        (timedelta(hours=23, minutes=59, seconds=59), "23 h ago"),
+        (timedelta(days=1), "1 d ago"),
+        (timedelta(days=5, hours=2), "5 d ago"),
+    ],
+)
+def test_host_read_age_boundaries(delta, expected):
+    """Only the hours branch had indirect coverage (via a diag integration
+    test's "3 h ago" assertion); the day/minute/second branches and the exact
+    86400/3600/60-second boundaries had none."""
+    when = datetime.now(timezone.utc) - delta
+    assert events_tail.host_read_age(when.isoformat(timespec="seconds")) == expected

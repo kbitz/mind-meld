@@ -166,7 +166,7 @@ class TestLockedJsonExceptionPath:
     def test_write_failure_is_reported_to_caller(self, tmp_path: Path, monkeypatch) -> None:
         path = tmp_path / "cache.json"
         failure = OSError("disk full")
-        monkeypatch.setattr(lockedjson, "_write_json", lambda _fd, _data: failure)
+        monkeypatch.setattr(lockedjson, "_write_json", lambda _fd, _data, compact=False: failure)
 
         with locked_json_rmw(path) as ljson:
             ljson.data["attempted"] = True
