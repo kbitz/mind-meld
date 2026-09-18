@@ -74,6 +74,12 @@ here by hand, use the H3 form.
 - **Why:** Use the latest row where each reader contributed, labelled with its `as_of`, so an autopush dropping a reader causes staleness instead of absence.
 - **Context:** Coordinate with Track 65A. Track 63A preserves today's device-wide replacement and tests both all-failed and mixed-reader recovery outcomes.
 
+### [ship] Track 63A's ROADMAP.md card was hand-edited instead of drained by /roadmap
+- **Why:** The approved plan's Acceptance section requires `/roadmap` to re-card Track 63A after implementation and says explicitly: "Do not hand-edit `docs/ROADMAP.md`." Commit `10794a7` hand-edited the Track 63A card anyway (2 tasks→5, ~150→~2400 LOC, 9→21 files, plus the task bullets, source paragraph, and execution-map note). The numbers match what actually shipped, but the mechanism violated the plan's own Acceptance criterion. User (kb) chose to ship PR #181 as-is rather than rewrite already-reviewed history, on the condition this gets tracked.
+- **Effort:** S
+- **Priority:** P1
+- **Context:** Deferred from plan: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-17-track-63a.md`. Run `/roadmap` and confirm the card it produces matches (or supersedes) the hand-edited version already on `main` — treat that run as the formal re-card, not a fresh edit.
+
 
 ## Drain records
 
