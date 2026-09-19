@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence, get_args
 
 from mind_meld import __version__, events, host_usage, identity, token_usage, upgrade
+from mind_meld import config as mm_config
 from mind_meld.config import (
     DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS,
     DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
@@ -585,6 +586,8 @@ def _host_skip_phrase(
     reader: str,
     reason: str,
     *,
+    readiness: mm_config.UsageCaptureReadiness,
+    upgrade_required: bool = False,
     verb: Literal["push", "init"] = "push",
     evidence: HostReadEvidence | None = None,
     in_diag: bool = False,
@@ -594,6 +597,13 @@ def _host_skip_phrase(
         f"host-usage snapshot skipped ({reader} {reason}) — "
         "content sync and git/session capture unaffected"
     )
+    if readiness != "ready":
+        return f"{phrase}. {mm_config.usage_capture_remedy(readiness, reader=reader)}"
+    if upgrade_required and reason not in _HOST_PERMANENT_REASONS:
+        return (
+            f"{phrase}. A consented reader has an unsupported record format; "
+            "run pipx upgrade mind-meld before refreshing usage."
+        )
     if reason in _HOST_PERMANENT_REASONS:
         return (
             f"{phrase}. {reader} wrote a record this version cannot read. "
@@ -710,6 +720,7 @@ def _capture_event_snapshots(
     git_budget_ms: int | None = None,
     warm_host_cache: Callable[[str], None] | None = None,
     suppress_host_capture: bool = False,
+    origin: str | None = None,
 ) -> CaptureResult:
     """Capture device-stamped git, session, and host snapshot rows without writing.
 
@@ -747,6 +758,7 @@ def _capture_event_snapshots(
         since=since,
         walk_budget_ms=git_budget_ms if git_budget_ms is not None else budget_ms,
         root_discovery_budget_ms=root_discovery_budget_ms,
+        origin=origin,
     )
     _roots, discovery_errors = root_discovery
 
@@ -832,7 +844,8 @@ def _capture_git_rows(
     """Discover roots and walk git. No writes, no notices, no mm-push.
 
     Shared by the push tail, init backfill, and recapture. ``origin`` marks
-    recapture rows so the aggregator can tell them from pushes.
+    non-push rows (init and recapture) so the aggregator can exclude them
+    from push counts.
     """
     root_discovery = events.discover_git_roots(
         config,
@@ -871,8 +884,9 @@ def _run_events_tail(
     dry_run: bool,
     quiet: bool,
     suppress_host_capture: bool = False,
+    capture_activity: bool = True,
 ) -> list[str]:
-    """Capture per-push fleet-retro events at the HEAD of ``_push_core``.
+    """Capture fleet-retro events after ``_push_core``'s substantive-change gate.
 
     Returns a list of human-readable degradation phrases for this push
     (empty when healthy). ``autopush`` turns a non-empty list into a
@@ -902,12 +916,13 @@ def _run_events_tail(
     Forensic-only invariant: any failure in this block is swallowed and
     breadcrumbed via ``mm: notice:``. The push proceeds.
     Track 61A's explicit flag captures first through ``_capture_host_snapshot``
-    with strict append, then suppresses this tail's host capture and mm-push
-    row. Bare no-op pushes still do zero host work; the flag never advances
-    the Git cursor or adds a retro push count.
+    with strict append, then suppresses this tail's host capture. A usage-only
+    refresh also skips all activity work before any walk or cache lock. A
+    content-carrying refresh records one push and can advance the Git cursor.
+    Bare no-op pushes still do zero host work.
     """
     degradations: list[str] = []
-    if dry_run:
+    if dry_run or not capture_activity:
         return degradations
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
@@ -997,7 +1012,7 @@ def _run_events_tail(
                 *capture.git_rows,
                 *capture.session_rows,
                 *capture.host_rows,
-                *([] if suppress_host_capture else [mm_event]),
+                mm_event,
             ],
         )
 
@@ -1046,11 +1061,13 @@ def _run_events_tail(
         # reader/reason when `dropped` is empty.
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                phrase = _host_skip_phrase(dropped_reader, dropped_reason)
+                phrase = _host_skip_phrase(dropped_reader, dropped_reason, readiness="ready")
                 sys.stderr.write(f"mm: notice: {phrase}\n")
                 degradations.append(phrase)
         elif not capture.host_capture.complete:
-            phrase = _host_skip_phrase(capture.host_capture.reader, capture.host_capture.reason)
+            phrase = _host_skip_phrase(
+                capture.host_capture.reader, capture.host_capture.reason, readiness="ready"
+            )
             sys.stderr.write(f"mm: notice: {phrase}\n")
             degradations.append(phrase)
     except Exception as e:
@@ -1130,6 +1147,7 @@ def _run_events_backfill(
             # hot cache, exactly as it does for tokens.
             warm_host_cache=_warm_host_cache_with_notice,
             prepare_token_cache=prepare_backfill_token_cache,
+            origin=events.GIT_SNAPSHOT_ORIGIN_INIT,
             host_readers=_default_host_readers(
                 sources, grok_consented=grok_host_usage_enabled(config)
             ),
@@ -1166,14 +1184,19 @@ def _run_events_backfill(
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
                 sys.stderr.write(
                     "mm: notice: "
-                    + _host_skip_phrase(dropped_reader, dropped_reason, verb="init")
+                    + _host_skip_phrase(
+                        dropped_reader, dropped_reason, verb="init", readiness="ready"
+                    )
                     + "\n"
                 )
         elif not capture.host_capture.complete:
             sys.stderr.write(
                 "mm: notice: "
                 + _host_skip_phrase(
-                    capture.host_capture.reader, capture.host_capture.reason, verb="init"
+                    capture.host_capture.reader,
+                    capture.host_capture.reason,
+                    verb="init",
+                    readiness="ready",
                 )
                 + "\n"
             )

@@ -121,8 +121,10 @@ GIT_SNAPSHOT_ORIGIN_RECAPTURE = "recapture"
 """Marker on git-snapshot rows written by ``mm recapture``.
 
 Lets the aggregator exclude them from its zero-capture *push* note
-(follow-up: they are not pushes). Ordinary tail/backfill rows omit the
-field."""
+(follow-up: they are not pushes). Ordinary tail rows omit the field."""
+
+GIT_SNAPSHOT_ORIGIN_INIT = "init"
+"""Init backfill marker; commits count, but zero-repository push counts do not."""
 
 WALK_SKIP_BUDGET_ABORT = "budget_abort"
 WALK_SKIP_TIMEOUT = "timeout"
@@ -1887,11 +1889,13 @@ def write_push_event(
 
     Order invariant (CT-4): when an ``mm-push`` row is present, it MUST
     be last so a partial write cannot advance the cursor. Requested
-    capture and ``suppress_host_capture`` batches may omit it; git and
-    session rows then do not move the cursor. Partial write before the
+    captures may omit it; git rows in a batch without it must carry an
+    origin (init or recapture). These rows do not move the cursor. Partial write before the
     mm-push appends → next push re-walks the range (deduped at retro
     render via canonical (remote, sha)). The single flock window is
-    best-effort batching, NOT transactionality.
+    best-effort batching, NOT transactionality. A subsequent append separates
+    an unterminated suffix so it cannot swallow the next valid row; it does
+    not reconstruct a torn row or guarantee rollback succeeds.
 
     File mode 0o600. Per-day naming: ``events/<device>-<YYYY-MM-DD>.jsonl``.
     A requested capture uses ``strict=True`` to observe append failures and
@@ -1899,6 +1903,9 @@ def write_push_event(
     """
     if not events:
         return
+    if not any(row.get("type") == "mm-push" for row in events):
+        if any(row.get("type") == "git-snapshot" and not row.get("origin") for row in events):
+            raise ValueError("git-snapshot without mm-push requires an origin")
     today = datetime.now(timezone.utc).date().isoformat()
     safe_device = _safe_device_filename(device_id)
     path = events_dir / f"{safe_device}-{today}.jsonl"

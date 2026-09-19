@@ -104,6 +104,17 @@ def _enable_test_host_source(tmp_path, reader, *, disabled=False):
             **({"include_dirs": ["skills"]} if reader == "codex" else {}),
         }
     )
+    events_root = tmp_path / "events-root"
+    events_root.mkdir(exist_ok=True)
+    if not any(s["name"] == "mm-events" for s in cfg["sync"]["sources"]):
+        cfg["sync"]["sources"].append(
+            {
+                "name": "mm-events",
+                "type": "generic",
+                "path": str(events_root),
+                "include_dirs": ["events"],
+            }
+        )
     if disabled:
         cfg["sync"]["disabled_sources"] = [reader]
     save_config(cfg, CONFIG_PATH)

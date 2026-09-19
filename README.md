@@ -215,7 +215,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Push with verbose output |
 | `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
-| `mm push --capture-usage` | Refresh and publish host usage even with no content changes. Exit 0: captured row accepted; 4: capture absent or unpublished while content sync was otherwise fine; 1: stopped before acceptance; 2: incompatible `--dry-run` |
+| `mm push --capture-usage` | Refresh and publish host usage even with no content changes. Exit 0: captured row accepted; 4: row written but its revision is not in the accepted manifest while content sync was otherwise fine; 1: no row written, append failed, or push stopped before acceptance (content not pushed); 2: incompatible `--dry-run`. See [capture outcomes](#host-usage-capture-codex-and-grok) |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
@@ -687,27 +687,64 @@ The flag refreshes usage even when ordinary push would have nothing to upload.
 It performs one bounded capture and at most one attended warm read per reader
 that missed its deadline, under the mm lock. That warm read supplies the
 published result; there is no second bounded retry. Another autopush may silently skip while that lock is held.
-It writes at most one host row and no `mm-push` row, so refreshes do not inflate
-retro push counts or advance the Git cursor. `mm recapture 30d` recovers Git
+It writes at most one host row. A **usage-only** refresh skips Git/session walks
+and writes no activity or `mm-push` rows, leaving retro push counts and the Git
+cursor unchanged. A refresh that also publishes user-source bytes, newer file
+mtimes, or source-selection changes records one push through the ordinary tail.
+The output names which mode ran and the number of file content changes (metadata
+and selection changes can have zero). `mm recapture 30d` recovers Git
 history; `mm push --capture-usage` refreshes host usage. Run both for both jobs.
 
 For example, the capture-specific output of a completed empty Codex scan is:
 
 ```text
 Usage capture: codex — completed, no usage
+Refresh mode: usage-only; content already up to date, Git cursor unchanged. Run mm recapture 30d for Git history.
 Host usage published (manifest accepted).
 ```
 
 Exit 0 means the row's file revision is in the accepted manifest, including
-partial coverage or a completed scan with no usage. Exit 4 means no row was
-written, an append failed, or the row was not included while content sync was
-otherwise fine. Exclusions, `include_dirs`, and `max_file_size` are preserved;
-the command explains which setting prevents publication. Exit 1 means the
-push stopped before manifest acceptance; exit 2 rejects `--capture-usage`
+partial coverage or a completed scan with no usage. Exit 4 means the row was
+written but its revision is not in the accepted manifest while content sync was
+otherwise fine. This includes an excluded day file on an already converged Mac,
+where no new manifest needs acceptance. Exclusions, `include_dirs`, and
+`max_file_size` are preserved; the command names the cause and a working remedy.
+Exit 1 means no row written, append failed, or push stopped before acceptance;
+content was not pushed. Capture failure deliberately stops before attempting
+content sync: run `mm push` yourself to sync content. Exit 2 rejects `--capture-usage`
 with `--dry-run`. Maintenance errors after acceptance are reported separately.
 Enable `mm-events` with `mm enable-source mm-events`; enable a reader with
 `mm enable-source codex` / `mm enable-source grok`, or Grok's usage-only
 `[retro] grok_host_usage = true` setting. Missing custom roots must be restored.
+
+| Outcome | Content | Activity / Git cursor | Exit |
+|---|---|---|---|
+| Usage-only refresh published | Already up to date | No activity capture; cursor unchanged | 0 |
+| Refresh carrying user-source changes published | Pushed (bytes, metadata or selection) | Ordinary activity tail; one push | 0 |
+| Capture produced no row or append failed | Not pushed; sync not attempted | No activity tail | 1 |
+| Row written locally, push failed before acceptance | Not pushed | Tail may already have recorded activity locally | 1 |
+| Row written, captured revision unpublished | Pushed or already up to date, as the mode line states | Depends on content changes | 4 |
+| Combined with `--dry-run` | Not attempted | Nothing captured | 2 |
+
+Capture errors go to stderr with stable tokens: `(no-row)`, `(append-failed)`,
+`(push-failed)`, or `(not-published: <cause>)`. Exclude/include remedies name the
+setting to adjust and re-run `mm push --capture-usage`; a size-limit remedy names
+archiving older rows outside the source to shrink the day file. `mm recapture`'s
+exit 4 continues to mean partial Git recovery.
+
+Status and diag share a read-only prerequisite check: enable an unselected
+mm-events source, restore an unavailable custom folder, or consent a reader
+before refreshing. An unreadable config produces an unknown verdict and no
+refresh/enable recommendation. An unsupported reader format calls for an upgrade,
+including in the publication block.
+
+Upgrade **both producing and rendering Macs** for corrected init counts. Init
+now marks its Git rows as `origin: init`; older renderers still count that unknown
+origin as a push. Historical unmarked init/refresh rows remain indistinguishable
+from older pushes until they leave the queried window (retention is 90 days).
+`mm recapture` cannot relabel them. The usage-only guarantee is per invocation:
+after a failed upload, a subsequent ordinary push/autopush publishes the pending
+event file through its ordinary tail and legitimately counts once.
 
 “Last recorded capture” is not “latest attempt”: a failed attempt may write no
 row, so the latter is explicitly unknown. Publication is proven only when the

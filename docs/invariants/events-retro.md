@@ -1023,9 +1023,13 @@ emits the notice alone.
 **Row order.** Tail: git rows, sessions row, optional host row, `mm-push`
 LAST (CT-4 unchanged). Backfill: git rows, sessions row, optional host row,
 and never an `mm-push`. Requested `push --capture-usage`: one host row before
-the normal push; that invocation suppresses the tail's host capture AND its
-terminal `mm-push`. Git/session rows can still follow. A usage refresh never
-increments retro push counts or advances the cursor. `_capture_host_snapshot`
+the normal push; that invocation always suppresses the tail's host capture.
+A usage-only refresh skips the entire activity tail before cursor lookup,
+root discovery, Git/session walks, token-cache locks or identity gathering.
+It writes no Git/session/`mm-push` rows and does not increment retro push counts
+or advance the cursor. A content-carrying refresh runs the ordinary activity
+tail, including its terminal `mm-push`, and legitimately counts once.
+`_capture_host_snapshot`
 owns the single bounded sweep and warm/retry for all three callers (tail and
 backfill through `_capture_event_snapshots`); no duplicated warm path.
 
@@ -1034,23 +1038,112 @@ backfill through `_capture_event_snapshots`); no duplicated warm path.
 reader opens a host store or touches a host cache. `push --capture-usage` is
 the named exception, not the deferred automatic no-op refresh (T3-B). It
 refuses incompatible dry-run, unavailable mm-events, uncreatable default roots
-and missing reader consent before Keychain access. Capture runs under the mm
-lock; concurrent autopush contention stays silent without a degraded crumb.
-The tail's suppression flag is keyword-only from `_push_core` through both
-tail helpers. Autopush never warms. Pinned in
+and missing reader consent before Keychain access. Source preflight/bootstrap
+runs before the mm lock; the capture, warming, append and push run under it.
+Read budgets are cooperative, not hard timeouts; content sync follows capture.
+Concurrent autopush contention stays silent without a degraded crumb.
+The `_push_core(usage_capture=True)` flag suppresses host capture and passes
+`capture_activity=content_changed` to the tail. Autopush never warms. Pinned in
 `tests/test_host_usage_snapshot.py` and `tests/test_integration.py`.
 
 **Requested capture publication (61A).** Strict event append reports OSError
 and short writes; forensic append callers keep their existing best-effort
 semantics. Exit 0 requires the requested row in the exact file revision of
-the manifest accepted by `backend.put(manifest_key, ...)`. Exit 4 means no
-row, append failure, or missing inclusion while content sync was otherwise
-fine; exit 1 means stopped before acceptance, and 2 incompatible flags. No row
+the manifest accepted by `backend.put(manifest_key, ...)`. Exit 4 means the row
+was written but its revision is not in the accepted manifest while content sync
+was otherwise fine. An excluded row can take this path with no new manifest
+accepted because content was already up to date. Exit 1 means no row written,
+append failed, or push stopped before acceptance; content was not pushed.
+Exit 2 means incompatible flags. No row
 means no `_push_core` call. Post-acceptance maintenance is reported separately.
 The flag uses its own `HostUsageCapture`, not the suppressed tail's degradation
 list. Excludes, include dirs and max size are never overridden. A *new* oversized
 day file may be omitted; an already advertised oversized file correctly refuses
 the whole snapshot under the sync invariant (exit 1).
+
+**Content gate (64A, UC1-E).** The conditional is scoped to `--capture-usage`.
+`content_changed` has three sources of truth: non-internal byte diffs from a
+single materialization of `iter_source_diffs`, forward-only mtime changes via
+`_has_mtime_only_changes_vs_remote(source_filter=...)` for each non-internal
+source, and the symmetric difference of current vs previously advertised source
+names, minus `MM_INTERNAL_SOURCE_NAMES`. Removing a user source counts too.
+The mtime test is independent of `has_mtime_only`: the freshly appended host
+row can make `has_substantive` true while user-file bytes remain unchanged.
+With a missing/corrupt real manifest, nonempty local user sources diff as new.
+The upload loop computes its own fresh diffs AFTER the tail's mm-events rescan;
+never reuse the pre-tail list there. Bytes, mtime-only, selection-only, first
+push and corrupt recovery are pinned separately.
+
+`PushResult.content_changed` and `content_files` carry the mode and the count of
+user-file byte additions/modifications/deletions. Metadata/selection changes
+can have a zero count. The flag receives a result even at a no-op return.
+`_print_usage_push_mode` renders at no-op or manifest acceptance, before later
+maintenance can hide the mode by raising. Usage-only output names the unchanged
+Git cursor and `mm recapture 30d`. A usage-only refresh has an empty
+`events_degradations` list by design: no Git/session walk ran, so reporting one
+as degraded would be false. The flag is attended and writes no autorun breadcrumb.
+
+The guarantee is **per invocation**. If a usage-only refresh appends then fails
+upload, a later ordinary push/autopush sees pending mm-events bytes, runs its
+ordinary tail and counts once. That recovery is a real push. No historical
+activity is relabeled. The flag stays on `push`, rather than a proposed
+`mm recapture --usage`, because proving publication requires manifest acceptance.
+The rename was considered and declined; recapture remains Git recovery.
+
+**Capture failures (64A, UC2-C).** No-row and append-failure branches stop before
+`_push_core`; content sync is deliberately not attempted. They say content was
+not pushed and name `mm push` for content-only recovery. All four capture errors
+use stderr, operation/problem/cause/action/link text and stable tokens: `no-row`,
+`append-failed`, `push-failed`, and `not-published: <cause>`. Publication causes
+include exclude-patterns, include-dirs, max-file-size, unreadable-row (including
+an unparseable line), and revision-mismatch. Exclusion remedies require fixing
+the named setting then running the flag; size remedies name archiving older
+rows outside the source to shrink the day file. `_error` escapes once, so pass
+raw strings to it. Capture exits still reach the upgrade nudge after releasing
+the mm lock; capture failure does not run automatic GC.
+
+**Readiness and coherent remedies (64A).** `config.usage_capture_readiness` is
+pure over already-resolved `selected`, `available`, and reader consent. Its five
+verdicts are ready, disabled/not configured, unavailable custom root, no-reader,
+and unknown (selection is `None` because config was unreadable). Inspection
+resolves once with `strict=False, bootstrap=False`; a missing bootstrapable
+default root is available, and neither status nor diag creates it. Capture
+preflight keeps its strict bootstrap policy. `usage_capture_remedy` supplies the
+prerequisite action. `_host_skip_phrase` requires an explicit readiness keyword;
+tail/init pass ready because they resolved the writer and readers already.
+Status/diag combine that verdict with current reader consent and permanent
+blockers, so an old cache cannot grant consent, a missing folder is not called
+disabled, and a screen cannot recommend both upgrade and retry. Unknown config
+recommends neither enable-source nor the flag. `host_publication.readiness`
+exposes the same verdict without publishing config or creating a receipt.
+
+**Append boundaries and non-push origins (64A).** Under its existing flock,
+`flock_append_jsonl` reads the last byte through an O_RDWR descriptor and prepends
+a newline if necessary. This preserves an intact unterminated row and prevents
+a torn suffix swallowing the next valid row. It does not reconstruct damaged
+JSON, validate the manifest's source files, or promise successful rollback.
+`write_push_event` rejects a git-snapshot batch without an mm-push unless each
+Git row carries an origin; host-only batches are valid. Init passes
+`GIT_SNAPSHOT_ORIGIN_INIT` through `_capture_event_snapshots(origin=...)`.
+The aggregator excludes init and recapture from both zero-repository counters,
+while retaining their commits/coverage. Absent or unknown origins still count
+(pre-30A and forward fail-open); no schema version bump.
+
+Both the **producing and rendering Macs must upgrade** for the init correction.
+Older renderers count the new init origin. Historical unmarked init/refresh
+rows remain indistinguishable from legacy pushes until they leave the queried
+window or age past the 90-day retention. `mm recapture` cannot relabel them;
+published history is not speculatively rewritten.
+
+**When to stop reading host logs (TASTE-1).** Retire the affected host-log reader
+when either a second consecutive Grok or Codex release breaks its record format
+in a way requiring a census re-pin, or that vendor ships a stable machine-readable
+usage command covering per-model token counts for the retained window. On either
+trigger, delete the reader rather than repair it and defer to vendor reporting.
+Track 36A's OpenCode reader deletion is the precedent. One format break is normal
+maintenance; slow reads alone are not a trigger (the configurable budgets address
+them). This is the stopping criterion for a subsystem that has consumed roughly
+18 Tracks.
 
 **Per-reader outcome labels (61A, corrected during pre-landing review).**
 `_push_captured_usage` prints one `Usage capture: <reader> — <outcome>` line per
@@ -1276,7 +1369,7 @@ with `~/.grok/sessions` would see the healthy-tail control pin in
 
 `_run_events_backfill(config, sources, device_id)` runs at the END of `mm init`, AFTER `_register_and_save` and `_ensure_retro_skill_links`. Closes the gap between init and first push: retro-fleet works immediately on a fresh install instead of being empty until the first `mm push` (or autopush hook) fires. Init explicitly resolves sources with `get_sources(config, bootstrap=True)` BEFORE the call, creating the default root at 0700; the backfill writer creates `events/` only when it has rows to append.
 
-**No `mm-push` event by design.** The backfill writes only `git-snapshot` + `sessions-snapshot` rows. Two consequences:
+**No `mm-push` event by design.** The backfill writes `git-snapshot` rows marked `origin: init`, `sessions-snapshot` rows, and the optional host snapshot. The init origin excludes Git rows from the zero-repository push counters as well as omitting the actual push row (64A). Two consequences:
 
 1. **Push counts stay honest.** An init-counted-as-push would inflate the per-window mm-push count in every fresh-install retro by exactly 1. A "1 more than expected" lie everywhere is worse than the trade-off below.
 
