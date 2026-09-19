@@ -829,14 +829,15 @@ def test_three_attended_callers_share_one_warm_sweep(tmp_path, monkeypatch, entr
         events_tail._run_events_backfill(config, sources, "dev-a")
     else:
 
-        def push(*args, on_manifest_accepted, suppress_host_capture, **kwargs):
+        def push(*args, on_manifest_accepted, usage_capture, **kwargs):
             events_tail._run_events_tail(
                 config,
                 sources,
                 "dev-a",
                 dry_run=False,
                 quiet=False,
-                suppress_host_capture=suppress_host_capture,
+                suppress_host_capture=usage_capture,
+                capture_activity=False,
             )
             path = next((root / "events").glob("*.jsonl"))
             on_manifest_accepted(
@@ -1356,7 +1357,7 @@ class TestTailWiring:
 
     def test_permanent_skip_phrase_carries_a_fix_clause(self):
         """T3-9: permanent branch used to append nothing."""
-        phrase = events_tail._host_skip_phrase("grok", "unsupported")
+        phrase = events_tail._host_skip_phrase("grok", "unsupported", readiness="ready")
         assert "pipx upgrade mind-meld" in phrase
         assert "Upgrade mm" not in phrase
         assert "mm disable-source grok" in phrase
@@ -1386,7 +1387,7 @@ class TestTailWiring:
 
     @pytest.mark.parametrize("reason", sorted(get_args(_mm_host_usage.Reason)))
     def test_degradation_phrase_is_safe(self, reason):
-        phrase = events_tail._host_skip_phrase("grok", reason)
+        phrase = events_tail._host_skip_phrase("grok", reason, readiness="ready")
         assert "content sync and git/session capture unaffected" in phrase
         assert "\x1b" not in phrase
 
@@ -2140,7 +2141,7 @@ if __name__ == "__main__":  # pragma: no cover
 
 @pytest.mark.parametrize("reader", ["codex", "grok"])
 def test_partial_takes_the_retry_sentence_not_warming(reader):
-    phrase = events_tail._host_skip_phrase(reader, "partial")
+    phrase = events_tail._host_skip_phrase(reader, "partial", readiness="ready")
     assert phrase.endswith(
         "Run `mm push --capture-usage` to retry; `mm diag` shows the reader's state."
     )
@@ -2149,7 +2150,7 @@ def test_partial_takes_the_retry_sentence_not_warming(reader):
 
 @pytest.mark.parametrize("reader", ["codex", "grok"])
 def test_deadline_names_bounded_interactive_warm(reader):
-    phrase = events_tail._host_skip_phrase(reader, "deadline")
+    phrase = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
     assert "to read it without that budget" in phrase
     assert "one pass" not in phrase
 
@@ -2233,7 +2234,7 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
     if evidence_state == "known":
         evidence = events_tail.HostReadEvidence(250, 300, "2999-01-01T00:00:00+00:00", 50, 51)
     phrase = events_tail._host_skip_phrase(
-        reader, "deadline", verb=verb, evidence=evidence, in_diag=in_diag
+        reader, "deadline", readiness="ready", verb=verb, evidence=evidence, in_diag=in_diag
     )
     assert phrase.startswith(
         f"host-usage snapshot skipped ({reader} deadline) — "

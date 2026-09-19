@@ -152,7 +152,8 @@ def flock_append_jsonl(
     """Append N JSONL rows to `path` atomically under fcntl.flock(LOCK_EX).
 
     Each element of `lines` is one JSON-encoded row WITHOUT a trailing newline;
-    the helper appends a single `\\n` after each row. All N rows share one
+    the helper appends a single `\\n` after each row and separates an
+    unterminated prior row before appending. All N rows share one
     flock window — best-effort batching, NOT transactionality (a crash mid-batch
     leaves a prefix of the rows on disk).
 
@@ -179,7 +180,7 @@ def flock_append_jsonl(
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(
             str(path),
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            os.O_RDWR | os.O_CREAT | os.O_APPEND,
             mode,
         )
         try:
@@ -190,6 +191,8 @@ def flock_append_jsonl(
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
                 start = os.fstat(fd).st_size
+                if start and os.pread(fd, 1, start - 1) != b"\n":
+                    payload = b"\n" + payload
 
                 def _restore_prefix() -> None:
                     if not strict:

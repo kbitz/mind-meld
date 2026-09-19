@@ -299,7 +299,7 @@ class GitAggregate:
     # device_id -> (zero-project snapshots, total snapshots) in-window.
     # A Notes line fires when any device captured 0 repositories on some
     # of its pushes: that machine's commits are missing from the window.
-    # Recapture-origin rows are excluded from both counts (they are not
+    # Init- and recapture-origin rows are excluded from both counts (they are not
     # pushes); a row with no ``origin`` key is a pre-30A peer and IS a push.
     zero_repo_captures: dict[str, tuple[int, int]] = field(default_factory=dict)
     # device_id -> uncovered [start, end] date pairs inside the retro
@@ -1026,10 +1026,13 @@ def aggregate_git(
         if isinstance(device, str) and device:
             origin = ev.get("origin")
             in_window = _within_window(ev.get("ts"), since, until)
-            # T9: recapture is not a push. A row with no origin key is a
-            # pre-30A peer and IS a push. T8 still counts recapture as
+            # Init and recapture are not pushes. An absent or unknown origin
+            # still counts (pre-30A / forward fail-open). T8 counts either as
             # covering its interval — opposite treatment of one field.
-            if in_window and origin != mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE:
+            if in_window and origin not in (
+                mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                mm_events.GIT_SNAPSHOT_ORIGIN_INIT,
+            ):
                 snap_total[device] = snap_total.get(device, 0) + 1
                 if not projects:
                     snap_zero[device] = snap_zero.get(device, 0) + 1

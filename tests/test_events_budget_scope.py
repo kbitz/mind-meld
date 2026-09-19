@@ -498,7 +498,7 @@ def test_all_host_budget_sites_use_resolver(site, interactive, configured, tmp_p
     else:
         with pytest.raises(cli.typer.Exit) as err:
             cli._push_captured_usage(config, "test-passphrase", 1024, sources, False)
-        assert err.value.exit_code == 4
+        assert err.value.exit_code == 1
     assert seen == [expected]
 
 

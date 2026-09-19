@@ -76,6 +76,175 @@ def _setup(tmp_path, monkeypatch, *, with_config=True, with_crypto_init=True):
 # ── JSON mode ────────────────────────────────────────────────────────────
 
 
+def _enable_capture_sources(tmp_path, *, readers):
+    cfg = load_config()
+    names = {s["name"] for s in cfg["sync"]["sources"]}
+    for name in ("mm-events", *readers):
+        if name in names:
+            continue
+        root = tmp_path / name
+        root.mkdir(exist_ok=True)
+        cfg["sync"]["sources"].append(
+            {
+                "name": name,
+                "path": str(root),
+                "type": "grok" if name == "grok" else "generic",
+                **({"include_dirs": ["events"]} if name != "grok" else {}),
+            }
+        )
+    save_config(cfg)
+
+
+@pytest.mark.parametrize(
+    "state", ["ready", "disabled", "unavailable", "default-missing", "no-reader", "unknown"]
+)
+@pytest.mark.parametrize("inventory", ["deadline", "rebuild", "warming", "unsupported"])
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_capture_remedies_respect_readiness_without_bootstrapping(
+    tmp_path, monkeypatch, state, inventory, reader
+):
+    from mind_meld import config as config_module
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=(reader,))
+    cfg = load_config()
+    root = tmp_path / "mm-events"
+    if state in ("unavailable", "default-missing"):
+        root = tmp_path / ("missing-custom" if state == "unavailable" else ".local/share/mind-meld")
+        next(s for s in cfg["sync"]["sources"] if s["name"] == "mm-events")["path"] = str(root)
+    elif state == "disabled":
+        cfg["sync"]["disabled_sources"] = ["mm-events"]
+    elif state == "no-reader":
+        cfg["sync"]["disabled_sources"] = [reader]
+    save_config(cfg)
+    if state == "unknown":
+        config_module.CONFIG_PATH.write_text("[invalid TOML")
+    cache_state = {
+        "complete_once": False,
+        "usage_less_skipped": 0,
+        "cache_state": "ok",
+        "state": "migrating" if inventory == "warming" else "ready",
+        "last_reason": inventory if inventory in ("deadline", "unsupported") else None,
+        "files_pre_track": 1 if inventory == "rebuild" else 0,
+        "pending": 2,
+        "files_cached": 1,
+        "files_on_disk": 3,
+    }
+    monkeypatch.setattr(host_usage, f"{reader}_usage_diag", lambda: cache_state)
+    before = root.exists()
+    commands = ["diag"] if state == "unknown" else ["status", "diag"]
+    expected = "ready" if state == "default-missing" else state
+    for command in commands:
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        if expected == "ready":
+            assert (
+                "pipx upgrade mind-meld"
+                if inventory == "unsupported"
+                else "mm push --capture-usage"
+            ) in flat
+            if inventory == "unsupported":
+                assert "mm push --capture-usage" not in flat
+        else:
+            assert "mm push --capture-usage" not in flat
+            if expected == "disabled":
+                assert "mm enable-source mm-events" in flat
+            elif expected == "unavailable":
+                assert "Restore access to the configured mm-events folder" in flat
+                assert "mm enable-source mm-events" not in flat
+                assert "mm disable-source mm-events" not in flat
+            elif expected == "unknown":
+                assert "mm enable-source mm-events" not in flat
+                assert "readiness is unknown" in flat
+            elif expected == "no-reader":
+                assert "No host reader is consented" in flat
+                assert "Usage capture unavailable" in flat
+                assert "mm enable-source codex" in flat
+                assert "mm enable-source grok" in flat
+        assert root.exists() == before
+    diag = runner.invoke(app, ["diag", "--json"])
+    assert diag.exit_code == 0, diag.output
+    assert json.loads(diag.stdout)["host_publication"]["readiness"] == expected
+    if not before:
+        assert not root.parent.exists() if state == "default-missing" else not root.exists()
+
+
+@pytest.mark.parametrize("other", ["deadline", "rebuild", "warming"])
+def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkeypatch, other):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex", "grok"))
+    monkeypatch.setattr(
+        host_usage,
+        "grok_usage_diag",
+        lambda: {
+            "last_reason": "unsupported",
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        host_usage,
+        "codex_usage_diag",
+        lambda: {
+            "last_reason": "deadline" if other == "deadline" else None,
+            "state": "migrating" if other == "warming" else "ready",
+            "files_pre_track": int(other == "rebuild"),
+        },
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "pipx upgrade mind-meld" in flat
+        assert "mm push --capture-usage" not in flat
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_unconsented_cached_reader_does_not_deny_siblings_consent(tmp_path, monkeypatch, reader):
+    _setup(tmp_path, monkeypatch)
+    _enable_capture_sources(tmp_path, readers=("grok" if reader == "codex" else "codex",))
+    monkeypatch.setattr(
+        host_usage,
+        f"{reader}_usage_diag",
+        lambda: {
+            "last_reason": "deadline",
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": "ok",
+            "files_pre_track": 1,
+        },
+    )
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "No host reader is consented" not in flat
+    assert f"{reader} usage reading is not consented" in flat
+    assert f"Run mm enable-source {reader}" in flat
+
+
+@pytest.mark.parametrize(
+    "selected,available,consented,expected",
+    [
+        (None, [], True, "unknown"),
+        ([], [], True, "disabled"),
+        ([{"name": "mm-events"}], [], True, "unavailable"),
+        ([{"name": "mm-events"}], [{"name": "mm-events"}], False, "no-reader"),
+        ([{"name": "mm-events"}], [{"name": "mm-events"}], True, "ready"),
+    ],
+)
+def test_capture_readiness_is_pure(selected, available, consented, expected, monkeypatch):
+    from mind_meld import config
+
+    monkeypatch.setattr(config, "resolve_sources", lambda *a, **kw: pytest.fail("resolution"))
+    assert (
+        config.usage_capture_readiness(selected, available, reader_consented=consented) == expected
+    )
+
+
 @pytest.mark.parametrize(
     "mode", ["absent", "stale", "empty", "degraded", "unreadable", "root-unreadable"]
 )
@@ -314,6 +483,7 @@ def test_diag_blocker_fields_are_validated_and_rendered(
     tmp_path, monkeypatch, reader, reason, since, version, expected_reason, expected_since
 ):
     _setup(tmp_path, monkeypatch)
+    _enable_capture_sources(tmp_path, readers=(reader,))
     cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(
@@ -455,6 +625,7 @@ def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
 
 def test_diag_renders_persisted_last_reason(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
+    _enable_capture_sources(tmp_path, readers=("grok",))
     host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     host_usage.GROK_CACHE_PATH.write_text(
         json.dumps(
@@ -1150,6 +1321,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         "host_usage_interactive_budget_ms": 500,
     }
     save_config(config)
+    _enable_capture_sources(tmp_path, readers=())
     at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds")
     for reader, ms in (("codex", 250 if case == "over" else 197), ("grok", 18)):
         path = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH

@@ -1683,6 +1683,32 @@ class TestLocalCaptureSelection61:
 
 
 class TestWritePushEvent:
+    def test_git_without_push_requires_origin_before_creating_file(self, tmp_path):
+        root = tmp_path / "events"
+        with pytest.raises(ValueError, match="requires an origin"):
+            events.write_push_event(root, "dev-a", [{"type": "git-snapshot", "projects": []}])
+        assert not root.exists()
+
+    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize("suffix", [None, b"", b"\n", b'\n{"torn":'])
+    def test_unterminated_prior_row_does_not_swallow_next_row(self, tmp_path, strict, suffix):
+        """64A: preserve complete rows on either side of a torn append."""
+        old = events.make_mm_push_event(device="dev-a", mm_version="old")
+        new = events.make_mm_push_event(device="dev-a", mm_version="new")
+        today = datetime.now(timezone.utc).date().isoformat()
+        path = tmp_path / f"dev-a-{today}.jsonl"
+        path.write_bytes(json.dumps(old).encode() + suffix if suffix is not None else b"")
+        events.write_push_event(tmp_path, "dev-a", [new], strict=strict)
+        rows = []
+        for line in path.read_bytes().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
+        assert rows == ([old, new] if suffix is not None else [new])
+        assert not path.read_bytes().startswith(b"\n")
+        assert b"\n\n" not in path.read_bytes()
+
     def test_append_round_trip(self, tmp_path):
         events_dir = tmp_path / "events"
         push = events.make_mm_push_event(device="dev-a", mm_version="0.11.0")
@@ -2458,7 +2484,7 @@ class TestMakeHostUsageSnapshot:
 
 
 class TestWriteOrderTransactionalPin:
-    def test_partial_write_does_not_advance_cursor(self, tmp_path):
+    def test_partial_write_does_not_advance_cursor(self, tmp_path, monkeypatch):
         """CT-4: mm-push event MUST be LAST. If the caller crashes between
         writing git-snapshot and mm-push, cursor stays at the prior value
         and the next push re-walks (deduped at retro render via (remote,
@@ -2466,11 +2492,17 @@ class TestWriteOrderTransactionalPin:
         verifying last_push_ts returns the default (now-30d), NOT a
         cursor advancement."""
         events_dir = tmp_path / "events"
+        real_write = os.write
+
+        def partial_write(fd, payload):
+            return real_write(fd, payload.split(b"\n", 1)[0] + b"\n")
+
+        monkeypatch.setattr(os, "write", partial_write)
         events.write_push_event(
             events_dir,
             "dev-a",
             [
-                # ONLY a git-snapshot — no mm-push (simulates partial write)
+                # Valid batch, physically interrupted before its terminal push.
                 {
                     "v": 1,
                     "type": "git-snapshot",
@@ -2479,6 +2511,7 @@ class TestWriteOrderTransactionalPin:
                     "projects": [],
                     "skipped": [],
                 },
+                events.make_mm_push_event(device="dev-a", mm_version="test"),
             ],
         )
         ts = events.last_push_ts(events_dir, "dev-a")

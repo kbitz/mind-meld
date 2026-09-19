@@ -7925,3 +7925,22 @@ class TestHostEconomics:
         out = aggregator.format_retro(_econ_data([legacy, upgraded]))
         section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
         assert "~$" in section
+
+
+# Track 64A deliberately retains pre-30A and forward fail-open counting.
+@pytest.mark.parametrize(
+    "origin,count", [(None, 1), ("future-origin", 1), ("init", 0), ("recapture", 0)]
+)
+def test_non_push_origins_and_mixed_version_counting(origin, count):
+    now = datetime.now(timezone.utc)
+    row = {"type": "git-snapshot", "ts": now.isoformat(), "device": "dev-a", "projects": []}
+    if origin is not None:
+        row["origin"] = origin
+    result = aggregator.aggregate_git(
+        [row], since=now - timedelta(days=7), until=now, author_emails=None
+    )
+    assert result.zero_repo_captures == ({"dev-a": (1, 1)} if count else {})
+    # A pre-64A renderer knows only recapture. New init rows remain readable,
+    # but that renderer still counts them until it upgrades.
+    legacy_count = int(row.get("origin") != "recapture")
+    assert legacy_count == (1 if origin == "init" else count)
