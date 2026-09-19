@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.17] - 2026-09-19
+
+**Usage-only refreshes preserve push counts and the Git cursor; capture failures say what was skipped.** Content-carrying refreshes count once, init snapshots have their own origin, and appends separate torn JSONL rows from the next valid record.
+
+### Fixed
+
+- `mm push --capture-usage` skips Git/session capture when only internal sources changed, including the host refresh itself. Byte changes, forward mtime changes and source selection changes still capture activity and count once; the host reader runs only once. Ordinary push/autopush recovery remains unchanged.
+- Capture no-row and append failures now exit 1 before content sync, with a bare `mm push` recovery action. Exit 4 means a locally written capture was not published while content sync was otherwise fine. Stderr identifies the cause and remedy; mode output distinguishes usage-only refreshes from content pushes. Upgrade nudges still run after the lock is released on capture failure.
+- Status and diag use selected and available sources plus reader consent to recommend a usable capture action. Disabled sources, missing custom folders, no consent and unreadable configuration get distinct advice; unsupported reader formats consistently recommend upgrading.
+- JSONL append repairs a missing final newline under the file lock. An unrecoverable torn row remains damaged, but cannot swallow the next valid event. Init Git rows carry `origin: init`; updated renderers exclude init and recapture from push counts while preserving legacy absent-origin behavior.
+
+### Documentation
+
+- Documented capture outcomes, exit codes, read-only diagnostics and the host-reader retirement criterion. Both producing and rendering Macs need the origin fix; old unmarked rows remain until they age out (up to 90 days), and recapture cannot relabel them.
+
 ## [0.14.16] - 2026-09-17
 
 **Warm Codex reads use less of the autopush budget, and attended captures publish their warm read.** Per-Mac read budgets and last-complete-read diagnostics make continuing capture headroom visible.

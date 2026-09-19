@@ -476,6 +476,54 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
     assert "no Git roots or content changes" in readme
 
 
+def test_usage_capture_exit_contract_on_all_five_surfaces() -> None:
+    """64A: pre-push failures cannot creep back into exit 4's cause list."""
+    import inspect
+
+    from mind_meld import cli
+
+    readme = (ROOT / "README.md").read_text()
+    invariant = (ROOT / "docs/invariants/events-retro.md").read_text()
+    agents = (ROOT / "AGENTS.md").read_text()
+    surfaces = [
+        inspect.getdoc(cli._push_captured_usage),
+        next(
+            line for line in readme.splitlines() if line.startswith("| `mm push --capture-usage`")
+        ),
+        readme[readme.index("Exit 0 means the row's file revision") :].split("\n\n", 1)[0],
+        next(
+            line for line in agents.splitlines() if line.startswith("Push flags: `--capture-usage`")
+        ),
+        invariant[invariant.index("Exit 0 requires the requested row") :].split("\n\n", 1)[0],
+    ]
+    for surface in surfaces:
+        flat = " ".join(surface.split())
+        exit4 = re.search(r"(?:Exit )?4(?: means|:)(.*?)(?:Exit )?1(?: means|:)", flat).group(1)
+        assert "written" in exit4 and "accepted manifest" in exit4
+        assert "content sync was otherwise fine" in exit4
+        assert "no row" not in exit4.lower() and "append fail" not in exit4.lower()
+        assert "no row written, append failed, or push stopped before acceptance" in flat
+    spec = (ROOT / "SPEC.md").read_text()
+    assert "mm recapture [WINDOW] [--dry-run]" in spec
+    assert "host_read_budgets, host_publication" in spec
+    for code in range(5):
+        assert f"| {code} |" in spec
+
+
+def test_usage_capture_help_names_prerequisites_and_exits() -> None:
+    from typer.testing import CliRunner
+
+    from mind_meld.cli import app
+
+    result = CliRunner().invoke(app, ["push", "--help"])
+    assert result.exit_code == 0
+    flat = " ".join(result.stdout.replace("│", " ").split())
+    assert "mm-events" in flat and "consented" in flat
+    for code in (0, 1, 2, 4):
+        assert str(code) in flat
+    assert "--dry-run" in flat and "accepted manifest" in flat
+
+
 def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:
     """``--dump-host-usage`` status vocabulary is JSON, not notes.append.
 
