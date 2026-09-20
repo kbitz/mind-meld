@@ -796,10 +796,8 @@ def _rows(events_root: Path) -> list[dict]:
     return [json.loads(ln) for f in files for ln in f.read_text().splitlines() if ln.strip()]
 
 
-@pytest.mark.parametrize("entry", ["tail", "backfill", "flag"])
+@pytest.mark.parametrize("entry", ["tail", "backfill", "attended"])
 def test_three_attended_callers_share_one_warm_sweep(tmp_path, monkeypatch, entry):
-    import hashlib
-
     from mind_meld import cli
 
     root = tmp_path / "events_root"
@@ -828,34 +826,18 @@ def test_three_attended_callers_share_one_warm_sweep(tmp_path, monkeypatch, entr
     elif entry == "backfill":
         events_tail._run_events_backfill(config, sources, "dev-a")
     else:
-
-        def push(*args, on_manifest_accepted, usage_capture, **kwargs):
-            events_tail._run_events_tail(
-                config,
-                sources,
-                "dev-a",
-                dry_run=False,
-                quiet=False,
-                suppress_host_capture=usage_capture,
-                capture_activity=False,
-            )
-            path = next((root / "events").glob("*.jsonl"))
-            on_manifest_accepted(
-                {
-                    "sources": {
-                        "mm-events": {
-                            "files": {
-                                f"events/{path.name}": {
-                                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest()
-                                }
-                            }
-                        }
-                    }
-                }
-            )
-
-        monkeypatch.setattr(cli, "_push_core", push)
-        cli._push_captured_usage(config, "unused", 1024, sources, False)
+        config["sync"]["max_file_size"] = 52_428_800
+        captured = cli._capture_attended_usage(config, sources, sources, verbose=False)
+        assert captured is not None
+        events_tail._run_events_tail(
+            config,
+            sources,
+            "dev-a",
+            dry_run=False,
+            quiet=False,
+            suppress_host_capture=True,
+            capture_activity=False,
+        )
     assert calls == ["read", "warm"]
     rows = _rows(root)
     hosts = [r for r in rows if r["type"] == "host-usage-snapshot"]
@@ -1164,7 +1146,7 @@ class TestTailWiring:
         assert degradations[0].startswith(f"host-usage snapshot skipped (grok {reason})")
         # Permanent vs transient: never promise a retry for a failure a later
         # push cannot fix, and never leave a transient one without a next step.
-        promises_retry = "Run `mm push --capture-usage`" in degradations[0]
+        promises_retry = "mm push" in degradations[0]
         if reason in events_tail._HOST_PERMANENT_REASONS:
             assert not promises_retry
             assert "pipx upgrade mind-meld" in degradations[0]
@@ -1172,7 +1154,9 @@ class TestTailWiring:
             assert promises_retry
             # Only deadline warrants warming; all transient remedies work
             # on a converged Mac as well as a substantive push.
-            assert ("to read it without that budget" in degradations[0]) == (reason == "deadline")
+            assert ("An attended mm push can warm cold readers" in degradations[0]) == (
+                reason == "deadline"
+            )
 
     def test_an_absent_source_publishes_a_row_and_no_degradation(self, tmp_path, monkeypatch):
         """The whole point of the revised premise: a machine whose Grok store
@@ -1519,7 +1503,8 @@ class TestColdCacheWarmAndRetry:
         assert row["tokens_by_day"][day]["by_model"]["grok-4.6-build"] == _usage(7)
         assert len(degradations) == (0 if codex_warm == "complete" else 1)
         err = capsys.readouterr().err
-        assert "mm: reading grok usage beyond the push budget (about 5 s of scanning)..." in err
+        assert "reading grok usage beyond [retro] host_usage_interactive_budget_ms" in err
+        assert "(about 5 s of scanning)..." in err
         assert "one-time" not in err
 
     def test_interactive_push_warms_then_retries_and_publishes(self, tmp_path, monkeypatch, capsys):
@@ -1538,7 +1523,8 @@ class TestColdCacheWarmAndRetry:
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
         err = capsys.readouterr().err
-        assert "mm: reading codex usage beyond the push budget (about 5 s of scanning)..." in err
+        assert "reading codex usage beyond [retro] host_usage_interactive_budget_ms" in err
+        assert "(about 5 s of scanning)..." in err
         assert "one-time" not in err
 
     def test_interactive_push_warms_a_dropped_grok_reader_then_retries(self, tmp_path, monkeypatch):
@@ -2143,7 +2129,7 @@ if __name__ == "__main__":  # pragma: no cover
 def test_partial_takes_the_retry_sentence_not_warming(reader):
     phrase = events_tail._host_skip_phrase(reader, "partial", readiness="ready")
     assert phrase.endswith(
-        "Run `mm push --capture-usage` to retry; `mm diag` shows the reader's state."
+        "Attended mm push refreshes usage automatically; `mm diag` shows the reader's state."
     )
     assert "warming" not in phrase
 
@@ -2151,7 +2137,7 @@ def test_partial_takes_the_retry_sentence_not_warming(reader):
 @pytest.mark.parametrize("reader", ["codex", "grok"])
 def test_deadline_names_bounded_interactive_warm(reader):
     phrase = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
-    assert "to read it without that budget" in phrase
+    assert "An attended mm push can warm cold readers" in phrase
     assert "one pass" not in phrase
 
 
@@ -2244,11 +2230,11 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
     assert "warming" not in phrase
     if evidence is None:
         assert f"this {verb}'s read budget" in phrase
-        assert "Run `mm push --capture-usage` to read it without that budget" in phrase
+        assert "An attended mm push can warm cold readers" in phrase
     else:
         unit = "ledgers" if reader == "grok" else "rollouts"
         assert (
-            "raise `[retro] host_usage_autopush_budget_ms`; otherwise run `mm push --capture-usage`"
+            "raise `[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage"
             in phrase
         )
         if evidence_state == "known":
@@ -2259,3 +2245,12 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
             assert f"unknown of unknown {unit} cached" in phrase
     if in_diag:
         assert "`mm diag`" not in phrase
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok"])
+def test_attended_deadline_does_not_promise_escaping_its_own_budget(reader):
+    background = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
+    attended = events_tail._host_skip_phrase(reader, "deadline", readiness="ready", attended=True)
+    assert "can warm cold readers" in background
+    assert "Attended warming also exhausted its allowance" in attended
+    assert "mm diag" in attended and "without that budget" not in attended

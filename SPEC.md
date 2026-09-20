@@ -327,9 +327,9 @@ Built with `typer`. Installed as `mm` (Mind Meld).
 
 ```
 mm init                     # generate device ID, configure storage, set passphrase
-mm push [--dry-run | --capture-usage]   # build manifest, diff against remote, upload changes
+mm push [--dry-run]   # build manifest, diff against remote, upload changes
                             # --dry-run previews publication and deletions; changes nothing except the local lock file (v0.14.10)
-                            # --capture-usage refreshes consented host readers; needs selected, available mm-events. Usage-only refreshes leave activity counts/cursor unchanged; content changes count as one push.
+                            # attended push refreshes consented host readers; needs selected, available mm-events. Usage-only refreshes leave activity counts/cursor unchanged; content changes count as one push.
 mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optionally scoped)
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
                             # --dry-run previews outcome totals; changes nothing except the local lock file. Combine with --conflict-mode fail for a write-free CI gate (v0.14.15)
@@ -409,7 +409,7 @@ receipt or proof that another Mac has received a row. See
 
 This numbered algorithm is historical. For the current source-selection and
 publication gates, read [sync invariants](docs/invariants/sync.md); for
-`--capture-usage`'s conditional activity tail and exit contract, read
+attended push's conditional activity tail and exit contract, read
 [host usage capture](README.md#host-usage-capture) and
 [events/retro invariants](docs/invariants/events-retro.md).
 
@@ -811,16 +811,17 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 
 | Exit | Meaning |
 |---|---|
-| 0 | Command completed. A usage capture's row is in the accepted manifest. A partial recapture preview can also complete with an explicit incomplete notice. Autopush/autopull report failures through stderr and breadcrumbs while retaining their hook exit-0 contract. |
-| 1 | Command stopped. For `push --capture-usage`, setup, no-row, append, or push failure: content was not pushed. For recapture, also no discovered repositories. |
-| 2 | Usage error, including `push --capture-usage --dry-run` or an invalid recapture window. |
+| 0 | Command completed. For push, content sync succeeded regardless of capture outcome; verify recorded usage with mm status. |
+| 1 | Command stopped. For push, content sync or required maintenance stopped; capture failures alone do not block content. For recapture, also no discovered repositories or a skipped event batch. |
+| 2 | Usage error, such as an invalid option or recapture window. |
 | 3 | `pull --conflict-mode fail` preflight refusal, before applying files (including with `--dry-run`). |
-| 4 | `push --capture-usage`: the row was written locally but was not published in the accepted manifest; content sync was otherwise fine (pushed or already up to date). `recapture`: partial recovery after publishing available Git rows. |
+| 4 | `recapture`: partial recovery after publishing available Git rows. Push does not use exit 4. |
 
 Usage-capture failures go to stderr with `no-row`, `append-failed`, `push-failed`,
 or `not-published: <cause>` tokens, content-sync status, an actionable remedy,
-and the [host usage capture](README.md#host-usage-capture) link. Pre-push capture
-failures deliberately stop before content sync; use bare `mm push` to sync content.
+and the [host usage capture](README.md#host-usage-capture) link. Capture failures
+do not stop content sync. `push-failed` is a content-sync stop, not a capture-only
+exit.
 
 ### Error Hierarchy (`mind-meld/errors.py`)
 

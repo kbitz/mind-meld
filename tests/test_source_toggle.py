@@ -710,7 +710,7 @@ class TestStatusBreadcrumbs:
         # Publication prerequisites come first. This fixture has never selected
         # mm-events; only after enabling it can reader recovery be actionable.
         assert "mm enable-source mm-events" in " ".join(drifted.output.split())
-        assert "mm push --capture-usage" not in " ".join(drifted.output.split())
+        assert "mm push" not in " ".join(drifted.output.split())
         enabled = runner.invoke(app, ["enable-source", "mm-events"])
         assert enabled.exit_code == 0, enabled.output
         drifted = runner.invoke(app, ["status"])

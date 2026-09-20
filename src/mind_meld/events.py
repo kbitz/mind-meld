@@ -1,7 +1,7 @@
 """Per-push event capture for fleet-aware retro (Group 7 — Track 7A).
 
-Every push appends 1 + N + M events to a per-device daily JSONL file under
-the mm-events synced source. Four event types per push:
+Content-changing pushes append activity to a per-device daily JSONL file
+under the mm-events synced source. Four supported event types:
 
   - mm-push           one per push, the cursor anchor for the next push
   - git-snapshot      per-repo commit metadata (deduped fleet-wide by canonical
@@ -17,21 +17,13 @@ The events log itself is the cursor (no separate cursor file): the most
 recent `mm-push` event's `ts` answers "since when do I scan?" on the next
 push. Pattern matches `pullhistory.py` (the log file is the state of truth).
 
-Same-push upload semantics. Track 7B's wiring runs the events tail at the
-HEAD of `_push_core` (BEFORE `build_manifest_v2`), so the just-written
-events file IS picked up by the manifest build and uploaded as part of the
-SAME push. (Pre-Track-7B prototypes ran a true tail-position write that
-required next-push lag; the production wiring eliminated that lag — see
-CLAUDE.md "Events tail in _push_core" for the locked invariants.)
-
-Trust boundary. The events tail runs on every push that uploads bytes
-(v0.12.2 substantive-change gate). Truly empty `mm push` invocations —
-no user-source diffs, no corrupt-manifest recovery — skip the tail and
-return "Nothing to push" without writing a row. Pre-v0.12.2 the tail
-fired at the HEAD of `_push_core` unconditionally, which made every
-empty push report a phantom "1 file uploaded" (the events file itself)
-and ship that row to peers; the gate eliminates that churn while
-keeping the cursor accurate (no-op pushes never advanced it anyway).
+Same-push upload semantics. `_push_core` captures attended host usage before
+its manifest scan, then runs the activity tail only when needed and rebuilds
+the manifest to include those rows. A converged attended push can publish a
+host-only row without adding mm-push/git/session activity or advancing the
+cursor. With no appended host row, the ordinary substantive-change gate
+still controls activity capture. Autopush retains its change-gated capture.
+See docs/invariants/events-retro.md for the separate append/activity gates.
 
 Init-time backfill. `events_tail._run_events_backfill` (moved out of cli.py in
 Track 16A) runs at the end of `mm init` and writes a 30-day git-snapshot, a
@@ -71,8 +63,8 @@ from typing import Callable, Mapping, Sequence, TypedDict
 from urllib.parse import urlsplit
 
 from mind_meld import fsutil, gitenv, token_usage
-from mind_meld.config import MM_INTERNAL_SOURCE_NAMES
-from mind_meld.safety import strip_terminal_escapes
+from mind_meld.config import DEFAULT_MAX_FILE_SIZE, MM_INTERNAL_SOURCE_NAMES
+from mind_meld.safety import safe_terminal_str, strip_terminal_escapes
 
 # ---------------------------------------------------------------------------
 # Module-level named constants (C3). Track 7B imports the budget pair to
@@ -1878,17 +1870,25 @@ def git_row_commit_records(row: dict) -> list[dict]:
     return out
 
 
+@dataclass(frozen=True)
+class EventAppendSkipped:
+    """Distinct from an empty/forensic append and a successful strict append."""
+
+    path: Path
+
+
 def write_push_event(
     events_dir: Path,
     device_id: str,
     events: list[dict],
     *,
     strict: bool = False,
-) -> Path | None:
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+) -> Path | EventAppendSkipped | None:
     """Append `events` to today's per-device JSONL.
 
     Order invariant (CT-4): when an ``mm-push`` row is present, it MUST
-    be last so a partial write cannot advance the cursor. Requested
+    be last so a partial write cannot advance the cursor. Host-only attended
     captures may omit it; git rows in a batch without it must carry an
     origin (init or recapture). These rows do not move the cursor. Partial write before the
     mm-push appends → next push re-walks the range (deduped at retro
@@ -1898,8 +1898,9 @@ def write_push_event(
     not reconstruct a torn row or guarantee rollback succeeds.
 
     File mode 0o600. Per-day naming: ``events/<device>-<YYYY-MM-DD>.jsonl``.
-    A requested capture uses ``strict=True`` to observe append failures and
+    An attended capture uses ``strict=True`` to observe append failures and
     receive the exact day path written (including across a midnight rollover).
+    A size skip returns EventAppendSkipped in either mode, with a stderr remedy.
     """
     if not events:
         return
@@ -1910,7 +1911,17 @@ def write_push_event(
     safe_device = _safe_device_filename(device_id)
     path = events_dir / f"{safe_device}-{today}.jsonl"
     lines = [json.dumps(e, sort_keys=True).encode("utf-8") for e in events]
-    fsutil.flock_append_jsonl(path, lines, mode=0o600, strict=strict)
+    try:
+        fsutil.flock_append_jsonl(path, lines, mode=0o600, strict=strict, max_bytes=max_file_size)
+    except fsutil.AppendSizeLimit:
+        print(
+            "mm: warning: Event append (max-file-size): batch skipped — "
+            f"{safe_terminal_str(path)} would exceed sync.max_file_size. "
+            "Archive older rows outside mm-events to shrink the day file, or increase "
+            "sync.max_file_size before retrying. Existing bytes were kept.",
+            file=sys.stderr,
+        )
+        return EventAppendSkipped(path)
     return path if strict else None
 
 

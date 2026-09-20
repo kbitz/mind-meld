@@ -66,7 +66,7 @@ def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None
     if readiness == "no-reader" and reader is not None:
         return f"{reader} usage reading is not consented. Run mm enable-source {reader}."
     return {
-        "ready": "Run mm push --capture-usage.",
+        "ready": "Attended mm push refreshes and publishes host usage automatically.",
         "disabled": "Run mm enable-source mm-events to enable usage publication.",
         "unavailable": "Restore access to the configured mm-events folder.",
         "no-reader": (

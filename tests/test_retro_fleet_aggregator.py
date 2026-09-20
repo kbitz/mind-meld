@@ -4558,7 +4558,7 @@ def test_stale_host_capture_note_is_one_class_for_two_devices():
     stale = [note for note in notes if "predate this window" in note]
     assert len(stale) == 1
     assert "dev-a" in stale[0] and "dev-b" in stale[0] and "dev-c" not in stale[0]
-    assert "2026-04-20" in stale[0] and "mm push --capture-usage" in stale[0]
+    assert "2026-04-20" in stale[0] and "mm push" in stale[0]
 
 
 class TestHostSnapshotAcceptance:
@@ -6921,7 +6921,7 @@ class TestAgentInventoryHardening:
     def test_version_floor_is_named_from_the_constant(self):
         data = self._data({}, known_ids=("dev-a",), missing=frozenset({"dev-a"}))
         notes = aggregator._agent_coverage_notes(data)
-        assert any(aggregator.HOST_SNAPSHOT_MIN_VERSION in n for n in notes)
+        assert any(aggregator.ATTENDED_USAGE_MIN_VERSION in n for n in notes)
 
 
 class TestAcceptorSchemaConstant:
@@ -7640,7 +7640,7 @@ class TestHostEconomics:
         section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
         assert "~$" not in section
         assert "older format" in out
-        assert "pipx upgrade mind-meld" in out
+        assert "upgrade mind-meld to v0.14.17+" in out
 
     def test_pre_d2_empty_peer_renders_no_host_token_numbers(self):
         ev = _host_event(
@@ -7682,7 +7682,7 @@ class TestHostEconomics:
         assert "| dev-a | — |" in section
         assert "~$0" not in section
         assert "snapshot predates this window" in out
-        assert "Run `mm push --capture-usage` on that Mac" in out
+        assert "verify with `mm --version`, then run `mm push`" in out
 
     def test_marker_partial_flips_to_floor(self):
         hosts = _priced_hosts()

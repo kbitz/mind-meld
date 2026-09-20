@@ -472,37 +472,29 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
         assert url in readme
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
     assert token_usage.PRICING_LAST_UPDATED in invariant
-    assert "mm push --capture-usage" in readme
+    assert "mm push" in readme
     assert "no Git roots or content changes" in readme
 
 
-def test_usage_capture_exit_contract_on_all_five_surfaces() -> None:
-    """64A: pre-push failures cannot creep back into exit 4's cause list."""
+def test_attended_push_contract_on_live_surfaces() -> None:
     import inspect
 
     from mind_meld import cli
 
-    readme = (ROOT / "README.md").read_text()
-    invariant = (ROOT / "docs/invariants/events-retro.md").read_text()
-    agents = (ROOT / "AGENTS.md").read_text()
-    surfaces = [
-        inspect.getdoc(cli._push_captured_usage),
-        next(
-            line for line in readme.splitlines() if line.startswith("| `mm push --capture-usage`")
-        ),
-        readme[readme.index("Exit 0 means the row's file revision") :].split("\n\n", 1)[0],
-        next(
-            line for line in agents.splitlines() if line.startswith("Push flags: `--capture-usage`")
-        ),
-        invariant[invariant.index("Exit 0 requires the requested row") :].split("\n\n", 1)[0],
+    paths = [
+        "README.md",
+        "SPEC.md",
+        "AGENTS.md",
+        "docs/invariants/events-retro.md",
+        "src/mind_meld/skills/retro_fleet/SKILL.md",
     ]
-    for surface in surfaces:
-        flat = " ".join(surface.split())
-        exit4 = re.search(r"(?:Exit )?4(?: means|:)(.*?)(?:Exit )?1(?: means|:)", flat).group(1)
-        assert "written" in exit4 and "accepted manifest" in exit4
-        assert "content sync was otherwise fine" in exit4
-        assert "no row" not in exit4.lower() and "append fail" not in exit4.lower()
-        assert "no row written, append failed, or push stopped before acceptance" in flat
+    for path in paths:
+        assert "capture-usage" not in (ROOT / path).read_text(), path
+    # CHANGELOG, PROGRESS and roadmap-shipped deliberately retain historical commands.
+    for path in ["README.md", "SPEC.md", "AGENTS.md", "docs/invariants/events-retro.md"]:
+        flat = " ".join((ROOT / path).read_text().split())
+        assert "content sync succeeded regardless of capture outcome" in flat.lower(), path
+    assert "regardless of usage coverage" in inspect.getdoc(cli.push)
     spec = (ROOT / "SPEC.md").read_text()
     assert "mm recapture [WINDOW] [--dry-run]" in spec
     assert "host_read_budgets, host_publication" in spec
@@ -519,9 +511,12 @@ def test_usage_capture_help_names_prerequisites_and_exits() -> None:
     assert result.exit_code == 0
     flat = " ".join(result.stdout.replace("│", " ").split())
     assert "mm-events" in flat and "consented" in flat
-    for code in (0, 1, 2, 4):
-        assert str(code) in flat
-    assert "--dry-run" in flat and "accepted manifest" in flat
+    assert "five seconds" in flat and "both readers can be cold" in flat
+    assert "GC" in flat and "hard timeouts" in flat
+    assert "Never scans or warms host usage" in flat
+    assert "--capture-usage" not in flat and "--no-capture-usage" not in flat
+    removed = CliRunner().invoke(app, ["push", "--capture-usage"])
+    assert removed.exit_code == 2
 
 
 def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:
@@ -882,30 +877,33 @@ def test_notes_decoder_compatibility_fixtures_both_directions():
         .split("## Trends vs prior", 1)[0]
     )
     new_output = agg.format_retro(presentation_data("degraded"), name="Example")
-    # The decoder is prose: preserve every old instruction, not a mock parser
-    # invented for the test. A new decoder must still understand old output.
-    # Track 61A changes only the host-refresh command in retained decoder rules.
-    compatible_decoder = new_decoder.replace("mm push --capture-usage", "mm push")
-    assert all(line in compatible_decoder for line in old_decoder.splitlines() if line.strip())
+    # Retained interpretation is compatible; refresh remedies deliberately gain
+    # a binary floor. Compare stable stems explicitly, never normalize commands.
+    for stem in (
+        "Fleet incomplete:",
+        "Sessions count incomplete:",
+        "Tokens incomplete",
+        "Skills incomplete:",
+        "No agent-log reader contributed",
+        "No agent activity observed",
+        "API list-rate equivalent unavailable",
+    ):
+        assert stem in old_decoder and stem in new_decoder
+    assert agg.ATTENDED_USAGE_MIN_VERSION in new_decoder
+    assert "verify `mm --version`" in new_decoder
     old_notes = old_output.split("## Notes\n", 1)[1].splitlines()
-    new_notes = (
-        new_output.replace("mm push --capture-usage", "mm push")
-        .split("## Notes\n", 1)[1]
-        .splitlines()
-    )
-    assert all(line in new_notes for line in old_notes if line.strip())
-    # An old decoder receives new distinct stems through its existing unknown-
-    # line rule. No new meaning is hidden under an old stem.
-    additions = [line for line in new_notes if line not in old_notes and line.strip()]
-    assert len(additions) == 2
-    assert all(
-        line.startswith(
-            (
-                "- Claude Code API list-rate equivalent is a floor",
-                "- API list-rate equivalent uses floor rates",
+    new_notes = new_output.split("## Notes\n", 1)[1].splitlines()
+    for line in old_notes:
+        if not line.strip():
+            continue
+        if "Not available for" in line:
+            assert any(
+                "Not available for" in new
+                and agg.ATTENDED_USAGE_MIN_VERSION in new
+                and "then run `mm push`" in new
+                for new in new_notes
             )
-        )
-        for line in additions
-    )
+        else:
+            assert line in new_notes
     for decoder in (old_decoder, new_decoder):
         assert "reported verbatim" in decoder and "never interpreted" in decoder

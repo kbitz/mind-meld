@@ -3053,31 +3053,25 @@ class TestSnapshotPublicationHelpers:
                 resolution,
                 remote,
                 [],
-                {"sources": {}},
-                "dev",
-                "A",
-                1024,
-                None,
             )
 
     def test_prior_grok_empty_customization_dirs_scans(self, tmp_path):
+        from mind_meld.manifest import build_manifest_v2
+
         root = tmp_path / ".grok"
         root.mkdir()
         grok_cfg = {"name": "grok", "path": str(root), "type": "grok"}
         resolution = SourceResolution(selected=[grok_cfg], available=[])
         remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
-        sources, local = _include_prior_grok_if_needed(
+        sources = _include_prior_grok_if_needed(
             {"sync": {}},
             resolution,
             remote,
             [],
-            {"sources": {}},
-            "dev",
-            "A",
-            1024,
-            None,
         )
         assert any(src["name"] == "grok" for src in sources)
+        # Recovery fixes selection before capture; the caller then scans it.
+        local = build_manifest_v2("dev", "A", sources, 1024, strict=True)
         assert "grok" in local["sources"]
         assert local["sources"]["grok"]["files"] == {}
 
@@ -3088,19 +3082,13 @@ class TestSnapshotPublicationHelpers:
         (root / "skills" / "a.md").write_text("x")
         resolution = SourceResolution(selected=[], available=[], explicit=True)
         remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
-        sources, local = _include_prior_grok_if_needed(
+        sources = _include_prior_grok_if_needed(
             {"sync": {"sources": []}},
             resolution,
             remote,
             [],
-            {"sources": {}},
-            "dev",
-            "A",
-            1024,
-            None,
         )
         assert sources == []
-        assert "grok" not in local["sources"]
 
     def test_legacy_prior_default_source_stays_selected(self):
         resolution = SourceResolution(

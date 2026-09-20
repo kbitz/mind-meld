@@ -35,6 +35,7 @@ def _setup(tmp_path, monkeypatch, *, with_config=True, with_crypto_init=True):
     """Shared setup: tmp storage + config + optional crypto bootstrap."""
     storage = tmp_path / "icloud"
     storage.mkdir()
+    monkeypatch.setattr("mind_meld.cli.DEFAULT_STORAGE_PATH", str(storage))
     backend = LocalBackend(storage)
     if with_crypto_init:
         bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
@@ -140,15 +141,11 @@ def test_capture_remedies_respect_readiness_without_bootstrapping(
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
         if expected == "ready":
-            assert (
-                "pipx upgrade mind-meld"
-                if inventory == "unsupported"
-                else "mm push --capture-usage"
-            ) in flat
+            assert ("pipx upgrade mind-meld" if inventory == "unsupported" else "mm push") in flat
             if inventory == "unsupported":
-                assert "mm push --capture-usage" not in flat
+                assert "mm push" not in flat
         else:
-            assert "mm push --capture-usage" not in flat
+            assert "mm push" not in flat
             if expected == "disabled":
                 assert "mm enable-source mm-events" in flat
             elif expected == "unavailable":
@@ -200,7 +197,7 @@ def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkey
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
         assert "pipx upgrade mind-meld" in flat
-        assert "mm push --capture-usage" not in flat
+        assert "mm push" not in flat
 
 
 @pytest.mark.parametrize("reader", ["codex", "grok"])
@@ -324,7 +321,7 @@ def test_host_publication_states_on_both_surfaces(tmp_path, monkeypatch, mode):
         if mode == "empty":
             assert "completed, no usage" in flat
         if mode != "empty":
-            assert "mm push --capture-usage" in flat
+            assert "mm push" in flat
         if mode == "absent":
             assert "no capture in the last 90 days" in flat
         if "unreadable" in mode:
@@ -889,7 +886,16 @@ def test_diag_handles_missing_config(tmp_path, monkeypatch):
     """No config on disk — diag falls back to DEFAULT_STORAGE_PATH and still
     runs. This is the primary use case for the command (debugging why
     config won't load)."""
-    _setup(tmp_path, monkeypatch, with_config=False)
+    storage, _cfg_path, _backend = _setup(tmp_path, monkeypatch, with_config=False)
+    observed_roots = []
+
+    def isolated_backend(root):
+        root = Path(root)
+        observed_roots.append(root)
+        assert root == storage
+        return LocalBackend(root)
+
+    monkeypatch.setattr("mind_meld.cli.LocalBackend", isolated_backend)
     # The cfg_path monkeypatch points at a non-existent file.
     result = runner.invoke(app, ["diag", "--json"])
     # Exit 0 — diag must be robust to config failures.
@@ -897,6 +903,7 @@ def test_diag_handles_missing_config(tmp_path, monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["config"]["state"].startswith("error")
     assert payload["host_usage"]["grok"]["consented"] is None
+    assert observed_roots == [storage]
 
 
 def test_diag_handles_unresolvable_explicit_source(tmp_path, monkeypatch):

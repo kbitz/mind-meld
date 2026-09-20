@@ -1689,6 +1689,13 @@ class TestWritePushEvent:
             events.write_push_event(root, "dev-a", [{"type": "git-snapshot", "projects": []}])
         assert not root.exists()
 
+    def test_size_skip_does_not_create_missing_day_file(self, tmp_path):
+        row = events.make_mm_push_event(device="dev-a", mm_version="test")
+        skipped = events.write_push_event(tmp_path, "dev-a", [row], max_file_size=1)
+        assert isinstance(skipped, events.EventAppendSkipped)
+        today = datetime.now(timezone.utc).date().isoformat()
+        assert not (tmp_path / f"dev-a-{today}.jsonl").exists()
+
     @pytest.mark.parametrize("strict", [False, True])
     @pytest.mark.parametrize("suffix", [None, b"", b"\n", b'\n{"torn":'])
     def test_unterminated_prior_row_does_not_swallow_next_row(self, tmp_path, strict, suffix):
@@ -2770,3 +2777,22 @@ class TestSkillsAggregationHook:
         }
         # Sessions count is parent-only (subagent doesn't bump).
         assert meta["sessions"] == 1
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_append_ceiling_includes_torn_separator_and_exact_boundary(tmp_path, strict):
+    row = events.make_mm_push_event(device="dev-a", mm_version="new")
+    today = datetime.now(timezone.utc).date().isoformat()
+    path = tmp_path / f"dev-a-{today}.jsonl"
+    prefix = b'{"torn":'
+    path.write_bytes(prefix)
+    payload = json.dumps(row, sort_keys=True).encode() + b"\n"
+    limit = len(prefix) + len(payload)
+    skipped = events.write_push_event(tmp_path, "dev-a", [row], strict=strict, max_file_size=limit)
+    assert isinstance(skipped, events.EventAppendSkipped)
+    assert path.read_bytes() == prefix
+    result = events.write_push_event(
+        tmp_path, "dev-a", [row], strict=strict, max_file_size=limit + 1
+    )
+    assert result == (path if strict else None)
+    assert path.read_bytes() == prefix + b"\n" + payload

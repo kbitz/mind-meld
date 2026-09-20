@@ -374,3 +374,45 @@ class TestFlockAppendJsonl:
         path.write_bytes(b'{"a":0}\n')
         fsutil.flock_append_jsonl(path, [b'{"a":1}', b'{"a":2}'])
         assert path.read_text().splitlines() == ['{"a":0}', '{"a":1}', '{"a":2}']
+
+    def test_size_limit_does_not_create_missing_file(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        with pytest.raises(fsutil.AppendSizeLimit):
+            fsutil.flock_append_jsonl(path, [b'{"a":1}'], max_bytes=1)
+        assert not path.exists()
+
+    def test_size_limit_does_not_change_existing_bytes(self, tmp_path):
+        path = tmp_path / "log.jsonl"
+        path.write_bytes(b'{"a":0}\n')
+        with pytest.raises(fsutil.AppendSizeLimit):
+            fsutil.flock_append_jsonl(path, [b'{"a":1}'], max_bytes=len(b'{"a":0}\n'))
+        assert path.read_bytes() == b'{"a":0}\n'
+
+    def test_excl_collision_retries_existing_open(self, tmp_path, monkeypatch):
+        path = tmp_path / "log.jsonl"
+        path.write_bytes(b'{"a":0}\n')
+        real_open = os.open
+        state = {"n": 0}
+
+        def open_once_missing(p, flags, *a):
+            state["n"] += 1
+            if state["n"] == 1 and not (flags & os.O_CREAT):
+                raise FileNotFoundError
+            if flags & os.O_EXCL:
+                raise FileExistsError
+            return real_open(p, flags, *a)
+
+        monkeypatch.setattr(fsutil.os, "open", open_once_missing)
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'])
+        assert path.read_text().splitlines() == ['{"a":0}', '{"a":1}']
+
+    def test_symlink_target_is_not_followed(self, tmp_path):
+        target = tmp_path / "secret"
+        target.write_bytes(b"keep\n")
+        path = tmp_path / "log.jsonl"
+        path.symlink_to(target)
+        with pytest.raises(OSError):
+            fsutil.flock_append_jsonl(path, [b'{"a":1}'], strict=True)
+        fsutil.flock_append_jsonl(path, [b'{"a":1}'], strict=False)
+        assert target.read_bytes() == b"keep\n"
+        assert path.is_symlink()

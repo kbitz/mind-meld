@@ -44,4 +44,4 @@ All token counts sum input, cache write, cache read and output. Claude* = Claude
 - 0 pushes across 0 device(s)
 
 ## Notes
-- No agent-log snapshots yet from 2 machine(s) — run `mm push --capture-usage` (mm v0.14.14+) there, and upgrade any machine below mm v0.12.32.
+- No agent-log snapshots yet from 2 machine(s) — upgrade mind-meld to v0.14.17+ on that Mac, verify with `mm --version`, then run `mm push`.
