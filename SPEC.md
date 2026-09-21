@@ -812,8 +812,8 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 | Exit | Meaning |
 |---|---|
 | 0 | Command completed. For push, content sync succeeded regardless of capture outcome; verify recorded usage with mm status. |
-| 1 | Command stopped. For push, content sync or required maintenance stopped; capture failures alone do not block content. For recapture, also no discovered repositories or a skipped event batch. |
-| 2 | Usage error, such as an invalid option or recapture window. |
+| 1 | Command stopped. For push, content sync or required maintenance stopped; capture failures alone do not block content. For recapture, also an invalid WINDOW, no discovered repositories or a skipped event batch. |
+| 2 | Usage error from the argument parser, such as an unknown option or an invalid option value. |
 | 3 | `pull --conflict-mode fail` preflight refusal, before applying files (including with `--dry-run`). |
 | 4 | `recapture`: partial recovery after publishing available Git rows. Push does not use exit 4. |
 
