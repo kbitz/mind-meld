@@ -3785,7 +3785,9 @@ def _push_core(
     """Core push logic shared by push, autopush, and recapture.
 
     When quiet=True, suppresses all rich console output (for autopush).
-    Returns PushResult on success, None if nothing to push or dry_run.
+    Returns PushResult on success, None if nothing to push or dry_run. A no-op
+    push that captured a host row, or that carries events degradations, returns
+    a PushResult with ``content_changed=False`` instead of None.
     Only the attended push command captures before the manifest build.
     Incomplete scans raise ``SnapshotError``; callers must catch it
     (interactive push and recapture via ``_error``, autopush via

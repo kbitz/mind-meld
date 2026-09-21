@@ -412,6 +412,24 @@ def test_skill_md_step0_gates_on_the_attended_floor_from_the_constant() -> None:
     assert "verify the recorded timestamp and publication with `mm status`" in gate
 
 
+def test_every_skill_md_floor_mention_is_the_attended_constant() -> None:
+    """Every hand-typed floor in SKILL.md must move with the constant.
+
+    The Step 0 gate is pinned above; the decoder entries repeat the floor in
+    remedies. One stale copy would tell an agent a Mac below the floor is fine.
+    """
+    import re
+
+    from mind_meld.skills.retro_fleet import aggregator
+
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    floors = re.findall(r"mm (v\d+\.\d+\.\d+)(?:\+| or newer)", skill)
+    assert floors, "the floor mentions moved; update this pattern with them"
+    assert set(floors) == {aggregator.ATTENDED_USAGE_MIN_VERSION}
+
+
 def test_every_notes_line_has_a_skill_decoder_entry() -> None:
     """Every aggregator Notes line has a SKILL.md decoder entry.
 

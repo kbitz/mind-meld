@@ -29,10 +29,12 @@ performs its own descriptor-bound scan and upload verification.
 
 `_upload_changed_blobs` verifies the upload revision against the scanned digest, size, and mtime **before** `backend.put`. Missing or changed input aborts; it does not `continue`. Earlier correctly keyed encrypted blobs may remain as orphans. The encrypted manifest is the commit boundary; last_seen, sidecar, and conflict cleanup run only after that put.
 
-The requested host capture's acceptance callback runs immediately after that
-manifest put. It requires the exact day-file hash containing the requested
-row, not merely a truthy `PushResult`. A later maintenance error cannot undo
-acceptance. Status/diag use the existing local accepted-manifest sidecar as
+Attended host capture's publication evidence runs immediately after that
+manifest put. `PushResult.content_accepted` is recorded at the put, so a later
+maintenance error cannot undo content acceptance; `_report_usage_publication`
+then reports the row published only when the exact day-file revision containing
+it is in the accepted manifest, not merely because the push returned a truthy
+`PushResult`. Status/diag use the existing local accepted-manifest sidecar as
 evidence; if the current day-file revision no longer matches it, publication
 is unknown. No new receipt file or wire field is introduced.
 

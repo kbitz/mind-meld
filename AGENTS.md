@@ -33,9 +33,9 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones |
 | `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
-| `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns |
+| `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns, (64A) the five-state `usage_capture_readiness` verdict and its shared `usage_capture_remedy` text |
 | `devices.py` | Device registry, short-id generation and lookup |
-| `events.py` | mm-events log: git-root discovery, git/session walkers, budgets; (61A) shared day scan and publication projection |
+| `events.py` | mm-events log: git-root discovery, git/session walkers, budgets; (61A) shared day scan and publication projection; (64A) size- and origin-guarded `write_push_event` (`EventAppendSkipped`, `GIT_SNAPSHOT_ORIGIN_INIT`) |
 | `token_usage.py` | Session-jsonl walker, token + skill caches, pricing, incremental resume |
 | `host_usage.py` | Local Codex and Grok (`updates.jsonl` terminal records, opt-in) usage readers, strict host-family classifier, and isolated host-token caches |
 | `host_skill_discovery.py` | Read-only `grok inspect --json` probe for `mm diag` (`host_skill_discovery` sibling key). Not a `skill_link` registry. |

@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [0.14.17] - 2026-09-19
+## [0.14.17] - 2026-09-20
 
 **Attended pushes refresh consented host usage even when user files are in sync.** Usage-only publication preserves push counts and the Git cursor; capture failures warn while content sync continues.
 
@@ -10,13 +10,13 @@ All notable changes to Mind Meld will be documented in this file.
 
 - Every attended `mm push` captures under the lock after final source resolution. Removed `--capture-usage` without an alias. No opt-out flag or config key; help discloses prerequisites and about five seconds of scanning per cold reader (both can be cold, budgets are cooperative).
 - Exit 0 describes content success regardless of capture outcome; capture failures and unpublished rows warn on stderr. Post-acceptance maintenance cannot revoke content acceptance. Exit 4 remains recapture-only. Verify last recorded capture and publication with `mm status`; it is not a latest-attempt receipt.
-- A usage-only push uploads the updated day file and refreshes last-seen/sidecar, while preserving activity counts and the cursor. It skips automatic fleet GC; obsolete blobs await a content-changing push or `mm gc`. Autopush stays change-gated and never warms; previews never capture.
+- A usage-only push uploads the updated day file and refreshes last-seen/sidecar, while preserving activity counts and the cursor. It skips automatic fleet GC; obsolete blobs await a content-changing push or `mm gc`. Autopush stays change-gated and never warms; previews never capture, and `mm push --dry-run` now lists host-usage capture among what it does not preview.
 
 ### Fixed
 
 - Separate host-append and activity decisions preserve Git/session rows on no-reader Macs. Whole-phase capture exceptions continue content sync without invoking readers twice. Both append stages and init/recapture respect the event-file size ceiling.
 - Status, diag and fleet remedies use prerequisites and reader consent consistently. Fleet refresh advice requires mm v0.14.17+, preventing a green no-op on older producing Macs. The skill preflight verifies that binary floor.
-- JSONL appends separate torn suffixes from the next valid row; rollback remains best effort. Init Git rows carry their own origin and updated renderers exclude them from push counts while preserving legacy absent/unknown-origin behavior. These close a counting class before it scales; the measured history had one refresh miscount and no init-origin rows.
+- JSONL appends separate torn suffixes from the next valid row and refuse non-regular targets before touching their permissions; rollback remains best effort. Init Git rows carry their own origin and updated renderers exclude them from push counts while preserving legacy absent/unknown-origin behavior. These close a counting class before it scales; the measured history had one refresh miscount and no init-origin rows.
 
 ### Documentation
 

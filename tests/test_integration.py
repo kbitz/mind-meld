@@ -4346,9 +4346,10 @@ def test_usage_only_refresh_twice_preserves_retro_and_skips_all_activity(capture
     for _ in range(2):
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
-        assert "usage-only" in result.stdout
-        assert "Git cursor unchanged" in result.stdout
-        assert "mm recapture 30d" in result.stdout
+        flat = " ".join(result.stdout.split())  # the mode line wraps at 80 columns
+        assert "usage-only" in flat
+        assert "Git cursor unchanged" in flat
+        assert "mm recapture 30d" in flat
         assert rendered_counts() == before
     added = [json.loads(line) for line in path.read_bytes()[len(original) :].splitlines()]
     assert [r["type"] for r in added] == ["host-usage-snapshot"] * 2

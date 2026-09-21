@@ -327,7 +327,7 @@ Built with `typer`. Installed as `mm` (Mind Meld).
 
 ```
 mm init                     # generate device ID, configure storage, set passphrase
-mm push [--dry-run]   # build manifest, diff against remote, upload changes
+mm push [--dry-run]         # build manifest, diff against remote, upload changes
                             # --dry-run previews publication and deletions; changes nothing except the local lock file (v0.14.10)
                             # attended push refreshes consented host readers; needs selected, available mm-events. Usage-only refreshes leave activity counts/cursor unchanged; content changes count as one push.
 mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optionally scoped)
@@ -819,10 +819,11 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 
 Usage-capture warnings go to stderr with `prerequisites: <state>`, `readers`,
 `no-row`, `capture-failed`, `append-failed`, `max-file-size`, or
-`not-published: <cause>` tokens, content-sync status, an actionable remedy, and
-the [host usage capture](README.md#host-usage-capture-codex-and-grok) link. Capture
-failures do not stop content sync. `push-failed` is a content-sync stop (an `Error:`
-line, exit 1), not a capture-only exit.
+`not-published: <cause>` tokens and an actionable remedy; most also state the
+content-sync outcome and link the [host usage
+capture](README.md#host-usage-capture-codex-and-grok) section. Capture failures do
+not stop content sync. `push-failed` is a content-sync stop (an `Error:` line,
+exit 1), not a capture-only exit.
 
 ### Error Hierarchy (`mind-meld/errors.py`)
 

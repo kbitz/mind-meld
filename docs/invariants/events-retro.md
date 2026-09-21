@@ -681,9 +681,10 @@ forever — the idle-Mac false gap in a new costume — and that machine already
 gets the zero-repo push note, whose copy is the right one. Do not collapse the
 two back into a bare `DISCOVERY_HOLD` test here; the cursor policy and the
 gap-reporting policy agree on `partial` and disagree on `empty` on purpose.
-A device with no `git_capture` is unknown, never a gap. `origin: recapture` rows COVER their interval and are EXCLUDED
-from the push tally (`snap_total` / `snap_zero`) — opposite treatment of
-one field. `walk_budget_aborts` is a budget-exhaustion note, not a gap.
+A device with no `git_capture` is unknown, never a gap. `origin: recapture` and
+`origin: init` rows COVER their interval and are EXCLUDED from the push tally
+(`snap_total` / `snap_zero`) — opposite treatment of one field; an absent or
+unknown origin still counts (see "Append boundaries and non-push origins"). `walk_budget_aborts` is a budget-exhaustion note, not a gap.
 The budget-note remedy is `mm diag` → Git capture → `recorded.walk_budget_aborts`,
 not a `last_push` key.
 
