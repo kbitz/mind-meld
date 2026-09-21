@@ -385,6 +385,33 @@ def test_skill_md_step0_preflight_contract() -> None:
     )
 
 
+def test_skill_md_step0_gates_on_the_attended_floor_from_the_constant() -> None:
+    """Step 0's binary floor must track the constant every fleet remedy cites.
+
+    Below the attended floor a converged ``mm push`` exits 0 without refreshing
+    usage, so the agent must STOP rather than read a stale capture as fresh. A
+    hand-typed version here would rot the first time the floor moves.
+    """
+    from mind_meld.skills.retro_fleet import aggregator
+
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    step0 = skill[skill.index("## Step 0") : skill.index("## Step 1")]
+    stage_0a = step0[: step0.index("**0B")]
+    flat = " ".join(stage_0a.split())
+    floor = f"Require **mm {aggregator.ATTENDED_USAGE_MIN_VERSION} or newer** before continuing."
+    assert floor in flat
+    gate = flat[flat.index(floor) :]
+    assert "Below that floor, STOP" in gate, "the floor must stop the run, not warn"
+    # Exit 0 proves nothing below the floor, so the gate names the real evidence
+    # and the way to make a running agent reload this very instruction.
+    assert "verify `mm --version`" in gate
+    assert "run `mm install-skills`" in gate
+    assert "restart the agent so it reloads this skill" in gate
+    assert "verify the recorded timestamp and publication with `mm status`" in gate
+
+
 def test_every_notes_line_has_a_skill_decoder_entry() -> None:
     """Every aggregator Notes line has a SKILL.md decoder entry.
 
@@ -472,7 +499,9 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
         assert url in readme
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
     assert token_usage.PRICING_LAST_UPDATED in invariant
-    assert "mm push" in readme
+    assert "Every attended `mm push` refreshes and publishes consented host usage" in " ".join(
+        readme.split()
+    )
     assert "no Git roots or content changes" in readme
 
 

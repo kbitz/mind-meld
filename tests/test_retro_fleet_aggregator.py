@@ -6078,6 +6078,32 @@ class TestHostTokensByDayAcceptance:
         assert "mm push" in fallback
         assert "mm diag" in fallback
 
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            None,
+            "active_days_mismatch",
+            "invalid_counter",
+            "unsupported_schema",
+            "invalid_day",
+            "some_future_reason",
+        ],
+    )
+    def test_every_dropped_detail_phrase_carries_the_attended_floor(self, reason):
+        """The bare "mm push" check above passes for a phrase with no floor at all."""
+        phrase = aggregator._host_detail_phrase("absent", reason)
+        assert aggregator._attended_usage_remedy() in phrase
+        assert "mm diag" in phrase and "capture-usage" not in phrase
+
+    @pytest.mark.parametrize("device", [None, "dev-a"])
+    def test_legacy_counters_phrase_names_the_floor_with_or_without_a_device(self, device):
+        phrase = aggregator._host_detail_phrase("absent", "legacy_counters", device=device)
+        assert "older format" in phrase
+        assert aggregator._attended_usage_remedy() in phrase
+        assert "then re-run `mm retro-fleet`" in phrase
+        assert ("`dev-a`" in phrase) == (device is not None)
+        assert "capture-usage" not in phrase
+
     def test_wire_row_fixture_measurement(self):
         """Deterministic size of a 90-day 4-family 2-model-per-day row."""
         import gzip
@@ -6564,6 +6590,38 @@ class TestAgentCoverageNotes:
         assert "never interpreted" in notes
         assert "git_capture.recorded.walk_budget_aborts" in notes
         assert "last_push.walk_budget_aborts" not in notes
+
+    @pytest.mark.parametrize(
+        "case,marker",
+        [
+            ("registry-unavailable", "No agent-log snapshots were accepted from any machine"),
+            ("no-reader", "No agent-log reader contributed on any machine"),
+            ("all-stale", "Agent-log snapshots all predate this window"),
+            ("some-missing", "have no agent-log snapshot (unknown, not zero)"),
+        ],
+    )
+    def test_every_refresh_remedy_names_the_attended_floor(self, case, marker):
+        """Each quiet-block cause repairs with an upgrade to the attended floor.
+
+        Below v0.14.17 a converged ``mm push`` succeeds without refreshing usage,
+        so a remedy that says only "run mm push" sends a stale Mac in a circle.
+        """
+        active = {"codex": {"2026-04-22": _usage(1)}}
+        if case == "registry-unavailable":
+            data = self._data([])
+        elif case == "no-reader":
+            data = self._data([_snap("dev-a", self.UNTIL, consulted=())])
+        elif case == "all-stale":
+            data = self._data([_snap("dev-a", datetime(2026, 3, 1, tzinfo=timezone.utc))])
+        else:
+            data = self._data(
+                [_snap("dev-a", self.UNTIL, families=active)], missing=frozenset({"dev-z"})
+            )
+        notes = [n for n in aggregator._agent_coverage_notes(data) if marker in n]
+        assert len(notes) == 1, notes
+        assert aggregator._attended_usage_remedy() in notes[0]
+        assert aggregator.ATTENDED_USAGE_MIN_VERSION in notes[0]
+        assert "capture-usage" not in notes[0]
 
 
 class TestAgentInventoryBody:
@@ -7061,6 +7119,28 @@ class TestGitCoverageAndRecapture:
         data = _aggregate(events_dir)
         assert "dev-a" not in data.git.uncovered_git
         assert "dev-a" not in data.git.zero_repo_captures
+
+    def test_h1b_init_row_leaves_the_push_tally_but_keeps_coverage_and_commits(self, tmp_path):
+        """64A: init is not a push, yet its walked history is still observed history.
+
+        The window's only coverage before the latest push comes from the init
+        row, so dropping init rows wholesale (rather than from the tally) would
+        reopen a gap and lose its commit.
+        """
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        init = _capture_on(_git_event("dev-a", 0.1, [_commit("aaa", 3)]), since_days=7)
+        init["origin"] = "init"
+        # A repo-less init snapshot would read as a zero-repository push if init
+        # rows were tallied, which is what the assertion below observes.
+        repo_less_init = _capture_on(dict(_git_event("dev-a", 0.2, []), projects=[]), since_days=7)
+        repo_less_init["origin"] = "init"
+        latest = _capture_on(_git_event("dev-a", 0, [_commit("bbb", 0)]), since_days=0.1)
+        _write_events(events_dir, "dev-a", "2026-04-21", [init, repo_less_init, latest])
+        data = _aggregate(events_dir)
+        assert "dev-a" not in data.git.uncovered_git
+        assert data.git.commits == 2
+        assert data.git.zero_repo_captures == {}
 
     def test_h2_budget_abort_renders_budget_note_not_gap_note(self, tmp_path):
         events_dir = tmp_path / "events"
@@ -7939,8 +8019,6 @@ def test_non_push_origins_and_mixed_version_counting(origin, count):
     result = aggregator.aggregate_git(
         [row], since=now - timedelta(days=7), until=now, author_emails=None
     )
+    # A pre-64A renderer knows only recapture, so it keeps counting init rows as
+    # pushes until it upgrades; new init rows stay readable to it.
     assert result.zero_repo_captures == ({"dev-a": (1, 1)} if count else {})
-    # A pre-64A renderer knows only recapture. New init rows remain readable,
-    # but that renderer still counts them until it upgrades.
-    legacy_count = int(row.get("origin") != "recapture")
-    assert legacy_count == (1 if origin == "init" else count)

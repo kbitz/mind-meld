@@ -416,3 +416,17 @@ class TestFlockAppendJsonl:
         fsutil.flock_append_jsonl(path, [b'{"a":1}'], strict=False)
         assert target.read_bytes() == b"keep\n"
         assert path.is_symlink()
+
+    def test_non_regular_target_is_refused_before_it_is_chmodded(self, tmp_path):
+        """A pipe opens and locks fine, so only the fstat guard stops it, and that
+        guard must run before fchmod can rewrite the mode of what it refuses."""
+        target = tmp_path / "day.jsonl"
+        os.mkfifo(target, 0o666)
+        os.chmod(target, 0o666)  # mkfifo applies the umask
+        with pytest.raises(OSError) as excinfo:
+            fsutil.flock_append_jsonl(target, [b'{"a":1}'], strict=True)
+        assert excinfo.value.errno == errno.EINVAL
+        assert "not a regular file" in str(excinfo.value)
+        # Forensic callers keep the never-break-the-sync contract.
+        fsutil.flock_append_jsonl(target, [b'{"a":1}'], strict=False)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o666

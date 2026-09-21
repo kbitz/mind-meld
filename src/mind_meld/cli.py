@@ -3445,15 +3445,28 @@ def _capture_attended_usage(
         return path, rows[0]
     except Exception as e:
         stderr_console.print(
-            f"mm: warning: Usage capture ({phase}): {safe_str(e)}. "
+            f"mm: warning: Usage capture ({phase}): {_exception_text(e)}. "
             "Content sync continues. Repair the local events folder if needed and run mm diag; "
             f"the next attended mm push retries automatically. See {HOST_USAGE_CAPTURE_URL}"
         )
         return None
 
 
+def _exception_text(e: BaseException) -> str:
+    """Printable cause for a warning; ``AssertionError()`` and ``StopIteration()`` are empty."""
+    return safe_str(e) or type(e).__name__
+
+
+def _warn_publication_evidence_unavailable(e: Exception, content_outcome: str) -> None:
+    """Publication evidence failing must never change what the push already did."""
+    stderr_console.print(
+        "mm: warning: Usage capture (not-published: unreadable-row): "
+        f"publication evidence unavailable — {_exception_text(e)}. {content_outcome} "
+        "Repair the local day file and check mm status."
+    )
+
+
 def _report_usage_publication(
-    config: dict,
     sources: list[dict],
     captured: tuple[Path, dict],
     manifest: dict | None,
@@ -3580,8 +3593,8 @@ def push(
                 console.print(safe_str(note))
             console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
             console.print(
-                "Not previewed: the mm-events activity row a real push appends, "
-                "post-push GC of orphaned blobs, and upload re-reads."
+                "Not previewed: host-usage capture, the mm-events activity row a real push "
+                "appends, post-push GC of orphaned blobs, and upload re-reads."
             )
 
         # Usage-only publication leaves obsolete day-file blobs for the next
@@ -3990,8 +4003,11 @@ def _push_core(
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
         if captured is not None:
             result = PushResult(events_degradations=events_degradations)
-            _print_usage_push_mode(result)
-            _report_usage_publication(config, sources, captured, None, result, verbose=verbose)
+            try:
+                _print_usage_push_mode(result)
+                _report_usage_publication(sources, captured, None, result, verbose=verbose)
+            except Exception as e:
+                _warn_publication_evidence_unavailable(e, "User content was already up to date.")
             return result
         return _push_result_or_none(events_degradations, dry_run)
 
@@ -4121,14 +4137,10 @@ def _push_core(
     if captured is not None:
         try:
             result.host_usage_published = _report_usage_publication(
-                config, sources, captured, local_manifest, result, verbose=verbose
+                sources, captured, local_manifest, result, verbose=verbose
             )
         except Exception as e:
-            stderr_console.print(
-                f"mm: warning: Usage capture (not-published: unreadable-row): "
-                f"publication evidence unavailable — {safe_str(e)}. Content sync succeeded. "
-                "Repair the local day file and check mm status."
-            )
+            _warn_publication_evidence_unavailable(e, "Content sync succeeded.")
     if captured is not None:
         try:
             _print_usage_push_mode(result)

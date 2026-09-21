@@ -3947,7 +3947,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             # becomes the only diagnostic — exactly what the contract forbids.
             notes.append(
                 "No agent-log snapshots were accepted from any machine — "
-                f"On each Mac, {_attended_usage_remedy()}."
+                f"for each Mac that should publish usage, {_attended_usage_remedy()}."
             )
     else:
         if view is None:
@@ -3974,7 +3974,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             if all(s.stale for s in snaps):
                 notes.append(
                     "Agent-log snapshots all predate this window — "
-                    f"on each affected machine, {_attended_usage_remedy()} "
+                    f"for each affected machine, {_attended_usage_remedy()} "
                     "for current agent activity."
                 )
             else:

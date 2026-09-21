@@ -187,7 +187,6 @@ def flock_append_jsonl(
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        created = False
         flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
         try:
             fd = os.open(str(path), flags, mode)
@@ -196,30 +195,25 @@ def flock_append_jsonl(
                 raise AppendSizeLimit("JSONL batch exceeds the file-size ceiling")
             try:
                 fd = os.open(str(path), flags | os.O_CREAT | os.O_EXCL, mode)
-                created = True
             except FileExistsError:
                 fd = os.open(str(path), flags, mode)
         try:
+            # Refuse a device or pipe before fchmod can rewrite its mode.
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "JSONL append target is not a regular file")
             try:
                 os.fchmod(fd, mode)
             except OSError:
                 pass  # fchmod can fail on some filesystems; perms are best-effort
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode):
-                    raise OSError(errno.EINVAL, "JSONL append target is not a regular file")
-                start = info.st_size
+                start = os.fstat(fd).st_size
                 if start and os.pread(fd, 1, start - 1) != b"\n":
                     payload = b"\n" + payload
                 # Decide under the same flock as the append, including the
-                # separator byte. A concurrent writer cannot invalidate it.
+                # separator byte. A concurrent writer cannot invalidate it. A file
+                # created above and still empty already passed the pre-check.
                 if max_bytes is not None and start + len(payload) > max_bytes:
-                    if created and start == 0:
-                        try:
-                            os.unlink(path)
-                        except OSError:
-                            pass
                     raise AppendSizeLimit("JSONL batch exceeds the file-size ceiling")
 
                 def _restore_prefix() -> None:

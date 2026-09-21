@@ -2254,3 +2254,44 @@ def test_attended_deadline_does_not_promise_escaping_its_own_budget(reader):
     assert "can warm cold readers" in background
     assert "Attended warming also exhausted its allowance" in attended
     assert "mm diag" in attended and "without that budget" not in attended
+
+
+@pytest.mark.parametrize("surface", ["attended-tail", "autopush-tail", "init"])
+def test_deadline_wording_follows_whether_the_caller_could_warm(
+    tmp_path, monkeypatch, capsys, surface
+):
+    """Wiring pin: only callers that already spent the warm allowance say so.
+
+    The unit test above proves the phrase; this proves each call site passes the
+    right ``attended`` fact, so an unattended hook is never told its warm expired.
+    """
+    root = tmp_path / "events_root"
+    sources = _sources(root)
+    config = _tail_config(sources)
+    _stub_fast_walks(monkeypatch)
+    _stub_hosts(monkeypatch, codex=_incomplete("deadline"))
+    warms: list[str] = []
+
+    def warm(*, reader):
+        warms.append(reader)
+        return _incomplete("deadline")
+
+    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+    if surface == "init":
+        events_tail._run_events_backfill(config, sources, "dev-a")
+        text = " ".join(capsys.readouterr().err.split())
+    else:
+        degradations = events_tail._run_events_tail(
+            config, sources, "dev-a", dry_run=False, quiet=surface == "autopush-tail"
+        )
+        assert len(degradations) == 1
+        text = degradations[0]
+    assert "(codex deadline)" in text
+    if surface == "autopush-tail":
+        assert warms == [], "unattended captures never warm"
+        assert "An attended mm push can warm cold readers" in text
+        assert "Attended warming also exhausted" not in text
+    else:
+        assert warms == ["codex"]
+        assert "Attended warming also exhausted its allowance" in text
+        assert "can warm cold readers" not in text
