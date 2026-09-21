@@ -76,7 +76,9 @@ HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
 2. **Nudge emission** (`upgrade.emit_nudge_if_due`) at the TAIL of
    `_pull_core`/`_push_core` (quiet AND interactive paths) AFTER main work
    completes. Tail position keeps cold-cache HTTP latency (~500ms 1x/24h) from
-   stacking on sync latency.
+   stacking on sync latency. Interactive `mm push` emits it from the command's
+   `finally` block after `release_lock()`, so a failed attended attempt still
+   nudges (64A); `--dry-run` never does.
 3. **Status surfacing** in `mm status` — calls `cached_upgrade_view`, reading
    `locked_json_snapshot(blocking=False)` with no HTTP request or cache write.
    It honors dev-build, `--no-check-version`, and `auto_check = false` skips.

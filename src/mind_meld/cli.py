@@ -115,7 +115,6 @@ from mind_meld.devices import (
 from mind_meld.errors import (
     GIT_WALK_FAILURES_URL,
     HOST_USAGE_CAPTURE_URL,
-    HOST_USAGE_CONSENT_URL,
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
     ConfigError,
@@ -287,6 +286,11 @@ class PullResult:
 class PushResult:
     """Result of a push operation."""
 
+    # User-source bytes, metadata or selection changed (mm-owned sources excluded).
+    content_changed: bool = False
+    content_files: int = 0
+    content_accepted: bool = False
+    host_usage_published: bool = False
     total_new: int = 0
     total_modified: int = 0
     total_deleted: int = 0
@@ -1048,25 +1052,20 @@ def _include_prior_grok_if_needed(
     resolution: SourceResolution,
     remote_manifest: dict | None,
     sources: list[dict[str, Any]],
-    local_manifest: dict,
-    device_id: str,
-    device_name: str,
-    max_file_size: int,
-    on_skip: Any,
-) -> tuple[list[dict[str, Any]], dict]:
-    """Scan a previously published Grok source whose customization dirs are gone."""
+) -> list[dict[str, Any]]:
+    """Retain Grok before capture/scanning when its customization dirs are gone."""
     if remote_manifest is None or "grok" not in remote_manifest.get("sources", {}):
-        return sources, local_manifest
+        return sources
     disabled = set(config.get("sync", {}).get("disabled_sources") or [])
     if "grok" in disabled or any(src["name"] == "grok" for src in sources):
-        return sources, local_manifest
+        return sources
     grok_cfg = next((src for src in resolution.selected if src["name"] == "grok"), None)
     if grok_cfg is None:
         if resolution.explicit:
-            return sources, local_manifest
+            return sources
         grok_cfg = get_default_source("grok")
         if grok_cfg is None:
-            return sources, local_manifest
+            return sources
         grok_cfg = {**grok_cfg, "path": str(Path(grok_cfg["path"]).expanduser())}
     root = Path(grok_cfg["path"]).expanduser()
     try:
@@ -1095,12 +1094,7 @@ def _include_prior_grok_if_needed(
                 ),
             )
         ) from e
-    sources = [*sources, grok_cfg]
-    grok_manifest = build_manifest_v2(
-        device_id, device_name, [grok_cfg], max_file_size, on_skip, strict=True
-    )
-    local_manifest["sources"].update(grok_manifest["sources"])
-    return sources, local_manifest
+    return [*sources, grok_cfg]
 
 
 def _refuse_unavailable_selected_sources(
@@ -3381,133 +3375,144 @@ def init() -> None:
 # ── push ──────────────────────────────────────────────────────────────
 
 
-def _prepare_usage_capture(config: dict) -> list[dict]:
-    """Resolve the writer and refuse unusable requests before the Keychain."""
-    try:
-        resolution = resolve_sources(config, strict=True, bootstrap=True)
-    except SnapshotError as e:
-        _error(
-            f"{e} No usage rows were written. Restore access to the source folder, "
-            f"then run mm push --capture-usage. See {HOST_USAGE_CAPTURE_URL}"
-        )
-    selected = next((s for s in resolution.selected if s["name"] == "mm-events"), None)
-    if selected is None:
-        _error(
-            "Usage capture requires mm-events. Run mm enable-source mm-events, "
-            f"then mm push --capture-usage. See {HOST_USAGE_CAPTURE_URL}"
-        )
-    if selected not in resolution.available:
-        _error(
-            f"{_config_module._missing_custom_mm_events_message(selected['path'])} "
-            "Requested usage capture needs that folder restored and mm-events enabled. "
-            f"See {HOST_USAGE_CAPTURE_URL}"
-        )
-    if not events_tail._default_host_readers(
-        resolution.available, grok_consented=grok_host_usage_enabled(config)
-    ):
-        _error(
-            "No host reader is consented. Run mm enable-source codex or "
-            "mm enable-source grok; Grok usage-only consent also accepts "
-            f"[retro] grok_host_usage = true. See {HOST_USAGE_CONSENT_URL}"
-        )
-    return resolution.available
+def _capture_attended_usage(
+    config: dict, sources: list[dict], selected: list[dict], *, verbose: bool
+) -> tuple[Path, dict] | None:
+    """Optional capture inside the push lock, after the final source selection.
 
-
-def _push_captured_usage(
-    config: dict, passphrase: str, memory_kb: int, sources: list[dict], verbose: bool
-) -> PushResult | None:
-    """Requested capture under the mm lock; publication has its own receipt.
-
-    Exit 0: row in accepted manifest; 4: capture absent/unpublished, content
-    otherwise fine; 1: stopped before acceptance; 2: incompatible flags.
-    Maintenance after acceptance cannot turn a published row into a failure.
+    Contain the whole phase: notice, warming, construction and serialization can
+    fail as well as readers and append. The caller never retries it in the tail.
     """
-    device_id = config["device"]["id"]
-    readers = events_tail._default_host_readers(
-        sources, grok_consented=grok_host_usage_enabled(config)
-    )
-    capture, rows = events_tail._capture_host_snapshot(
-        device_id,
-        readers,
-        host_budget_ms=events_tail.resolve_host_read_budget(config, interactive=True)[0],
-        warm_host_cache=events_tail._warm_host_cache_with_notice,
-    )
-    dropped = dict(capture.dropped)
-    for name, _read in readers:
-        outcome = (
-            dropped[name]
-            if name in dropped
-            else "partial"
-            if name in capture.partial
-            else "completed, no usage"
-            if name in capture.empty
-            else "contributed"
-            if name in capture.token_sources
-            else "absent (no metadata ledger)"
-        )
-        console.print(f"Usage capture: {safe_str(name)} — {safe_str(outcome)}")
-    if not rows:
-        console.print(f"No usage snapshot written. Run mm diag; see {HOST_USAGE_CAPTURE_URL}")
-        raise typer.Exit(4)
-    src = next(s for s in sources if s["name"] == "mm-events")
+    phase = "capture-failed"
     try:
-        path = events.write_push_event(Path(src["path"]) / "events", device_id, rows, strict=True)
-    except OSError as e:
-        stderr_console.print(
-            f"Usage snapshot append failed: {safe_str(e)}. Fix the local events folder and retry "
-            f"mm push --capture-usage. See {HOST_USAGE_CAPTURE_URL}"
+        readers = events_tail._default_host_readers(
+            sources, grok_consented=grok_host_usage_enabled(config)
         )
-        raise typer.Exit(4)
-    assert path is not None
-    accepted: dict | None = None
-    published = False
-
-    def record_acceptance(manifest: dict) -> None:
-        nonlocal accepted, published
-        # Record the boundary BEFORE any subsequent observation can fail.
-        accepted = manifest
-        digest = events.recorded_row_revision(path, rows[0])
-        published = events.capture_revision_in_manifest(manifest, f"events/{path.name}", digest)
-
-    result = None
-    try:
-        result = _push_core(
-            config,
-            passphrase,
-            memory_kb,
-            verbose=verbose,
-            suppress_host_capture=True,
-            on_manifest_accepted=record_acceptance,
+        readiness = _config_module.usage_capture_readiness(
+            selected, sources, reader_consented=bool(readers)
         )
-    except (OSError, MindMeldError, typer.Exit) as e:
-        if accepted is None:
-            _error(
-                "Usage capture was written locally but not synced. "
-                f"Fix the push failure, then run mm push. {e}"
+        if readiness != "ready":
+            stderr_console.print(
+                f"mm: warning: Usage capture (prerequisites: {readiness}): skipped — "
+                f"{safe_str(_config_module.usage_capture_remedy(readiness))} "
+                "Content sync continues."
             )
-        console.print(f"Manifest accepted; post-publication maintenance failed: {safe_str(e)}")
-    if not published:
-        rel = f"events/{path.name}"
-        cause = "the captured file revision is not in the accepted manifest"
-        if _manifest_is_excluded(rel, src.get("exclude_patterns", [])):
-            cause = "mm-events exclude_patterns excludes this day file"
-        elif not any(
-            Path(rel).is_relative_to(Path(directory)) for directory in src.get("include_dirs", [])
-        ) and not any(Path(rel) == Path(file) for file in src.get("include_files", [])):
-            cause = "mm-events include_dirs does not select events/"
-        else:
-            try:
-                if path.stat().st_size > config["sync"]["max_file_size"]:
-                    cause = "the day file exceeds sync.max_file_size"
-            except OSError:
-                pass  # A lost local file cannot undo manifest acceptance.
-        console.print(
-            f"Usage capture not published: {cause}. Source settings were preserved. "
-            f"Review them, then run mm push. See {HOST_USAGE_CAPTURE_URL}"
+            return None
+        capture, rows = events_tail._capture_host_snapshot(
+            config["device"]["id"],
+            readers,
+            host_budget_ms=events_tail.resolve_host_read_budget(config, interactive=True)[0],
+            warm_host_cache=events_tail._warm_host_cache_with_notice,
         )
-        raise typer.Exit(4)
-    console.print("Host usage published (manifest accepted).")
-    return result
+        dropped = dict(capture.dropped)
+        notices = []
+        for name, _read in readers:
+            if name in dropped:
+                notices.append(
+                    events_tail._host_skip_phrase(
+                        name, dropped[name], readiness="ready", attended=True
+                    )
+                )
+            elif name in capture.partial:
+                notices.append(f"{name} coverage is partial; mm diag shows the reader's state.")
+            elif name not in capture.token_sources:
+                notices.append(f"{name} absent (no metadata ledger).")
+            elif verbose:
+                outcome = "completed, no usage" if name in capture.empty else "contributed"
+                console.print(f"Usage capture: {safe_str(name)} — {outcome}")
+        if not rows:
+            notices.append("No usage snapshot written; run mm diag to diagnose the reader.")
+        if notices:
+            token = "no-row" if not rows else "readers"
+            stderr_console.print(
+                f"mm: warning: Usage capture ({token}): {safe_str(' '.join(notices))} "
+                f"Content sync continues. See {HOST_USAGE_CAPTURE_URL}"
+            )
+        if not rows:
+            return None
+        src = next(s for s in sources if s["name"] == "mm-events")
+        phase = "append-failed"
+        path = events.write_push_event(
+            Path(src["path"]) / "events",
+            config["device"]["id"],
+            rows,
+            strict=True,
+            max_file_size=config["sync"]["max_file_size"],
+        )
+        if isinstance(path, events.EventAppendSkipped):
+            return None  # The shared append guard already reported the size remedy.
+        assert path is not None
+        return path, rows[0]
+    except Exception as e:
+        stderr_console.print(
+            f"mm: warning: Usage capture ({phase}): {_exception_text(e)}. "
+            "Content sync continues. Repair the local events folder if needed and run mm diag; "
+            f"the next attended mm push retries automatically. See {HOST_USAGE_CAPTURE_URL}"
+        )
+        return None
+
+
+def _exception_text(e: BaseException) -> str:
+    """Printable cause for a warning; ``AssertionError()`` and ``StopIteration()`` are empty."""
+    return safe_str(e) or type(e).__name__
+
+
+def _warn_publication_evidence_unavailable(e: Exception, content_outcome: str) -> None:
+    """Publication evidence failing must never change what the push already did."""
+    stderr_console.print(
+        "mm: warning: Usage capture (not-published: unreadable-row): "
+        f"publication evidence unavailable — {_exception_text(e)}. {content_outcome} "
+        "Repair the local day file and check mm status."
+    )
+
+
+def _report_usage_publication(
+    sources: list[dict],
+    captured: tuple[Path, dict],
+    manifest: dict | None,
+    result: PushResult,
+    *,
+    verbose: bool,
+) -> bool:
+    """Publication evidence is independent of content acceptance and command exit."""
+    path, row = captured
+    src = next(s for s in sources if s["name"] == "mm-events")
+    rel = f"events/{path.name}"
+    digest = events.recorded_row_revision(path, row)
+    if manifest is not None and events.capture_revision_in_manifest(manifest, rel, digest):
+        if verbose:
+            console.print("Host usage published (manifest accepted).")
+        return True
+    cause = "the captured file revision is not in the accepted manifest"
+    token = "revision-mismatch"
+    remedy = "This is usually transient; the next attended mm push retries automatically."
+    if _manifest_is_excluded(rel, src.get("exclude_patterns", [])):
+        cause = "mm-events exclude_patterns excludes this day file"
+        token = "exclude-patterns"
+        remedy = "Adjust mm-events exclude_patterns, then run mm push."
+    elif not any(
+        Path(rel).is_relative_to(Path(directory)) for directory in src.get("include_dirs", [])
+    ) and not any(Path(rel) == Path(file) for file in src.get("include_files", [])):
+        cause = "mm-events include_dirs does not select events/"
+        token = "include-dirs"
+        remedy = "Add events/ to mm-events include_dirs, then run mm push."
+    elif digest is None:
+        cause = "the local day file is unreadable or the captured row is on an unparseable line"
+        token = "unreadable-row"
+        remedy = (
+            "Restore read access and repair the local day file (preserve a copy outside "
+            "mm-events before repairing damaged JSONL), then run mm push."
+        )
+    content_outcome = (
+        "Content changes were pushed."
+        if result.content_changed
+        else "User content was already up to date."
+    )
+    stderr_console.print(
+        f"mm: warning: Usage capture (not-published: {token}): row written but not published — "
+        f"{safe_str(cause)}. {content_outcome} {safe_str(remedy)} See {HOST_USAGE_CAPTURE_URL}"
+    )
+    return False
 
 
 @app.command()
@@ -3520,37 +3525,32 @@ def push(
             "Preview what mm push would publish or delete. Changes nothing except "
             "the local lock file (no uploads, config writes, pull-history rows, "
             "upgrade checks or new directories); setup the real push would perform "
-            "is reported, not done. Exits 1 if the preview stops."
-        ),
-    ),
-    capture_usage: bool = typer.Option(
-        False,
-        "--capture-usage",
-        help=(
-            "Refresh and publish host usage, even with no content changes. "
-            "Cannot combine with --dry-run."
+            "is reported, not done. Never scans or warms host usage. Exits 1 if the preview stops."
         ),
     ),
 ) -> None:
     """Push selected agent context to storage.
 
-    Publishes only after a complete scan of configured sources. Each
-    advertised digest, size, and mtime describes one accepted file
-    revision. An unreadable selected file refuses the whole push and
-    keeps the previous snapshot.
+    Publishes only after a complete source scan. Unreadable selected files
+    refuse the push and preserve the previous snapshot.
+
+    Attended pushes also refresh and publish host usage, even when user content
+    is up to date. Requires mm-events and a consented Codex or Grok reader.
+    Capture runs before content sync: about five seconds of scanning per cold
+    reader, and both readers can be cold. Budgets are not hard timeouts.
+    Content-changing pushes also run a fleet-wide GC sweep; usage-only pushes
+    leave obsolete blobs for the next content push or mm gc.
+
+    Exit 0 means content sync succeeded, regardless of usage coverage; check
+    mm status for recorded capture/publication evidence. Exit 1 means sync or
+    required maintenance stopped; exit 2 means invalid arguments.
     """
-    if capture_usage and dry_run:
-        raise typer.BadParameter(
-            "--capture-usage cannot be combined with --dry-run. "
-            f"Run mm push --capture-usage without --dry-run. See {HOST_USAGE_CAPTURE_URL}"
-        )
     config = _get_config(read_only=dry_run)
     _maybe_prompt_migration(config, read_only=dry_run)
     # Re-load in case the migration prompt mutated config on disk so the
     # current command sees the new exclude_patterns.
     if not dry_run:
         config = _get_config(read_only=False)
-    capture_sources = _prepare_usage_capture(config) if capture_usage else []
     passphrase = _get_passphrase_or_exit()
     pending: list[str] = []
     refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
@@ -3569,39 +3569,37 @@ def push(
         except MindMeldError as e:
             _error(str(e) + refusal_suffix)
         try:
-            if capture_usage:
-                result = _push_captured_usage(
-                    config, passphrase, memory_kb, capture_sources, verbose
-                )
-            else:
-                result = _push_core(
-                    config, passphrase, memory_kb, verbose, dry_run, preview_notes=pending
-                )
+            result = _push_core(
+                config,
+                passphrase,
+                memory_kb,
+                verbose,
+                dry_run,
+                preview_notes=pending,
+                attended=True,
+            )
         except SnapshotError as e:
             _error(str(e) + refusal_suffix)
-        except MindMeldError as e:
+        except (OSError, MindMeldError) as e:
             if dry_run:
                 _error(str(e) + refusal_suffix)
-            raise
+            _error(
+                f"Push (push-failed): content was not pushed — {e}. "
+                f"Repair the sync failure and retry mm push. See {HOST_USAGE_CAPTURE_URL}"
+            )
 
         if dry_run:
             for note in pending:
                 console.print(safe_str(note))
             console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
             console.print(
-                "Not previewed: the mm-events activity row a real push appends, "
-                "post-push GC of orphaned blobs, and upload re-reads."
+                "Not previewed: host-usage capture, the mm-events activity row a real push "
+                "appends, post-push GC of orphaned blobs, and upload re-reads."
             )
 
-        # Auto GC on interactive push only (not autopush).
-        # typer.Exit from _do_gc's refuse-on-corrupt path still aborts a
-        # normal push. After --capture-usage the host row is already in the
-        # accepted manifest, so report GC as post-publication maintenance.
-        if (
-            not dry_run
-            and result
-            and (result.total_new or result.total_modified or result.total_deleted)
-        ):
+        # Usage-only publication leaves obsolete day-file blobs for the next
+        # content-changing push or explicit mm gc, avoiding a fleet sweep per refresh.
+        if not dry_run and result and result.content_changed:
             try:
                 gc_count = _do_gc(
                     config,
@@ -3614,22 +3612,21 @@ def push(
                 if gc_count:
                     console.print(f"  GC: deleted {gc_count} orphaned blobs.")
             except typer.Exit:
-                if not capture_usage:
+                if not result.host_usage_published:
                     raise
-                console.print(
-                    "Host usage was published; post-publication GC stopped. Run mm gc for details."
+                stderr_console.print(
+                    "mm: warning: Host usage was published; post-publication GC stopped. "
+                    "Run mm gc for details."
                 )
             except (OSError, MindMeldError) as e:
-                console.print(
-                    f"  [yellow]Warning:[/yellow] GC skipped ({e}). "
-                    f"Run 'mm gc' manually for details."
+                stderr_console.print(
+                    f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
                 )
     finally:
         release_lock()
-
-    # Seam 2 — interactive push tail nudge.
-    if not dry_run:
-        upgrade.emit_nudge_if_due(config)
+        # Failed attended attempts need the nudge too; previews never fetch/write it.
+        if not dry_run:
+            upgrade.emit_nudge_if_due(config)
 
 
 def _ensure_device_registered(
@@ -3759,9 +3756,16 @@ def _has_mtime_only_changes_vs_remote(
     return False
 
 
-def _push_result_or_none(events_degradations: list[str], dry_run: bool) -> "PushResult | None":
-    """Shared early-return shape for `_push_core`'s no-op exits — a degraded
-    events tail must still be reported even when there's nothing to push."""
+def _print_usage_push_mode(result: PushResult) -> None:
+    if not result.content_changed:
+        console.print(
+            "Refresh mode: usage-only; user content already up to date, Git cursor unchanged. "
+            "Run mm recapture 30d for Git history."
+        )
+
+
+def _push_result_or_none(events_degradations: list[str], dry_run: bool) -> PushResult | None:
+    """Preserve forensic degradations on no-op exits without inventing a capture."""
     if events_degradations and not dry_run:
         return PushResult(events_degradations=events_degradations)
     return None
@@ -3776,13 +3780,15 @@ def _push_core(
     quiet: bool = False,
     *,
     preview_notes: list[str] | None = None,
-    suppress_host_capture: bool = False,
-    on_manifest_accepted: Callable[[dict], None] | None = None,
+    attended: bool = False,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
     When quiet=True, suppresses all rich console output (for autopush).
-    Returns PushResult on success, None if nothing to push or dry_run.
+    Returns PushResult on success, None if nothing to push or dry_run. A no-op
+    push that captured a host row, or that carries events degradations, returns
+    a PushResult with ``content_changed=False`` instead of None.
+    Only the attended push command captures before the manifest build.
     Incomplete scans raise ``SnapshotError``; callers must catch it
     (interactive push and recapture via ``_error``, autopush via
     ``_auto_command_scope``).
@@ -3795,10 +3801,8 @@ def _push_core(
     backend = get_backend(config)
     _ensure_device_registered(backend, device_id, device_name, dry_run=dry_run)
 
-    # Build local manifest (v2 with sources). Hoisted above the skill hook
-    # so consent is known before the gate runs (Track 25C). The hook itself
-    # stays AFTER _ensure_device_registered and BEFORE _run_events_tail.
-    # Only real push creates/tightens the default mm-events root here.
+    # Resolve under the lock, then recover prior sources before capturing so
+    # consent and readers are final. Only real push bootstraps mm-events here.
     resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
     events_degradations: list[str] = []
     available_names = {src["name"] for src in resolution.available}
@@ -3825,13 +3829,9 @@ def _push_core(
     sources = list(resolution.available)
     may_create = skill_link.consented_agent_keys(config, sources)
 
-    # Group 8 / Track 8A retro-fleet skill self-heal. Position locked in
-    # /plan-eng-review Architecture #5: AFTER device self-heal (storage-
-    # write before any walk), BEFORE events tail (local-FS self-heals
-    # stacked, events tail is the load-bearing always-runs block). Gated by
-    # 24h-TTL — the marker stat is the entire hot-path cost on the steady-
-    # state push (~1 syscall). dry_run gates the install too (preview
-    # contract; mirrors _ensure_device_registered).
+    # Preserve skill maintenance before the no-sources return. A changed store
+    # version/payload refreshes before the 24h link-drift gate. Preview skips
+    # installation, matching _ensure_device_registered's write-free contract.
     # The gate and the installer MUST receive the same may_create: a
     # declined row never gets its success marker touched, so an unfiltered
     # gate stays open and runs the full installer prologue on every push.
@@ -3858,15 +3858,46 @@ def _push_core(
     if not resolution.selected and not skipped_internal:
         msg = "no sync sources found. Run 'mm init' to configure."
         if quiet:
-            # Load-bearing: a misconfigured sources list silently no-ops every
-            # autopush forever. Surface to stderr so the user notices the
-            # broken state (this is distinct from "no config at all", which
-            # the caller filters before reaching here).
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
         return _push_result_or_none(events_degradations, dry_run)
 
+    # Fetch remote manifest (tri-state: ok / missing / corrupt).
+    # `fetch.manifest` (when ok) is pre-normalized via load_manifest;
+    # _recover_prior_manifest's sidecar/peer paths emit the same shape.
+    fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    remote_manifest = _recover_prior_manifest(
+        fetch, backend, device_id, passphrase, memory_kb, quiet=quiet, dry_run=dry_run
+    )
+    advertised_prior_sources = set((remote_manifest or {}).get("sources", {}))
+    resolution = _retain_prior_default_sources(resolution, remote_manifest, config)
+    sources = _include_prior_grok_if_needed(
+        config,
+        resolution,
+        remote_manifest,
+        sources,
+    )
+    intended_names = {src["name"] for src in resolution.selected}
+    intended_names.update(src["name"] for src in sources)
+    _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
+    if not sources and not skipped_internal:
+        msg = "no sync sources found. Run 'mm init' to configure."
+        if quiet:
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        return _push_result_or_none(events_degradations, dry_run)
+
+    # Evaluate prerequisites against the final set, including recovered Grok.
+    # Keep skipped custom roots in this view so "unavailable" is not "disabled".
+    captured = None
+    capture_attempted = attended and not dry_run
+    if capture_attempted:
+        captured = _capture_attended_usage(
+            config, sources, [*resolution.selected, *skipped_internal], verbose=verbose
+        )
+    host_row_appended = captured is not None
     skipped: list[tuple[str, str]] = []
 
     def on_skip(path: str, reason: str) -> None:
@@ -3874,14 +3905,9 @@ def _push_core(
         if verbose and not quiet:
             console.print(f"  [dim]skipped: {safe_str(path)} ({safe_str(reason)})[/dim]")
 
-    # Build local manifest BEFORE the events tail. The substantive-change
-    # gate below decides whether to write a new mm-push event row at all \u2014
-    # without this, every empty `mm push` would write an event, mutate the
-    # mm-events file, and report "1 file uploaded" forever (the phantom-
-    # change-on-empty-push regression). The events tail's pre-v0.12.2
-    # trust boundary "MUST run on every push attempt" is relaxed to "MUST
-    # run on every push that uploads bytes" \u2014 the cursor stays accurate
-    # because no-op pushes don't advance it (see events.py).
+    # Scan before the activity tail. A captured host row can itself require
+    # an upload, but only user-content changes then warrant activity capture.
+    # With no host row, the existing substantive-change gate stays in force.
     if not quiet:
         console.print("[bold]Building manifest...[/bold]")
     local_manifest = build_manifest_v2(
@@ -3897,37 +3923,6 @@ def _push_core(
         )
         if skipped:
             console.print(f"  [yellow]{len(skipped)} files skipped[/yellow]")
-
-    # Fetch remote manifest (tri-state: ok / missing / corrupt).
-    # `fetch.manifest` (when ok) is pre-normalized via load_manifest;
-    # _recover_prior_manifest's sidecar/peer paths emit the same shape.
-    fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
-    remote_manifest = _recover_prior_manifest(
-        fetch, backend, device_id, passphrase, memory_kb, quiet=quiet, dry_run=dry_run
-    )
-    advertised_prior_sources = set((remote_manifest or {}).get("sources", {}))
-    resolution = _retain_prior_default_sources(resolution, remote_manifest, config)
-    sources, local_manifest = _include_prior_grok_if_needed(
-        config,
-        resolution,
-        remote_manifest,
-        sources,
-        local_manifest,
-        device_id,
-        device_name,
-        max_file_size,
-        on_skip,
-    )
-    intended_names = {src["name"] for src in resolution.selected}
-    intended_names.update(src["name"] for src in sources)
-    _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
-    if not sources and not skipped_internal:
-        msg = "no sync sources found. Run 'mm init' to configure."
-        if quiet:
-            print(f"mm: warning: {msg}", file=sys.stderr)
-        else:
-            console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return _push_result_or_none(events_degradations, dry_run)
 
     # Consumer-boundary filters. Strip from prior_manifest BOTH (1) paths
     # the local config now excludes via per-source `exclude_patterns` and
@@ -3977,10 +3972,8 @@ def _push_core(
     # _push_core unconditionally, so every `mm push` reported at least
     # the events-file modification.
     recovering_from_corrupt = fetch.status == "corrupt"
-    has_substantive = any(
-        True
-        for _, _, _, _ in iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True)
-    )
+    source_diffs = list(iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True))
+    has_substantive = bool(source_diffs)
     # mtime-only republish leg (v0.12.6): sha256-equal files with drifted
     # mtime must still trigger a manifest upload so peers see authoritative-
     # local claims from `mm resolve` (l)ocal. See `_has_mtime_only_changes_vs_remote`.
@@ -3988,6 +3981,20 @@ def _push_core(
         local_manifest, remote_sources
     )
     has_selection_change = set(local_manifest["sources"]) != advertised_prior_sources
+    # Three independent facts: byte diffs, forward-only mtime drift, and
+    # selection in BOTH directions. Host rows make has_substantive true even
+    # during a user-file mtime republish, so do not gate this on has_mtime_only.
+    content_diffs = [d for d in source_diffs if d[0] not in MM_INTERNAL_SOURCE_NAMES]
+    content_changed = bool(content_diffs) or bool(
+        (set(local_manifest["sources"]) ^ advertised_prior_sources) - MM_INTERNAL_SOURCE_NAMES
+    )
+    if not content_changed:
+        content_changed = any(
+            _has_mtime_only_changes_vs_remote(local_manifest, remote_sources, source_filter=name)
+            for name in local_manifest["sources"]
+            if name not in MM_INTERNAL_SOURCE_NAMES
+        )
+    content_files = sum(len(d.new) + len(d.modified) + len(d.deleted) for *_, d in content_diffs)
     if (
         not has_substantive
         and not has_mtime_only
@@ -3996,6 +4003,14 @@ def _push_core(
     ):
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
+        if captured is not None:
+            result = PushResult(events_degradations=events_degradations)
+            try:
+                _print_usage_push_mode(result)
+                _report_usage_publication(sources, captured, None, result, verbose=verbose)
+            except Exception as e:
+                _warn_publication_evidence_unavailable(e, "User content was already up to date.")
+            return result
         return _push_result_or_none(events_degradations, dry_run)
 
     # OK, this push will upload bytes. Run the events tail now to capture
@@ -4011,7 +4026,8 @@ def _push_core(
                 device_id,
                 dry_run=dry_run,
                 quiet=quiet,
-                suppress_host_capture=suppress_host_capture,
+                suppress_host_capture=capture_attempted,
+                capture_activity=not host_row_appended or content_changed,
             )
         )
     if not dry_run:
@@ -4108,9 +4124,33 @@ def _push_core(
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     mkey = manifest_key(device_id)
     backend.put(mkey, enc_manifest)
-    if on_manifest_accepted is not None:
-        on_manifest_accepted(local_manifest)
-
+    # Independent content receipt at the actual acceptance boundary, even when
+    # capture was skipped or failed. Maintenance cannot revoke accepted content.
+    result = PushResult(
+        total_new=total_new,
+        total_modified=total_modified,
+        total_deleted=total_deleted,
+        bytes_transferred=total_bytes,
+        events_degradations=events_degradations,
+        content_changed=content_changed,
+        content_files=content_files,
+        content_accepted=True,
+    )
+    if captured is not None:
+        try:
+            result.host_usage_published = _report_usage_publication(
+                sources, captured, local_manifest, result, verbose=verbose
+            )
+        except Exception as e:
+            _warn_publication_evidence_unavailable(e, "Content sync succeeded.")
+    if captured is not None:
+        try:
+            _print_usage_push_mode(result)
+        except OSError as e:
+            stderr_console.print(
+                f"mm: warning: Content sync reached manifest acceptance; "
+                f"post-publication maintenance failed: {safe_str(e)}. Run mm status."
+            )
     # Write sidecar (best-effort: failure warns but does not abort push;
     # the remote manifest succeeded, so peers still have a path to recovery).
     # Warn on both paths: without the sidecar, future corruption recovery
@@ -4133,23 +4173,19 @@ def _push_core(
                 f"corruption recovery will fall back to peer devices."
             )
 
-    # Update device last_seen
-    update_last_seen(backend, device_id)
-
-    # Clean up conflict copies (write-path only). Validator gates deletion
-    # so a bogus sibling whose name matches the iCloud pattern but doesn't
-    # deserialize as a manifest is left on disk with a stderr warning.
-    _cleanup_conflict_copies(backend, device_id, passphrase, memory_kb)
+    try:
+        update_last_seen(backend, device_id)
+        _cleanup_conflict_copies(backend, device_id, passphrase, memory_kb)
+    except (OSError, MindMeldError) as e:
+        if not attended:
+            raise
+        stderr_console.print(
+            f"mm: warning: Content sync reached manifest acceptance; "
+            f"post-publication maintenance failed: {safe_str(e)}. Run mm diag."
+        )
 
     elapsed = time.time() - start
-    result = PushResult(
-        total_new=total_new,
-        total_modified=total_modified,
-        total_deleted=total_deleted,
-        bytes_transferred=total_bytes,
-        elapsed=elapsed,
-        events_degradations=events_degradations,
-    )
+    result.elapsed = elapsed
 
     if not quiet:
         console.print("\n[bold green]Push complete.[/bold green]")
@@ -5511,7 +5547,8 @@ def status(
         _error(str(e))
 
     # Build local manifest (v2)
-    sources_configs = get_sources(config)
+    source_resolution = resolve_sources(config, strict=False, bootstrap=False)
+    sources_configs = source_resolution.available
     capture_rows = _read_capture_rows(sources_configs, device_id)
     local_manifest = build_manifest_v2(
         device_id,
@@ -5699,23 +5736,40 @@ def status(
 
     from mind_meld import host_usage as _host_usage
 
-    _print_host_publication(_host_publication(config, sources_configs, capture_rows))
+    publication = _host_publication(
+        config, sources_configs, capture_rows, selected=source_resolution.selected
+    )
+    reader_states = {
+        name: _host_usage.codex_usage_diag() if name == "codex" else _host_usage.grok_usage_diag()
+        for name in publication["readers"]
+    }
+    capture_remedy = _usage_capture_remedy(publication, reader_states)
+    upgrade_required = _usage_capture_needs_upgrade(publication, reader_states)
+    _print_host_publication(publication, reader_states=reader_states)
 
     # Enabling the Codex source is consent. A standing blocker takes priority
     # over inventory-based remedies; healthy Codex capture stays quiet here.
     if any(s.get("name") == "codex" for s in sources_configs):
-        codex_diag = _host_usage.codex_usage_diag()
+        codex_diag = reader_states["codex"]
         if codex_diag.get("last_reason"):
-            console.print("  Codex usage capture: " + _host_usage_blocker("codex", codex_diag))
+            console.print(
+                "  Codex usage capture: "
+                + _host_usage_blocker(
+                    "codex",
+                    codex_diag,
+                    readiness=_reader_capture_readiness(publication, "codex"),
+                    upgrade_required=upgrade_required,
+                )
+            )
         elif codex_diag.get("files_pre_track"):
             console.print(
                 f"  Codex usage capture: rebuilding — {codex_diag['files_pre_track']} rollouts "
-                "awaiting re-walk; run [bold]mm push --capture-usage[/bold] to finish it"
+                f"awaiting re-walk; {safe_str(capture_remedy)}"
             )
         elif codex_diag.get("state") == "migrating":
             console.print(
                 f"  Codex usage capture: warming — {codex_diag.get('pending') or 0} rollouts "
-                "not yet scanned; run [bold]mm push --capture-usage[/bold] to finish it"
+                f"not yet scanned; {safe_str(capture_remedy)}"
             )
 
     grok_source_on = any(s.get("name") == "grok" for s in sources_configs)
@@ -5727,18 +5781,24 @@ def status(
         grok_present = False
     if grok_on or grok_present:
         if grok_on:
-            grok_diag = _host_usage.grok_usage_diag()
+            grok_diag = reader_states["grok"]
             last_reason = grok_diag.get("last_reason")
             if last_reason:
                 console.print(
-                    "  Grok usage capture: enabled — " + _host_usage_blocker("grok", grok_diag)
+                    "  Grok usage capture: enabled — "
+                    + _host_usage_blocker(
+                        "grok",
+                        grok_diag,
+                        readiness=_reader_capture_readiness(publication, "grok"),
+                        upgrade_required=upgrade_required,
+                    )
                 )
             elif grok_diag.get("complete_once") is True:
                 console.print("  Grok usage capture: enabled; a prior scan completed successfully")
             else:
                 console.print(
                     "  Grok usage capture: enabled, but no successful scan yet — "
-                    "run [bold]mm push --capture-usage[/bold]"
+                    + safe_str(capture_remedy)
                 )
         else:
             console.print(
@@ -5840,7 +5900,23 @@ always exact, so a truncated list never reads as the whole set.
 """
 
 
-def _host_usage_blocker(reader: str, state: dict, *, in_diag: bool = False) -> str:
+def _reader_capture_readiness(
+    publication: dict, reader: str
+) -> _config_module.UsageCaptureReadiness:
+    readiness = publication["readiness"]
+    if readiness == "ready" and reader not in publication["readers"]:
+        return "no-reader"
+    return readiness
+
+
+def _host_usage_blocker(
+    reader: str,
+    state: dict,
+    *,
+    readiness: _config_module.UsageCaptureReadiness,
+    upgrade_required: bool = False,
+    in_diag: bool = False,
+) -> str:
     """Render cache-validated blocker metadata for both diagnostic surfaces."""
     reason = state.get("last_reason")
     if reason is None:
@@ -5852,7 +5928,14 @@ def _host_usage_blocker(reader: str, state: dict, *, in_diag: bool = False) -> s
         files_cached=state.get("files_cached"),
         files_on_disk=state.get("files_on_disk"),
     )
-    phrase = events_tail._host_skip_phrase(reader, reason, evidence=evidence, in_diag=in_diag)
+    phrase = events_tail._host_skip_phrase(
+        reader,
+        reason,
+        readiness=readiness,
+        evidence=evidence,
+        in_diag=in_diag,
+        upgrade_required=upgrade_required,
+    )
     since = state.get("last_reason_since")
     if since is not None:
         try:
@@ -5981,7 +6064,9 @@ def _read_capture_rows(sources: list[dict], device_id: str | None) -> events.Eve
     )
 
 
-def _host_publication(config: dict, sources: list[dict], scan: events.EventScan) -> dict:
+def _host_publication(
+    config: dict, sources: list[dict], scan: events.EventScan, *, selected: list[dict] | None
+) -> dict:
     readers = [
         name
         for name, _ in events_tail._default_host_readers(
@@ -5993,13 +6078,16 @@ def _host_publication(config: dict, sources: list[dict], scan: events.EventScan)
     except (OSError, MindMeldError, KeyError, RecursionError):
         manifest = None
     projected = events.project_host_publication(scan, readers, manifest)
+    projected["readiness"] = _config_module.usage_capture_readiness(
+        selected, sources, reader_consented=bool(readers)
+    )
     if scan.errors and projected["state"] == "unknown":
         # Local paths must remain recognizable even under a long home prefix.
         projected["error"] = safe_str(_home_relative_path(Path(scan.errors[0])))
     return projected
 
 
-def _print_host_publication(state: dict) -> None:
+def _print_host_publication(state: dict, *, reader_states: dict[str, dict]) -> None:
     """Keep recorded coverage, publication evidence and attempts distinct."""
     if state["state"] == "absent":
         recorded = f"no capture in the last {events.CURSOR_SCAN_DAYS} days"
@@ -6015,13 +6103,32 @@ def _print_host_publication(state: dict) -> None:
     console.print("    Latest attempt: unknown (no attempt receipt)")
     if state.get("coverage_invalid"):
         console.print("    Coverage metadata is inconsistent; reader completeness is unknown.")
-    if state["readers"] and (
-        state["state"] != "recorded"
-        or (state.get("age_days") or 0) > 0
-        or state.get("coverage_invalid")
-        or any(v != "contributed" for v in state["readers"].values())
+    if state["readiness"] != "ready" or (
+        state["readers"]
+        and (
+            state["state"] != "recorded"
+            or (state.get("age_days") or 0) > 0
+            or state.get("coverage_invalid")
+            or any(v != "contributed" for v in state["readers"].values())
+        )
     ):
-        console.print("    Refresh on this Mac: [bold]mm push --capture-usage[/bold]")
+        remedy = _usage_capture_remedy(state, reader_states)
+        label = "Usage refresh" if state["readiness"] == "ready" else "Usage capture unavailable"
+        console.print(f"    {label}: {safe_str(remedy)}")
+
+
+def _usage_capture_needs_upgrade(publication: dict, reader_states: dict[str, dict]) -> bool:
+    return publication["readiness"] == "ready" and any(
+        reader_states.get(reader, {}).get("last_reason") in events_tail._HOST_PERMANENT_REASONS
+        for reader in publication["readers"]
+    )
+
+
+def _usage_capture_remedy(publication: dict, reader_states: dict[str, dict]) -> str:
+    """Pair the shared prerequisite verdict with currently consented reader blockers."""
+    if _usage_capture_needs_upgrade(publication, reader_states):
+        return "Run pipx upgrade mind-meld; a consented reader has an unsupported record format."
+    return _config_module.usage_capture_remedy(publication["readiness"])
 
 
 def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
@@ -6040,7 +6147,7 @@ def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
         if cold or state.get("last_reason"):
             console.print(
                 "Recapture covers Git history only. Refresh host usage on this Mac: "
-                "[bold]mm push --capture-usage[/bold]"
+                "[bold]mm push[/bold]"
             )
             return
 
@@ -6244,6 +6351,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     skill_may_create: frozenset[str] | None = None
     skill_config_error: str | None = None
     resolved_sources: list[dict] = []
+    selected_sources: list[dict] | None = None
     cfg: dict = {}
     try:
         cfg = load_config()
@@ -6252,7 +6360,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         storage_path = cfg.get("storage", {}).get("path")
         local_fp = cfg.get("crypto", {}).get("root_salt_fp")
         config_state = "ok"
-        resolved_sources = get_sources(cfg)
+        source_resolution = resolve_sources(cfg, strict=False, bootstrap=False)
+        resolved_sources = source_resolution.available
+        selected_sources = source_resolution.selected
         skill_may_create = skill_link.consented_agent_keys(cfg, resolved_sources)
     except MindMeldError as e:
         dev_id = dev_name = storage_path = local_fp = None
@@ -6404,7 +6514,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
         "host_usage": host_usage_state,
         "host_read_budgets": _host_read_budgets(cfg if config_state == "ok" else None),
-        "host_publication": _host_publication(cfg, resolved_sources, capture_rows),
+        "host_publication": _host_publication(
+            cfg, resolved_sources, capture_rows, selected=selected_sources
+        ),
         "discovery": discovery,
         "git_capture": _collect_git_capture_diag(cfg, dev_id, discovery, scan=capture_rows),
     }
@@ -6536,7 +6648,9 @@ def diag(
 
     hu_state = (state.get("host_usage") or {}).get("grok") or {}
     console.print("\n[bold]Host usage[/bold]")
-    _print_host_publication(state["host_publication"])
+    publication = state["host_publication"]
+    upgrade_required = _usage_capture_needs_upgrade(publication, state["host_usage"])
+    _print_host_publication(publication, reader_states=state["host_usage"])
     budgets = state["host_read_budgets"]
     if budgets["autopush_ms"] is None:
         budget_line = "unknown (config unavailable)"
@@ -6563,7 +6677,14 @@ def diag(
     console.print(f"  grok cache inventory:    {safe_str(str(hu_state.get('cache_state', '')))}")
     if hu_state.get("cache_state") == "ok":
         console.print(
-            "  grok usage read blocker: " + _host_usage_blocker("grok", hu_state, in_diag=True)
+            "  grok usage read blocker: "
+            + _host_usage_blocker(
+                "grok",
+                hu_state,
+                in_diag=True,
+                readiness=_reader_capture_readiness(publication, "grok"),
+                upgrade_required=upgrade_required,
+            )
         )
     console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
     grok_cached = hu_state.get("files_cached")
@@ -6580,7 +6701,14 @@ def diag(
     console.print(f"  codex cache inventory:   {safe_str(str(cx_state.get('state', '')))}")
     if cx_state.get("cache_state") == "ok":
         console.print(
-            "  codex usage read blocker: " + _host_usage_blocker("codex", cx_state, in_diag=True)
+            "  codex usage read blocker: "
+            + _host_usage_blocker(
+                "codex",
+                cx_state,
+                in_diag=True,
+                readiness=_reader_capture_readiness(publication, "codex"),
+                upgrade_required=upgrade_required,
+            )
         )
     cx_disk = cx_state.get("files_on_disk")
     console.print(
@@ -6595,7 +6723,14 @@ def diag(
         # quiet Mac the nudge is the only way a user learns to finish it.
         console.print(
             f"  codex awaiting re-walk:  {cx_state['files_pre_track']}"
-            " — run [bold]mm push --capture-usage[/bold] to finish the rebuild"
+            " — "
+            + safe_str(
+                _usage_capture_remedy(publication, state["host_usage"])
+                if "codex" in publication["readers"]
+                else _config_module.usage_capture_remedy(
+                    _reader_capture_readiness(publication, "codex"), reader="codex"
+                )
+            )
         )
 
     disc = state.get("discovery") or {}
@@ -8098,7 +8233,17 @@ def recapture(
             raise typer.Exit(1)
 
         device_id = config["device"]["id"]
-        events.write_push_event(prepared.events_dir, device_id, prepared.git_rows)
+        appended = events.write_push_event(
+            prepared.events_dir,
+            device_id,
+            prepared.git_rows,
+            max_file_size=config["sync"]["max_file_size"],
+        )
+        if isinstance(appended, events.EventAppendSkipped):
+            _error(
+                "Recapture stopped: event batch was not written. Fix sync.max_file_size "
+                "or shrink the day file, then retry mm recapture."
+            )
 
         try:
             result = _push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)

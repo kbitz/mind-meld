@@ -483,7 +483,7 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         events,
         "write_push_event",
-        lambda _events_dir, _device_id, rows: calls.append(("snapshot", rows)),
+        lambda _events_dir, _device_id, rows, **kwargs: calls.append(("snapshot", rows)),
     )
     monkeypatch.setattr(
         cli,
@@ -499,9 +499,7 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, 
     assert snapshot_rows is not None
     assert [item["type"] for item in snapshot_rows] == ["git-snapshot"]
     assert snapshot_rows[0]["origin"] == events.GIT_SNAPSHOT_ORIGIN_RECAPTURE
-    assert ("mm push --capture-usage" in " ".join(r.output.split())) == (
-        host_state in ("cold", "blocked")
-    )
+    assert ("mm push" in " ".join(r.output.split())) == (host_state in ("cold", "blocked"))
 
 
 def test_recapture_snapshoterror_exits_1_no_traceback(tmp_path, monkeypatch):

@@ -141,6 +141,10 @@ def atomic_write_bytes(
         raise StorageError(f"storage: atomic_write_bytes({path}) — {e}") from e
 
 
+class AppendSizeLimit(ValueError):
+    """The complete JSONL batch would cross the caller's file-size ceiling."""
+
+
 def flock_append_jsonl(
     path: Path,
     lines: Iterable[bytes],
@@ -148,25 +152,31 @@ def flock_append_jsonl(
     mode: int = 0o600,
     on_locked: Callable[[int], None] | None = None,
     strict: bool = False,
+    max_bytes: int | None = None,
 ) -> None:
     """Append N JSONL rows to `path` atomically under fcntl.flock(LOCK_EX).
 
     Each element of `lines` is one JSON-encoded row WITHOUT a trailing newline;
-    the helper appends a single `\\n` after each row. All N rows share one
+    the helper appends a single `\\n` after each row and separates an
+    unterminated prior row before appending. All N rows share one
     flock window — best-effort batching, NOT transactionality (a crash mid-batch
     leaves a prefix of the rows on disk).
 
     Contract:
       - Parent dir created with parents=True (mode 0o700) if missing.
-      - File created with O_APPEND if missing; perms enforced via os.fchmod.
+      - File created with O_APPEND|O_EXCL|O_NOFOLLOW only when the batch will
+        fit; existing paths are opened O_NOFOLLOW and must be regular files.
       - LOCK_EX is BLOCKING (no LOCK_NB / no retry budget). mm.lockfile already
         serializes push-vs-push at the higher layer; cross-process contention
         on this helper is rare in practice.
       - Best-effort: OSError swallowed silently. Callers are forensic logs
         (pullhistory, mm-events), not data integrity — a crashed FS or
         permission flip MUST NOT break the calling sync.
-        Explicitly requested captures opt into ``strict``: write errors and
+        Attended host captures opt into ``strict``: write errors and
         short appends raise OSError. Existing forensic callers are unchanged.
+      - `max_bytes` checks the whole batch, including any separator, under
+        flock; `AppendSizeLimit` reports a skipped append without changing
+        bytes and without creating a missing file.
       - `on_locked(fd)` runs under flock AFTER the writes complete; pullhistory
         uses this for its line-boundary rotation closure. Exceptions raised
         from the callback are swallowed (same forensic-only stance).
@@ -177,12 +187,20 @@ def flock_append_jsonl(
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd = os.open(
-            str(path),
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-            mode,
-        )
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
         try:
+            fd = os.open(str(path), flags, mode)
+        except FileNotFoundError:
+            if max_bytes is not None and len(payload) > max_bytes:
+                raise AppendSizeLimit("JSONL batch exceeds the file-size ceiling")
+            try:
+                fd = os.open(str(path), flags | os.O_CREAT | os.O_EXCL, mode)
+            except FileExistsError:
+                fd = os.open(str(path), flags, mode)
+        try:
+            # Refuse a device or pipe before fchmod can rewrite its mode.
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "JSONL append target is not a regular file")
             try:
                 os.fchmod(fd, mode)
             except OSError:
@@ -190,6 +208,13 @@ def flock_append_jsonl(
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
                 start = os.fstat(fd).st_size
+                if start and os.pread(fd, 1, start - 1) != b"\n":
+                    payload = b"\n" + payload
+                # Decide under the same flock as the append, including the
+                # separator byte. A concurrent writer cannot invalidate it. A file
+                # created above and still empty already passed the pre-check.
+                if max_bytes is not None and start + len(payload) > max_bytes:
+                    raise AppendSizeLimit("JSONL batch exceeds the file-size ceiling")
 
                 def _restore_prefix() -> None:
                     if not strict:

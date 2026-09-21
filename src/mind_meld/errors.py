@@ -16,7 +16,6 @@ GIT_WALK_FAILURES_URL = (
     "https://github.com/kbitz/mind-meld#dropped-repositories-and-ignored-git-environment-variables"
 )
 HOST_USAGE_CAPTURE_URL = "https://github.com/kbitz/mind-meld#host-usage-capture-codex-and-grok"
-HOST_USAGE_CONSENT_URL = "https://github.com/kbitz/mind-meld#grok-usage-in-fleet-retro"
 
 
 class MindMeldError(Exception):

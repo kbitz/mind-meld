@@ -385,6 +385,51 @@ def test_skill_md_step0_preflight_contract() -> None:
     )
 
 
+def test_skill_md_step0_gates_on_the_attended_floor_from_the_constant() -> None:
+    """Step 0's binary floor must track the constant every fleet remedy cites.
+
+    Below the attended floor a converged ``mm push`` exits 0 without refreshing
+    usage, so the agent must STOP rather than read a stale capture as fresh. A
+    hand-typed version here would rot the first time the floor moves.
+    """
+    from mind_meld.skills.retro_fleet import aggregator
+
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    step0 = skill[skill.index("## Step 0") : skill.index("## Step 1")]
+    stage_0a = step0[: step0.index("**0B")]
+    flat = " ".join(stage_0a.split())
+    floor = f"Require **mm {aggregator.ATTENDED_USAGE_MIN_VERSION} or newer** before continuing."
+    assert floor in flat
+    gate = flat[flat.index(floor) :]
+    assert "Below that floor, STOP" in gate, "the floor must stop the run, not warn"
+    # Exit 0 proves nothing below the floor, so the gate names the real evidence
+    # and the way to make a running agent reload this very instruction.
+    assert "verify `mm --version`" in gate
+    assert "run `mm install-skills`" in gate
+    assert "restart the agent so it reloads this skill" in gate
+    assert "verify the recorded timestamp and publication with `mm status`" in gate
+
+
+def test_every_skill_md_floor_mention_is_the_attended_constant() -> None:
+    """Every hand-typed floor in SKILL.md must move with the constant.
+
+    The Step 0 gate is pinned above; the decoder entries repeat the floor in
+    remedies. One stale copy would tell an agent a Mac below the floor is fine.
+    """
+    import re
+
+    from mind_meld.skills.retro_fleet import aggregator
+
+    skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    floors = re.findall(r"mm (v\d+\.\d+\.\d+)(?:\+| or newer)", skill)
+    assert floors, "the floor mentions moved; update this pattern with them"
+    assert set(floors) == {aggregator.ATTENDED_USAGE_MIN_VERSION}
+
+
 def test_every_notes_line_has_a_skill_decoder_entry() -> None:
     """Every aggregator Notes line has a SKILL.md decoder entry.
 
@@ -472,8 +517,53 @@ def test_readme_prices_all_three_vendors_with_matching_provenance():
         assert url in readme
     invariant = (ROOT / "docs" / "invariants" / "events-retro.md").read_text()
     assert token_usage.PRICING_LAST_UPDATED in invariant
-    assert "mm push --capture-usage" in readme
+    assert "Every attended `mm push` refreshes and publishes consented host usage" in " ".join(
+        readme.split()
+    )
     assert "no Git roots or content changes" in readme
+
+
+def test_attended_push_contract_on_live_surfaces() -> None:
+    import inspect
+
+    from mind_meld import cli
+
+    paths = [
+        "README.md",
+        "SPEC.md",
+        "AGENTS.md",
+        "docs/invariants/events-retro.md",
+        "src/mind_meld/skills/retro_fleet/SKILL.md",
+    ]
+    for path in paths:
+        assert "capture-usage" not in (ROOT / path).read_text(), path
+    # CHANGELOG, PROGRESS and roadmap-shipped deliberately retain historical commands.
+    for path in ["README.md", "SPEC.md", "AGENTS.md", "docs/invariants/events-retro.md"]:
+        flat = " ".join((ROOT / path).read_text().split())
+        assert "content sync succeeded regardless of capture outcome" in flat.lower(), path
+    assert "regardless of usage coverage" in inspect.getdoc(cli.push)
+    spec = (ROOT / "SPEC.md").read_text()
+    assert "mm recapture [WINDOW] [--dry-run]" in spec
+    assert "host_read_budgets, host_publication" in spec
+    for code in range(5):
+        assert f"| {code} |" in spec
+
+
+def test_usage_capture_help_names_prerequisites_and_exits() -> None:
+    from typer.testing import CliRunner
+
+    from mind_meld.cli import app
+
+    result = CliRunner().invoke(app, ["push", "--help"])
+    assert result.exit_code == 0
+    flat = " ".join(result.stdout.replace("│", " ").split())
+    assert "mm-events" in flat and "consented" in flat
+    assert "five seconds" in flat and "both readers can be cold" in flat
+    assert "GC" in flat and "hard timeouts" in flat
+    assert "Never scans or warms host usage" in flat
+    assert "--capture-usage" not in flat and "--no-capture-usage" not in flat
+    removed = CliRunner().invoke(app, ["push", "--capture-usage"])
+    assert removed.exit_code == 2
 
 
 def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:
@@ -834,30 +924,33 @@ def test_notes_decoder_compatibility_fixtures_both_directions():
         .split("## Trends vs prior", 1)[0]
     )
     new_output = agg.format_retro(presentation_data("degraded"), name="Example")
-    # The decoder is prose: preserve every old instruction, not a mock parser
-    # invented for the test. A new decoder must still understand old output.
-    # Track 61A changes only the host-refresh command in retained decoder rules.
-    compatible_decoder = new_decoder.replace("mm push --capture-usage", "mm push")
-    assert all(line in compatible_decoder for line in old_decoder.splitlines() if line.strip())
+    # Retained interpretation is compatible; refresh remedies deliberately gain
+    # a binary floor. Compare stable stems explicitly, never normalize commands.
+    for stem in (
+        "Fleet incomplete:",
+        "Sessions count incomplete:",
+        "Tokens incomplete",
+        "Skills incomplete:",
+        "No agent-log reader contributed",
+        "No agent activity observed",
+        "API list-rate equivalent unavailable",
+    ):
+        assert stem in old_decoder and stem in new_decoder
+    assert agg.ATTENDED_USAGE_MIN_VERSION in new_decoder
+    assert "verify `mm --version`" in new_decoder
     old_notes = old_output.split("## Notes\n", 1)[1].splitlines()
-    new_notes = (
-        new_output.replace("mm push --capture-usage", "mm push")
-        .split("## Notes\n", 1)[1]
-        .splitlines()
-    )
-    assert all(line in new_notes for line in old_notes if line.strip())
-    # An old decoder receives new distinct stems through its existing unknown-
-    # line rule. No new meaning is hidden under an old stem.
-    additions = [line for line in new_notes if line not in old_notes and line.strip()]
-    assert len(additions) == 2
-    assert all(
-        line.startswith(
-            (
-                "- Claude Code API list-rate equivalent is a floor",
-                "- API list-rate equivalent uses floor rates",
+    new_notes = new_output.split("## Notes\n", 1)[1].splitlines()
+    for line in old_notes:
+        if not line.strip():
+            continue
+        if "Not available for" in line:
+            assert any(
+                "Not available for" in new
+                and agg.ATTENDED_USAGE_MIN_VERSION in new
+                and "then run `mm push`" in new
+                for new in new_notes
             )
-        )
-        for line in additions
-    )
+        else:
+            assert line in new_notes
     for decoder in (old_decoder, new_decoder):
         assert "reported verbatim" in decoder and "never interpreted" in decoder

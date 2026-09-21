@@ -13,7 +13,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal, Sequence
 
 from mind_meld import fsutil
 from mind_meld.errors import ConfigError, SnapshotError, os_error_cause, snapshot_refusal
@@ -37,6 +37,45 @@ DEFAULT_STORAGE_PATH = str(
 # Source names that are mm-owned infrastructure (auto-included at init,
 # not user-prompted). Per-machine opt-out remains via `mm disable-source`.
 MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
+
+UsageCaptureReadiness = Literal["ready", "disabled", "unavailable", "no-reader", "unknown"]
+
+
+def usage_capture_readiness(
+    selected: Sequence[dict] | None,
+    available: Sequence[dict],
+    *,
+    reader_consented: bool,
+) -> UsageCaptureReadiness:
+    """Pure prerequisite verdict; None selection means config could not be read.
+
+    Resolve once at the caller with its own write policy. In read-only resolution
+    a missing bootstrapable default root is already available; custom roots are not.
+    """
+    if selected is None:
+        return "unknown"
+    if not any(s.get("name") == "mm-events" for s in selected):
+        return "disabled"
+    if not any(s.get("name") == "mm-events" for s in available):
+        return "unavailable"
+    return "ready" if reader_consented else "no-reader"
+
+
+def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None = None) -> str:
+    """One prerequisite action shared by capture, status, diag and reader notices."""
+    if readiness == "no-reader" and reader is not None:
+        return f"{reader} usage reading is not consented. Run mm enable-source {reader}."
+    return {
+        "ready": "Attended mm push refreshes and publishes host usage automatically.",
+        "disabled": "Run mm enable-source mm-events to enable usage publication.",
+        "unavailable": "Restore access to the configured mm-events folder.",
+        "no-reader": (
+            "No host reader is consented. Run mm enable-source codex or mm enable-source grok; "
+            "Grok usage-only consent also accepts [retro] grok_host_usage = true."
+        ),
+        "unknown": "Usage capture readiness is unknown; repair the unreadable config first.",
+    }[readiness]
+
 
 # Per-normalized-path warning suppression for explicit bootstrap/tightening
 # attempts. Read-only resolution never calls bootstrap. Strict creation

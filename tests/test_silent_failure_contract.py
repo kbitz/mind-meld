@@ -104,6 +104,17 @@ def _enable_test_host_source(tmp_path, reader, *, disabled=False):
             **({"include_dirs": ["skills"]} if reader == "codex" else {}),
         }
     )
+    events_root = tmp_path / "events-root"
+    events_root.mkdir(exist_ok=True)
+    if not any(s["name"] == "mm-events" for s in cfg["sync"]["sources"]):
+        cfg["sync"]["sources"].append(
+            {
+                "name": "mm-events",
+                "type": "generic",
+                "path": str(events_root),
+                "include_dirs": ["events"],
+            }
+        )
     if disabled:
         cfg["sync"]["disabled_sources"] = [reader]
     save_config(cfg, CONFIG_PATH)
@@ -1738,6 +1749,31 @@ def test_autopush_breadcrumb_degraded_when_token_cache_cold(tmp_path, monkeypatc
     payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     assert "tokens and skills are missing" in payload.get("detail", "")
+
+
+def test_autopush_breadcrumb_degraded_when_event_append_is_skipped(tmp_path, monkeypatch):
+    """A day file that cannot take the activity batch loses rows, not the push.
+
+    The size guard prints to a hook's stderr, which nobody reads, so the skip
+    must also reach the breadcrumb (AGENTS.md: append, never merely print).
+    """
+    from mind_meld import token_usage
+    from mind_meld.config import load_config
+
+    iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    config_path = tmp_path / "config.toml"
+    cfg = load_config(config_path)
+    cfg["sync"]["max_file_size"] = 100  # smaller than any mm-push batch
+    save_config(cfg, config_path)
+
+    r = runner.invoke(app, ["autopush"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert payload["outcome"] == "degraded", payload
+    assert "event append skipped (max-file-size)" in payload["detail"]
+    assert "Event append (max-file-size)" in r.stderr
+    assert not list((tmp_path / "mm-events" / "events").glob("*.jsonl"))
 
 
 def test_autopush_no_claude_source_is_not_a_degradation(tmp_path, monkeypatch):

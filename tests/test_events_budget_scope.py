@@ -174,7 +174,7 @@ class TestEventsTailBudgetScope:
             "gather_local_identities",
             lambda *, allow_refresh=True, root_discovery=None: [],
         )
-        monkeypatch.setattr(_mm_events, "write_push_event", lambda *_args: None)
+        monkeypatch.setattr(_mm_events, "write_push_event", lambda *_args, **_kwargs: None)
 
         assert (
             events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=True) == []
@@ -359,7 +359,7 @@ class TestRootDiscoveryHandoffAndDegradation:
         monkeypatch.setattr(
             _mm_events,
             "write_push_event",
-            lambda _events_dir, _device, rows: writes.append(rows),
+            lambda _events_dir, _device, rows, **kwargs: writes.append(rows),
         )
 
         assert (
@@ -391,7 +391,7 @@ class TestRootDiscoveryHandoffAndDegradation:
         monkeypatch.setattr(
             _mm_events,
             "write_push_event",
-            lambda _events_dir, _device, rows: writes.append(rows),
+            lambda _events_dir, _device, rows, **kwargs: writes.append(rows),
         )
 
         degradations = events_tail._run_events_tail(
@@ -431,7 +431,7 @@ class TestRootDiscoveryHandoffAndDegradation:
         monkeypatch.setattr(
             _mm_events,
             "write_push_event",
-            lambda _events_dir, _device, rows: writes.append(rows),
+            lambda _events_dir, _device, rows, **kwargs: writes.append(rows),
         )
 
         events_tail._run_events_backfill(config, sources, "dev-a")
@@ -496,9 +496,10 @@ def test_all_host_budget_sites_use_resolver(site, interactive, configured, tmp_p
     elif site == "backfill":
         events_tail._run_events_backfill(config, sources, "dev-a")
     else:
-        with pytest.raises(cli.typer.Exit) as err:
-            cli._push_captured_usage(config, "test-passphrase", 1024, sources, False)
-        assert err.value.exit_code == 4
+        monkeypatch.setattr(
+            events_tail, "_default_host_readers", lambda *a, **kw: (("codex", None),)
+        )
+        assert cli._capture_attended_usage(config, sources, sources, verbose=False) is None
     assert seen == [expected]
 
 

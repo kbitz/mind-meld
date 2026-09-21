@@ -282,6 +282,24 @@ def test_empty_device_label_keeps_unnamed_parens():
     assert out.count("| (unnamed) |") >= 2
 
 
+def test_fleet_refresh_remedies_require_the_attended_producer_version():
+    data = stale_data()
+    snap = data.host_inventory.by_device["dev-a"]
+    _, economics_notes, _, _ = agg._device_economics_cell(
+        snap, data.since.date().isoformat(), data.until.date().isoformat()
+    )
+    remedies = [
+        agg._host_detail_phrase("absent", None),
+        *economics_notes,
+        *agg._agent_coverage_notes(presentation_data("absent")),
+        *agg._host_reader_coverage_notes([snap]),
+    ]
+    assert len(remedies) >= 4
+    for remedy in remedies:
+        assert f"upgrade mind-meld to {agg.ATTENDED_USAGE_MIN_VERSION}+" in remedy
+        assert "verify with `mm --version`, then run `mm push`" in remedy
+
+
 def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
     import os
     import time

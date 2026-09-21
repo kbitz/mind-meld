@@ -329,13 +329,14 @@ Built with `typer`. Installed as `mm` (Mind Meld).
 mm init                     # generate device ID, configure storage, set passphrase
 mm push [--dry-run]         # build manifest, diff against remote, upload changes
                             # --dry-run previews publication and deletions; changes nothing except the local lock file (v0.14.10)
+                            # attended push refreshes consented host readers; needs selected, available mm-events. Usage-only refreshes leave activity counts/cursor unchanged; content changes count as one push.
 mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optionally scoped)
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
                             # --dry-run previews outcome totals; changes nothing except the local lock file. Combine with --conflict-mode fail for a write-free CI gate (v0.14.15)
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, last_autorun, skill_links, host_skill_discovery, host_usage, discovery, git_capture
+                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, last_autorun, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
@@ -370,7 +371,19 @@ mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N
 mm retro-fleet [WINDOW] [--no-author-filter]
                             # render fleet retrospective markdown to stdout (default 7d). Public CLI surface for the /retro-fleet Claude Code skill; safe to invoke directly for scripted exports.
                             # Skill-internal second-pass flags (v0.12.0+): --theme TEXT (≤3x), --noteworthy TEXT, --name TEXT — supplied by the /retro-fleet skill on its second pass to render the pixel-aligned ASCII card up top. Direct CLI users typically don't pass these. --no-save is a hidden no-op as of v0.12.39.
+mm recapture [WINDOW] [--dry-run]
+                            # recover Git history on this Mac (default 30d, 1d–90d); commits deduplicate fleet-wide. Does not relabel old event rows or refresh host usage.
+                            # --dry-run discovers/walks and reports; changes nothing except the local lock file. Partial previews exit 0, stopped/no-repository previews exit 1.
 ```
+
+`mm diag --json` separates reader cache inventory (`host_usage`) from recorded
+capture and publication evidence (`host_publication`). The latter includes
+`state`, `publication`, `readers`, and `readiness` (ready / disabled / unavailable /
+no-reader / unknown); unreadable config means unknown, without bootstrapping paths.
+`host_read_budgets` contains `autopush_ms`, `autopush_source`, `interactive_ms`,
+`interactive_source`, and `warm_ms`. These are local diagnostics, not an attempt
+receipt or proof that another Mac has received a row. See
+[host capture invariants](docs/invariants/events-retro.md#host-usage-snapshot-capture-load-bearing-track-19a).
 
 ### Global Flags
 
@@ -393,6 +406,12 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 8. Write `devices/{device_id}.json` to storage.
 
 ### `mm push`
+
+This numbered algorithm is historical. For the current source-selection and
+publication gates, read [sync invariants](docs/invariants/sync.md); for
+attended push's conditional activity tail and exit contract, read
+[host usage capture](README.md#host-usage-capture-codex-and-grok) and
+[events/retro invariants](docs/invariants/events-retro.md).
 
 1. Acquire lockfile (`~/.config/mind-meld/mind-meld.lock`). Fail if another operation is running.
 2. Walk `~/.claude/projects/` recursively.
@@ -789,6 +808,22 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 ---
 
 ## Error Handling
+
+| Exit | Meaning |
+|---|---|
+| 0 | Command completed. For push, content sync succeeded regardless of capture outcome; verify recorded usage with mm status. |
+| 1 | Command stopped. For push, content sync or required maintenance stopped; capture failures alone do not block content. For recapture, also an invalid WINDOW, no discovered repositories or a skipped event batch. |
+| 2 | Usage error from the argument parser, such as an unknown option or an invalid option value. |
+| 3 | `pull --conflict-mode fail` preflight refusal, before applying files (including with `--dry-run`). |
+| 4 | `recapture`: partial recovery after publishing available Git rows. Push does not use exit 4. |
+
+Usage-capture warnings go to stderr with `prerequisites: <state>`, `readers`,
+`no-row`, `capture-failed`, `append-failed`, `max-file-size`, or
+`not-published: <cause>` tokens and an actionable remedy; most also state the
+content-sync outcome and link the [host usage
+capture](README.md#host-usage-capture-codex-and-grok) section. Capture failures do
+not stop content sync. `push-failed` is a content-sync stop (an `Error:` line,
+exit 1), not a capture-only exit.
 
 ### Error Hierarchy (`mind-meld/errors.py`)
 

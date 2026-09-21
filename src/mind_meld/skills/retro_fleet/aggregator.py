@@ -165,17 +165,24 @@ guard that cannot fire is worse than no guard, because it reads as protection.
 Re-adding one is only meaningful BELOW the product."""
 
 HOST_SNAPSHOT_MIN_VERSION = "v0.12.32"
-"""First mm release whose event tail publishes ``host-usage-snapshot`` rows. Named
-once because it appears in several user-facing remedies; a machine below it cannot
-contribute agent-log activity no matter how often it pushes."""
+"""First mm release whose event tail publishes ``host-usage-snapshot`` rows.
+Named in events-retro as the schema floor. Refresh remedies use
+``ATTENDED_USAGE_MIN_VERSION``; a machine below this schema floor still
+cannot contribute agent-log activity no matter how often it pushes."""
 
-CAPTURE_USAGE_MIN_VERSION = "v0.14.14"
-"""First mm release with the ``mm push --capture-usage`` flag itself (Track 61A).
-A machine between ``HOST_SNAPSHOT_MIN_VERSION`` and this floor already contributes
-agent-log rows passively via a content-changing push, but rejects the flag as an
-unrecognized option — remedies that name the flag by name must cite this floor,
-not ``HOST_SNAPSHOT_MIN_VERSION``, or a mid-fleet-upgrade Mac reads as "new enough"
-while still lacking the flag it's being told to run."""
+ATTENDED_USAGE_MIN_VERSION = "v0.14.17"
+"""First release that captures on every attended push, including converged trees.
+Below this floor a converged mm push reports success without refreshing usage.
+The older host-snapshot schema floor alone cannot qualify a refresh remedy.
+"""
+
+
+def _attended_usage_remedy() -> str:
+    return (
+        f"upgrade mind-meld to {ATTENDED_USAGE_MIN_VERSION}+ on that Mac, "
+        "verify with `mm --version`, then run `mm push`"
+    )
+
 
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
 """Usable content width inside the card. Themes/noteworthy strings
@@ -299,7 +306,7 @@ class GitAggregate:
     # device_id -> (zero-project snapshots, total snapshots) in-window.
     # A Notes line fires when any device captured 0 repositories on some
     # of its pushes: that machine's commits are missing from the window.
-    # Recapture-origin rows are excluded from both counts (they are not
+    # Init- and recapture-origin rows are excluded from both counts (they are not
     # pushes); a row with no ``origin`` key is a pre-30A peer and IS a push.
     zero_repo_captures: dict[str, tuple[int, int]] = field(default_factory=dict)
     # device_id -> uncovered [start, end] date pairs inside the retro
@@ -1026,10 +1033,13 @@ def aggregate_git(
         if isinstance(device, str) and device:
             origin = ev.get("origin")
             in_window = _within_window(ev.get("ts"), since, until)
-            # T9: recapture is not a push. A row with no origin key is a
-            # pre-30A peer and IS a push. T8 still counts recapture as
+            # Init and recapture are not pushes. An absent or unknown origin
+            # still counts (pre-30A / forward fail-open). T8 counts either as
             # covering its interval — opposite treatment of one field.
-            if in_window and origin != mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE:
+            if in_window and origin not in (
+                mm_events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                mm_events.GIT_SNAPSHOT_ORIGIN_INIT,
+            ):
                 snap_total[device] = snap_total.get(device, 0) + 1
                 if not projects:
                     snap_zero[device] = snap_zero.get(device, 0) + 1
@@ -1730,55 +1740,28 @@ def _host_detail_phrase(detail: str, reason: str | None, *, device: str | None =
     Modeled on ``events_tail._host_skip_phrase``. A raw reason token tells
     nobody anything; this names the command that repairs each branch.
     """
-    if reason == "legacy_counters":
-        if device:
-            return (
-                "Not available for `"
-                + _safe_short(device)
-                + "`: that Mac runs an mm that reported token counters in an "
-                "older format. Run `pipx upgrade mind-meld` and `mm push --capture-usage` "
-                "there, then re-run."
-            )
-        return (
-            "A Mac still showing — on the retro reported token counters in an "
-            "older format. Run `pipx upgrade mind-meld` and `mm push --capture-usage` there, "
-            "then re-run `mm retro-fleet`."
-        )
     if detail == "present":
         return "per-model host tokens present"
+    if reason == "legacy_counters":
+        who = f"Not available for `{_safe_short(device)}`" if device else "Not available"
+        return (
+            f"{who}: a Mac reported token counters in an older format; "
+            f"{_attended_usage_remedy()}, then re-run `mm retro-fleet`."
+        )
+    causes = {
+        "active_days_mismatch": "the day set did not match the family totals",
+        "invalid_counter": "a counter did not reconcile with the family totals, or overflowed",
+        "unsupported_schema": (
+            "a model id or day bucket was malformed, or exceeded the protocol cap"
+        ),
+        "invalid_day": "a day key was not a canonical UTC date",
+    }
     if reason is None:
-        return (
-            "per-model host tokens absent — this machine is on mm older than "
-            "v0.12.49, or its last push had an empty host scan. Upgrade mm "
-            "and run `mm push --capture-usage` on that machine."
-        )
-    if reason == "active_days_mismatch":
-        return (
-            "per-model host tokens dropped (active_days_mismatch) — the day "
-            "set did not match the family totals. Upgrade mm on that machine "
-            "and run `mm push --capture-usage`."
-        )
-    if reason == "invalid_counter":
-        return (
-            "per-model host tokens dropped (invalid_counter) — a counter did "
-            "not reconcile with the family totals, or overflowed. Upgrade mm "
-            "on that machine and run `mm push --capture-usage`; if it persists, run `mm diag`."
-        )
-    if reason == "unsupported_schema":
-        return (
-            "per-model host tokens dropped (unsupported_schema) — a model id "
-            "or day bucket was malformed, or exceeded the protocol cap. "
-            "Upgrade mm on that machine and run `mm push --capture-usage`."
-        )
-    if reason == "invalid_day":
-        return (
-            "per-model host tokens dropped (invalid_day) — a day key was not "
-            "a canonical UTC date. Upgrade mm on that machine and run `mm push --capture-usage`."
-        )
-    return (
-        f"per-model host tokens dropped ({reason}) — upgrade mm on that "
-        "machine and run `mm push --capture-usage`; run `mm diag` if it persists."
-    )
+        problem = "per-model host tokens absent — pre-v0.12.49 peer or an empty host scan"
+    else:
+        cause = causes.get(reason, "unrecognized per-model detail")
+        problem = f"per-model host tokens dropped ({reason}) — {cause}"
+    return f"{problem}; {_attended_usage_remedy()}; run `mm diag` if it persists."
 
 
 def _host_coverage_phrase(kind: str, sources: tuple[str, ...], reason: str | None) -> str:
@@ -3873,8 +3856,8 @@ def _device_economics_cell(
         notes.append(
             "API list-rate equivalent unavailable for `"
             + _safe_short(device)
-            + "`: its agent-log snapshot predates this window. Run `mm push --capture-usage` "
-            "on that Mac, then re-run."
+            + f"`: its agent-log snapshot predates this window; {_attended_usage_remedy()}, "
+            "then re-run."
         )
         return "—", notes, {}, {}
     if snap.tokens_by_day is None:
@@ -3934,8 +3917,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
     """Name why the AGENT LOGS block is quiet, with a remedy for each cause.
 
     Ordered most-actionable first. Each line follows the product's established
-    problem/cause/fix shape ("run `mm push --capture-usage` on those machines; upgrade if the
-    warning persists") rather than describing a state and stopping.
+    problem/cause/fix shape, qualifying every attended refresh by its release floor.
 
     ``view`` is the same ``AgentRhythmView`` the card rendered. Pass it whenever
     one exists: two independent construction sites with hand-copied keyword
@@ -3955,8 +3937,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             notes.append(
                 f"No agent-log snapshots yet from "
                 f"{len(inventory.devices_without_accepted_row)} machine(s) — "
-                f"run `mm push --capture-usage` (mm {CAPTURE_USAGE_MIN_VERSION}+) "
-                f"there, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
+                f"{_attended_usage_remedy()}."
             )
         else:
             # Reachable whenever the device registry is unavailable:
@@ -3966,8 +3947,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             # becomes the only diagnostic — exactly what the contract forbids.
             notes.append(
                 "No agent-log snapshots were accepted from any machine — "
-                f"run `mm push --capture-usage` (mm {CAPTURE_USAGE_MIN_VERSION}+) on "
-                f"each Mac, and upgrade any machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
+                f"for each Mac that should publish usage, {_attended_usage_remedy()}."
             )
     else:
         if view is None:
@@ -3986,16 +3966,16 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
             # the latter as a consent failure.
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
-                "enable with `mm enable-source codex` (or `grok`) and run "
-                "`mm push --capture-usage`; readers with no attributable local ledger "
+                "enable with `mm enable-source codex` (or `grok`), then "
+                f"{_attended_usage_remedy()}; readers with no attributable local ledger "
                 "are also omitted."
             )
         elif not view.any_activity:
             if all(s.stale for s in snaps):
                 notes.append(
                     "Agent-log snapshots all predate this window — "
-                    "run `mm push --capture-usage` on those "
-                    "machines for current agent activity."
+                    f"for each affected machine, {_attended_usage_remedy()} "
+                    "for current agent activity."
                 )
             else:
                 notes.append(
@@ -4006,9 +3986,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
         if inventory.devices_without_accepted_row:
             notes.append(
                 f"{len(inventory.devices_without_accepted_row)} machine(s) have no agent-log "
-                f"snapshot (unknown, not zero) — run `mm push --capture-usage` "
-                f"(mm {CAPTURE_USAGE_MIN_VERSION}+) there, and upgrade any "
-                f"machine below mm {HOST_SNAPSHOT_MIN_VERSION}."
+                f"snapshot (unknown, not zero) — {_attended_usage_remedy()}."
             )
 
     # Named devices and unidentified rows are counted separately. `HostReject.device`
@@ -4061,8 +4039,8 @@ def _host_reader_coverage_notes(snaps: list[HostDeviceSnapshot]) -> list[str]:
         oldest = min(s.as_of for s in stale).date().isoformat()
         notes.append(
             f"Host-usage captures from {names} predate this window "
-            f"(oldest {oldest} UTC) — on each named machine, run "
-            "`mm push --capture-usage`, then `mm status`; pull again on this Mac."
+            f"(oldest {oldest} UTC) — {_attended_usage_remedy()}, "
+            "then `mm status`; pull again on this Mac."
         )
     return notes
 

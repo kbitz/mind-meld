@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Literal, Sequence, get_args
 
 from mind_meld import __version__, events, host_usage, identity, token_usage, upgrade
+from mind_meld import config as mm_config
 from mind_meld.config import (
     DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS,
     DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
@@ -550,7 +551,7 @@ def _merge_warm_retry_capture(
 def _warm_host_cache_with_notice(reader: str = "codex") -> None:
     """Attended notice only; the capture core contains and publishes the read."""
     sys.stderr.write(
-        f"mm: reading {reader} usage beyond the push budget "
+        f"mm: reading {reader} usage beyond [retro] host_usage_interactive_budget_ms "
         f"(about {host_usage.DEFAULT_READ_BUDGET_S:.0f} s of scanning)...\n"
     )
 
@@ -585,15 +586,25 @@ def _host_skip_phrase(
     reader: str,
     reason: str,
     *,
+    readiness: mm_config.UsageCaptureReadiness,
+    upgrade_required: bool = False,
     verb: Literal["push", "init"] = "push",
     evidence: HostReadEvidence | None = None,
     in_diag: bool = False,
+    attended: bool = False,
 ) -> str:
     """Closed-vocabulary reader remedy; callers escape at their display sink."""
     phrase = (
         f"host-usage snapshot skipped ({reader} {reason}) — "
         "content sync and git/session capture unaffected"
     )
+    if readiness != "ready":
+        return f"{phrase}. {mm_config.usage_capture_remedy(readiness, reader=reader)}"
+    if upgrade_required and reason not in _HOST_PERMANENT_REASONS:
+        return (
+            f"{phrase}. A consented reader has an unsupported record format; "
+            "run pipx upgrade mind-meld before refreshing usage."
+        )
     if reason in _HOST_PERMANENT_REASONS:
         return (
             f"{phrase}. {reader} wrote a record this version cannot read. "
@@ -601,6 +612,12 @@ def _host_skip_phrase(
             f"`mm disable-source {reader}` to stop retrying."
         )
     if reason == "deadline":
+        if attended:
+            return (
+                f"{phrase}. Attended warming also exhausted its allowance. "
+                "Check mm diag for cached progress and the last complete read; the next "
+                f"attended mm push retries automatically. See {HOST_USAGE_CAPTURE_URL}."
+            )
         if evidence is not None:
 
             def shown(value: int | None) -> str:
@@ -613,7 +630,8 @@ def _host_skip_phrase(
                 f"({host_read_age(evidence.last_complete_at)}); "
                 f"{shown(evidence.files_cached)} of {shown(evidence.files_on_disk)} {unit} cached. "
                 "If the last complete read is over your autopush budget, raise "
-                "`[retro] host_usage_autopush_budget_ms`; otherwise run `mm push --capture-usage`; "
+                "`[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage "
+                "and can warm cold readers; "
                 f"see {HOST_USAGE_CAPTURE_URL}."
             )
         compare = (
@@ -623,11 +641,11 @@ def _host_skip_phrase(
         )
         return (
             f"{phrase}. The {reader} read did not finish inside this {verb}'s read budget. "
-            f"Run `mm push --capture-usage` to read it without that budget{compare}; "
+            f"An attended mm push can warm cold readers{compare}; "
             f"see {HOST_USAGE_CAPTURE_URL}."
         )
     diag = "" if in_diag else "; `mm diag` shows the reader's state"
-    return f"{phrase}. Run `mm push --capture-usage` to retry{diag}."
+    return f"{phrase}. Attended mm push refreshes usage automatically{diag}."
 
 
 def _capture_host_snapshot(
@@ -641,7 +659,7 @@ def _capture_host_snapshot(
 
     tail ─────┐
     backfill ─┼─> shared event capture ─> this helper
-    push --capture-usage ──────────────> this helper
+    attended push ────────────────────> this helper
 
     Wrappers own notices and persistence; autopush supplies no warm callback.
     """
@@ -710,6 +728,7 @@ def _capture_event_snapshots(
     git_budget_ms: int | None = None,
     warm_host_cache: Callable[[str], None] | None = None,
     suppress_host_capture: bool = False,
+    origin: str | None = None,
 ) -> CaptureResult:
     """Capture device-stamped git, session, and host snapshot rows without writing.
 
@@ -747,6 +766,7 @@ def _capture_event_snapshots(
         since=since,
         walk_budget_ms=git_budget_ms if git_budget_ms is not None else budget_ms,
         root_discovery_budget_ms=root_discovery_budget_ms,
+        origin=origin,
     )
     _roots, discovery_errors = root_discovery
 
@@ -832,7 +852,8 @@ def _capture_git_rows(
     """Discover roots and walk git. No writes, no notices, no mm-push.
 
     Shared by the push tail, init backfill, and recapture. ``origin`` marks
-    recapture rows so the aggregator can tell them from pushes.
+    non-push rows (init and recapture) so the aggregator can exclude them
+    from push counts.
     """
     root_discovery = events.discover_git_roots(
         config,
@@ -871,8 +892,9 @@ def _run_events_tail(
     dry_run: bool,
     quiet: bool,
     suppress_host_capture: bool = False,
+    capture_activity: bool = True,
 ) -> list[str]:
-    """Capture per-push fleet-retro events at the HEAD of ``_push_core``.
+    """Capture fleet-retro events after ``_push_core``'s substantive-change gate.
 
     Returns a list of human-readable degradation phrases for this push
     (empty when healthy). ``autopush`` turns a non-empty list into a
@@ -901,13 +923,14 @@ def _run_events_tail(
 
     Forensic-only invariant: any failure in this block is swallowed and
     breadcrumbed via ``mm: notice:``. The push proceeds.
-    Track 61A's explicit flag captures first through ``_capture_host_snapshot``
-    with strict append, then suppresses this tail's host capture and mm-push
-    row. Bare no-op pushes still do zero host work; the flag never advances
-    the Git cursor or adds a retro push count.
+    Attended push captures first through ``_capture_host_snapshot`` with strict
+    append, then suppresses this tail's host capture even on capture failure. A usage-only
+    refresh also skips all activity work before any walk or cache lock. A
+    content-carrying refresh records one push and can advance the Git cursor.
+    Unattended no-op pushes still do zero host work.
     """
     degradations: list[str] = []
-    if dry_run:
+    if dry_run or not capture_activity:
         return degradations
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
@@ -990,16 +1013,21 @@ def _run_events_tail(
         # advance the next-push cursor. The optional host row sits between the
         # session rows and it — it is capture data like the others, and must
         # not displace the terminal row.
-        events.write_push_event(
+        append_result = events.write_push_event(
             events_dir,
             device_id,
             [
                 *capture.git_rows,
                 *capture.session_rows,
                 *capture.host_rows,
-                *([] if suppress_host_capture else [mm_event]),
+                mm_event,
             ],
+            max_file_size=config.get("sync", {}).get(
+                "max_file_size", mm_config.DEFAULT_MAX_FILE_SIZE
+            ),
         )
+        if isinstance(append_result, events.EventAppendSkipped):
+            degradations.append("event append skipped (max-file-size)")
 
         if cursor.held:
             sys.stderr.write(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
@@ -1046,11 +1074,18 @@ def _run_events_tail(
         # reader/reason when `dropped` is empty.
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                phrase = _host_skip_phrase(dropped_reader, dropped_reason)
+                phrase = _host_skip_phrase(
+                    dropped_reader, dropped_reason, readiness="ready", attended=not quiet
+                )
                 sys.stderr.write(f"mm: notice: {phrase}\n")
                 degradations.append(phrase)
         elif not capture.host_capture.complete:
-            phrase = _host_skip_phrase(capture.host_capture.reader, capture.host_capture.reason)
+            phrase = _host_skip_phrase(
+                capture.host_capture.reader,
+                capture.host_capture.reason,
+                readiness="ready",
+                attended=not quiet,
+            )
             sys.stderr.write(f"mm: notice: {phrase}\n")
             degradations.append(phrase)
     except Exception as e:
@@ -1130,6 +1165,7 @@ def _run_events_backfill(
             # hot cache, exactly as it does for tokens.
             warm_host_cache=_warm_host_cache_with_notice,
             prepare_token_cache=prepare_backfill_token_cache,
+            origin=events.GIT_SNAPSHOT_ORIGIN_INIT,
             host_readers=_default_host_readers(
                 sources, grok_consented=grok_host_usage_enabled(config)
             ),
@@ -1137,7 +1173,14 @@ def _run_events_backfill(
 
         rows_to_write = [*capture.git_rows, *capture.session_rows, *capture.host_rows]
         if rows_to_write:
-            events.write_push_event(events_dir, device_id, rows_to_write)
+            events.write_push_event(
+                events_dir,
+                device_id,
+                rows_to_write,
+                max_file_size=config.get("sync", {}).get(
+                    "max_file_size", mm_config.DEFAULT_MAX_FILE_SIZE
+                ),
+            )
 
         # Warm the identity cache at init (v0.11.17, D5 from /plan-eng-review).
         # First push after init then has hot identity data and emits no
@@ -1166,14 +1209,24 @@ def _run_events_backfill(
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
                 sys.stderr.write(
                     "mm: notice: "
-                    + _host_skip_phrase(dropped_reader, dropped_reason, verb="init")
+                    + _host_skip_phrase(
+                        dropped_reader,
+                        dropped_reason,
+                        verb="init",
+                        readiness="ready",
+                        attended=True,
+                    )
                     + "\n"
                 )
         elif not capture.host_capture.complete:
             sys.stderr.write(
                 "mm: notice: "
                 + _host_skip_phrase(
-                    capture.host_capture.reader, capture.host_capture.reason, verb="init"
+                    capture.host_capture.reader,
+                    capture.host_capture.reason,
+                    verb="init",
+                    readiness="ready",
+                    attended=True,
                 )
                 + "\n"
             )

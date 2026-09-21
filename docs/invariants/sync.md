@@ -29,10 +29,12 @@ performs its own descriptor-bound scan and upload verification.
 
 `_upload_changed_blobs` verifies the upload revision against the scanned digest, size, and mtime **before** `backend.put`. Missing or changed input aborts; it does not `continue`. Earlier correctly keyed encrypted blobs may remain as orphans. The encrypted manifest is the commit boundary; last_seen, sidecar, and conflict cleanup run only after that put.
 
-The requested host capture's acceptance callback runs immediately after that
-manifest put. It requires the exact day-file hash containing the requested
-row, not merely a truthy `PushResult`. A later maintenance error cannot undo
-acceptance. Status/diag use the existing local accepted-manifest sidecar as
+Attended host capture's publication evidence runs immediately after that
+manifest put. `PushResult.content_accepted` is recorded at the put, so a later
+maintenance error cannot undo content acceptance; `_report_usage_publication`
+then reports the row published only when the exact day-file revision containing
+it is in the accepted manifest, not merely because the push returned a truthy
+`PushResult`. Status/diag use the existing local accepted-manifest sidecar as
 evidence; if the current day-file revision no longer matches it, publication
 is unknown. No new receipt file or wire field is introduced.
 
@@ -226,11 +228,11 @@ Honest writers (`manifest.walk_*`) build rel keys via `path.relative_to(base)` w
 
 ## Push dry-run setup contract (Track 56A)
 
-`mm push --dry-run` changes nothing except the local lock file, including the lock parent's creation when needed. `_get_config(read_only=True)` skips the entire transition hook, and push skips its second config load because migration cannot run. Migration emits the existing warning; only when both streams are TTYs does it explain that the preview uses current config and the command without `--dry-run` offers `mm migrate-config` (default yes). No confirm prompt runs. Crypto repair and mm-events bootstrap are planned; fingerprint backfill stays in memory. The nudge is gated at the CLI call site. `lockfile.py` and `_prove_omitted_paths_absent` retain their existing contracts.
+`mm push --dry-run` changes nothing except the local lock file, including the lock parent's creation when needed. `_get_config(read_only=True)` skips the entire transition hook, and push skips its second config load because migration cannot run. Migration emits the existing warning; only when both streams are TTYs does it explain that the preview uses current config and the command without `--dry-run` offers `mm migrate-config` (default yes). No confirm prompt runs. Crypto repair and mm-events bootstrap are planned; fingerprint backfill stays in memory. The nudge is gated on `not dry_run` in push's finally block. Previews never scan, warm or capture host usage. `lockfile.py` and `_prove_omitted_paths_absent` retain their existing contracts.
 
 **Missing mm-events root (PC3 reversed by Track 59A).** Missing default event files are deletions, even when the root itself or its `events/` child is gone. Preview completes and reports the deletion a real push would publish, except for the activity row already excluded from preview. A missing default root is omitted from the source list passed to the unchanged deletion proof; it remains an empty source in the local manifest. There is no loss check or automatic restore. Missing custom roots follow the warning-and-skip rule above, in preview and real push. Strict read/access failures still refuse.
 
-Successful previews always print pending setup and “Dry run complete. Nothing was changed except the local lock file.” plus the not-previewed scope (activity row, GC, upload re-reads). Refusals never print completion and carry the lock-qualified suffix. Exit codes remain 0 completed, 1 stopped, 2 usage error. Tests in `TestPushPreviewNoMutation56A` record filesystem/network/keyring mutation attempts and compare the entire isolated tree with pinned mtimes. Track 62A extends this to the commands and explicit inspection exemptions below.
+Successful previews always print pending setup and “Dry run complete. Nothing was changed except the local lock file.” plus the not-previewed scope (host-usage capture, activity row, GC, upload re-reads). Refusals never print completion and carry the lock-qualified suffix. Exit codes remain 0 completed, 1 stopped, 2 usage error. Tests in `TestPushPreviewNoMutation56A` record filesystem/network/keyring mutation attempts and compare the entire isolated tree with pinned mtimes. Track 62A extends this to the commands and explicit inspection exemptions below.
 
 ## Preview and inspection contract (Track 62A)
 
