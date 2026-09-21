@@ -19,98 +19,53 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 - **A Track that prices, sums, or trends a counter must first prove the counter schema of every reader it consumes.** Added 2026-09-01. Track 35A's card was measured against HEAD, its premises were re-verified at drain time, and it was still going to ship a 7.40x error, because every existing constraint checks *behaviour* and *premises* while the defect sat in an undocumented property of the source formats. Codex CLI and Grok CLI report **inclusive** `input` (cache-read already inside it); Claude is **disjoint**. `grok-4.6` appeared under both schemas, so the semantics belong to the READER, not the model id. This is the "check the cache shape" constraint one layer further out: check the SOURCE shape.
 - **A feature nobody uses is deleted, not repaired.** Added 2026-09-01. The OpenCode reader had been discarding its entire store since v0.12.30 and a Track was drafted to fix it; probing first showed `opencode.db` 19 days cold, `~/.config/opencode/` three weeks stale and composed entirely of symlinks into a git repo already under version control. The fix was real and the feature was not. Probe the artifact's liveness before pricing its repair.
 - **A host usage reader may not ship against a synthetic fixture.** Added 2026-09-01. Its `CONTRACT.md` must record a live census against a real corpus and the host version it was taken from. `tests/fixtures/host_sessions/opencode/CONTRACT.md` said outright "the local machine did not have an OpenCode data directory" and "the SQLite schema is a minimal synthetic contract table." It was the only reader built that way and the only one that returned zero — the root cause Track 36A existed to delete (shipped v0.12.53).
+- **Precision work on status or diag publication evidence requires a wrong or permanently unknown status line a user actually saw.** Added 2026-09-21. v0.14.14, v0.14.16, v0.14.17 and v0.14.18 were four consecutive releases on host-usage publication evidence, every one drained from /ship adversarial passes; the Track 65A probes showed two of its four carded tasks were reachable only by synthetic setup (an unreadable older day file; a `resolve()` failure). A probe result is not a user observation. Source: Track 65A /autoplan decision 16, `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-21-track-65a.md`.
 
 ---
 
 ## In Progress
 
-Nothing is partially shipped. The retro-fidelity work closed with Group 58 at v0.14.12; Groups 58–62 live in `docs/roadmap-shipped.md`.
+Nothing is partially shipped. Groups 63–65 shipped as v0.14.16–v0.14.18 and live in `docs/roadmap-shipped.md`.
 
 ## Current Plan
 
 _tombstone: 27_
 
-#### Group 63: Codex read headroom
+#### Group 66: Cut 1.0
 
 _Depends on: none_
 
-##### Track 63A: Keep the warm Codex read inside its budget
-_5 tasks . ~2400 LOC including the 681-line frozen oracle . medium risk . 21 files_
-_touches: src/mind_meld/host_usage.py, src/mind_meld/lockedjson.py, src/mind_meld/events_tail.py, src/mind_meld/config.py, src/mind_meld/cli.py, tests/_host_usage_oracle.py (new), tests/test_host_usage.py, tests/test_host_usage_snapshot.py, tests/test_events_budget_scope.py, tests/test_config.py, tests/test_diag.py, tests/test_silent_failure_contract.py, tests/test_source_toggle.py, tests/test_integration.py, tests/test_docs_routing.py, docs/invariants/events-retro.md, README.md, docs/TODOS.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_read-first: docs/invariants/events-retro.md (host-usage-snapshot section, standing read blockers), docs/invariants/sync.md, AGENTS.md (Source Layout, import direction, testing), ~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-17-track-63a.md (EFFECTIVE SPEC only)_
-_produces: exact shipped Codex totals with a cheaper warm read, attended publication of warm results, per-Mac budget controls, and last complete read/budget evidence on status and diag_
-_session: fresh · effort: high · verify: ./bin/check tests/test_host_usage.py tests/test_host_usage_snapshot.py tests/test_events_budget_scope.py tests/test_config.py tests/test_diag.py tests/test_silent_failure_contract.py tests/test_source_toggle.py tests/test_integration.py tests/test_docs_routing.py_
+##### Track 66A: Cut v1.0.0: retire the pre-1.0 conflict alias and converge the failed-read cache write
+_3 tasks . ~120 LOC . low risk . 12 files_
+_touches: src/mind_meld/resolveflow.py, src/mind_meld/cli.py, src/mind_meld/host_usage.py, tests/test_conflict_copy.py, tests/test_host_usage.py, docs/invariants/conflicts.md, docs/invariants/events-retro.md, SPEC.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
+_read-first: docs/invariants/conflicts.md (the `(b)oth` → `(s)kip` alias paragraph), docs/invariants/events-retro.md (standing read blockers; "Optional cache timing fields (Track 63A)"), AGENTS.md (Source Layout, import direction, testing)_
+_produces: v1.0.0, with the one deprecation the code and docs promise to remove "at 1.0" removed, and a host read that is steadily over budget writing its cache once instead of on every autopush_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_conflict_copy.py tests/test_host_usage.py tests/test_diag.py tests/test_silent_failure_contract.py tests/test_docs_routing.py_
 
-_Source: Track 63A EFFECTIVE SPEC, approved UC1/UC2 and TASTE-1 through TASTE-6, 2026-09-17. Replaces the original unchanged-write-skip proposal: serialization occurs after the read deadline. Baseline 70abdee/v0.14.15 missed 3/3 warm 250 ms attempts on device 3a6c7dc9. Implementation qualification on Python 3.14.7 measured 168.26/166.66/166.90 ms before serialization over 1,066 rollouts; ordered live-corpus totals matched the shipped oracle. Measurements and interpreter are recorded in docs/invariants/events-retro.md. This card remains unshipped until the implementation PR lands; the five follow-ups stay in docs/TODOS.md for a separate drain._
+_Source: the 1.0 goal (user, 2026-09-21) and `[ship]` "host_usage.py: last_deadline_allotted_ms jitter can defeat the failed-pass write-skip" (P2, PR #181 /ship adversarial review, 2026-09-18). Verified at cdffc34: the alias is the only pre-1.0 shim in the tree — `resolveflow._LEGACY_SKIP_ALIAS_NOTICE` says "alias removed at 1.0", `_normalize_legacy_skip_choice_and_warn` is called from `resolveflow.py:827` and `cli.py:1797`, `cli.py:9004`'s docstring, `docs/invariants/conflicts.md:59`, `SPEC.md:569` / `:579` and `README.md:521` all describe it as living "until 1.0", and `grep -rn 'pre-1\.0\|until 1\.0' src docs/invariants` finds nothing else. `_carry_read_timing` computes `last_deadline_allotted_ms` as `round((deadline - started) * 1000)` where `deadline` is the caller's monotonic clock plus budget and `started` is the callee's own `time.monotonic()`, and `_skip_failed_cache_write` compares the whole timing map for equality, so scheduling latency between the two reads flips the value by ±1 ms between otherwise-identical over-budget passes and the failed-pass skip never converges; both readers share the helper (`host_usage.py:413`, `:775`). README carries no beta or pre-release statement, so nothing there needs removing for 1.0._
 
-- **Reader core** -- preserve validator acceptance, transition accounting, insertion order and malformed-increment precedence against the frozen shipped oracle; add seeded/tamper parity, one validation per entry, one fingerprint descriptor, root-resolved keys, reversible GC pause, timing/blocker precedence, and compact host caches. Keep the full reduction cooperative; late completion still commits/prunes. _host_usage.py + lockedjson.py + test_host_usage.py + frozen oracle._ (S)
-- **Read-budget lever** -- validate both retro budget keys, defaults, ranges and effective ordering; use one resolver at all four capture sites while preserving the 5-second warm and later-reader grace. _config.py + events_tail.py + cli.py + config/budget tests._ (S)
-- **Warm-read publication and recovery** -- publish the attended warm's result through the existing singleton reader boundary, replace its first-pass outcome, preserve completed siblings, and use the specified evidence-aware remedies. Pin usage/empty/partial/unsupported/exception/absence and both later-autopush recovery outcomes. _events_tail.py + cli.py + snapshot/integration/silent-contract/source-toggle tests._ (S)
-- **Diagnostics** -- show last complete read/time, allotted deadline, effective budget sources and a consent-scoped sweep estimate; unknown and future evidence stays explicit, output stays sanitized, JSON keys are pinned. _cli.py + test_diag.py + test_docs_routing.py._ (S)
-- **Docs, follow-ups and release** -- record producing-Mac recovery, exact blocker/warm contracts, pre-serialization timing breakdown, cold/GC/differential evidence and interpreter/device; add the five approved TODOs and the patch release with its PROGRESS row. Run the targeted checks above, then full ./bin/check. _README.md + events-retro.md + TODOS.md + CHANGELOG.md + PROGRESS.md + pyproject.toml._ (S)
-
-#### Group 64: Usage-only capture
-
-_Depends on: Group 63_
-
-##### Track 64A: A usage refresh is not a push, and exit 4 says what it skipped
-_4 tasks . ~150 LOC . medium risk . 8 files_
-_touches: src/mind_meld/cli.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_integration.py, tests/test_events.py, tests/test_retro_fleet_aggregator.py, tests/test_silent_failure_contract.py, tests/test_diag.py, docs/invariants/events-retro.md, README.md, SPEC.md, AGENTS.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 63A_
-_read-first: docs/invariants/events-retro.md (cursor gate + recapture; host-usage-snapshot section), docs/invariants/sync.md, Group 61's entry in docs/roadmap-shipped.md_
-_produces: `mm push --capture-usage` adds nothing to the retro's push counts or zero-repository note however often it runs, and every exit-4 message and document says whether content was pushed_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_integration.py tests/test_events.py tests/test_retro_fleet_aggregator.py tests/test_silent_failure_contract.py tests/test_diag.py tests/test_docs_routing.py_
-
-_Source: `[ship:severity=informational]` "Five smaller mm push --capture-usage rough edges from adversarial review", items 1 and 2 plus its reopened third finding (Codex structured review, P2), PR #178 /ship, 2026-09-16; the SPEC.md task is documentation debt recorded by the PR #179 /ship doc-sync and never filed. Verified at 66b5293: `events_tail._run_events_tail` writes `[*capture.git_rows, *capture.session_rows, *capture.host_rows, *([] if suppress_host_capture else [mm_event])]` — the flag drops only the terminal `mm-push` row, so the cursor never advances and every invocation re-emits the same git and session rows; `aggregator.aggregate_git` counts every in-window `git-snapshot` whose `origin` is not `GIT_SNAPSHOT_ORIGIN_RECAPTURE` into `snap_total` / `snap_zero`, so a repo-less Mac's usage refresh lands in the retro's zero-repository "N of M pushes" note. `_push_captured_usage` raises `typer.Exit(4)` from its "No usage snapshot written" and "Usage snapshot append failed" branches before `_push_core` runs, while its docstring, AGENTS.md and README describe exit 4 as content sync being otherwise fine; `test_requested_capture_failure_never_calls_push` pins the ordering as intended, so the words are wrong, not the order. `_host_publication` builds its reader list from `_default_host_readers` alone and `_print_host_publication` prints "Refresh on this Mac: mm push --capture-usage" without checking that mm-events is a selected source, the condition `_prepare_usage_capture` refuses on. `grep -c "recapture\|capture-usage" SPEC.md` returns 0._
-
-- **A requested capture writes usage and nothing else** -- settle one direction at review: skip git and session capture entirely under the flag (usage-only; also removes the duplicate rows and the wasted walk), or mark those rows with an origin `aggregate_git` excludes from push counts the way it already excludes recapture. v0.14.14's own rule is the test: a usage refresh must not count as a push. Under the first direction a `--capture-usage` run that also uploads content records no git rows; the content still syncs and the next ordinary push captures git from the unmoved cursor. Pin: a repo-less Mac runs the flag twice, the retro's zero-repository note and push totals do not move, and no duplicate session rows appear. _events_tail.py + aggregator.py + tests + invariants, ~70 lines._ (M)
-- **Exit 4 before the push says content was not pushed** -- both pre-push exit-4 branches add "Content was not pushed; run mm push". Correct the `_push_captured_usage` docstring, the AGENTS.md push-flags paragraph, README's exit-code table and events-retro.md so exit 4 distinguishes "capture failed before the push" from "pushed, capture not in the accepted manifest". _cli.py + docs, ~30 lines._ (S)
-- **Do not recommend a command that will refuse** -- when mm-events is not a selected source, status and diag name `mm enable-source mm-events` instead of the flag. _cli.py + tests, ~25 lines._ (S)
-- **List the two missing commands in SPEC.md** -- add `mm recapture` and `mm push --capture-usage` to the CLI command reference with the exit codes this Track settles. _SPEC.md, ~25 lines._ (S)
-
-#### Group 65: Reader-scoped publication evidence
-
-_Depends on: Group 64_
-
-##### Track 65A: Reader-scoped publication evidence on status and diag
-_4 tasks . ~200 LOC . medium risk . 9 files_
-_touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/cli.py, tests/test_events.py, tests/test_host_usage_snapshot.py, tests/test_integration.py, tests/test_diag.py, tests/test_retro_fleet_aggregator.py, docs/invariants/events-retro.md, README.md, AGENTS.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_blocked-by: Track 64A_
-_read-first: docs/invariants/events-retro.md (host-usage-snapshot section, coverage states), docs/invariants/sync.md, Group 61's entry in docs/roadmap-shipped.md_
-_produces: `mm status` and `mm diag` label each host reader from that reader's own recorded result, report uncertainty when any retained day file that could hold the winning host row is unreadable, and bind the publication receipt to the bytes that were parsed_
-_session: fresh · effort: high · verify: ./bin/check tests/test_events.py tests/test_host_usage_snapshot.py tests/test_integration.py tests/test_diag.py tests/test_retro_fleet_aggregator.py tests/test_docs_routing.py_
-
-_Source: `[ship:severity=informational]` "Per-reader 'completed, no usage' is whole-row-scoped on the mm status/diag read path" (P2); items 3, 4 and 5 of the rough-edges entry; and `[ship]` "Investigate a claimed TOCTOU on the accepted-manifest digest check" — all PR #178 /ship, 2026-09-16. Verified at 66b5293: `aggregator.local_host_capture_candidate` emits `"empty": not row.lifetime_by_family`, one row-level boolean, and `cli._print_host_publication` appends "; completed, no usage" to every reader marked contributed when it is set, so a mixed sweep labels no reader empty and an all-empty sweep labels every reader empty; the live-push path already holds the right signal, `HostUsageCapture.empty`, recorded per reader before the family-keyed merge, and `make_host_usage_snapshot` writes no per-reader field. `latest_event_rows` marks a type uncertain only when the failing file has no winner yet or won in it — sound for `mm-push`'s `(-delta, index)` key, not for host rows, which `_host_row_order_key` orders by `row.as_of`. `recorded_row_revision` confirms the row through `_iter_typed_objs`, discards the digest that function computed from the bytes it parsed, then re-opens the file through `hash_file`. `_iter_mm_push_objs` runs the same digest into a throwaway `EventScan`. `EventScan.cached_hash` calls `path.resolve()` for every file of every source through `status`'s `diagnostic_hash` lambda although `scan.hashes` only ever holds mm-events day files, and `manifest`'s per-file hash step reports any `OSError` from that callback as "read error" and drops the file._
-
-- **Put each reader's own empty result on the row** -- `make_host_usage_snapshot` gains an allowlist-safe per-reader list written from `capture.empty` (reader names only, never token payload). Its readers, in this card: `local_host_capture_candidate` → `project_host_publication` → `_print_host_publication`, which stop deriving emptiness from `lifetime_by_family`. Do not key off family-name membership: `host_family()` classifies by model-id prefix, so a Codex model it does not recognize lands under `other` — the first /ship fix made exactly this mistake. A row from an older Mac without the key renders its coverage with no empty claim. Aggregator acceptance tolerates the key across a mixed fleet (`_accept_optional_source_list` is the precedent). Pin mixed, all-empty and legacy rows. _events.py + events_tail.py + aggregator.py + cli.py + tests, ~110 lines._ (M)
-- **An unreadable older day file marks a host row uncertain** -- for a type whose winner is chosen by a selector rather than file order, any read failure in the retained window makes that type uncertain. `mm-push` keeps its filename-order rule. _events.py + tests, ~30 lines._ (S)
-- **Bind the receipt to the bytes that were parsed** -- `recorded_row_revision` returns the revision `_iter_typed_objs` computed in the same pass instead of re-hashing, which removes the claimed race by construction rather than settling whether it is reachable. One behaviour changes and needs a decision at review: a day file holding an oversized skipped line has no single-pass revision, so the receipt would report unpublished where `hash_file` reports published; status already reports that file as unknown. _events.py + tests, ~25 lines._ (S)
-- **Stop hashing where nothing reads the hash** -- the cursor walk skips the digest when no caller wants a revision, and `cached_hash` checks the filename shape (or keys on the unresolved path) before `resolve()`, so a `resolve()` failure can no longer drop a non-event file from the status manifest. _events.py + cli.py + tests, ~35 lines._ (S)
+- **Retire the `b` / `both` alias** -- delete `_LEGACY_SKIP_ALIAS_NOTICE` and `_normalize_legacy_skip_choice_and_warn` with both call sites, so `b` and `both` fall through to each prompt's existing unknown-choice re-prompt and join the loud-rejected pre-v0.9.0 `c` / `f` letters. Rewrite the four alias tests in `tests/test_conflict_copy.py` (the `"both"` prompt cases near lines 1397–1438 and the `["b", "both"]` parametrize near 2935–3009) as rejection pins. Update the `cli.py:9004` docstring, the conflicts invariant paragraph, both SPEC.md sentences and README's `mm resolve` line to say the alias was removed at 1.0. _resolveflow.py + cli.py + test_conflict_copy.py + conflicts.md + SPEC.md + README.md, ~60 lines (del)._ (S)
+- **Converge the failed-pass cache write** -- make `_skip_failed_cache_write`'s comparison insensitive to sub-budget jitter: compare `last_deadline_allotted_ms` on the caller's nominal budget (or a coarse bucket) while still persisting and displaying the value events-retro.md records. Decide at review which of the two the invariant keeps; the persisted formula is documented, so changing it needs the doc updated in the same commit. Pin: two consecutive over-budget passes whose fake clocks differ by 1 ms between caller and callee write the cache once. _host_usage.py + test_host_usage.py + events-retro.md, ~40 lines._ (S)
+- **Release 1.0.0** -- CHANGELOG entry (the alias removal is the one BREAKING line), PROGRESS row, `pyproject.toml` to 1.0.0. Run the targeted checks above, then the full `./bin/check`. _CHANGELOG.md + docs/PROGRESS.md + pyproject.toml, ~20 lines._ (S)
 
 ### Execution Map
 
-**This adjacency is RELEASE order, not launch order.** Every edge is release serialization on `pyproject.toml`: three cards claim three consecutive versions, and only one tag can exist per version. The cards also share `cli.py` and `events_tail.py` across all three, and `aggregator.py` across 64A and 65A, so the packer separates them anyway. Tracks may be worked in parallel Conductor workspaces; only their version slots serialize, and document order is priority. 63A is first because the shipped v0.14.15 warm read missed the autopush budget; its implemented fix awaits review and release.
+A Group may launch when every Group in its ← set has landed, regardless of document order; document order is priority, not gating.
 
-Adjacency from gstack-extend's `roadmap-pack` tool on the drafted Tracks (identical to the audit's GROUP_DEPS after apply; this is the `/roadmap` skill's own packer, not a script in this repo's `bin/`):
+Adjacency from gstack-extend's `roadmap-pack` tool on the drafted Track (identical to the audit's GROUP_DEPS after apply; this is the `/roadmap` skill's own packer, not a script in this repo's `bin/`):
 
 ```
-- Group 63 ← {}
-- Group 64 ← {63}
-- Group 65 ← {64}
+- Group 66 ← {}
 ```
 
 Track detail per group:
 
 ```
-Group 63: Codex read headroom
-  +-- Track 63A ........... ~L . 5 tasks
-Group 64: Usage-only capture
-  +-- Track 64A ........... ~L . 4 tasks
-Group 65: Reader-scoped publication evidence
-  +-- Track 65A ........... ~L . 4 tasks
+Group 66: Cut 1.0
+  +-- Track 66A ........... ~M . 3 tasks
 ```
 
-**Total: 3 groups . 3 tracks remaining.**
+**Total: 1 group . 1 track remaining.**
 
 ---
 
