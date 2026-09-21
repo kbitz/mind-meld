@@ -328,6 +328,31 @@ def test_writer_enforces_batch_row_to_file_day_contract(tmp_path, monkeypatch, r
     assert [json.loads(line) for line in path.read_text().splitlines()] == [row, earlier]
 
 
+def test_cursor_finds_terminal_row_in_the_next_day_file(tmp_path, monkeypatch):
+    rolled = datetime(2026, 9, 20, 23, 59, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return rolled
+
+    monkeypatch.setattr(events, "datetime", Clock)
+    host = events.make_host_usage_snapshot(
+        device="local",
+        hosts={},
+        token_sources=["codex"],
+        ts=rolled + timedelta(minutes=2),
+    )
+    push = events.make_mm_push_event(
+        device="local", mm_version="0.14.18", sources=["mm-events"], discovery_errors=[]
+    )
+    path = events.write_push_event(tmp_path, "local", [host, push], strict=True)
+    assert path.name == "local-2026-09-21.jsonl"
+    cursor = events.resolve_push_cursor(tmp_path, "local", now=rolled + timedelta(seconds=1))
+    assert cursor.used_floor is False
+    assert cursor.since == datetime.fromisoformat(push["ts"])
+
+
 def test_host_scan_reads_the_next_day_a_rolled_back_clock_would_write(tmp_path, monkeypatch):
     rolled = NOW - timedelta(hours=13)  # 2026-09-20 23:00 UTC
     row = {**host_row(), "ts": (rolled + timedelta(hours=2)).isoformat()}

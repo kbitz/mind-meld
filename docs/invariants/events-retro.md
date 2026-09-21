@@ -1257,9 +1257,12 @@ when it has no winner, won in the failing file, or the failing day is on/after
 the UTC date of winner `ts` minus the margin. Read `ts` from the projected row,
 never the opaque selector key. Margin underflow saturates: every day may matter.
 `mm-push` retains filename/line order; an irrelevant old failure cannot poison
-current host evidence for 90 days. A scan that opts into a day margin also
-opens the next UTC day, because the writer may name that file from a row
-timestamp ahead of a rolled-back clock. The cursor does not.
+current host evidence for 90 days. Host scans that opt into a day margin, and
+the push cursor, also open the next UTC day. The writer may name a batch from
+a row timestamp one day ahead of a rolled-back clock; the terminal `mm-push`
+in that file still advances the cursor when its own timestamp is not after
+`now`. A rollback of more than one UTC day can hide the file until the clock
+catches up.
 `host_publication` contains timestamp/age, allowlisted reader coverage and
 publication/attempt states; never hosts, model ids, tokens or peer ids.
 The accepted-manifest sidecar proves publication only for matching file bytes.

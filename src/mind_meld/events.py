@@ -1515,7 +1515,13 @@ def resolve_push_cursor(
     *,
     now: datetime | None = None,
 ) -> CursorResolution:
-    """Read retained mm-push rows newest-first and apply the cursor gate."""
+    """Read retained mm-push rows newest-first and apply the cursor gate.
+
+    Also opens the next UTC day. A batch can be named from a row timestamp
+    one day ahead of a rolled-back clock, and the terminal ``mm-push`` in
+    that file is still a valid cursor if its own timestamp is not in the
+    future. A timestamp after ``now`` still cannot move the cursor.
+    """
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(days=INITIAL_CURSOR_LOOKBACK_DAYS)
     if not events_dir.is_dir():
@@ -1523,7 +1529,7 @@ def resolve_push_cursor(
     today = now.date()
     seen_hold = False
     held_since: datetime | None = None
-    for delta in range(0, CURSOR_SCAN_DAYS + 1):
+    for delta in range(-1, CURSOR_SCAN_DAYS + 1):
         day = today - timedelta(days=delta)
         path = events_dir / f"{_safe_device_filename(device_id)}-{day.isoformat()}.jsonl"
         if not path.is_file():
