@@ -681,10 +681,11 @@ If `mm --version` is still below v0.14.17, a tag-pinned pipx install may not hav
 moved. Use the [upgrade instructions](#upgrading), verify again, then run `mm push`.
 In status, check a recent **last recorded capture**, the expected reader coverage
 and `Publication: published`. **Exit 0 means content sync succeeded regardless of
-capture outcome**; it no longer speaks to capture. Status is the verification
-step, but cannot prove the latest attempt succeeded: an earlier capture within
-the same day remains visible after a failed refresh. Diag exposes the same
-recorded evidence under `host_publication`, without token magnitudes or payloads.
+capture outcome**. On v0.14.18+, status also shows the **last recorded attended
+attempt**, independently of an earlier capture that remains visible after a failed
+refresh. Diag exposes the same evidence under `host_publication`, without token
+magnitudes or payloads. Local publication evidence proves acceptance by this Mac's
+storage backend; it does not prove delivery to another Mac.
 
 Capture requires enabled, available `mm-events` and consented readers. Enable
 with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok`;
@@ -727,17 +728,26 @@ host usage, fetch upgrade information or write nudge state.
 | Refresh carrying user-source changes published | Pushed (bytes, metadata or selection) | Ordinary activity tail; one push | 0 |
 | Prerequisites unavailable, capture fails, or append skipped | Ordinary content sync continues | Ordinary activity rules; capture is not retried in the tail | 0 if content sync succeeds |
 | Push fails before manifest acceptance | Not pushed | Locally recorded rows may remain | 1 |
-| Row written, captured revision unpublished | Pushed or already up to date | Depends on user-content changes | 0, with a warning |
+| Row excluded, file absent from accepted manifest, or row absent from accepted bytes (`not-published`) | Pushed or already up to date | Depends on user-content changes | 0, with a warning |
+| Publication evidence changed or cannot be read (`unverified`) | Pushed or already up to date | Depends on user-content changes | 0, with a warning; check `mm status` read-only |
 | `mm push --dry-run` | Preview only | Nothing captured | 0 completed; 1 stopped |
 
 Capture problems are always stderr `mm: warning:` lines with stable tokens:
 `(prerequisites: <state>)`, `(readers)` (a row was still written, but a consented
 reader was partial, dropped or absent), `(no-row)`, `(capture-failed)`,
-`(append-failed)`, `(max-file-size)` or `(not-published: <cause>)`. Only
+`(append-failed)`, `(max-file-size)`, `(not-published: <cause>)` or
+`(unverified: <reason>)`. Only
 `(push-failed)`, a stop before manifest acceptance, is an `Error:` line with
-exit 1. Fix exclude/include settings before retrying. A revision mismatch is usually transient; the next attended
-push retries automatically. For unreadable rows, restore read access and repair
-the local day file, preserving a copy outside mm-events first.
+exit 1. `not-published` requires proof: `exclude-patterns`, `include-dirs`,
+`file-absent` (no day file in the accepted manifest), or `row-missing` (the accepted
+bytes contain no matching row). Fix exclude/include settings before retrying;
+preserve a copy outside mm-events before repairing damaged JSONL for `row-missing`.
+The old `unreadable-row` token is retired. `unverified` reasons are `missing`,
+`unreadable`, `oversized-line`, `changed`, `revision-mismatch`, and `evidence-error`.
+They describe gaps in evidence, not proof of non-publication: restore read access
+if needed and check `mm status`. A new push writes a new capture, so it cannot
+verify the previous attempt. A line over 16 MiB, which mm's writer cannot produce,
+leaves publication unverified even if those bytes were accepted.
 
 All four event writers guard each whole batch against `sync.max_file_size`,
 including the host batch and the later activity batch. A skipped batch leaves
@@ -764,13 +774,102 @@ after a failed upload, the next attended push that appends a host row remains
 usage-only if user content is unchanged; autopush recovery runs its ordinary
 activity tail and legitimately counts once.
 
-“Last recorded capture” is not “latest attempt”: a failed attempt may write no
-row, so the latter is explicitly unknown. Publication is proven only when the
-recorded file revision matches the local accepted-manifest sidecar; otherwise
-it is unknown. An absent retained row means “no capture in the last 90 days”,
-not “never published”. An unreadable event file means unknown. Reader coverage
-is contributed, partial, degraded, or absent; a contributed empty scan is
-healthy. A capture at least one day old gets a refresh reminder in status.
+“Last recorded capture” and “Last recorded attended attempt” are separate facts:
+a failed attempt may write no row. The local attempt record is
+`~/.config/mind-meld/last-attended-capture.json` (mode 0600, never synced).
+It records the capture start, appended row timestamp when present, class/cause
+and reader outcomes, including a push failure before manifest acceptance.
+A later GC failure preserves a computed publication verdict. Dry-run and
+autopush leave the record alone. A failed durable record write prints a notice;
+status may show the previous or new record. A later capture is noted beside a
+failed attempt; healthy published attempts need no such note.
+
+Before the first attended push after upgrading, status says
+`unknown (no attended attempt recorded yet — run mm push)`. Unreadable and corrupt
+records have distinct remedies; a future timestamp says `in the future`.
+The `run mm push` suffix is omitted when prerequisites are unavailable or a
+consented reader requires an upgrade; the prerequisite/blocker remedy takes precedence.
+Status/diag read the record without locking or writing. Publication is proven
+only when the recorded file revision matches the local accepted-manifest sidecar;
+a known failed read of that revision says `unverified (<reason>)`, and other gaps
+say `unknown`. An absent retained row means “no capture in the last 90 days”, not
+“never published”. A failed day-file read makes capture selection uncertain only
+if that file could contain a winning row within the allowed clock skew.
+
+Reader coverage is contributed, partial, degraded, or absent. A reader proven
+empty within the snapshot's retained days says `completed, no usage in snapshot`.
+Mixed-reader empty labels become available after this Mac captures with v0.14.18;
+legacy all-empty rows still prove every consulted reader empty. Legacy mixed
+rows make no per-reader empty claim. A capture at least one day old gets a
+refresh reminder in status.
+
+`mm diag --json` keeps `readers` in its existing vocabulary and the row-level
+`empty` boolean (`hosts == {}`). Additive `empty_readers` is `null` when no
+per-reader claim is possible, otherwise a list (possibly `[]`). `publication`
+adds `unverified` and `publication_reason` names its cause. Attempt fields are
+`latest_attempt` (class or `unknown`), `latest_attempt_cause`, `latest_attempt_at`,
+`latest_attempt_readers`, `latest_attempt_reason` (`missing`, `unreadable`, or
+`corrupt` for an unknown record), and `latest_attempt_superseded`. Attempt reader
+values are `contributed`, `empty`, `partial`, `dropped:<reason>`, or `absent`.
+
+#### Host usage looks wrong
+
+Run `mm status` on the producing Mac, then `mm diag` for reader blockers.
+These example excerpts use both Codex and Grok, at a fixed UTC time.
+
+Healthy: the recorded capture and attended attempt both have publication evidence.
+
+<!-- usage-example:healthy -->
+```text
+Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
+  Publication: published (accepted manifest evidence)
+  codex: contributed
+  grok: contributed
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — published
+```
+
+Mixed with an empty reader: Grok completed successfully and found no usage in
+the retained snapshot. It does not need repair.
+
+<!-- usage-example:mixed-empty -->
+```text
+Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
+  Publication: published (accepted manifest evidence)
+  codex: contributed
+  grok: completed, no usage in snapshot
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — published
+    codex contributed; grok completed, no usage in snapshot
+```
+
+Failed refresh: the earlier published capture remains visible. The newer attempt
+records why no row was written. Inspect the named readers in `mm diag`; follow
+the blocker remedies below before refreshing.
+
+<!-- usage-example:failed-refresh -->
+```text
+Host usage last recorded capture: 2026-09-21T11:00:00+00:00 (0d ago)
+  Publication: published (accepted manifest evidence)
+  codex: contributed
+  grok: contributed
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — no-row
+    codex dropped (unsupported); grok dropped (deadline)
+```
+
+Unverified: a line larger than 16 MiB prevents proof from this file, including
+certainty about the winning capture. This does not establish non-publication;
+check evidence read-only with `mm status`. An attended push creates a new attempt.
+
+<!-- usage-example:unverified -->
+```text
+Host usage last recorded capture: unknown (~/.local/share/mind-meld/events/local-2026-09-21.jsonl)
+  Publication: unverified (oversized-line) (accepted manifest evidence)
+  codex: contributed
+  grok: contributed
+  Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — unverified (oversized-line)
+  Usage refresh: Attended mm push refreshes and publishes host usage automatically.
+```
+
+#### Reader blockers
 
 Diag separates `<reader> cache inventory:` from `<reader> usage read blocker:`.
 A readable cache with no known blocker says `none`; a blocker can appear beside

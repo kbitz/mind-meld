@@ -499,7 +499,9 @@ def test_all_host_budget_sites_use_resolver(site, interactive, configured, tmp_p
         monkeypatch.setattr(
             events_tail, "_default_host_readers", lambda *a, **kw: (("codex", None),)
         )
-        assert cli._capture_attended_usage(config, sources, sources, verbose=False) is None
+        outcome = cli._capture_attended_usage(config, sources, sources, verbose=False)
+        assert outcome.appended is None
+        assert outcome.kind == "no-row"
     assert seen == [expected]
 
 

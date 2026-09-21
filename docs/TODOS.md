@@ -44,6 +44,31 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-ceo-review] Standing constraint: publication-evidence precision needs a user-observed wrong status
+- **Priority:** P3
+- **Why:** 65A is the fourth consecutive release on host-usage publication evidence (0.14.14, 0.14.16, 0.14.17,
+  65A). Its drained items came from /ship adversarial passes; the /autoplan probes showed two of four were reachable
+  only by synthetic setup (Task 2's older-file case, Task 4's resolve() failure). Proposed rule for `/roadmap`'s
+  standing constraints: further precision work on status/diag publication evidence requires a wrong or permanently
+  unknown status line a user actually saw, not a probe result.
+- **Context:** Track 65A /autoplan, 2026-09-21, decision 16. Plan:
+  `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-21-track-65a.md`.
+
+### [plan-eng-review] Discharge "Say on the wire whether a host capture was requested" when 65A's T5 ships
+- **Priority:** P3
+- **Why:** The Future item's only candidate reader was status's permanent "Latest attempt: unknown" line. 65A's
+  local attended-attempt record consumes that reader without any wire field, so the Future item has no reader left.
+- **Context:** `docs/roadmap-future.md` ("Say on the wire whether a host capture was requested"); 65A T5.
+
+### [plan-eng-review] Re-card shipped 63A/64A and 65A in one /roadmap run
+- **Priority:** P2
+- **Why:** At `a12096c` ROADMAP.md still lists Groups 63 and 64 in Current Plan although both shipped (v0.14.16,
+  v0.14.17), and the 64A card describes the pre-ship design (`--capture-usage` exit 4) rather than what shipped.
+  The existing P1 `[ship]` item covers only 63A's hand-edited card.
+- **Context:** 65A /autoplan system audit; `feedback_probe_before_planning` memory (roadmap regenerated before
+  Tracks land).
+
+
 
 ### [plan-ceo-review] Autopush read-budget predictor
 - **Priority:** P3

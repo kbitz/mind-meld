@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import typer
@@ -42,6 +42,7 @@ from rich.table import Table
 
 from mind_meld import (
     __version__,
+    attemptlog,
     crypto,
     events,
     events_tail,
@@ -3376,13 +3377,19 @@ def init() -> None:
 
 
 def _capture_attended_usage(
-    config: dict, sources: list[dict], selected: list[dict], *, verbose: bool
-) -> tuple[Path, dict] | None:
+    config: dict,
+    sources: list[dict],
+    selected: list[dict],
+    *,
+    verbose: bool,
+    outcome: attemptlog.CaptureOutcome | None = None,
+) -> attemptlog.CaptureOutcome:
     """Optional capture inside the push lock, after the final source selection.
 
     Contain the whole phase: notice, warming, construction and serialization can
     fail as well as readers and append. The caller never retries it in the tail.
     """
+    outcome = outcome or attemptlog.CaptureOutcome()
     phase = "capture-failed"
     try:
         readers = events_tail._default_host_readers(
@@ -3397,7 +3404,7 @@ def _capture_attended_usage(
                 f"{safe_str(_config_module.usage_capture_remedy(readiness))} "
                 "Content sync continues."
             )
-            return None
+            return outcome.finish("prerequisites", readiness)
         capture, rows = events_tail._capture_host_snapshot(
             config["device"]["id"],
             readers,
@@ -3405,6 +3412,12 @@ def _capture_attended_usage(
             warm_host_cache=events_tail._warm_host_cache_with_notice,
         )
         dropped = dict(capture.dropped)
+        outcomes = events.host_reader_outcomes(
+            rows[0] if rows else None,
+            [name for name, _read in readers],
+            dropped=capture.dropped,
+        )
+        outcome.readers = outcomes
         notices = []
         for name, _read in readers:
             if name in dropped:
@@ -3413,13 +3426,13 @@ def _capture_attended_usage(
                         name, dropped[name], readiness="ready", attended=True
                     )
                 )
-            elif name in capture.partial:
+            elif outcomes.get(name) == "partial":
                 notices.append(f"{name} coverage is partial; mm diag shows the reader's state.")
-            elif name not in capture.token_sources:
+            elif outcomes.get(name) == "absent":
                 notices.append(f"{name} absent (no metadata ledger).")
             elif verbose:
-                outcome = "completed, no usage" if name in capture.empty else "contributed"
-                console.print(f"Usage capture: {safe_str(name)} — {outcome}")
+                label = events.host_reader_label(outcomes[name])
+                console.print(f"Usage capture: {safe_str(name)} — {label}")
         if not rows:
             notices.append("No usage snapshot written; run mm diag to diagnose the reader.")
         if notices:
@@ -3429,7 +3442,7 @@ def _capture_attended_usage(
                 f"Content sync continues. See {HOST_USAGE_CAPTURE_URL}"
             )
         if not rows:
-            return None
+            return outcome.finish("no-row")
         src = next(s for s in sources if s["name"] == "mm-events")
         phase = "append-failed"
         path = events.write_push_event(
@@ -3440,16 +3453,17 @@ def _capture_attended_usage(
             max_file_size=config["sync"]["max_file_size"],
         )
         if isinstance(path, events.EventAppendSkipped):
-            return None  # The shared append guard already reported the size remedy.
+            return outcome.finish("max-file-size")  # Append already reported the remedy.
         assert path is not None
-        return path, rows[0]
+        outcome.appended = (path, rows[0])
+        return outcome
     except Exception as e:
         stderr_console.print(
             f"mm: warning: Usage capture ({phase}): {_exception_text(e)}. "
             "Content sync continues. Repair the local events folder if needed and run mm diag; "
             f"the next attended mm push retries automatically. See {HOST_USAGE_CAPTURE_URL}"
         )
-        return None
+        return outcome.finish(phase)
 
 
 def _exception_text(e: BaseException) -> str:
@@ -3457,13 +3471,116 @@ def _exception_text(e: BaseException) -> str:
     return safe_str(e) or type(e).__name__
 
 
-def _warn_publication_evidence_unavailable(e: Exception, content_outcome: str) -> None:
+def _warn_publication_evidence_unavailable(
+    e: Exception, content_outcome: str, *, attempt: attemptlog.Attempt | None = None
+) -> None:
     """Publication evidence failing must never change what the push already did."""
+    if attempt is not None and attempt.outcome is not None:
+        attempt.outcome.finish("unverified", "evidence-error")
     stderr_console.print(
-        "mm: warning: Usage capture (not-published: unreadable-row): "
-        f"publication evidence unavailable — {_exception_text(e)}. {content_outcome} "
-        "Repair the local day file and check mm status."
+        "mm: warning: Usage capture (unverified: evidence-error): "
+        f"publication evidence could not be read ({_exception_text(e)}); check mm status. "
+        f"{content_outcome} See {HOST_USAGE_CAPTURE_URL}"
     )
+
+
+def _mm_events_files(manifest: dict | None) -> dict:
+    if not isinstance(manifest, dict):
+        return {}
+    files = manifest.get("sources", {}).get("mm-events", {}).get("files", {})
+    return files if isinstance(files, dict) else {}
+
+
+def _stored_event_key(files: dict, rel: str) -> str | None:
+    """Manifest key for this day file, including one APFS case variant.
+
+    The writer always uses ``events/<file>``. A walker that opened
+    ``include_dirs = ["Events"]`` can store that same inode under the
+    config's spelling. Two case variants is ambiguous, so it does not match.
+    """
+    if rel in files:
+        return rel
+    folded = rel.casefold()
+    matches = [key for key in files if isinstance(key, str) and key.casefold() == folded]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _casefold_selected(rel: str, src: dict) -> bool:
+    """Same selection as the walker, ignoring case in configured spellings.
+
+    ``include_dirs = []`` still excludes the day file. ``["Events"]`` selects
+    the writer's ``events/<file>`` on a case-insensitive volume without
+    treating a stale manifest key as permission to ignore the config.
+    """
+    child = PurePosixPath(rel)
+    child_parts = [part.casefold() for part in child.parts]
+    for directory in src.get("include_dirs", []):
+        parent = PurePosixPath(directory)
+        if parent == PurePosixPath("."):
+            return True
+        parent_parts = [part.casefold() for part in parent.parts]
+        if child_parts[: len(parent_parts)] == parent_parts and len(child_parts) > len(
+            parent_parts
+        ):
+            return True
+    return any(
+        rel.casefold() == str(PurePosixPath(file)).casefold()
+        for file in src.get("include_files", [])
+    )
+
+
+def _usage_publication_verdict(
+    src: dict, path: Path, row: dict, manifest: dict | None
+) -> tuple[str, str | None]:
+    """Claim non-publication only from config or the accepted bytes themselves."""
+    rel = f"events/{path.name}"
+    if _manifest_is_excluded(rel, src.get("exclude_patterns", [])):
+        return "not-published", "exclude-patterns"
+    if not _casefold_selected(rel, src):
+        return "not-published", "include-dirs"
+    if manifest is None:
+        raise ValueError("accepted manifest unavailable")
+    files = _mm_events_files(manifest)
+    stored = _stored_event_key(files, rel)
+    if stored is None:
+        return "not-published", "file-absent"
+    revision = events.recorded_row_revision(path, row)
+    if revision.reason:
+        return "unverified", revision.reason
+    if not events.capture_revision_in_manifest(manifest, stored, revision.digest):
+        return "unverified", "revision-mismatch"
+    return ("published", None) if revision.found else ("not-published", "row-missing")
+
+
+def _publication_remedy(outcome: str, cause: str, path: Path) -> str:
+    local_path = _home_relative_path(path)
+    if outcome == "unverified":
+        return {
+            "changed": "the day file changed while mm verified it; "
+            "check publication read-only with mm status",
+            "missing": "the day file was moved or deleted before verification; "
+            "check mm status, and the next attended mm push writes a new row",
+            "unreadable": f"mm could not read {local_path}; restore read access, "
+            "then check mm status",
+            "oversized-line": f"{local_path} holds a line over 16 MiB that mm did not write, "
+            "so publication cannot be verified from this file; content sync is unaffected "
+            "and mm status shows publication unverified for it",
+            "revision-mismatch": "the day file changed after the push accepted it; "
+            "check publication read-only with mm status",
+        }[cause]
+    return {
+        "exclude-patterns": "mm-events exclude_patterns excludes this day file. "
+        "Adjust mm-events exclude_patterns, then run mm push",
+        "include-dirs": "mm-events include_dirs does not select events/. "
+        "Add events/ to mm-events include_dirs, then run mm push",
+        "file-absent": "the day file is absent from the accepted manifest; "
+        "check mm-events source selection with mm diag before the next mm push",
+        "row-missing": "the accepted day file does not contain the captured row. "
+        "Repair the local day file (preserve a copy outside mm-events before repairing "
+        "damaged JSONL), then run mm push",
+    }[cause]
 
 
 def _report_usage_publication(
@@ -3473,46 +3590,40 @@ def _report_usage_publication(
     result: PushResult,
     *,
     verbose: bool,
+    attempt: attemptlog.Attempt | None = None,
 ) -> bool:
     """Publication evidence is independent of content acceptance and command exit."""
     path, row = captured
     src = next(s for s in sources if s["name"] == "mm-events")
-    rel = f"events/{path.name}"
-    digest = events.recorded_row_revision(path, row)
-    if manifest is not None and events.capture_revision_in_manifest(manifest, rel, digest):
-        if verbose:
-            console.print("Host usage published (manifest accepted).")
-        return True
-    cause = "the captured file revision is not in the accepted manifest"
-    token = "revision-mismatch"
-    remedy = "This is usually transient; the next attended mm push retries automatically."
-    if _manifest_is_excluded(rel, src.get("exclude_patterns", [])):
-        cause = "mm-events exclude_patterns excludes this day file"
-        token = "exclude-patterns"
-        remedy = "Adjust mm-events exclude_patterns, then run mm push."
-    elif not any(
-        Path(rel).is_relative_to(Path(directory)) for directory in src.get("include_dirs", [])
-    ) and not any(Path(rel) == Path(file) for file in src.get("include_files", [])):
-        cause = "mm-events include_dirs does not select events/"
-        token = "include-dirs"
-        remedy = "Add events/ to mm-events include_dirs, then run mm push."
-    elif digest is None:
-        cause = "the local day file is unreadable or the captured row is on an unparseable line"
-        token = "unreadable-row"
-        remedy = (
-            "Restore read access and repair the local day file (preserve a copy outside "
-            "mm-events before repairing damaged JSONL), then run mm push."
+    outcome, cause = _usage_publication_verdict(src, path, row, manifest)
+    if attempt is not None and attempt.outcome is not None:
+        attempt.outcome.finish(outcome, cause)
+    published = outcome == "published"
+    try:
+        if published:
+            if verbose:
+                console.print("Host usage published (manifest accepted).")
+        else:
+            assert cause is not None
+            remedy = _publication_remedy(outcome, cause, path)
+            content_outcome = (
+                "Content changes were pushed."
+                if result.content_changed
+                else "User content was already up to date."
+            )
+            stderr_console.print(
+                f"mm: warning: Usage capture ({outcome}: {cause}): "
+                f"{safe_str(remedy)}. {content_outcome} See {HOST_USAGE_CAPTURE_URL}"
+            )
+    except Exception as e:
+        # The verdict is already on the attempt. A broken stream, including
+        # UnicodeEncodeError, must not relabel it as unverified evidence.
+        print(
+            "mm: notice: could not print publication evidence "
+            f"({_exception_text(e)}); check mm status",
+            file=sys.stderr,
         )
-    content_outcome = (
-        "Content changes were pushed."
-        if result.content_changed
-        else "User content was already up to date."
-    )
-    stderr_console.print(
-        f"mm: warning: Usage capture (not-published: {token}): row written but not published — "
-        f"{safe_str(cause)}. {content_outcome} {safe_str(remedy)} See {HOST_USAGE_CAPTURE_URL}"
-    )
-    return False
+    return published
 
 
 @app.command()
@@ -3554,6 +3665,8 @@ def push(
     passphrase = _get_passphrase_or_exit()
     pending: list[str] = []
     refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
+    attempt = attemptlog.Attempt()
+    core_finished = False
 
     try:
         acquire_lock()
@@ -3577,7 +3690,9 @@ def push(
                 dry_run,
                 preview_notes=pending,
                 attended=True,
+                attempt=attempt,
             )
+            core_finished = True
         except SnapshotError as e:
             _error(str(e) + refusal_suffix)
         except (OSError, MindMeldError) as e:
@@ -3623,7 +3738,20 @@ def push(
                     f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
                 )
     finally:
-        release_lock()
+        try:
+            if not dry_run and attempt.outcome is not None:
+                if not core_finished:
+                    attempt.stopped()
+                try:
+                    attemptlog.write(attempt.outcome)
+                except Exception as e:
+                    stderr_console.print(
+                        "mm: notice: could not durably record this attended capture attempt at "
+                        f"{safe_str(_home_relative_path(attemptlog.record_path()))} "
+                        f"({_exception_text(e)}); check mm status"
+                    )
+        finally:
+            release_lock()
         # Failed attended attempts need the nudge too; previews never fetch/write it.
         if not dry_run:
             upgrade.emit_nudge_if_due(config)
@@ -3781,6 +3909,7 @@ def _push_core(
     *,
     preview_notes: list[str] | None = None,
     attended: bool = False,
+    attempt: attemptlog.Attempt | None = None,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
@@ -3894,10 +4023,17 @@ def _push_core(
     captured = None
     capture_attempted = attended and not dry_run
     if capture_attempted:
+        captured = attemptlog.CaptureOutcome()
+        if attempt is not None:
+            attempt.outcome = captured
         captured = _capture_attended_usage(
-            config, sources, [*resolution.selected, *skipped_internal], verbose=verbose
+            config,
+            sources,
+            [*resolution.selected, *skipped_internal],
+            verbose=verbose,
+            outcome=captured,
         )
-    host_row_appended = captured is not None
+    host_row_appended = captured is not None and captured.appended is not None
     skipped: list[tuple[str, str]] = []
 
     def on_skip(path: str, reason: str) -> None:
@@ -4003,13 +4139,29 @@ def _push_core(
     ):
         if not quiet:
             console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
-        if captured is not None:
+        if captured is not None and captured.appended is not None:
             result = PushResult(events_degradations=events_degradations)
             try:
-                _print_usage_push_mode(result)
-                _report_usage_publication(sources, captured, None, result, verbose=verbose)
+                result.host_usage_published = _report_usage_publication(
+                    sources,
+                    captured.appended,
+                    remote_manifest,
+                    result,
+                    verbose=verbose,
+                    attempt=attempt,
+                )
             except Exception as e:
-                _warn_publication_evidence_unavailable(e, "User content was already up to date.")
+                _warn_publication_evidence_unavailable(
+                    e, "User content was already up to date.", attempt=attempt
+                )
+            try:
+                _print_usage_push_mode(result)
+            except Exception as e:
+                print(
+                    "mm: notice: could not print usage refresh mode "
+                    f"({_exception_text(e)}); check mm status",
+                    file=sys.stderr,
+                )
             return result
         return _push_result_or_none(events_degradations, dry_run)
 
@@ -4124,6 +4276,8 @@ def _push_core(
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     mkey = manifest_key(device_id)
     backend.put(mkey, enc_manifest)
+    if attempt is not None:
+        attempt.content_accepted = True
     # Independent content receipt at the actual acceptance boundary, even when
     # capture was skipped or failed. Maintenance cannot revoke accepted content.
     result = PushResult(
@@ -4136,14 +4290,14 @@ def _push_core(
         content_files=content_files,
         content_accepted=True,
     )
-    if captured is not None:
+    if captured is not None and captured.appended is not None:
         try:
             result.host_usage_published = _report_usage_publication(
-                sources, captured, local_manifest, result, verbose=verbose
+                sources, captured.appended, local_manifest, result, verbose=verbose, attempt=attempt
             )
         except Exception as e:
-            _warn_publication_evidence_unavailable(e, "Content sync succeeded.")
-    if captured is not None:
+            _warn_publication_evidence_unavailable(e, "Content sync succeeded.", attempt=attempt)
+    if captured is not None and captured.appended is not None:
         try:
             _print_usage_push_mode(result)
         except OSError as e:
@@ -6061,6 +6215,7 @@ def _read_capture_rows(sources: list[dict], device_id: str | None) -> events.Eve
                 row, until=now
             )
         },
+        day_margins={"host-usage-snapshot": aggregator._HOST_FUTURE_SKEW},
     )
 
 
@@ -6078,6 +6233,7 @@ def _host_publication(
     except (OSError, MindMeldError, KeyError, RecursionError):
         manifest = None
     projected = events.project_host_publication(scan, readers, manifest)
+    projected.update(attemptlog.project(readers, projected.get("ts")))
     projected["readiness"] = _config_module.usage_capture_readiness(
         selected, sources, reader_consented=bool(readers)
     )
@@ -6096,11 +6252,23 @@ def _print_host_publication(state: dict, *, reader_states: dict[str, dict]) -> N
     else:
         recorded = f"{state['ts']} ({state['age_days']}d ago)"
     console.print(f"  Host usage last recorded capture: {safe_str(recorded)}")
-    console.print(f"    Publication: {state['publication']} (accepted manifest evidence)")
+    reason = f" ({state['publication_reason']})" if state.get("publication_reason") else ""
+    console.print(
+        f"    Publication: {safe_str(state['publication'] + reason)} (accepted manifest evidence)"
+    )
     for reader, coverage in state["readers"].items():
-        empty = "; completed, no usage" if state.get("empty") and coverage == "contributed" else ""
-        console.print(f"    {reader}: {coverage}{empty}")
-    console.print("    Latest attempt: unknown (no attempt receipt)")
+        if reader not in events.HOST_USAGE_TOKEN_SOURCES:
+            continue
+        outcome = "empty" if reader in (state.get("empty_readers") or ()) else coverage
+        console.print(f"    {safe_str(reader)}: {safe_str(events.host_reader_label(outcome))}")
+    for line in attemptlog.render(
+        state,
+        age=events_tail.host_read_age(state.get("latest_attempt_at")),
+        path=_home_relative_path(attemptlog.record_path()),
+        refresh_ready=state["readiness"] == "ready"
+        and not _usage_capture_needs_upgrade(state, reader_states),
+    ):
+        console.print(f"    {safe_str(line)}")
     if state.get("coverage_invalid"):
         console.print("    Coverage metadata is inconsistent; reader completeness is unknown.")
     if state["readiness"] != "ready" or (
@@ -6339,7 +6507,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * local_emails (this machine's author-email trust set, and peers'
         after a pull merge) — project an allowlist, never render the row
       * host_publication payloads: only state, timestamp/age, allowlisted
-        reader coverage, publication/attempt evidence and sanitized errors
+        reader coverage, row-level empty and nullable empty_readers,
+        publication/publication_reason, latest_attempt class/cause/time/readers/
+        read-reason/superseded evidence and sanitized errors
         may escape; never hosts, tokens_by_day, magnitudes, models or peer ids
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)

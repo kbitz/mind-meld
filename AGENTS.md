@@ -47,6 +47,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
 | `synclog.py` | Per-project `.mind-meld-log.md` writer |
 | `sidecar.py` | Manifest sidecar read/write |
+| `attemptlog.py` | (65A) Local attended-capture outcome holder, atomic private record, closed-vocabulary validation, and write-free attempt projection/render states |
 | `lockfile.py` | The mm lockfile |
 | `lockedjson.py` | Single-file flock read/modify/write primitive |
 | `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome; (64A) whole-batch size ceiling, torn-row separator, regular-files-only), `fsync_dir` |
@@ -64,7 +65,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 **Import direction (Track 16A, load-bearing).** `cli` imports the six modules
 above; none of them imports `cli`, at module scope *or* function scope. The
 leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`,
-`host_skill_discovery`, `gitenv`, `pullplan`) import nothing from the CLI layer at all. Enforced by
+`host_skill_discovery`, `gitenv`, `pullplan`, `attemptlog`) import nothing from the CLI layer at all. Enforced by
 `tests/test_module_boundaries.py` and a CI grep gate — ruff's F811 cannot see
 function-local shadowing, so lint alone will never catch a re-introduced cycle.
 `aggregator.py` reaches the CLI as a **subprocess**
@@ -140,6 +141,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 
 | If you're editing… | READ FIRST |
 |---|---|
+| `attemptlog.py` / `events.py:host_reader_outcomes` / `empty_host_readers` / `host_reader_label` / `EventScan` / `RowRevision` / `cli.py:_usage_publication_verdict` / `_publication_remedy` / `push` (attempt finally) / `aggregator.py:_AcceptedHostRow.empty_sources` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `config.py:UsageCaptureReadiness` / `usage_capture_readiness` / `usage_capture_remedy` / `cli.py:_reader_capture_readiness` / `_usage_capture_needs_upgrade` / `_usage_capture_remedy` / `_print_usage_push_mode` / `_push_result_or_none` / `PushResult.content_changed` / `PushResult.content_files` / `PushResult.content_accepted` / `PushResult.host_usage_published` / `events.py:GIT_SNAPSHOT_ORIGIN_INIT` / `write_push_event` (batch origin guard) / `events_tail.py:_capture_event_snapshots` (`origin`) / `_run_events_tail` (`capture_activity`) / `cli.py:_push_core` (`attended`, `host_row_appended`, `capture_activity`, content gate) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `pullplan.py` / `cli.py:_plan_pull` / `_preflight_conflicts` / `_print_pull_prediction` / preview completion/refusal constants / `diff_cmd` exclude filtering | `docs/invariants/sync.md` |
 | `seen_sources.py:read` / `_read_under_lock` / status seed recovery and exemptions | `docs/invariants/sync.md` |

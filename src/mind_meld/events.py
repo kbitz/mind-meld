@@ -436,6 +436,8 @@ class HostUsageSnapshot(TypedDict, total=False):
     ``token_sources``). Additive ``partial_sources`` names readers that
     contributed usable totals the host declared incomplete — INTERSECTS
     ``token_sources``, never unified with ``degraded_sources``.
+    ``empty_sources`` (65A) identifies consulted readers with no usage day in
+    this row's retained window, independently of the merged model families.
     Additive ``counter_semantics`` (Track 35A) is ``"disjoint-v1"`` when
     this writer published the row: host counters are mutually exclusive
     billable buckets. Key absent means a pre-35A peer whose ``input`` may
@@ -497,6 +499,7 @@ class HostUsageSnapshot(TypedDict, total=False):
     degraded_sources: list[str]
     tokens_by_day: dict[str, dict]
     partial_sources: list[str]
+    empty_sources: list[str]
     counter_semantics: str
 
 
@@ -1512,7 +1515,13 @@ def resolve_push_cursor(
     *,
     now: datetime | None = None,
 ) -> CursorResolution:
-    """Read retained mm-push rows newest-first and apply the cursor gate."""
+    """Read retained mm-push rows newest-first and apply the cursor gate.
+
+    Also opens the next UTC day. A batch can be named from a row timestamp
+    one day ahead of a rolled-back clock, and the terminal ``mm-push`` in
+    that file is still a valid cursor if its own timestamp is not in the
+    future. A timestamp after ``now`` still cannot move the cursor.
+    """
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(days=INITIAL_CURSOR_LOOKBACK_DAYS)
     if not events_dir.is_dir():
@@ -1520,7 +1529,7 @@ def resolve_push_cursor(
     today = now.date()
     seen_hold = False
     held_since: datetime | None = None
-    for delta in range(0, CURSOR_SCAN_DAYS + 1):
+    for delta in range(-1, CURSOR_SCAN_DAYS + 1):
         day = today - timedelta(days=delta)
         path = events_dir / f"{_safe_device_filename(device_id)}-{day.isoformat()}.jsonl"
         if not path.is_file():
@@ -1568,13 +1577,14 @@ class EventScan:
 
     rows: dict[str, dict] = field(default_factory=dict)
     files: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+    file_reasons: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
-    hashes: dict[Path, tuple[tuple, str]] = field(default_factory=dict)
+    hashes: dict[tuple[int, int], tuple[tuple, str]] = field(default_factory=dict)
     uncertain_types: set[str] = field(default_factory=set)
 
     def cached_hash(self, path: Path, stat: os.stat_result) -> str | None:
         """Reuse a diagnostic read only while the file identity is unchanged."""
-        cached = self.hashes.get(path.resolve())
+        cached = self.hashes.get((stat.st_dev, stat.st_ino))
         return cached[1] if cached and cached[0] == _event_file_identity(stat) else None
 
 
@@ -1613,14 +1623,24 @@ def _iter_typed_objs(path: Path, row_types: set[str], scan: EventScan, revision:
                 and size == before.st_size == after.st_size
             ):
                 revision["sha256"] = digest.hexdigest()
-                scan.hashes[path.resolve()] = (_event_file_identity(after), digest.hexdigest())
+                scan.hashes[(after.st_dev, after.st_ino)] = (
+                    _event_file_identity(after),
+                    digest.hexdigest(),
+                )
             else:
+                revision["reason"] = (
+                    "changed"
+                    if _event_file_identity(before) != _event_file_identity(after)
+                    else "oversized-line"
+                )
                 scan.errors.append(str(path))
     except FileNotFoundError:
+        revision["reason"] = "changed" if opened else "missing"
         if opened:
             scan.errors.append(str(path))
         return
     except OSError:
+        revision["reason"] = "unreadable"
         scan.errors.append(str(path))
 
 
@@ -1635,6 +1655,7 @@ def latest_event_rows(
     row_types: set[str],
     *,
     selectors: Mapping[str, Callable[[dict], tuple[tuple, dict] | None]] | None = None,
+    day_margins: Mapping[str, timedelta] | None = None,
     now: datetime | None = None,
 ) -> EventScan:
     """Newest of each requested type in one pass per retained day file.
@@ -1644,9 +1665,13 @@ def latest_event_rows(
     use the fleet's actual acceptor, including its sibling tie-breakers.
     Other types retain latest-filename/last-line ordering. Identity comes
     exclusively from the filename, never a row's device field.
+    Types opting into a day margin must project an aware ``ts``. Their keys
+    remain opaque: uncertainty uses that timestamp and the writer's contract
+    that a row never lands in a file dated before its own UTC date.
     """
     scan = EventScan()
     selectors = selectors or {}
+    day_margins = day_margins or {}
     now = now or datetime.now(timezone.utc)
     try:
         if not events_dir.is_dir():
@@ -1659,15 +1684,35 @@ def latest_event_rows(
         scan.errors.append(str(events_dir))
         return scan
     keys: dict[str, tuple] = {}
+
+    def mark_uncertain(day, winners=()) -> None:
+        for kind in row_types:
+            if kind not in keys or kind in winners:
+                scan.uncertain_types.add(kind)
+            elif kind in day_margins:
+                ts = _parse_aware_ts(scan.rows[kind].get("ts"))
+                try:
+                    floor = (ts.astimezone(timezone.utc) - day_margins[kind]).date() if ts else None
+                except OverflowError:
+                    floor = None  # Minimum-date underflow: every scanned day may matter.
+                if floor is None or day >= floor:
+                    scan.uncertain_types.add(kind)
+
     safe_device = _safe_device_filename(device_id)
-    for delta in range(CURSOR_SCAN_DAYS + 1):
+    # The writer names the file from max(append day, row day). A row inside
+    # the caller's day margin can therefore sit one UTC day ahead of this
+    # clock. Look that day up only for scans that opted into a margin; the
+    # cursor's backward window stays put.
+    forward_days = 1 if any(day_margins.get(kind) for kind in row_types) else 0
+    for delta in range(-forward_days, CURSOR_SCAN_DAYS + 1):
         day = now.date() - timedelta(days=delta)
         path = events_dir / f"{safe_device}-{day.isoformat()}.jsonl"
         try:
             skip_non_file = path.exists() and not path.is_file()
         except OSError:
             scan.errors.append(str(path))
-            scan.uncertain_types.update(kind for kind in row_types if kind not in keys)
+            scan.file_reasons[f"events/{path.name}"] = "unreadable"
+            mark_uncertain(day)
             continue
         if skip_non_file:
             continue
@@ -1685,10 +1730,11 @@ def latest_event_rows(
                 scan.rows[kind] = projected
                 winners.add(kind)
         if len(scan.errors) > err_before:
-            scan.uncertain_types.update(kind for kind in row_types if kind not in keys)
-            scan.uncertain_types.update(winners)
+            mark_uncertain(day, winners)
         for kind in winners:
             scan.files[kind] = (f"events/{path.name}", revision.get("sha256"))
+        if revision.get("reason") and (winners or len(scan.errors) > err_before):
+            scan.file_reasons[f"events/{path.name}"] = revision["reason"]
     return scan
 
 
@@ -1708,20 +1754,72 @@ def capture_revision_in_manifest(manifest: dict | None, rel: str, digest: str | 
     return isinstance(info, dict) and info.get("sha256") == digest
 
 
-def recorded_row_revision(path: Path, row: dict) -> str | None:
-    """Bind a requested row to the same file bytes the publisher hashed."""
-    from mind_meld.manifest import hash_file
+@dataclass(frozen=True)
+class RowRevision:
+    found: bool
+    digest: str | None
+    reason: str | None
+
+
+def recorded_row_revision(path: Path, row: dict) -> RowRevision:
+    """Bind row presence to the digest of the parsed bytes, with one open."""
 
     scan = EventScan()
+    revision: dict = {}
+    normalized = json.loads(json.dumps(row, sort_keys=True))
     found = False
-    for candidate in _iter_typed_objs(path, {row["type"]}, scan, {}):
-        found = found or candidate == row
-    if not found:
-        return None
-    try:
-        return hash_file(path)
-    except OSError:
-        return None
+    # Do not break after finding the row: the digest covers the whole file.
+    for candidate in _iter_typed_objs(path, {row["type"]}, scan, revision):
+        found = found or candidate == normalized
+    return RowRevision(found, revision.get("sha256"), revision.get("reason"))
+
+
+def empty_host_readers(row: dict) -> tuple[str, ...] | None:
+    """Accepted/built coverage only; legacy empty hosts prove all consulted empty."""
+    empty = row.get("empty_sources")
+    if empty is None:
+        if row.get("empty") is True or row.get("hosts") == {}:
+            empty = row.get("token_sources", ())
+        else:
+            return None
+    return tuple(name for name in HOST_USAGE_TOKEN_SOURCES if name in empty)
+
+
+def host_reader_outcomes(
+    row: dict | None, readers: Sequence[str], *, dropped: Sequence[tuple[str, str]] = ()
+) -> dict[str, str]:
+    """One retained-snapshot projection for push, attempts and inspection.
+
+    Inspection has only degraded names; capture can additionally supply the
+    reader's closed failure reason. Callers supply currently consented readers.
+    """
+    row = row or {}
+    empty = empty_host_readers(row) or ()
+    failures = dict(dropped)
+    return {
+        name: f"dropped:{failures[name]}"
+        if name in failures
+        else "partial"
+        if name in row.get("partial_sources", ())
+        else "empty"
+        if name in empty
+        else "contributed"
+        if name in row.get("token_sources", ())
+        else "degraded"
+        if name in row.get("degraded_sources", ())
+        else "absent"
+        for name in HOST_USAGE_TOKEN_SOURCES
+        if name in readers
+    }
+
+
+def host_reader_label(outcome: str) -> str:
+    """Shared human label; JSON keeps its existing coverage vocabulary."""
+    if outcome == "empty":
+        return "completed, no usage in snapshot"
+    if outcome.startswith("dropped:"):
+        return f"dropped ({outcome.partition(':')[2]})"
+    return outcome
 
 
 def project_host_publication(
@@ -1747,6 +1845,8 @@ def project_host_publication(
         "ts": None,
         "age_days": None,
         "publication": "unknown",
+        "publication_reason": None,
+        "empty_readers": None,
         "readers": {r: "unknown" for r in readers if r in HOST_USAGE_TOKEN_SOURCES},
         "latest_attempt": "unknown",
     }
@@ -1755,39 +1855,34 @@ def project_host_publication(
     ts = _parse_aware_ts(row.get("ts"))
     if ts is None:
         return out
-    coverage = {}
-    for key in ("token_sources", "partial_sources", "degraded_sources"):
-        raw = row.get(key)
-        coverage[key] = (
-            {v for v in raw if isinstance(v, str) and v in HOST_USAGE_TOKEN_SOURCES}
-            if isinstance(raw, (list, tuple))
-            else set()
-        )
+    outcomes = host_reader_outcomes(row, readers)
+    empty_readers = empty_host_readers(row)
     out.update(
         state="unknown" if host_uncertain else "recorded",
         ts=ts.isoformat(),
         age_days=max(0, (now - ts).days),
         empty=row.get("empty") is True,
+        empty_readers=(
+            [name for name in empty_readers if name in outcomes]
+            if empty_readers is not None
+            else None
+        ),
         coverage_invalid=bool(row.get("coverage_invalid")),
         readers={
-            r: "partial"
-            if r in coverage["partial_sources"]
-            else "contributed"
-            if r in coverage["token_sources"]
-            else "degraded"
-            if r in coverage["degraded_sources"]
-            else "absent"
-            for r in readers
-            if r in HOST_USAGE_TOKEN_SOURCES
+            name: "contributed" if outcome == "empty" else outcome
+            for name, outcome in outcomes.items()
         },
     )
     revision = scan.files.get("host-usage-snapshot")
     if (
         not host_uncertain
         and revision
-        and capture_revision_in_manifest(accepted_manifest, *revision)
+        and capture_revision_in_manifest(accepted_manifest, revision[0], revision[1])
     ):
         out["publication"] = "published"
+    elif revision and revision[1] is None and revision[0] in scan.file_reasons:
+        out["publication"] = "unverified"
+        out["publication_reason"] = scan.file_reasons[revision[0]]
     return out
 
 
@@ -1885,7 +1980,7 @@ def write_push_event(
     strict: bool = False,
     max_file_size: int = DEFAULT_MAX_FILE_SIZE,
 ) -> Path | EventAppendSkipped | None:
-    """Append `events` to today's per-device JSONL.
+    """Append `events` to a per-device JSONL no earlier than any row's UTC date.
 
     Order invariant (CT-4): when an ``mm-push`` row is present, it MUST
     be last so a partial write cannot advance the cursor. Host-only attended
@@ -1907,9 +2002,18 @@ def write_push_event(
     if not any(row.get("type") == "mm-push" for row in events):
         if any(row.get("type") == "git-snapshot" and not row.get("origin") for row in events):
             raise ValueError("git-snapshot without mm-push requires an origin")
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(timezone.utc).date()
+    # A clock rollback between capture and append cannot put a row in a file
+    # dated before its own timestamp. Diagnostics rely on this bound.
+    for row in events:
+        ts = _parse_aware_ts(row.get("ts"))
+        if ts is not None:
+            try:
+                today = max(today, ts.astimezone(timezone.utc).date())
+            except OverflowError:
+                pass  # Invalid UTC timestamps are rejected by consumers.
     safe_device = _safe_device_filename(device_id)
-    path = events_dir / f"{safe_device}-{today}.jsonl"
+    path = events_dir / f"{safe_device}-{today.isoformat()}.jsonl"
     lines = [json.dumps(e, sort_keys=True).encode("utf-8") for e in events]
     try:
         fsutil.flock_append_jsonl(path, lines, mode=0o600, strict=strict, max_bytes=max_file_size)
@@ -2087,14 +2191,16 @@ def make_host_usage_snapshot(
     degraded_sources: Sequence[str] = (),
     tokens_by_day: dict[str, token_usage.DayBucket] | None = None,
     partial_days: Mapping[str, Sequence[str]] | None = None,
+    usage_days: Mapping[str, Sequence[str]] | None = None,
 ) -> HostUsageSnapshot:
     """Construct a ``host-usage-snapshot`` row from completed reader output.
 
     Pure: the caller (``events_tail._capture_event_snapshots``) has already
     merged the ``hosts`` maps of every reader that completed. This function
-    adds no classification of its own — it does not parse model IDs, consult a
-    session's ``cwd``, attribute activity to a project, or invent a bucket for
-    a host that reported none. ``host_usage`` owns all of that.
+    does not parse model IDs, consult a session's ``cwd``, attribute activity
+    to a project, or invent a bucket for a host that reported none.
+    ``host_usage`` owns that classification. It does record ``empty_sources``
+    from each reader's own ``usage_days``, intersected with the retained window.
 
     ``token_sources`` is the per-push list of readers that actually
     contributed, NOT the built-in set: a host the user has not enabled as a
@@ -2144,6 +2250,10 @@ def make_host_usage_snapshot(
     never advertise a day the payload dropped. The payload is copied so a
     caller that keeps merging into its own dict cannot mutate an already-built
     row.
+
+    ``usage_days`` carries each reader's own day keys, including zero buckets.
+    A mapping writes ``empty_sources`` (possibly []), intersected with ``keep``;
+    None omits the claim. Production capture always supplies the mapping.
     """
     payload: dict[str, dict[str, token_usage.Usage]] = {
         family: {day: dict(usage) for day, usage in days.items()}  # type: ignore[misc]
@@ -2206,6 +2316,14 @@ def make_host_usage_snapshot(
     ]
     if has_observation and partial:
         row["partial_sources"] = partial
+    # None is no claim; production captures always supply the reader's OWN
+    # day keys. Even an all-zero day is usage, independent of model family.
+    if usage_days is not None:
+        row["empty_sources"] = [
+            name
+            for name in HOST_USAGE_TOKEN_SOURCES
+            if name in excluded and not (set(usage_days.get(name, ())) & keep)
+        ]
     # Additive sibling, always present from this writer. Absence is the
     # mixed-fleet discriminator: a pre-35A peer's counters are inclusive
     # and must not be priced. No EVENTS_SCHEMA_VERSION bump.

@@ -4244,7 +4244,7 @@ def test_capture_outcome_labels_each_reader_independently(capture61, monkeypatch
     monkeypatch.setattr(
         _mm_host_usage,
         "read_codex_usage",
-        lambda **kw: _mm_host_usage.HostUsageResult({"codex": {day: usage}}, complete=True),
+        lambda **kw: _mm_host_usage.HostUsageResult({"other": {day: usage}}, complete=True),
     )
     monkeypatch.setattr(
         _mm_host_usage,
@@ -4254,7 +4254,18 @@ def test_capture_outcome_labels_each_reader_independently(capture61, monkeypatch
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert "Usage capture: codex — contributed" in result.output
-    assert "Usage capture: grok — completed, no usage" in result.output
+    assert "Usage capture: grok — completed, no usage in snapshot" in result.output
+    rows = [json.loads(line) for line in capture61["dayfile"].read_text().splitlines()]
+    row = [row for row in rows if row["type"] == "host-usage-snapshot"][-1]
+    assert row["empty_sources"] == ["grok"]
+    for command in (["status"], ["diag"]):
+        inspected = runner.invoke(app, command)
+        assert inspected.exit_code == 0, inspected.output
+        assert "grok: completed, no usage in snapshot" in inspected.stdout
+        assert "codex: contributed" in inspected.stdout
+    publication = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
+    assert publication["empty_readers"] == ["grok"]
+    assert publication["publication"] == "published"
 
 
 def test_requested_capture_holds_lock_against_push_and_autopush(capture61, monkeypatch):
@@ -4308,7 +4319,7 @@ def test_no_content_push_capture_usage_refreshes_once(capture61, monkeypatch):
     pub = json.loads(diag.stdout)["host_publication"]
     assert pub["publication"] == "published"
     assert pub["readers"] == {"codex": "contributed"}
-    assert pub["latest_attempt"] == "unknown"
+    assert pub["latest_attempt"] == "published"
     status = runner.invoke(app, ["status"])
     assert status.exit_code == 0, status.output
     assert "Host usage last recorded capture" in status.output
@@ -4826,12 +4837,12 @@ def test_converged_publication_evidence_failure_keeps_exit_zero(capture61, monke
     def broken(*args, **kwargs):
         raise RecursionError("evidence broke")
 
-    monkeypatch.setattr(_mm_events, "recorded_row_revision", broken)
+    monkeypatch.setattr(cli_module, "_report_usage_publication", broken)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert "Nothing to push" in result.stdout
     flat = " ".join(result.stderr.split())
-    assert "(not-published: unreadable-row)" in flat
+    assert "(unverified: evidence-error)" in flat
     assert "evidence broke" in flat
     assert "User content was already up to date" in flat
     assert "push-failed" not in result.output
@@ -4859,12 +4870,12 @@ def test_capture_publication_reports_local_revision_evidence_loss(capture61, mon
     monkeypatch.setattr(LocalBackend, "put", put)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
-    token = "revision-mismatch" if damage == "changed" else "unreadable-row"
-    assert f"(not-published: {token})" in result.stderr
-    assert "not-published:" not in result.stdout
+    token = "missing" if damage == "missing" else "revision-mismatch"
+    assert f"(unverified: {token})" in result.stderr
+    assert "not-published:" not in result.output
     flat = " ".join(result.stderr.split())
     assert "User content was already up to date" in flat
-    assert "mm push" in flat
+    assert "mm status" in flat
     assert "#host-usage-capture" in flat
 
 
@@ -4902,6 +4913,10 @@ def test_capture_exit_uses_acceptance_boundary(capture61, monkeypatch, after):
     result = runner.invoke(app, ["push"])
     assert result.exit_code == (0 if after else 1), result.output
     assert ("Host usage was published" if after else "content was not pushed") in result.output
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None
+    assert record["class"] == ("published" if after else "push-failed")
+    assert record["row_ts"] is not None
     if after:
         assert "post-publication GC stopped" in result.output
 
@@ -8967,6 +8982,14 @@ def test_corrupt_peer_gc_refusal_preserved(capture61, monkeypatch, capture_state
     assert result.exit_code == (0 if capture_state == "published" else 1), result.output
     assert "corrupt" in result.stderr.lower()
     assert ("Host usage was published" in result.stderr) == (capture_state == "published")
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None
+    assert (
+        record["class"]
+        == {"published": "published", "failed": "no-row", "no-reader": "prerequisites"}[
+            capture_state
+        ]
+    )
     assert (
         "projects/-Users-kb-myapp/memory/new.md"
         in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
@@ -8989,7 +9012,7 @@ def test_attended_resolves_once_and_bootstraps_inside_lock(capture61, monkeypatc
     assert calls == [{"strict": True, "bootstrap": True}]
 
 
-def test_failed_refresh_does_not_manufacture_same_day_attempt_receipt(capture61, monkeypatch):
+def test_failed_refresh_records_attempt_without_replacing_capture(capture61, monkeypatch):
     before = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
     monkeypatch.setattr(
         _mm_host_usage,
@@ -9000,9 +9023,11 @@ def test_failed_refresh_does_not_manufacture_same_day_attempt_receipt(capture61,
     assert failed.exit_code == 0 and "(no-row)" in failed.stderr
     after = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
     assert after["ts"] == before["ts"] and after["age_days"] == 0
-    assert after["latest_attempt"] == "unknown"
+    assert after["latest_attempt"] == "no-row"
+    assert after["latest_attempt_readers"] == {"codex": "dropped:unsupported"}
     status = runner.invoke(app, ["status"])
-    assert "Latest attempt: unknown (no attempt receipt)" in status.stdout
+    assert "Last recorded attended attempt:" in status.stdout
+    assert "codex dropped (unsupported)" in status.stdout
 
 
 @pytest.mark.parametrize("stage", ["host", "activity"])
@@ -9225,13 +9250,234 @@ def test_publication_evidence_failure_cannot_undo_content_acceptance(capture61, 
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     flat = " ".join(result.stderr.split())
-    assert "(not-published: unreadable-row)" in flat
-    assert "publication evidence unavailable" in flat
+    assert "(unverified: evidence-error)" in flat
+    assert "publication evidence could not be read" in flat
     assert "evidence broke" in flat
     assert "Content sync succeeded" in flat
     assert "not-published:" not in result.stdout
     accepted = cli_module.sidecar.read("dev-a")
     assert "projects/-Users-kb-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
+    attempt, error = cli_module.attemptlog.read()
+    assert error is None
+    assert (attempt["class"], attempt["cause"]) == ("unverified", "evidence-error")
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["published", "capture-failed", "append-failed", "max-file-size", "prerequisites", "no-row"],
+)
+def test_attended_attempt_records_each_capture_outcome(capture61, monkeypatch, mode):
+    def fail(*a, **kw):
+        raise OSError("capture test failure")
+
+    if mode == "capture-failed":
+        monkeypatch.setattr(events_tail, "_capture_host_snapshot", fail)
+    elif mode == "append-failed":
+        monkeypatch.setattr(_mm_events, "write_push_event", fail)
+    elif mode == "max-file-size":
+        real = _mm_events.write_push_event
+
+        def skipped(root, device, rows, **kw):
+            if kw.get("strict"):
+                return _mm_events.EventAppendSkipped(capture61["dayfile"])
+            return real(root, device, rows, **kw)
+
+        monkeypatch.setattr(_mm_events, "write_push_event", skipped)
+    elif mode == "prerequisites":
+        monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **kw: ())
+    elif mode == "no-row":
+        monkeypatch.setattr(
+            _mm_host_usage,
+            "read_codex_usage",
+            lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
+        )
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None and record["class"] == mode
+    assert record["cause"] == ("no-reader" if mode == "prerequisites" else None)
+    assert (record["row_ts"] is not None) == (mode == "published")
+
+
+@pytest.mark.parametrize("stage", ["pre-rename", "post-rename", "mkdir"])
+def test_attempt_write_failure_keeps_push_exit_and_releases_lock(capture61, monkeypatch, stage):
+    log = cli_module.attemptlog
+    before = log.record_path().read_bytes()
+    real_write = log.write
+    real_replace = os.replace
+    real_fsync = cli_module.fsutil.fsync_dir
+    real_mkdir = Path.mkdir
+
+    def fail_replace(src, dst):
+        if Path(dst) == log.record_path():
+            raise OSError("ENOSPC before rename")
+        return real_replace(src, dst)
+
+    def fail_fsync(path):
+        if Path(path) == log.record_path().parent:
+            raise OSError("EIO after rename")
+        return real_fsync(path)
+
+    def fail_mkdir(path, *a, **kw):
+        if path == log.record_path().parent:
+            raise OSError("mkdir denied")
+        return real_mkdir(path, *a, **kw)
+
+    def write(outcome):
+        # Fail only inside this record write, never the publishing sidecar.
+        with monkeypatch.context() as patch:
+            if stage == "pre-rename":
+                patch.setattr(os, "replace", fail_replace)
+            elif stage == "post-rename":
+                patch.setattr(cli_module.fsutil, "fsync_dir", fail_fsync)
+            else:
+                patch.setattr(Path, "mkdir", fail_mkdir)
+            real_write(outcome)
+
+    monkeypatch.setattr(log, "write", write)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "could not durably record this attended capture attempt" in " ".join(
+        result.stderr.split()
+    )
+    assert "check mm status" in " ".join(result.stderr.split())
+    assert (log.record_path().read_bytes() == before) == (stage != "post-rename")
+    cli_module.acquire_lock()
+    cli_module.release_lock()
+
+
+def test_dry_run_and_autopush_do_not_write_attended_record(capture61, monkeypatch):
+    path = cli_module.attemptlog.record_path()
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    monkeypatch.setattr(cli_module.attemptlog, "write", lambda *a: pytest.fail("wrote attempt"))
+    for command in (["push", "--dry-run"], ["autopush"]):
+        result = runner.invoke(app, command)
+        assert result.exit_code == 0, result.output
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("read_state", ["missing", "corrupt", "unreadable", "future"])
+def test_attempt_status_diag_read_states_are_write_free(capture61, monkeypatch, read_state):
+    from datetime import timedelta
+
+    log = cli_module.attemptlog
+    path = log.record_path()
+    if read_state == "missing":
+        path.unlink()
+    elif read_state == "corrupt":
+        path.write_text("{torn")
+    elif read_state == "future":
+        record = json.loads(path.read_text())
+        record["attempted_at"] = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        path.write_text(json.dumps(record))
+    original = Path.open
+    if read_state == "unreadable":
+
+        def denied(target, *args, **kwargs):
+            if target == path:
+                raise PermissionError("denied")
+            return original(target, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", denied)
+
+    def identity():
+        if not path.exists():
+            return None
+        stat = path.stat()
+        # Ordinary reads can advance atime; only write-relevant identity counts.
+        return _mm_events._event_file_identity(stat), stat.st_mode
+
+    before = identity()
+    monkeypatch.setattr(log, "write", lambda *a: pytest.fail("inspection wrote attempt"))
+    for command in (["status"], ["diag"], ["diag", "--json"]):
+        result = runner.invoke(app, command)
+        assert result.exit_code == 0, result.output
+        if "--json" in command:
+            state = json.loads(result.stdout)["host_publication"]
+            assert state["latest_attempt"] == ("published" if read_state == "future" else "unknown")
+            assert state["latest_attempt_reason"] == (
+                None if read_state == "future" else read_state
+            )
+        else:
+            assert {
+                "missing": "no attended attempt recorded yet",
+                "corrupt": "record corrupt",
+                "unreadable": "record unreadable:",
+                "future": "in the future",
+            }[read_state] in " ".join(result.stdout.split())
+    assert identity() == before
+
+
+def test_verbose_capture_uses_the_trimmed_row_for_partial_and_empty_labels(capture61, monkeypatch):
+    cfg = capture61["cfg"]
+    cfg["retro"] = {"grok_host_usage": True}
+    save_config(cfg, capture61["path"])
+    today = datetime.now(timezone.utc).date().isoformat()
+    usage = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult(
+            {"other": {"2020-01-01": usage}}, True, partial_days=frozenset({"2020-01-01"})
+        ),
+    )
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_grok_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({"other": {today: usage}}, True),
+    )
+    real = _mm_events.make_host_usage_snapshot
+    monkeypatch.setattr(_mm_events, "make_host_usage_snapshot", lambda **kw: real(**kw, max_days=1))
+    result = runner.invoke(app, ["push", "-v"])
+    assert result.exit_code == 0, result.output
+    assert "Usage capture: codex — completed, no usage in snapshot" in result.stdout
+    assert "Usage capture: grok — contributed" in result.stdout
+    assert "partial" not in result.stderr
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None and record["readers"] == {"codex": "empty", "grok": "contributed"}
+
+
+@pytest.mark.parametrize("trigger", ["recovery", "selection"])
+def test_no_row_prerequisites_keep_activity_walk_and_cursor(capture61, monkeypatch, trigger):
+    env = capture61
+    old_cursor = _mm_events.resolve_push_cursor(env["dayfile"].parent, "dev-a")
+    # No user-content diff. Only internal recovery/selection triggers the tail.
+    monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **kw: ())
+    if trigger == "recovery":
+        env["backend"].put(cli_module.manifest_key("dev-a"), b"corrupt")
+    else:
+        prior = cli_module.sidecar.read("dev-a")
+        prior["sources"].pop("mm-events")
+        env["backend"].put(
+            cli_module.manifest_key("dev-a"),
+            encrypt(serialize_manifest(prior), PASSPHRASE, MEMORY_KB),
+        )
+    calls = []
+    real_git = _mm_events.walk_git_projects
+    real_sessions = _mm_events.walk_session_metadata
+
+    def git(*args, **kwargs):
+        calls.append("git")
+        return real_git(*args, **kwargs)
+
+    def sessions(*args, **kwargs):
+        calls.append("sessions")
+        return real_sessions(*args, **kwargs)
+
+    monkeypatch.setattr(_mm_events, "walk_git_projects", git)
+    monkeypatch.setattr(_mm_events, "walk_session_metadata", sessions)
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **kw: _mm_events.GitRootDiscovery([env["claude"]], [], False),
+    )
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert set(calls) == {"git", "sessions"}
+    assert _mm_events.resolve_push_cursor(env["dayfile"].parent, "dev-a").since > old_cursor.since
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None
+    assert (record["class"], record["cause"]) == ("prerequisites", "no-reader")
 
 
 def test_attended_push_deadline_after_warm_gets_an_honest_diagnostic(capture61, monkeypatch):
@@ -9357,6 +9603,9 @@ def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61
     monkeypatch.setattr(_mm_host_usage, "read_codex_usage", interrupt)
     aborted = runner.invoke(app, ["push"])
     assert aborted.exit_code != 0
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None and record["class"] == "push-failed"
+    assert record["row_ts"] is None
     assert env["dayfile"].read_bytes() == before
     rel = "projects/-Users-kb-myapp/memory/new.md"
     assert rel not in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
@@ -9365,6 +9614,20 @@ def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61
     assert retry.exit_code == 0, retry.output
     assert "holds the lock" not in retry.output
     assert rel in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
+
+
+def test_interrupt_after_acceptance_before_verdict_records_unverified(capture61, monkeypatch):
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli_module, "_report_usage_publication", interrupt)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code != 0
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None and record["row_ts"] is not None
+    assert (record["class"], record["cause"]) == ("unverified", "evidence-error")
+    cli_module.acquire_lock()
+    cli_module.release_lock()
 
 
 @pytest.mark.parametrize("maintenance", ["last-seen", "cleanup"])

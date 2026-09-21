@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [0.14.18] - 2026-09-21
+
+**Status and diag show each reader's snapshot coverage and the last recorded attended attempt.** Publication receipts distinguish proven non-publication from unavailable evidence without changing content-sync exit codes.
+
+### Added
+
+- A private, mode-0600 `last-attended-capture.json` records attended capture outcomes under the push lock. Status/diag show its time, class/cause and reader outcomes separately from the last recorded capture; missing, unreadable, corrupt and future-dated records remain explicit. Record write failures warn without stranding the lock or changing push success. Dry-run and autopush leave it alone.
+- Host snapshots carry per-reader `empty_sources`, based on each reader's own usage days within the retained snapshot. Verbose push and inspection share the label `completed, no usage in snapshot`; trimmed partial days cannot label a reader partial.
+
+### Changed
+
+- Publication verification uses one fully consumed parser pass. Configuration exclusion, a file absent from the accepted manifest, or accepted bytes missing the row prove `not-published`; missing/unreadable/oversized/changed reads, post-acceptance revision mismatch and evidence errors are `unverified`. This deliberately rewrites `test_capture_publication_reports_local_revision_evidence_loss`: post-acceptance corruption or mutation cannot prove non-publication. The `unreadable-row` token is retired; proven row absence uses `row-missing` with the preserve-before-repair remedy.
+- Local host selection bounds uncertainty from an unreadable day file by the winning timestamp and allowed clock skew, with minimum-date arithmetic saturated. Appends enforce the row-to-file UTC-date contract even after a clock rollback. The diagnostic hash cache now keys by file identity.
+
+### Upgrade notes
+
+- Mixed-reader empty labels appear after this Mac's first attended push on v0.14.18; legacy all-empty snapshots retain their valid empty labels. Before any attended attempt is recorded, status explains that absence. `mm diag --json` additions are additive: nullable `empty_readers`, `publication_reason`, attempt cause/time/readers/read-reason/superseded fields, and the new `publication: unverified` value. Local publication evidence does not prove delivery to another Mac.
+- README adds four checked troubleshooting examples. The deferred TODOs capture follow-up planning constraints; `/roadmap` will reconcile shipped 63A/64A and 65A after landing.
+
 ## [0.14.17] - 2026-09-20
 
 **Attended pushes refresh consented host usage even when user files are in sync.** Usage-only publication preserves push counts and the Git cursor; capture failures warn while content sync continues.

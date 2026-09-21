@@ -10,6 +10,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
+- `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
@@ -357,6 +358,13 @@ those completed sources observed no host data; an empty list says no source
 contributed. Neither form is fleet-wide zero. The omission case writes nothing
 at all.
 
+**Reader emptiness (65A).** Production capture supplies `usage_days` to
+`make_host_usage_snapshot`; it always writes `empty_sources`, possibly `[]`.
+The optional argument defaults to None, which omits the key and makes no claim.
+Each reader's own `result.hosts` day keys (even all-zero buckets) are recorded
+before family merging, retained through the warm retry, and intersected with
+the row's `keep` set. No model-family lookup can identify an empty reader.
+
 ### Track 20A consumer handoff: complete, coverage-aware snapshots
 
 Track 20A locks this existing writer shape for its future consumer; it does
@@ -614,6 +622,10 @@ shape and opposite disjointness contracts. **Do not unify them.**
   explicitly declared those totals incomplete. INTERSECTS `token_sources`.
   A well-meant unification that filters partial the same way as degraded
   silently drops every partial signal. That is the 1-year failure mode.
+- **`empty_sources`** (65A): consulted readers with no usage day in this
+  snapshot's retained days. A subset of `token_sources`, disjoint from
+  `partial_sources`; written even when empty when reader-day evidence is supplied.
+  It is neither a lifetime claim nor a classification by model family.
 
 **Partial is day-scoped until the writer, then row-scoped.** The Grok reader
 carries `HostUsageResult.partial_days` (UTC days that had a `usageIsIncomplete
@@ -644,6 +656,19 @@ issue". `partial_sources` beside empty `hosts` is rejected as a claim.
 `degraded` joins `_sibling_tie_key` (appended, never prepended) so a
 degradation cannot make a row win; a malformed sibling MAY change the
 winner, which is intended.
+
+65A preserves empty-field presence at its call site, leaving
+`_accept_optional_source_list` unchanged for existing consumers.
+`_AcceptedHostRow.empty_sources` is None for absent or dropped metadata;
+`empty_reason = invalid_coverage` distinguishes a dropped claim. Reject a bad
+list, a non-subset of consulted readers, overlap with declared partial readers,
+or a mismatch between `hosts == {}` and every consulted reader being listed.
+Drop the field, keep the row, and include its reason in local `coverage_invalid`.
+Append presence, list and reason to `_sibling_tie_key` after counter semantics.
+With absent/invalid metadata, empty hosts still prove every consulted reader
+empty; nonempty hosts make no per-reader claim. Local JSON `empty_readers` is
+therefore null or an allowlisted, consent-intersected list (possibly empty).
+The existing `empty` boolean continues to mean `hosts == {}`.
 
 **The acceptor re-checks BOTH writer contracts against `token_sources`, not
 just the pair against each other.** `degraded_sources ∩ token_sources` must
@@ -1112,18 +1137,29 @@ after releasing the lock; dry-run never nudges.
 
 **Capture failures and remedies.** Always-stderr `mm: warning:` lines carry
 `prerequisites`, `readers` (a row was still written), `no-row`, `capture-failed`,
-`append-failed`, `max-file-size`, or `not-published: <cause>`; `push-failed` is
+`append-failed`, `max-file-size`, `not-published: <cause>`, or
+`unverified: <reason>`; `push-failed` is
 the content-sync stop, an `Error:` line with exit 1. A permanent format failure calls for
 upgrade; a background deadline can use attended warming, while an exhausted
 attended warm allowance needs an honest diagnostic, not a promise to bypass its
-own budget. Revision mismatch is usually transient and retries automatically on
-the next attended push. Unreadable/unparseable local rows need read-access or
-JSONL repair, with a preserved copy outside mm-events. Include/exclude failures
-name the setting to change. Inspection says automatic refresh is available,
+own budget. Include/exclude failures name the setting to change. Non-publication
+requires proof: config exclusion wins before reading; an absent file in the
+accepted manifest is `file-absent`; matching accepted bytes without the row are
+`row-missing`. Only that last case calls for JSONL repair with a copy preserved
+outside mm-events. The retired `unreadable-row` token must not return.
+Missing/unreadable/oversized/changed reads, revision mismatch after acceptance,
+and an evidence exception are **unverified**, never proven non-publication.
+The literal remedies in `cli._publication_remedy` and the evidence-error warning
+point at read-only `mm status`, not another push to verify old bytes. Missing
+files additionally explain that the next attended push creates a new row;
+oversized lines name the 16 MiB boundary and do not suggest repairing accepted
+bytes. `PushResult.host_usage_published` stays False when unverified.
+Inspection says automatic refresh is available,
 not a daily imperative for an action push already performs.
 
 Capture cadence and publication cadence are separable; the product contract
-binds publication to push because manifest acceptance proves delivery. A separate
+binds publication to push because manifest acceptance proves local storage acceptance,
+not delivery to another Mac. A separate
 `mm recapture --usage` was considered and declined; recapture stays Git recovery.
 The review measured pushes on 15 of 33 device-days, so cadence limits granularity.
 The measured historical miscount was one row in 94; zero observed init-origin
@@ -1154,6 +1190,12 @@ create a new over-limit file. A file **already** over the limit (lowered config
 or an external writer) still triggers `snapshot_refusal` if previously advertised;
 shrink it outside the source, raise the limit or intentionally exclude it.
 This guard is not a repair for existing oversize files.
+
+65A enforces the row-to-file day contract: the filename day is the greater of
+the current UTC date and every aware batch-row timestamp's UTC date. A clock
+rollback larger than the diagnostic margin cannot put a row in a file dated
+before that row. Pre-65A rows rely on capture and append sharing the same clock;
+the diagnostic margin absorbs ordinary clock skew.
 
 **Append boundaries and non-push origins (64A).** Under its existing flock,
 `flock_append_jsonl` reads the last byte through an O_RDWR descriptor and prepends
@@ -1186,42 +1228,85 @@ maintenance; slow reads alone are not a trigger (the configurable budgets addres
 them). This is the stopping criterion for a subsystem that has consumed roughly
 18 Tracks.
 
-**Per-reader outcome labels (64A).** `_capture_attended_usage` reports dropped
+**Per-reader outcome labels (65A).** `_capture_attended_usage` reports dropped
 readers via `_host_skip_phrase(attended=True)`, then partial/absent readers in one
 stderr summary. Contributed and completed-empty labels are verbose-only.
-`HostUsageCapture.empty` is reader-identity-scoped:
-recorded in `_capture_host_usage` from each reader's own un-merged `result.hosts`
-BEFORE the family-keyed merge into `hosts`, never derived from `name not in hosts`
-or any `host_family()` membership check. `host_family()` classifies by MODEL ID
-PREFIX, not reader identity, so an unrecognized model id (e.g. a real OpenAI id
-like `codex-mini-latest`) lands a genuine contribution under family `"other"`
-instead of `"codex"` — checking the family-keyed `hosts` dict for the reader's own
-name would then mislabel a contributing reader as empty. `_canonical_empty` mirrors
-`_canonical_partial`'s exact pattern. The read path (`cli.py:_print_host_publication`
-/ `aggregator.py:local_host_capture_candidate`'s `"empty": not row.lifetime_by_family`)
-still has the family-keyed version of this bug — deferred, see TODOS.md.
+`HostUsageCapture.usage_days` replaces the lifetime `empty` field. A reader can
+contribute under `other` (for example an unrecognized Codex model id), so reader
+names must never be inferred from `host_family()` membership. `host_reader_outcomes`
+projects the built or accepted row once for verbose push, the local attempt record,
+and status/diag. A trimmed-away partial day cannot keep a reader labelled partial.
+`empty` renders as `completed, no usage in snapshot`, replacing the coverage word.
+Inspection JSON preserves its existing reader vocabulary; `empty_readers` carries
+the separate claim. All displayed names intersect the live allowlist and consent
+and go through `safe_str`.
 
 **Local capture evidence (61A).** Status and diag share one filename-scoped,
 bounded binary day-file pass for mm-push and host rows. Status reuses its stable
 file hashes for the diagnostic manifest only (see sync.md), so it does not open
-the same day file again. Names use
+the same day file again. The cache uses `(st_dev, st_ino)`, verified against
+device/inode/size/mtime/ctime; it never resolves paths. The cursor keeps its digest.
+Names use
 `_safe_device_filename`; row `device` never selects a local file. Cursor
 fail-open physical ordering remains unchanged. The CLI injects the aggregator's
 actual host acceptance/order selector into events, so events never imports the
 skills package. Invalid timestamps, future rows and sibling ties agree with the
-fleet consumer. Read errors are explicit, even with a readable older row.
+fleet consumer. The CLI also injects `_HOST_FUTURE_SKEW` as a per-type day margin.
+After either an exists-probe or read error, a selector-ordered type is uncertain
+when it has no winner, won in the failing file, or the failing day is on/after
+the UTC date of winner `ts` minus the margin. Read `ts` from the projected row,
+never the opaque selector key. Margin underflow saturates: every day may matter.
+`mm-push` retains filename/line order; an irrelevant old failure cannot poison
+current host evidence for 90 days. Host scans that opt into a day margin, and
+the push cursor, also open the next UTC day. The writer may name a batch from
+a row timestamp one day ahead of a rolled-back clock; the terminal `mm-push`
+in that file still advances the cursor when its own timestamp is not after
+`now`. A rollback of more than one UTC day can hide the file until the clock
+catches up.
 `host_publication` contains timestamp/age, allowlisted reader coverage and
 publication/attempt states; never hosts, model ids, tokens or peer ids.
-The accepted-manifest sidecar proves publication only for matching file bytes;
-otherwise it is unknown. No row means no capture in the retained 90-day window,
-not never published. Latest attempt stays unknown without an attempt receipt.
-Making exit 0 describe content alone increases the cost of the deferred Track
-65A attempt receipt: status can verify recorded evidence, but cannot prove that
-the latest invocation refreshed it. Do not infer that receipt from same-day age.
+The accepted-manifest sidecar proves publication only for matching file bytes.
+`recorded_row_revision` returns frozen `(found, digest, reason)` evidence from one
+fully exhausted parser pass and compares the requested row after a JSON round-trip.
+The parser distinguishes missing before open, unreadable, oversized-line and
+changed (including a missing post-read stat). `EventScan.files` stays a 2-tuple;
+reasons live in `file_reasons`, and projection passes explicit receipt arguments.
+A winning file with a known missing revision renders `unverified (<reason>)`;
+other gaps remain unknown. No row means no capture in the retained 90-day window,
+not never published. Do not infer an attempt from same-day capture age.
 Complete empty scans have a reader in token_sources and hosts:{}; token_sources:[]
 means all consulted readers were absent. Status reminds after one day or on
 absent/degraded/partial coverage. Fleet notes aggregate snapshots predating the
 retro window into one staleness class. Latest-per-device supersession is unchanged.
+
+**Local attended attempt record (65A).** The leaf `attemptlog.py` owns
+`sidecar.SIDECAR_DIR / last-attended-capture.json`, resolved at call time, local
+only and mode 0600. Every real attended push reaching capture installs a typed
+outcome holder before invoking it. All four CLI capture gates test `appended`,
+not the existence of that outcome: no-row/prerequisite outcomes must preserve
+the ordinary activity walk and cursor advance. The holder records capture-start
+UTC `attempted_at`, `row_ts` if appended, separate class/cause, and allowlisted
+reader outcomes. Computed publication verdicts win over `push-failed`; the latter
+applies only to a core failure before manifest acceptance. Post-acceptance GC
+retains the verdict; evidence exceptions set `unverified: evidence-error` before
+printing so stderr and the record agree.
+
+Push writes in its finally, before releasing the mm lock, using mkdir then
+`fsutil.atomic_write_bytes(fsync=True, mode=0o600)`. A separate exception guard and
+outer finally always release the lock. Pre-rename failure preserves the old file;
+directory-fsync failure can follow a successful rename. The notice therefore says
+"could not durably record this attended capture attempt …; check mm status" and
+does not promise which record survived. Record failure does not change push exit.
+Dry-run/autopush never write it. Status/diag perform one bounded plain read with
+no lock, creation, normalization or permission changes. Validate aware timestamps
+and closed class/cause/reader vocabularies. Missing, unreadable and corrupt files
+remain distinct unknown states; there is no busy state.
+Missing-record advice preserves the existing readiness guards: append "run mm push"
+only when ready and no consented reader requires an upgrade. Present records show UTC
+timestamp/age (including `in the future`) and non-contributing reader outcomes.
+For a non-published attempt only, a capture newer than both `attempted_at` and
+`row_ts` adds "a later capture has since been recorded". JSON exposes that as
+`latest_attempt_superseded` beside the class/cause/time/readers/read-reason fields.
 
 **Reader tolerance: an ordinary Codex shape must never refuse the store.**
 One unreadable rollout fails the WHOLE `_scan_codex_root`, and all-or-nothing
