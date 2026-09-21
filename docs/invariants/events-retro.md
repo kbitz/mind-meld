@@ -1079,6 +1079,14 @@ sources count. Mtime is independent of `has_mtime_only`, since the host row itse
 makes the substantive gate true. A missing/corrupt real manifest makes local
 user files new. Upload diffs are recomputed after the activity rescan.
 
+Known limit: a usage-only refresh republishes the complete local manifest, so a
+user file whose mtime drifted BACKWARD with identical bytes (which the bare-push
+gate ignores) is published at the older mtime, as any content-changing push
+already does. A peer holding divergent bytes with an in-between mtime then treats
+its own copy as newer instead of recording a conflict. Restoring identical bytes
+with an older mtime is rare; carrying the advertised mtime forward would make the
+manifest stop reflecting local truth, so it is not done.
+
 A usage-only refresh skips cursor lookup, Git/session walks, identity gathering,
 activity rows and token-cache locks; retro push counts and cursor remain unchanged.
 It has no activity degradation and writes no autorun breadcrumb. The usage-only
@@ -1102,8 +1110,9 @@ usage was published while GC stopped. Failed attended attempts still nudge once
 after releasing the lock; dry-run never nudges.
 
 **Capture failures and remedies.** Always-stderr `mm: warning:` lines carry
-`prerequisites`, `no-row`, `capture-failed`, `append-failed`, `max-file-size`,
-`push-failed`, or `not-published: <cause>`. A permanent format failure calls for
+`prerequisites`, `readers` (a row was still written), `no-row`, `capture-failed`,
+`append-failed`, `max-file-size`, or `not-published: <cause>`; `push-failed` is
+the content-sync stop, an `Error:` line with exit 1. A permanent format failure calls for
 upgrade; a background deadline can use attended warming, while an exhausted
 attended warm allowance needs an honest diagnostic, not a promise to bypass its
 own budget. Revision mismatch is usually transient and retries automatically on

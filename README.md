@@ -731,9 +731,11 @@ host usage, fetch upgrade information or write nudge state.
 | `mm push --dry-run` | Preview only | Nothing captured | 0 completed; 1 stopped |
 
 Capture problems are always stderr `mm: warning:` lines with stable tokens:
-`(prerequisites: <state>)`, `(no-row)`, `(capture-failed)`, `(append-failed)`,
-`(max-file-size)` or `(not-published: <cause>)`. Fix exclude/include settings
-before retrying. A revision mismatch is usually transient; the next attended
+`(prerequisites: <state>)`, `(readers)` (a row was still written, but a consented
+reader was partial, dropped or absent), `(no-row)`, `(capture-failed)`,
+`(append-failed)`, `(max-file-size)` or `(not-published: <cause>)`. Only
+`(push-failed)`, a stop before manifest acceptance, is an `Error:` line with
+exit 1. Fix exclude/include settings before retrying. A revision mismatch is usually transient; the next attended
 push retries automatically. For unreadable rows, restore read access and repair
 the local day file, preserving a copy outside mm-events first.
 
@@ -817,9 +819,9 @@ not a publication check. Missing measurements say `unknown`; future dates
 say `in the future`. The attended warm remains about 5 s of cooperative
 scanning, independent of these settings.
 
-Bare no-op `mm push` and `mm autopush` still do not re-read usage, even after
-upgrading. The flag is the deliberate exception; no automatic refresh was added.
-Orchestration failures (`unavailable`, or expiry
+An attended `mm push` re-reads usage even when nothing else needs uploading. A
+no-op `mm autopush` still does not: autopush stays change-gated and never warms,
+and previews never capture. Orchestration failures (`unavailable`, or expiry
 before a reader was invoked) stay on push stderr and the autorun breadcrumb;
 they cannot be recorded by a reader that never ran. A no-op autopush may
 replace that breadcrumb with `success` while the standing reader blocker

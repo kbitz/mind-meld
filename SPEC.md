@@ -410,7 +410,7 @@ receipt or proof that another Mac has received a row. See
 This numbered algorithm is historical. For the current source-selection and
 publication gates, read [sync invariants](docs/invariants/sync.md); for
 attended push's conditional activity tail and exit contract, read
-[host usage capture](README.md#host-usage-capture) and
+[host usage capture](README.md#host-usage-capture-codex-and-grok) and
 [events/retro invariants](docs/invariants/events-retro.md).
 
 1. Acquire lockfile (`~/.config/mind-meld/mind-meld.lock`). Fail if another operation is running.
@@ -817,11 +817,12 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 | 3 | `pull --conflict-mode fail` preflight refusal, before applying files (including with `--dry-run`). |
 | 4 | `recapture`: partial recovery after publishing available Git rows. Push does not use exit 4. |
 
-Usage-capture failures go to stderr with `no-row`, `append-failed`, `push-failed`,
-or `not-published: <cause>` tokens, content-sync status, an actionable remedy,
-and the [host usage capture](README.md#host-usage-capture) link. Capture failures
-do not stop content sync. `push-failed` is a content-sync stop, not a capture-only
-exit.
+Usage-capture warnings go to stderr with `prerequisites: <state>`, `readers`,
+`no-row`, `capture-failed`, `append-failed`, `max-file-size`, or
+`not-published: <cause>` tokens, content-sync status, an actionable remedy, and
+the [host usage capture](README.md#host-usage-capture-codex-and-grok) link. Capture
+failures do not stop content sync. `push-failed` is a content-sync stop (an `Error:`
+line, exit 1), not a capture-only exit.
 
 ### Error Hierarchy (`mind-meld/errors.py`)
 

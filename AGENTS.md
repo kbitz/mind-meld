@@ -29,7 +29,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 
 | Module | Owns |
 |---|---|
-| `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (61A) requested host capture and local publication diagnostics, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
+| `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
 | `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones |
 | `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
@@ -49,7 +49,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `sidecar.py` | Manifest sidecar read/write |
 | `lockfile.py` | The mm lockfile |
 | `lockedjson.py` | Single-file flock read/modify/write primitive |
-| `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome), `fsync_dir` |
+| `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome; (64A) whole-batch size ceiling, torn-row separator, regular-files-only), `fsync_dir` |
 | `errors.py` | Exception hierarchy |
 | **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
 | **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
