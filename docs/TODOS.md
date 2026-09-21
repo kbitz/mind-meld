@@ -44,77 +44,40 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-ceo-review] Standing constraint: publication-evidence precision needs a user-observed wrong status
-- **Priority:** P3
-- **Why:** 65A is the fourth consecutive release on host-usage publication evidence (0.14.14, 0.14.16, 0.14.17,
-  65A). Its drained items came from /ship adversarial passes; the /autoplan probes showed two of four were reachable
-  only by synthetic setup (Task 2's older-file case, Task 4's resolve() failure). Proposed rule for `/roadmap`'s
-  standing constraints: further precision work on status/diag publication evidence requires a wrong or permanently
-  unknown status line a user actually saw, not a probe result.
-- **Context:** Track 65A /autoplan, 2026-09-21, decision 16. Plan:
-  `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-21-track-65a.md`.
-
-### [plan-eng-review] Discharge "Say on the wire whether a host capture was requested" when 65A's T5 ships
-- **Priority:** P3
-- **Why:** The Future item's only candidate reader was status's permanent "Latest attempt: unknown" line. 65A's
-  local attended-attempt record consumes that reader without any wire field, so the Future item has no reader left.
-- **Context:** `docs/roadmap-future.md` ("Say on the wire whether a host capture was requested"); 65A T5.
-
-### [plan-eng-review] Re-card shipped 63A/64A and 65A in one /roadmap run
-- **Priority:** P2
-- **Why:** At `a12096c` ROADMAP.md still lists Groups 63 and 64 in Current Plan although both shipped (v0.14.16,
-  v0.14.17), and the 64A card describes the pre-ship design (`--capture-usage` exit 4) rather than what shipped.
-  The existing P1 `[ship]` item covers only 63A's hand-edited card.
-- **Context:** 65A /autoplan system audit; `feedback_probe_before_planning` memory (roadmap regenerated before
-  Tracks land).
-
-
-
-### [plan-ceo-review] Autopush read-budget predictor
-- **Priority:** P3
-- **Trigger:** A Mac with autopush wired has a standing `deadline` blocker and `last_complete_ms` over its effective autopush budget for 7+ days.
-- **Evidence needed:** That Mac's combined sweep, a cold-filesystem pass, and `sys.version`.
-- **Context:** Track 63A ships the manual budget lever; a count-derived budget remains rejected. Source: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-17-track-63a.md`.
-
-### [plan-ceo-review] Sealed or incremental lineage tier
-- **Priority:** P3
-- **Trigger:** Last complete Codex read exceeds 400 ms after Track 63A, or the corpus exceeds 170,000 states.
-- **Prerequisite:** Track 63A's frozen-oracle parity harness; preserve transition accounting and ordered output.
-- **Context:** Track 63A effective spec; current full reduction remains linear in corpus size.
-
-### [plan-ceo-review] Codex token_usage_record drift tripwire
-- **Priority:** P2
-- **Trigger:** Any rollout with `token_usage_record` but no `token_count`.
-- **Evidence:** The 2026-09-17 planning census found both record types in 250/278 September rollouts and zero with only the new type (codex-cli 0.154.0).
-- **Context:** Track 63A review census; no reader format expansion was approved in this Track.
-
-### [plan-eng-review] Host cache encoding trigger restated and over-cap notice
-- **Priority:** P3
-- **Trigger:** Compact cache reaches 25 MB, or a read reaches the 64 MiB cap; add a named `too_large` snapshot state/notice.
-- **Evidence:** Planning measurement on kb-mbp: 15.87 MB indented / 4.03 MB compact at 1,064 rollouts. Track 63A qualification: 4,040,684 compact bytes, 1,066 rollouts, device `3a6c7dc9`, Python 3.14.7.
-- **Context:** Restate encoding thresholds in compact bytes now that both host caches write compact JSON; Track 63A effective spec.
-
-### [plan-eng-review] Per-reader carry-forward in the fleet aggregator
-- **Priority:** P3
-- **Why:** Use the latest row where each reader contributed, labelled with its `as_of`, so an autopush dropping a reader causes staleness instead of absence.
-- **Context:** Coordinate with Track 65A. Track 63A preserves today's device-wide replacement and tests both all-failed and mixed-reader recovery outcomes.
-
-### [ship] Track 63A's ROADMAP.md card was hand-edited instead of drained by /roadmap
-- **Why:** The approved plan's Acceptance section requires `/roadmap` to re-card Track 63A after implementation and says explicitly: "Do not hand-edit `docs/ROADMAP.md`." Commit `10794a7` hand-edited the Track 63A card anyway (2 tasks→5, ~150→~2400 LOC, 9→21 files, plus the task bullets, source paragraph, and execution-map note). The numbers match what actually shipped, but the mechanism violated the plan's own Acceptance criterion. User (kb) chose to ship PR #181 as-is rather than rewrite already-reviewed history, on the condition this gets tracked.
-- **Effort:** S
-- **Priority:** P1
-- **Context:** Deferred from plan: `~/.gstack/projects/kbitz-mind-meld/ceo-plans/2026-09-17-track-63a.md`. Run `/roadmap` and confirm the card it produces matches (or supersedes) the hand-edited version already on `main` — treat that run as the formal re-card, not a fresh edit.
-
-### [ship] host_usage.py: last_deadline_allotted_ms jitter can defeat the failed-pass write-skip
-- **Why:** `/ship`'s adversarial review (native Claude pass, 2026-09-18) found that `_carry_read_timing` computes `last_deadline_allotted_ms` from two independently-measured `time.monotonic()` calls — the caller's `deadline` and the callee's `started` — exactly per the approved Track 63A spec's formula. On a host that is steadily over its read budget (the exact steady state `_skip_failed_cache_write` targets), ordinary scheduling jitter between those two timestamps can flip the rounded millisecond value by ±1 between otherwise-identical autopush attempts, so `timing == prior_timing` fails and the cache gets rewritten anyway — repeatedly, instead of converging to zero writes. Impact is bounded (an extra write on an already-degraded host, not incorrect data), so this was not treated as a merge blocker; the same pass's two independent Codex outside reviews (adversarial + structured) both concluded "no actionable regressions, recommend merge" without raising it.
-- **Repro:** Not yet reproduced with a real clock — the existing test suite controls `time.monotonic()`/deadlines deterministically via monkeypatch, so it doesn't exercise real wall-clock jitter between caller and callee. Confirming this live would need two consecutive real (non-mocked) over-budget `read_codex_usage`/`read_grok_usage` passes with the timestamps logged.
-- **Hypothesis (untested):** Either derive the write-skip comparison from a coarser bucket of `last_deadline_allotted_ms` (e.g. round to the nearest 25–50ms before comparing, while still persisting/displaying the precise spec'd value), or gate the skip decision on the caller-supplied nominal budget (`host_budget_ms`) instead of the two independently-measured monotonic timestamps. Changing the stored/displayed value itself would deviate from the approved spec formula and needs discussion first.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Same adversarial pass also flagged (both informational, not actioned): (1) `_pause_gc()`'s docstring/review premise that "this codebase has no threading" is inaccurate — `events.py:walk_git_projects` uses a `ThreadPoolExecutor` for git scans, and a timed-out scan can leave orphaned worker threads alive while a later `gc.disable()` call (process-global) runs for the host read in the same process; impact assessed as bounded/self-correcting (delayed GC, not corruption), so no fix needed, but don't reuse the "no threading" premise elsewhere in this codebase without re-checking. (2) `_cache_key`'s fast path (`_scan_codex_root`/`_scan_grok_root`) runs before the per-file `try/except _ReadFailure` block and has no exception guard, unlike its fallback branch; currently unreachable (every caller passes a literal root-descendant path) but would silently discard a whole scan's progress instead of degrading gracefully if that ever changed.
+_Empty. Drained 2026-09-21; see the drain record below._
 
 
 ## Drain records
+
+### Roadmap drain — 2026-09-21
+
+10 inbox items from the Track 63A–65A /autoplan reviews and the PR #181 /ship run, drained under the user's cue "as few Tracks as possible, ideally one, or kill": **2 placed, 4 deferred, 1 killed, 3 discharged**. Authored-false rate: 3 / (2 + 3) = 60%; all three discharges are roadmap-reconcile items the shipping Tracks filed against themselves, not stale observations. Verification baseline: `cdffc34` (v0.14.18). Ground truth closed all three Current Plan Tracks first: 63A (v0.14.16 `77338bd`), 64A (v0.14.17 `a12096c`), 65A (v0.14.18 `cdffc34`); Groups 63–65 are appended to `docs/roadmap-shipped.md`. The regenerated plan is one Group with one Track, and that Track is the v1.0.0 cut.
+
+| Inbox item | Title | Disposition / destination | Evidence or reason |
+|---|---|---|---|
+| 1 | Standing constraint: publication-evidence precision needs a user-observed wrong status | place → ROADMAP.md standing constraint | A rule that refuses Tracks belongs in the header, not in a Track. |
+| 2 | Discharge "Say on the wire whether a host capture was requested" when 65A's T5 ships | discharged@cdffc34 | `attemptlog.py` exists; `cli.py:6236` / `:6264` render the attempt from the local record. The Future bullet is deleted. |
+| 3 | Re-card shipped 63A/64A and 65A in one /roadmap run | discharged@cdffc34 | This run. |
+| 4 | Autopush read-budget predictor | kill | Its own context rejects the only mechanism it could name (a count-derived budget), and the observation it wants already exists: `mm diag` prints the sweep estimate (`_host_read_sweep_line`) and the standing `deadline` blocker with `last_complete_ms` and `last_deadline_allotted_ms`. |
+| 5 | Sealed or incremental lineage tier | defer → docs/roadmap-future.md | Real design, real prerequisite; measured 2.4x / 2x headroom against its own trigger. |
+| 6 | Codex `token_usage_record` drift tripwire | defer → docs/roadmap-future.md | Concrete form of the 46B drift trigger; the reader reads every rollout in the census today, and a drift would show on status as `completed, no usage in snapshot`. |
+| 7 | Host cache encoding trigger restated and over-cap notice | defer (datum merged into the existing bullet); `too_large` notice killed | Same topic as the 2026-09-05 bullet; the notice is forward defence for a condition 16x away. |
+| 8 | Per-reader carry-forward in the fleet aggregator | defer → docs/roadmap-future.md | v0.14.16 chose device-wide replacement on purpose; 65A's `empty_sources` is the data a change would need; trigger stated. |
+| 9 | Track 63A's ROADMAP.md card was hand-edited instead of drained by /roadmap | discharged@cdffc34 | This run is the formal re-card; the shipped entry supersedes the hand-edited card. |
+| 10 | host_usage.py: last_deadline_allotted_ms jitter can defeat the failed-pass write-skip | place → Track 66A | Premise verified by reading `_carry_read_timing` and `_skip_failed_cache_write` at cdffc34: two independent monotonic reads, whole-map equality. |
+
+**Leftover Future bullets discharged by v0.14.16–v0.14.18** (deleted from `docs/roadmap-future.md`): "Say on the wire whether a host capture was requested" (discharged@cdffc34, above); "Re-read standing host-usage blockers on an interactive no-op push (T3-B)" (discharged@a12096c — every attended push captures, `--capture-usage` removed); "`warm_host_cache_inline`'s docstring cites a stale measurement" (discharged@77338bd — `grep 573 host_usage.py` returns 0 hits; the docstring cites the 2026-09-17 qualification).
+
+**Former active plan:** all three 2026-09-17 IDs shipped under their own numbers; nothing recycled, no renames table. Group 66 is the first free number after shipped history.
+
+| 2026-09-17 ID | Title | 2026-09-21 disposition |
+|---|---|---|
+| 63A | Keep the warm Codex read inside its budget | shipped as 63A (v0.14.16) |
+| 64A | A usage refresh is not a push, and exit 4 says what it skipped | shipped as 64A (v0.14.17); re-scoped at review — `--capture-usage` removed, every attended push captures |
+| 65A | Reader-scoped publication evidence on status and diag | shipped as 65A (v0.14.18), with a fifth task (the attended-attempt record) added at the gate |
+
+New Track: 66A (Cut v1.0.0: retire the pre-1.0 conflict alias and converge the failed-read cache write). Future: 93 → 93 (three discharged, three appended, one amended). Shipped history is append-only. Not acted on: the audit's archive finding for `docs/designs/sync-gstack-context.md` (a live design doc cited from CLAUDE.md and AGENTS.md), same call as 2026-09-17. Version recommendation when 66A ships: MAJOR (1.0.0).
+
 
 ### Roadmap drain — 2026-09-17
 
@@ -449,4 +412,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-17 by Track 63A implementation; five follow-ups await a separate /roadmap drain. Prior drain records are historical._
+_Last updated 2026-09-21 by /roadmap: inbox drained, Groups 63–65 reconciled to shipped history, Track 66A carded as the v1.0.0 cut. Prior drain records are historical._
