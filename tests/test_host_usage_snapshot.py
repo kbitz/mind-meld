@@ -445,7 +445,7 @@ class TestAdditiveMerge:
         its own name (e.g. an unrecognized model id landing in "other") must
         not be mislabeled empty. `host_family()` classifies by model-id
         prefix, not reader identity — "a reader is not a row of its own" —
-        so `name not in capture.hosts` is the wrong test; `.empty` is
+        so `name not in capture.hosts` is the wrong test; `.usage_days` is
         recorded from each reader's own un-merged result before any
         family-keyed merge happens, exactly to avoid this trap.
         """
@@ -464,7 +464,7 @@ class TestAdditiveMerge:
 
         assert "codex" not in capture.hosts
         assert set(capture.token_sources) == {"codex", "grok"}
-        assert capture.empty == ("grok",)
+        assert capture.usage_days == {"codex": frozenset({"2026-08-15"}), "grok": frozenset()}
 
     def test_merge_sums_same_model_across_readers(self):
         capture = events_tail._capture_host_usage(
@@ -1080,6 +1080,7 @@ class TestTailWiring:
                 "active_days": ["2026-08-15"],
                 "tokens_by_day": {"2026-08-15": {**_usage(9), "by_model": {"gpt-5": _usage(9)}}},
                 "counter_semantics": "disjoint-v1",
+                "empty_sources": [],
             },
             {
                 "v": _mm_events.EVENTS_SCHEMA_VERSION,
@@ -1089,6 +1090,7 @@ class TestTailWiring:
                 "hosts": {},
                 "active_days": [],
                 "counter_semantics": "disjoint-v1",
+                "empty_sources": [],
             },
         ]
         assert [row["type"] for row in rows] == [
@@ -2194,7 +2196,8 @@ def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, m
         assert rows[0]["tokens_by_day"][day]["by_model"]["gpt-5"] == _usage(7)
         assert capture.partial_days == ({"codex": frozenset({day})} if outcome == "partial" else {})
     elif outcome == "empty":
-        assert capture.empty == ("codex",)
+        assert capture.usage_days["codex"] == frozenset()
+        assert rows[0]["empty_sources"] == ["codex"]
         assert "codex" in rows[0]["token_sources"]
     elif outcome == "absent":
         assert "codex" not in rows[0]["token_sources"]

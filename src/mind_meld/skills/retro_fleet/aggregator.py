@@ -608,6 +608,8 @@ class _AcceptedHostRow:
     degraded_reason: str | None = None
     partial_reason: str | None = None
     counter_semantics: str | None = None
+    empty_sources: tuple[str, ...] | None = None
+    empty_reason: str | None = None
 
 
 @dataclass
@@ -1894,6 +1896,7 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
             detail_reason = drop_reason
     degraded, degraded_reason = _accept_optional_source_list(ev, "degraded_sources")
     partial, partial_reason = _accept_optional_source_list(ev, "partial_sources")
+    declared_partial = partial
     # A partial claim beside empty hosts is meaningless: the writer gates
     # on a real observation, but a hand-crafted row can still send it.
     # Reject the claim, keep the row.
@@ -1921,6 +1924,20 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
     if not set(partial) <= consulted_set:
         partial = ()
         partial_reason = "invalid_coverage"
+    # Preserve presence locally; the existing optional-list helper deliberately
+    # treats absent and [] alike for the other coverage siblings.
+    empty_sources = None
+    empty_reason = None
+    if "empty_sources" in ev:
+        empty_sources, empty_reason = _accept_optional_source_list(ev, "empty_sources")
+        if (
+            empty_reason
+            or not set(empty_sources) <= consulted_set
+            or (not hosts) != (set(empty_sources) == consulted_set)
+            or set(empty_sources) & set(declared_partial)
+        ):
+            empty_sources = None
+            empty_reason = "invalid_coverage"
     # Three-way on KEY PRESENCE: absent (legacy inclusive), present-and-
     # exact (priceable), present-and-invalid (fail closed, keep the row).
     if "counter_semantics" not in ev:
@@ -1948,6 +1965,8 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         degraded_reason=degraded_reason,
         partial_reason=partial_reason,
         counter_semantics=counter_semantics,
+        empty_sources=empty_sources,
+        empty_reason=empty_reason,
     )
 
 
@@ -2008,6 +2027,9 @@ def _sibling_tie_key(row: _AcceptedHostRow) -> str:
             # equal-ts rows differing only in semantics must not select
             # by encounter order. APPENDED, never prepended.
             row.counter_semantics or "",
+            row.empty_sources is not None,
+            list(row.empty_sources or ()),
+            row.empty_reason or "",
         ],
         sort_keys=True,
         separators=(",", ":"),
@@ -2043,8 +2065,9 @@ def local_host_capture_candidate(ev: dict, *, until: datetime) -> tuple[tuple, d
         "token_sources": row.consulted,
         "partial_sources": row.partial,
         "degraded_sources": row.degraded,
-        "coverage_invalid": bool(row.partial_reason or row.degraded_reason),
+        "coverage_invalid": bool(row.partial_reason or row.degraded_reason or row.empty_reason),
         "empty": not row.lifetime_by_family,
+        "empty_sources": row.empty_sources,
     }
 
 

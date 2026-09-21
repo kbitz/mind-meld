@@ -314,7 +314,7 @@ def test_host_publication_states_on_both_surfaces(tmp_path, monkeypatch, mode):
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
         assert "Host usage last recorded capture" in flat
-        assert "Latest attempt: unknown" in flat
+        assert "Last recorded attended attempt: unknown" in flat
         assert flat.index("Host usage last recorded capture") < flat.index(
             "Grok usage capture" if command == ["status"] else "grok consented"
         )

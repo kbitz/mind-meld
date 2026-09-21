@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 0.14.18 | 2026-09-21 | **Status and diag show each reader's snapshot coverage and the last recorded attended attempt.** Publication receipts distinguish proven non-publication from unavailable evidence without changing content-sync exit codes. |
 | 0.14.17 | 2026-09-20 | **Attended pushes refresh consented host usage even when user files are in sync.** Usage-only publication preserves push counts and the Git cursor; capture failures warn while content sync continues. |
 | 0.14.16 | 2026-09-17 | **Warm Codex reads use less of the autopush budget, and attended captures publish their warm read.** Per-Mac read budgets and last-complete-read diagnostics make continuing capture headroom visible. |
 | 0.14.15 | 2026-09-16 | **Previews now leave files and storage untouched, with only their declared local lock allowance.** Pull forecasts account for successive peers, and inspection commands defer upgrade bookkeeping. |

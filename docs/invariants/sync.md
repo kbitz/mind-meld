@@ -36,7 +36,15 @@ then reports the row published only when the exact day-file revision containing
 it is in the accepted manifest, not merely because the push returned a truthy
 `PushResult`. Status/diag use the existing local accepted-manifest sidecar as
 evidence; if the current day-file revision no longer matches it, publication
-is unknown. No new receipt file or wire field is introduced.
+is unknown. A known failed read of the winning revision is `unverified`.
+65A's attended receipt hashes the same bytes it parses, once: post-acceptance
+mutation is unverified, never proof the row was not published. Configuration
+exclusion, absence of the day file from the accepted manifest, or matching accepted
+bytes without the row prove non-publication. The private local
+`last-attended-capture.json` records that attempt independently; it never goes to
+storage, and cannot prove delivery to another Mac. See events-retro.md for its
+atomic write, closed vocabulary and write-free inspection contract. Host rows add
+only reader-name `empty_sources` evidence, scoped to retained days.
 
 `_download_and_apply` hashes plaintext after the non-mutating symlink/containment guards and before `_apply_incoming_file`. A mismatch is a per-file `failed` outcome; later valid files continue. Unchanged historical blobs are not rewritten by a no-op push; incoming verification rejects them if encountered.
 
