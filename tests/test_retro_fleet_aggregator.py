@@ -261,7 +261,7 @@ class TestTolerantReader:
         _write_events(events_dir, "dev-a", "2026-04-28", [_push_event("dev-a", 0)])
         data = _aggregate(events_dir, skill_usage_path=tmp_path / "no-gstack.jsonl")
         out = aggregator.format_retro(data)
-        assert "section omitted" in out
+        assert "## Skills used" not in out
 
     # NOTE (v0.11.27): the gstack-analytics skill-usage.jsonl reader was
     # retired with the fleet-skill-counts pivot. The "unknown field
@@ -748,10 +748,13 @@ class TestVisibleFailures:
         data = _aggregate(events_dir)
         assert data.skipped_lines == 1
         out = aggregator.format_retro(data)
-        assert "1 event(s) skipped" in out
-        # Notes-section consolidation post-v0.11.12: the skip breadcrumb
-        # must live in the Notes block, not a tail aside.
-        assert "## Notes" in out
+        # 1.1: degradations are health-payload entries, not rendered prose.
+        # The body carries one summary line; the detail is machine-readable
+        # so the skill can decide whether it deserves the reader's attention.
+        assert "## Notes" not in out
+        assert "Data health:" in out
+        entry = _health_entry(out, "parse_errors")
+        assert entry is not None and "1 event(s) skipped" in entry["detail"]
 
     # NOTE (v0.11.27): the five gstack-analytics tests that previously
     # lived here — skip-categories-tracked-separately, per-source-
@@ -864,9 +867,9 @@ class TestFleetCount:
         assert data.fleet.devices_known == 3
         assert len(data.fleet.devices_in_events) == 1
         out = aggregator.format_retro(data)
-        assert "1 of 3 known machines" in out
+        assert "1 of 3 machines" in out
         # Notes section copy (post-v0.11.12 consolidation).
-        assert "Fleet incomplete: 2 registered device(s)" in out
+        assert "2 registered machine(s)" in _health_entry(out, "fleet_incomplete")["detail"]
 
     def test_mm_devices_returncode_failure_degrades(self, tmp_path, monkeypatch):
         """Non-zero returncode (mm not initialized) degrades to None."""
@@ -926,14 +929,15 @@ class TestFleetCount:
 
         out = aggregator.format_retro(data)
         # Header reads honestly against the registered fleet.
-        assert "Activity across 2 of 2 known machines" in out
+        assert "Activity across 2 of 2 machines" in out
         # Old noisy banner must NOT fire (the user complaint).
         assert "currently registered" not in out
         assert "Fleet inconsistency" not in out
-        # Phantom-event count surfaces as a Notes-section line so the
-        # user knows the disk still has stale files reaping naturally.
-        assert "## Notes" in out
-        assert "3 unregistered device id(s)" in out
+        # Phantom-event count surfaces in the health payload so the user
+        # knows the disk still has stale files reaping naturally.
+        entry = _health_entry(out, "unregistered_devices")
+        assert entry is not None
+        assert "3 unregistered device id(s)" in entry["detail"]
 
     def test_phantom_filter_falls_back_to_raw_when_devices_unavailable(self, tmp_path, monkeypatch):
         """If `mm devices --format=json` fails, the filter MUST fall back
@@ -1053,12 +1057,11 @@ class TestRendering:
         data = _aggregate(events_dir)
         out = aggregator.format_retro(data)
         assert "## Code shipped" in out
-        assert "## Claude Code activity" in out
-        assert "## Skills used" in out
-        # D5#5 (v0.11.27): Skills section is fleet-wide, not this-machine-only.
-        # Lock against accidental reintroduction of the old caveat string.
+        assert "## Agents" in out
+        # 1.1: the Skills heading is omitted entirely when nothing was
+        # invoked, rather than printing a caveat about why it is empty.
         assert "this machine only" not in out
-        assert "## mm sync activity" in out
+        assert "## Fleet" in out
         # Eureka section was removed in v0.11.12 (always 0 in practice).
         assert "## Eureka moments" not in out
 
@@ -1069,7 +1072,7 @@ class TestRendering:
         out = aggregator.format_retro(data)
         # All sections present; substantive content gracefully degrades.
         assert "0 commits" in out
-        assert "No Claude Code sessions captured" in out
+        assert "No agent usage observed in this window." in out
 
 
 # ---------------------------------------------------------------------------
@@ -1885,92 +1888,6 @@ class TestTokenAggregation:
         assert "dev-a" not in result.pre_token_peers
 
 
-class TestTokenBlockRender:
-    def _data_with_tokens(self, **overrides):
-        from mind_meld.skills.retro_fleet.aggregator import (
-            RetroData,
-            SessionsAggregate,
-        )
-
-        data = RetroData(
-            window_days=7,
-            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
-            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        )
-        data.sessions = SessionsAggregate(
-            total_sessions=17,
-            projects=4,
-            tokens_input=12_400_000,
-            tokens_cache_read=87_300_000,
-            tokens_cache_create=10_000_000,
-            tokens_output=142_000,
-            tokens_by_model={
-                "claude-sonnet-4-6": {
-                    "input": 4_000_000,
-                    "cache_create": 0,
-                    "cache_read": 50_000_000,
-                    "output": 100_000,
-                },
-                "claude-opus-4-7": {
-                    "input": 8_400_000,
-                    "cache_create": 10_000_000,
-                    "cache_read": 37_300_000,
-                    "output": 42_000,
-                },
-            },
-            **overrides,
-        )
-        return data
-
-    def test_render_includes_token_lines(self):
-        from mind_meld.skills.retro_fleet.aggregator import format_retro
-
-        data = self._data_with_tokens()
-        out = format_retro(data)
-        assert "| Model | In | Cache w | Cache r | Out | List-rate $ |" in out
-        assert "| 12.4M |" in out
-        assert "| 87.3M |" in out
-        assert "Cache hit ratio:" in out
-        assert "API list-rate equivalent (Claude Code, window sum)" in out
-        assert "| All models |" in out
-        assert "Sonnet 4.6" in out
-        assert "Opus 4.7" in out
-        # Subscription caveat as italicized footer.
-        assert "Cost estimates do not account for subscription plan pricing." in out
-
-    def test_render_hidden_when_no_tokens(self):
-        from mind_meld.skills.retro_fleet.aggregator import (
-            RetroData,
-            SessionsAggregate,
-            format_retro,
-        )
-
-        data = RetroData(
-            window_days=7,
-            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
-            until=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        )
-        data.sessions = SessionsAggregate(total_sessions=5, projects=1)
-        out = format_retro(data)
-        # Token block lines absent.
-        assert "| Model | In | Cache w | Cache r | Out | List-rate $ |" not in out
-        assert "Cache hit ratio:" not in out
-        # But the section is still present with sessions count.
-        assert "5 sessions" in out
-        # Projects-count line dropped (worktrees + Conductor workspaces
-        # inflated it) — repo count under Code shipped covers the signal.
-        assert "across 1 projects" not in out
-
-    def test_pre_token_peers_breadcrumb_in_notes(self):
-        from mind_meld.skills.retro_fleet.aggregator import format_retro
-
-        data = self._data_with_tokens()
-        data.sessions.pre_token_peers = {"dev-mac-mini"}
-        out = format_retro(data)
-        assert "Tokens incomplete on dev-mac-mini" in out
-        assert "run `mm push` on those machines" in out
-
-
 class TestSyntheticAndUnpricedTokens:
     """v0.11.22: displayed token totals share the cost-estimate basis.
 
@@ -2083,7 +2000,7 @@ class TestSyntheticAndUnpricedTokens:
         # + output of the unpriced claude-future-9-9 entry).
         assert "unpriced" in out
         assert "1 unpriced model(s)" in out
-        assert "excluded from cost estimate" in out
+        assert "excluded from pricing" in _health_entry(out, "unpriced_models")["detail"]
 
     def test_no_unpriced_note_when_all_models_priced(self):
         from mind_meld.skills.retro_fleet.aggregator import (
@@ -2113,7 +2030,7 @@ class TestSyntheticAndUnpricedTokens:
             },
         )
         out = format_retro(data)
-        assert "unpriced model(s) excluded from cost estimate" not in out
+        assert _health_entry(out, "unpriced_models") is None
 
     def test_synthetic_alone_does_not_trigger_unpriced_note(self):
         """Synthetic is cost-excluded by design, not unpriced. A fleet whose
@@ -2150,7 +2067,7 @@ class TestSyntheticAndUnpricedTokens:
             },
         )
         out = format_retro(data)
-        assert "unpriced model(s) excluded from cost estimate" not in out
+        assert _health_entry(out, "unpriced_models") is None
 
 
 class TestCostLineHonesty:
@@ -2214,7 +2131,7 @@ class TestCostLineHonesty:
         assert unpriced_models == 0
         assert unpriced_tokens == 0
         out = format_retro(self._data(by_model))
-        assert "unpriced model(s) excluded from cost estimate" not in out
+        assert _health_entry(out, "unpriced_models") is None
 
     def test_unpriced_volume_downgrades_estimate_to_lower_bound(self):
         """A confident ``~`` over incomplete data is the v0.12.13 bug.
@@ -2239,8 +2156,8 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert "| >=$200 |" in out
-        assert "1 unpriced model(s)" in out
+        assert "| ≥$200 |" in out
+        assert "1 unpriced model(s)" in _health_entry(out, "unpriced_models")["detail"]
 
     def test_fully_priced_window_keeps_tilde_and_drops_cents(self):
         from mind_meld.skills.retro_fleet.aggregator import format_retro
@@ -2259,7 +2176,7 @@ class TestCostLineHonesty:
         )
         assert "| ~$200 |" in out
         assert "~$200.00" not in out
-        assert "unpriced model(s) excluded from cost estimate" not in out
+        assert _health_entry(out, "unpriced_models") is None
 
     def test_all_models_unpriced_says_so_explicitly(self):
         """When nothing resolves, total_cost is 0. Dropping the cost line
@@ -2279,11 +2196,10 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert next(
-            line for line in out.splitlines() if line.startswith("| All models |")
-        ).endswith("| — |")
-        assert "1 unpriced model(s)" in out
-        assert "40.0M tokens" in out
+        claude = next(line for line in out.splitlines() if line.startswith("| Claude |"))
+        assert "| — |" in claude
+        detail = _health_entry(out, "unpriced_models")["detail"]
+        assert "1 unpriced model(s)" in detail and "40.0M tokens" in detail
 
     def test_bedrock_style_ids_are_unpriced_not_silent(self):
         """A fleet running Claude Code through Bedrock sends ids like
@@ -2304,10 +2220,9 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert next(
-            line for line in out.splitlines() if line.startswith("| All models |")
-        ).endswith("| — |")
-        assert "1 unpriced model(s)" in out
+        claude = next(line for line in out.splitlines() if line.startswith("| Claude |"))
+        assert "| — |" in claude
+        assert "1 unpriced model(s)" in _health_entry(out, "unpriced_models")["detail"]
 
     def test_caveat_carries_verification_date(self):
         """mm has no network, so the table cannot self-update. The card
@@ -2328,7 +2243,8 @@ class TestCostLineHonesty:
                 }
             )
         )
-        assert f"Anthropic rates verified {PRICING_LAST_UPDATED}" in out
+        block = out.split("<!-- MM_HEALTH -->", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+        assert json.loads(block)["pricing"]["anthropic_verified"] == PRICING_LAST_UPDATED
 
 
 class TestShortModelName:
@@ -3295,7 +3211,7 @@ class TestFleetSkillsAggregation:
         assert data.skills.pre_skills_peers == {"dev-x"}
         out = aggregator.format_retro(data)
         # Both populations named — "pre-v0.11.27" AND "cold token cache".
-        assert "Skills incomplete:" in out
+        assert "pre-v0.11.27" in _health_entry(out, "skills_incomplete")["detail"]
         assert "pre-v0.11.27" in out
         assert "cold token cache" in out
         # Recovery action named.
@@ -3384,8 +3300,8 @@ class TestFleetSkillsAggregation:
 
     def test_empty_fleet_no_peer_ships_skills_renders_omitted(self, tmp_path):
         """Plan test #16: every peer is on pre-v0.11.27 (no skills_by_day
-        on any project) → ``available = False`` → renderer emits the
-        "section omitted" caveat instead of "0 invocations"."""
+                on any project) → ``available = False`` → renderer emits the
+        the section is omitted entirely instead of printing "0 invocations"."""
         events_dir = tmp_path / "events"
         events_dir.mkdir()
         proj = _proj_without_skills_field()
@@ -3393,7 +3309,7 @@ class TestFleetSkillsAggregation:
         data = _aggregate(events_dir)
         assert data.skills.available is False
         out = aggregator.format_retro(data)
-        assert "section omitted" in out
+        assert "## Skills used" not in out
 
     def test_d5_5_format_retro_never_contains_this_machine_only(self, tmp_path):
         """D5#5 regression gate: assert the legacy "this machine only"
@@ -3590,7 +3506,7 @@ class TestCommitTypeMix:
         out = _agg_git_only([_commit("a" * 7, 1, subject="feat!: breaking")])
         assert out.commit_types.counts.get("feat") == 1
 
-    def test_render_emits_mix_line(self):
+    def test_mix_feeds_synthesis_rather_than_the_body(self):
         out = _agg_git_only(
             [
                 _commit("a" * 7, 1, subject="feat: x"),
@@ -3600,8 +3516,13 @@ class TestCommitTypeMix:
         data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
         data.git = out
         markdown = aggregator.format_retro(data)
-        assert "Mix:" in markdown
-        assert "feat 1" in markdown
+        # 1.1: the mix moved to MM_THEMES_PROMPT. Its largest bucket is
+        # routinely "other" — a breakdown whose top category is "could not
+        # classify" does not earn a body line, but it still feeds synthesis.
+        assert "Mix:" not in markdown
+        raw = markdown.split("<!-- MM_THEMES_PROMPT -->", 1)[1]
+        payload = json.loads(raw.split("```json", 1)[1].split("```", 1)[0])
+        assert payload["commit_types"]["feat"] == 1
 
 
 class TestHourlyDistribution:
@@ -3967,7 +3888,7 @@ class TestPriorPeriodComparison:
         assert data.comparison.status == "ok"
         assert data.comparison.fleet_changed is True
         out = aggregator.format_retro(data)
-        assert "Fleet composition changed between windows" in out
+        assert _health_entry(out, "fleet_changed") is not None
 
     def test_prior_window_sees_rows_outside_the_current_window(self, tmp_path, monkeypatch):
         data = _agg_with_floor(
@@ -4163,67 +4084,70 @@ class TestAsciiCard:
         )
         assert "\x1b" not in out
 
-    def test_model_family_rows_are_defensive_and_reconcile(self):
-        rows = aggregator._aggregate_model_families(
-            {
-                "claude-sonnet-4-6": {
-                    "input": 100,
-                    "cache_create": 7,
-                    "cache_read": 1_000,
-                    "output": 3,
-                },
-                "CLAUDE-OPUS-4-7": {
-                    "input": 10,
-                    "cache_create": 3,
-                    "cache_read": 4,
-                    "output": 5,
-                },
-                "gpt-5": {"input": 1, "cache_create": 2, "cache_read": 3, "output": 4},
-                "grok-3": {"input": 20, "cache_create": 0, "cache_read": 0, "output": 1},
-                "anthropic.claude-bedrock": {
-                    "input": -1,
-                    "cache_create": True,
-                    "cache_read": "9",
-                    "output": "not-a-number",
-                },
-                "<synthetic>": {
-                    "input": 9_999,
-                    "cache_create": 9_999,
-                    "cache_read": 9_999,
-                    "output": 9_999,
-                },
-                "": {"input": 99, "cache_create": 0, "cache_read": 0, "output": 0},
-                "   ": {"input": 99, "cache_create": 0, "cache_read": 0, "output": 0},
-                "zero": {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
-                "malformed": "not-a-bucket",
-            }
-        )
+    def test_agent_rows_survive_hostile_peer_buckets(self):
+        """Peer-controlled model maps reach pricing and rendering. Negative
+        ints, bools, numeric strings, blank ids and non-dict buckets must not
+        crash the render or leak into a figure."""
+        hostile: dict = {
+            "claude-sonnet-4-6": {
+                "input": 100,
+                "cache_create": 7,
+                "cache_read": 1_000,
+                "output": 3,
+            },
+            "CLAUDE-OPUS-4-7": {
+                "input": 10,
+                "cache_create": 3,
+                "cache_read": 4,
+                "output": 5,
+            },
+            "gpt-5": {"input": 1, "cache_create": 2, "cache_read": 3, "output": 4},
+            "grok-3": {"input": 20, "cache_create": 0, "cache_read": 0, "output": 1},
+            "anthropic.claude-bedrock": {
+                "input": -1,
+                "cache_create": True,
+                "cache_read": "9",
+                "output": "not-a-number",
+            },
+            "<synthetic>": {
+                "input": 9_999,
+                "cache_create": 9_999,
+                "cache_read": 9_999,
+                "output": 9_999,
+            },
+            "": {"input": 99, "cache_create": 0, "cache_read": 0, "output": 0},
+            "   ": {"input": 99, "cache_create": 0, "cache_read": 0, "output": 0},
+            "zero": {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0},
+            "malformed": "not-a-bucket",
+        }
+        data = self._baseline()
+        data.sessions = aggregator.SessionsAggregate(tokens_by_model=hostile)
+        out = aggregator.format_retro(data, name="kb")
+        card = [line for line in out.splitlines() if line.startswith("║")]
+        assert card, "card must still render"
+        for line in card:
+            assert len(line) == aggregator.CARD_WIDTH
+        assert "not-a-number" not in out
+        assert "not-a-bucket" not in out
 
-        assert rows == [
-            ("Claude", 1_132),
-            ("Codex", 10),
-            ("Grok", 21),
-            ("Unclassified", 9),
-        ]
-        assert sum(total for _family, total in rows) == 1_172
-        assert aggregator._aggregate_model_families(None) == []
-
-    def test_model_family_rows_preserve_accumulated_safe_peer_totals(self):
-        rows = aggregator._aggregate_model_families(
-            {
-                # _merge_token_window caps each peer contribution before
-                # summing. Two valid maximum-size peers can therefore leave
-                # an aggregate field above the per-peer cap.
+    def test_agent_rows_preserve_accumulated_safe_peer_totals(self):
+        """``_merge_token_window`` caps each peer contribution before summing,
+        so two valid maximum-size peers can leave an aggregate field above the
+        per-peer cap. The row must carry it, not re-clamp it."""
+        data = self._baseline()
+        data.sessions = aggregator.SessionsAggregate(
+            tokens_by_model={
                 "claude-sonnet-4-6": {
                     "input": 2**54,
                     "cache_create": 0,
                     "cache_read": 0,
                     "output": 0,
                 }
-            }
+            },
         )
-
-        assert rows == [("Claude", 2**54)]
+        usage = aggregator.aggregate_agent_usage(data, machines_known=None)
+        claude = next(r for r in usage.rows if r.key == "claude")
+        assert claude.tokens == 2**54
 
     def test_models_block_golden_layout_and_global_pr_reference(self):
         data = self._baseline()
@@ -4254,20 +4178,14 @@ class TestAsciiCard:
 
         assert card_contents == [
             "kb · 2026-04-21 → 2026-04-28",
-            "42 commits · 2 repos · 2 machines",
+            "42 commits · 2 repos · 2 PRs · 2 machines",
             "+1.0k / -200 LOC · 37-day streak",
-            "2 detected GitHub PR references",
             "",
-            # v0.12.37: provenance moved into the header and the separate
-            # "Coverage: …" line was deleted. A line saying "only" that scopes
-            # just the rows above it contradicts the AGENT LOGS block below it.
-            "MODELS (Claude Code sessions)",
-            "Claude: 1.1k tokens",
-            "Codex: 10 tokens",
-            "Unclassified: 9 tokens",
-            "Model-token coverage incomplete: 2 peer(s); see Notes",
-            # No AGENT LOGS block: this baseline has no accepted host snapshot,
-            # the one state where mm genuinely knows nothing.
+            # 1.1: ONE block. The pre-1.1 card carried MODELS (Claude tokens)
+            # above AGENT LOGS (host day-counts) — two units, two sources, and
+            # a standing prohibition on comparing them. Claude is a row here.
+            "AGENTS (0 machines)",
+            "Claude  1.1k tokens · 0 days · ≥$0",
             "",
             "NOTEWORTHY",
             "something noteworthy",
@@ -4276,25 +4194,33 @@ class TestAsciiCard:
             "• theme one",
             "• theme two",
         ]
-        assert out.count("2 detected GitHub PR references") == 1
+        # Coverage gaps no longer need their own card line: an incomplete
+        # Claude corpus makes the row a floor, and the ≥ sits on the number.
+        assert "Model-token coverage incomplete" not in out
+        # Once on the card, once in the body headline — the same treatment
+        # commits and LOC get. What must not happen is a second card line.
+        assert out.count("2 PRs") == 2
+        assert sum(1 for line in out.splitlines() if line.startswith("║") and "PRs" in line) == 1
         assert "merged" not in out
-        assert "Tokens incomplete on dev-a, dev-b" in out
+        # Second pass carries no health block; read the payload from pass one.
+        first = aggregator.format_retro(data)
+        assert "dev-a, dev-b" in _health_entry(first, "tokens_incomplete")["detail"]
 
-    def test_models_block_renders_for_name_only_second_pass(self):
+    def test_agents_block_renders_for_name_only_second_pass(self):
         data = self._baseline()
         out = aggregator.format_retro(data, name="kb")
 
-        assert "MODELS (Claude Code sessions)" in out
-        # Scoped empty state: the unscoped pre-v0.12.37 string ("No model usage
-        # observed in available snapshots") becomes false the moment the AGENT
-        # LOGS block reports a family beside it.
-        assert "No Claude Code model usage observed" in out
-        assert "No model usage observed in available snapshots" not in out
-        assert not hasattr(aggregator, "MODEL_COVERAGE_LINE")
-        assert "0 detected GitHub PR references" in out
+        assert "AGENTS (" in out
+        # One empty state for every agent. The pre-1.1 card needed a
+        # Claude-scoped string here ("No Claude Code model usage observed")
+        # precisely because a sibling block could contradict it.
+        assert "No agent usage observed this window" in out
+        assert "MODELS (Claude Code sessions)" not in out
+        assert "AGENT LOGS" not in out
+        assert "0 PRs" in out
         assert "MM_THEMES_PROMPT" not in out
 
-    def test_models_block_warns_for_pre_v2_peer(self):
+    def test_incomplete_claude_corpus_makes_the_row_a_floor(self):
         data = self._baseline()
         data.sessions = aggregator.SessionsAggregate(
             tokens_by_model={
@@ -4307,17 +4233,21 @@ class TestAsciiCard:
             },
             pre_v2_peers={"old-host"},
         )
-        out = aggregator.format_retro(data, name="kb")
-
-        assert "Model-token coverage incomplete: 1 peer(s); see Notes" in out
-        assert "Tokens incomplete on old-host: pre-v0.11.0 session schema" in out
+        # Second pass is the shareable artifact and carries no health block;
+        # read the payload from a first-pass render.
+        assert "≥$" in aggregator.format_retro(data, name="kb")
+        detail = _health_entry(aggregator.format_retro(data), "tokens_incomplete")["detail"]
+        assert "old-host" in detail and "pre-v0.11.0 session schema" in detail
 
     def test_token_coverage_notes_bound_peer_names(self):
         data = self._baseline()
         data.sessions.pre_token_peers = {f"dev-{n}" for n in range(6)}
         out = aggregator.format_retro(data)
 
-        assert "Tokens incomplete on dev-0, dev-1, dev-2, dev-3, dev-4 (+1 more)" in out
+        assert (
+            "dev-0, dev-1, dev-2, dev-3, dev-4 (+1 more)"
+            in _health_entry(out, "tokens_incomplete")["detail"]
+        )
         assert "dev-5" not in out
 
 
@@ -4413,8 +4343,8 @@ class TestMainCliFlags:
         assert "╔" in out
         assert "kb · " in out
         assert "alpha" in out
-        assert "MODELS" in out
-        assert "0 detected GitHub PR references" in out
+        assert "AGENTS (" in out
+        assert "0 PRs" in out
         assert "MM_THEMES_PROMPT" not in out
         assert "mm: notice: --no-save is a no-op" in captured.err
 
@@ -4493,6 +4423,27 @@ class TestRenderHardening:
 # ---------------------------------------------------------------------------
 # Track 22A — host-usage-snapshot consumer
 # ---------------------------------------------------------------------------
+
+
+def _health(out: str) -> list[dict]:
+    """Parse the MM_HEALTH payload out of a first-pass render.
+
+    Tests assert on health CODES, not on rendered prose. That is the 1.1
+    contract: the body carries one summary line and the detail lives in a
+    machine-readable block the skill reads with judgment.
+    """
+    if "<!-- MM_HEALTH -->" not in out:
+        return []
+    block = out.split("<!-- MM_HEALTH -->", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+    return json.loads(block)["issues"]
+
+
+def _health_entry(out: str, code: str) -> dict | None:
+    return next((e for e in _health(out) if e["code"] == code), None)
+
+
+def _health_codes(out: str) -> set[str]:
+    return {e["code"] for e in _health(out)}
 
 
 def _usage(n: int = 1) -> dict:
@@ -4763,7 +4714,11 @@ class TestHostSnapshotWireCompat:
         assert row.consulted == ("codex", "opencode")
         assert "codex" in row.lifetime_by_family
         rendered = aggregator.format_retro(_econ_data([ev]))
-        assert aggregator._UNKNOWN_READER_LABEL in rendered
+        # 1.1 removed per-machine reader reporting with the rest of the
+        # per-machine inventory, so a HEALTHY retired reader name no longer
+        # reaches any surface. What must still hold — and is the whole point
+        # of the retained-but-unmapped vocabulary — is that the raw
+        # peer-controlled string never leaks into rendered output.
         assert "opencode" not in rendered
 
     def test_shipped_three_name_shape_accepted_on_acceptor(self):
@@ -5295,63 +5250,24 @@ class TestHostSnapshotNoWindowSpend:
             now=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
         )
 
-        # v0.12.37 DELIBERATELY loosens this from whole-output equality: 23A
-        # renders an "## Agent activity" body section and an AGENT LOGS card
-        # block, so identical output is no longer the contract. What 22A
-        # actually protects — that host data never leaks into Claude session
-        # totals, cost, or the trend snapshot — is asserted directly instead,
-        # plus a positive check that the agent section is the ONLY difference.
-        def _strip_agent_section(text: str) -> list[str]:
-            """Drop everything the agent-log feature owns: its body section and
-            its own coverage Notes lines. Both are legitimately part of the
-            feature; what must NOT move is any Claude-side line."""
-            out, skipping = [], False
-            for line in text.splitlines():
-                if line.startswith("## Agent activity") or line.startswith(
-                    "## API list-rate equivalent"
-                ):
-                    skipping = True
-                    continue
-                if skipping:
-                    if line.startswith("## "):
-                        skipping = False
-                    else:
-                        continue
-                if line.startswith("- ") and (
-                    "agent" in line.lower()
-                    or "API list-rate" in line
-                    or "Not available for" in line
-                    or "token counters in an older format" in line
-                ):
-                    continue
-                out.append(line)
-            return out
-
         with_text = aggregator.format_retro(with_host)
         without_text = aggregator.format_retro(without)
-        assert with_text != without_text, "host inventory should now render something"
-        assert "## Agent activity" in with_text
-        assert "## Agent activity" not in without_text
-        # Removing everything the agent feature owns must reproduce the host-free
-        # output exactly. That is the precise form of the old whole-output
-        # equality: host data may add its own section and its own notes, and may
-        # change nothing else.
-        assert _strip_agent_section(with_text) == _strip_agent_section(without_text)
+        assert with_text != without_text, "host inventory should render something"
+        # 1.1: host data is a ROW in the shared Agents table rather than its own
+        # section, so the isolation contract is stated on the row. Adding a
+        # Codex row must not move one number on the Claude row.
+        assert "| Codex |" in with_text
+        assert "| Codex |" not in without_text
 
-        # The five isolation guardrails.
-        token_with: list[str] = []
-        token_without: list[str] = []
-        aggregator._render_token_block(token_with, with_host.sessions)
-        aggregator._render_token_block(token_without, without.sessions)
-        assert token_with == token_without
-        # Guardrail #2 of 5: host data never reaches the prior-period integers
-        # (replaces the deleted `_retro_to_snapshot` pin).
+        def _claude_row(data):
+            usage = aggregator.aggregate_agent_usage(data, machines_known=None)
+            return next(r for r in usage.rows if r.key == "claude")
+
+        assert _claude_row(with_host) == _claude_row(without)
+        # Host data never reaches the prior-period integers either.
         assert with_host.comparison.prior == without.comparison.prior
         assert with_host.comparison.current == without.comparison.current
         assert with_host.sessions.tokens_by_model == without.sessions.tokens_by_model
-        assert aggregator._aggregate_model_families(
-            with_host.sessions.tokens_by_model
-        ) == aggregator._aggregate_model_families(without.sessions.tokens_by_model)
         assert with_host.host_inventory.by_device
         assert not without.host_inventory.by_device
 
@@ -6194,22 +6110,14 @@ class TestAgentRhythmView:
         )
 
     def test_family_label_set_matches_the_canonical_families(self):
-        """The three family authorities are defined independently. If they ever
-        diverge, accepted host data is silently dropped from the card AND
-        `_aggregate_model_families` raises KeyError, taking down the whole
-        render. Three lines that protect both."""
-        model_keys = {key for key, _ in aggregator.MODEL_FAMILY_ROWS}
-        agent_keys = {key for key, _ in aggregator.AGENT_FAMILY_ROWS}
-        assert model_keys == agent_keys == set(aggregator._HOST_FAMILIES)
+        """One registry now, not two. The pre-1.1 code carried MODEL_FAMILY_ROWS
+        and AGENT_FAMILY_ROWS with deliberately different labels so two adjacent
+        card blocks could not be confused; with a single AGENTS block that
+        distinction has no referent, and a second label set is just drift
+        waiting to happen."""
+        keys = {key for key, _ in aggregator.AGENT_ROW_ORDER}
+        assert keys == set(aggregator._HOST_FAMILIES)
         assert set(aggregator._HOST_FAMILIES) == set(get_args(host_usage.HostFamily))
-
-    def test_agent_labels_never_collide_with_model_labels(self):
-        """`claude` is a legal host family, so OpenCode on a claude-* model would
-        otherwise put two identical `Claude` rows on one card meaning different
-        things."""
-        model_labels = {label for _, label in aggregator.MODEL_FAMILY_ROWS}
-        agent_labels = {label for _, label in aggregator.AGENT_FAMILY_ROWS}
-        assert not (model_labels & agent_labels)
 
     def test_counts_distinct_in_window_days_in_canonical_order(self):
         view = self._view(
@@ -6224,15 +6132,15 @@ class TestAgentRhythmView:
                 )
             ]
         )
-        assert view.rows == (("Codex models", 2), ("Grok models", 1))
+        assert view.rows == (("Codex", 2), ("Grok", 1))
         assert view.machines_with_activity == 1
         assert view.any_activity is True
 
     def test_cross_machine_union_is_idempotent_under_duplicate_corpora(self):
-        """The property that justified rhythm over magnitude: migrating a Mac's
-        home directory and re-initing yields two device ids with overlapping
-        history, undetectably. A summed total would double; a day-set union does
-        not move."""
+        """Day-set union is idempotent under a duplicated corpus, which is why
+        the Days column stays trustworthy even when a migrated home directory
+        doubles the token column. The tokens are guarded separately, by
+        ``_detect_duplicate_ledgers``."""
         day = {"codex": {"2026-04-22": _usage(7)}}
         one = self._view([_snap("dev-a", self.UNTIL, families=day)])
         two = self._view(
@@ -6241,8 +6149,8 @@ class TestAgentRhythmView:
                 _snap("dev-b", self.UNTIL, families=dict(day)),
             ]
         )
-        assert one.rows == (("Codex models", 1),)
-        assert two.rows == (("Codex models", 1),)
+        assert one.rows == (("Codex", 1),)
+        assert two.rows == (("Codex", 1),)
         assert two.machines_with_activity == 2
 
     def test_all_zero_bucket_is_omitted_not_rendered_as_zero(self):
@@ -6252,17 +6160,14 @@ class TestAgentRhythmView:
         view = self._view([_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": zero}})])
         assert view.rows == ()
         assert view.machines_with_activity == 0
-        assert aggregator._render_agent_block(view) == [
-            aggregator._card_line("AGENT LOGS (0 of 3 machines with agent activity)"),
-            aggregator._card_line("No agent activity this window"),
-        ]
+        assert view.any_activity is False
 
     def test_window_edges_are_inclusive(self):
         lo = self.SINCE.date().isoformat()
         hi = self.UNTIL.date().isoformat()
         for day in (lo, hi):
             view = self._view([_snap("dev-a", self.UNTIL, families={"codex": {day: _usage(1)}})])
-            assert view.rows == (("Codex models", 1),), day
+            assert view.rows == (("Codex", 1),), day
 
     def test_days_outside_the_window_do_not_count(self):
         for day in ("2026-04-20", "2026-04-29"):
@@ -6291,7 +6196,7 @@ class TestAgentRhythmView:
             families={"codex": {"2026-04-22": _usage(1), "2026-04-26": _usage(1)}},
         )
         view = self._view([snap])
-        assert view.rows == (("Codex models", 1),)
+        assert view.rows == (("Codex", 1),)
 
     def test_resumed_session_collapse_makes_the_count_drop(self):
         """The residual imprecision, pinned. Resuming a session moves its whole
@@ -6318,8 +6223,8 @@ class TestAgentRhythmView:
         after = self._view(
             [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(30)}})]
         )
-        assert before.rows == (("Codex models", 3),)
-        assert after.rows == (("Codex models", 1),)
+        assert before.rows == (("Codex", 3),)
+        assert after.rows == (("Codex", 1),)
 
     def test_unknown_family_on_the_wire_is_ignored(self):
         view = self._view(
@@ -6334,86 +6239,119 @@ class TestAgentRhythmView:
             )
             assert view.rows == ()
             assert view.any_activity is False
-            assert aggregator._render_agent_block(view) == []
 
     def test_view_carries_no_magnitude(self):
-        """Structural guarantee: nothing on the card view can be a token count."""
+        """The rhythm view is a day-count union and nothing else. Since 1.1 it
+        no longer reaches the card — magnitude lives on ``FleetAgentRow`` — but
+        keeping it magnitude-free preserves its one job: answering "was there
+        any agent activity" for the coverage diagnostics, idempotently under a
+        duplicated corpus."""
         view = self._view(
             [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(999_999)}})]
         )
-        assert view.rows == (("Codex models", 1),)
+        assert view.rows == (("Codex", 1),)
         assert set(view.__dataclass_fields__) == {
             "rows",
             "machines_with_activity",
             "machines_known",
             "snapshots_accepted",
         }
-        assert "999" not in "".join(aggregator._render_agent_block(view))
+        assert all(isinstance(days, int) for _label, days in view.rows)
+        assert 999_999 not in [days for _label, days in view.rows]
 
 
-class TestAgentBlockRendering:
-    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
-    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+class TestAgentsCardBlock:
+    """The card's unified AGENTS block. Successor to the split MODELS /
+    AGENT LOGS pair, which reported two units from two sources and is the
+    reason the card read Claude-first."""
 
-    def _block(self, rows, *, machines_known=3, with_activity=1, accepted=1):
-        view = aggregator.AgentRhythmView(
-            rows=rows,
+    def _usage(self, rows, *, machines_known=3, with_activity=1, accepted=1):
+        return aggregator.FleetAgentUsage(
+            rows=tuple(rows),
             machines_with_activity=with_activity,
             machines_known=machines_known,
             snapshots_accepted=accepted,
         )
-        return aggregator._render_agent_block(view)
 
-    def test_block_omitted_only_when_no_snapshot_was_accepted(self):
-        assert self._block((("Codex models", 5),), accepted=0) == []
-        assert self._block((), accepted=1) != []
+    def _row(self, key, label, tokens, days, *, machines=1, by_model=None, known=True, causes=()):
+        return aggregator.FleetAgentRow(
+            key=key,
+            label=label,
+            by_model=by_model or {},
+            tokens=tokens,
+            active_days=days,
+            machines=machines,
+            counters_known=known,
+            floor_causes=tuple(causes),
+        )
+
+    def test_every_agent_gets_the_same_row_shape(self):
+        rows = [
+            self._row("claude", "Claude", 8_000_000_000, 29),
+            self._row("codex", "Codex", 3_300_000_000, 28),
+            self._row("grok", "Grok", 1_000_000_000, 11),
+        ]
+        lines = aggregator._render_agents_card_block(self._usage(rows))
+        body = lines[1:]
+        assert len(body) == 3
+        for line in body:
+            assert "tokens ·" in line and "days" in line
 
     def test_empty_but_covered_keeps_the_provenance_count(self):
-        """Omitting on no-activity would destroy the `N of M machines` count
-        exactly when it matters, and make "everyone reported, nobody used an
-        agent" identical to "mm knows nothing"."""
-        lines = self._block((), with_activity=0)
-        assert "AGENT LOGS (0 of 3 machines with agent activity)" in lines[0]
-        assert "No agent activity this window" in lines[1]
-
-    def test_one_family_per_line_never_truncates(self):
-        """A joined 4-family line reaches 96 chars against a 58-char budget and
-        `_card_line` would silently eat a metric. Two-digit counts are the normal
-        case for a 30d window, three-digit reachable via the cross-machine union."""
-        rows = tuple(
-            (label, n) for (_key, label), n in zip(aggregator.AGENT_FAMILY_ROWS, (90, 90, 90, 90))
-        )
-        lines = self._block(rows)
-        assert len(lines) == 1 + len(aggregator.AGENT_FAMILY_ROWS)
-        for line in lines:
-            assert len(line) == aggregator.CARD_WIDTH
-            assert "…" not in line, f"content lost to truncation: {line}"
-        for _key, label in aggregator.AGENT_FAMILY_ROWS:
-            assert any(label in line for line in lines), label
+        lines = aggregator._render_agents_card_block(self._usage([], with_activity=0))
+        assert "AGENTS (0 of 3 machines)" in lines[0]
+        assert "No agent usage observed this window" in lines[1]
 
     def test_registry_unavailable_drops_the_denominator(self):
-        lines = self._block((("Codex models", 5),), machines_known=None)
-        assert "1 machine with agent activity" in lines[0]
+        lines = aggregator._render_agents_card_block(
+            self._usage([self._row("codex", "Codex", 5, 5)], machines_known=None)
+        )
+        assert "1 machine" in lines[0]
         assert "None" not in "".join(lines)
 
     def test_singular_grammar(self):
-        one = self._block((("Codex models", 1),), with_activity=1, machines_known=1)
-        assert "seen on 1 day" in one[1]
-        assert "seen on 1 days" not in one[1]
-        assert "1 of 1 machines" in one[0]
+        lines = aggregator._render_agents_card_block(
+            self._usage([self._row("codex", "Codex", 5, 1)], machines_known=1)
+        )
+        assert "1 day" in lines[1] and "1 days" not in lines[1]
+        assert "1 of 1 machines" in lines[0]
+
+    def test_legacy_counters_render_unavailable_not_a_number(self):
+        """Inclusive counters run up to ~2x high. That is the one caveat that
+        points the wrong way, so it stays a rendered `—`, never a health note."""
+        lines = aggregator._render_agents_card_block(
+            self._usage([self._row("codex", "Codex", 9_000, 3, known=False)])
+        )
+        assert "—" in lines[1]
+        assert "9" not in lines[1].replace("9 ", "")
 
     def test_every_state_holds_the_card_width(self):
         states = [
-            self._block((), accepted=1),
-            self._block((("Codex models", 5),)),
-            self._block((("Codex models", 5),), machines_known=None),
-            self._block(
-                tuple((label, 12) for _k, label in aggregator.AGENT_FAMILY_ROWS),
+            self._usage([], with_activity=0),
+            self._usage([self._row("codex", "Codex", 5_000_000_000, 12)]),
+            self._usage([self._row("codex", "Codex", 5, 5)], machines_known=None),
+            self._usage(
+                [
+                    self._row(k, lbl, 999_000_000_000, 120, machines=9)
+                    for k, lbl in aggregator.AGENT_ROW_ORDER
+                ]
             ),
         ]
-        for lines in states:
-            for line in lines:
+        for usage in states:
+            for line in aggregator._render_agents_card_block(usage):
                 assert len(line) == aggregator.CARD_WIDTH
+                assert "…" not in line, f"content lost to truncation: {line}"
+
+    def test_one_agent_per_line_never_truncates(self):
+        """Four agents at three-digit day counts still fit; a joined line would
+        blow the 58-char budget and `_card_line` would silently eat a metric."""
+        usage = self._usage(
+            [self._row(k, lbl, 123_400_000_000, 365) for k, lbl in aggregator.AGENT_ROW_ORDER]
+        )
+        lines = aggregator._render_agents_card_block(usage)
+        assert len(lines) == 1 + len(aggregator.AGENT_ROW_ORDER)
+        for _k, label in aggregator.AGENT_ROW_ORDER:
+            assert any(label in line for line in lines), label
 
 
 class TestAgentCoverageNotes:
@@ -6572,25 +6510,56 @@ class TestAgentCoverageNotes:
         assert "too old" not in joined
         assert "partial_sources" not in joined
 
-    def test_f6_each_new_note_prefix_appears_in_skill_md(self):
+    def test_every_health_code_is_documented_in_skill_md(self):
+        """The 1.1 doc-sync contract.
+
+        Pre-1.1 this pinned a closed vocabulary of rendered Notes PROSE, which
+        meant every copy edit was a doc change and the skill had to be told
+        that an unlisted line "is reported verbatim and never interpreted".
+        Codes are a real interface: stable, greppable, and safe to reword.
+        """
         skill = Path(__file__).resolve().parents[1] / "src/mind_meld/skills/retro_fleet/SKILL.md"
         text = skill.read_text(encoding="utf-8")
-        start, end = "## Notes section in aggregator output", "## Trends vs prior"
-        assert start in text and end in text
-        i0, i1 = text.index(start), text.index(end)
-        assert i0 < i1
-        notes = text[i0:i1]
-        for prefix in (
-            "Host-usage reader(s)",
-            "Host-usage totals from",
-            "Git walk ran out of budget on",
-            "Git history has an uncovered interval on",
-        ):
-            assert prefix in notes, prefix
-        assert "reported verbatim" in notes
-        assert "never interpreted" in notes
-        assert "git_capture.recorded.walk_budget_aborts" in notes
-        assert "last_push.walk_budget_aborts" not in notes
+        emitted = {
+            "fleet_incomplete",
+            "registry_unavailable",
+            "duplicate_ledger",
+            "legacy_counters",
+            "cost_floor",
+            "cost_unavailable",
+            "sessions_incomplete",
+            "tokens_incomplete",
+            "pricing_extrapolated",
+            "skills_incomplete",
+            "unpriced_models",
+            "agent_coverage",
+            "unregistered_devices",
+            "discovery_errors",
+            "git_budget",
+            "git_gap",
+            "zero_repo_capture",
+            "parse_errors",
+            "window_exceeds_retention",
+            "fleet_changed",
+        }
+        for code in sorted(emitted):
+            assert f"`{code}`" in text, code
+        # The skill must still refuse to invent meaning for a code it does not
+        # know — a stale installed copy is the normal case, not an edge case.
+        assert "reported verbatim" in text and "never interpreted" in text
+        assert "git_capture.recorded.walk_budget_aborts" not in text
+
+    def test_every_emitted_health_code_is_in_the_documented_set(self):
+        """The other direction: no code reaches output undocumented."""
+        skill = Path(__file__).resolve().parents[1] / "src/mind_meld/skills/retro_fleet/SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+        data = self._data([_snap("dev-a", self.UNTIL, consulted=())])
+        data.skipped_per_source = {aggregator.SKIP_CATEGORY_EVENTS: 1}
+        data.git.zero_repo_captures = {"dev-a": (1, 2)}
+        data.pushes.discovery_errors = ["boom"]
+        data.window_exceeds_retention = True
+        for entry in _health(aggregator.format_retro(data)):
+            assert f"`{entry['code']}`" in text, entry["code"]
 
     @pytest.mark.parametrize(
         "case,marker",
@@ -6625,152 +6594,27 @@ class TestAgentCoverageNotes:
         assert "capture-usage" not in notes[0]
 
 
-class TestAgentInventoryBody:
-    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
-    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+class TestUnifiedAgents:
+    """The 1.1 ``## Agents`` table and its aggregate.
 
-    def _data(self, snaps, *, known_ids=(), missing=frozenset()):
-        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
-        data.fleet = aggregator.FleetState(
-            devices_known=len(known_ids) or None,
-            devices_known_list=[{"device_id": d, "device_name": d} for d in known_ids],
-        )
-        data.host_inventory = aggregator.HostUsageInventory(
-            by_device={s.device: s for s in snaps},
-            devices_without_accepted_row=missing,
-        )
-        return data
-
-    def test_three_row_shapes(self):
-        body = "\n".join(
-            aggregator._render_agent_inventory(
-                self._data(
-                    [
-                        _snap(
-                            "dev-a",
-                            self.UNTIL,
-                            families={"codex": {"2026-04-22": _usage(10)}},
-                        ),
-                        _snap("dev-b", self.UNTIL, consulted=("grok",)),
-                    ],
-                    known_ids=("dev-a", "dev-b", "dev-c"),
-                )
-            )
-        )
-        assert "| dev-a | Codex | 2026-04-28 | current | 10 | 10 |" in body
-        # Accepted but nothing observed: 0 is KNOWN data, `—` means unavailable.
-        assert "| dev-b | — | 2026-04-28 | idle | 0 | 0 |" in body
-        assert "| dev-c | — | — | missing | — | — |" in body
-        assert (
-            "Readers per machine (`none` = no reader contributed): dev-a codex; dev-b grok." in body
-        )
-
-    def test_state_strings_are_never_raw_field_names(self):
-        body = "\n".join(
-            aggregator._render_agent_inventory(
-                self._data(
-                    [
-                        _snap(
-                            "dev-old",
-                            datetime(2026, 3, 1, tzinfo=timezone.utc),
-                            families={"codex": {"2026-02-28": _usage(1)}},
-                        ),
-                        _snap(
-                            "dev-fut",
-                            datetime(2026, 4, 28, 20, tzinfo=timezone.utc),
-                            families={"codex": {"2026-04-28": _usage(1)}},
-                        ),
-                    ],
-                    known_ids=("dev-old", "dev-fut"),
-                )
-            )
-        )
-        assert "last seen before window" in body
-        assert "clock ahead (<=24h)" in body
-        assert "future_dated" not in body
-        assert "| stale |" in body  # compact state is expanded in the legend
-
-    def test_rows_are_capped_and_the_omission_is_stated(self):
-        n = aggregator.MAX_AGENT_INVENTORY_MACHINES + 4
-        ids = tuple(f"dev-{i:03d}" for i in range(n))
-        body = "\n".join(
-            aggregator._render_agent_inventory(
-                self._data(
-                    [
-                        _snap(d, self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})
-                        for d in ids
-                    ],
-                    known_ids=ids,
-                )
-            )
-        )
-        assert body.count("| dev-") == aggregator.MAX_AGENT_INVENTORY_MACHINES
-        assert "(+4 more machines omitted; those with data are shown first.)" in body
-
-    def test_hostile_device_id_cannot_break_the_markdown_table(self):
-        body = "\n".join(
-            aggregator._render_agent_inventory(
-                self._data(
-                    [
-                        _snap(
-                            "a|b\x1b[31m`x`",
-                            self.UNTIL,
-                            families={"codex": {"2026-04-22": _usage(1)}},
-                        )
-                    ],
-                    known_ids=(),
-                )
-            )
-        )
-        rows = [ln for ln in body.splitlines() if ln.startswith("| dev") or ln.startswith("| a")]
-        for row in rows:
-            assert row.count("|") == 7, f"pipe count changed by a peer id: {row}"
-        assert "\x1b" not in body
-
-    def test_omitted_entirely_when_nothing_is_known(self):
-        assert aggregator._render_agent_inventory(self._data([])) == []
-
-    def test_retained_and_window_columns_differ(self):
-        body = "\n".join(
-            aggregator._render_agent_inventory(
-                self._data(
-                    [
-                        _snap(
-                            "dev-a",
-                            self.UNTIL,
-                            families={
-                                "codex": {
-                                    "2026-04-01": _usage(1000),  # outside the window
-                                    "2026-04-22": _usage(7),  # inside
-                                }
-                            },
-                        )
-                    ],
-                    known_ids=("dev-a",),
-                )
-            )
-        )
-        assert "| 1.0k | 7 |" in body
-
-
-class TestAgentBlockReachesTheCard:
-    """The AGENT LOGS block wiring inside `_render_ascii_card`, not the helpers.
-
-    Every other agent test calls `_agent_rhythm_view` / `_render_agent_block`
-    directly with a hand-built view, which left the wiring itself unpinned:
-    deleting the whole 12-line block from `_render_ascii_card` kept 2500 tests
-    green. These tests fail if that wiring, its window arguments, its
-    `machines_known` source, or its position ever regress.
+    Successor to three sections that reported one fleet three ways:
+    ``Claude Code activity`` (Claude-only tokens + a per-model cost table),
+    ``Agent activity`` (per-machine host families), and ``API list-rate
+    equivalent`` (per-machine dollars behind a do-not-sum warning).
     """
 
     SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
     UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
 
-    def _data(self, snaps, *, known_ids=("dev-a", "dev-b"), missing=frozenset()):
+    def _data(self, snaps, *, known_ids=(), names=None, missing=frozenset()):
         data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        names = names or {}
         data.fleet = aggregator.FleetState(
-            devices_known=len(known_ids),
-            devices_known_list=[{"device_id": d, "device_name": d} for d in known_ids],
+            devices_in_events={s.device for s in snaps},
+            devices_known=len(known_ids) or None,
+            devices_known_list=[
+                {"device_id": d, "device_name": names.get(d, d)} for d in known_ids
+            ],
         )
         data.host_inventory = aggregator.HostUsageInventory(
             by_device={s.device: s for s in snaps},
@@ -6778,209 +6622,439 @@ class TestAgentBlockReachesTheCard:
         )
         return data
 
-    def _card(self, out):
-        return [line for line in out.splitlines() if line.startswith("║")]
+    def _usage_for(self, data):
+        return aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
 
-    def test_agent_block_renders_inside_the_card_between_models_and_noteworthy(self):
+    def _row(self, usage, key):
+        return next((r for r in usage.rows if r.key == key), None)
+
+    # --- summation -------------------------------------------------------
+
+    def test_host_tokens_sum_across_machines(self):
+        """The 1.1 inversion. Pre-1.1 this was three per-machine rows under a
+        'do not sum these values' heading, while Claude was summed fleet-wide
+        under the identical hazard."""
+        hosts = {"codex": {"2026-04-22": _usage(100)}}
         data = self._data(
-            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})]
+            [
+                _snap("dev-a", self.UNTIL, families=hosts),
+                _snap("dev-b", self.UNTIL, families={"codex": {"2026-04-23": _usage(50)}}),
+            ],
+            known_ids=("dev-a", "dev-b"),
         )
-        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
-        card = self._card(out)
-        hits = [i for i, line in enumerate(card) if "AGENT LOGS" in line]
-        assert hits, "AGENT LOGS never reached the rendered card"
-        i = hits[0]
-        assert any("MODELS" in line for line in card[:i]), "AGENT LOGS rendered above MODELS"
-        assert any("NOTEWORTHY" in line for line in card[i:]), (
-            "AGENT LOGS rendered below NOTEWORTHY"
-        )
-        assert any("Codex models: seen on 1 day" in line for line in card)
+        codex = self._row(self._usage_for(data), "codex")
+        assert codex.tokens == 150
+        assert codex.active_days == 2
+        assert codex.machines == 2
 
-    def test_denominator_comes_from_the_fleet_registry(self):
+    def test_claude_and_hosts_share_one_row_shape(self):
         data = self._data(
-            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})],
-            known_ids=("dev-a", "dev-b", "dev-c"),
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(7)}})],
+            known_ids=("dev-a",),
         )
-        out = aggregator.format_retro(data, name="kb")
-        assert "AGENT LOGS (1 of 3 machines with agent activity)" in out
+        data.sessions.tokens_by_model = {
+            "claude-sonnet-5": {"input": 11, "cache_create": 0, "cache_read": 0, "output": 0}
+        }
+        data.sessions.active_days = {"2026-04-22", "2026-04-23"}
+        data.sessions.token_devices = {"dev-a": self.UNTIL}
+        usage = self._usage_for(data)
+        claude, codex = self._row(usage, "claude"), self._row(usage, "codex")
+        assert (claude.tokens, claude.active_days, claude.machines) == (11, 2, 1)
+        assert (codex.tokens, codex.active_days, codex.machines) == (7, 1, 1)
+        body = "\n".join(aggregator._render_agents_table(usage))
+        assert "| Claude | 11 | 2 | 1 |" in body
+        assert "| Codex | 7 | 1 | 1 |" in body
 
-    def test_window_bounds_come_from_the_retro_data(self):
-        """A day inside the snapshot but outside the window must not be counted,
-        which only holds if the card passes data.since/data.until through."""
+    @pytest.mark.parametrize("host_device, expected", [(None, 1), ("dev-a", 1), ("dev-b", 2)])
+    def test_card_counts_union_of_claude_and_host_machines(self, host_device, expected):
+        snaps = (
+            [_snap(host_device, self.UNTIL, families={"codex": {"2026-04-22": _usage(7)}})]
+            if host_device
+            else []
+        )
+        data = self._data(snaps, known_ids=("dev-a", "dev-b"))
+        data.sessions.tokens_by_model = {"claude-sonnet-5": _usage(11)}
+        data.sessions.active_days = {"2026-04-22"}
+        data.sessions.token_devices = {"dev-a": self.UNTIL}
+        assert self._usage_for(data).machines_with_activity == expected
+        assert f"AGENTS ({expected} of 2 machines)" in aggregator.format_retro(data, name="test")
+
+    @pytest.mark.parametrize("semantics", [None, "disjoint-v1"])
+    def test_cross_version_classification_keeps_volume_without_phantom_pricing(self, semantics):
+        hosts = {"other": {"2026-04-22": _usage(1_000_000)}}
+        ev = _host_event(
+            "dev-a",
+            self.UNTIL.isoformat(),
+            hosts=hosts,
+            extra={
+                "counter_semantics": semantics,
+                "tokens_by_day": _sibling(hosts, "gpt-6-astra"),
+            },
+        )
+        data = self._data([], known_ids=("dev-a",))
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [ev], since=self.SINCE, until=self.UNTIL, registered_ids={"dev-a"}
+        )
+        assert data.host_inventory.by_device["dev-a"].detail == "present"
+        usage = self._usage_for(data)
+        assert [row.key for row in usage.rows] == ["other"]
+        row = usage.rows[0]
+        assert (row.tokens, row.active_days, row.machines) == (1_000_000, 1, 1)
+        assert not row.by_model
+        assert any("different family classification" in cause for cause in row.floor_causes)
+        assert aggregator._agent_row_cost(row)[0] is None
+        body = "\n".join(aggregator._render_agents_table(usage))
+        assert "| Codex |" not in body
+        assert " | — | — |" in body
+
+    def test_classification_mismatch_cannot_cancel_across_days(self):
+        hosts = {
+            "other": {"2026-04-22": _usage(10)},
+            "codex": {"2026-04-23": _usage(10)},
+        }
+        snap = _snap("dev-a", self.UNTIL, families=hosts)
+        snap.tokens_by_day = {
+            "2026-04-22": {**_usage(10), "by_model": {"gpt-6-astra": _usage(10)}},
+            "2026-04-23": {**_usage(10), "by_model": {"unknown-model": _usage(10)}},
+        }
+        usage = self._usage_for(self._data([snap], known_ids=("dev-a",)))
+        assert all(not row.by_model for row in usage.rows)
+
+    def test_capped_model_detail_still_prices_a_floor(self):
+        hosts = {"codex": {"2026-04-22": _usage(1_000_000)}}
+        snap = _snap("dev-a", self.UNTIL, families=hosts, counter_semantics="disjoint-v1")
+        snap.tokens_by_day = {
+            "2026-04-22": {**_usage(1_000_000), "by_model": {"gpt-6-astra": _usage(500_000)}}
+        }
+        row = self._row(self._usage_for(self._data([snap])), "codex")
+        assert row.tokens == 1_000_000
+        assert aggregator._agent_row_cost(row) == (5.0, True)
+
+    def test_zero_only_model_maps_are_not_agent_activity(self):
+        hosts = {"codex": {"2026-04-22": _usage(0)}}
+        ev = _host_event(
+            "dev-a",
+            self.UNTIL.isoformat(),
+            hosts=hosts,
+            extra={
+                "counter_semantics": "disjoint-v1",
+                "tokens_by_day": _sibling(hosts, "gpt-6-astra"),
+            },
+        )
+        data = self._data([], known_ids=("dev-a",))
+        data.sessions.tokens_by_model = {"claude-sonnet-5": _usage(0)}
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [ev], since=self.SINCE, until=self.UNTIL, registered_ids={"dev-a"}
+        )
+        assert data.host_inventory.by_device["dev-a"].detail == "present"
+        out = aggregator.format_retro(data, name="test")
+        assert "| Codex |" not in out
+        assert "| Claude |" not in out
+        assert "No agent usage observed" in out
+
+    def test_stale_snapshot_contributes_nothing_to_the_window(self):
         data = self._data(
             [
                 _snap(
-                    "dev-a",
-                    self.UNTIL,
-                    families={"codex": {"2026-03-01": _usage(9999)}},
+                    "dev-old",
+                    datetime(2026, 3, 1, tzinfo=timezone.utc),
+                    families={"codex": {"2026-02-28": _usage(999)}},
                 )
-            ]
+            ],
+            known_ids=("dev-old",),
         )
-        out = aggregator.format_retro(data, name="kb")
-        assert "AGENT LOGS (0 of 2 machines with agent activity)" in out
-        assert "No agent activity this window" in out
-        assert "seen on" not in out
+        assert self._row(self._usage_for(data), "codex") is None
 
-    def test_no_agent_block_on_the_first_pass(self):
-        """First pass has no card at all, so the block must not leak into it."""
+    # --- duplicate-ledger detector ---------------------------------------
+
+    def test_identical_counter_tuples_across_devices_are_flagged(self):
+        """A migrated home directory copies the ledger byte for byte, so the
+        shared days match exactly. That is the signal the pre-1.1 docstring
+        claimed did not exist."""
+        day = {"codex": {"2026-04-22": _usage(7)}}
         data = self._data(
-            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(3)}})]
+            [
+                _snap("dev-a", self.UNTIL, families=day),
+                _snap("dev-b", self.UNTIL, families={"codex": {"2026-04-22": _usage(7)}}),
+            ],
+            known_ids=("dev-a", "dev-b"),
+        )
+        assert self._usage_for(data).duplicate_ledger == ("codex",)
+
+    def test_genuine_concurrent_use_is_not_flagged(self):
+        """Two Macs used the same day produce different numbers. Verified
+        against a real two-Mac fleet: 14 shared (family, day) pairs, zero
+        identical tuples."""
+        data = self._data(
+            [
+                _snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(7)}}),
+                _snap("dev-b", self.UNTIL, families={"codex": {"2026-04-22": _usage(9)}}),
+            ],
+            known_ids=("dev-a", "dev-b"),
+        )
+        assert self._usage_for(data).duplicate_ledger == ()
+
+    def test_duplicate_ledger_reaches_health_with_a_remedy(self):
+        day = {"codex": {"2026-04-22": _usage(7)}}
+        data = self._data(
+            [
+                _snap("dev-a", self.UNTIL, families=day),
+                _snap("dev-b", self.UNTIL, families={"codex": {"2026-04-22": _usage(7)}}),
+            ],
+            known_ids=("dev-a", "dev-b"),
         )
         out = aggregator.format_retro(data)
-        assert "╔" not in out
-        assert "AGENT LOGS" not in out
+        entry = _health_entry(out, "duplicate_ledger")
+        assert entry is not None
+        assert "double-counted" in entry["detail"]
+        assert "mm devices" in entry["remedy"]
 
-    def test_card_holds_its_width_with_the_agent_block_present(self):
+    def test_days_stay_idempotent_even_when_tokens_double(self):
+        day = {"codex": {"2026-04-22": _usage(7)}}
+        data = self._data(
+            [
+                _snap("dev-a", self.UNTIL, families=day),
+                _snap("dev-b", self.UNTIL, families={"codex": {"2026-04-22": _usage(7)}}),
+            ],
+            known_ids=("dev-a", "dev-b"),
+        )
+        codex = self._row(self._usage_for(data), "codex")
+        assert codex.active_days == 1
+        assert codex.tokens == 14
+
+    # --- markers and floors ----------------------------------------------
+
+    def test_legacy_counters_render_unavailable_never_a_number(self):
         data = self._data(
             [
                 _snap(
                     "dev-a",
                     self.UNTIL,
-                    families={
-                        key: {"2026-04-24": _usage(5)} for key, _ in aggregator.AGENT_FAMILY_ROWS
-                    },
+                    families={"codex": {"2026-04-22": _usage(10)}},
+                    counter_semantics=None,
                 )
-            ]
+            ],
+            known_ids=("dev-a",),
         )
-        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
-        card = [line for line in out.splitlines() if line.startswith(("╔", "╠", "╚", "║"))]
-        assert {len(line) for line in card} == {aggregator.CARD_WIDTH}
-        assert "…" not in "\n".join(
-            line for line in card if "models:" in line or "AGENT LOGS" in line
-        )
+        usage = self._usage_for(data)
+        assert self._row(usage, "codex").counters_known is False
+        body = "\n".join(aggregator._render_agents_table(usage))
+        assert "| Codex | — |" in body
+        raw = aggregator.format_retro(data).split("<!-- MM_THEMES_PROMPT -->", 1)[1]
+        payload = json.loads(raw.split("```json", 1)[1].split("```", 1)[0])
+        assert payload["agents"][0]["tokens"] is None
+        assert payload["agents"][0]["counters_known"] is False
 
-    def test_no_card_line_carries_a_host_token_magnitude(self):
+    def test_themes_skill_names_are_bounded_without_losing_colliding_entries(self):
+        data = self._data([])
+        data.skills.by_skill = {"a" * 2000 + "x": 2, "a" * 2000 + "y": 1}
+        raw = "\n".join(aggregator._render_themes_prompt(data))
+        payload = json.loads(raw.split("```json", 1)[1].split("```", 1)[0])
+        assert [entry["invocations"] for entry in payload["skills"]] == [2, 1]
+        assert all(len(entry["skill"]) <= 128 for entry in payload["skills"])
+        assert len(raw) < 2000
+
+    def test_fleet_names_are_bounded_in_both_passes(self):
+        names = {f"dev-{i:04d}": f"machine-{i:04d}" for i in range(1000)}
+        data = self._data([], known_ids=tuple(names), names=names)
+        out = aggregator.format_retro(data)
+        entry = _health_entry(out, "fleet_incomplete")
+        assert len(entry["machines"]) == aggregator.MAX_TOKEN_COVERAGE_PEER_NAMES
+        assert entry["machines_omitted"] == 995
+        assert "(+995 more)" in entry["detail"]
+        assert len(out) < 10_000
+        data.pushes.devices_with_pushes = set(names)
+        final = aggregator.format_retro(data, name="test")
+        assert "(+995 more)" in final
+        assert len(final) < 10_000
+
+    def test_partial_host_preserves_unknown_reader_to_model_attribution(self):
+        """A reader can serve another family's models; missing coverage cannot
+        be assigned by reader name alone. Inherent tier causes stay per model."""
+        hosts = {
+            "codex": {"2026-04-22": _usage(10)},
+            "grok": {"2026-04-22": _usage(10)},
+        }
         data = self._data(
-            [
-                _snap(
-                    "dev-a",
-                    self.UNTIL,
-                    families={"codex": {"2026-04-24": _usage(123_456_789)}},
-                )
-            ]
+            [_snap("dev-a", self.UNTIL, families=hosts, partial=("grok",))],
+            known_ids=("dev-a",),
         )
-        out = aggregator.format_retro(data, name="kb", themes=["t"], noteworthy="n")
-        card = "\n".join(self._card(out))
-        assert "123" not in card
-        assert "123.5M" not in card
-        # The magnitude belongs to the body, and only the body.
-        assert "123.5M" in out
+        usage = self._usage_for(data)
+        codex_causes = self._row(usage, "codex").floor_causes
+        grok_causes = self._row(usage, "grok").floor_causes
+        assert any("grok" in c and "incomplete" in c for c in codex_causes), codex_causes
+        assert any("grok" in c and "incomplete" in c for c in grok_causes), grok_causes
 
-
-class TestAgentInventoryHardening:
-    """Guards for the paths a hand-built or hostile inventory can reach."""
-
-    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
-    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
-
-    def _data(self, by_device, *, known_ids=(), missing=frozenset()):
-        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
-        data.fleet = aggregator.FleetState(
-            devices_known=len(known_ids) or None,
-            devices_known_list=[{"device_id": d} for d in known_ids],
+    def test_partial_codex_serving_claude_floors_claude_cost(self):
+        counters = {**_usage(1_000_000), "cache_create": 1_000_000}
+        hosts = {"claude": {"2026-04-22": counters}}
+        ev = _host_event(
+            "dev-a",
+            self.UNTIL.isoformat(),
+            hosts=hosts,
+            token_sources=("codex",),
+            extra={
+                "counter_semantics": "disjoint-v1",
+                "partial_sources": ["codex"],
+                "tokens_by_day": _sibling(hosts, "claude-opus-5"),
+            },
         )
-        data.host_inventory = aggregator.HostUsageInventory(
-            by_device=by_device, devices_without_accepted_row=missing
+        data = self._data([], known_ids=("dev-a",))
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [ev], since=self.SINCE, until=self.UNTIL, registered_ids={"dev-a"}
         )
-        return data
+        assert data.host_inventory.rejected_rows == 0
+        row = self._row(self._usage_for(data), "claude")
+        assert any("incomplete" in cause for cause in row.floor_causes)
+        assert aggregator._agent_row_cost(row) == (11.25, True)
 
-    def test_cap_keeps_machines_that_have_data(self):
-        """Ordering by information content before capping. Alphabetical order
-        plus truncation let a dozen empty machines evict the only one with
-        data, and took the readers line with it."""
-        n = aggregator.MAX_AGENT_INVENTORY_MACHINES
-        empty = tuple(f"aaa-{i:03d}" for i in range(n))
-        snap = _snap("zzz-a", self.UNTIL, families={"codex": {"2026-04-24": _usage(5000)}})
-        body = "\n".join(
-            aggregator._render_agent_inventory(
-                self._data({"zzz-a": snap}, known_ids=empty + ("zzz-a",))
+    @pytest.mark.parametrize("reader", ["codex", "opencode"])
+    def test_failed_reader_without_data_floors_observed_families(self, reader):
+        good = _host_event(
+            "dev-a",
+            self.UNTIL.isoformat(),
+            hosts={"codex": {"2026-04-22": _usage(1_000_000)}},
+            extra={
+                "counter_semantics": "disjoint-v1",
+                "tokens_by_day": {
+                    "2026-04-22": {
+                        **_usage(1_000_000),
+                        "by_model": {"gpt-6-astra": _usage(1_000_000)},
+                    }
+                },
+            },
+        )
+        failed = _host_event(
+            "dev-b",
+            self.UNTIL.isoformat(),
+            hosts={},
+            token_sources=(),
+            extra={"degraded_sources": [reader], "active_days": []},
+        )
+        data = self._data([], known_ids=("dev-a", "dev-b"))
+        data.sessions.tokens_by_model = {"claude-opus-5": _usage(1_000_000)}
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [good, failed], since=self.SINCE, until=self.UNTIL, registered_ids={"dev-a", "dev-b"}
+        )
+        assert data.host_inventory.rejected_rows == 0
+        expected_reader = "codex" if reader == "codex" else "unknown/retired reader"
+        for row in self._usage_for(data).rows:
+            assert any(expected_reader in c for c in row.floor_causes)
+            assert aggregator._agent_row_cost(row)[1] is True
+
+    def test_per_machine_grok_bounds_remain_attributed_after_fleet_sum(self):
+        snaps = []
+        for device, n in (("dev-a", 1_000_000), ("dev-b", 2_000_000)):
+            snap = _snap(
+                device,
+                self.UNTIL,
+                families={"grok": {"2026-04-22": _usage(n)}},
+                counter_semantics="disjoint-v1",
             )
+            snap.tokens_by_day = {
+                "2026-04-22": {**_usage(n), "by_model": {"grok-4.6-build": _usage(n)}}
+            }
+            snaps.append(snap)
+        data = self._data(
+            snaps, known_ids=("dev-a", "dev-b"), names={"dev-a": "laptop", "dev-b": "desktop"}
         )
-        assert "zzz-a" in body, "the only machine with data was evicted by the cap"
-        assert "| zzz-a | Codex |" in body
-        assert "Readers per machine" in body
+        row = self._row(self._usage_for(data), "grok")
+        assert aggregator._agent_row_cost(row) == (6.0, True)
+        assert any(c.startswith("laptop:") and "at most $4.00" in c for c in row.floor_causes)
+        assert any(c.startswith("desktop:") and "at most $8.00" in c for c in row.floor_causes)
 
-    def test_non_snapshot_value_does_not_crash_the_render(self):
-        data = self._data({"dev-a": {"not": "a snapshot"}}, known_ids=("dev-a",))
-        body = aggregator._render_agent_inventory(data)  # must not raise
-        assert "| dev-a | — | — | missing | — | — |" in "\n".join(body)
-        assert aggregator._agent_coverage_notes(data) is not None
-
-    def test_consulted_names_are_sanitized_like_device_ids(self):
-        snap = _snap(
-            "dev-a",
-            self.UNTIL,
-            consulted=("codex\n- INJECTED BULLET", "gr|ok\x1b[31m"),
-            families={"codex": {"2026-04-24": _usage(5)}},
+    def test_degraded_reader_flips_its_family_to_a_floor(self):
+        data = self._data(
+            [
+                _snap(
+                    "dev-a",
+                    self.UNTIL,
+                    families={"codex": {"2026-04-22": _usage(10)}},
+                    degraded=("codex",),
+                )
+            ],
+            known_ids=("dev-a",),
         )
-        body = "\n".join(
-            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
-        )
-        assert "\n- INJECTED BULLET" not in body
-        assert "\x1b" not in body
-        readers_line = [ln for ln in body.splitlines() if "Readers per machine" in ln][0]
-        assert readers_line.count("|") == 0
+        causes = self._row(self._usage_for(data), "codex").floor_causes
+        assert any("failed" in c for c in causes)
 
-    def test_missing_devices_render_rows_not_an_empty_table(self):
-        body = aggregator._render_agent_inventory(
-            self._data({}, known_ids=(), missing=frozenset({"dev-x", "dev-y"}))
+    def test_unknown_reader_widens_rather_than_misattributing(self):
+        """A reader id that names no family cannot be narrowed to one; the wire
+        carries no reader-to-family attribution."""
+        hosts = {
+            "codex": {"2026-04-22": _usage(10)},
+            "grok": {"2026-04-22": _usage(10)},
+        }
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families=hosts, degraded=("mystery",))],
+            known_ids=("dev-a",),
         )
-        rows = [
-            ln
-            for ln in body
-            if ln.startswith("| ") and not ln.startswith("| Machine") and not ln.startswith("|---")
-        ]
-        assert len(rows) == 2, f"header rendered with no rows: {body}"
-        assert all("missing" in row for row in rows)
+        usage = self._usage_for(data)
+        for key in ("codex", "grok"):
+            assert self._row(usage, key).floor_causes != ()
 
-    def test_body_clamps_in_window_days_to_as_of(self):
-        """The body's own clamp, distinct from the rhythm view's. Every other
-        body test uses as_of == UNTIL, where the clamp is inert."""
-        snap = _snap(
-            "dev-a",
-            datetime(2026, 4, 24, tzinfo=timezone.utc),
-            families={"codex": {"2026-04-23": _usage(1), "2026-04-27": _usage(1000)}},
+    # --- hostnames --------------------------------------------------------
+
+    def test_hostnames_replace_device_ids_in_health(self):
+        data = self._data(
+            [_snap("3a6c7dc9", self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})],
+            known_ids=("3a6c7dc9", "0356e8c7"),
+            names={"3a6c7dc9": "kb-mbp", "0356e8c7": "3771H-kb-ms"},
         )
-        body = "\n".join(
-            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+        out = aggregator.format_retro(data)
+        entry = _health_entry(out, "fleet_incomplete")
+        assert entry is not None
+        assert "3771H-kb-ms" in entry["detail"]
+        assert "0356e8c7" not in entry["detail"]
+
+    def test_unknown_device_falls_back_to_the_short_id(self):
+        labels = aggregator.device_labels(aggregator.FleetState())
+        assert aggregator.device_label("3a6c7dc9ff", labels) == "3a6c7dc9"
+
+    def test_blank_device_name_falls_back_rather_than_rendering_empty(self):
+        fleet = aggregator.FleetState(
+            devices_known_list=[{"device_id": "dev-a", "device_name": "   "}]
         )
-        assert "| 1.0k | 1 |" in body, body
+        assert aggregator.device_label("dev-a", aggregator.device_labels(fleet)) == "dev-a"
 
-    def test_state_reflects_in_window_activity_not_retained(self):
-        """A machine whose only activity predates the window is `current` with a
-        zero in-window column, and the State column must agree with the card's
-        in-window activity count rather than with the retained total."""
-        snap = _snap("dev-a", self.UNTIL, families={"codex": {"2026-03-01": _usage(500)}})
-        body = "\n".join(
-            aggregator._render_agent_inventory(self._data({"dev-a": snap}, known_ids=("dev-a",)))
+    @pytest.mark.parametrize("names", [("kb-mbp", "kb-mbp"), ("kb|mbp", "kb`mbp")])
+    def test_colliding_display_hostnames_keep_device_identity(self, names):
+        devices = ("3a6c7dc9-full", "0356e8c7-full")
+        data = self._data([], known_ids=devices, names=dict(zip(devices, names)))
+        labels = aggregator.device_labels(data.fleet)
+        assert labels[devices[0]] != labels[devices[1]]
+        for device in devices:
+            assert device[:8] in labels[device]
+        entry = _health_entry(aggregator.format_retro(data), "fleet_incomplete")
+        assert set(entry["machines"]) == set(labels.values())
+
+    def test_empty_host_activity_does_not_deny_observed_claude_activity(self):
+        data = self._data([_snap("dev-a", self.UNTIL)], known_ids=("dev-a",))
+        data.sessions.tokens_by_model = {"claude-sonnet-5": _usage(1_000_000)}
+        data.sessions.active_days = {"2026-04-22"}
+        data.sessions.token_devices = {"dev-a": self.UNTIL}
+        out = aggregator.format_retro(data)
+        assert "| Claude | 1.0M |" in out
+        notes = [entry["detail"] for entry in _health(out) if entry["code"] == "agent_coverage"]
+        assert any("No host-ledger activity observed" in note for note in notes)
+        assert not any("No agent activity observed" in note for note in notes)
+
+    # --- removed surfaces --------------------------------------------------
+
+    def test_removed_sections_are_gone(self):
+        data = self._data(
+            [_snap("dev-a", self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})],
+            known_ids=("dev-a",),
         )
-        row = next(ln for ln in body.splitlines() if ln.startswith("| dev-a |"))
-        assert "| idle |" in row
-        assert "| current |" not in row
-        assert "| 500 | 0 |" in body
-
-    def test_no_snapshots_and_no_missing_still_names_a_cause(self):
-        """Reachable whenever the device registry read fails: `missing` is empty
-        and `by_device` is empty, so without this the card block, the body and
-        the notes are ALL silent."""
-        data = self._data({}, known_ids=())
-        assert aggregator._render_agent_inventory(data) == []
-        notes = aggregator._agent_coverage_notes(data)
-        assert notes, "block vanished with no diagnostic note"
-        assert any("No agent-log snapshots were accepted" in n for n in notes)
-
-    def test_unidentified_rejects_still_light_the_breadcrumb(self):
-        data = self._data({}, known_ids=("dev-a",))
-        data.host_inventory = aggregator.HostUsageInventory(
-            rejected=(aggregator.HostReject(device="", reason="not_object"),)
-        )
-        notes = aggregator._agent_coverage_notes(data)
-        assert any("1 unidentified row(s) were rejected" in n for n in notes)
-
-    def test_version_floor_is_named_from_the_constant(self):
-        data = self._data({}, known_ids=("dev-a",), missing=frozenset({"dev-a"}))
-        notes = aggregator._agent_coverage_notes(data)
-        assert any(aggregator.ATTENDED_USAGE_MIN_VERSION in n for n in notes)
+        out = aggregator.format_retro(data)
+        for heading in (
+            "## Claude Code activity",
+            "## Agent activity",
+            "## API list-rate equivalent",
+            "## Notes",
+            "### Do not sum these values",
+        ):
+            assert heading not in out, heading
 
 
 class TestAcceptorSchemaConstant:
@@ -7025,7 +7099,7 @@ class TestZeroRepoCaptureNotes:
         assert data.git.zero_repo_captures["dev-quiet"] == (1, 2)
         out = aggregator.format_retro(data)
         assert "captured 0 repositories on 1 of 2 pushes" in out
-        assert "run mm diag" not in out or "discovery error" not in out
+        assert _health_entry(out, "discovery_errors") is None
 
     def test_discovery_errors_point_at_mm_diag(self):
         data = aggregator.RetroData(
@@ -7035,7 +7109,7 @@ class TestZeroRepoCaptureNotes:
         )
         data.pushes.discovery_errors.append("git root discovery exceeded its time budget")
         out = aggregator.format_retro(data)
-        assert "run mm diag" in out
+        assert "mm diag" in _health_entry(out, "discovery_errors")["remedy"]
         assert "stderr breadcrumbs" not in out
 
 
@@ -7414,531 +7488,24 @@ class TestCounterSemanticsMarker:
         assert row.detail_reason == "unsupported_schema"
 
 
-class TestHostEconomics:
+class TestAgentEconomics:
+    """Cost semantics on the unified Agents row.
+
+    Successor to ``TestHostEconomics``, which pinned a per-machine dollar
+    table plus a "do not sum these values" heading. The rules it protected —
+    what makes a figure a floor, what makes it unavailable, and that an
+    unreconstructable long-context tier names a MODEL rather than a reader —
+    all still hold; they are asserted here against the surface that replaced
+    it, including through the health payload where the causes now live.
+    """
+
     TS = "2026-04-28T12:00:00+00:00"
 
-    def test_per_device_cost_from_tokens_by_day(self):
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "## API list-rate equivalent (per machine)" in out
-        assert "Do not sum these values" in out
-        assert "~$2.00" in out or "~$2" in out
-        section = out.split("## API list-rate equivalent (per machine)")[1].split("## ")[0]
-        assert "## Cost" not in out
-        assert section.lstrip().startswith("- Anthropic")
+    def _row(self, data, key="codex"):
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        return next((r for r in usage.rows if r.key == key), None)
 
-    def test_host_economics_header_names_all_three_vendors_with_provenance(self):
-        """Track 57A rewrote the header into one dated bullet per vendor plus
-        a separate marker legend. Pin the actual rendered text, not just the
-        hand-maintained README mirror asserted elsewhere."""
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        section = out.split("## API list-rate equivalent (per machine)")[1].split("### Do not sum")[
-            0
-        ]
-        tu = aggregator.token_usage
-        assert (
-            f"Anthropic list rates, verified {tu.PRICING_LAST_UPDATED}: "
-            "https://platform.claude.com/docs/en/about-claude/pricing" in section
-        )
-        assert (
-            "OpenAI short-context list rates, verified "
-            f"{tu.PRICING_OPENAI_LAST_UPDATED} against "
-            "https://developers.openai.com/api/docs/pricing" in section
-        )
-        assert (
-            f"xAI base and long-context list rates, verified {tu.PRICING_XAI_LAST_UPDATED}: "
-            "https://docs.x.ai/developers/models/grok-4.6" in section
-        )
-        assert "- ``~``: estimate from the recorded tokens and bundled rates." in section
-        assert "a model whose long-context tier cannot be reconstructed" in section
-        assert "- ``—``: the figure is unavailable, not zero." in section
-
-    @pytest.mark.parametrize("family,readers", [("grok", ("grok",)), ("codex", ("codex",))])
-    def test_grok_always_floor_and_ceiling_names_model_not_reader(self, family, readers):
-        hosts = {
-            family: {
-                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
-            }
-        }
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=readers,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | >=$2.00 |" in out
-        assert "`grok-4.6-build`: $2.00 at the base tier, at most $4.00" in out
-        assert "Grok's logs do not record per-request prompt sizes; no action resolves this" in out
-        assert (
-            "this model's recorded tokens, in token charges; server-side tool fees excluded" in out
-        )
-
-    @pytest.mark.parametrize(
-        "coverage",
-        [
-            {"partial_sources": ["grok"]},
-            {"degraded_sources": ["codex"]},
-            {"partial_sources": ["codex"]},
-        ],
-    )
-    def test_any_reader_coverage_loss_suppresses_grok_ceiling(self, coverage):
-        hosts = {
-            "grok": {
-                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
-            }
-        }
-        readers = ("grok",) if "degraded_sources" in coverage else ("codex", "grok")
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=readers,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build"), **coverage},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | >=$2.00 |" in out
-        assert "at most $" not in out
-        assert "no action resolves this" in out
-        assert "$-" not in out
-
-    def test_invalid_coverage_metadata_suppresses_grok_ceiling(self):
-        hosts = {
-            "grok": {
-                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
-            }
-        }
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=("grok",),
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build"), "partial_sources": "grok"},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | >=$2.00 |" in out
-        assert "at most $" not in out
-        assert "no action resolves this" in out
-
-    def test_invalid_coverage_on_codex_only_row_is_a_floor_not_a_tilde(self):
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "gpt-6-astra"), "partial_sources": "codex"},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | >=$" in out
-        assert "| dev-a | ~$" not in out
-        assert "host coverage metadata was unusable" in out
-
-    def test_grok_cache_reads_do_not_suppress_the_ceiling(self):
-        hosts = {
-            "grok": {
-                "2026-04-22": {
-                    "input": 1_000_000,
-                    "cache_read": 1_000_000,
-                    "cache_create": 0,
-                    "output": 0,
-                }
-            }
-        }
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=("grok",),
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | >=$2.50 |" in out
-        assert "`grok-4.6-build`: $2.50 at the base tier, at most $5.00" in out
-
-    def test_residual_does_not_suppress_the_grok_model_ceiling(self):
-        day = "2026-04-22"
-        grok = {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=("grok",),
-            hosts={
-                "grok": {day: {"input": 1_000_100, "cache_read": 0, "cache_create": 0, "output": 0}}
-            },
-            extra={
-                "tokens_by_day": {
-                    day: {
-                        "input": 1_000_100,
-                        "cache_read": 0,
-                        "cache_create": 0,
-                        "output": 0,
-                        "by_model": {"grok-4.6-build": grok},
-                    }
-                }
-            },
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | >=$2.00 |" in out
-        assert "not attributed to a named model" in out
-        assert "at most $4.00" in out
-
-    @pytest.mark.parametrize("input_tokens", [0, 1_000_000])
-    def test_grok_cache_writes_suppress_ceiling_without_a_partial_marker(self, input_tokens):
-        hosts = {
-            "grok": {
-                "2026-04-22": {
-                    "input": input_tokens,
-                    "cache_read": 0,
-                    "cache_create": 1_000_000,
-                    "output": 0,
-                }
-            }
-        }
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=("grok",),
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert f"| dev-a | >=${input_tokens / 500_000:.2f} |" in out
-        assert "at most $" not in out
-        assert "no action resolves this" in out
-
-    @pytest.mark.parametrize(
-        "tokens,ceiling", [(1, "$0.01"), (250_001, "$1.01"), (250_001_001, "$1,001")]
-    )
-    def test_grok_at_most_rounds_up_to_preserve_the_bound(self, tokens, ceiling):
-        hosts = _priced_hosts(n=tokens)
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert f"at most {ceiling} at the long-context tier" in out
-
-    def test_mixed_models_ceiling_covers_only_grok(self):
-        day = "2026-04-22"
-        usage = {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
-        hosts = {"codex": {day: usage}, "grok": {day: usage}}
-        sibling = {
-            day: {
-                **usage,
-                "input": 2_000_000,
-                "by_model": {"gpt-6-astra": usage, "grok-4.6-build": usage},
-            }
-        }
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            token_sources=("codex", "grok"),
-            extra={"tokens_by_day": sibling},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | >=$12.00 |" in out
-        assert "`grok-4.6-build`: $2.00 at the base tier, at most $4.00" in out
-        assert "at most $14" not in out
-
-    def test_no_in_window_grok_tokens_has_no_inherent_cause(self):
-        hosts = _priced_hosts(day="2026-04-20")
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | ~$0.00 |" in out
-        assert "no action resolves this" not in out
-
-    def test_duplicate_grok_history_is_two_floors_in_either_device_order(self):
-        hosts = {
-            "grok": {
-                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
-            }
-        }
-        rows = [
-            _host_event(
-                device,
-                self.TS,
-                token_sources=("grok",),
-                hosts=hosts,
-                extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
-            )
-            for device in ("aaa", "bbb")
-        ]
-        forward = aggregator.format_retro(_econ_data(rows))
-        assert forward == aggregator.format_retro(_econ_data(list(reversed(rows))))
-        section = forward.split("## API list-rate equivalent", 1)[1].split(
-            "## mm sync activity", 1
-        )[0]
-        assert "| aaa | >=$2.00 |" in section
-        assert "| bbb | >=$2.00 |" in section
-        assert "$4.00" not in section  # ceilings belong only to model-scoped Notes
-        assert forward.count("at most $4.00") == 2
-        assert "Do not sum these values" in section
-
-    def test_tokens_by_day_none_renders_em_dash_never_zero_dollars(self):
-        ev = _host_event("dev-a", self.TS, hosts=_priced_hosts())
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | — |" in out
-        section = out.split("## API list-rate equivalent")[1].split("## ")[0]
-        assert "$0" not in section
-
-    def test_pre_d2_peer_renders_no_cost(self):
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={
-                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
-                "counter_semantics": None,
-            },
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "| dev-a | — |" in out
-        activity = out.split("## Agent activity", 1)[1].split("## API list-rate equivalent", 1)[0]
-        assert "| dev-a | Codex | 2026-04-28 | current | — | — |" in activity
-        section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
-        assert "~$" not in section
-        assert "older format" in out
-        assert "upgrade mind-meld to v0.14.17+" in out
-
-    def test_pre_d2_empty_peer_renders_no_host_token_numbers(self):
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts={},
-            extra={"counter_semantics": None},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        section = out.split("## Agent activity", 1)[1].split("## API list-rate equivalent", 1)[0]
-        assert "| dev-a | — | 2026-04-28 | idle | — | — |" in section
-        assert "| 0 | 0 |" not in section
-
-    def test_marker_unpriced_flips_to_floor(self):
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "gpt-5.7-sol")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "gpt-5.7-sol" in out
-        assert "unpriced" in out.lower()
-        assert "| dev-a | >=$0.00 |" in out
-        assert "upgrading mm on the machine that renders this report may price it" in out
-        assert "republishing does not add a rate; do not estimate" in out
-
-    def test_stale_snapshot_renders_unavailable_never_confident_zero(self):
-        hosts = _priced_hosts(day="2026-04-20")
-        ev = _host_event(
-            "dev-a",
-            "2026-04-20T12:00:00+00:00",
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        section = out.split("## API list-rate equivalent", 1)[1].split("## mm sync activity", 1)[0]
-        assert "| dev-a | — |" in section
-        assert "~$0" not in section
-        assert "snapshot predates this window" in out
-        assert "verify with `mm --version`, then run `mm push`" in out
-
-    def test_marker_partial_flips_to_floor(self):
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=("codex",),
-            hosts=hosts,
-            extra={
-                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
-                "partial_sources": ["codex"],
-            },
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert ">=$" in out or "| dev-a | >=" in out
-
-    def test_marker_degraded_flips_to_floor(self):
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=("codex",),
-            hosts=hosts,
-            extra={
-                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
-                "degraded_sources": ["grok"],
-            },
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert ">=$" in out or "| dev-a | >=" in out
-
-    def test_by_model_residual_flips_to_floor(self):
-        day = "2026-04-22"
-        hosts = {"codex": {day: {"input": 100, "cache_create": 0, "cache_read": 0, "output": 0}}}
-        priced = {"gpt-5.6-terra": {"input": 32, "cache_create": 0, "cache_read": 0, "output": 0}}
-        extras = {
-            f"gpt-5.6-terra-cap-{i}": {
-                "input": 1,
-                "cache_create": 0,
-                "cache_read": 0,
-                "output": 0,
-            }
-            for i in range(31)
-        }
-        # 32 models (the cap). Priced terra has 32; extras 31; day total 100.
-        # Residual 100 - 63 = 37, unattributable.
-        extras.update(priced)
-        sibling = {
-            day: {
-                "input": 100,
-                "cache_create": 0,
-                "cache_read": 0,
-                "output": 0,
-                "by_model": extras,
-            }
-        }
-        ev = _host_event("dev-a", self.TS, hosts=hosts, extra={"tokens_by_day": sibling})
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert ">=$" in out or "| dev-a | >=" in out
-        assert "not attributed" in out or "model cap" in out
-
-    def test_notes_name_which_cause_fired(self):
-        hosts = _priced_hosts()
-        ev = _host_event(
-            "dev-a",
-            self.TS,
-            token_sources=("codex",),
-            hosts=hosts,
-            extra={
-                "tokens_by_day": _sibling(hosts, "gpt-5.7-mystery"),
-                "partial_sources": ["codex"],
-            },
-        )
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "gpt-5.7-mystery" in out
-        assert "incomplete" in out.lower() or "declared" in out.lower()
-
-    def test_unpriced_notes_name_ids_sanitized_ordered_capped(self):
-        hosts = {
-            "codex": {
-                "2026-04-22": {
-                    "input": 110,
-                    "cache_create": 0,
-                    "cache_read": 0,
-                    "output": 0,
-                }
-            }
-        }
-        long_id = "gpt-long-" + ("x" * 180)
-        model_ids = ["gpt-00\nINJECT", *(f"gpt-{i:02d}" for i in range(1, 10)), long_id]
-        by_model = {
-            model: {"input": 10, "cache_create": 0, "cache_read": 0, "output": 0}
-            for model in reversed(model_ids)
-        }
-        sibling = {
-            "2026-04-22": {
-                "input": 110,
-                "cache_create": 0,
-                "cache_read": 0,
-                "output": 0,
-                "by_model": by_model,
-            }
-        }
-        ev = _host_event("dev-a", self.TS, hosts=hosts, extra={"tokens_by_day": sibling})
-        out = aggregator.format_retro(_econ_data([ev]))
-        assert "\nINJECT" not in out
-        assert "gpt-00_INJECT" in out
-        assert long_id not in out
-        assert "(+3 more)" in out
-        named = out[out.index("gpt-00_INJECT") : out.index("(+3 more)")]
-        assert named.index("gpt-00_INJECT") < named.index("gpt-01") < named.index("gpt-07")
-        assert "gpt-08" not in named
-        assert "gpt-long" not in named
-
-    def test_two_devices_with_duplicate_history_render_no_fleet_currency(self, monkeypatch):
-        hosts = _priced_hosts()
-        tbd = _sibling(hosts, "gpt-5.6-terra")
-        a = _host_event("aaa", self.TS, hosts=hosts, extra={"tokens_by_day": tbd})
-        b = _host_event("bbb", self.TS, hosts=hosts, extra={"tokens_by_day": tbd})
-        received: list = []
-        real = aggregator.token_usage.estimate_cost
-
-        def spy(by_model):
-            received.append(dict(by_model))
-            return real(by_model)
-
-        monkeypatch.setattr(aggregator.token_usage, "estimate_cost", spy)
-        first = aggregator.format_retro(_econ_data([a, b]))
-        first_calls = [call for call in received if "gpt-5.6-terra" in call]
-        received.clear()
-        second = aggregator.format_retro(_econ_data([b, a]))
-        assert first == second
-        econ = first.split("## API list-rate equivalent", 1)[1].split("## mm sync activity", 1)[0]
-        assert "| aaa | ~$2.00 |" in econ
-        assert "| bbb | ~$2.00 |" in econ
-        assert "$4.00" not in econ
-        assert len(first_calls) == 2
-        assert all(
-            call
-            == {
-                "gpt-5.6-terra": {
-                    "input": 1_000_000,
-                    "cache_create": 0,
-                    "cache_read": 0,
-                    "output": 0,
-                }
-            }
-            for call in first_calls
-        )
-
-    def test_economics_cap_keeps_estimate_and_states_omission(self):
-        unavailable = [
-            _host_event(
-                f"aaa-{i:03d}",
-                self.TS,
-                hosts={},
-                extra={"counter_semantics": None},
-            )
-            for i in range(aggregator.MAX_AGENT_INVENTORY_MACHINES)
-        ]
-        hosts = _priced_hosts()
-        priced = _host_event(
-            "zzz-priced",
-            self.TS,
-            hosts=hosts,
-            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
-        )
-        out = aggregator.format_retro(_econ_data([*unavailable, priced]))
-        section = out.split("## API list-rate equivalent", 1)[1].split("## mm sync activity", 1)[0]
-        assert "| zzz-pric | ~$2.00 |" in section
-        assert "| zzz-pric | gpt-5.6-terra | ~$2.00 |" in section
-        assert section.count("| aaa-") == aggregator.MAX_AGENT_INVENTORY_MACHINES - 1
-        assert "(+1 more machines omitted; those with an estimate are shown first.)" in section
-
-    def test_host_cost_never_enters_token_block(self):
+    def test_priced_host_tokens_produce_an_estimate(self):
         hosts = _priced_hosts()
         ev = _host_event(
             "dev-a",
@@ -7947,68 +7514,365 @@ class TestHostEconomics:
             extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
         )
         data = _econ_data([ev])
-        lines: list[str] = []
-        aggregator._render_token_block(lines, data.sessions)
-        joined = "\n".join(lines)
-        assert "gpt-5.6-terra" not in joined
-        assert "API list-rate" not in joined
+        total, floor = aggregator._agent_row_cost(self._row(data))
+        assert total == pytest.approx(2.0, rel=1e-6)
+        assert floor is False
+        assert "~$2.00" in aggregator.format_retro(data)
 
-    def test_hostile_qa_inclusive_looking_row_without_marker(self):
-        day = "2026-04-22"
+    def test_pricing_provenance_survives_in_the_health_payload(self):
+        """The rendered six-line vendor header is gone; the dates are not."""
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        out = aggregator.format_retro(_econ_data([ev]))
+        block = out.split("<!-- MM_HEALTH -->", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+        pricing = json.loads(block)["pricing"]
+        tu = aggregator.token_usage
+        assert pricing["anthropic_verified"] == tu.PRICING_LAST_UPDATED
+        assert pricing["openai_verified"] == tu.PRICING_OPENAI_LAST_UPDATED
+        assert pricing["xai_verified"] == tu.PRICING_XAI_LAST_UPDATED
+        assert "docs.x.ai" in pricing["xai_url"]
+        assert "never zero" in pricing["basis"]
+
+    @pytest.mark.parametrize("readers", [("grok",), ("codex", "grok")])
+    def test_long_context_cause_names_the_model_not_the_reader(self, readers):
+        """The cause is a property of the vendor's LOG FORMAT, keyed on the
+        model id, so which reader happened to collect it is irrelevant."""
+        hosts = {
+            "grok": {
+                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+            }
+        }
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=readers,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "grok-4.6-build")},
+        )
+        joined = " ".join(self._row(_econ_data([ev]), "grok").floor_causes)
+        assert "grok-4.6-build" in joined
+        assert "per-request prompt sizes" in joined
+
+    def test_coverage_loss_suppresses_the_long_context_ceiling(self):
+        hosts = {
+            "grok": {
+                "2026-04-22": {"input": 1_000_000, "cache_read": 0, "cache_create": 0, "output": 0}
+            }
+        }
         ev = _host_event(
             "dev-a",
             self.TS,
             token_sources=("grok",),
-            hosts={"grok": {day: {"input": 0, "cache_create": 0, "cache_read": 100, "output": 0}}},
+            hosts=hosts,
             extra={
-                "tokens_by_day": {
-                    day: {
-                        "input": 0,
-                        "cache_create": 0,
-                        "cache_read": 100,
-                        "output": 0,
-                        "by_model": {
-                            "gpt-5.6-terra": {
-                                "input": 0,
-                                "cache_create": 0,
-                                "cache_read": 100,
-                                "output": 0,
-                            }
-                        },
-                    }
-                },
+                "tokens_by_day": _sibling(hosts, "grok-4.6-build"),
                 "partial_sources": ["grok"],
-                "counter_semantics": None,
             },
         )
-        out = aggregator.format_retro(_econ_data([ev]))
-        econ = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
-        assert "| dev-a | — |" in out
-        assert "$-" not in econ
-        assert "~$" not in econ
-        assert "older format" in out
+        causes = " ".join(self._row(_econ_data([ev]), "grok").floor_causes)
+        assert "at most" not in causes
+        assert "incomplete" in causes
 
-    def test_upgraded_peer_repush_makes_history_priceable(self):
+    def test_partial_host_flips_the_row_to_a_floor(self):
         hosts = _priced_hosts()
-        tbd = _sibling(hosts, "gpt-5.6-terra")
-        legacy = _host_event(
-            "dev-a",
-            "2026-04-27T12:00:00+00:00",
-            hosts=hosts,
-            extra={"tokens_by_day": tbd, "counter_semantics": None},
-        )
-        upgraded = _host_event(
+        ev = _host_event(
             "dev-a",
             self.TS,
             hosts=hosts,
-            extra={"tokens_by_day": tbd},
+            extra={
+                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
+                "partial_sources": ["codex"],
+            },
         )
-        out = aggregator.format_retro(_econ_data([legacy, upgraded]))
-        section = out.split("## API list-rate equivalent")[1].split("## Notes")[0]
-        assert "~$" in section
+        data = _econ_data([ev])
+        _total, floor = aggregator._agent_row_cost(self._row(data))
+        assert floor is True
+        assert "incomplete" in " ".join(self._row(data).floor_causes)
+        assert "≥$" in aggregator.format_retro(data)
+
+    def test_failed_reader_elsewhere_floors_the_fleet_row(self):
+        """``degraded_sources`` is disjoint from ``token_sources`` by contract —
+        a failed reader contributed nothing — so the machine whose codex reader
+        died reports no codex data at all. The fleet's Codex total is therefore
+        missing that machine's share, which is precisely a lower bound."""
+        codex_hosts = _priced_hosts()
+        grok_hosts = {
+            "grok": {
+                "2026-04-22": {"input": 1_000, "cache_read": 0, "cache_create": 0, "output": 0}
+            }
+        }
+        healthy = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=codex_hosts,
+            extra={"tokens_by_day": _sibling(codex_hosts, "gpt-5.6-terra")},
+        )
+        broken = _host_event(
+            "dev-b",
+            self.TS,
+            token_sources=("grok",),
+            hosts=grok_hosts,
+            extra={
+                "tokens_by_day": _sibling(grok_hosts, "grok-4.6-build"),
+                "degraded_sources": ["codex"],
+            },
+        )
+        data = _econ_data([healthy, broken])
+        codex = self._row(data, "codex")
+        assert "failed" in " ".join(codex.floor_causes)
+        assert aggregator._agent_row_cost(codex)[1] is True
+
+    def test_unpriced_model_makes_cost_unavailable_and_names_the_id(self):
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-not-a-real-model")},
+        )
+        data = _econ_data([ev])
+        causes = aggregator.agent_row_floor_causes(self._row(data))
+        assert any("unpriced" in c and "gpt-not-a-real-model" in c for c in causes)
+        out = aggregator.format_retro(data)
+        assert _health_entry(out, "cost_unavailable")["causes"] == list(causes)
+        assert _health_entry(out, "cost_floor") is None
+
+    @pytest.mark.parametrize(
+        "state,expected_code",
+        [
+            ("priced", None),
+            ("partial", "cost_floor"),
+            ("unpriced", "cost_unavailable"),
+            ("absent", "cost_unavailable"),
+            ("dropped", "cost_unavailable"),
+            ("zero", None),
+        ],
+    )
+    def test_cost_health_matches_the_visible_row(self, state, expected_code):
+        hosts = _priced_hosts(0 if state == "zero" else 1_000_000)
+        model = "gpt-not-a-real-model" if state == "unpriced" else "gpt-5.6-terra"
+        extra = {"tokens_by_day": _sibling(hosts, model)}
+        if state in {"partial", "zero"}:
+            extra["partial_sources"] = ["codex"]
+        if state == "absent":
+            extra.pop("tokens_by_day")
+        if state == "dropped":
+            extra["tokens_by_day"] = "not-a-map"
+        data = _econ_data([_host_event("dev-a", self.TS, hosts=hosts, extra=extra)])
+        out = aggregator.format_retro(data)
+        cost_issues = [e for e in _health(out) if e["code"] in {"cost_floor", "cost_unavailable"}]
+        assert [e["code"] for e in cost_issues] == ([expected_code] if expected_code else [])
+        table_row = next((line for line in out.splitlines() if line.startswith("| Codex |")), "")
+        if state == "zero":
+            assert not table_row
+        elif expected_code == "cost_unavailable":
+            assert "| 1.0M | 1 | 1 | — |" in table_row
+            assert cost_issues[0]["causes"]
+            assert "unavailable" in cost_issues[0]["detail"]
+            assert "is a floor" not in cost_issues[0]["detail"]
+        elif expected_code == "cost_floor":
+            assert "≥$" in table_row
+        else:
+            assert "~$2.00" in table_row
+
+    @pytest.mark.parametrize("dropped", [False, True])
+    def test_missing_model_detail_names_machine_reason_and_attended_remedy(self, dropped):
+        extra = {"tokens_by_day": "not-a-map"} if dropped else {}
+        data = _econ_data([_host_event("dev-a", self.TS, hosts=_priced_hosts(), extra=extra)])
+        data.fleet.devices_known_list = [{"device_id": "dev-a", "device_name": "kb-mbp"}]
+        snap = data.host_inventory.by_device["dev-a"]
+        assert snap.detail_reason == ("unsupported_schema" if dropped else None)
+        issue = _health_entry(aggregator.format_retro(data), "cost_unavailable")
+        cause = next(c for c in issue["causes"] if "per-model host tokens" in c)
+        assert "kb-mbp" in cause
+        assert ("unsupported_schema" if dropped else "absent") in cause
+        assert aggregator.ATTENDED_USAGE_MIN_VERSION in cause
+        assert "mm --version" in cause
+        assert "mm push" in cause
+
+    def test_many_machine_detail_failures_preserve_provenance_but_bound_health_output(self):
+        events = [
+            _host_event(f"laptop-{i:04d}", self.TS, hosts=_priced_hosts(1_000_000 + i))
+            for i in range(1_000)
+        ]
+        data = _econ_data(events)
+        assert data.host_inventory.rejected_rows == 0
+        row = self._row(data)
+        assert len(row.floor_causes) == 1_000
+        assert any(c.startswith("laptop-0999:") for c in row.floor_causes)
+        out = aggregator.format_retro(data)
+        entry = _health_entry(out, "cost_unavailable")
+        assert len(entry["causes"]) <= aggregator.MAX_AGENT_FLOOR_CAUSES + 1
+        assert any(
+            "additional" in cause and "details omitted" in cause for cause in entry["causes"]
+        )
+        assert len(out) < 20_000
+
+        hosts = _priced_hosts(5_000)
+        events.append(
+            _host_event(
+                "unpriced-laptop",
+                self.TS,
+                hosts=hosts,
+                extra={"tokens_by_day": _sibling(hosts, "gpt-not-a-real-model")},
+            )
+        )
+        out = aggregator.format_retro(_econ_data(events))
+        causes = _health_entry(out, "cost_unavailable")["causes"]
+        assert any(
+            "gpt-not-a-real-model" in cause and "do not estimate" in cause for cause in causes
+        )
+        assert len(out) < 20_000
+
+    def test_missing_per_model_sibling_keeps_tokens_and_drops_cost(self):
+        """`—` is unavailable, never a confident $0. The token volume is real
+        and still reported."""
+        ev = _host_event("dev-a", self.TS, hosts=_priced_hosts())
+        data = _econ_data([ev])
+        row = self._row(data)
+        assert row.tokens == 1_000_000
+        assert aggregator._agent_row_cost(row) == (None, False)
+        out = aggregator.format_retro(data)
+        assert "| Codex | 1.0M | 1 | 1 | — |" in out
+
+    def test_legacy_inclusive_counters_render_unavailable_not_a_number(self):
+        """Inclusive counters are a ceiling up to ~2x high — the one caveat
+        that points the wrong way, so it never becomes a rendered figure."""
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "tokens_by_day": _sibling(hosts, "gpt-5.6-terra"),
+                "counter_semantics": None,
+            },
+        )
+        data = _econ_data([ev])
+        assert self._row(data).counters_known is False
+        out = aggregator.format_retro(data)
+        assert "| Codex | — |" in out
+        assert _health_entry(out, "legacy_counters") is not None
+
+    def test_legacy_counters_do_not_leak_numeric_pricing_diagnostics_or_theme_tokens(self):
+        hosts = {"claude": {"2026-04-22": _usage(1_000_000)}}
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={
+                "counter_semantics": None,
+                "tokens_by_day": {
+                    "2026-04-22": {
+                        **_usage(1_000_000),
+                        "by_model": {
+                            "claude-opus-6": _usage(500_000),
+                            "claude-unknown-1": _usage(500_000),
+                        },
+                    }
+                },
+            },
+        )
+        data = _econ_data([ev])
+        row = self._row(data, "claude")
+        assert aggregator._unpriced_token_summary(row.by_model)[0] == 500_000
+        assert aggregator._extrapolation_notes(row.by_model, scope="Claude")
+        out = aggregator.format_retro(data)
+        agent_issues = [e for e in _health(out) if e.get("agent") == "Claude"]
+        assert [e["code"] for e in agent_issues] == ["legacy_counters"]
+        assert "| Claude | — |" in out
+        block = (
+            out.split("<!-- MM_THEMES_PROMPT -->", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+        )
+        agent = json.loads(block)["agents"][0]
+        assert agent["tokens"] is None
+        assert agent["counters_known"] is False
+
+    def test_legacy_health_names_only_legacy_machines_with_bounded_provenance(self):
+        count = aggregator.MAX_TOKEN_COVERAGE_PEER_NAMES + 2
+        legacy_devices = [f"legacy-{i}" for i in range(count)]
+        events = []
+        for i, device in enumerate([*legacy_devices, "healthy"]):
+            hosts = _priced_hosts(1_000_000 + i)
+            extra = {"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")}
+            if device in legacy_devices:
+                extra["counter_semantics"] = None
+            events.append(_host_event(device, self.TS, hosts=hosts, extra=extra))
+        data = _econ_data(events)
+        data.fleet.devices_known_list = [
+            {"device_id": d, "device_name": f"laptop-{i}"} for i, d in enumerate(legacy_devices)
+        ] + [{"device_id": "healthy", "device_name": "healthy-desktop"}]
+        assert self._row(data).legacy_devices == tuple(sorted(legacy_devices))
+        entry = _health_entry(aggregator.format_retro(data), "legacy_counters")
+        assert entry["machines"] == [
+            f"laptop-{i}" for i in range(aggregator.MAX_TOKEN_COVERAGE_PEER_NAMES)
+        ]
+        assert entry["machines_omitted"] == 2
+        assert "healthy-desktop" not in entry["detail"]
+        assert aggregator.ATTENDED_USAGE_MIN_VERSION in entry["remedy"]
+        assert "mm --version" in entry["remedy"]
+        assert "mm push" in entry["remedy"]
+
+    def test_stale_snapshot_is_absent_rather_than_zero(self):
+        hosts = _priced_hosts(day="2026-03-02")
+        ev = _host_event(
+            "dev-a",
+            "2026-03-03T12:00:00+00:00",
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        data = _econ_data([ev])
+        assert self._row(data) is None
+        out = aggregator.format_retro(data)
+        assert "$0" not in out
+
+    def test_duplicate_history_is_detected_rather_than_refused(self):
+        """Pre-1.1 this rendered two per-machine floors and no fleet figure,
+        because the aggregator believed the overlap was undetectable."""
+        hosts = _priced_hosts()
+        events = [
+            _host_event(
+                dev,
+                self.TS,
+                hosts=hosts,
+                extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+            )
+            for dev in ("dev-a", "dev-b")
+        ]
+        data = _econ_data(events)
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        assert usage.duplicate_ledger == ("codex",)
+        out = aggregator.format_retro(data)
+        assert _health_entry(out, "duplicate_ledger") is not None
+
+    def test_claude_and_host_dollars_are_separate_rows_never_one_total(self):
+        """The pre-1.1 invariant was 'host cost never enters the token block'.
+        One table per agent makes the mistake structurally unavailable, but the
+        property is still worth pinning."""
+        hosts = _priced_hosts()
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        data = _econ_data([ev])
+        data.sessions.active_days = {"2026-04-22"}
+        data.sessions.token_devices = {"dev-a": datetime(2026, 4, 28, tzinfo=timezone.utc)}
+        data.sessions.tokens_by_model = {
+            "claude-sonnet-5": {"input": 5_000, "cache_create": 0, "cache_read": 0, "output": 0}
+        }
+        usage = aggregator.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+        keys = [r.key for r in usage.rows]
+        assert keys == ["claude", "codex"]
+        assert "All models" not in aggregator.format_retro(data)
 
 
-# Track 64A deliberately retains pre-30A and forward fail-open counting.
 @pytest.mark.parametrize(
     "origin,count", [(None, 1), ("future-origin", 1), ("init", 0), ("recapture", 0)]
 )

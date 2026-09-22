@@ -3334,11 +3334,14 @@ class TestCounterSemantics:
             devices_known_list=[{"device_id": "dev-a", "device_name": "dev-a"}],
         )
         output = aggregator.format_retro(data)
-        economics = output.split("## API list-rate equivalent", 1)[1].split(
-            "## mm sync activity", 1
-        )[0]
-        assert "| dev-a | >=$1.84 |" in economics
-        assert "host declared totals incomplete (codex)" in output
+        # 1.1: one fleet-wide Agents row per agent, not a per-machine dollar
+        # table. The reader normalization and its partial-day tripwire still
+        # have to survive the wire and land on that row as a floor.
+        agents = output.split("## Agents", 1)[1].split("## ", 1)[0]
+        assert "| Codex | 1.0M | 1 | 1 | ≥$1.84 |" in agents
+        usage = aggregator.aggregate_agent_usage(data, machines_known=1)
+        codex = next(r for r in usage.rows if r.key == "codex")
+        assert any("incomplete" in c and "codex" in c for c in codex.floor_causes)
 
 
 def test_census_1030_fixture_embodies_the_new_pin(isolated_adapter_caches):

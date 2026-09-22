@@ -200,7 +200,7 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 ### Grok usage in fleet retro
 
-`mm enable-source grok` does two things: it syncs `~/.grok` `skills/`, `commands/`, and `rules/` (session files stay local), and it opts this Mac into reading terminal token totals from local `updates.jsonl`. Prompts never leave the Mac. The fleet retro's `AGENT LOGS` block then gains a `Grok models: seen on N days` line — a day count, not a token magnitude.
+`mm enable-source grok` does two things: it syncs `~/.grok` `skills/`, `commands/`, and `rules/` (session files stay local), and it opts this Mac into reading terminal token totals from local `updates.jsonl`. Prompts never leave the Mac. The fleet retro's `AGENTS` block then gains a `Grok` row alongside Claude and Codex, on the same footing.
 
 Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first upgrade
 to v0.14.17+ and verify with `mm --version`, then:
@@ -425,55 +425,48 @@ Inside Claude Code:
 
 The skill renders a paste-ready markdown retro — drop it into iMessage, Slack, or email. Commits are deduped across machines via `(canonical remote URL, sha)` so the same PR landed once but pushed from two laptops counts as one.
 
-**v0.12.37 output shape.** A pixel-aligned ASCII card sits at the top, then the full markdown body (commit-type mix, peak hours, commit bursts, ship-of-the-window, weekly buckets when window ≥14d). The card carries, in order: volume, LOC, PR references, a `MODELS (Claude Code sessions)` block of per-family token totals, an `AGENT LOGS` block, then NOTEWORTHY and up to three TOP WORK bullets the skill synthesizes.
+Requires **mm v1.1.0+** on the rendering Mac (below that the aggregator emits
+the pre-1.1 sections and no `MM_HEALTH` block). Peers only need v0.14.17+ to
+publish a usable capture.
 
-`AGENT LOGS` reports **rhythm, not magnitude** for other coding agents (Codex, Grok, and legacy OpenCode peers) — `Codex models: seen on 5 days`, plus `N of M machines with agent activity`. Rows are canonical model families rather than agents, because the synced snapshot carries no reader-to-family attribution; the day count is a lower bound, because a machine that has not pushed contributes no days and a peer on an older mm still reports last-touch totals. Per-machine token counters live in the body's `## Agent activity` table and are never summed across machines. Requires `mm enable-source codex` (or `grok`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. When the block is quiet, `## Notes` names the cause and the fix rather than leaving an absence to be read as zero.
+**v1.1 output shape.** A pixel-aligned ASCII card sits at the top, then a short markdown body: `## Code shipped` (volume, top repos, peak hours, ship-of-the-window, weekly buckets when window ≥14d), `## Agents`, `## Skills used`, `## Fleet`. The card carries volume, LOC, an `AGENTS` block, then NOTEWORTHY and up to three TOP WORK bullets the skill synthesizes.
+
+**Every agent is reported identically** — fleet-summed tokens, active days, contributing machines, estimated cost, top model:
+
+```text
+| Agent  | Tokens | Days | Machines | Est. cost | Top model          |
+|--------|-------:|-----:|---------:|----------:|--------------------|
+| Claude |   8.0B |   29 |        2 |   ~$5,590 | Opus 5 (4.8B)      |
+| Codex  |   3.3B |   28 |        2 |   ~$2,239 | gpt-5.6-terra (2.0B) |
+| Grok   |   1.0B |   11 |        1 |     ≥$546 | grok-4.6-build (830.8M) |
+```
+
+Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
+
+Days are a set union across machines and can only understate. Token sums can double-count a migrated home directory carrying two device ids with overlapping ledger history. mm flags identical host-ledger day counters as possible overlap through health code `duplicate_ledger`; matching totals alone are not proof, so inspect the machines before retiring one. This detector covers host ledgers, including their Claude models; it does not establish that Claude Code session histories are disjoint. Before v1.1 this hazard was handled by refusing to sum host tokens at all, while summing Claude's under the identical risk.
 
 The card is generated via a two-pass flow: the first invocation emits an `MM_THEMES_PROMPT` JSON sidecar, the skill synthesizes themes + noteworthy, then re-invokes `mm retro-fleet <window> --theme … --noteworthy … --name …` to render the final card. `## Trends vs prior <N>d` is a two-column table computed from the synced events corpus (the immediately preceding equal-length window), identical in both passes, and fleet-deterministic — it does not depend on when you last typed the command. Direct CLI users (no skill) get the body without the card. The window argument is `Nd` — `7d`, not `7`.
 
 Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the same CLI surface is available directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`) or terminal use, just without the LLM judgment layer the skill adds (natural-language window parsing, error translation). The earlier `python -m mind_meld.skills.retro_fleet.aggregator` form is a development-checkout fallback only; pipx-installed mm lives in an isolated venv that bare `python` / `python3` can't import from, so the skill's documented invocation routes through the `mm` console-script (always on PATH wherever mm is installed).
 
-**Token usage and API list-rate equivalent (v0.11.14, hosts in v0.12.52).** Under **Claude Code activity** the retro answers: how much did Claude Code consume this window, was it Sonnet- or Opus-heavy, did the cache do its job, what would this have cost at API list rates. Those numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
+**Token usage and cost (v0.11.14, hosts in v0.12.52, unified in v1.1).** The `## Agents` table answers: how much did each agent consume this window, on which model, and what would that have cost at API list rates. Claude's numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
 
-The body also has **`## API list-rate equivalent (per machine)`** for the five observed `gpt-*` host models and `grok-4.6-build`. It is not subscription spend: historical tokens are repriced at current rates, meaning the rates bundled with this mm release, verified on the dates shown. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. A synthetic example (all four token fields are included):
+Cost is not subscription spend: historical tokens are repriced at the rates bundled with this mm release, verified on the dates below. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
 
-```text
-API list-rate equivalent (Claude Code, window sum)
-| Model | In | Cache w | Cache r | Out | List-rate $ |
-|---|---:|---:|---:|---:|---:|
-| Sonnet 5 | 1.0M | 2.0M | 3.0M | 100.0k | >=$8.60 |
-| Fable 5.1 | 100.0k | 1.0M | 4.0M | 100.0k | >=$19.50 |
-| All models | 1.1M | 3.0M | 7.0M | 200.0k | >=$28.10 |
-
-API list-rate equivalent (per machine — do not sum)
-| Machine | API list-rate equivalent |
-|---|---|
-| dev-a | >=$20.25 |
-| dev-b | >=$11.25 |
-```
-
-Here the Claude token cache is incomplete on one project, so every Claude row
-uses floor rates. Host dev-a has an unpriced Grok model and Grok's inherent
-context-tier uncertainty; dev-b's Grok reader failed. Each cause appears in
-Notes. These two figures come from different logs; never add them. Claude's
-sum is itself a sum of per-machine inventories, not deduplicated: a migrated
-home directory can be counted twice. Per-machine model subtotals live in the
-economics section, capped at five with an omitted count, never in Agent activity.
-The compact table headers mean input, cache write, cache read and output.
+Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Grok's prompt-size caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
 
 Legend:
 
-- `~` is an estimate; it may use a family-extrapolated rate, named in Notes.
-- `>=` is a floor of the priced subtotal under bundled rate assumptions,
+- `~` is an estimate; it may use a family-extrapolated rate, named in `MM_HEALTH`.
+- `≥` is a floor of the priced subtotal under bundled rate assumptions,
   never a guaranteed billing minimum. Causes include unpriced models,
   incomplete coverage, dropped readers, unattributed tokens and an unknown
-  long-context tier. One floor condition makes every priced cell in that
-  section use floor rates; model amounts and totals share one basis.
+  long-context tier, and are named per agent in `MM_HEALTH`.
 - `—` is unavailable, not zero.
 
-An all-unpriced device shows `>=$0.00` plus the named cause; a snapshot predating the window shows `—`. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so its row is also `—` until it upgrades and republishes. Estimates take priority under the 12-machine display cap, with omissions stated. Grok's Notes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. This is never a machine-level range. Any partial/degraded reader or nonzero model cache writes suppress that figure.
+An agent with no priceable model shows `—`, never a confident `$0`. A snapshot predating the window contributes nothing at all. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so any agent it contributes to shows `—` until it upgrades and republishes — the one caveat that points the wrong way, and so the one that stays a rendered marker. Grok's cost causes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. Any partial/degraded reader or nonzero model cache writes suppress that figure.
 
-`--dump-host-usage` carries the inputs (`tokens_by_day` and coverage); the rate table is bundled with mm and is not in the dump. Host totals never enter the Claude cost line, and there is no fleet sum.
+`--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); the rate table is bundled with mm and is not in the dump.
 
 **Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-09-10 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)). mm has no network, so a rate change is a code change.
 
@@ -482,7 +475,7 @@ stays at $3/$15. Fable/Mythos 5.1 cache reads are $0.25 per MTok; 5.0 stays
 at $1.00. Anthropic estimates assume 1h cache writes (2x input), while floors
 use 5m writes (1.25x); the wire does not distinguish TTLs. Verified model ids
 are recorded separately from the family fallback, which still prices new ids
-but names them as extrapolated in Notes.
+but names them as extrapolated in `MM_HEALTH`.
 
 Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.
 The 2026-09-14 local census found 0 fast rows in 22,042 carrying `speed`, and
@@ -499,10 +492,15 @@ mm retro-fleet 7d
 
 Pull refreshes peer snapshots; attended push refreshes this Mac's capture.
 Direct rendering reads available snapshots and skips the skill's refresh step.
-In `## Agent activity`, Retained is what the host logs still hold (at most 90
-active UTC days); Window counts only eligible snapshots. Host logs can lose old
-records. Observation dates are endpoints, not proof of continuous coverage.
-A stale snapshot on the window's first UTC day still shows Window `—`.
+Host logs hold at most 90 active UTC days and can lose old records; observation
+dates are endpoints, not proof of continuous coverage. A stale snapshot
+contributes nothing to the window, even on its first UTC day.
+
+**Data health.** Degradations do not clutter the report. The body carries one
+line (`_Data health: N items worth knowing about — ask me to diagnose._`) and
+the detail — every issue, with its remedy — rides a machine-readable
+`MM_HEALTH` JSON block that the skill reads and summarizes with judgment.
+Machines are named by hostname there, not by device id.
 
 Upgrade roles are separate: upgrade the **producer** and republish for reader
 or counter fixes; upgrade the **renderer** for new rates and presentation (old

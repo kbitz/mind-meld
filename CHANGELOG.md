@@ -2,6 +2,37 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.1.0] - 2026-09-22
+
+**The fleet retro now reports Claude, Codex and Grok identically — fleet-summed tokens, active days, machines, cost and top model in one `## Agents` table — and moves every data-quality caveat into a machine-readable `MM_HEALTH` block.** Output drops from roughly 150 lines to about 50.
+
+### Changed
+
+- The card carries one `AGENTS` block instead of `MODELS (Claude Code sessions)` above `AGENT LOGS`. Those two reported different units (tokens vs distinct days) from different sources and carried a standing prohibition on comparing them, which is what made the card read Claude-first. Comparing the rows is now the point.
+- Host tokens are summed fleet-wide per agent. The pre-1.1 refusal rested on a claim that a migrated home directory's overlapping history was undetectable; it is not. A migration copies the ledger byte for byte, so duplicated days carry identical counter tuples on both devices, and `_detect_duplicate_ledgers` reports that as health code `duplicate_ledger`. The asymmetry it replaced was indefensible on its own terms: Claude's tokens were already summed under the identical hazard, with the risk stated out loud in the scope sentence.
+- Machines are identified by hostname (`kb-mbp`) rather than device id (`3a6c7dc9`); duplicate hostnames include short IDs so remedies identify the right Mac. The registry has always carried `device_name`; the retro simply never read it.
+- Cost floors name their causes. Partial or failed readers conservatively floor every agent's priced subtotal because the wire cannot attribute missing data to model families. Grok's inherent prompt-size pricing uncertainty remains specific to its models.
+- Step 0 gates on `SKILL_MIN_VERSION` (v1.1.0) for the rendering Mac, distinct from `ATTENDED_USAGE_MIN_VERSION` (v0.14.17) for a peer publishing a capture.
+
+### Removed
+
+- `## Claude Code activity`, `## Agent activity`, and `## API list-rate equivalent (per machine)` — three sections describing one fleet three ways, keyed on unreadable device ids, including a currency table under a "Do not sum these values" heading. Machine-level forensics stay in `mm diag` and `--dump-host-usage`.
+- `## Notes` and its closed thirty-entry vocabulary, the five-line rate-marker legend, and the two scope sentences. `MM_HEALTH` preserves diagnostic meaning and remedies through the current health-code interface; the body carries one summary line and the skill decides what is worth the reader's attention. Health CODES are the documented interface, so rewording a detail is no longer a doc change.
+- Cache-hit ratio, session counts and the ephemeral-workspace breakdown (Claude-only, no Codex/Grok analogue; cache hit ratio is not user-controllable). The commit-type mix and burst shape moved to `MM_THEMES_PROMPT`, where they still feed theme synthesis.
+
+### Fixed
+
+- Host ledgers carrying `claude-*` models were dropped entirely rather than counted. They now merge into the Claude row; the two corpora cannot overlap, because `host_usage` reads Codex and Grok ledgers and never Claude Code's session jsonls.
+- Claude's token volume and its cost basis derive from the same model map, so the two cannot drift.
+- Card dollar amounts under a `≥` marker round down, matching the body table instead of rounding up past the bound they claim.
+- The card counts Claude-only machines; zero-only model buckets do not create activity rows. Mixed-version model classifications preserve reported volume without inventing another agent's cost. Legacy counters remain unavailable during theme synthesis too.
+- Partial/failed-reader coverage stays conservative across all families; per-machine Grok bounds retain their machine labels. Skill names and fleet-name lists remain bounded in the JSON payloads and report.
+- Pricing health matches the visible cell: `cost_floor` accompanies a priced `≥` subtotal; `cost_unavailable` explains `—` when no priced basis exists. Legacy rows suppress numeric and extrapolated pricing health and identify the machines needing a versioned upgrade. Missing or rejected detail retains its machine and acceptor reason.
+
+### Upgrade notes
+
+- Upgrade the rendering Mac, then run `mm install-skills` and restart the agent so it reloads `SKILL.md`. A store refresh cannot change instructions already loaded in a session. Peers need no change.
+
 ## [1.0.0] - 2026-09-22
 
 **Mind Meld 1.0 establishes the [Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x) for storage, CLI, and machine-readable output.** Existing 0.14.x fleets interoperate without migration; newer-format storage now refuses safely.

@@ -31,91 +31,92 @@ hands you a screenshot-quality ASCII card up front for sharing.
 
 mind-meld's `_run_events_tail` writes per-device daily JSONL files at
 `~/.local/share/mind-meld/events/<device>-<YYYY-MM-DD>.jsonl` on every push.
-Three event types drive the rendered retro: `mm-push`, `git-snapshot`,
-`sessions-snapshot`. A fourth type, `host-usage-snapshot`, is accepted as
-last-known-good host inventory per device (Track 22A) and is **not**
-rendered as window spend. Files sync fleet-wide via the `mm-events` source.
+Four event types drive the retro: `mm-push`, `git-snapshot`,
+`sessions-snapshot`, and `host-usage-snapshot`. Files sync fleet-wide via the
+`mm-events` source.
 
 This skill orchestrates a **two-pass flow**:
 
-1. **Pass 1** — call the aggregator. It dedups commits, sums sessions /
-   tokens / skills, and renders the markdown body. The bottom of the
-   output carries an `MM_THEMES_PROMPT` JSON block: raw material for you
-   to synthesize the card's NOTEWORTHY line + 3 TOP WORK themes.
-2. **Pass 2** — call the aggregator again with `--theme` / `--noteworthy`
-   / `--name` flags. Python re-renders with a pixel-aligned ASCII card
-   pinned at the top of the output.
+1. **Pass 1** — call the aggregator. It dedups commits, sums usage, and renders
+   the markdown body. The bottom carries two JSON blocks: `MM_THEMES_PROMPT`
+   (raw material for the card's NOTEWORTHY line + 3 TOP WORK themes) and
+   `MM_HEALTH` (every data-quality issue, with remedies).
+2. **Pass 2** — call the aggregator again with `--theme` / `--noteworthy` /
+   `--name`. Python re-renders with a pixel-aligned ASCII card at the top.
 
-This split is load-bearing. LLM-padded right borders drift by a char or
-two often enough to look janky in screenshots; routing the card through
-Python's deterministic padding solves it without making the card content
-dumber.
+This split is load-bearing. LLM-padded right borders drift by a char or two
+often enough to look janky in screenshots; routing the card through Python's
+deterministic padding solves it without making the card content dumber.
 
-The `MODELS` block is also a **second-pass share-card feature**. The first
-pass remains useful raw markdown and deliberately has no card. Its rows group
-observed model IDs from Claude Code session snapshots; they do not claim
-fleet-host or vendor adoption, and an omitted family means unobserved rather
-than zero. The header states that source coverage directly
-(`MODELS (Claude Code sessions)`) and the block points to Notes when token
-coverage is incomplete.
+## One table, every agent
 
-The `AGENT LOGS` block (v0.12.37) is the second-pass sibling for **other**
-coding agents — Codex and Grok Build. It reports **rhythm, never magnitude**:
+Claude, Codex and Grok are reported **identically**: fleet-summed tokens,
+active days, contributing machines, estimated cost, top model. Both the card's
+`AGENTS` block and the body's `## Agents` table use that one shape.
 
-```text
-AGENT LOGS (1 of 3 machines with agent activity)
-Codex models: seen on 5 days
-```
+Comparing the rows is the point. They share a unit (tokens), a window, and a
+counter basis (input + cache write + cache read + output, disjoint counters
+only). Say "Claude carried roughly twice Codex's volume" if the numbers say so.
 
-Read it as: *"the Codex model family appeared on 5 distinct UTC days in this
-window, and 1 of 3 known machines contributed any agent activity."* Token
-totals for these agents live in the body's `## Agent activity` table, per
-machine, and nowhere on the card.
+Four things are still true and still matter:
 
-Three things this block is not, each of which the data genuinely cannot
-support:
+1. **Days are a lower bound.** A machine that never pushed in the window
+   contributes no days, and a peer on an older mm publishes a coarser shape.
+   The error is one-directional: it can only understate.
+2. **`≥` is a floor, `~` is an estimate, `—` is unavailable — never zero.**
+   Every dollar cell carries one. `cost_floor` explains a priced `≥` subtotal;
+   `cost_unavailable` explains a visible row with no priced basis. Legacy
+   inclusive counters use `legacy_counters`, with affected machines and an
+   upgrade remedy, and never carry numeric or extrapolated pricing claims.
+3. **Sources still differ.** Claude's tokens come from Claude Code session
+   logs; Codex and Grok come from each machine's local agent ledger. Both are
+   fleet sums; both can double-count a migrated home directory. The detector
+   below flags possible host-ledger overlap; it does not prove that Claude Code
+   session histories are disjoint.
+4. **An absent row means unobserved, not zero.** Check `MM_HEALTH`.
 
-1. **A row is a model family, not an agent.** The wire carries no
-   reader-to-family attribution at all, and model IDs are bucketed by prefix,
-   so the Codex reader (and a legacy OpenCode peer still publishing host
-   snapshots) both land GPT models in the `Codex models` family.
-   `Claude (via agents)` is a legal row on a legacy peer that still names a
-   retired reader — it is not a live "OpenCode running a Claude model" claim —
-   and it means something different from the `MODELS` block's `Claude` row.
-2. **`seen on N days` is a lower bound, not a count.** Track 32A made every
-   reader per-turn, so resuming a session no longer moves its total onto a
-   later day. What remains: a peer on an older mm still publishes the old
-   shape, and a machine that never pushed in a window contributes no days.
-   It can only ever understate.
-3. **An absent or empty block is not zero.** The body always names the cause
-   (no snapshot yet, no reader contributed, all snapshots stale, nothing active)
-   with a remedy. An empty contributor list can mean no source is enabled or
-   that every selected reader had no attributable local ledger; read the note
-   instead of inferring which one occurred.
+A partial or failed reader makes every agent's priced total conservative
+(`≥`): the wire cannot identify which model families that reader omitted.
+Do not guess ownership from the reader's name. Grok's inherent prompt-size
+pricing uncertainty remains specific to its models. Missing or rejected price
+detail names its machine and the acceptor's `detail_reason` when available.
+Repeated hostnames carry short device IDs so remedies identify the right Mac.
+
+### The duplicate-ledger detector
+
+Pre-1.1 the renderer summed Claude's tokens fleet-wide but refused to sum
+Codex's or Grok's, on the theory that a migrated home directory yields two
+device ids with overlapping history and nothing could detect the overlap. The
+asymmetry was indefensible — Claude carried the identical hazard and was summed
+anyway — and the premise was false. A migration copies the ledger byte for
+byte, so duplicated days carry *identical* counter tuples on both devices.
+
+`_detect_duplicate_ledgers` looks for that signal. If it fires, `MM_HEALTH`
+reports code `duplicate_ledger` and names the affected agents; their token and
+cost figures may be double-counted. Equal aggregate counters can also occur
+independently: inspect `mm devices` and `--dump-host-usage` before recommending
+device removal. Day counts are unaffected — a set union is idempotent.
 
 ## Step 0: preflight
 
-Within Step 0, only stage 0A can stop the run: 0B is informational and
-must not change what you do next. This rule scopes to Step 0 only — it says
-nothing about Steps 1-5, which keep their own failure contracts. In
-particular, a failed or malformed `mm retro-fleet` in Step 2 is still fatal;
-never synthesize a card from output you did not get. On a healthy machine
-Step 0 is silent — do not narrate the preflight.
+Within Step 0, only stage 0A can stop the run: 0B is informational and must not
+change what you do next. This rule scopes to Step 0 only — a failed or
+malformed `mm retro-fleet` in Step 2 is still fatal; never synthesize a card
+from output you did not get. On a healthy machine Step 0 is silent — do not
+narrate the preflight.
 
 **0A — is `mm` on PATH and working?** Its own block, its own contract.
-Do not fold this into Step 1's `mm push` / `mm autopull` block.
 
 ```bash
 command -v mm
 ```
 
-If that exits non-zero, **STOP.** Do not run Steps 1-5. Anything you
-produced would be missing this machine's activity entirely. Tell the user:
+If that exits non-zero, **STOP.** Do not run Steps 1-5. Tell the user:
 
 > `mm` is not on your PATH, so I stopped before running the retro. Check
-> `pipx list | grep mind-meld`. If it is listed there, this is a
-> PATH-order problem, not a missing install. After you repair it, restart
-> the agent so it reloads SKILL.md.
+> `pipx list | grep mind-meld`. If it is listed there, this is a PATH-order
+> problem, not a missing install. After you repair it,
+> restart the agent so it reloads SKILL.md
 
 If `mm` resolves, run:
 
@@ -123,112 +124,91 @@ If `mm` resolves, run:
 mm --version
 ```
 
-If that fails, **STOP.** A broken install is not a degraded run; later
-`mm` commands cannot work either. Quote the error, tell the user to
-repair it (same `pipx list` check), and restart the agent so it reloads
-SKILL.md.
+If that fails, **STOP.** A broken install is not a degraded run. Quote the
+error, tell the user to repair it, and restart the agent.
 
-Require **mm v0.14.17 or newer** before continuing. Below that floor, STOP:
-a converged `mm push` can succeed without refreshing usage. Tell the user to
-upgrade using the command below, verify `mm --version`, run `mm install-skills`,
-and restart the agent so it reloads this skill. A store refresh cannot change
-instructions already loaded in an agent session. Do not infer a fresh capture
-from exit 0; verify the recorded timestamp and publication with `mm status`.
+Require **mm v1.1.0 or newer** before continuing. Below that floor, STOP: the
+aggregator emits the pre-1.1 sections and no `MM_HEALTH` block, so this file's
+instructions describe surfaces its output does not have. Tell the user to
+upgrade, verify `mm --version`, run `mm install-skills`, and restart the agent
+so it reloads this skill — a store refresh cannot change instructions already
+loaded in a session. Do not infer a fresh capture from exit 0; verify the
+recorded timestamp and publication with `mm status`.
 
-**0B — after Step 1, relay an upgrade notice if one appeared.** Step 1
-runs interactive `mm push`, whose tail may print something about
-upgrading (GitHub `/tags` check). If `mm push` printed anything about
-upgrading, repeat it verbatim in your reply, then add: this retro may
-omit blocks added after your installed version; absent means unmeasured,
-not zero. The upgrade command is
-`pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`
-— do not invent a different one. After they run it, they still need
-`mm install-skills`, then restart the agent so it reloads SKILL.md.
+Peers may lag the rendering Mac. A machine needs **mm v0.14.17 or newer**
+for attended capture publication. Peer-binary upgrades needed for host capture
+target this floor; local pricing upgrades and diagnostics have their own remedies.
 
-Silence is not evidence of freshness. The notice is 24h-throttled,
-skipped when `[upgrade] auto_check = false` or `--no-check-version`, and
-network-dependent.
+**0B — after Step 1, relay an upgrade notice if one appeared.** Step 1 runs
+interactive `mm push`, whose tail may print something about upgrading. If it
+did, repeat it verbatim, then add: this retro may omit blocks added after your
+installed version; absent means unmeasured, not zero. The upgrade command is
+`pipx install --force git+https://github.com/kbitz/mind-meld.git@latest` — do
+not invent a different one. After they run it they still need
+`mm install-skills`, then an agent restart.
+
+Silence is not evidence of freshness. The notice is 24h-throttled, skipped when
+`[upgrade] auto_check = false` or `--no-check-version`, and network-dependent.
 
 ## Step 1: refresh fleet state
 
 Push first, then pull. Attended push refreshes host usage even without user
-content changes; Git/session activity capture still requires a substantive push.
-Use `mm recapture 30d` for omitted Git history, not repeated empty pushes. `mm autopull` then collects what
-other Macs have pushed since the last sync.
+content changes; Git/session activity capture still requires a substantive
+push. Use `mm recapture 30d` for omitted Git history, not repeated empty
+pushes.
 
-Use `mm push`, not `mm autopush` (v0.12.16). The quiet autopush path gets
-the 250ms walk budget instead of 500ms AND takes
-`_decide_token_walk_policy`'s cold-cache branch, which passes
-`token_cache_files=None` and drops both `tokens_by_day` and `skills_by_day`
-for every project — so refreshing through it made the retro's own refresh
-the most truncation-prone push in the system, immediately before the retro
-read that snapshot. `mm push` is safe here: `_maybe_prompt_migration`
-short-circuits to a stderr warning on a non-TTY, which is what a skill Bash
-call is.
+Use `mm push`, not `mm autopush`. The quiet autopush path gets the 250ms walk
+budget instead of 500ms AND takes `_decide_token_walk_policy`'s cold-cache
+branch, which drops both `tokens_by_day` and `skills_by_day` for every project
+— so refreshing through it made the retro's own refresh the most
+truncation-prone push in the system, immediately before the retro read that
+snapshot.
 
 The two commands do NOT have the same failure contract, so don't treat a
-non-zero exit as fatal here. `mm autopull` exits 0 on every error path,
-including when mm isn't initialized. `mm push` exits 1 on missing config, an
-unavailable passphrase, or a lock held by a concurrent autopush hook — all
-routine, none of them a reason to abandon the retro. Run both, ignore a
-non-zero exit from `mm push`, and continue to Step 2 with whatever state
-exists on disk.
+non-zero exit as fatal. `mm autopull` exits 0 on every error path. `mm push`
+exits 1 on missing config, an unavailable passphrase, or a lock held by a
+concurrent autopush hook — all routine. Run both, ignore a non-zero exit from
+`mm push`, and continue to Step 2 with whatever state exists on disk.
 
 ```bash
 mm push
 mm autopull
 ```
 
-Skip Step 1 only if the user explicitly asks for a "stale" or "offline"
-retro, or if they just ran `mm push` and `mm pull` themselves. Step 0
-still runs.
+Skip Step 1 only if the user explicitly asks for a "stale" or "offline" retro,
+or if they just ran `mm push` and `mm pull` themselves. Step 0 still runs.
 
 ## Step 2: first-pass aggregation
-
-Run this command and capture the output. Substitute `<window>` with what the
-user asked for (`7d`, `30d`, `90d`, etc. — days only).
 
 ```bash
 mm retro-fleet <window>
 ```
 
-Default window is `7d` if the user did not specify.
+Substitute `<window>` with what the user asked for (`7d`, `30d`, `90d` — days
+only). Default is `7d`.
 
-If `mm` is not on `$PATH`, the command fails with `command not found`. Do
-not retry — surface the error and tell the user to verify their mm install
-(`pipx list | grep mind-meld`). Do NOT fall back to
-`python -m mind_meld.skills.retro_fleet.aggregator`: on most macOS systems
-`python` is not on PATH (only `python3` is), and pipx-installed mm lives in
-an isolated venv that nothing outside it can import.
+Do NOT fall back to `python -m mind_meld.skills.retro_fleet.aggregator`: on
+most macOS systems `python` is not on PATH, and pipx-installed mm lives in an
+isolated venv that nothing outside it can import.
 
 ## Step 3: synthesize themes + noteworthy
 
-The first-pass output ends with a fenced JSON block tagged
-`<!-- MM_THEMES_PROMPT -->`. Read it. The payload includes top repos by
-commit count, the ship-of-the-window commit, and aggregate window stats —
-plus the surrounding markdown body shows the commit-type mix, peak hours,
-commit bursts, and per-skill counts.
+The first-pass output ends with `<!-- MM_THEMES_PROMPT -->`. Read it. It
+carries top repos, the ship-of-the-window commit, window stats, the
+commit-type mix, burst shape, skill counts, and the per-agent rollup.
+Skill entries carry bounded display names and invocation counts. Agent tokens
+are `null` when `counters_known` is false; never infer or quote a token count
+for those rows.
 
-Synthesize:
-
-- **NOTEWORTHY** — one line, ≤55 chars. The single biggest thing
-  shipped this window. Lead with the verb; name the artifact, not the
-  commit. "Shipped fleet-wide skill counts (mm v0.11.27)" not
-  "v0.11.27 fix(retro): track skills_by_day".
+- **NOTEWORTHY** — one line, ≤55 chars. The single biggest thing shipped. Lead
+  with the verb; name the artifact, not the commit. "Shipped fleet-wide skill
+  counts (mm v1.1.0)" not "v1.1.0 fix(retro): track skills_by_day".
 - **TOP WORK** — three bullets, each ≤55 chars. Themes, not individual
-  commits. Synthesize commit messages into a few cohesive narratives
-  (e.g., "Fleet retro polish + token rollup" covers six related
-  commits). Lead with the verb. No leading bullets / dashes — Python
-  adds the bullet glyph in the card.
+  commits. Lead with the verb. No leading dashes — Python adds the glyph.
 
-Keep them tight. The card has a fixed width and Python truncates with
-`…` when content overflows; aim short on purpose.
+Python truncates with `…` when content overflows; aim short on purpose.
 
 ## Step 4: second-pass card render
-
-Call the aggregator again with the synthesized strings and `--name` set to
-the user's identifier (use `git config --global user.email` to derive a
-short handle when the user hasn't said one explicitly).
 
 ```bash
 mm retro-fleet <window> \
@@ -239,253 +219,120 @@ mm retro-fleet <window> \
   --theme "<theme 3>"
 ```
 
-**Echo the output as your assistant message text — do NOT rely on the
-bash tool result alone.** Claude Code collapses bash output behind
-Ctrl-O, so just running the command leaves the card buried. Paste
-stdout directly into your reply, split into two pieces so both render
-correctly:
+Derive `--name` from `git config --global user.email` when the user hasn't
+given one.
 
-1. The ASCII card (lines from `╔═══╗` through `╚═══╝` inclusive) goes
-   inside a fenced code block tagged ` ```text `. The card uses
-   box-drawing chars + space padding for alignment, which markdown
-   collapses outside a code fence.
-2. The markdown body that follows the card pastes inline, unwrapped,
-   so headers and lists render normally.
+**Echo the output as your assistant message text — do NOT rely on the bash
+tool result alone.** Claude Code collapses bash output behind Ctrl-O, so just
+running the command leaves the card buried. Paste stdout into your reply in
+two pieces:
 
-Then continue with Step 5 in the same message. The card is paste-ready
-for iMessage / Slack / email; the body is for readers who want the
-deeper data.
+1. The ASCII card (lines from `╔═══╗` through `╚═══╝` inclusive) inside a
+   fenced ` ```text ` block. The card uses box-drawing chars and space padding,
+   which markdown collapses outside a fence.
+2. The markdown body that follows pastes inline, unwrapped.
 
-The card's `N detected GitHub PR references` line is global delivery context,
-not a model-family metric or verified merge status. It appears once above
-`MODELS`, including when the count is zero. When the card says
-`Model-token coverage incomplete: N peer(s); see Notes`, treat the family rows
-as a partial subtotal: the Notes identify affected peers and tell you to run
-`mm push`, then upgrade if the warning persists.
+Then continue with Step 5 in the same message.
 
-## Step 5: write the praise / level-up / focus narrative
+## Step 5: health, then narrative
 
-The card is the shareable artifact. The conversation is where the
-narrative lives. After showing the second-pass output, append in the
-chat (NOT to the card) three short paragraphs:
+### Health — use judgment
 
-- **Praise (one specific thing).** Anchor in actual commits or stats
-  from the body. Not "great work" — say exactly what was good. "Six
-  commits restructured the lockedjson contract without breaking the
-  flock contention semantics — that's textbook refactor discipline."
-- **Level-up (one specific thing).** Frame as investment, not
-  criticism. "Test ratio held at ~25% this window; lifting it past 40%
-  before the next major refactor would cushion regressions."
-- **Focus next window (one specific thing).** Forward-looking and
-  actionable. "Land the `--format json` export so a weekly cron can
-  keep a long-horizon archive now that snapshot files are gone."
+The body ends with at most one italic line: `_Data health: N items worth
+knowing about — ask me to diagnose._` The detail is in the `MM_HEALTH` JSON
+block on the first pass. **Read it and decide what matters.** This is the whole
+reason the retro is an LLM skill and not a program: the aggregator used to
+render every caveat it knew, and the result was a wall of hedging longer than
+the data. The current health-code interface preserves diagnostic meaning and
+remedies; it does not preserve every old Notes sentence verbatim.
 
-Match the **tone block**: specific, earned, no coddling. Praise should
-feel like something you'd actually say in a 1:1; growth suggestions
-should feel like investment advice. Skip generic compliments. If the
-data doesn't support a confident take, say so and skip the section
-rather than fluffing.
+Your job:
 
-## Usage scope and markers
+- Say **one sentence** about anything that changes how the user should read
+  the numbers. A silent machine, a double-counted ledger, a floor on a headline
+  cost — those matter.
+- Say **nothing** about noise. "1 of 16 pushes captured 0 repositories" does
+  not change a 172-commit picture. "8 of 16" does.
+- Then offer: *"Want me to diagnose?"* If they say yes, walk the `MM_HEALTH`
+  entries, run the `remedy` commands where they're local, and report back.
+- Never invent a cause. Each entry carries `code`, `detail`, and usually
+  `remedy`; the wire does not always say *why* something failed, and an
+  unrecognized `code` is reported verbatim, never interpreted.
 
-The existing H2 sections keep their source boundaries. These scope sentences
-are a renderer contract:
+Known codes: `fleet_incomplete`, `registry_unavailable`, `duplicate_ledger`,
+`legacy_counters`, `cost_floor`, `cost_unavailable`, `sessions_incomplete`, `tokens_incomplete`,
+`pricing_extrapolated`, `skills_incomplete`, `unpriced_models`,
+`agent_coverage`, `unregistered_devices`, `discovery_errors`, `git_budget`,
+`git_gap`, `zero_repo_capture`, `parse_errors`, `window_exceeds_retention`,
+`fleet_changed`.
 
-- Source: Claude Code session logs; sum of per-machine inventories, not deduplicated (a migrated home directory can be counted twice).
-- Source: latest host-usage snapshots; per machine, never summed. Host logs can lose old records; observed endpoints do not prove continuous coverage.
+Two of these change what a number *means* and should almost always surface:
+`duplicate_ledger` (possible double-counted tokens and cost for the named agents) and
+`zero_repo_capture` (the commit count is a lower bound — do not compute a trend
+from it, and do not write the narrative off it).
 
-Claude names its contributing machine count, newest snapshot, UTC window and
-coverage before its table. Agent activity names the window, then each machine's
-snapshot and observed day range below its family table. Short states decode as
-stale = last seen before window; ahead = clock ahead (<=24h); idle = current,
-no agent activity observed; missing = no snapshot. Claude* means Claude (via agents).
-A stale snapshot contributes no in-window figure, even on the first UTC day,
-but its retained total still appears. Input, cache write, cache read and output
-all contribute to token totals. Model tables cap at five, with an omitted count.
+### Narrative
 
-API list-rate equivalent (Claude Code, window sum) and API list-rate equivalent
-(per machine — do not sum) come from different logs; never add them. The shared
-legend stays after the vendor provenance in the economics H2. `~` is an estimate;
-`>=` is a floor of the priced subtotal under bundled assumptions, never a
-billing minimum; `—` is unavailable, not zero. Every dollar cell has a marker.
-Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.
-Per-model host dollars belong only in economics; at-most figures stay in Notes.
+Append three short paragraphs in the chat, NOT to the card:
 
-## Notes section in aggregator output
+- **Praise (one specific thing).** Anchor in actual commits or stats. Not
+  "great work" — say exactly what was good. "Six commits restructured the
+  lockedjson contract without breaking the flock contention semantics — that's
+  textbook refactor discipline."
+- **Level-up (one specific thing).** Frame as investment, not criticism. "Test
+  ratio held at ~25% this window; lifting it past 40% before the next major
+  refactor would cushion regressions."
+- **Focus next window (one specific thing).** Forward-looking and actionable.
 
-The body's `## Notes` section consolidates these data-quality lines (the
-section is omitted when there is nothing to surface). This list is closed
-and 1:1 with strings the aggregator emits. **An unlisted `## Notes` line
-is reported verbatim and never interpreted** — a stale installed copy of
-this file must not invent a meaning on a surface whose purpose is not
-lying.
+Match the tone: specific, earned, no coddling. Praise should feel like
+something you'd actually say in a 1:1. Skip generic compliments. If the data
+doesn't support a confident take, say so and skip the section rather than
+fluffing it.
 
-Known lines:
-
-- `Host-usage captures from <machines> predate this window (oldest <day> UTC)` —
-  one aggregated staleness class, not one note per machine. On the named
-  producing Macs upgrade to mm v0.14.17+, verify `mm --version`, then run `mm push` and `mm status`; pull again
-  on the rendering Mac. It refreshes usage without Git roots or content
-  changes. Do not infer zero spend from a stale capture.
-- `Fleet incomplete: N registered device(s) haven't pushed events in this
-  window.` — activity may be incomplete from those peers.
-- `N unregistered device id(s) had events in this window (filtered out).` —
-  phantom event files from de-registered or test-leaked devices were
-  skipped from the rendered count. Stale files reap automatically after 90
-  days via `mm gc`.
-- `Sessions count incomplete: N peer(s) on pre-v0.11.0` — those peers still
-  emit v=1 sessions snapshots (delta semantics). Their session totals are
-  honestly omitted instead of double-counted.
-- `Tokens incomplete on <peers>: pre-v0.11.0 session schema + pre-v0.11.14 OR cold token cache` —
-  those peers cannot provide complete model-token totals. The reasons join with
-  ` + ` and name `pre-v0.11.0 session schema` and/or `pre-v0.11.14 OR cold token
-  cache`. Run `mm push` on the named peers to rebuild the cache, then upgrade
-  if the warning persists.
-- `Skills incomplete: N peer(s) on pre-v0.11.27 OR with cold token cache` —
-  those peers' v=2 snapshots omit ``skills_by_day``. Run `mm push` on the
-  named peers (warms the token cache and re-emits the field), or upgrade
-  if they're on pre-v0.11.27. *(Distinct from "no skills used this
-  window" — empty-dict rows from v0.11.27+ warm-cache peers do NOT
-  trigger this.)*
-- `N event(s) skipped due to parse errors in mm event log.` — torn JSONL
-  lines were skipped. Output is partial.
-- `Requested Nd window exceeds the 90-day events retention.` — user asked
-  for a window longer than `EVENTS_RETENTION_DAYS`. Older days are reaped
-  by `mm gc` and not in the data.
-- `No agent-log snapshots yet from N machine(s) — upgrade to mm v0.14.17+, then run mm push there…` —
-  no accepted host-usage snapshot on those machines. Unknown, not zero.
-- `No agent-log snapshots were accepted from any machine — upgrade to mm v0.14.17+, then run mm push on
-  each Mac…` — the device registry was unavailable so missing-device
-  detection could not run; still unknown, not zero.
-- `No agent-log reader contributed on any machine…` — the row's contributor
-  list is empty. That can mean no source is enabled, or that each selected
-  reader had no attributable local ledger; it cannot distinguish the two.
-  Enable one of those sources if needed, upgrade to mm v0.14.17+, verify `mm --version`, then run `mm push`; do not report a
-  consent failure as a fact.
-- `No agent activity observed in this window. Counts are lower bounds…` —
-  readers ran and found nothing dated inside the window. The bound is
-  because a machine that has not pushed contributes no days, and a peer on
-  an older mm still reports last-touch totals rather than per-turn ones.
-  Report it as observed-nothing, not as zero usage.
-- `Agent-log snapshots all predate this window — upgrade to mm v0.14.17+, then run mm push…` — every
-  accepted snapshot is older than the window, so no current rhythm exists.
-- `N machine(s) have no agent-log snapshot (unknown, not zero)…` — those
-  machines have not published one yet (pre-v0.12.32, or no push since).
-  Never fill the gap with a zero.
-- `Agent-log snapshots from N machine(s) were rejected (<reasons>)…` — those
-  machines' rows failed validation, usually a version mismatch. Counts
-  **machines**, not rows, so one broken writer cannot inflate it.
-- `Known-fleet count unavailable (`mm devices --format=json` failed).` — the
-  header drops the "of M known" tail. Not a data-loss signal.
-- `Models priced by family extrapolation (<scope>): <ids>.` — these priced ids
-  were not checked on the bundled rate date. The list is sanitized and capped.
-  `~` or `>=` can include this assumption; do not call those particular rates verified.
-  Upgrade mm on the rendering Mac for newly verified cards.
-- `Claude Code API list-rate equivalent is a floor (>=): token coverage is incomplete;`
-  — every priced Claude row and the total use the 5m cache-write floor. The
-  project/session counts describe missing v2 token data only; pre-v2 peers
-  cannot be measured. Preserve the older Tokens incomplete remedy.
-- `API list-rate equivalent uses floor rates throughout the per-machine section:`
-  — one machine's floor condition sets the rate basis for all priced cells
-  in that section. This does not assert a reader failed on every machine.
-  Each model subtotal and machine row uses floor rates; no cross-machine sum.
-- `N tokens from N unpriced model(s) excluded from cost estimate: <ids>.` —
-  those models contribute to the token total but not the cost line. The ids
-  are sanitized, sorted, and capped. Do not invent a rate for a named id.
-- Not available for `<device>`: that Mac runs an mm that reported token
-  counters in an older format. Upgrade to mm v0.14.17+, verify `mm --version`, then run `mm push`
-  there, then re-run. — the economics row (and that machine's token columns)
-  show `—`, never a number. Inclusive counters would be a ceiling up to ~2x
-  high; do not treat `—` as zero and do not estimate the missing dollars.
-- API list-rate equivalent unavailable for `<device>`: its agent-log
-  snapshot predates this window. Upgrade to mm v0.14.17+, verify `mm --version`, then run `mm push` on that Mac and re-run. —
-  no observation exists inside the requested window, so the economics row
-  shows `—`, never a confident `$0`.
-- API list-rate equivalent for `<device>` is a floor (>=): <causes>. —
-  the marker is binary; the causes name which of: unpriced models, a host
-  that declared totals incomplete, a dropped reader, tokens the per-day
-  model cap left unattributed, or an unreconstructable long-context tier.
-  An all-unpriced device renders `>=$0.00`, not
-  unavailable: zero is the priced subtotal and the named tokens sit above
-  that floor. Report the named cause. Do not sum the per-machine figures.
-- Grok's logs do not record per-request prompt sizes; no action resolves this.
-  — an inherent floor cause, distinct from actionable reader or pricing gaps.
-  The at-most figure bounds that model's recorded token charges only: never
-  average it with the floor, never sum machines, never present it as the
-  machine's cost. Server-side tool fees are excluded. An incomplete snapshot
-  or nonzero model cache writes suppress the at-most figure entirely.
-- Unpriced model(s): upgrading mm on the machine that renders this report may
-  price it; republishing does not add a rate; do not estimate. Name the ids and
-  the rendering-machine remedy; do not tell the producing Mac to republish
-  merely to add a price.
-- `N discovery error(s) recorded — run mm diag.` —
-  forensic; do not invent a cause. Those notices go to an unattended hook's
-  stderr and are persisted nowhere.
-- `Machine X captured 0 repositories on N of M pushes; its commits are
-  missing from this window.` — that machine's git-snapshot rows in the
-  window have `projects == []`. The commit count is a **lower bound**.
-  Name the machine. Do not compute a trend from the commit number. Do not
-  write the Step 5 narrative off it.
-- `N record(s) skipped due to parse errors. Output may be incomplete.` —
-  foreign-caller fallback; treat like the mm-event parse-error line.
-- `Fleet composition changed between windows:` — the set of devices that
-  pushed in the prior Nd differs from this Nd. Report it; never compute the
-  trend yourself from the two windows.
-- `Host-usage reader(s) <readers> failed on the latest push from <machines>
-  — on <machine>, run mm diag and inspect host_usage.<reader>.` — that
-  machine's host reader ran and failed. Name the machine and the reader.
-  Do not treat the missing host as zero. Do not promise that `mm push`
-  repairs it; the wire carries which reader failed, not why. Walk over to
-  the named machine if you are not already on it.
-- `Host-usage totals from <readers> on <machines> are incomplete (the host
-  declared those totals incomplete) — on <machine>, run mm diag and inspect
-  host_usage.<reader>.` — the source contributed usable totals, but the
-  host explicitly declared those totals incomplete. Treat the number as a
-  floor, not an estimate. Same remedy as the failed-reader line: `mm diag`
-  on the named machine, never a bare `mm push`.
-- `Git walk ran out of budget on <machines> — some repositories were not
-  captured. On those machines, run mm diag and inspect
-  git_capture.recorded.walk_budget_aborts; this is not a missing push.` — the capture
-  ran and exhausted its budget. Different from a gap. Do not tell the user
-  to `mm recapture` as if nothing was attempted.
-- `Git history has an uncovered interval on <machines> — those windows were
-  never captured. On those machines, run mm recapture for the missing
-  window, then mm diag to confirm.` — a device with no `git_capture` at all
-  is unknown, not a gap; do not invent one. A recapture row covers its
-  interval even though it is not a push.
+Anchor praise in things the user controls. Cache hit ratio is not one of them —
+it was removed from the output in 1.1 for that reason.
 
 ## Trends vs prior Nd
 
 For windows shorter than 14d the body includes a `## Trends vs prior <N>d
-(A → B)` two-column table (commits, lines added, lines removed, active
-days) computed from the synced events corpus against the immediately
-preceding equal-length window. Identical in both passes. Windows of 14d
-and longer omit this section — week-over-week already owns
+(A → B)` two-column table (commits, lines added, lines removed, active days)
+computed against the immediately preceding equal-length window. Identical in
+both passes. Windows of 14d and longer omit it — week-over-week already owns
 period-over-period there.
 
-This is NOT a delta vs the last time the command was run. Do not add a
-trends line to the ASCII card: the card is width-constrained and a
-down-arrow on a shareable artifact is public self-flagellation.
+This is NOT a delta vs the last time the command was run. Do not add a trends
+line to the ASCII card: the card is width-constrained and a down-arrow on a
+shareable artifact is public self-flagellation.
 
-If the section is missing on a 7d retro whose current window has commits,
-the heading is still present with an `_Unavailable: ..._` italic line —
-coverage is incomplete, not "no change". Never invent a trend from the
-two windows yourself.
+If the section is missing on a 7d retro whose current window has commits, the
+heading is still present with an `_Unavailable: ..._` italic line — coverage is
+incomplete, not "no change". Never invent a trend from the two windows.
 
 ## Author email filtering
 
 By default the aggregator filters commits to those authored by `git config
---global user.email` plus any `[retro].author_emails` aliases in the user's
-mm config.toml. To render ALL fleet commits without a filter, run:
+--global user.email` plus any `[retro].author_emails` aliases in the user's mm
+config.toml. To render ALL fleet commits:
 
 ```bash
 mm retro-fleet <window> --no-author-filter
 ```
 
-## Custom events directory
+## Raw host inventory
 
-Power users with a custom `path` on the `mm-events` sync source can override
-the aggregator's events directory via env var:
+For debugging a host row, dump the accepted per-machine inventory:
+
+```bash
+mm retro-fleet <window> --dump-host-usage
+```
+
+Hidden flag, JSON on stdout, no card or body. It exposes the complete retained
+per-model host inventory by machine; health entries carry selected diagnostics.
+Do not narrate raw per-model host data as actual spend, market share, or a
+cross-machine total — the `## Agents` table is the fleet view, and this dump is
+per machine precisely so you can see which one is misbehaving.
+
+## Custom events directory
 
 ```bash
 MM_EVENTS_DIR=/path/to/events mm retro-fleet <window>
@@ -495,48 +342,15 @@ The aggregator's default is `~/.local/share/mind-meld/events/`.
 
 ## What this skill does NOT do
 
-- **A commit count is a lower bound.** If Notes reports zero-repository
-  captures, say the number is incomplete, name the machine, do not compute
-  a trend from it, and do not write the Step 5 narrative off it. A
-  `61 -> 4` Trends collapse next to a zero-repository note is missing
-  capture, not a bad week.
-- It does not query GitHub directly. Everything comes from the synced events log.
-- It does not include sessions from machines that haven't yet upgraded to mm
-  v0.11.0+ (those peers emit pre-v=2 snapshots). The Notes section names
-  which peers need to upgrade.
-- It does not include skill counts from machines whose latest snapshot
-  in the window omits ``skills_by_day`` — either pre-v0.11.27 peers
-  (code never emits the field) OR v0.11.27+ peers whose most recent push
-  ran with a cold token cache under the autopush gate (skill walk
-  skipped, field absent). The Notes section names them; running `mm push`
-  interactively on those machines warms the cache and emits the field on
-  the next push. Cross-machine skill counts come from each peer's Claude
-  Code session jsonls (the same source it walks for tokens) — not from
-  gstack analytics.
-- It does not save the user-facing output to a file. `> /tmp/retro.md` is
-  the v1 save story. A `--save` flag is deferred to v2.
-- **It does not compare `MODELS` to `AGENT LOGS`.** Never infer relative
-  usage, share, spend, cost, productivity, adoption, or "dominance" between
-  them. Those two card blocks still differ in unit (tokens vs distinct days),
-  source (Claude Code session snapshots vs local agent logs), and completeness
-  (Claude tokens are a window sum; host activity is last-known-good inventory
-  per machine). The two body economics sections are also incomparable:
-  host ledgers can overlap after an OS migration, which is why host dollars
-  are per machine and must never be summed. Allowed: *"Codex-family models
-  appeared on five UTC activity days."* Not allowed: *"Claude did most of the
-  work"*, *"Codex cost more than Claude"*, or any ratio between the two
-  blocks. Also never read active days as sessions, prompts, hours, or
-  intensity.
-- **It does not attribute agent-log activity to a specific agent.** The rows
-  are model families. The body table names which readers ran, per machine;
-  that is the only reader-level claim the data supports. Per-model host
-  totals exist on the wire as of v0.12.49 and reach
-  `mm retro-fleet --dump-host-usage` and the per-machine API list-rate
-  equivalent section. The Agent activity table stays family-only until Group
-  36. Do not narrate raw per-model host data as actual spend, market share, or
-  a cross-machine total.
-- **It does not treat a missing `AGENT LOGS` block as zero activity.** The
-  block is omitted only when no snapshot has ever been accepted, and the body
-  always names the cause. A stale `mm` also produces no block — Step 0
-  already stopped you if the install is missing or broken; treat any
-  remaining absence as unmeasured, not zero.
+- **It does not query GitHub.** Everything comes from the synced events log.
+  The PR count is detected from commit subjects, not verified merge status.
+- **It does not report per-machine spend.** Machines appear as a count and, in
+  health entries, by hostname. The pre-1.1 per-machine dollar tables were
+  removed: they keyed on unreadable 8-hex ids and invited exactly the
+  cross-machine summation they warned against. Machine-level forensics belong
+  in `mm diag`.
+- **It does not include sessions from peers on pre-v0.11.0 mm.** `MM_HEALTH`
+  names them under `sessions_incomplete`.
+- **It does not save output to a file.** `> /tmp/retro.md` is the save story.
+- **It does not read `active days` as sessions, prompts, hours, or intensity.**
+  It is a count of distinct UTC days on which that agent moved a counter.

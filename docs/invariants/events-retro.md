@@ -26,7 +26,7 @@ Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events
 - [Cursor gate + recapture](#cursor-gate--recapture-load-bearing-track-30a)
 - [Host-usage snapshot capture](#host-usage-snapshot-capture-load-bearing-track-19a)
 - [Track 22A consumer](#track-22a-consumer-last-known-good-inventory)
-- [Track 23A renderer contract](#track-23a-renderer-contract)
+- [Unified-agents renderer contract](#unified-agents-renderer-contract-track-67a-supersedes-23a)
 - [Coverage states (Track 34A)](#coverage-states-track-34a)
 - [Init-time event backfill](#init-time-event-backfill-v0118)
 - [Sessions snapshot v=2](#sessions-snapshot-v2-full-inventory-load-bearing-v0110)
@@ -456,13 +456,15 @@ row). A peer without the marker renders ``—`` for host token columns and
 API-list-rate figures, never a number: inclusive counters would be a
 ceiling up to ~2x high, the one caveat that points the wrong way.
 
-**Host economics rendering.** A snapshot that predates the requested
-window also renders ``—``: it contains no observation in that window, so a
-confident ``~$0`` is absence-as-zero. An all-unpriced disjoint snapshot is
-different: its known priced subtotal is zero and the unpriced volume sits
-above it, so it renders ``>=$0.00`` plus the named-cause Note. The per-machine
-table caps only after information-content ranking and states how many rows it
-omitted; unavailable alphabetic rows must not evict the only estimate.
+**Agent economics rendering (1.1).** A snapshot that predates the requested
+window contributes no usage to the unified rows: it contains no observation
+in that window, so a confident ``~$0`` would be absence-as-zero. An
+all-unpriced disjoint row retains its token volume and renders ``—`` for cost
+because it has no priced basis; ``cost_unavailable`` in ``MM_HEALTH`` names
+the missing basis, with ``unpriced_models`` naming unpriced volume when present.
+A partly priced row renders its priced subtotal
+with ``≥`` and named ``cost_floor`` causes. The old per-machine economics
+table and its row cap no longer render.
 
 ### Track 22A consumer: last-known-good inventory
 
@@ -472,8 +474,9 @@ not in the writer. A complete later row replaces the entire device view;
 there is no per-source carry-forward.
 
 The winning row is kept **whole**. ``HostDeviceSnapshot.lifetime_by_family``
-is inventory as of ``as_of``, and **do not sum devices into a fleet spend map**
-(see the disjointness note below).
+is inventory as of ``as_of``. The consumer retains this per-device inventory;
+the 1.1 renderer sums its in-window buckets into agent rows and checks for
+duplicated ledgers as described in the unified-agents contract below.
 
 **What a day key actually is (corrected TWICE — read both corrections).** The
 pre-v0.12.37 wording said "day keys are last-touch lifetime totals", which was
@@ -491,15 +494,13 @@ sums them), Grok has been per-turn since v0.12.47 (`_aggregate_grok` over
 through without normalizing again; the obsolete `_Terminal` representation is gone. Buckets are therefore additive and
 stable: a fixed day's value no longer moves when an old session is resumed.
 
-**This retired three derived prohibitions and kept one.** Retired: "a window
+**Track 32A retired three derived prohibitions.** Retired: "a window
 slice over-counts at the recent edge", "active DAYS is a lower bound because
 restatement erases the old key", and "never label a column spend". All three
-followed from cumulative-with-restatement, which no longer exists. **Kept: the
-cross-machine disjointness argument below.** Host stores sit outside every mm
-sync source, so a migrated home directory can put overlapping history under two
-device ids. That is independent of the counter shape and still argues against a
-naive cross-machine sum. Do not delete an argument merely because a neighbouring
-one expired.
+followed from cumulative-with-restatement, which no longer exists. Migration
+can still put overlapping history under two device ids. Track 67A replaced
+the resulting no-sum rule with a fleet sum plus ``duplicate_ledger`` disclosure;
+it did not claim that changing the counter shape made migration impossible.
 
 **Do not compare a window that straddles v0.12.48.** Codex totals before it
 double-counted work shared across forked and resumed rollout files — measured at
@@ -510,19 +511,19 @@ across that boundary shows a large fake decline.
   changed reason. Restatement no longer erases the old day key: Track 32A made
   every reader per-turn, so day keys are stable. What remains: a peer on an
   older mm still publishes the old shape, and a machine that never pushed in a
-  window contributes no days at all. Word it as an observation (``seen on N
-  days``), never as a census, and never diff or chart it. Once ``tokens_by_day``
+  window contributes no days at all. The unified table's ``Days`` column is an
+  observation, never a census; never diff or chart it. Once ``tokens_by_day``
   is always present when ``hosts`` is non-empty, its *absence* is the mixed-fleet
   version discriminator (same pattern as ``skills_by_day`` / ``offset``/``head``).
 
-**Neither is a fleet spend total, and a fleet SUM is separately forbidden**
-because device ledgers are not provably disjoint: ``device_id`` lives in local
+**Migration remains a disclosure condition.** ``device_id`` lives in local
 ``config.toml`` while the host stores (``~/.codex/sessions``,
-``~/.grok/sessions``) sit outside every mm sync source, so they move between
-Macs only by OS-level migration. Migrate a home directory, run ``mm init``
-fresh, and two device ids carry overlapping history with no signal the
-aggregator could detect. A **day-set union** across devices is safe precisely
-because set union is idempotent under duplicated corpora; a token sum is not.
+``~/.grok/sessions``) sit outside every mm sync source. Migrating a home
+directory and running ``mm init`` fresh can put copied history under two
+device ids. The renderer sums the reported usage and detects matching daily
+counter tuples; ``duplicate_ledger`` warns that affected token and cost totals
+may include copied history. Matching totals are evidence to inspect, not proof
+of migration. A **day-set union** remains unaffected by duplicates.
 
 **Day keys are UTC calendar days; the card header is LOCAL.**
 ``_render_ascii_card`` builds its date range from ``since.astimezone().date()``
@@ -547,65 +548,182 @@ Coverage fields are the only honest zero-prevention:
 ``consulted_sources`` union — one Grok-opted-in Mac must not mark the
 fleet Grok-covered.
 
-Host totals never enter Claude cost estimation or snapshot
-``metrics.tokens_total``.
+Host totals never mutate ``sessions.tokens_by_model`` or snapshot
+``metrics.tokens_total``. Host ``claude-*`` usage does join Claude session usage
+in the render-only ``FleetAgentRow`` and shares its cost calculation.
 
-### Track 23A renderer contract
+### Unified-agents renderer contract (Track 67A, supersedes 23A)
 
-#### Card vs body
+#### One table, one unit
 
-The card carries **rhythm**; the body carries **magnitude**. That split is the
-whole design, and it follows from the two consequences above: a day count can
-only understate, while a magnitude can overstate without bound and inverts over
-time (measured, at the time of writing: 6.9B Claude tokens over 7 days beside
-2.2B Codex over 140 — same order of magnitude, so nothing cues the reader that
-the bases differ, and the lifetime figure keeps growing while the weekly one
-does not).
+Claude, Codex and Grok render **identically**: fleet-summed tokens, active
+days, contributing machines, estimated cost, top model. The card's `AGENTS`
+block and the body's `## Agents` table share that row shape, and comparing the
+rows is legitimate — they share a unit, a window, and a counter basis.
 
-- **Card, `AGENT LOGS` block** (`_agent_rhythm_view` + `_render_agent_block`):
-  per-family count of distinct in-window UTC days, unioned across machines, one
-  family per line, plus an `N of M machines with agent activity` scope in the
-  header. **No token magnitude in any state.** The block is omitted only when
-  **zero** snapshots were accepted; when snapshots exist but nothing was active
-  it still renders, so the provenance count cannot vanish exactly when it
-  matters.
-- **Rows are MODEL FAMILIES, not agents.** The row carries no per-source status
-  and `host_usage.host_family` buckets by model-id prefix, so GPT ids land in
-  the `codex` family regardless of which reader produced them (historically
-  Codex and OpenCode both did). `AGENT_FAMILY_ROWS`
-  labels them accordingly (`Codex models`), and labels the legal `claude` family
-  `Claude (via agents)` so it cannot be confused with the MODELS block's own
-  `Claude` row. Its keys must stay equal to `MODEL_FAMILY_ROWS` and
-  `_HOST_FAMILIES`; a test pins all three, because divergence would both
-  silently drop host families AND raise `KeyError` out of
-  `_aggregate_model_families`, taking down the whole render.
-- **Body, `## Agent activity`** (`_render_agent_inventory`): one row per
-  `(machine, model family)`, never per `(machine, agent)`. Columns are
-  `Machine / Family / As of UTC / State / Retained / Window`, fitting 80
-  columns. `Retained` means what the host logs still hold, at most
-  `MAX_BY_DAY_DAYS` active UTC days; host deletion can reduce it. Observation
-  timestamps, observed day ranges and coverage are per machine below the table;
-  endpoints do not prove continuous coverage. All four fields (input, cache
-  write, cache read, output) contribute. A row for every known machine,
-  including `missing` (no snapshot). An accepted-but-idle current machine
-  renders **`0`, not `—`**; a stale window is **`—`**, including an empty-family
-  row. Retained counters remain visible for disjoint stale snapshots. Rows are
-  capped (`MAX_AGENT_INVENTORY_MACHINES`) because the registry is loaded
-  wholesale and uncapped. Which readers ran is reported per machine, below the
-  table, never per row.
-- **State strings are display strings**, never raw fields. Compact cells are
-  `current` / `idle` / `stale` / `ahead` / `missing`; the adjacent legend expands
-  them to `current, no agent activity observed` / `last seen before window` /
-  `clock ahead (<=24h)` / `no snapshot`. The skew band really is ≤24h and the
-  boundary itself is accepted (the rejection test is `>`).
-- **Absence is never silent.** `_agent_coverage_notes` names the cause with a
-  remedy every time the block is quiet: no snapshot yet, no reader contributed,
-  all snapshots stale, or nothing active. `token_sources` is per-push
-  contribution state, so the second case may mean no source is enabled **or**
-  that each selected reader had no attributable local ledger; the renderer must
-  state that ambiguity rather than falsely diagnosing consent. A vanished block
-  must never be the diagnostic interface — seven distinct causes would otherwise
-  render identically as nothing.
+This replaced a split that had become indefensible. Pre-1.1 the card carried
+`MODELS (Claude Code sessions)` (Claude token magnitudes) above `AGENT LOGS`
+(Codex/Grok day counts), with a standing prohibition on comparing them, and
+the body carried three sections describing one fleet three ways. The split
+rested on a claimed asymmetry in what the data could support. There was none:
+`CLAUDE_SCOPE` said out loud that Claude's tokens were a "sum of per-machine
+inventories, not deduplicated (a migrated home directory can be counted
+twice)", while `HOST_SCOPE` refused to sum on that exact hazard. Same risk,
+opposite treatment, and the one that got a number was the one whose vendor
+also wrote the tool.
+
+#### Summing host tokens, and detecting possible overlap
+
+`_agent_rhythm_view`'s pre-1.1 docstring justified the refusal by asserting
+that a migrated home directory yields two device ids with overlapping history
+and "the aggregator has no signal that could detect the overlap". Copied
+ledger days do provide a signal: their counter tuples can match exactly on
+both devices. The signal is not proof. Different model inventories can sum
+to the same family/day tuple, and a migrated ledger can subsequently diverge.
+Neither a match nor its absence proves whether all retained history overlaps.
+
+`_detect_duplicate_ledgers` (over `_host_family_day_tuples`) is that signal. It
+reports affected FAMILIES, and `format_retro` raises health code
+`duplicate_ledger`. Probed against a real two-Mac fleet before the change: 14
+shared `(family, day)` pairs, zero identical tuples. That probe exercises a
+concurrent-use case; it does not establish that false positives are impossible.
+
+Day counts remain a set union and are therefore idempotent under a duplicated
+corpus, so possible copied history does not inflate the Days column.
+`duplicate_ledger` means the token and cost totals may double-count. Inspect
+the named families and devices before deciding whether a device was retired;
+do not automatically discard a device or ledger based on equal totals.
+
+#### Row assembly (`aggregate_agent_usage`)
+
+- **Claude** comes from the Claude Code session corpus, not re-bucketed by
+  `host_family`. Its `tokens` derive from the same `by_model` map that prices
+  it — reading volume from `SessionsAggregate.tokens_input` and cost from
+  `tokens_by_model` lets the two drift.
+- **Host families** come from `lifetime_by_family` (volume and days, always
+  available) and `_windowed_host_by_model` (the priced basis, absent on a
+  pre-33A peer). A family keeps its token volume and loses only its cost cell
+  when the per-model sibling is missing.
+  Missing or rejected detail identifies the contributing machine and preserves
+  the acceptor's `detail_reason` when available, so an operator can distinguish
+  an older peer without detail from malformed detail that was dropped.
+- **Classifier disagreement preserves accepted wire totals.** Before pricing
+  a host snapshot, compare locally classified per-model sums with its wire
+  family totals for each day and counter. If a local model sum exceeds the
+  corresponding wire total, suppress that snapshot's pricing detail rather
+  than moving accepted tokens between families or pricing an inconsistent
+  basis. Other snapshots can still supply a priced subtotal for the row.
+- **`claude` is a legal host family**, so a host ledger carrying `claude-*`
+  models merges INTO the Claude row rather than being dropped. The row means
+  "usage of this model family across the fleet". The two corpora cannot
+  overlap — `host_usage` reads Codex and Grok ledgers, never Claude Code's own
+  session jsonls — so this is a sum, not a double count.
+- **`AGENT_ROW_ORDER` is the only label registry.** The pre-1.1 pair
+  (`MODEL_FAMILY_ROWS` + `AGENT_FAMILY_ROWS`, with deliberately different
+  labels like `Claude (via agents)`) existed so two adjacent card blocks could
+  not be confused. With one block that distinction has no referent, and a
+  second label set is drift waiting to happen. Keys must equal `_HOST_FAMILIES`.
+- **Card machine scope is a device-id union.** Include both contributing host
+  devices and Claude session `token_devices`; a machine present in both counts
+  once. A Claude-only machine counts even when no host snapshot exists.
+
+#### Floors are per agent, and name their cause
+
+`FleetAgentRow.floor_causes` is the fleet-wide successor to the per-device
+cause list `_device_economics_cell` built. Collapsing a per-machine table into
+one row must not drop the REASON a number is a floor — only the machine it
+happened on.
+
+- Causes are attributed **per family, not per machine.** One Mac running both
+  readers publishes ONE snapshot; a machine-scoped cause list put Grok's "logs
+  do not record per-request prompt sizes" onto the Codex row, which is a claim
+  about a different vendor's log format.
+- Reader coverage causes (`partial_sources`, `degraded_sources`) apply to
+  **all families**, even families this machine contributed no data for. The
+  wire carries no reader-to-model attribution, and a failed or partial reader
+  cannot establish which families are missing. Do not infer ownership from
+  a reader name or from the families that happened to contribute. The simple,
+  conservative result is `≥` on every agent's available priced subtotal.
+  Inherent pricing-tier causes remain specific to the models they describe;
+  each machine's recorded-token bounds name that machine in the health payload.
+- `residual` (the per-day model cap leaving unattributable tokens) is
+  genuinely cross-family — `tokens_by_day` day totals are not
+  family-partitioned — so it is shared across every family the snapshot
+  touched.
+- **Legacy inclusive counters render `—`, never a number.** `counters_known`
+  is False when any contributing snapshot lacks `disjoint-v1`. Inclusive
+  counters run up to ~2x HIGH: the one caveat that points the wrong way, and
+  therefore the one that stays a rendered marker rather than moving into the
+  health payload. `legacy_counters` names the affected machine(s) and uses the
+  attended-capture version floor in its peer-upgrade remedy. Legacy rows skip
+  numeric token/pricing and pricing-extrapolation health details as well.
+- **Pricing health matches the visible cost cell.** Emit `cost_floor` only
+  when the row has a priced subtotal rendered with `≥`. A visible non-legacy
+  row with no priced basis renders `—` and emits `cost_unavailable`, retaining
+  the reasons and remedies for missing, dropped, or entirely unpriced detail.
+  Do not describe an unavailable cell as a priced floor.
+
+#### The health payload replaced the Notes section
+
+Machine/model pricing details are bounded by `MAX_AGENT_FLOOR_CAUSES`, with
+an omitted-count summary. Full causes remain in the aggregate; the skill-facing
+payload must not grow one detail per device without a bound.
+
+`_render_health_block` emits `MM_HEALTH` on the FIRST pass only — the second
+pass is the shareable artifact. The body carries at most one italic line.
+
+This is an inversion of responsibility, not a deletion. A program must
+pre-render every caveat because nothing downstream can judge; this renderer
+feeds an LLM skill that can. The current health-code interface preserves
+diagnostic meaning and remedies; it does not promise that every old Notes
+sentence survives verbatim. `pricing` provenance (vendor rate dates and URLs) rides
+the same payload because a dollar column is uninterpretable without it, but it
+is reference material rather than something a reader needs every run.
+
+**Health codes are the interface, not the prose.** `test_docs_routing` walks
+every `note(<code>, …)` call and requires the code appear in SKILL.md; reword a
+detail freely. Two codes change what a number MEANS and must be called out by
+name in the skill: `duplicate_ledger` and `zero_repo_capture`.
+
+#### Machines are named, not hashed
+
+`device_labels` / `device_label` resolve `device_id` to the registry's
+`device_name` (set from `socket.gethostname()` at `mm init`), falling back to
+the short id. The data was always on the wire and in `FleetState`; the retro
+simply never used it, and every table keyed on 8-hex ids nobody can read.
+Peer-controlled, so it takes the same `_safe_short` path as any wire string.
+When multiple devices share a hostname, their labels include short device IDs
+so a health remedy can identify the intended machine.
+
+#### What was removed, and why it is not hiding somewhere
+
+- `## Claude Code activity` — a Claude-only token table, session count, and
+  cache-hit ratio. Session count and ephemeral-workspace counts have no
+  Codex/Grok analogue; cache-hit ratio is not something the user controls.
+- `## Agent activity` — per-machine `(machine, family)` inventory.
+- `## API list-rate equivalent (per machine)` — per-machine dollars behind a
+  `### Do not sum these values` heading and a five-line marker legend. A
+  currency table keyed on unreadable ids that warns you not to add it up is a
+  table that should not have been rendered.
+- The commit-type mix and burst shape moved to `MM_THEMES_PROMPT`: useful for
+  synthesizing a theme, near-useless to read (the mix's largest bucket is
+  routinely `other`, and the burst count tracks the commit count).
+
+Machine-level forensics belong in `mm diag` and `--dump-host-usage`.
+
+- **Absence is never silent.** `_agent_coverage_notes` still names the cause
+  with a remedy every time the block is quiet: no snapshot yet, no reader
+  contributed, all snapshots stale, or nothing active. `token_sources` is
+  per-push contribution state, so the second case may mean no source is enabled
+  **or** that each selected reader had no attributable local ledger; the
+  renderer must state that ambiguity rather than falsely diagnosing consent.
+- **Two version floors, two constants.** `SKILL_MIN_VERSION` gates the
+  RENDERING machine (below it there is no unified table and no `MM_HEALTH`, so
+  a 1.1 SKILL.md reads for surfaces that do not exist).
+  `ATTENDED_USAGE_MIN_VERSION` gates a PEER publishing a usable capture and is
+  the target for peer-binary upgrades needed for host capture. Local pricing
+  upgrades and diagnostics have their own remedies. Conflating these scopes
+  sends a fine Mac in a circle.
 
 ### Coverage states (Track 34A)
 
@@ -795,7 +913,7 @@ init-origin counting fix.
   `_tie_break_key` projects `hosts` and `active_days` verbatim, so two rows can
   only reach the rank when their family totals are already byte-identical —
   the rank therefore decides which *sibling* survives and can never change a
-  rendered `## Agent activity` number. Put it above `tie_key` and a v0.12.49
+  rendered `## Agents` number. Put it above `tie_key` and a v0.12.49
   Mac starts selecting a different winner than a v0.12.48 Mac from the same
   synced corpus, which is a cross-version rendering divergence in the product's
   headline claim of fleet accuracy. Do not "simplify" the ordering.
@@ -823,33 +941,30 @@ init-origin counting fix.
   constant swap — do not "fix" the inconsistency by unifying them.
 #### Isolation
 
-- **Isolation, pinned by test.** Host data reaches exactly two render sites and
-  nothing else: not `sessions.tokens_by_model`, not
-  `_aggregate_model_families`, not `estimate_cost`, not
-  `_unpriced_token_summary`, not `_render_token_block`, not `PriorPeriod`,
-  not `_aggregate_git_period_pair`. `token_usage.sum_bucket` is deliberately NOT shared
-  with `_aggregate_model_families`: the two callers sit on opposite sides of a
-  trust boundary, and a later hardening for the tolerant caller would otherwise
-  silently cap accepted host totals. Pinned by
+- **Isolation, pinned by test.** Host snapshots remain separate from
+  `sessions.tokens_by_model`, `PriorPeriod`, and `_aggregate_git_period_pair`.
+  `aggregate_agent_usage` combines the two corpora only in render-only rows;
+  host `claude-*` models join the Claude row. Every row intentionally shares
+  `estimate_cost`, `_unpriced_token_summary`, and `token_usage.sum_bucket`.
+  Peer validation and tolerant session parsing remain at their respective
+  ingestion boundaries, before these shared helpers. Prior-period isolation
+  is pinned by
   `test_host_tokens_do_not_reach_prior_period` (replaces the deleted
   `_retro_to_snapshot` pin).
-- **No card row (Track 24B, closed).** `_render_ascii_card` stays untouched.
-  The card is width-constrained at 64 chars with five blocks already competing,
+- **No card trends row (Track 24B, closed).** The card remains
+  width-constrained at 64 chars,
   and a down-arrow on an artifact you paste into iMessage is public
   self-flagellation. Do not add a trends line to the card.
 
-#### Forbidden sums
+#### Sum boundaries
 
-Forbidden: summing across machines at all, and rendering any ratio against the
-in-window day count. Per-machine in-window summing of
-`lifetime_by_family[family][day]` buckets (`_render_agent_inventory`) is
-correct post-32A — buckets are additive and stable — and is the body table's
-"Tokens in this window" column. Cross-machine summing of those buckets is
-still forbidden: host stores move by OS migration, so two device ids can hold
-one history. Host per-model keys in `tokens_by_day` are a separate namespace
-and are never merged into `sessions.tokens_by_model`, even though the keys
-collide (a host reader running Claude puts `claude-*` ids into the `claude`
-host family).
+The unified renderer sums in-window `lifetime_by_family[family][day]` buckets
+across machines and reports duplicate-ledger evidence in `MM_HEALTH`. Day
+counts use a set union; rendering any ratio against that inclusive UTC count
+remains forbidden. Host per-model keys in `tokens_by_day` are never merged
+into the source `sessions.tokens_by_model` aggregate. They join the matching
+render-only agent row, including host `claude-*` models joining Claude session
+usage. These rows do not become token trends or `PriorPeriod` fields.
 
 #### Forensic dump
 
@@ -1926,7 +2041,7 @@ The retro-fleet output has two artifacts with different production paths:
 
 `PriorPeriod` holds integers only, with no reference to the prior `GitAggregate` / `SessionsAggregate`. Pinned by `test_prior_period_holds_only_integers`.
 
-**Render states.** Section renders only when `window_days < 14` (`_render_weekly` owns ≥14d). Below `## Code shipped`. Unavailable (coverage proof unmet **or** unreadable event records) renders the heading with the reason inline — a vanished section never encodes a data-availability state. Current-window-empty suppresses the section entirely (never itemize a week off). `0` is known-zero; `—` is unavailable. No arrow glyphs. Both windows use today's author-email union; `--no-author-filter` is consistent across both. Fleet composition change (`prior.devices_with_pushes != current`) is a `## Notes` line. No card row.
+**Render states.** Section renders only when `window_days < 14` (`_render_weekly` owns ≥14d). Below `## Code shipped`. Unavailable (coverage proof unmet **or** unreadable event records) renders the heading with the reason inline — a vanished section never encodes a data-availability state. Current-window-empty suppresses the section entirely (never itemize a week off). `0` is known-zero; `—` is unavailable. No arrow glyphs. Both windows use today's author-email union; `--no-author-filter` is consistent across both. Fleet composition change (`prior.devices_with_pushes != current`) produces the `fleet_changed` issue in `MM_HEALTH`. No card row.
 
 **`--no-save` is a hidden no-op.** Removing it is a silent truncation of `mm retro-fleet 30d --no-save > /tmp/retro.md` (exit 2, 0-byte file) and breaks the `/retro-fleet` skill's Step 4 exactly once per upgrade, because SKILL.md is copied into the skill store and refreshes on `mm init` / non-quiet `mm push` / `mm install-skills`, not on `pipx upgrade`. Keep the flag (`hidden=True` in typer, `help=argparse.SUPPRESS` in argparse), ignore the value, emit one `mm: notice:` to stderr only when actually passed. Snapshot saving was removed in v0.12.39; the notice names **2.0** for removal of the flag. The current SKILL.md Step 4 no longer passes it; stale stores remain supported until 2.0.
 
@@ -2062,8 +2177,8 @@ skill walk was skipped this push because `events.py:_scan_one_project`
 ran with `token_cache_files=None` (cold token cache + autopush gate at
 `events_tail.py:_decide_token_walk_policy`, or warn-mode flock contention where
 `lock_and_get_files("warn")` yields `None`). The wire genuinely can't
-distinguish the two — both ship the field absent. The rendered Notes
-breadcrumb, built in `aggregator.format_retro`, mirrors `pre_token_peers`'s
+distinguish the two — both ship the field absent. The `skills_incomplete`
+health issue, built in `aggregator.format_retro`, mirrors `pre_token_peers`'s
 "OR with cold token cache" phrasing to admit the ambiguity honestly.
 
 **Why not "always set `meta['skills_by_day'] = {}`" (rejected fix,
@@ -2332,7 +2447,8 @@ Empty fleet returns `[]`. Sorted alphabetically by `device_id` for cross-platfor
 
 **Read before touching `token_usage.PRICING`, `MODEL_FAMILY_TIERS`,
 `resolve_prices`, `model_family`, `estimate_cost`, or the aggregator's
-`_render_token_block` / `_unpriced_token_summary` / `_short_model_name`.**
+`_agent_row_cost` / `agent_row_floor_causes` / `_unpriced_token_summary` /
+`_short_model_name`.**
 
 **What went wrong.** The v0.12.12 card reported `~$3.37` for a 60-day
 window whose real list cost was `~$11,015` — understated ~3,000x. Two
@@ -2407,8 +2523,8 @@ prefix/suffix variants and case variants stay unpriced. The literal base card
 is $2 input / $0.50 cached input / $0 cache writes / $6 output per MTok;
 the long card is $4 / $1 / $0 / $12. Requests whose prompt reaches 200k
 tokens pay the higher rates for ALL tokens in that request. Aggregate
-counters cannot reconstruct request sizes, so every device with in-window
-Grok tokens renders `>=`. `_cost_under(card, usage)` owns the arithmetic;
+counters cannot reconstruct request sizes, so the unified row with in-window
+Grok tokens renders `≥`. `_cost_under(card, usage)` owns the arithmetic;
 `estimate_cost` keeps its signature, priced-predicate calls and warnings.
 `resolve_long_context_prices` returns a copy through the same exact alias
 registry and is not a priced-predicate. Every xAI family must have a long card.
@@ -2416,11 +2532,15 @@ registry and is not a priced-predicate. Every xAI family must have a long card.
 The inherent cause says: "Grok's logs do not record per-request prompt sizes;
 no action resolves this". The base and at-most values cover **this model's
 recorded tokens, in token charges; server-side tool fees excluded**. Never
-average them, sum machines, or present a machine-level range. Omit the at-most
+average them or present a machine-level range. The agent row sums usage across
+machines; the cause's at-most values describe only their stated recorded-token
+basis and must not be promoted to a complete fleet billing range. Omit the at-most
 figure if ANY snapshot reader is partial or degraded (the wire cannot map
 readers to models), or that model has nonzero `cache_create`. A cache-write-only
 bucket is still `>=` and must never claim "at most $0". Missing, stale or
-legacy-counter snapshots retain their `—` paths. No in-window Grok tokens
+legacy-counter observations retain their unavailable paths: missing or stale
+snapshots contribute no usage, while a contributing legacy-counter snapshot
+makes its agent row's token and cost cells `—`. No in-window Grok tokens
 means no inherent cause. Unpriced models name the rendering-Mac remedy:
 upgrading mm there may add a rate; republishing cannot; do not estimate.
 At-most figures round upward so display rounding cannot understate the bound; `_format_usd(bound=...)` rounds floors down, ceilings up and estimates
@@ -2450,7 +2570,8 @@ rollouts, max observed input 244,361. Codex's `~` rests on that assumption;
 the window is configurable and absent from the wire, so a tripwire is deferred
 in TODOS. Anthropic 4.6+ bills the full 1M context at standard rates. The
 Anthropic rate refresh landed in Track 58A, verified 2026-09-14; 57A's
-host delivery and model-scoped at-most Notes contract remain in force.
+host delivery and model-scoped at-most contract remain in force, with the
+details carried by `cost_floor` in `MM_HEALTH`.
 
 Provenance is per vendor, because one date over two vendors' tables is
 a lie of composition. Anthropic: `PRICING_LAST_UPDATED` (verified
@@ -2459,8 +2580,8 @@ against Anthropic's public pricing page). OpenAI:
 https://developers.openai.com/api/docs/pricing, short-context Standard).
 xAI: `PRICING_XAI_LAST_UPDATED` (2026-09-10, model page and Build overview
 above). OpenAI's five cards, including `gpt-6-astra` ($10 / $1 / $12.50 / $50),
-were all re-read 2026-09-10. Each vendor gets a dated source bullet in the
-rendered header, followed by the marker legend. "Current rates" means rates
+were all re-read 2026-09-10. Each vendor's date and source URL are carried in
+`MM_HEALTH.pricing`, alongside the marker definitions. "Current rates" means rates
 bundled with this mm release, verified on those dates. mm does not fetch rates.
 
 **Publication-proof release evidence.** After merge and upgrade on the
@@ -2477,44 +2598,51 @@ the agent with `mm install-skills` plus restart for the decoder.
 separate explicit set covering every override and currently verified family
 id, plus the curated vendor ids at their respective dates. It does not gate
 pricing. A priced id outside it gets a bounded, sanitized "Models priced by
-family extrapolation" Notes line, never an unpriced label.
+family extrapolation" detail under `pricing_extrapolated` in `MM_HEALTH`,
+never an unpriced label.
 
 `floor_prices` lives beside `resolve_prices`: Anthropic uses the minimum 5m
 cache-write rate (1.25x input), vendor literal cards are unchanged. One floor
-condition makes **every priced cell in that source section** use floor cards;
-`_section_costs` computes models and total from that same basis. Host machines
-remain separate subtotals, never summed. `RATE_MARKER_LEGEND` defines `~`
-estimate, `>=` floor of a priced subtotal under bundled assumptions, **not a
-guaranteed billing minimum**, and `—` unavailable. Estimates may extrapolate.
-Claude coverage gaps floor all priced Claude rows. The old Tokens incomplete
-line retains its meaning; a new line explains the floor and missing-project /
-session scale, without claiming to measure pre-v2 omissions.
+condition makes **every priced model in that agent row** use floor cards;
+`_section_costs` computes models and total from that same basis. Since 1.1 host tokens are summed
+fleet-wide per agent rather than kept as per-machine subtotals; see the
+unified-agents renderer contract for the possible-overlap detector and its
+limits. Floors are computed per AGENT row. Model-specific pricing causes stay
+with their family; partial/failed-reader coverage applies to every family
+because the missing models cannot be attributed. The markers are `~` estimate, `≥` floor of
+a priced subtotal under bundled assumptions — **not a guaranteed billing
+minimum** — and `—` unavailable, never zero. Estimates may extrapolate. Claude
+coverage gaps floor the Claude row. The five-line `RATE_MARKER_LEGEND` no
+longer renders; the same definitions live in `MM_HEALTH`'s `pricing.basis`.
+`tokens_incomplete` names missing Claude coverage and its remedy; `cost_floor`
+names an available priced lower bound, while `cost_unavailable` names a missing
+priced basis. Neither claims to measure pre-v2 omissions.
 
 `window_bounds` rejects instant-stale snapshots before inclusive day slicing;
-`contributes_in_window` is shared by inventory, rhythm and economics. `as_of`
-before `since` but on the first UTC day contributes nothing to all three. The
-retained count survives, empty-family stale cells are unavailable, and exact
+`contributes_in_window` is shared by the unified rows, host-only coverage view,
+and duplicate detector. `as_of` before `since` but on the first UTC day
+contributes nothing to any of them. The retained inventory survives for
+forensics, stale snapshots contribute no window usage, and exact
 `as_of == since` plus the accepted 24h future clamp keep their semantics.
 
-H2 names and order are unchanged. Claude's four-counter model table caps at
-five rows by token volume plus an omitted count, sanitizing every id through
-`_safe_short`. The all-model total reconciles with MODELS on the same data.
-Per-machine model dollar tables belong only in economics, with a cap, omitted
-count, and "does not sum to the row" header; model at-most values stay in Notes.
-Scope lines name source, machine scope, observation, UTC window and coverage.
-The economics section retains provenance first (the existing structural pin),
-then the shared legend and scope before figures. The Claude footer names its
-own rate date and points there. Both scopes say never add their figures.
-Body tables fit 80 columns; goldens exercise 80 and 120-column terminals.
+The 1.1 renderer has one `## Agents` table and one card `AGENTS` block.
+Each row reports the same token basis, observed days, contributing machines,
+and estimated cost; the body also names the top model. Model ids pass through
+`_safe_short` and bounded labels. There are no Claude-only counter tables,
+per-machine economics tables, or separate source-scope footers. Model-specific
+at-most details, pricing provenance, and named floor causes live in
+`MM_HEALTH`. Goldens exercise 80 and 120-column terminals.
 
 Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.
 D1 = B: disclosure only. Local evidence, 2026-09-14: zero fast rows among
 22,042 carrying `speed`, 4,297 lacking it (absence is not chronology). No
 detector, cache field or wire flag is added; exposure elsewhere is unknown.
 Producer, renderer and decoder upgrades are separate, documented in README.
-Existing Notes keep their meaning; new conditions have distinct decoder
-entries. Compatibility fixtures preserve old decoder/new output and new
-decoder/old output behavior; unknown lines must be echoed verbatim.
+Health issues retain the relevant caveat and remedy information. Codes are the
+skill interface: the AST test requires every literal `note(<code>, ...)` code
+in SKILL.md, and the skill reports an unfamiliar code verbatim rather than
+inventing an interpretation. `SKILL_MIN_VERSION` gates the local
+renderer separately from the peer capture floor `ATTENDED_USAGE_MIN_VERSION`.
 
 **Invariant 3 — `model_family` matches POSITIONALLY against a literal
 allowlist, never by substring.** Model ids are peer-controlled (peer's
@@ -2528,20 +2656,21 @@ An id scheme that stops fitting `claude-<family>-...` degrades to
 unpriced, which is the safe direction — silence is what this fixed.
 
 **Invariant 4 — never print a confident total over incomplete data.** Any
-unresolvable model in the window flips the cost line's prefix from `~` to
-`>=`. The stderr breadcrumb in `estimate_cost` is NOT sufficient on its
+unresolvable model in the window makes any priced subtotal a floor (`≥`);
+an entirely unpriced row keeps its cost unavailable (`—`). The stderr
+breadcrumb in `estimate_cost` is NOT sufficient on its
 own: it fired for four unpriced models across the whole v0.12.x line and
-nobody saw it. The load-bearing signals are the rendered ones — the `>=`
-marker and the Notes line.
+nobody saw it. The load-bearing signals are the rendered ones — the `≥`
+marker and its `MM_HEALTH` issue.
 
-**Invariant 5 — `PRICING_LAST_UPDATED` is a fact on the card, not a
+**Invariant 5 — `PRICING_LAST_UPDATED` is provenance, not a
 threshold.** mm has no network by design (CLAUDE.md: "No API server"), so
 this table can never self-update and **stale is the steady state, not the
 exception**. The old docstring said "refresh if more than ~6 months old";
 nothing read it, and it would not have helped — the table was three
-months into that window while wrong about four models. The date now
-renders in the caveat line so a human can judge. Do NOT reintroduce a
-"warn after N months" rule: it is a verdict the code cannot earn, and it
+months into that window while wrong about four models. The date is now
+carried in `MM_HEALTH.pricing` so the skill can cite it when relevant.
+Do NOT reintroduce a "warn after N months" rule: it is a verdict the code cannot earn, and it
 is the count-based-threshold anti-pattern this project has rejected
 before.
 

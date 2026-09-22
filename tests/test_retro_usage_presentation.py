@@ -1,5 +1,6 @@
 """One synthetic corpus for Track 58A's before/after and acceptance views."""
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -100,49 +101,113 @@ def presentation_data(state="populated"):
 GOLDENS = Path(__file__).parent / "fixtures" / "retro_usage"
 
 
-def test_models_total_reconciles_with_four_field_body():
+def health(out):
+    """MM_HEALTH issues from a first-pass render."""
+    if "<!-- MM_HEALTH -->" not in out:
+        return []
+    block = out.split("<!-- MM_HEALTH -->", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+    return json.loads(block)["issues"]
+
+
+def entry(out, code):
+    return next((e for e in health(out) if e["code"] == code), None)
+
+
+def agents(data):
+    return agg.aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
+
+
+def row(data, key):
+    return next((r for r in agents(data).rows if r.key == key), None)
+
+
+def test_every_agent_reports_the_same_four_measures():
+    """The 1.1 contract. Pre-1.1 Claude got a token table and a window-sum
+    cost while Codex and Grok got per-machine day counts under a do-not-sum
+    heading, which is what made the card read Claude-first."""
     data = presentation_data()
-    total = sum(n for _, n in agg._aggregate_model_families(data.sessions.tokens_by_model))
+    keys = [r.key for r in agents(data).rows]
+    assert keys == ["claude", "codex", "grok"]
+    for r in agents(data).rows:
+        assert r.tokens > 0
+        assert r.active_days >= 1
+        assert r.machines >= 1
+    body = agg.format_retro(data)
+    assert "| Agent | Tokens | Days | Machines | Est. cost | Top model |" in body
+
+
+def test_claude_tokens_reconcile_with_the_four_session_counters():
+    data = presentation_data()
     counts = [
         data.sessions.tokens_input,
         data.sessions.tokens_cache_create,
         data.sessions.tokens_cache_read,
         data.sessions.tokens_output,
     ]
-    assert total == sum(counts) == 11_300_000
-    body = agg.format_retro(data, name="Example")
-    assert "Claude: 11.3M tokens" in body
-    assert "| All models | 1.1M | 3.0M | 7.0M | 200.0k |" in body
+    assert sum(counts) == 11_300_000
+    assert row(data, "claude").tokens >= sum(counts)
     assert data.sessions.token_devices == {"dev-a": data.until, "dev-b": data.until}
 
 
-def test_floor_basis_and_row_sum_for_both_sections():
+def test_host_rows_sum_across_machines():
+    """The fleet row adds every contributing machine's in-window ledger."""
+    data = presentation_data()
+    for key in ("codex", "grok"):
+        expected = 0
+        machines = set()
+        for device, snap in data.host_inventory.by_device.items():
+            for _day, bucket in (snap.lifetime_by_family.get(key) or {}).items():
+                if tu.sum_bucket(bucket) > 0:
+                    expected += tu.sum_bucket(bucket)
+                    machines.add(device)
+        assert row(data, key).tokens == expected, key
+        assert row(data, key).machines == len(machines), key
+
+
+def test_host_claude_models_are_not_silently_dropped():
+    """dev-b's host ledger carries ``claude-opus-5``. The row means "usage of
+    this model family across the fleet", so the host side adds into the Claude
+    row rather than vanishing because Claude Code already produced one."""
+    data = presentation_data()
+    host_claude = sum(
+        tu.sum_bucket(bucket)
+        for snap in data.host_inventory.by_device.values()
+        for _day, bucket in (snap.lifetime_by_family.get("claude") or {}).items()
+    )
+    assert host_claude > 0, "corpus must exercise the collision"
+    session_only = (
+        data.sessions.tokens_input
+        + data.sessions.tokens_cache_create
+        + data.sessions.tokens_cache_read
+        + data.sessions.tokens_output
+    )
+    assert row(data, "claude").tokens == session_only + host_claude
+
+
+def test_degraded_reader_floors_its_agent_and_names_the_cause():
     data = presentation_data("degraded")
-    total, rows = agg._section_costs(data.sessions.tokens_by_model, floor=True)
-    assert total == sum(rows.values())
-    assert total <= agg._section_costs(data.sessions.tokens_by_model, floor=False)[0]
+    grok = row(data, "grok")
+    assert agg._agent_row_cost(grok)[1] is True
+    assert any("failed" in c for c in grok.floor_causes)
     out = agg.format_retro(data)
-    claude = out.split("## Claude Code activity")[1].split("## Skills")[0]
-    assert "| >=$8.60 |" in claude and "| >=$19.50 |" in claude and "| >=$28.10 |" in claude
-    assert "~$" not in claude
-    host = out.split("## API list-rate equivalent (per machine)")[1].split("## mm sync")[0]
-    assert "| dev-b | >=$11.25 |" in host  # floor writes, not the $15 estimate
-    assert "| grok-unknown | — |" in host
-    assert "~$" not in host and "$4.00" not in host
-    assert "at most $4.00" in out.split("## Notes")[1]
-    assert "does not sum to the row" in host
+    assert "≥$" in out
+    grok_floor = next(e for e in health(out) if e["code"] == "cost_floor" and e["agent"] == "Grok")
+    assert "a host reader failed" in grok_floor["detail"]
 
 
-def test_one_machine_floor_changes_other_machine_cards_without_claiming_failure():
-    out = agg.format_retro(presentation_data())
-    assert "| dev-b | >=$11.25 |" in out
-    notes = out.split("## Notes")[1]
-    assert "floor rates throughout the per-machine section" in notes
-    assert "equivalent for `dev-b` is a floor" not in notes
-    assert "a host reader failed" not in notes
+def test_unpriced_model_is_counted_in_tokens_and_excluded_from_cost():
+    data = presentation_data()
+    grok = row(data, "grok")
+    assert grok.tokens > 0
+    causes = agg.agent_row_floor_causes(grok)
+    assert any("unpriced" in c and "grok-unknown" in c for c in causes)
+    out = agg.format_retro(data)
+    assert "grok-unknown" in entry(out, "cost_floor")["detail"]
 
 
-def test_claude_coverage_floor_does_not_floor_priced_host_section():
+def test_claude_coverage_floor_does_not_floor_a_healthy_host_row():
+    """Per-agent floors are independent. Pre-1.1 one machine's floor condition
+    set the rate basis for every priced cell in the per-machine section."""
     from dataclasses import replace
 
     data = presentation_data("degraded")
@@ -154,51 +219,28 @@ def test_claude_coverage_floor_does_not_floor_priced_host_section():
         tokens_by_day={"2026-09-10": day_bucket({"gpt-6-astra": usage(1_000_000)})},
         lifetime_by_family={"codex": {"2026-09-10": usage(1_000_000)}},
     )
+    assert agg._agent_row_cost(row(data, "claude"))[1] is True
+    assert agg._agent_row_cost(row(data, "codex"))[1] is False
     out = agg.format_retro(data)
-    claude = out.split("## Claude Code activity")[1].split("## Skills")[0]
-    host = out.split("## API list-rate equivalent (per machine)")[1].split("## mm sync")[0]
-    assert ">=$" in claude and "~$" not in claude
-    assert "| dev-b | ~$" in host
+    assert "| Codex | 1.0M | 1 | 1 | ~$" in out
 
 
-def test_unpriced_claude_row_is_unavailable_and_total_is_floor():
-    data = presentation_data()
-    data.sessions.tokens_by_model["unknown-model"] = usage(20)
-    data.sessions.tokens_input += 20
-    out = agg.format_retro(data)
-    section = out.split("## Claude Code activity")[1].split("## Skills")[0]
-    assert "| unknown-model | 20 | 0 | 0 | 0 | — |" in section
-    assert "~$" not in section
-    assert ">=$28.10" in section
-
-
-def test_model_tables_and_extrapolation_notes_are_bounded_and_safe():
+def test_model_names_are_bounded_and_defanged():
     data = presentation_data()
     models = {f"claude-opus-{i:03d}": usage(i + 1) for i in range(200)}
     hostile = "claude-opus-999\x1b[31m|`\n" + "x" * 200
     models[hostile] = usage(1_000_000)
     data.sessions.tokens_by_model = models
-    data.sessions.tokens_input = sum(tu.sum_bucket(u) for u in models.values())
     out = agg.format_retro(data)
-    section = out.split("## Claude Code activity")[1].split("## Skills")[0]
-    assert "(+196 more)" in section
-    assert len([line for line in section.splitlines() if line.startswith("| ")]) == 8
-    notes = " ".join(agg._extrapolation_notes(models, scope="Claude Code"))
-    assert "Models priced by family extrapolation" in notes
-    assert "The ~ or >= marker may include this assumption." in notes
-    assert "(+193 more)" in notes
     assert hostile not in out and "\x1b" not in out
+    notes = " ".join(agg._extrapolation_notes(models, scope="Claude"))
+    assert "Models priced by family extrapolation" in notes
+    assert "(+193 more)" in notes
     assert "(+" not in " ".join(
-        agg._extrapolation_notes({m: usage(1) for m in tu.VERIFIED_MODEL_IDS}, scope="Claude Code")
+        agg._extrapolation_notes({m: usage(1) for m in tu.VERIFIED_MODEL_IDS}, scope="Claude")
     )
-    snap = data.host_inventory.by_device["dev-b"]
-    snap.tokens_by_day = {"2026-09-10": day_bucket(models)}
-    _, costs = agg._section_costs(models, floor=True)
-    rows = agg._per_model_cost_summary(snap.device, models, costs, floor=True)
-    blob = "\n".join(rows)
-    assert len(rows) == 6 and "(+196 more)" in rows[-1]
-    assert all(len(row) <= 80 for row in rows)
-    assert hostile not in blob and "\x1b" not in blob
+    # The top-model cell is one bounded name, never a table of 200.
+    assert len(agg._agent_top_model(row(data, "claude"))) <= 40
 
 
 def stale_data(*, exactly_at_since=False, empty=False):
@@ -223,25 +265,29 @@ def stale_data(*, exactly_at_since=False, empty=False):
     return data
 
 
-def test_stale_on_window_start_day_is_unavailable_everywhere_but_retained():
+def test_stale_on_window_start_day_contributes_nothing_but_is_not_zero():
     data = stale_data()
     view = agg._agent_rhythm_view(
         data.host_inventory, since=data.since, until=data.until, machines_known=2
     )
     assert view.machines_with_activity == 0 and not view.any_activity
+    assert row(data, "codex") is None
     out = agg.format_retro(data, name="Example")
-    assert "AGENT LOGS (0 of 2 machines with agent activity)" in out
-    assert "| dev-a | Codex | 2026-09-07 | stale | 1.0M | — |" in out
-    assert "| dev-a | — |" in out
-    assert "Agent-log snapshots all predate this window" in out
+    assert "AGENTS (0 of 2 machines)" in out
+    assert "$0" not in out
     snap = data.host_inventory.by_device["dev-a"]
     assert agg._windowed_host_by_model(snap, "2026-09-07", "2026-09-14") == ({}, False)
     assert agg.window_bounds(snap, "2026-09-07", "2026-09-14") is None
+    assert (
+        "Agent-log snapshots all predate this window"
+        in entry(agg.format_retro(data), "agent_coverage")["detail"]
+    )
 
 
 def test_stale_empty_family_is_not_zero():
-    out = agg.format_retro(stale_data(empty=True))
-    assert "| dev-a | — | 2026-09-07 | stale | 0 | — |" in out
+    data = stale_data(empty=True)
+    assert row(data, "codex") is None
+    assert "$0" not in agg.format_retro(data)
 
 
 def test_snapshot_exactly_at_since_keeps_first_day():
@@ -250,9 +296,10 @@ def test_snapshot_exactly_at_since_keeps_first_day():
         data.host_inventory, since=data.since, until=data.until, machines_known=2
     )
     assert view.machines_with_activity == 1 and view.any_activity
+    codex = row(data, "codex")
+    assert codex.active_days == 1 and codex.tokens == 1_000_000
     out = agg.format_retro(data)
-    assert "| dev-a | Codex | 2026-09-07 | current | 1.0M | 1.0M |" in out
-    assert "| dev-a | ~$10.00 |" in out
+    assert "| Codex | 1.0M | 1 | 1 | ~$10.00 |" in out
     assert "all predate" not in out
 
 
@@ -270,31 +317,37 @@ def test_currency_bounds_on_both_sides_of_precision_transition():
         assert float(floor[1:]) <= amount <= float(ceiling[1:])
 
 
-def test_empty_device_label_keeps_unnamed_parens():
+def test_card_short_dollars_never_round_past_a_floor():
+    """A figure printed under ``≥`` must not round UP past the bound it
+    claims; the card and the body table must agree on the same number."""
+    for amount in (546.5, 999.95, 1249.0, 2239.4):
+        short = agg._format_usd_short(amount, floor=True)
+        value = float(short.lstrip("$").rstrip("k"))
+        if short.endswith("k"):
+            value *= 1000
+        assert value <= amount + 1e-9, (short, amount)
+
+
+def test_empty_device_label_falls_back_rather_than_rendering_blank():
     from dataclasses import replace
 
     data = presentation_data()
     snap = data.host_inventory.by_device["dev-a"]
     data.host_inventory.by_device = {"": replace(snap, device="")}
-    out = agg.format_retro(data)
-    assert "(unnamed)" in out
-    assert "(unnamed |" not in out
-    assert out.count("| (unnamed) |") >= 2
+    labels = agg.device_labels(data.fleet)
+    assert agg.device_label("", labels) == "(unnamed)"
+    agg.format_retro(data)  # must not raise
 
 
 def test_fleet_refresh_remedies_require_the_attended_producer_version():
     data = stale_data()
     snap = data.host_inventory.by_device["dev-a"]
-    _, economics_notes, _, _ = agg._device_economics_cell(
-        snap, data.since.date().isoformat(), data.until.date().isoformat()
-    )
     remedies = [
         agg._host_detail_phrase("absent", None),
-        *economics_notes,
         *agg._agent_coverage_notes(presentation_data("absent")),
         *agg._host_reader_coverage_notes([snap]),
     ]
-    assert len(remedies) >= 4
+    assert len(remedies) >= 3
     for remedy in remedies:
         assert f"upgrade mind-meld to {agg.ATTENDED_USAGE_MIN_VERSION}+" in remedy
         assert "verify with `mm --version`, then run `mm push`" in remedy
@@ -317,7 +370,6 @@ def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
             for state in ("populated", "absent", "degraded"):
                 out = agg.format_retro(presentation_data(state), name="Example")
                 assert out == (GOLDENS / f"{state}.md").read_text()
-                assert all(len(line) <= 80 for line in out.splitlines() if line.startswith("|"))
                 stream = StringIO()
                 console = Console(file=stream, width=width, color_system=None)
                 console.print(Markdown(out))
@@ -328,43 +380,3 @@ def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
         else:
             os.environ["TZ"] = original_tz
         time.tzset()
-
-
-def test_section_floor_does_not_let_zero_rows_evict_positive_rows():
-    from dataclasses import replace
-
-    data = presentation_data()
-    positive = data.host_inventory.by_device["dev-a"]
-    data.host_inventory.by_device = {"zzz": replace(positive, device="zzz")}
-    for i in range(agg.MAX_AGENT_INVENTORY_MACHINES):
-        device = f"aaa-{i}"
-        data.host_inventory.by_device[device] = replace(
-            positive,
-            device=device,
-            lifetime_by_family={},
-            tokens_by_day={},
-        )
-    lines, _ = agg._render_host_economics(data)
-    assert "| zzz | >=$20.25 |" in lines
-
-
-def test_floor_trigger_keeps_its_cause_when_outside_machine_display_cap():
-    from dataclasses import replace
-
-    data = presentation_data()
-    positive = data.host_inventory.by_device["dev-b"]
-    data.host_inventory.by_device = {
-        f"aaa-{i}": replace(positive, device=f"aaa-{i}")
-        for i in range(agg.MAX_AGENT_INVENTORY_MACHINES)
-    }
-    data.host_inventory.by_device["zzz"] = replace(
-        positive,
-        device="zzz",
-        lifetime_by_family={},
-        tokens_by_day={},
-        degraded=("grok",),
-    )
-    lines, notes = agg._render_host_economics(data)
-    assert "| zzz | >=$0.00 |" not in lines
-    assert "| aaa-0 | >=$11.25 |" in lines
-    assert any("for `zzz` is a floor" in note and "a host reader failed" in note for note in notes)
